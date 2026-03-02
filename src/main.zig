@@ -36,6 +36,12 @@ pub fn main() !void {
         cmdRm(&args);
     } else if (std.mem.eql(u8, command, "logs")) {
         cmdLogs(&args, alloc);
+    } else if (std.mem.eql(u8, command, "pull")) {
+        cmdPull(&args, alloc);
+    } else if (std.mem.eql(u8, command, "images")) {
+        cmdImages(alloc);
+    } else if (std.mem.eql(u8, command, "rmi")) {
+        cmdRmi(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -255,6 +261,125 @@ fn cmdLogs(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s}", .{data});
 }
 
+fn cmdPull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const image_str = args.next() orelse {
+        writeErr("usage: yoq pull <image>\n", .{});
+        std.process.exit(1);
+    };
+
+    const ref = spec.parseImageRef(image_str);
+
+    writeErr("pulling {s}...\n", .{image_str});
+
+    var result = registry.pull(alloc, ref) catch {
+        writeErr("failed to pull image: {s}\n", .{image_str});
+        std.process.exit(1);
+    };
+    defer result.deinit();
+
+    // extract layers so they're cached for future runs
+    const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch {
+        writeErr("failed to extract image layers\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (layer_paths) |p| alloc.free(p);
+        alloc.free(layer_paths);
+    }
+
+    // save image record
+    store.saveImage(.{
+        .id = result.manifest_digest,
+        .repository = ref.repository,
+        .tag = ref.reference,
+        .manifest_digest = result.manifest_digest,
+        .config_digest = "sha256:config",
+        .total_size = @intCast(result.total_size),
+        .created_at = std.time.timestamp(),
+    }) catch {
+        writeErr("failed to save image record\n", .{});
+        std.process.exit(1);
+    };
+
+    // format size for display
+    const size_mb = result.total_size / (1024 * 1024);
+    write("{s}: pulled ({d} layers, {d} MB)\n", .{
+        image_str,
+        result.layer_digests.len,
+        size_mb,
+    });
+}
+
+fn cmdImages(alloc: std.mem.Allocator) void {
+    var images = store.listImages(alloc) catch {
+        writeErr("failed to list images\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (images.items) |img| {
+            alloc.free(img.id);
+            alloc.free(img.repository);
+            alloc.free(img.tag);
+            alloc.free(img.manifest_digest);
+            alloc.free(img.config_digest);
+        }
+        images.deinit(alloc);
+    }
+
+    if (images.items.len == 0) {
+        write("no images\n", .{});
+        return;
+    }
+
+    write("{s:<30} {s:<15} {s:<14} {s:<10}\n", .{ "REPOSITORY", "TAG", "IMAGE ID", "SIZE" });
+    for (images.items) |img| {
+        // truncate the digest for display (first 12 chars after "sha256:")
+        const short_id = if (img.id.len > 19) img.id[7..19] else img.id;
+        const size_mb = @divTrunc(img.total_size, 1024 * 1024);
+
+        write("{s:<30} {s:<15} {s:<14} {d} MB\n", .{
+            img.repository,
+            img.tag,
+            short_id,
+            size_mb,
+        });
+    }
+}
+
+fn cmdRmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const image_str = args.next() orelse {
+        writeErr("usage: yoq rmi <image>\n", .{});
+        std.process.exit(1);
+    };
+
+    // try to find the image by repository:tag
+    const ref = spec.parseImageRef(image_str);
+    const image = store.findImage(alloc, ref.repository, ref.reference) catch {
+        writeErr("image not found: {s}\n", .{image_str});
+        std.process.exit(1);
+    };
+    defer {
+        alloc.free(image.id);
+        alloc.free(image.repository);
+        alloc.free(image.tag);
+        alloc.free(image.manifest_digest);
+        alloc.free(image.config_digest);
+    }
+
+    // remove the image record from the database
+    store.removeImage(image.id) catch {
+        writeErr("failed to remove image record\n", .{});
+        std.process.exit(1);
+    };
+
+    // note: we don't delete the blobs or extracted layers here.
+    // a future `yoq prune` command can handle garbage collection
+    // of unreferenced blobs. this matches docker's behavior —
+    // rmi removes the tag, prune cleans up storage.
+
+    write("untagged: {s}:{s}\n", .{ image.repository, image.tag });
+}
+
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -262,16 +387,19 @@ fn printUsage() void {
         \\usage: yoq <command> [options]
         \\
         \\commands:
-        \\  run <rootfs> <cmd>   create and run a container
-        \\  ps                   list containers
-        \\  logs <id>            show container output
-        \\  stop <id>            stop a running container
-        \\  rm <id>              remove a stopped container
-        \\  version              print version
-        \\  help                 show this help
+        \\  run <image|rootfs> [cmd]  create and run a container
+        \\  ps                        list containers
+        \\  logs <id>                 show container output
+        \\  stop <id>                 stop a running container
+        \\  rm <id>                   remove a stopped container
+        \\  pull <image>              pull an image from a registry
+        \\  images                    list pulled images
+        \\  rmi <image>               remove a pulled image
+        \\  version                   print version
+        \\  help                      show this help
         \\
         \\options:
-        \\  logs --tail N        show last N lines only
+        \\  logs --tail N             show last N lines only
         \\
     , .{});
 }
