@@ -168,6 +168,130 @@ pub fn updateStatus(id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u
     ) catch return StoreError.WriteFailed;
 }
 
+// -- image records --
+
+/// persisted image record
+pub const ImageRecord = struct {
+    id: []const u8,
+    repository: []const u8,
+    tag: []const u8,
+    manifest_digest: []const u8,
+    config_digest: []const u8,
+    total_size: i64,
+    created_at: i64,
+};
+
+/// row type for reading image records from sqlite
+const ImageRow = struct {
+    id: sqlite.Text,
+    repository: sqlite.Text,
+    tag: sqlite.Text,
+    manifest_digest: sqlite.Text,
+    config_digest: sqlite.Text,
+    total_size: i64,
+    created_at: i64,
+};
+
+fn imageRowToRecord(row: ImageRow) ImageRecord {
+    return ImageRecord{
+        .id = row.id.data,
+        .repository = row.repository.data,
+        .tag = row.tag.data,
+        .manifest_digest = row.manifest_digest.data,
+        .config_digest = row.config_digest.data,
+        .total_size = row.total_size,
+        .created_at = row.created_at,
+    };
+}
+
+/// save an image record
+pub fn saveImage(record: ImageRecord) StoreError!void {
+    var db = try openDb();
+    defer db.deinit();
+
+    db.exec(
+        "INSERT OR REPLACE INTO images (id, repository, tag, manifest_digest, config_digest, total_size, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{
+            record.id,
+            record.repository,
+            record.tag,
+            record.manifest_digest,
+            record.config_digest,
+            record.total_size,
+            record.created_at,
+        },
+    ) catch return StoreError.WriteFailed;
+}
+
+/// load an image record by id (manifest digest).
+/// caller owns the returned strings.
+pub fn loadImage(alloc: std.mem.Allocator, id: []const u8) StoreError!ImageRecord {
+    var db = try openDb();
+    defer db.deinit();
+
+    const row = (db.oneAlloc(
+        ImageRow,
+        alloc,
+        "SELECT id, repository, tag, manifest_digest, config_digest, total_size, created_at" ++
+            " FROM images WHERE id = ?;",
+        .{},
+        .{id},
+    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+
+    return imageRowToRecord(row);
+}
+
+/// find an image by repository and tag.
+/// caller owns the returned strings.
+pub fn findImage(alloc: std.mem.Allocator, repository: []const u8, tag: []const u8) StoreError!ImageRecord {
+    var db = try openDb();
+    defer db.deinit();
+
+    const row = (db.oneAlloc(
+        ImageRow,
+        alloc,
+        "SELECT id, repository, tag, manifest_digest, config_digest, total_size, created_at" ++
+            " FROM images WHERE repository = ? AND tag = ?;",
+        .{},
+        .{ repository, tag },
+    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+
+    return imageRowToRecord(row);
+}
+
+/// list all image records, newest first.
+/// caller owns the returned list and records.
+pub fn listImages(alloc: std.mem.Allocator) StoreError!std.ArrayList(ImageRecord) {
+    var db = try openDb();
+    defer db.deinit();
+
+    var images: std.ArrayList(ImageRecord) = .empty;
+
+    var stmt = db.prepare(
+        "SELECT id, repository, tag, manifest_digest, config_digest, total_size, created_at" ++
+            " FROM images ORDER BY created_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(ImageRow, .{}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        images.append(alloc, imageRowToRecord(row)) catch return StoreError.ReadFailed;
+    }
+
+    return images;
+}
+
+/// delete an image record
+pub fn removeImage(id: []const u8) StoreError!void {
+    var db = try openDb();
+    defer db.deinit();
+
+    db.exec("DELETE FROM images WHERE id = ?;", .{}, .{id}) catch
+        return StoreError.WriteFailed;
+}
+
 // -- tests --
 
 test "container record defaults" {
@@ -271,6 +395,42 @@ test "delete removes record" {
     const CountRow = struct { count: i64 };
     const result = (db.one(CountRow, "SELECT COUNT(*) AS count FROM containers;", .{}, .{}) catch unreachable).?;
     try std.testing.expectEqual(@as(i64, 0), result.count);
+}
+
+test "image record round-trip via sqlite" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    // insert
+    db.exec(
+        "INSERT INTO images (id, repository, tag, manifest_digest, config_digest, total_size, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "sha256:abc", "library/nginx", "latest", "sha256:abc", "sha256:def", @as(i64, 2048), @as(i64, 1700000000) },
+    ) catch unreachable;
+
+    // read back
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        ImageRow,
+        alloc,
+        "SELECT id, repository, tag, manifest_digest, config_digest, total_size, created_at FROM images WHERE id = ?;",
+        .{},
+        .{"sha256:abc"},
+    ) catch unreachable).?;
+    defer {
+        alloc.free(row.id.data);
+        alloc.free(row.repository.data);
+        alloc.free(row.tag.data);
+        alloc.free(row.manifest_digest.data);
+        alloc.free(row.config_digest.data);
+    }
+
+    try std.testing.expectEqualStrings("sha256:abc", row.id.data);
+    try std.testing.expectEqualStrings("library/nginx", row.repository.data);
+    try std.testing.expectEqualStrings("latest", row.tag.data);
+    try std.testing.expectEqual(@as(i64, 2048), row.total_size);
 }
 
 test "update status" {
