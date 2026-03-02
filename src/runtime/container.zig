@@ -111,6 +111,75 @@ pub const Container = struct {
     }
 };
 
+/// base directory for per-container overlay storage
+const containers_subdir = ".local/share/yoq/containers";
+
+/// paths to the overlay directories for a container
+pub const OverlayDirs = struct {
+    upper: [512]u8,
+    upper_len: usize,
+    work: [512]u8,
+    work_len: usize,
+    merged: [512]u8,
+    merged_len: usize,
+
+    pub fn upperPath(self: *const OverlayDirs) []const u8 {
+        return self.upper[0..self.upper_len];
+    }
+
+    pub fn workPath(self: *const OverlayDirs) []const u8 {
+        return self.work[0..self.work_len];
+    }
+
+    pub fn mergedPath(self: *const OverlayDirs) []const u8 {
+        return self.merged[0..self.merged_len];
+    }
+};
+
+/// create the per-container overlay directories:
+///   ~/.local/share/yoq/containers/<id>/upper
+///   ~/.local/share/yoq/containers/<id>/work
+///   ~/.local/share/yoq/containers/<id>/rootfs  (merged mount point)
+pub fn createContainerDirs(container_id: []const u8) ContainerError!OverlayDirs {
+    const home = std.posix.getenv("HOME") orelse return ContainerError.CreateFailed;
+
+    var dirs: OverlayDirs = undefined;
+
+    const upper_slice = std.fmt.bufPrint(&dirs.upper, "{s}/{s}/{s}/upper", .{
+        home, containers_subdir, container_id,
+    }) catch return ContainerError.CreateFailed;
+    dirs.upper_len = upper_slice.len;
+
+    const work_slice = std.fmt.bufPrint(&dirs.work, "{s}/{s}/{s}/work", .{
+        home, containers_subdir, container_id,
+    }) catch return ContainerError.CreateFailed;
+    dirs.work_len = work_slice.len;
+
+    const merged_slice = std.fmt.bufPrint(&dirs.merged, "{s}/{s}/{s}/rootfs", .{
+        home, containers_subdir, container_id,
+    }) catch return ContainerError.CreateFailed;
+    dirs.merged_len = merged_slice.len;
+
+    // create all three directories (makePath creates parents too)
+    std.fs.cwd().makePath(dirs.upperPath()) catch return ContainerError.CreateFailed;
+    std.fs.cwd().makePath(dirs.workPath()) catch return ContainerError.CreateFailed;
+    std.fs.cwd().makePath(dirs.mergedPath()) catch return ContainerError.CreateFailed;
+
+    return dirs;
+}
+
+/// remove all per-container directories
+pub fn cleanupContainerDirs(container_id: []const u8) void {
+    const home = std.posix.getenv("HOME") orelse return;
+
+    var path_buf: [512]u8 = undefined;
+    const dir_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}", .{
+        home, containers_subdir, container_id,
+    }) catch return;
+
+    std.fs.cwd().deleteTree(dir_path) catch {};
+}
+
 /// generate a short random container id (12 hex chars)
 pub fn generateId(buf: *[12]u8) void {
     const chars = "0123456789abcdef";
