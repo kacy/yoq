@@ -23,13 +23,13 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "help")) {
         printUsage();
     } else if (std.mem.eql(u8, command, "run")) {
-        cmdRun(&args, alloc);
+        cmdRun(&args);
     } else if (std.mem.eql(u8, command, "ps")) {
         cmdPs(alloc);
     } else if (std.mem.eql(u8, command, "stop")) {
         cmdStop(&args);
     } else if (std.mem.eql(u8, command, "rm")) {
-        cmdRm(&args, alloc);
+        cmdRm(&args);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -37,7 +37,7 @@ pub fn main() !void {
     }
 }
 
-fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn cmdRun(args: *std.process.ArgIterator) void {
     const rootfs = args.next() orelse {
         writeErr("usage: yoq run <rootfs> <command>\n", .{});
         std.process.exit(1);
@@ -65,7 +65,7 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         .created_at = std.time.timestamp(),
     };
 
-    store.save(alloc, record) catch {
+    store.save(record) catch {
         writeErr("failed to save container state\n", .{});
         std.process.exit(1);
     };
@@ -94,9 +94,24 @@ fn cmdPs(alloc: std.mem.Allocator) void {
         return;
     }
 
-    write("{s:<14} {s:<10}\n", .{ "CONTAINER ID", "STATUS" });
+    write("{s:<14} {s:<10} {s:<20}\n", .{ "CONTAINER ID", "STATUS", "COMMAND" });
     for (ids.items) |id| {
-        write("{s:<14} {s:<10}\n", .{ id, "created" });
+        const record = store.load(alloc, id) catch {
+            write("{s:<14} {s:<10} {s:<20}\n", .{ id, "unknown", "-" });
+            continue;
+        };
+        defer {
+            alloc.free(record.rootfs);
+            alloc.free(record.command);
+            alloc.free(record.hostname);
+            alloc.free(record.status);
+            // id is freed by the outer loop
+        }
+        // don't double-free — load() allocates its own copy of id,
+        // but we already have one from listIds(). free load's copy.
+        alloc.free(record.id);
+
+        write("{s:<14} {s:<10} {s:<20}\n", .{ id, record.status, record.command });
     }
 }
 
@@ -110,13 +125,13 @@ fn cmdStop(args: *std.process.ArgIterator) void {
     writeErr("stop requires Linux\n", .{});
 }
 
-fn cmdRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn cmdRm(args: *std.process.ArgIterator) void {
     const id = args.next() orelse {
         writeErr("usage: yoq rm <container-id>\n", .{});
         std.process.exit(1);
     };
 
-    store.remove(alloc, id) catch {
+    store.remove(id) catch {
         writeErr("container not found: {s}\n", .{id});
         std.process.exit(1);
     };
