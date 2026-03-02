@@ -58,6 +58,10 @@ pub const ContainerConfig = struct {
     namespaces: namespaces.NamespaceFlags = .{},
     /// environment variables (KEY=VALUE pairs)
     env: []const []const u8 = &.{},
+    /// working directory inside the container
+    working_dir: []const u8 = "/",
+    /// image layer paths for overlayfs (bottom to top)
+    lower_dirs: []const []const u8 = &.{},
 };
 
 /// a running or stopped container
@@ -140,6 +144,8 @@ test "container config defaults" {
     try std.testing.expectEqualStrings("container", config.hostname);
     try std.testing.expectEqual(@as(usize, 0), config.args.len);
     try std.testing.expectEqual(@as(usize, 0), config.env.len);
+    try std.testing.expectEqualStrings("/", config.working_dir);
+    try std.testing.expectEqual(@as(usize, 0), config.lower_dirs.len);
 }
 
 test "generate id produces 12 hex chars" {
