@@ -249,4 +249,5 @@ comptime {
     _ = @import("lib/log.zig");
     _ = @import("image/spec.zig");
     _ = @import("image/store.zig");
+    _ = @import("image/registry.zig");
 }
