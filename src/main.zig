@@ -184,6 +184,7 @@ comptime {
     _ = @import("runtime/filesystem.zig");
     _ = @import("runtime/security.zig");
     _ = @import("runtime/process.zig");
+    _ = @import("runtime/logs.zig");
     _ = @import("state/store.zig");
     _ = @import("state/schema.zig");
     _ = @import("lib/log.zig");
