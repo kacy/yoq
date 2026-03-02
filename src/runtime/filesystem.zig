@@ -10,6 +10,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
+const syscall_util = @import("../lib/syscall.zig");
 
 pub const FilesystemError = error{
     MountFailed,
@@ -29,8 +30,6 @@ pub const FilesystemConfig = struct {
     work_dir: []const u8,
     /// merged mount point
     merged_dir: []const u8,
-    /// hostname to set in the UTS namespace
-    hostname: []const u8 = "container",
 };
 
 /// mount overlayfs from image layers.
@@ -80,7 +79,7 @@ pub fn mountOverlay(config: FilesystemConfig) FilesystemError!void {
         0,
         @intFromPtr(&opts_buf),
     );
-    if (isError(rc)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc)) return FilesystemError.MountFailed;
 }
 
 /// pivot into a new rootfs directory.
@@ -103,7 +102,7 @@ pub fn pivotRoot(new_root: []const u8) FilesystemError!void {
         linux.MS.REC | linux.MS.PRIVATE,
         0,
     );
-    if (isError(rc1)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc1)) return FilesystemError.MountFailed;
 
     // step 2: bind mount new_root onto itself
     const rc2 = linux.mount(
@@ -113,7 +112,7 @@ pub fn pivotRoot(new_root: []const u8) FilesystemError!void {
         linux.MS.BIND | linux.MS.REC,
         0,
     );
-    if (isError(rc2)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc2)) return FilesystemError.MountFailed;
 
     // step 3: chdir into new root
     posix.chdir(new_root) catch return FilesystemError.PivotFailed;
@@ -124,11 +123,11 @@ pub fn pivotRoot(new_root: []const u8) FilesystemError!void {
         @intFromPtr(dot),
         @intFromPtr(dot),
     );
-    if (isError(rc4)) return FilesystemError.PivotFailed;
+    if (syscall_util.isError(rc4)) return FilesystemError.PivotFailed;
 
     // step 5: unmount old root (now stacked under ".")
     const rc5 = linux.umount2(dot, linux.MNT.DETACH);
-    if (isError(rc5)) return FilesystemError.UnmountFailed;
+    if (syscall_util.isError(rc5)) return FilesystemError.UnmountFailed;
 }
 
 /// mount essential filesystems inside the container.
@@ -143,7 +142,7 @@ pub fn mountEssential() FilesystemError!void {
         linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC,
         0,
     );
-    if (isError(rc1)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc1)) return FilesystemError.MountFailed;
 
     // /dev — devices (tmpfs)
     mkdirIfNeeded("/dev") catch return FilesystemError.MkdirFailed;
@@ -154,7 +153,7 @@ pub fn mountEssential() FilesystemError!void {
         linux.MS.NOSUID | linux.MS.STRICTATIME,
         @intFromPtr(@as([*:0]const u8, "mode=755,size=65536k")),
     );
-    if (isError(rc2)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc2)) return FilesystemError.MountFailed;
 
     // /sys — kernel interface (sysfs, read-only)
     mkdirIfNeeded("/sys") catch return FilesystemError.MkdirFailed;
@@ -165,7 +164,7 @@ pub fn mountEssential() FilesystemError!void {
         linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC | linux.MS.RDONLY,
         0,
     );
-    if (isError(rc3)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc3)) return FilesystemError.MountFailed;
 
     // /tmp — temporary files (tmpfs)
     mkdirIfNeeded("/tmp") catch return FilesystemError.MkdirFailed;
@@ -176,7 +175,7 @@ pub fn mountEssential() FilesystemError!void {
         linux.MS.NOSUID | linux.MS.NODEV,
         @intFromPtr(@as([*:0]const u8, "mode=1777,size=65536k")),
     );
-    if (isError(rc4)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc4)) return FilesystemError.MountFailed;
 
     // /dev/pts — pseudo-terminals
     mkdirIfNeeded("/dev/pts") catch return FilesystemError.MkdirFailed;
@@ -187,7 +186,7 @@ pub fn mountEssential() FilesystemError!void {
         linux.MS.NOSUID | linux.MS.NOEXEC,
         @intFromPtr(@as([*:0]const u8, "newinstance,ptmxmode=0666,mode=0620")),
     );
-    if (isError(rc5)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc5)) return FilesystemError.MountFailed;
 }
 
 /// create a directory if it doesn't exist
@@ -210,12 +209,6 @@ fn sentinelize(path: *const []const u8) ![:0]const u8 {
     return S.buf[0..path.len :0];
 }
 
-/// check if a syscall return value indicates an error
-fn isError(rc: usize) bool {
-    const signed: isize = @bitCast(rc);
-    return signed < 0;
-}
-
 // -- tests --
 
 test "overlay options building" {
@@ -230,20 +223,6 @@ test "overlay options building" {
     try std.testing.expectEqual(@as(usize, 2), config.lower_dirs.len);
     try std.testing.expectEqualStrings("/layers/base", config.lower_dirs[0]);
     try std.testing.expectEqualStrings("/layers/app", config.lower_dirs[1]);
-    try std.testing.expectEqualStrings("container", config.hostname);
-}
-
-test "isError" {
-    // success
-    try std.testing.expect(!isError(0));
-    try std.testing.expect(!isError(42));
-
-    // error (-1 in two's complement)
-    const neg_one: usize = @bitCast(@as(isize, -1));
-    try std.testing.expect(isError(neg_one));
-
-    const neg_eperm: usize = @bitCast(@as(isize, -1));
-    try std.testing.expect(isError(neg_eperm));
 }
 
 test "sentinelize" {

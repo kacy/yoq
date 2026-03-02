@@ -83,7 +83,7 @@ pub const Cgroup = struct {
     pub fn setLimits(self: *const Cgroup, limits: ResourceLimits) CgroupError!void {
         if (limits.cpu_weight) |weight| {
             if (weight < 1 or weight > 10000) return CgroupError.InvalidLimit;
-            self.writeFile("cpu.weight", &intToStr(weight)) catch return CgroupError.WriteFailed;
+            self.writeFile("cpu.weight", intToStr(weight)) catch return CgroupError.WriteFailed;
         }
 
         if (limits.cpu_max_usec) |max_usec| {
@@ -94,21 +94,21 @@ pub const Cgroup = struct {
         }
 
         if (limits.memory_max) |max| {
-            self.writeFile("memory.max", &intToStr(max)) catch return CgroupError.WriteFailed;
+            self.writeFile("memory.max", intToStr(max)) catch return CgroupError.WriteFailed;
         }
 
         if (limits.memory_high) |high| {
-            self.writeFile("memory.high", &intToStr(high)) catch return CgroupError.WriteFailed;
+            self.writeFile("memory.high", intToStr(high)) catch return CgroupError.WriteFailed;
         }
 
         if (limits.pids_max) |max| {
-            self.writeFile("pids.max", &intToStr(max)) catch return CgroupError.WriteFailed;
+            self.writeFile("pids.max", intToStr(max)) catch return CgroupError.WriteFailed;
         }
     }
 
     /// add a process to this cgroup
     pub fn addProcess(self: *const Cgroup, pid: std.posix.pid_t) CgroupError!void {
-        self.writeFile("cgroup.procs", &intToStr(pid)) catch return CgroupError.WriteFailed;
+        self.writeFile("cgroup.procs", intToStr(pid)) catch return CgroupError.WriteFailed;
     }
 
     /// read memory usage in bytes
@@ -211,11 +211,12 @@ fn parsePsiAvg10(line: []const u8) !f64 {
 }
 
 /// format a number into a decimal string.
-/// returns a slice into the provided buffer.
-fn intToStr(value: anytype) [20]u8 {
-    var buf: [20]u8 = .{0} ** 20;
-    _ = std.fmt.bufPrint(&buf, "{d}", .{value}) catch {};
-    return buf;
+/// uses a thread-local buffer and returns a slice of only the formatted digits.
+fn intToStr(value: anytype) []const u8 {
+    const S = struct {
+        threadlocal var buf: [20]u8 = undefined;
+    };
+    return std.fmt.bufPrint(&S.buf, "{d}", .{value}) catch "0";
 }
 
 // -- tests --
@@ -242,8 +243,7 @@ test "resource limits validation" {
 }
 
 test "intToStr" {
-    const buf = intToStr(@as(u64, 12345));
-    const str = std.mem.sliceTo(&buf, 0);
+    const str = intToStr(@as(u64, 12345));
     try std.testing.expectEqualStrings("12345", str);
 }
 

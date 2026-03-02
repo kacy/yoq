@@ -9,6 +9,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
+const syscall_util = @import("../lib/syscall.zig");
 
 pub const NamespaceError = error{
     CloneFailed,
@@ -142,7 +143,7 @@ pub fn spawn(
 
     var args = CloneArgs{
         .flags = ns_flags.toCloneFlags(),
-        .exit_signal = 17, // SIGCHLD
+        .exit_signal = linux.SIG.CHLD,
         .stack = @intFromPtr(stack_mem),
         .stack_size = stack_size,
     };
@@ -153,7 +154,7 @@ pub fn spawn(
         @sizeOf(CloneArgs),
     );
 
-    const pid = unwrapSyscall(rc) catch return NamespaceError.CloneFailed;
+    const pid = syscall_util.unwrap(rc) catch return NamespaceError.CloneFailed;
 
     if (pid == 0) {
         // child process — run through trampoline
@@ -179,6 +180,10 @@ pub fn spawn(
 
     // signal child that mappings are ready
     posix.close(pipe_write);
+
+    // free the child stack now that clone3 has copied it.
+    // the child has its own copy in the new address space.
+    posix.munmap(@alignCast(stack_mem), stack_size);
 
     return SpawnResult{ .pid = @intCast(pid) };
 }
@@ -223,13 +228,6 @@ fn writeProc(path: []const u8, value: []const u8) !void {
         return error.WriteFailed;
     defer file.close();
     file.writeAll(value) catch return error.WriteFailed;
-}
-
-/// convert a raw syscall return to a usable value or error
-fn unwrapSyscall(rc: usize) !usize {
-    const signed: isize = @bitCast(rc);
-    if (signed < 0) return error.SyscallFailed;
-    return rc;
 }
 
 // -- tests --

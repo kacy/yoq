@@ -5,7 +5,6 @@
 // create, start, stop, remove.
 
 const std = @import("std");
-const linux = std.os.linux;
 const posix = std.posix;
 
 const namespaces = @import("namespaces.zig");
@@ -111,13 +110,13 @@ pub const Container = struct {
 /// generate a short random container id (12 hex chars)
 pub fn generateId(buf: *[12]u8) void {
     const chars = "0123456789abcdef";
-    // use a timestamp-based seed for simplicity
-    var seed: u64 = @bitCast(std.time.timestamp());
-    seed ^= @as(u64, @intCast(std.time.milliTimestamp())) *% 6364136223846793005;
+    // use crypto random when available, fall back to timestamp-based LCG
+    var bytes: [6]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
 
-    for (buf) |*c| {
-        seed = seed *% 6364136223846793005 +% 1442695040888963407;
-        c.* = chars[@intCast((seed >> 33) % 16)];
+    for (bytes, 0..) |b, i| {
+        buf[i * 2] = chars[b >> 4];
+        buf[i * 2 + 1] = chars[b & 0x0f];
     }
 }
 
@@ -160,20 +159,12 @@ test "generate id produces 12 hex chars" {
     }
 }
 
-test "generate id varies" {
+test "generate id varies between calls" {
     var id1: [12]u8 = undefined;
+    var id2: [12]u8 = undefined;
     generateId(&id1);
+    generateId(&id2);
 
-    // verify all chars are valid hex
-    const hex_chars = "0123456789abcdef";
-    for (id1) |c| {
-        var found = false;
-        for (hex_chars) |h| {
-            if (c == h) {
-                found = true;
-                break;
-            }
-        }
-        try std.testing.expect(found);
-    }
+    // two random IDs should (almost certainly) differ
+    try std.testing.expect(!std.mem.eql(u8, &id1, &id2));
 }

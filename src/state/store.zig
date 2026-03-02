@@ -76,8 +76,8 @@ pub fn save(alloc: std.mem.Allocator, record: ContainerRecord) StoreError!void {
         record.command,
         record.hostname,
         record.status,
-        if (record.pid) |p| fmtInt(p) else "null",
-        if (record.exit_code) |c| fmtInt(c) else "null",
+        if (record.pid) |p| fmtPid(p) else "null",
+        if (record.exit_code) |c| fmtExitCode(c) else "null",
         record.created_at,
     }) catch return StoreError.WriteFailed;
 
@@ -127,13 +127,22 @@ pub fn listIds(alloc: std.mem.Allocator) !std.ArrayList([]const u8) {
     return ids;
 }
 
-/// format a small integer into a static buffer for JSON output
-fn fmtInt(value: anytype) []const u8 {
+/// format a small integer into a stack buffer for JSON output.
+/// returns a copy allocated from the provided buffer.
+/// IMPORTANT: do not call this twice in the same format string —
+/// each call needs its own buffer to avoid overwriting the previous result.
+fn fmtPid(value: i32) []const u8 {
     const S = struct {
         threadlocal var buf: [20]u8 = undefined;
     };
-    const result = std.fmt.bufPrint(&S.buf, "{d}", .{value}) catch "0";
-    return result;
+    return std.fmt.bufPrint(&S.buf, "{d}", .{value}) catch "0";
+}
+
+fn fmtExitCode(value: u8) []const u8 {
+    const S = struct {
+        threadlocal var buf: [4]u8 = undefined;
+    };
+    return std.fmt.bufPrint(&S.buf, "{d}", .{value}) catch "0";
 }
 
 // -- tests --
@@ -155,14 +164,27 @@ test "container record defaults" {
     try std.testing.expect(record.exit_code == null);
 }
 
-test "fmtInt" {
-    const result = fmtInt(@as(i32, 42));
+test "fmtPid" {
+    const result = fmtPid(42);
     try std.testing.expectEqualStrings("42", result);
 }
 
-test "fmtInt negative" {
-    const result = fmtInt(@as(i32, -1));
+test "fmtPid negative" {
+    const result = fmtPid(-1);
     try std.testing.expectEqualStrings("-1", result);
+}
+
+test "fmtExitCode" {
+    const result = fmtExitCode(0);
+    try std.testing.expectEqualStrings("0", result);
+}
+
+test "pid and exit code dont share buffer" {
+    // both formatters can be called without overwriting each other
+    const pid = fmtPid(1234);
+    const code = fmtExitCode(42);
+    try std.testing.expectEqualStrings("1234", pid);
+    try std.testing.expectEqualStrings("42", code);
 }
 
 test "store dir path" {

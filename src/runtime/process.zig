@@ -7,6 +7,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
+const syscall_util = @import("../lib/syscall.zig");
 
 pub const ProcessError = error{
     WaitFailed,
@@ -36,7 +37,7 @@ pub const ExitStatus = union(enum) {
 pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
     var status: u32 = 0;
     var flags: u32 = 0;
-    if (no_hang) flags |= 1; // WNOHANG
+    if (no_hang) flags |= linux.W.NOHANG;
 
     const rc = linux.syscall4(
         .wait4,
@@ -46,8 +47,8 @@ pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
         0, // rusage
     );
 
+    if (syscall_util.isError(rc)) return ProcessError.WaitFailed;
     const result_pid: isize = @bitCast(rc);
-    if (result_pid < 0) return ProcessError.WaitFailed;
 
     // WNOHANG and process hasn't changed state
     if (result_pid == 0) {
@@ -67,18 +68,17 @@ pub fn sendSignal(pid: posix.pid_t, sig: u32) ProcessError!void {
         @as(usize, @bitCast(@as(isize, pid))),
         sig,
     );
-    const signed: isize = @bitCast(rc);
-    if (signed < 0) return ProcessError.KillFailed;
+    if (syscall_util.isError(rc)) return ProcessError.KillFailed;
 }
 
 /// send SIGTERM, giving the process a chance to clean up.
 pub fn terminate(pid: posix.pid_t) ProcessError!void {
-    return sendSignal(pid, 15); // SIGTERM
+    return sendSignal(pid, linux.SIG.TERM);
 }
 
 /// send SIGKILL, forcing immediate termination.
 pub fn kill(pid: posix.pid_t) ProcessError!void {
-    return sendSignal(pid, 9); // SIGKILL
+    return sendSignal(pid, linux.SIG.KILL);
 }
 
 /// parse the raw status value from wait4.

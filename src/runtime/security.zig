@@ -10,6 +10,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
+const syscall_util = @import("../lib/syscall.zig");
 
 pub const SecurityError = error{
     SeccompFailed,
@@ -99,7 +100,7 @@ fn dropCapabilities() SecurityError!void {
     };
 
     const rc = linux.capset(&hdr, &data);
-    if (isError(rc)) return SecurityError.CapabilityFailed;
+    if (syscall_util.isError(rc)) return SecurityError.CapabilityFailed;
 }
 
 /// set PR_SET_NO_NEW_PRIVS so the process can't gain new
@@ -168,7 +169,7 @@ fn installSeccompFilter() SecurityError!void {
         0, // flags
         @intFromPtr(&prog),
     );
-    if (isError(rc)) return SecurityError.SeccompFailed;
+    if (syscall_util.isError(rc)) return SecurityError.SeccompFailed;
 }
 
 // number of deny rules in the filter (must match the actual count above)
@@ -192,11 +193,6 @@ fn archValue() u32 {
 /// get syscall number for the current architecture
 fn syscallNum(sc: linux.SYS) u32 {
     return @intFromEnum(sc);
-}
-
-fn isError(rc: usize) bool {
-    const signed: isize = @bitCast(rc);
-    return signed < 0;
 }
 
 // -- tests --
