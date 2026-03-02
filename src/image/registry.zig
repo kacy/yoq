@@ -95,47 +95,46 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     };
 
     // step 5: download all layer blobs (stored in blob store)
-    var layer_digests = std.ArrayList([]const u8).init(alloc);
+    var layer_digests: std.ArrayListUnmanaged([]const u8) = .empty;
     var total_size: u64 = 0;
 
-    for (manifest.layers) |layer| {
-        // store each layer blob in the content-addressable store
-        downloadLayerBlob(alloc, &client, image_ref.host, repository, layer.digest, token) catch {
+    for (manifest.layers) |l| {
+        downloadLayerBlob(alloc, &client, image_ref.host, repository, l.digest, token) catch {
             for (layer_digests.items) |d| alloc.free(d);
-            layer_digests.deinit();
+            layer_digests.deinit(alloc);
             alloc.free(manifest_bytes);
             alloc.free(config_bytes);
             if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
             return RegistryError.BlobNotFound;
         };
 
-        const digest_copy = alloc.dupe(u8, layer.digest) catch {
+        const digest_copy = alloc.dupe(u8, l.digest) catch {
             for (layer_digests.items) |d| alloc.free(d);
-            layer_digests.deinit();
+            layer_digests.deinit(alloc);
             alloc.free(manifest_bytes);
             alloc.free(config_bytes);
             if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
             return RegistryError.NetworkError;
         };
-        layer_digests.append(digest_copy) catch {
+        layer_digests.append(alloc, digest_copy) catch {
             alloc.free(digest_copy);
             for (layer_digests.items) |d| alloc.free(d);
-            layer_digests.deinit();
+            layer_digests.deinit(alloc);
             alloc.free(manifest_bytes);
             alloc.free(config_bytes);
             if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
             return RegistryError.NetworkError;
         };
-        total_size += layer.size;
+        total_size += l.size;
     }
 
     return PullResult{
         .manifest_digest = manifest_digest_str,
         .manifest_bytes = manifest_bytes,
         .config_bytes = config_bytes,
-        .layer_digests = layer_digests.toOwnedSlice() catch {
+        .layer_digests = layer_digests.toOwnedSlice(alloc) catch {
             for (layer_digests.items) |d| alloc.free(d);
-            layer_digests.deinit();
+            layer_digests.deinit(alloc);
             alloc.free(manifest_bytes);
             alloc.free(config_bytes);
             if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
@@ -205,21 +204,24 @@ fn authenticate(
     ) catch return error.AuthFailed;
 
     // use fetch for the token request — it's simple and we just need the body
-    var body_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer body_buf.deinit(alloc);
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
 
     const result = client.fetch(.{
         .location = .{ .url = token_url },
-        .response_writer = &body_buf.writer(alloc).interface,
+        .response_writer = &aw.writer,
     }) catch return error.AuthFailed;
 
     if (result.status != .ok) return error.AuthFailed;
+
+    // the response body is in aw.writer.buffer[0..aw.writer.end]
+    const body_data = aw.writer.buffer[0..aw.writer.end];
 
     // parse the token from the JSON response
     const token_json = std.json.parseFromSlice(struct {
         token: ?[]const u8 = null,
         access_token: ?[]const u8 = null,
-    }, alloc, body_buf.items, .{ .ignore_unknown_fields = true }) catch return error.AuthFailed;
+    }, alloc, body_data, .{ .ignore_unknown_fields = true }) catch return error.AuthFailed;
     defer token_json.deinit();
 
     const token_str = token_json.value.token orelse
@@ -285,6 +287,17 @@ const ManifestFetchResult = struct {
     digest: []const u8,
 };
 
+/// shared error set for manifest fetching (needed because fetchManifest
+/// and resolveImageIndex call each other recursively)
+const ManifestError = error{
+    ManifestNotFound,
+    NetworkError,
+    AuthFailed,
+    ParseError,
+    PlatformNotFound,
+    OutOfMemory,
+};
+
 /// fetch a manifest, resolving image index → platform-specific manifest if needed.
 fn fetchManifest(
     alloc: std.mem.Allocator,
@@ -293,7 +306,7 @@ fn fetchManifest(
     repository: []const u8,
     reference: []const u8,
     token: Token,
-) !ManifestFetchResult {
+) ManifestError!ManifestFetchResult {
     // fetch the manifest (might be an index or a direct manifest)
     var url_buf: [1024]u8 = undefined;
     const url = std.fmt.bufPrint(
@@ -341,17 +354,14 @@ fn fetchManifest(
     // read the content type to determine what we got
     const content_type = response.head.content_type orelse "";
 
-    // read the body
-    var body_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer body_buf.deinit(alloc);
+    // read the body using stream API
+    var transfer_buf: [8192]u8 = undefined;
+    const body_reader = response.reader(&transfer_buf);
 
-    const body_reader = response.reader(&.{});
-    var read_buf: [8192]u8 = undefined;
-    while (true) {
-        const n = body_reader.read(&read_buf) catch break;
-        if (n == 0) break;
-        body_buf.appendSlice(alloc, read_buf[0..n]) catch return error.NetworkError;
-    }
+    var aw_body: std.Io.Writer.Allocating = .init(alloc);
+    defer aw_body.deinit();
+
+    _ = body_reader.streamRemaining(&aw_body.writer) catch return error.NetworkError;
 
     // also grab the Docker-Content-Digest header if present
     var digest_str: []const u8 = "";
@@ -368,13 +378,13 @@ fn fetchManifest(
         // free the digest we just captured — we'll get the platform manifest's digest instead
         if (digest_str.len > 0) alloc.free(digest_str);
 
-        const platform_result = resolveImageIndex(alloc, client, host, repository, body_buf.items, token) catch
+        const platform_result = resolveImageIndex(alloc, client, host, repository, aw_body.writer.buffer[0..aw_body.writer.end], token) catch
             return error.PlatformNotFound;
         return platform_result;
     }
 
     // it's a direct manifest — return it
-    const body = alloc.dupe(u8, body_buf.items) catch return error.NetworkError;
+    const body = alloc.dupe(u8, aw_body.writer.buffer[0..aw_body.writer.end]) catch return error.NetworkError;
 
     // if no digest header, compute it ourselves
     if (digest_str.len == 0) {
@@ -401,7 +411,7 @@ fn resolveImageIndex(
     repository: []const u8,
     index_bytes: []const u8,
     token: Token,
-) !ManifestFetchResult {
+) ManifestError!ManifestFetchResult {
     var parsed = spec.parseImageIndex(alloc, index_bytes) catch return error.ParseError;
     defer parsed.deinit();
     const index = parsed.value;
@@ -459,20 +469,21 @@ fn fetchBlob(
     else
         "";
 
-    var body_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer body_buf.deinit(alloc);
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
 
     const result = client.fetch(.{
         .location = .{ .url = url },
         .headers = .{
             .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
         },
-        .response_writer = &body_buf.writer(alloc).interface,
+        .response_writer = &aw.writer,
     }) catch return error.NetworkError;
 
     if (result.status != .ok) return error.BlobNotFound;
 
-    return alloc.dupe(u8, body_buf.items) catch return error.NetworkError;
+    const body_data = aw.writer.buffer[0..aw.writer.end];
+    return alloc.dupe(u8, body_data) catch return error.NetworkError;
 }
 
 /// download a layer blob and store it in the content-addressable blob store.
