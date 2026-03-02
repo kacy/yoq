@@ -1,21 +1,11 @@
 const std = @import("std");
 
-/// shared sqlite build flags for both exe and test targets
-const sqlite_flags: []const []const u8 = &.{
-    "-DSQLITE_THREADSAFE=1",
-    "-DSQLITE_DQS=0",
-    "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
-    "-DSQLITE_OMIT_LOAD_EXTENSION",
-    "-DSQLITE_OMIT_DEPRECATED",
-};
-
 fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
-    module.addCSourceFile(.{
-        .file = b.path("lib/sqlite3.c"),
-        .flags = sqlite_flags,
+    const sqlite = b.dependency("sqlite", .{
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
     });
-    module.addIncludePath(b.path("lib"));
-    module.link_libc = true;
+    module.addImport("sqlite", sqlite.module("sqlite"));
 }
 
 pub fn build(b: *std.Build) void {
