@@ -5,7 +5,7 @@
 // database structure.
 
 const std = @import("std");
-const db_mod = @import("db.zig");
+const sqlite = @import("sqlite");
 
 pub const SchemaError = error{
     InitFailed,
@@ -13,23 +13,21 @@ pub const SchemaError = error{
     HomeDirNotFound,
 };
 
-const containers_table =
-    \\CREATE TABLE IF NOT EXISTS containers (
-    \\    id TEXT PRIMARY KEY,
-    \\    rootfs TEXT NOT NULL,
-    \\    command TEXT NOT NULL,
-    \\    hostname TEXT NOT NULL DEFAULT 'container',
-    \\    status TEXT NOT NULL DEFAULT 'created',
-    \\    pid INTEGER,
-    \\    exit_code INTEGER,
-    \\    created_at INTEGER NOT NULL
-    \\);
-;
-
 /// initialize the database schema. safe to call multiple times
 /// (uses CREATE TABLE IF NOT EXISTS).
-pub fn init(db: *db_mod.Db) SchemaError!void {
-    db.exec(@ptrCast(containers_table)) catch return SchemaError.InitFailed;
+pub fn init(db: *sqlite.Db) SchemaError!void {
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS containers (
+        \\    id TEXT PRIMARY KEY,
+        \\    rootfs TEXT NOT NULL,
+        \\    command TEXT NOT NULL,
+        \\    hostname TEXT NOT NULL DEFAULT 'container',
+        \\    status TEXT NOT NULL DEFAULT 'created',
+        \\    pid INTEGER,
+        \\    exit_code INTEGER,
+        \\    created_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -50,51 +48,55 @@ pub fn defaultDbPath(buf: *[512]u8) SchemaError![:0]const u8 {
 // -- tests --
 
 test "init creates containers table" {
-    var db = try db_mod.Db.open(":memory:");
-    defer db.close();
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
 
     try init(&db);
 
     // verify table exists by inserting a row
-    var stmt = try db.prepare(
-        "INSERT INTO containers (id, rootfs, command, created_at) VALUES (?1, ?2, ?3, ?4);",
-    );
-    defer stmt.finalize();
-    try stmt.bindText(1, "test123");
-    try stmt.bindText(2, "/tmp/rootfs");
-    try stmt.bindText(3, "/bin/sh");
-    try stmt.bindInt(4, 1234567890);
-    const result = try stmt.step();
-    try std.testing.expectEqual(db_mod.StepResult.done, result);
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, created_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "test123", "/tmp/rootfs", "/bin/sh", @as(i64, 1234567890) },
+    ) catch unreachable;
 }
 
 test "init is idempotent" {
-    var db = try db_mod.Db.open(":memory:");
-    defer db.close();
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
 
-    // calling init twice should not fail
     try init(&db);
     try init(&db);
 }
 
 test "default columns" {
-    var db = try db_mod.Db.open(":memory:");
-    defer db.close();
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
 
     try init(&db);
 
-    // insert with minimal fields, check defaults
-    db.exec(@ptrCast(
-        "INSERT INTO containers (id, rootfs, command, created_at) " ++
-            "VALUES ('abc', '/rootfs', '/bin/sh', 100);"
-    )) catch unreachable;
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, created_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "abc", "/rootfs", "/bin/sh", @as(i64, 100) },
+    ) catch unreachable;
 
-    var query = try db.prepare("SELECT hostname, status, pid, exit_code FROM containers WHERE id = 'abc';");
-    defer query.finalize();
-    _ = try query.step();
+    const Row = struct {
+        hostname: sqlite.Text,
+        status: sqlite.Text,
+        pid: ?i64,
+        exit_code: ?i64,
+    };
 
-    try std.testing.expectEqualStrings("container", query.columnText(0).?);
-    try std.testing.expectEqualStrings("created", query.columnText(1).?);
-    try std.testing.expect(query.columnOptionalInt(2) == null);
-    try std.testing.expect(query.columnOptionalInt(3) == null);
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(Row, alloc, "SELECT hostname, status, pid, exit_code FROM containers WHERE id = ?;", .{}, .{"abc"}) catch unreachable).?;
+    defer {
+        alloc.free(row.hostname.data);
+        alloc.free(row.status.data);
+    }
+
+    try std.testing.expectEqualStrings("container", row.hostname.data);
+    try std.testing.expectEqualStrings("created", row.status.data);
+    try std.testing.expect(row.pid == null);
+    try std.testing.expect(row.exit_code == null);
 }
