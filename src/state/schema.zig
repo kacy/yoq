@@ -28,6 +28,18 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    created_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS images (
+        \\    id TEXT PRIMARY KEY,
+        \\    repository TEXT NOT NULL,
+        \\    tag TEXT NOT NULL DEFAULT 'latest',
+        \\    manifest_digest TEXT NOT NULL,
+        \\    config_digest TEXT NOT NULL,
+        \\    total_size INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -58,6 +70,20 @@ test "init creates containers table" {
         "INSERT INTO containers (id, rootfs, command, created_at) VALUES (?, ?, ?, ?);",
         .{},
         .{ "test123", "/tmp/rootfs", "/bin/sh", @as(i64, 1234567890) },
+    ) catch unreachable;
+}
+
+test "init creates images table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO images (id, repository, tag, manifest_digest, config_digest, total_size, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "sha256:abc", "library/nginx", "latest", "sha256:abc", "sha256:def", @as(i64, 1024), @as(i64, 1234567890) },
     ) catch unreachable;
 }
 
