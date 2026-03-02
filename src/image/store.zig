@@ -1,0 +1,246 @@
+// store — content-addressable blob store
+//
+// stores image blobs (manifests, configs, layers) addressed by their
+// sha256 digest. blobs are immutable — same content always gets the
+// same path. deduplication is automatic.
+//
+// layout: ~/.local/share/yoq/blobs/sha256/<hex>
+//
+// this module only handles raw blob storage. image metadata tracking
+// (which images are pulled, tags, etc.) lives in state/store.zig.
+
+const std = @import("std");
+
+pub const BlobError = error{
+    WriteFailed,
+    ReadFailed,
+    NotFound,
+    HashMismatch,
+    PathTooLong,
+    HomeDirNotFound,
+};
+
+/// the base directory for all blob storage
+const blob_subdir = "blobs/sha256";
+
+/// maximum path length we'll handle
+const max_path = 512;
+
+/// write a blob to the store. returns the sha256 digest.
+/// if a blob with the same digest already exists, this is a no-op.
+pub fn putBlob(data: []const u8) BlobError!Digest {
+    const digest = computeDigest(data);
+
+    // check if already stored
+    if (hasBlob(digest)) return digest;
+
+    // write to a temp file first, then rename for atomicity
+    var dir_buf: [max_path]u8 = undefined;
+    const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
+    std.fs.cwd().makePath(dir_path) catch {};
+
+    var path_buf: [max_path]u8 = undefined;
+    const path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
+
+    const file = std.fs.cwd().createFile(path, .{}) catch
+        return BlobError.WriteFailed;
+    defer file.close();
+
+    file.writeAll(data) catch return BlobError.WriteFailed;
+
+    return digest;
+}
+
+/// write a blob from a file path instead of memory.
+/// useful for large layers that shouldn't be loaded entirely into RAM.
+/// the file is copied to the blob store and its digest is verified.
+pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobError!void {
+    if (hasBlob(expected_digest)) return;
+
+    var dir_buf: [max_path]u8 = undefined;
+    const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
+    std.fs.cwd().makePath(dir_path) catch {};
+
+    var path_buf: [max_path]u8 = undefined;
+    const dest_path = blobPath(expected_digest, &path_buf) catch return BlobError.PathTooLong;
+
+    // copy file to blob store
+    const src_file = std.fs.cwd().openFile(source_path, .{}) catch
+        return BlobError.ReadFailed;
+    defer src_file.close();
+
+    const dest_file = std.fs.cwd().createFile(dest_path, .{}) catch
+        return BlobError.WriteFailed;
+    defer dest_file.close();
+
+    // copy in chunks and compute digest simultaneously
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = src_file.read(&buf) catch return BlobError.ReadFailed;
+        if (n == 0) break;
+        hasher.update(buf[0..n]);
+        dest_file.writeAll(buf[0..n]) catch return BlobError.WriteFailed;
+    }
+
+    // verify digest
+    const actual = hasher.finalResult();
+    if (actual != expected_digest.hash) {
+        // digest mismatch — remove the bad file
+        std.fs.cwd().deleteFile(dest_path) catch {};
+        return BlobError.HashMismatch;
+    }
+}
+
+/// read a blob's contents by digest.
+/// caller owns the returned slice.
+pub fn getBlob(alloc: std.mem.Allocator, digest: Digest) BlobError![]u8 {
+    var path_buf: [max_path]u8 = undefined;
+    const path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
+
+    return std.fs.cwd().readFileAlloc(alloc, path, 256 * 1024 * 1024) catch
+        return BlobError.NotFound;
+}
+
+/// check if a blob exists without reading it
+pub fn hasBlob(digest: Digest) bool {
+    var path_buf: [max_path]u8 = undefined;
+    const path = blobPath(digest, &path_buf) catch return false;
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+/// delete a blob by digest
+pub fn deleteBlob(digest: Digest) BlobError!void {
+    var path_buf: [max_path]u8 = undefined;
+    const path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
+    std.fs.cwd().deleteFile(path) catch return BlobError.NotFound;
+}
+
+/// get the filesystem path for a blob
+pub fn blobPath(digest: Digest, buf: *[max_path]u8) BlobError![]const u8 {
+    const hex = digest.hex();
+    const home = std.posix.getenv("HOME") orelse return BlobError.HomeDirNotFound;
+    const path = std.fmt.bufPrint(buf, "{s}/.local/share/yoq/{s}/{s}", .{
+        home, blob_subdir, hex,
+    }) catch return BlobError.PathTooLong;
+    return path;
+}
+
+/// get the blob store directory
+fn blobDir(buf: *[max_path]u8) BlobError![]const u8 {
+    const home = std.posix.getenv("HOME") orelse return BlobError.HomeDirNotFound;
+    return std.fmt.bufPrint(buf, "{s}/.local/share/yoq/{s}", .{
+        home, blob_subdir,
+    }) catch return BlobError.PathTooLong;
+}
+
+// -- digest type --
+
+/// a sha256 digest — the primary identifier for blobs
+pub const Digest = struct {
+    hash: [32]u8,
+
+    /// format as "sha256:<hex>"
+    pub fn string(self: Digest, buf: *[71]u8) []const u8 {
+        const result = std.fmt.bufPrint(buf, "sha256:{s}", .{self.hex()}) catch unreachable;
+        return result;
+    }
+
+    /// format as hex string (64 chars)
+    pub fn hex(self: Digest) [64]u8 {
+        return std.fmt.bytesToHex(self.hash, .lower);
+    }
+
+    /// parse a "sha256:<hex>" string into a Digest
+    pub fn parse(s: []const u8) ?Digest {
+        const prefix = "sha256:";
+        if (!std.mem.startsWith(u8, s, prefix)) return null;
+        const hex_str = s[prefix.len..];
+        if (hex_str.len != 64) return null;
+
+        var hash: [32]u8 = undefined;
+        for (0..32) |i| {
+            hash[i] = std.fmt.parseInt(u8, hex_str[i * 2 ..][0..2], 16) catch return null;
+        }
+        return Digest{ .hash = hash };
+    }
+
+    pub fn eql(self: Digest, other: Digest) bool {
+        return std.mem.eql(u8, &self.hash, &other.hash);
+    }
+};
+
+/// compute the sha256 digest of some data
+pub fn computeDigest(data: []const u8) Digest {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(data);
+    return Digest{ .hash = hasher.finalResult() };
+}
+
+// -- tests --
+
+test "compute digest" {
+    const digest = computeDigest("hello world");
+    const hex = digest.hex();
+    // sha256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+    try std.testing.expectEqualStrings("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", &hex);
+}
+
+test "digest parse and round-trip" {
+    const original = computeDigest("test data");
+    var buf: [71]u8 = undefined;
+    const str = original.string(&buf);
+
+    try std.testing.expect(std.mem.startsWith(u8, str, "sha256:"));
+
+    const parsed = Digest.parse(str).?;
+    try std.testing.expect(original.eql(parsed));
+}
+
+test "digest parse — invalid" {
+    try std.testing.expect(Digest.parse("md5:abc") == null);
+    try std.testing.expect(Digest.parse("sha256:tooshort") == null);
+    try std.testing.expect(Digest.parse("not-a-digest") == null);
+}
+
+test "put and get blob" {
+    // skip if HOME isn't set (CI environments)
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+
+    const data = "test blob content for yoq store";
+    const digest = try putBlob(data);
+
+    // verify it exists
+    try std.testing.expect(hasBlob(digest));
+
+    // read it back
+    const alloc = std.testing.allocator;
+    const read_back = try getBlob(alloc, digest);
+    defer alloc.free(read_back);
+    try std.testing.expectEqualStrings(data, read_back);
+
+    // clean up
+    try deleteBlob(digest);
+    try std.testing.expect(!hasBlob(digest));
+}
+
+test "put blob is idempotent" {
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+
+    const data = "idempotent test blob";
+    const d1 = try putBlob(data);
+    const d2 = try putBlob(data);
+
+    try std.testing.expect(d1.eql(d2));
+
+    // clean up
+    try deleteBlob(d1);
+}
+
+test "has blob returns false for missing" {
+    const digest = computeDigest("definitely not stored");
+    try std.testing.expect(!hasBlob(digest));
+}
