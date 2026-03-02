@@ -250,4 +250,5 @@ comptime {
     _ = @import("image/spec.zig");
     _ = @import("image/store.zig");
     _ = @import("image/registry.zig");
+    _ = @import("image/layer.zig");
 }
