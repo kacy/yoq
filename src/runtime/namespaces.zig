@@ -81,6 +81,10 @@ const CloneArgs = extern struct {
 pub const SpawnResult = struct {
     /// pid of the child process (in the parent's PID namespace)
     pid: posix.pid_t,
+    /// read end of the child's stdout pipe (parent reads from this)
+    stdout_fd: posix.fd_t,
+    /// read end of the child's stderr pipe (parent reads from this)
+    stderr_fd: posix.fd_t,
 };
 
 /// spawn a new process in isolated namespaces.
@@ -104,6 +108,11 @@ pub fn spawn(
     const pipe_read = pipe_fds[0];
     const pipe_write = pipe_fds[1];
 
+    // create stdout and stderr pipes for log capture.
+    // parent gets the read ends, child gets the write ends (dup2'd to fd 1/2).
+    const stdout_pipe = posix.pipe() catch return NamespaceError.PipeFailed;
+    const stderr_pipe = posix.pipe() catch return NamespaceError.PipeFailed;
+
     // allocate child stack. clone3 needs an explicit stack for the child.
     const stack_size: usize = 1024 * 1024; // 1MB
     const stack_mem = posix.mmap(
@@ -119,6 +128,8 @@ pub fn spawn(
     // we pass the pipe read fd and the real child function through a trampoline.
     const ChildContext = struct {
         pipe_read_fd: posix.fd_t,
+        stdout_write_fd: posix.fd_t,
+        stderr_write_fd: posix.fd_t,
         real_fn: *const fn (arg: ?*anyopaque) callconv(.C) u8,
         real_arg: ?*anyopaque,
 
@@ -130,6 +141,12 @@ pub fn spawn(
             _ = posix.read(ctx.pipe_read_fd, &buf) catch {};
             posix.close(ctx.pipe_read_fd);
 
+            // redirect stdout and stderr to the log pipes
+            posix.dup2(ctx.stdout_write_fd, posix.STDOUT_FILENO) catch {};
+            posix.dup2(ctx.stderr_write_fd, posix.STDERR_FILENO) catch {};
+            posix.close(ctx.stdout_write_fd);
+            posix.close(ctx.stderr_write_fd);
+
             // run the real child function
             return ctx.real_fn(ctx.real_arg);
         }
@@ -137,6 +154,8 @@ pub fn spawn(
 
     var ctx = ChildContext{
         .pipe_read_fd = pipe_read,
+        .stdout_write_fd = stdout_pipe[1],
+        .stderr_write_fd = stderr_pipe[1],
         .real_fn = child_fn,
         .real_arg = child_arg,
     };
@@ -157,14 +176,19 @@ pub fn spawn(
     const pid = syscall_util.unwrap(rc) catch return NamespaceError.CloneFailed;
 
     if (pid == 0) {
-        // child process — run through trampoline
+        // child process — run through trampoline.
+        // close parent-side fds before executing.
         posix.close(pipe_write);
+        posix.close(stdout_pipe[0]);
+        posix.close(stderr_pipe[0]);
         const exit_code = ChildContext.trampoline(@ptrCast(&ctx));
         linux.exit_group(exit_code);
     }
 
-    // parent process
+    // parent process — close child-side fds
     posix.close(pipe_read);
+    posix.close(stdout_pipe[1]);
+    posix.close(stderr_pipe[1]);
 
     // set up user namespace mappings if requested
     if (ns_flags.user) {
@@ -185,7 +209,11 @@ pub fn spawn(
     // the child has its own copy in the new address space.
     posix.munmap(@alignCast(stack_mem), stack_size);
 
-    return SpawnResult{ .pid = @intCast(pid) };
+    return SpawnResult{
+        .pid = @intCast(pid),
+        .stdout_fd = stdout_pipe[0],
+        .stderr_fd = stderr_pipe[0],
+    };
 }
 
 /// write uid_map, gid_map, and setgroups for a child process.
