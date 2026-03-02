@@ -170,5 +170,6 @@ comptime {
     _ = @import("runtime/security.zig");
     _ = @import("runtime/process.zig");
     _ = @import("state/store.zig");
+    _ = @import("state/db.zig");
     _ = @import("lib/log.zig");
 }
