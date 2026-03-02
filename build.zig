@@ -1,5 +1,23 @@
 const std = @import("std");
 
+/// shared sqlite build flags for both exe and test targets
+const sqlite_flags: []const []const u8 = &.{
+    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+    "-DSQLITE_OMIT_LOAD_EXTENSION",
+    "-DSQLITE_OMIT_DEPRECATED",
+};
+
+fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
+    module.addCSourceFile(.{
+        .file = b.path("lib/sqlite3.c"),
+        .flags = sqlite_flags,
+    });
+    module.addIncludePath(b.path("lib"));
+    module.link_libc = true;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -13,6 +31,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    addSqlite(exe.root_module, b);
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run yoq");
@@ -31,6 +50,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+
+    addSqlite(tests.root_module, b);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
