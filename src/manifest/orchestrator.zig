@@ -233,15 +233,7 @@ pub const Orchestrator = struct {
         }
 
         // save image record
-        store.saveImage(.{
-            .id = result.manifest_digest,
-            .repository = ref.repository,
-            .tag = ref.reference,
-            .manifest_digest = result.manifest_digest,
-            .config_digest = "sha256:config",
-            .total_size = @intCast(result.total_size),
-            .created_at = std.time.timestamp(),
-        }) catch return false;
+        oci.saveImageFromPull(ref, result.manifest_digest, result.total_size) catch return false;
 
         return true;
     }

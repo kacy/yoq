@@ -1,9 +1,12 @@
 // oci — OCI image spec utilities
 //
 // provides helpers for working with OCI image configurations,
-// including command resolution per the OCI runtime spec.
+// including command resolution and image record management
+// per the OCI runtime spec.
 
 const std = @import("std");
+const image_spec = @import("spec.zig");
+const store = @import("../state/store.zig");
 
 pub const ResolvedCommand = struct {
     command: []const u8,
@@ -39,27 +42,40 @@ pub fn resolveCommand(
     var full_args: std.ArrayList([]const u8) = .empty;
 
     if (entrypoint.len > 1) {
-        for (entrypoint[1..]) |ep_arg| {
-            full_args.append(alloc, ep_arg) catch {};
-        }
+        full_args.appendSlice(alloc, entrypoint[1..]) catch {};
     }
 
     if (entrypoint.len > 0) {
         // entrypoint is set — append all of effective_args
-        for (effective_args) |arg| {
-            full_args.append(alloc, arg) catch {};
-        }
+        full_args.appendSlice(alloc, effective_args) catch {};
     } else if (effective_args.len > 1) {
         // no entrypoint — effective_args[0] is the command, rest are args
-        for (effective_args[1..]) |arg| {
-            full_args.append(alloc, arg) catch {};
-        }
+        full_args.appendSlice(alloc, effective_args[1..]) catch {};
     }
 
     return .{
         .command = effective_cmd,
         .args = full_args,
     };
+}
+
+/// save an image record after a successful pull.
+/// consolidates the common pattern of building an ImageRecord from
+/// a parsed image reference and pull results.
+pub fn saveImageFromPull(
+    ref: image_spec.ImageRef,
+    manifest_digest: []const u8,
+    total_size: usize,
+) store.StoreError!void {
+    return store.saveImage(.{
+        .id = manifest_digest,
+        .repository = ref.repository,
+        .tag = ref.reference,
+        .manifest_digest = manifest_digest,
+        .config_digest = "sha256:config",
+        .total_size = @intCast(total_size),
+        .created_at = std.time.timestamp(),
+    });
 }
 
 // -- tests --
