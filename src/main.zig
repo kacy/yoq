@@ -66,10 +66,16 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--name")) {
-            container_name = args.next() orelse {
+            const name_val = args.next() orelse {
                 writeErr("--name requires a container name\n", .{});
                 std.process.exit(1);
             };
+            if (!isValidContainerName(name_val)) {
+                writeErr("invalid container name: {s}\n", .{name_val});
+                writeErr("names must be 1-63 chars, alphanumeric or hyphens, no leading/trailing hyphen\n", .{});
+                std.process.exit(1);
+            }
+            container_name = name_val;
         } else if (std.mem.eql(u8, arg, "-p")) {
             const port_str = args.next() orelse {
                 writeErr("-p requires host_port:container_port\n", .{});
@@ -650,6 +656,21 @@ fn writeErr(comptime fmt: []const u8, args: anytype) void {
     out.flush() catch {};
 }
 
+/// validate a container name as an RFC 1123 DNS label.
+/// must be 1-63 chars, alphanumeric or hyphens, no leading/trailing hyphen.
+fn isValidContainerName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 63) return false;
+    if (name[0] == '-' or name[name.len - 1] == '-') return false;
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or
+            c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 /// parse a port mapping string "host_port:container_port" into a PortMap
 fn parsePortMap(str: []const u8) ?net_setup.PortMap {
     // find the colon separator
@@ -698,6 +719,24 @@ test "parse port map invalid" {
     try std.testing.expect(parsePortMap(":80") == null);
     try std.testing.expect(parsePortMap("8080:") == null);
     try std.testing.expect(parsePortMap("99999:80") == null);
+}
+
+test "valid container names" {
+    try std.testing.expect(isValidContainerName("db"));
+    try std.testing.expect(isValidContainerName("web-api"));
+    try std.testing.expect(isValidContainerName("my-service-1"));
+    try std.testing.expect(isValidContainerName("A"));
+    try std.testing.expect(isValidContainerName("abc123"));
+}
+
+test "invalid container names" {
+    try std.testing.expect(!isValidContainerName(""));
+    try std.testing.expect(!isValidContainerName("-db"));
+    try std.testing.expect(!isValidContainerName("db-"));
+    try std.testing.expect(!isValidContainerName("my db"));
+    try std.testing.expect(!isValidContainerName("../../etc/passwd"));
+    try std.testing.expect(!isValidContainerName("a" ** 64));
+    try std.testing.expect(!isValidContainerName("hello_world"));
 }
 
 // pull in tests from all modules

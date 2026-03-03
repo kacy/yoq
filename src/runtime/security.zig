@@ -76,6 +76,8 @@ pub fn apply() SecurityError!void {
 }
 
 /// drop all capabilities except the default allowlist.
+/// uses a 2-element data array as required by capability v3 —
+/// data[0] covers caps 0-31, data[1] covers caps 32-63.
 fn dropCapabilities() SecurityError!void {
     var hdr = linux.cap_user_header_t{
         .version = 0x20080522, // _LINUX_CAPABILITY_VERSION_3
@@ -83,23 +85,21 @@ fn dropCapabilities() SecurityError!void {
     };
 
     // build capability masks from the allowlist
-    var effective: u32 = 0;
-    var permitted: u32 = 0;
-    var inheritable: u32 = 0;
+    var data: [2]linux.cap_user_data_t = .{
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+    };
     for (default_caps) |cap| {
+        const idx = linux.CAP.TO_INDEX(cap);
         const mask = linux.CAP.TO_MASK(cap);
-        effective |= mask;
-        permitted |= mask;
-        inheritable |= mask;
+        data[idx].effective |= mask;
+        data[idx].permitted |= mask;
+        data[idx].inheritable |= mask;
     }
 
-    var data = linux.cap_user_data_t{
-        .effective = effective,
-        .permitted = permitted,
-        .inheritable = inheritable,
-    };
-
-    const rc = linux.capset(&hdr, &data);
+    // use raw syscall because the stdlib capset() wrapper takes a pointer
+    // to a single cap_user_data_t, but v3 requires a 2-element array
+    const rc = linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&data));
     if (syscall_util.isError(rc)) return SecurityError.CapabilityFailed;
 }
 
@@ -112,6 +112,26 @@ fn setNoNewPrivs() SecurityError!void {
     if (syscall_util.isError(rc)) return SecurityError.PrctlFailed;
 }
 
+/// syscalls blocked inside containers. adding or removing entries here
+/// automatically updates the BPF filter — no manual offset counting needed.
+const blocked_syscalls = [_]linux.SYS{
+    .kexec_load, // load a new kernel
+    .reboot, // reboot the host
+    .init_module, // load kernel modules
+    .delete_module, // unload kernel modules
+    .acct, // process accounting control
+    .swapon, // enable swap
+    .swapoff, // disable swap
+    .mount_setattr, // change mount properties
+    .ptrace, // trace/debug other processes
+    .bpf, // load BPF programs into the kernel
+    .perf_event_open, // access performance counters
+    .process_vm_writev, // write to another process's memory
+    .open_by_handle_at, // bypass DAC with file handles
+    .userfaultfd, // userfault file descriptor (used in exploits)
+    .keyctl, // kernel keyring manipulation
+};
+
 /// install a seccomp-bpf filter that blocks dangerous syscalls.
 ///
 /// the filter architecture:
@@ -123,39 +143,40 @@ fn setNoNewPrivs() SecurityError!void {
 /// we use a denylist approach (block known-dangerous) rather than
 /// an allowlist (allow known-safe) for pragmatic reasons: an
 /// allowlist breaks too many programs. Docker uses the same approach.
+///
+/// the filter is generated at comptime from blocked_syscalls, so
+/// adding/removing entries never causes jump offset bugs.
 fn installSeccompFilter() SecurityError!void {
     const arch = comptime archValue();
 
-    // BPF program instructions
-    const filter = [_]SockFilter{
+    // build the BPF program at comptime from the blocked_syscalls list.
+    // layout: arch check (3 insns) + load nr (1) + N deny jumps + allow + deny return
+    const n = blocked_syscalls.len;
+    const filter_len = 4 + n + 2; // 3 arch + 1 load + N checks + 1 allow + 1 deny
+    const filter = comptime blk: {
+        var f: [filter_len]SockFilter = undefined;
+
         // load architecture from seccomp_data
-        bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH),
-
-        // if arch != expected, kill the process
-        // jt=0 means fall through (arch matches), jf=jump to kill
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, arch, 1, 0),
-        bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.KILL_PROCESS),
-
+        f[0] = bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH);
+        // if arch matches, skip to syscall check; otherwise kill
+        f[1] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, arch, 1, 0);
+        f[2] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.KILL_PROCESS);
         // load syscall number
-        bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR),
+        f[3] = bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR);
 
-        // block dangerous syscalls. for each: if match, jump to errno return.
-        // the jump offsets count from the NEXT instruction.
-        // we have N blocked syscalls, each takes 1 instruction, then 1 allow + 1 errno.
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.kexec_load), deny_count, 0),
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.reboot), deny_count - 1, 0),
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.init_module), deny_count - 2, 0),
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.delete_module), deny_count - 3, 0),
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.acct), deny_count - 4, 0),
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.swapon), deny_count - 5, 0),
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.swapoff), deny_count - 6, 0),
-        bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.mount_setattr), deny_count - 7, 0),
+        // each blocked syscall: if match, jump to the deny return.
+        // jump offset = remaining checks after this one (to skip) + 1 (allow stmt)
+        for (blocked_syscalls, 0..) |sc, i| {
+            const remaining = n - 1 - i; // checks still to come
+            f[4 + i] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(sc), @intCast(remaining + 1), 0);
+        }
 
-        // allow everything else
-        bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ALLOW),
-
+        // allow everything not blocked
+        f[4 + n] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ALLOW);
         // deny: return EPERM
-        bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ERRNO | 1), // EPERM = 1
+        f[4 + n + 1] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ERRNO | 1);
+
+        break :blk f;
     };
 
     const prog = SockFprog{
@@ -172,9 +193,6 @@ fn installSeccompFilter() SecurityError!void {
     );
     if (syscall_util.isError(rc)) return SecurityError.SeccompFailed;
 }
-
-// number of deny rules in the filter (must match the actual count above)
-const deny_count = 8;
 
 /// helper: create a BPF statement (no jump)
 fn bpfStmt(code: u16, k: u32) SockFilter {
@@ -243,4 +261,27 @@ test "sock_filter struct size" {
 test "sock_fprog struct size" {
     // kernel expects 16 bytes on 64-bit (with padding)
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(SockFprog));
+}
+
+test "default caps all in low word" {
+    // all current default caps are <32, so they fit in data[0].
+    // if a cap >=32 is ever added, the 2-element data array handles it,
+    // but this test documents the current invariant.
+    for (default_caps) |cap| {
+        try std.testing.expect(linux.CAP.TO_INDEX(cap) == 0);
+    }
+}
+
+test "blocked_syscalls includes critical entries" {
+    const critical = [_]linux.SYS{ .kexec_load, .reboot, .ptrace, .bpf };
+    for (critical) |sc| {
+        var found = false;
+        for (blocked_syscalls) |blocked| {
+            if (blocked == sc) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
 }

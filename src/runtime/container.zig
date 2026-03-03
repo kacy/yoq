@@ -334,16 +334,20 @@ fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     // 3. set hostname
     setHostname(ctx.hostname);
 
-    // 4. chdir to working directory (fall back to / if it doesn't exist)
+    // 4. set a safe default umask — the child inherits the parent's umask,
+    // which could be permissive (e.g. 0000). 0o022 matches the standard default.
+    _ = linux.syscall1(.umask, 0o022);
+
+    // 5. chdir to working directory (fall back to / if it doesn't exist)
     posix.chdir(ctx.working_dir) catch {
         posix.chdir("/") catch {};
     };
 
-    // 5. apply security restrictions (capabilities + seccomp)
+    // 6. apply security restrictions (capabilities + seccomp)
     // must be after filesystem setup since mounting requires caps
     security.apply() catch return 1;
 
-    // 6. exec the container command
+    // 7. exec the container command
     return execCommand(ctx.command, ctx.args, ctx.env);
 }
 
