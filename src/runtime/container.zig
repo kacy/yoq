@@ -17,6 +17,7 @@ const logs = @import("logs.zig");
 const store = @import("../state/store.zig");
 const paths = @import("../lib/paths.zig");
 const net_setup = @import("../network/setup.zig");
+const log = @import("../lib/log.zig");
 
 pub const ContainerError = error{
     CreateFailed,
@@ -157,7 +158,10 @@ pub const Container = struct {
         };
 
         // create cgroup (non-fatal — container runs without limits if this fails)
-        var cgroup: ?cgroups.Cgroup = cgroups.Cgroup.create(config.id) catch null;
+        var cgroup: ?cgroups.Cgroup = cgroups.Cgroup.create(config.id) catch |e| blk: {
+            log.warn("cgroup setup failed for {s}: {}", .{ config.id, e });
+            break :blk null;
+        };
 
         // spawn the container process in isolated namespaces.
         // the child blocks until we call signalReady(), giving us time
@@ -243,7 +247,9 @@ pub const Container = struct {
         }
 
         // update sqlite to "running"
-        store.updateStatus(config.id, "running", spawn_result.pid, null) catch {};
+        store.updateStatus(config.id, "running", spawn_result.pid, null) catch |e| {
+            log.warn("failed to update status for {s}: {}", .{ config.id, e });
+        };
 
         // block until the child exits
         const wait_result = process.wait(spawn_result.pid, false) catch {
