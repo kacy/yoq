@@ -127,6 +127,7 @@ const blocked_syscalls = [_]linux.SYS{
     .bpf, // load BPF programs into the kernel
     .perf_event_open, // access performance counters
     .process_vm_writev, // write to another process's memory
+    .process_vm_readv, // read from another process's memory
     .open_by_handle_at, // bypass DAC with file handles
     .userfaultfd, // userfault file descriptor (used in exploits)
     .keyctl, // kernel keyring manipulation
