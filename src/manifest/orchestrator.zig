@@ -22,6 +22,7 @@ const spec = @import("spec.zig");
 const image_spec = @import("../image/spec.zig");
 const registry = @import("../image/registry.zig");
 const layer = @import("../image/layer.zig");
+const oci = @import("../image/oci.zig");
 const container = @import("../runtime/container.zig");
 const process = @import("../runtime/process.zig");
 const store = @import("../state/store.zig");
@@ -329,51 +330,9 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         "/";
 
     // resolve effective command: manifest command overrides image defaults
-    const effective_args: []const []const u8 = if (svc.command.len > 0)
-        svc.command
-    else if (entrypoint.len > 0)
-        // entrypoint set, use default cmd as args
-        default_cmd
-    else
-        default_cmd;
-
-    const effective_cmd: []const u8 = if (svc.command.len > 0)
-        svc.command[0]
-    else if (entrypoint.len > 0)
-        entrypoint[0]
-    else if (default_cmd.len > 0)
-        default_cmd[0]
-    else
-        "/bin/sh";
-
-    // build full args list
-    var full_args: std.ArrayList([]const u8) = .empty;
-    defer full_args.deinit(alloc);
-
-    if (svc.command.len > 0) {
-        // manifest command overrides everything — skip first element (it's the cmd)
-        if (svc.command.len > 1) {
-            for (svc.command[1..]) |arg| {
-                full_args.append(alloc, arg) catch {};
-            }
-        }
-    } else {
-        // use image entrypoint + cmd
-        if (entrypoint.len > 1) {
-            for (entrypoint[1..]) |ep_arg| {
-                full_args.append(alloc, ep_arg) catch {};
-            }
-        }
-        if (entrypoint.len > 0) {
-            for (effective_args) |arg| {
-                full_args.append(alloc, arg) catch {};
-            }
-        } else if (effective_args.len > 1) {
-            for (effective_args[1..]) |arg| {
-                full_args.append(alloc, arg) catch {};
-            }
-        }
-    }
+    var resolved = oci.resolveCommand(alloc, entrypoint, default_cmd, svc.command);
+    defer resolved.args.deinit(alloc);
+    const effective_cmd = resolved.command;
 
     // merge env: image env + manifest env (manifest overrides by key)
     var merged_env: std.ArrayList([]const u8) = .empty;
@@ -484,7 +443,7 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
                 .id = id,
                 .rootfs = rootfs_str,
                 .command = effective_cmd,
-                .args = full_args.items,
+                .args = resolved.args.items,
                 .env = merged_env.items,
                 .working_dir = working_dir,
                 .lower_dirs = layer_paths,
