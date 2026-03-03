@@ -14,6 +14,7 @@ pub const ContextError = error{
     HashFailed,
     CopyFailed,
     NotFound,
+    PathTraversal,
 };
 
 /// compute a content hash of files at src_path (relative to context_dir).
@@ -119,6 +120,9 @@ pub fn copyFiles(
     // determine the destination path (strip leading /)
     const dest_clean = if (dest.len > 0 and dest[0] == '/') dest[1..] else dest;
 
+    // reject paths that could escape the layer directory
+    if (containsPathTraversal(dest_clean)) return ContextError.PathTraversal;
+
     // check if source is a file or directory
     const stat = ctx_dir.statFile(src) catch {
         // try as directory
@@ -192,7 +196,27 @@ fn copyDirectory(
     }
 }
 
+/// check if a path contains ".." components that could escape a directory.
+/// only matches exact ".." path segments, not filenames containing ".."
+/// (e.g. "some..file" is fine, "../escape" is not).
+fn containsPathTraversal(path: []const u8) bool {
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |component| {
+        if (std.mem.eql(u8, component, "..")) return true;
+    }
+    return false;
+}
+
 // -- tests --
+
+test "path traversal detection" {
+    try std.testing.expect(containsPathTraversal("../etc/passwd"));
+    try std.testing.expect(containsPathTraversal("foo/../../etc"));
+    try std.testing.expect(containsPathTraversal(".."));
+    try std.testing.expect(!containsPathTraversal("some..file"));
+    try std.testing.expect(!containsPathTraversal("normal/path/here"));
+    try std.testing.expect(!containsPathTraversal(""));
+}
 
 test "hash single file" {
     const alloc = std.testing.allocator;
