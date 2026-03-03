@@ -264,6 +264,137 @@ pub const Orchestrator = struct {
     }
 };
 
+// -- service thread helpers --
+//
+// these extract the setup phases from serviceThread so the main function
+// reads as a short sequence of steps rather than a wall of code.
+
+/// resolved image configuration — owns the pull result, parsed config,
+/// and image record so they live as long as the service thread needs them.
+const ServiceImageConfig = struct {
+    rootfs: []const u8,
+    entrypoint: []const []const u8 = &.{},
+    default_cmd: []const []const u8 = &.{},
+    image_env: []const []const u8 = &.{},
+    working_dir: []const u8 = "/",
+    layer_paths: []const []const u8 = &.{},
+    pull_result: ?registry.PullResult = null,
+    config_parsed: ?image_spec.ParseResult(image_spec.ImageConfig) = null,
+    img_record: ?store.ImageRecord = null,
+
+    fn deinit(self: *ServiceImageConfig, alloc: std.mem.Allocator) void {
+        if (self.pull_result) |*r| r.deinit();
+        if (self.config_parsed) |*c| c.deinit();
+        if (self.img_record) |img| img.deinit(alloc);
+    }
+};
+
+/// resolve image config for a service: find image, pull for config,
+/// extract defaults (entrypoint, cmd, env, working_dir), assemble layers.
+fn resolveServiceImage(alloc: std.mem.Allocator, image: []const u8) ?ServiceImageConfig {
+    const ref = image_spec.parseImageRef(image);
+    const img = store.findImage(alloc, ref.repository, ref.reference) catch return null;
+
+    var result = ServiceImageConfig{ .rootfs = "/", .img_record = img };
+
+    // re-pull manifest for config
+    result.pull_result = registry.pull(alloc, ref) catch return null;
+
+    result.config_parsed = image_spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch return null;
+
+    // extract image defaults
+    if (result.config_parsed.?.value.config) |cc| {
+        if (cc.Entrypoint) |ep| result.entrypoint = ep;
+        if (cc.Cmd) |cmd| result.default_cmd = cmd;
+        if (cc.Env) |env| result.image_env = env;
+        if (cc.WorkingDir) |wd| {
+            if (wd.len > 0) result.working_dir = wd;
+        }
+    }
+
+    // assemble layers
+    result.layer_paths = layer.assembleRootfs(alloc, result.pull_result.?.layer_digests) catch return null;
+
+    if (result.layer_paths.len > 0) {
+        result.rootfs = result.layer_paths[result.layer_paths.len - 1];
+    }
+
+    return result;
+}
+
+/// merge image env with manifest env. manifest vars override image vars
+/// with the same key (before the '=').
+fn mergeServiceEnv(
+    alloc: std.mem.Allocator,
+    image_env: []const []const u8,
+    manifest_env: []const []const u8,
+) std.ArrayList([]const u8) {
+    var merged: std.ArrayList([]const u8) = .empty;
+
+    for (image_env) |img_var| {
+        const img_key = envKey(img_var);
+        var overridden = false;
+        for (manifest_env) |manifest_var| {
+            if (std.mem.eql(u8, envKey(manifest_var), img_key)) {
+                overridden = true;
+                break;
+            }
+        }
+        if (!overridden) {
+            merged.append(alloc, img_var) catch {};
+        }
+    }
+    for (manifest_env) |manifest_var| {
+        merged.append(alloc, manifest_var) catch {};
+    }
+
+    return merged;
+}
+
+/// resolved bind mounts with their allocated source paths.
+const ServiceVolumes = struct {
+    bind_mounts: std.ArrayList(container.BindMount),
+    resolved_sources: std.ArrayList([]const u8),
+
+    fn deinit(self: *ServiceVolumes, alloc: std.mem.Allocator) void {
+        for (self.resolved_sources.items) |s| alloc.free(s);
+        self.resolved_sources.deinit(alloc);
+        self.bind_mounts.deinit(alloc);
+    }
+};
+
+/// resolve bind mounts from manifest volume declarations.
+/// relative source paths are resolved to absolute paths.
+fn resolveServiceVolumes(alloc: std.mem.Allocator, volumes: []const spec.VolumeMount) ServiceVolumes {
+    var result = ServiceVolumes{
+        .bind_mounts = .empty,
+        .resolved_sources = .empty,
+    };
+
+    for (volumes) |vol| {
+        if (vol.kind != .bind) continue;
+
+        var resolve_buf: [4096]u8 = undefined;
+        const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch {
+            log.warn("failed to resolve bind mount source: {s}", .{vol.source});
+            continue;
+        };
+
+        const duped = alloc.dupe(u8, abs_source) catch continue;
+        result.resolved_sources.append(alloc, duped) catch {
+            alloc.free(duped);
+            continue;
+        };
+
+        result.bind_mounts.append(alloc, .{
+            .source = duped,
+            .target = vol.target,
+        }) catch {};
+    }
+
+    return result;
+}
+
 /// runs a single service in its own thread.
 /// in normal mode: runs once, then exits.
 /// in dev mode: restarts the container whenever restart_requested is set.
@@ -271,124 +402,32 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
     const svc = orch.manifest.services[idx];
     const alloc = orch.alloc;
 
-    // resolve image config for defaults
-    const ref = image_spec.parseImageRef(svc.image);
-    const img = store.findImage(alloc, ref.repository, ref.reference) catch {
+    // resolve image config
+    var img = resolveServiceImage(alloc, svc.image) orelse {
         orch.states[idx].status = .failed;
         return;
     };
     defer img.deinit(alloc);
 
-    // extract layers for this container
-    var pull_result: ?registry.PullResult = null;
-    defer if (pull_result) |*r| r.deinit();
-
-    // we need the image config to get defaults — re-pull manifest for config
-    pull_result = registry.pull(alloc, ref) catch {
-        orch.states[idx].status = .failed;
-        return;
-    };
-
-    var config_parsed = image_spec.parseImageConfig(alloc, pull_result.?.config_bytes) catch {
-        orch.states[idx].status = .failed;
-        return;
-    };
-    defer config_parsed.deinit();
-
-    // extract image defaults
-    var entrypoint: []const []const u8 = &.{};
-    var default_cmd: []const []const u8 = &.{};
-    var image_env: []const []const u8 = &.{};
-    var working_dir: []const u8 = "/";
-
-    if (config_parsed.value.config) |cc| {
-        if (cc.Entrypoint) |ep| entrypoint = ep;
-        if (cc.Cmd) |cmd| default_cmd = cmd;
-        if (cc.Env) |env| image_env = env;
-        if (cc.WorkingDir) |wd| {
-            if (wd.len > 0) working_dir = wd;
-        }
-    }
-
-    // extract layers
-    const layer_paths = layer.assembleRootfs(alloc, pull_result.?.layer_digests) catch {
-        orch.states[idx].status = .failed;
-        return;
-    };
-
-    const rootfs_str: []const u8 = if (layer_paths.len > 0)
-        layer_paths[layer_paths.len - 1]
-    else
-        "/";
-
-    // resolve effective command: manifest command overrides image defaults
-    var resolved = oci.resolveCommand(alloc, entrypoint, default_cmd, svc.command);
+    // resolve command
+    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, svc.command);
     defer resolved.args.deinit(alloc);
-    const effective_cmd = resolved.command;
 
-    // merge env: image env + manifest env (manifest overrides by key)
-    var merged_env: std.ArrayList([]const u8) = .empty;
+    // merge env
+    var merged_env = mergeServiceEnv(alloc, img.image_env, svc.env);
     defer merged_env.deinit(alloc);
 
-    for (image_env) |img_var| {
-        // check if manifest overrides this key
-        const img_key = envKey(img_var);
-        var overridden = false;
-        for (svc.env) |manifest_var| {
-            if (std.mem.eql(u8, envKey(manifest_var), img_key)) {
-                overridden = true;
-                break;
-            }
-        }
-        if (!overridden) {
-            merged_env.append(alloc, img_var) catch {};
-        }
-    }
-    for (svc.env) |manifest_var| {
-        merged_env.append(alloc, manifest_var) catch {};
-    }
-
-    // use manifest working_dir if set, else image default
+    // working dir override
+    var working_dir = img.working_dir;
     if (svc.working_dir) |wd| working_dir = wd;
 
-    // resolve bind mounts from manifest volumes
-    var bind_mounts: std.ArrayList(container.BindMount) = .empty;
-    defer bind_mounts.deinit(alloc);
+    // resolve volumes
+    var vols = resolveServiceVolumes(alloc, svc.volumes);
+    defer vols.deinit(alloc);
 
-    // track resolved source paths so we can free them after start()
-    var resolved_sources: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (resolved_sources.items) |s| alloc.free(s);
-        resolved_sources.deinit(alloc);
-    }
-
-    for (svc.volumes) |vol| {
-        if (vol.kind != .bind) continue;
-
-        // resolve relative paths to absolute
-        var resolve_buf: [4096]u8 = undefined;
-        const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch {
-            log.warn("failed to resolve bind mount source: {s}", .{vol.source});
-            continue;
-        };
-
-        // dupe the resolved path so it outlives the stack buffer
-        const duped = alloc.dupe(u8, abs_source) catch continue;
-        resolved_sources.append(alloc, duped) catch {
-            alloc.free(duped);
-            continue;
-        };
-
-        bind_mounts.append(alloc, .{
-            .source = duped,
-            .target = vol.target,
-        }) catch {};
-    }
-
-    // convert manifest port mappings to network PortMap
+    // port mappings
     var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
     defer port_maps.deinit(alloc);
-
     for (svc.ports) |pm| {
         port_maps.append(alloc, .{
             .host_port = pm.host_port,
@@ -397,7 +436,6 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         }) catch {};
     }
 
-    // build network config (reused across restarts)
     const net_config: ?net_setup.NetworkConfig = if (port_maps.items.len > 0)
         .{ .port_maps = port_maps.items }
     else
@@ -416,8 +454,8 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         // save container record with app_name
         store.save(.{
             .id = id,
-            .rootfs = rootfs_str,
-            .command = effective_cmd,
+            .rootfs = img.rootfs,
+            .command = resolved.command,
             .hostname = svc.name,
             .status = "created",
             .pid = null,
@@ -433,15 +471,15 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         var c = container.Container{
             .config = .{
                 .id = id,
-                .rootfs = rootfs_str,
-                .command = effective_cmd,
+                .rootfs = img.rootfs,
+                .command = resolved.command,
                 .args = resolved.args.items,
                 .env = merged_env.items,
                 .working_dir = working_dir,
-                .lower_dirs = layer_paths,
+                .lower_dirs = img.layer_paths,
                 .network = net_config,
                 .hostname = svc.name,
-                .mounts = bind_mounts.items,
+                .mounts = vols.bind_mounts.items,
                 .dev_service_name = if (orch.dev_mode) svc.name else null,
                 .dev_color_idx = idx,
             },
