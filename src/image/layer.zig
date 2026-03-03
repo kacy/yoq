@@ -19,6 +19,7 @@ pub const LayerError = error{
     PathTooLong,
     HomeDirNotFound,
     AssemblyFailed,
+    PathTraversal,
 };
 
 /// cache directory for extracted layers
@@ -99,6 +100,12 @@ fn layerDir(buf: *[max_path]u8) LayerError![]const u8 {
 
 /// extract a gzipped tarball to a directory.
 /// this is the core extraction logic: gzip decompress → tar extract.
+///
+/// uses the tar iterator directly (instead of pipeToFileSystem) so we
+/// can validate each entry's path before extraction. this prevents
+/// path traversal attacks where a malicious tar contains entries like
+/// "../../../etc/crontab" that would write outside the extraction dir.
+/// (similar to CVE-2019-14271 in Docker.)
 fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     const file = try std.fs.cwd().openFile(gz_path, .{});
     defer file.close();
@@ -118,13 +125,74 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     var dest_dir = try std.fs.cwd().openDir(dest_path, .{});
     defer dest_dir.close();
 
-    // extract tar contents to the directory
-    try std.tar.pipeToFileSystem(dest_dir, &decompress.reader, .{
-        .mode_mode = .executable_bit_only,
-        // OCI layers sometimes have unsupported file types (block devices, etc.)
-        // use diagnostics to skip them instead of failing
-        .diagnostics = null,
+    // iterate tar entries with path validation
+    var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var file_contents_buffer: [1024]u8 = undefined;
+
+    var it: std.tar.Iterator = .init(&decompress.reader, .{
+        .file_name_buffer = &file_name_buffer,
+        .link_name_buffer = &link_name_buffer,
     });
+
+    while (it.next() catch null) |entry| {
+        // reject paths that could escape the extraction directory
+        if (!isSafeTarPath(entry.name)) continue;
+
+        switch (entry.kind) {
+            .directory => {
+                if (entry.name.len > 0) {
+                    dest_dir.makePath(entry.name) catch {};
+                }
+            },
+            .file => {
+                const fs_file = createFileWithParents(dest_dir, entry.name, entry.mode) catch continue;
+                defer fs_file.close();
+                var file_writer = fs_file.writer(&file_contents_buffer);
+                it.streamRemaining(entry, &file_writer.interface) catch {};
+                file_writer.interface.flush() catch {};
+            },
+            .sym_link => {
+                // validate symlink target too — a symlink pointing to ../../etc/shadow
+                // is just as dangerous as a file with that path
+                if (!isSafeTarPath(entry.link_name)) continue;
+                dest_dir.symLink(entry.link_name, entry.name, .{}) catch {};
+            },
+        }
+    }
+}
+
+/// create a file inside dir, creating parent directories as needed.
+/// applies the executable bit from the tar mode.
+fn createFileWithParents(dir: std.fs.Dir, name: []const u8, tar_mode: u32) !std.fs.File {
+    const mode: std.fs.File.Mode = if (tar_mode & 0o100 != 0) 0o755 else 0o644;
+    return dir.createFile(name, .{ .exclusive = true, .mode = mode }) catch |err| {
+        if (err == error.FileNotFound) {
+            if (std.fs.path.dirname(name)) |dir_name| {
+                try dir.makePath(dir_name);
+                return try dir.createFile(name, .{ .exclusive = true, .mode = mode });
+            }
+        }
+        return err;
+    };
+}
+
+/// check if a tar entry path is safe to extract.
+/// rejects absolute paths and any path containing ".." components,
+/// which could escape the extraction directory.
+fn isSafeTarPath(path: []const u8) bool {
+    if (path.len == 0) return true;
+
+    // reject absolute paths
+    if (path[0] == '/') return false;
+
+    // reject paths containing ".." components
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |component| {
+        if (std.mem.eql(u8, component, "..")) return false;
+    }
+
+    return true;
 }
 
 // -- tests --
@@ -158,4 +226,31 @@ test "assemble rootfs — empty layer list" {
     const layer_paths = try assembleRootfs(alloc, &.{});
     defer alloc.free(layer_paths);
     try std.testing.expectEqual(@as(usize, 0), layer_paths.len);
+}
+
+test "path traversal — rejects ../ paths" {
+    try std.testing.expect(!isSafeTarPath("../etc/passwd"));
+    try std.testing.expect(!isSafeTarPath("foo/../../etc/shadow"));
+    try std.testing.expect(!isSafeTarPath(".."));
+    try std.testing.expect(!isSafeTarPath("foo/bar/../../../etc/crontab"));
+}
+
+test "path traversal — rejects absolute paths" {
+    try std.testing.expect(!isSafeTarPath("/etc/passwd"));
+    try std.testing.expect(!isSafeTarPath("/usr/bin/something"));
+}
+
+test "path traversal — allows normal paths" {
+    try std.testing.expect(isSafeTarPath("usr/bin/app"));
+    try std.testing.expect(isSafeTarPath("etc/config.toml"));
+    try std.testing.expect(isSafeTarPath("single_file"));
+    try std.testing.expect(isSafeTarPath(""));
+    try std.testing.expect(isSafeTarPath("a/b/c/d"));
+}
+
+test "path traversal — allows paths with dots that aren't .." {
+    try std.testing.expect(isSafeTarPath(".hidden"));
+    try std.testing.expect(isSafeTarPath("dir/.config"));
+    try std.testing.expect(isSafeTarPath("file.tar.gz"));
+    try std.testing.expect(isSafeTarPath("..."));
 }
