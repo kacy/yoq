@@ -15,6 +15,7 @@ const manifest_loader = @import("manifest/loader.zig");
 const orchestrator = @import("manifest/orchestrator.zig");
 const watcher_mod = @import("dev/watcher.zig");
 const manifest_spec = @import("manifest/spec.zig");
+const api_server = @import("api/server.zig");
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -60,6 +61,8 @@ pub fn main() !void {
         cmdUp(&args, alloc);
     } else if (std.mem.eql(u8, command, "down")) {
         cmdDown(&args, alloc);
+    } else if (std.mem.eql(u8, command, "serve")) {
+        cmdServe(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -848,6 +851,32 @@ fn cmdDown(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     writeErr("all services stopped\n", .{});
 }
 
+fn cmdServe(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var port: u16 = 7700;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--port")) {
+            const port_str = args.next() orelse {
+                writeErr("--port requires a port number\n", .{});
+                std.process.exit(1);
+            };
+            port = std.fmt.parseInt(u16, port_str, 10) catch {
+                writeErr("invalid port: {s}\n", .{port_str});
+                std.process.exit(1);
+            };
+        }
+    }
+
+    var server = api_server.Server.init(alloc, port) catch {
+        writeErr("failed to start server on port {d}\n", .{port});
+        std.process.exit(1);
+    };
+    defer server.deinit();
+
+    orchestrator.installSignalHandlers();
+    server.run();
+}
+
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -858,6 +887,7 @@ fn printUsage() void {
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
         \\  up [-f manifest.toml] [--dev]     start services (--dev: watch + restart)
         \\  down [-f manifest.toml]          stop all services from manifest
+        \\  serve [--port PORT]             start the API server (default: 7700)
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  ps                               list containers
@@ -1017,4 +1047,7 @@ comptime {
     _ = @import("manifest/orchestrator.zig");
     _ = @import("dev/log_mux.zig");
     _ = @import("dev/watcher.zig");
+    _ = @import("api/http.zig");
+    _ = @import("api/routes.zig");
+    _ = @import("api/server.zig");
 }
