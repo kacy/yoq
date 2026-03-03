@@ -76,6 +76,8 @@ pub fn apply() SecurityError!void {
 }
 
 /// drop all capabilities except the default allowlist.
+/// uses a 2-element data array as required by capability v3 —
+/// data[0] covers caps 0-31, data[1] covers caps 32-63.
 fn dropCapabilities() SecurityError!void {
     var hdr = linux.cap_user_header_t{
         .version = 0x20080522, // _LINUX_CAPABILITY_VERSION_3
@@ -83,23 +85,21 @@ fn dropCapabilities() SecurityError!void {
     };
 
     // build capability masks from the allowlist
-    var effective: u32 = 0;
-    var permitted: u32 = 0;
-    var inheritable: u32 = 0;
+    var data: [2]linux.cap_user_data_t = .{
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+    };
     for (default_caps) |cap| {
+        const idx = linux.CAP.TO_INDEX(cap);
         const mask = linux.CAP.TO_MASK(cap);
-        effective |= mask;
-        permitted |= mask;
-        inheritable |= mask;
+        data[idx].effective |= mask;
+        data[idx].permitted |= mask;
+        data[idx].inheritable |= mask;
     }
 
-    var data = linux.cap_user_data_t{
-        .effective = effective,
-        .permitted = permitted,
-        .inheritable = inheritable,
-    };
-
-    const rc = linux.capset(&hdr, &data);
+    // use raw syscall because the stdlib capset() wrapper takes a pointer
+    // to a single cap_user_data_t, but v3 requires a 2-element array
+    const rc = linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&data));
     if (syscall_util.isError(rc)) return SecurityError.CapabilityFailed;
 }
 
@@ -261,6 +261,15 @@ test "sock_filter struct size" {
 test "sock_fprog struct size" {
     // kernel expects 16 bytes on 64-bit (with padding)
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(SockFprog));
+}
+
+test "default caps all in low word" {
+    // all current default caps are <32, so they fit in data[0].
+    // if a cap >=32 is ever added, the 2-element data array handles it,
+    // but this test documents the current invariant.
+    for (default_caps) |cap| {
+        try std.testing.expect(linux.CAP.TO_INDEX(cap) == 0);
+    }
 }
 
 test "blocked_syscalls includes critical entries" {
