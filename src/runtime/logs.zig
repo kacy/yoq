@@ -24,14 +24,20 @@ pub const LogError = error{
 
 const logs_subdir = "logs";
 
+/// resolve the log file path for a container.
+/// returns the formatted path within the provided buffer.
+fn logPath(buf: *[paths.max_path]u8, container_id: []const u8) LogError![]const u8 {
+    return paths.dataPathFmt(buf, "{s}/{s}.log", .{ logs_subdir, container_id }) catch
+        return LogError.PathTooLong;
+}
+
 /// ensure the log directory exists and return a file handle for
 /// the container's log file. creates the file if it doesn't exist.
 pub fn createLogFile(container_id: []const u8) LogError!std.fs.File {
     paths.ensureDataDir(logs_subdir) catch {};
 
     var path_buf: [paths.max_path]u8 = undefined;
-    const file_path = paths.dataPathFmt(&path_buf, "{s}/{s}.log", .{ logs_subdir, container_id }) catch
-        return LogError.PathTooLong;
+    const file_path = try logPath(&path_buf, container_id);
 
     return std.fs.cwd().createFile(file_path, .{}) catch
         return LogError.CreateFailed;
@@ -40,8 +46,7 @@ pub fn createLogFile(container_id: []const u8) LogError!std.fs.File {
 /// read the full log file for a container. caller owns the returned slice.
 pub fn readLogs(alloc: std.mem.Allocator, container_id: []const u8) LogError![]const u8 {
     var path_buf: [paths.max_path]u8 = undefined;
-    const file_path = paths.dataPathFmt(&path_buf, "{s}/{s}.log", .{ logs_subdir, container_id }) catch
-        return LogError.PathTooLong;
+    const file_path = try logPath(&path_buf, container_id);
 
     const file = std.fs.cwd().openFile(file_path, .{}) catch
         return LogError.NotFound;
@@ -83,7 +88,7 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
 /// delete the log file for a container
 pub fn deleteLogFile(container_id: []const u8) void {
     var path_buf: [paths.max_path]u8 = undefined;
-    const file_path = paths.dataPathFmt(&path_buf, "{s}/{s}.log", .{ logs_subdir, container_id }) catch return;
+    const file_path = logPath(&path_buf, container_id) catch return;
     std.fs.cwd().deleteFile(file_path) catch {};
 }
 
