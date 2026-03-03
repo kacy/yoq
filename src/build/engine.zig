@@ -221,7 +221,9 @@ fn processFrom(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) B
             .config_digest = "sha256:config",
             .total_size = @intCast(result.total_size),
             .created_at = std.time.timestamp(),
-        }) catch {};
+        }) catch |err| {
+            log.warn("failed to save base image record: {}", .{err});
+        };
 
         // extract layers so they're available for overlayfs
         const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch
@@ -524,7 +526,9 @@ fn storeCache(cache_key: []const u8, layer_digest: []const u8, diff_id: []const 
         .diff_id = diff_id,
         .layer_size = @intCast(size),
         .created_at = std.time.timestamp(),
-    }) catch {};
+    }) catch |err| {
+        log.warn("failed to store build cache: {}", .{err});
+    };
 }
 
 // -- config inheritance --
@@ -738,7 +742,9 @@ fn produceImage(alloc: std.mem.Allocator, state: *BuildState, tag: ?[]const u8) 
         .config_digest = manifest_digest_str,
         .total_size = @intCast(state.total_size),
         .created_at = std.time.timestamp(),
-    }) catch {};
+    }) catch |err| {
+        log.warn("failed to save built image record: {}", .{err});
+    };
 
     return BuildResult{
         .manifest_digest = owned_digest,

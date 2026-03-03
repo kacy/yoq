@@ -234,10 +234,16 @@ pub const Container = struct {
         if (log_file) |lf| {
             stdout_thread = std.Thread.spawn(.{}, logs.captureStream, .{
                 lf, spawn_result.stdout_fd, stdout_label,
-            }) catch null;
+            }) catch |err| blk: {
+                log.warn("failed to spawn stdout capture thread: {}", .{err});
+                break :blk null;
+            };
             stderr_thread = std.Thread.spawn(.{}, logs.captureStream, .{
                 lf, spawn_result.stderr_fd, stderr_label,
-            }) catch null;
+            }) catch |err| blk: {
+                log.warn("failed to spawn stderr capture thread: {}", .{err});
+                break :blk null;
+            };
         }
 
         // close pipe fds that aren't being captured by a thread
@@ -285,7 +291,9 @@ pub const Container = struct {
         }
 
         // destroy cgroup
-        if (cgroup) |*cg| cg.destroy() catch {};
+        if (cgroup) |*cg| cg.destroy() catch |err| {
+            log.warn("failed to destroy cgroup for {s}: {}", .{ config.id, err });
+        };
 
         // update sqlite with final status
         store.updateStatus(config.id, "stopped", null, exit_code) catch |e| {

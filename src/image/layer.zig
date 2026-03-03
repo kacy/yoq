@@ -13,6 +13,7 @@
 const std = @import("std");
 const blob_store = @import("store.zig");
 const paths = @import("../lib/paths.zig");
+const log = @import("../lib/log.zig");
 
 pub const LayerError = error{
     ExtractionFailed,
@@ -47,7 +48,9 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) LayerError
     // ensure parent directory exists
     var parent_buf: [max_path]u8 = undefined;
     const parent_path = layerDir(&parent_buf) catch return LayerError.PathTooLong;
-    std.fs.cwd().makePath(parent_path) catch {};
+    std.fs.cwd().makePath(parent_path) catch |err| {
+        log.warn("failed to create layer cache dir: {}", .{err});
+    };
 
     // create the extraction directory
     std.fs.cwd().makePath(dest_path) catch return LayerError.ExtractionFailed;
@@ -252,7 +255,9 @@ fn writeTarFromDir(dir_path: []const u8, tar_path: []const u8) !blob_store.Diges
     }
 
     // flush the writer
-    file_writer.interface.flush() catch {};
+    file_writer.interface.flush() catch |err| {
+        log.warn("failed to flush tar writer: {}", .{err});
+    };
 
     // now hash the tar file for uncompressed digest
     tar_file.close();
