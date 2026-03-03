@@ -1,6 +1,7 @@
 const std = @import("std");
 const store = @import("state/store.zig");
 const container = @import("runtime/container.zig");
+const process = @import("runtime/process.zig");
 const logs = @import("runtime/logs.zig");
 const spec = @import("image/spec.zig");
 const registry = @import("image/registry.zig");
@@ -31,9 +32,9 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "ps")) {
         cmdPs(alloc);
     } else if (std.mem.eql(u8, command, "stop")) {
-        cmdStop(&args);
+        cmdStop(&args, alloc);
     } else if (std.mem.eql(u8, command, "rm")) {
-        cmdRm(&args);
+        cmdRm(&args, alloc);
     } else if (std.mem.eql(u8, command, "logs")) {
         cmdLogs(&args, alloc);
     } else if (std.mem.eql(u8, command, "pull")) {
@@ -56,107 +57,164 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     };
 
     // detect if target is an image reference or a local rootfs path.
-    // image references don't start with '/' or './' and typically contain ':'
+    // image references don't start with '/' or './'
     const is_image = !std.mem.startsWith(u8, target, "/") and
         !std.mem.startsWith(u8, target, "./");
 
+    // collect user-provided command + args from CLI
+    var user_argv: std.ArrayList([]const u8) = .empty;
+    defer user_argv.deinit(alloc);
+    while (args.next()) |arg| {
+        user_argv.append(alloc, arg) catch {};
+    }
+
+    // these will be populated from the image config or defaults
+    var entrypoint: []const []const u8 = &.{};
+    var default_cmd: []const []const u8 = &.{};
+    var image_env: []const []const u8 = &.{};
+    var working_dir: []const u8 = "/";
+    var layer_paths: []const []const u8 = &.{};
     var rootfs_str: []const u8 = target;
-    var cmd_from_image: ?[]const u8 = null;
+
+    // image pull state (deferred cleanup)
+    var pull_result: ?registry.PullResult = null;
+    defer if (pull_result) |*r| r.deinit();
+    var config_parsed: ?spec.ParseResult(spec.ImageConfig) = null;
+    defer if (config_parsed) |*c| c.deinit();
 
     if (is_image) {
-        // pull the image and extract layers
         const ref = spec.parseImageRef(target);
 
         writeErr("pulling {s}...\n", .{target});
 
-        var result = registry.pull(alloc, ref) catch {
+        pull_result = registry.pull(alloc, ref) catch {
             writeErr("failed to pull image: {s}\n", .{target});
             std.process.exit(1);
         };
-        defer result.deinit();
 
-        // parse the image config for default command
-        var config_parsed = spec.parseImageConfig(alloc, result.config_bytes) catch {
+        config_parsed = spec.parseImageConfig(alloc, pull_result.?.config_bytes) catch {
             writeErr("failed to parse image config\n", .{});
             std.process.exit(1);
         };
-        defer config_parsed.deinit();
 
-        // extract default command from image config
-        if (config_parsed.value.config) |cc| {
-            // entrypoint + cmd form the full command
-            if (cc.Entrypoint) |ep| {
-                if (ep.len > 0) cmd_from_image = ep[0];
-            } else if (cc.Cmd) |cmd_list| {
-                if (cmd_list.len > 0) cmd_from_image = cmd_list[0];
+        // extract defaults from image config
+        if (config_parsed.?.value.config) |cc| {
+            if (cc.Entrypoint) |ep| entrypoint = ep;
+            if (cc.Cmd) |cmd| default_cmd = cmd;
+            if (cc.Env) |env| image_env = env;
+            if (cc.WorkingDir) |wd| {
+                if (wd.len > 0) working_dir = wd;
             }
         }
 
-        // extract layers to get rootfs paths
-        const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch {
+        // extract layers for overlayfs
+        layer_paths = layer.assembleRootfs(alloc, pull_result.?.layer_digests) catch {
             writeErr("failed to extract image layers\n", .{});
             std.process.exit(1);
         };
-        defer {
-            for (layer_paths) |p| alloc.free(p);
-            alloc.free(layer_paths);
-        }
 
-        // save the image record in the database
-        store.saveImage(.{
-            .id = result.manifest_digest,
-            .repository = ref.repository,
-            .tag = ref.reference,
-            .manifest_digest = result.manifest_digest,
-            .config_digest = "sha256:config", // simplified for now
-            .total_size = @intCast(result.total_size),
-            .created_at = std.time.timestamp(),
-        }) catch {};
-
-        // for now, use the first layer path as the rootfs indicator
-        // when overlayfs is wired up (Linux), we'll pass all layers
         if (layer_paths.len > 0) {
             rootfs_str = layer_paths[layer_paths.len - 1];
         }
 
+        // save image record
+        store.saveImage(.{
+            .id = pull_result.?.manifest_digest,
+            .repository = ref.repository,
+            .tag = ref.reference,
+            .manifest_digest = pull_result.?.manifest_digest,
+            .config_digest = "sha256:config",
+            .total_size = @intCast(pull_result.?.total_size),
+            .created_at = std.time.timestamp(),
+        }) catch {};
+
         writeErr("image pulled and extracted\n", .{});
     }
 
-    // get the command — either from args, image config, or default
-    const cmd = args.next() orelse cmd_from_image orelse "/bin/sh";
+    // resolve the effective command per OCI spec:
+    //   effective_argv = entrypoint ++ (user_override or default_cmd)
+    // if nothing specified, fall back to /bin/sh
+    const effective_args: []const []const u8 = if (user_argv.items.len > 0)
+        user_argv.items
+    else
+        default_cmd;
+
+    const effective_cmd: []const u8 = if (entrypoint.len > 0)
+        entrypoint[0]
+    else if (effective_args.len > 0)
+        effective_args[0]
+    else
+        "/bin/sh";
+
+    // build the full args list: entrypoint[1..] ++ effective_args
+    // (or effective_args[1..] if no entrypoint)
+    var full_args: std.ArrayList([]const u8) = .empty;
+    defer full_args.deinit(alloc);
+
+    if (entrypoint.len > 1) {
+        for (entrypoint[1..]) |ep_arg| {
+            full_args.append(alloc, ep_arg) catch {};
+        }
+    }
+
+    if (entrypoint.len > 0) {
+        // entrypoint is set — append all of effective_args
+        for (effective_args) |arg| {
+            full_args.append(alloc, arg) catch {};
+        }
+    } else if (effective_args.len > 1) {
+        // no entrypoint — effective_args[0] is the command, rest are args
+        for (effective_args[1..]) |arg| {
+            full_args.append(alloc, arg) catch {};
+        }
+    }
 
     // generate container id
     var id_buf: [12]u8 = undefined;
     container.generateId(&id_buf);
     const id = id_buf[0..];
 
-    // create the log file for this container
-    if (logs.createLogFile(id)) |log_file| {
-        log_file.close();
-    } else |_| {}
-
     // save container record
-    const record = store.ContainerRecord{
+    store.save(.{
         .id = id,
         .rootfs = rootfs_str,
-        .command = cmd,
+        .command = effective_cmd,
         .hostname = "container",
         .status = "created",
         .pid = null,
         .exit_code = null,
         .created_at = std.time.timestamp(),
-    };
-
-    store.save(record) catch {
+    }) catch {
         writeErr("failed to save container state\n", .{});
         std.process.exit(1);
     };
 
     write("{s}\n", .{id});
 
-    // actual container execution (clone3, namespace setup, etc.)
-    // requires Linux. the CLI and state management work on any platform.
-    writeErr("container created (execution requires Linux)\n", .{});
+    // build container config and start execution
+    var c = container.Container{
+        .config = .{
+            .id = id,
+            .rootfs = rootfs_str,
+            .command = effective_cmd,
+            .args = full_args.items,
+            .env = image_env,
+            .working_dir = working_dir,
+            .lower_dirs = layer_paths,
+        },
+        .status = .created,
+        .pid = null,
+        .exit_code = null,
+        .created_at = std.time.timestamp(),
+    };
+
+    c.start() catch {
+        writeErr("failed to start container\n", .{});
+        std.process.exit(1);
+    };
+
+    // exit with the container's exit code
+    std.process.exit(c.exit_code orelse 0);
 }
 
 fn cmdPs(alloc: std.mem.Allocator) void {
@@ -194,29 +252,78 @@ fn cmdPs(alloc: std.mem.Allocator) void {
     }
 }
 
-fn cmdStop(args: *std.process.ArgIterator) void {
+fn cmdStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const id = args.next() orelse {
         writeErr("usage: yoq stop <container-id>\n", .{});
         std.process.exit(1);
     };
-    write("stopping {s}...\n", .{id});
-    // on Linux: look up pid from state, send SIGTERM
-    writeErr("stop requires Linux\n", .{});
+
+    // load container record to get the pid
+    const record = store.load(alloc, id) catch {
+        writeErr("container not found: {s}\n", .{id});
+        std.process.exit(1);
+    };
+    defer {
+        alloc.free(record.id);
+        alloc.free(record.rootfs);
+        alloc.free(record.command);
+        alloc.free(record.hostname);
+        alloc.free(record.status);
+    }
+
+    if (!std.mem.eql(u8, record.status, "running")) {
+        writeErr("container {s} is not running (status: {s})\n", .{ id, record.status });
+        std.process.exit(1);
+    }
+
+    const pid = record.pid orelse {
+        writeErr("container {s} has no pid\n", .{id});
+        std.process.exit(1);
+    };
+
+    process.terminate(pid) catch {
+        writeErr("failed to stop container {s}\n", .{id});
+        std.process.exit(1);
+    };
+
+    store.updateStatus(id, "stopped", null, null) catch {};
+
+    write("{s}\n", .{id});
 }
 
-fn cmdRm(args: *std.process.ArgIterator) void {
+fn cmdRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const id = args.next() orelse {
         writeErr("usage: yoq rm <container-id>\n", .{});
         std.process.exit(1);
     };
 
-    store.remove(id) catch {
+    // check if the container is still running
+    if (store.load(alloc, id)) |record| {
+        defer {
+            alloc.free(record.id);
+            alloc.free(record.rootfs);
+            alloc.free(record.command);
+            alloc.free(record.hostname);
+            alloc.free(record.status);
+        }
+
+        if (std.mem.eql(u8, record.status, "running")) {
+            writeErr("cannot remove running container {s} — stop it first\n", .{id});
+            std.process.exit(1);
+        }
+    } else |_| {
         writeErr("container not found: {s}\n", .{id});
+        std.process.exit(1);
+    }
+
+    store.remove(id) catch {
+        writeErr("failed to remove container: {s}\n", .{id});
         std.process.exit(1);
     };
 
-    // clean up log file too
+    // clean up log file and container directories
     logs.deleteLogFile(id);
+    container.cleanupContainerDirs(id);
 
     write("{s}\n", .{id});
 }
