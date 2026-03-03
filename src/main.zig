@@ -6,6 +6,8 @@ const logs = @import("runtime/logs.zig");
 const spec = @import("image/spec.zig");
 const registry = @import("image/registry.zig");
 const layer = @import("image/layer.zig");
+const net_setup = @import("network/setup.zig");
+const ip = @import("network/ip.zig");
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -51,15 +53,42 @@ pub fn main() !void {
 }
 
 fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const target = args.next() orelse {
-        writeErr("usage: yoq run <image|rootfs> [command]\n", .{});
+    // parse flags before the target
+    var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
+    defer port_maps.deinit(alloc);
+    var networking_enabled = true;
+    var target: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-p")) {
+            const port_str = args.next() orelse {
+                writeErr("-p requires host_port:container_port\n", .{});
+                std.process.exit(1);
+            };
+            const pm = parsePortMap(port_str) orelse {
+                writeErr("invalid port mapping: {s}\n", .{port_str});
+                std.process.exit(1);
+            };
+            port_maps.append(alloc, pm) catch {};
+        } else if (std.mem.eql(u8, arg, "--no-net")) {
+            networking_enabled = false;
+        } else if (std.mem.eql(u8, arg, "--net")) {
+            networking_enabled = true;
+        } else {
+            target = arg;
+            break;
+        }
+    }
+
+    const run_target = target orelse {
+        writeErr("usage: yoq run [-p host:container] [--no-net] <image|rootfs> [command]\n", .{});
         std.process.exit(1);
     };
 
     // detect if target is an image reference or a local rootfs path.
     // image references don't start with '/' or './'
-    const is_image = !std.mem.startsWith(u8, target, "/") and
-        !std.mem.startsWith(u8, target, "./");
+    const is_image = !std.mem.startsWith(u8, run_target, "/") and
+        !std.mem.startsWith(u8, run_target, "./");
 
     // collect user-provided command + args from CLI
     var user_argv: std.ArrayList([]const u8) = .empty;
@@ -74,7 +103,7 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var image_env: []const []const u8 = &.{};
     var working_dir: []const u8 = "/";
     var layer_paths: []const []const u8 = &.{};
-    var rootfs_str: []const u8 = target;
+    var rootfs_str: []const u8 = run_target;
 
     // image pull state (deferred cleanup)
     var pull_result: ?registry.PullResult = null;
@@ -83,12 +112,12 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     defer if (config_parsed) |*c| c.deinit();
 
     if (is_image) {
-        const ref = spec.parseImageRef(target);
+        const ref = spec.parseImageRef(run_target);
 
-        writeErr("pulling {s}...\n", .{target});
+        writeErr("pulling {s}...\n", .{run_target});
 
         pull_result = registry.pull(alloc, ref) catch {
-            writeErr("failed to pull image: {s}\n", .{target});
+            writeErr("failed to pull image: {s}\n", .{run_target});
             std.process.exit(1);
         };
 
@@ -191,6 +220,12 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     write("{s}\n", .{id});
 
+    // build network config
+    const net_config: ?net_setup.NetworkConfig = if (networking_enabled)
+        .{ .port_maps = port_maps.items }
+    else
+        null;
+
     // build container config and start execution
     var c = container.Container{
         .config = .{
@@ -201,6 +236,7 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             .env = image_env,
             .working_dir = working_dir,
             .lower_dirs = layer_paths,
+            .network = net_config,
         },
         .status = .created,
         .pid = null,
@@ -232,15 +268,16 @@ fn cmdPs(alloc: std.mem.Allocator) void {
         return;
     }
 
-    write("{s:<14} {s:<10} {s:<20}\n", .{ "CONTAINER ID", "STATUS", "COMMAND" });
+    write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ "CONTAINER ID", "STATUS", "IP", "COMMAND" });
     for (ids.items) |id| {
         const record = store.load(alloc, id) catch {
-            write("{s:<14} {s:<10} {s:<20}\n", .{ id, "unknown", "-" });
+            write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, "unknown", "-", "-" });
             continue;
         };
         defer record.deinit(alloc);
 
-        write("{s:<14} {s:<10} {s:<20}\n", .{ id, record.status, record.command });
+        const ip_display: []const u8 = record.ip_address orelse "-";
+        write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, record.status, ip_display, record.command });
     }
 }
 
@@ -272,6 +309,9 @@ fn cmdStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
+    // clean up network resources
+    cleanupNetwork(id, record.ip_address, record.veth_host);
+
     store.updateStatus(id, "stopped", null, null) catch {};
 
     write("{s}\n", .{id});
@@ -283,17 +323,21 @@ fn cmdRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    // check if the container is still running
-    if (store.load(alloc, id)) |record| {
-        defer record.deinit(alloc);
-        if (std.mem.eql(u8, record.status, "running")) {
-            writeErr("cannot remove running container {s} — stop it first\n", .{id});
-            std.process.exit(1);
-        }
-    } else |_| {
+    // load record to check status and get network info
+    const record = store.load(alloc, id) catch {
         writeErr("container not found: {s}\n", .{id});
         std.process.exit(1);
+    };
+
+    if (std.mem.eql(u8, record.status, "running")) {
+        record.deinit(alloc);
+        writeErr("cannot remove running container {s} — stop it first\n", .{id});
+        std.process.exit(1);
     }
+
+    // clean up network resources (veth + IP allocation)
+    cleanupNetwork(id, record.ip_address, record.veth_host);
+    record.deinit(alloc);
 
     store.remove(id) catch {
         writeErr("failed to remove container: {s}\n", .{id});
@@ -461,18 +505,22 @@ fn printUsage() void {
         \\usage: yoq <command> [options]
         \\
         \\commands:
-        \\  run <image|rootfs> [cmd]  create and run a container
-        \\  ps                        list containers
-        \\  logs <id>                 show container output
-        \\  stop <id>                 stop a running container
-        \\  rm <id>                   remove a stopped container
-        \\  pull <image>              pull an image from a registry
-        \\  images                    list pulled images
-        \\  rmi <image>               remove a pulled image
-        \\  version                   print version
-        \\  help                      show this help
+        \\  run [opts] <image|rootfs> [cmd]  create and run a container
+        \\  ps                               list containers
+        \\  logs <id>                        show container output
+        \\  stop <id>                        stop a running container
+        \\  rm <id>                          remove a stopped container
+        \\  pull <image>                     pull an image from a registry
+        \\  images                           list pulled images
+        \\  rmi <image>                      remove a pulled image
+        \\  version                          print version
+        \\  help                             show this help
         \\
-        \\options:
+        \\run options:
+        \\  -p host:container         map host port to container port
+        \\  --no-net                  disable networking
+        \\
+        \\other options:
         \\  logs --tail N             show last N lines only
         \\
     , .{});
@@ -494,8 +542,54 @@ fn writeErr(comptime fmt: []const u8, args: anytype) void {
     out.flush() catch {};
 }
 
+/// parse a port mapping string "host_port:container_port" into a PortMap
+fn parsePortMap(str: []const u8) ?net_setup.PortMap {
+    // find the colon separator
+    const colon_pos = std.mem.indexOf(u8, str, ":") orelse return null;
+    if (colon_pos == 0 or colon_pos >= str.len - 1) return null;
+
+    const host_port = std.fmt.parseInt(u16, str[0..colon_pos], 10) catch return null;
+    const container_port = std.fmt.parseInt(u16, str[colon_pos + 1 ..], 10) catch return null;
+
+    return .{ .host_port = host_port, .container_port = container_port };
+}
+
+/// clean up network resources for a container (veth pair + IP allocation).
+/// called from cmdStop and cmdRm. non-fatal — ignores errors.
+fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) void {
+    const bridge = @import("network/bridge.zig");
+
+    // delete veth pair
+    if (veth_host) |veth| {
+        var name_buf: [32]u8 = undefined;
+        const len = @min(veth.len, name_buf.len);
+        @memcpy(name_buf[0..len], veth[0..len]);
+        bridge.deleteVeth(name_buf[0..len]) catch {};
+    }
+
+    // release IP allocation
+    if (ip_address != null) {
+        var db = store.openDb() catch return;
+        defer db.deinit();
+        ip.release(&db, container_id) catch {};
+    }
+}
+
 test "smoke test" {
     try std.testing.expect(true);
+}
+
+test "parse port map" {
+    const pm = parsePortMap("8080:80").?;
+    try std.testing.expectEqual(@as(u16, 8080), pm.host_port);
+    try std.testing.expectEqual(@as(u16, 80), pm.container_port);
+}
+
+test "parse port map invalid" {
+    try std.testing.expect(parsePortMap("invalid") == null);
+    try std.testing.expect(parsePortMap(":80") == null);
+    try std.testing.expect(parsePortMap("8080:") == null);
+    try std.testing.expect(parsePortMap("99999:80") == null);
 }
 
 // pull in tests from all modules
@@ -516,4 +610,8 @@ comptime {
     _ = @import("image/registry.zig");
     _ = @import("image/layer.zig");
     _ = @import("network/netlink.zig");
+    _ = @import("network/bridge.zig");
+    _ = @import("network/ip.zig");
+    _ = @import("network/nat.zig");
+    _ = @import("network/setup.zig");
 }

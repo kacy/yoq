@@ -16,6 +16,7 @@ const process = @import("process.zig");
 const logs = @import("logs.zig");
 const store = @import("../state/store.zig");
 const paths = @import("../lib/paths.zig");
+const net_setup = @import("../network/setup.zig");
 
 pub const ContainerError = error{
     CreateFailed,
@@ -66,6 +67,8 @@ pub const ContainerConfig = struct {
     working_dir: []const u8 = "/",
     /// image layer paths for overlayfs (bottom to top)
     lower_dirs: []const []const u8 = &.{},
+    /// network configuration (bridge, port maps)
+    network: ?net_setup.NetworkConfig = null,
 };
 
 /// a running or stopped container
@@ -75,6 +78,7 @@ pub const Container = struct {
     pid: ?posix.pid_t,
     exit_code: ?u8,
     created_at: i64,
+    net_info: ?net_setup.NetworkInfo = null,
 
     /// check if the container's process is still alive.
     /// updates status if it has exited.
@@ -155,8 +159,10 @@ pub const Container = struct {
         // create cgroup (non-fatal — container runs without limits if this fails)
         var cgroup: ?cgroups.Cgroup = cgroups.Cgroup.create(config.id) catch null;
 
-        // spawn the container process in isolated namespaces
-        const spawn_result = namespaces.spawn(
+        // spawn the container process in isolated namespaces.
+        // the child blocks until we call signalReady(), giving us time
+        // to set up networking before it proceeds.
+        var spawn_result = namespaces.spawn(
             config.namespaces,
             null,
             childMain,
@@ -175,6 +181,37 @@ pub const Container = struct {
             cg.addProcess(spawn_result.pid) catch {};
             cg.setLimits(config.limits) catch {};
         }
+
+        // set up container networking (non-fatal — container works without it)
+        if (config.network) |net_config| {
+            var db = store.openDb() catch null;
+            defer if (db) |*d| d.deinit();
+
+            if (db) |*d| {
+                if (net_setup.setupContainer(config.id, spawn_result.pid, net_config, d)) |info| {
+                    self.net_info = info;
+
+                    // persist network info in the database
+                    var ip_buf: [16]u8 = undefined;
+                    const ip_str = @import("../network/ip.zig").formatIp(info.ip, &ip_buf);
+                    store.updateNetwork(config.id, ip_str, info.vethName()) catch {};
+
+                    // write resolv.conf and hosts into the rootfs
+                    if (dirs) |*overlay_dirs| {
+                        net_setup.writeNetworkFiles(
+                            overlay_dirs.mergedPath(),
+                            info.ip,
+                            config.hostname,
+                        );
+                    }
+                } else |_| {
+                    // networking failed, but container can still run
+                }
+            }
+        }
+
+        // signal child that all parent-side setup is complete
+        spawn_result.signalReady();
 
         // open log file and start capture threads
         const log_file = logs.createLogFile(config.id) catch null;
@@ -223,6 +260,17 @@ pub const Container = struct {
         if (stdout_thread) |t| t.join();
         if (stderr_thread) |t| t.join();
         if (log_file) |lf| lf.close();
+
+        // tear down networking
+        if (self.net_info) |*info| {
+            if (config.network) |net_config| {
+                var db = store.openDb() catch null;
+                defer if (db) |*d| d.deinit();
+                if (db) |*d| {
+                    net_setup.teardownContainer(config.id, info, net_config, d);
+                }
+            }
+        }
 
         // destroy cgroup
         if (cgroup) |*cg| cg.destroy() catch {};
