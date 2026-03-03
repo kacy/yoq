@@ -219,7 +219,12 @@ pub fn spawn(
             .outer_gid = std.os.linux.getgid(),
         };
         writeUserMapping(child_pid, mapping) catch {
+            // child has no uid/gid mappings — must not proceed
+            _ = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, child_pid))), linux.SIG.KILL);
+            _ = linux.syscall4(.wait4, @as(usize, @bitCast(@as(isize, child_pid))), 0, 0, 0);
             posix.close(pipe_write);
+            posix.close(stdout_pipe[0]);
+            posix.close(stderr_pipe[0]);
             return NamespaceError.WriteFailed;
         };
     }
