@@ -28,25 +28,42 @@ const max_path = paths.max_path;
 
 /// write a blob to the store. returns the sha256 digest.
 /// if a blob with the same digest already exists, this is a no-op.
+///
+/// writes to a temp file first, then renames to the final path.
+/// this ensures a crash during write never leaves a partial blob
+/// that hasBlob() would consider valid.
 pub fn putBlob(data: []const u8) BlobError!Digest {
     const digest = computeDigest(data);
 
     // check if already stored
     if (hasBlob(digest)) return digest;
 
-    // write to a temp file first, then rename for atomicity
     var dir_buf: [max_path]u8 = undefined;
     const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
     std.fs.cwd().makePath(dir_path) catch {};
 
-    var path_buf: [max_path]u8 = undefined;
-    const path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
+    // write to a temp file, then rename for atomicity
+    var tmp_buf: [max_path]u8 = undefined;
+    const tmp_path = paths.dataPathFmt(&tmp_buf, "{s}/.tmp.{s}", .{ blob_subdir, digest.hex() }) catch
+        return BlobError.PathTooLong;
 
-    const file = std.fs.cwd().createFile(path, .{}) catch
+    const file = std.fs.cwd().createFile(tmp_path, .{}) catch
         return BlobError.WriteFailed;
-    defer file.close();
 
-    file.writeAll(data) catch return BlobError.WriteFailed;
+    file.writeAll(data) catch {
+        file.close();
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return BlobError.WriteFailed;
+    };
+    file.close();
+
+    // atomic rename to final path
+    var path_buf: [max_path]u8 = undefined;
+    const final_path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
+    std.fs.cwd().rename(tmp_path, final_path) catch {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return BlobError.WriteFailed;
+    };
 
     return digest;
 }
@@ -54,6 +71,9 @@ pub fn putBlob(data: []const u8) BlobError!Digest {
 /// write a blob from a file path instead of memory.
 /// useful for large layers that shouldn't be loaded entirely into RAM.
 /// the file is copied to the blob store and its digest is verified.
+///
+/// writes to a temp file first, then renames to the final path.
+/// on failure or digest mismatch, the temp file is cleaned up.
 pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobError!void {
     if (hasBlob(expected_digest)) return;
 
@@ -61,35 +81,55 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
     const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
     std.fs.cwd().makePath(dir_path) catch {};
 
-    var path_buf: [max_path]u8 = undefined;
-    const dest_path = blobPath(expected_digest, &path_buf) catch return BlobError.PathTooLong;
+    // write to a temp file, then rename for atomicity
+    var tmp_buf: [max_path]u8 = undefined;
+    const tmp_path = paths.dataPathFmt(&tmp_buf, "{s}/.tmp.{s}", .{ blob_subdir, expected_digest.hex() }) catch
+        return BlobError.PathTooLong;
 
-    // copy file to blob store
     const src_file = std.fs.cwd().openFile(source_path, .{}) catch
         return BlobError.ReadFailed;
     defer src_file.close();
 
-    const dest_file = std.fs.cwd().createFile(dest_path, .{}) catch
+    const dest_file = std.fs.cwd().createFile(tmp_path, .{}) catch
         return BlobError.WriteFailed;
-    defer dest_file.close();
 
     // copy in chunks and compute digest simultaneously
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [8192]u8 = undefined;
+    var write_ok = true;
     while (true) {
-        const n = src_file.read(&buf) catch return BlobError.ReadFailed;
+        const n = src_file.read(&buf) catch {
+            write_ok = false;
+            break;
+        };
         if (n == 0) break;
         hasher.update(buf[0..n]);
-        dest_file.writeAll(buf[0..n]) catch return BlobError.WriteFailed;
+        dest_file.writeAll(buf[0..n]) catch {
+            write_ok = false;
+            break;
+        };
+    }
+    dest_file.close();
+
+    if (!write_ok) {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return BlobError.WriteFailed;
     }
 
-    // verify digest
+    // verify digest before committing
     const actual = hasher.finalResult();
     if (actual != expected_digest.hash) {
-        // digest mismatch — remove the bad file
-        std.fs.cwd().deleteFile(dest_path) catch {};
+        std.fs.cwd().deleteFile(tmp_path) catch {};
         return BlobError.HashMismatch;
     }
+
+    // atomic rename to final path
+    var path_buf: [max_path]u8 = undefined;
+    const final_path = blobPath(expected_digest, &path_buf) catch return BlobError.PathTooLong;
+    std.fs.cwd().rename(tmp_path, final_path) catch {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return BlobError.WriteFailed;
+    };
 }
 
 /// read a blob's contents by digest.
