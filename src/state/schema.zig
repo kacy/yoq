@@ -26,6 +26,8 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    status TEXT NOT NULL DEFAULT 'created',
         \\    pid INTEGER,
         \\    exit_code INTEGER,
+        \\    ip_address TEXT,
+        \\    veth_host TEXT,
         \\    created_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;

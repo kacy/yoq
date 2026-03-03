@@ -27,6 +27,8 @@ pub const ContainerRecord = struct {
     status: []const u8,
     pid: ?i32,
     exit_code: ?u8,
+    ip_address: ?[]const u8 = null,
+    veth_host: ?[]const u8 = null,
     created_at: i64,
 
     /// free all heap-allocated string fields
@@ -36,6 +38,8 @@ pub const ContainerRecord = struct {
         alloc.free(self.command);
         alloc.free(self.hostname);
         alloc.free(self.status);
+        if (self.ip_address) |ip| alloc.free(ip);
+        if (self.veth_host) |veth| alloc.free(veth);
     }
 };
 
@@ -50,6 +54,8 @@ const ContainerRow = struct {
     status: sqlite.Text,
     pid: ?i64,
     exit_code: ?i64,
+    ip_address: ?sqlite.Text,
+    veth_host: ?sqlite.Text,
     created_at: i64,
 };
 
@@ -70,12 +76,14 @@ fn rowToRecord(row: ContainerRow) ContainerRecord {
         .status = row.status.data,
         .pid = if (row.pid) |p| @intCast(p) else null,
         .exit_code = if (row.exit_code) |e| @intCast(e) else null,
+        .ip_address = if (row.ip_address) |ip| ip.data else null,
+        .veth_host = if (row.veth_host) |veth| veth.data else null,
         .created_at = row.created_at,
     };
 }
 
 /// open the store database, creating it and the schema if needed.
-fn openDb() StoreError!sqlite.Db {
+pub fn openDb() StoreError!sqlite.Db {
     var path_buf: [512]u8 = undefined;
     const path = schema.defaultDbPath(&path_buf) catch return StoreError.DbOpenFailed;
     var db = sqlite.Db.init(.{
@@ -99,8 +107,8 @@ pub fn save(record: ContainerRecord) StoreError!void {
     const exit_code: ?i64 = if (record.exit_code) |e| @intCast(e) else null;
 
     db.exec(
-        "INSERT OR REPLACE INTO containers (id, rootfs, command, hostname, status, pid, exit_code, created_at)" ++
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT OR REPLACE INTO containers (id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -110,6 +118,8 @@ pub fn save(record: ContainerRecord) StoreError!void {
             record.status,
             pid,
             exit_code,
+            record.ip_address,
+            record.veth_host,
             record.created_at,
         },
     ) catch return StoreError.WriteFailed;
@@ -124,7 +134,7 @@ pub fn load(alloc: std.mem.Allocator, id: []const u8) StoreError!ContainerRecord
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
-        "SELECT id, rootfs, command, hostname, status, pid, exit_code, created_at" ++
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, created_at" ++
             " FROM containers WHERE id = ?;",
         .{},
         .{id},
@@ -174,6 +184,18 @@ pub fn updateStatus(id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u
         "UPDATE containers SET status = ?, pid = ?, exit_code = ? WHERE id = ?;",
         .{},
         .{ status, pid_val, exit_val, id },
+    ) catch return StoreError.WriteFailed;
+}
+
+/// update network info for a container
+pub fn updateNetwork(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) StoreError!void {
+    var db = try openDb();
+    defer db.deinit();
+
+    db.exec(
+        "UPDATE containers SET ip_address = ?, veth_host = ? WHERE id = ?;",
+        .{},
+        .{ ip_address, veth_host, id },
     ) catch return StoreError.WriteFailed;
 }
 
