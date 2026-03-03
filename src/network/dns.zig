@@ -305,8 +305,9 @@ pub fn startResolver() void {
 
     if (resolver_running) return;
 
-    // create UDP socket
-    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch |e| {
+    // create UDP socket with CLOEXEC so it isn't inherited by child
+    // processes (e.g. iptables spawned during container setup)
+    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0) catch |e| {
         log.warn("dns: failed to create socket: {}", .{e});
         return;
     };
@@ -441,6 +442,11 @@ fn forwardQuery(
     // receive response
     var response_buf: [512]u8 = undefined;
     const resp_n = posix.recvfrom(upstream_sock, &response_buf, 0, null, null) catch return;
+
+    // verify the response's transaction ID matches our query.
+    // drop mismatched responses — could be stale or spoofed.
+    if (resp_n < 2 or query.len < 2) return;
+    if (response_buf[0] != query[0] or response_buf[1] != query[1]) return;
 
     // relay response to original client
     _ = posix.sendto(sock, response_buf[0..resp_n], 0, @ptrCast(client_addr), addr_len) catch {};
