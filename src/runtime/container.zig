@@ -46,6 +46,16 @@ pub const Status = enum {
     }
 };
 
+/// a bind mount mapping a host path into the container
+pub const BindMount = struct {
+    /// absolute path on the host
+    source: []const u8,
+    /// absolute path inside the container
+    target: []const u8,
+    /// mount read-only
+    read_only: bool = false,
+};
+
 /// configuration for creating a container
 pub const ContainerConfig = struct {
     /// unique container identifier
@@ -70,6 +80,8 @@ pub const ContainerConfig = struct {
     lower_dirs: []const []const u8 = &.{},
     /// network configuration (bridge, port maps)
     network: ?net_setup.NetworkConfig = null,
+    /// bind mounts (host path -> container path)
+    mounts: []const BindMount = &.{},
 };
 
 /// a running or stopped container
@@ -155,6 +167,7 @@ pub const Container = struct {
             .env = config.env,
             .working_dir = config.working_dir,
             .hostname = config.hostname,
+            .mounts = config.mounts,
         };
 
         // create cgroup (non-fatal — container runs without limits if this fails)
@@ -320,6 +333,7 @@ const ChildExecContext = struct {
     env: []const []const u8,
     working_dir: []const u8,
     hostname: []const u8,
+    mounts: []const BindMount,
 };
 
 /// child process entry point (called after namespace creation).
@@ -329,10 +343,23 @@ fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
 
     // 1. set up filesystem
+    //    bind mounts happen after overlay (target dirs must exist in merged fs)
+    //    but before pivot_root (host source paths are only visible pre-pivot)
     if (ctx.has_overlay) {
         filesystem.mountOverlay(ctx.fs_config) catch return 1;
+
+        // 1.5 apply bind mounts into the merged overlay
+        for (ctx.mounts) |m| {
+            filesystem.bindMount(ctx.fs_config.merged_dir, m.source, m.target, m.read_only) catch return 1;
+        }
+
         filesystem.pivotRoot(ctx.fs_config.merged_dir) catch return 1;
     } else {
+        // bind mounts with a local rootfs — mount into rootfs before pivot
+        for (ctx.mounts) |m| {
+            filesystem.bindMount(ctx.rootfs, m.source, m.target, m.read_only) catch return 1;
+        }
+
         filesystem.pivotRoot(ctx.rootfs) catch return 1;
     }
 
