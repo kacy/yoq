@@ -238,15 +238,7 @@ fn cmdPs(alloc: std.mem.Allocator) void {
             write("{s:<14} {s:<10} {s:<20}\n", .{ id, "unknown", "-" });
             continue;
         };
-        defer {
-            alloc.free(record.rootfs);
-            alloc.free(record.command);
-            alloc.free(record.hostname);
-            alloc.free(record.status);
-        }
-        // don't double-free — load() allocates its own copy of id,
-        // but we already have one from listIds(). free load's copy.
-        alloc.free(record.id);
+        defer record.deinit(alloc);
 
         write("{s:<14} {s:<10} {s:<20}\n", .{ id, record.status, record.command });
     }
@@ -263,13 +255,7 @@ fn cmdStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         writeErr("container not found: {s}\n", .{id});
         std.process.exit(1);
     };
-    defer {
-        alloc.free(record.id);
-        alloc.free(record.rootfs);
-        alloc.free(record.command);
-        alloc.free(record.hostname);
-        alloc.free(record.status);
-    }
+    defer record.deinit(alloc);
 
     if (!std.mem.eql(u8, record.status, "running")) {
         writeErr("container {s} is not running (status: {s})\n", .{ id, record.status });
@@ -299,14 +285,7 @@ fn cmdRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     // check if the container is still running
     if (store.load(alloc, id)) |record| {
-        defer {
-            alloc.free(record.id);
-            alloc.free(record.rootfs);
-            alloc.free(record.command);
-            alloc.free(record.hostname);
-            alloc.free(record.status);
-        }
-
+        defer record.deinit(alloc);
         if (std.mem.eql(u8, record.status, "running")) {
             writeErr("cannot remove running container {s} — stop it first\n", .{id});
             std.process.exit(1);
@@ -423,13 +402,7 @@ fn cmdImages(alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
     defer {
-        for (images.items) |img| {
-            alloc.free(img.id);
-            alloc.free(img.repository);
-            alloc.free(img.tag);
-            alloc.free(img.manifest_digest);
-            alloc.free(img.config_digest);
-        }
+        for (images.items) |img| img.deinit(alloc);
         images.deinit(alloc);
     }
 
@@ -465,13 +438,7 @@ fn cmdRmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         writeErr("image not found: {s}\n", .{image_str});
         std.process.exit(1);
     };
-    defer {
-        alloc.free(image.id);
-        alloc.free(image.repository);
-        alloc.free(image.tag);
-        alloc.free(image.manifest_digest);
-        alloc.free(image.config_digest);
-    }
+    defer image.deinit(alloc);
 
     // remove the image record from the database
     store.removeImage(image.id) catch {
@@ -543,6 +510,7 @@ comptime {
     _ = @import("state/store.zig");
     _ = @import("state/schema.zig");
     _ = @import("lib/log.zig");
+    _ = @import("lib/paths.zig");
     _ = @import("image/spec.zig");
     _ = @import("image/store.zig");
     _ = @import("image/registry.zig");

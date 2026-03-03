@@ -15,6 +15,7 @@ const security = @import("security.zig");
 const process = @import("process.zig");
 const logs = @import("logs.zig");
 const store = @import("../state/store.zig");
+const paths = @import("../lib/paths.zig");
 
 pub const ContainerError = error{
     CreateFailed,
@@ -339,7 +340,7 @@ fn setHostname(name: []const u8) void {
 }
 
 /// base directory for per-container overlay storage
-const containers_subdir = ".local/share/yoq/containers";
+const containers_subdir = "containers";
 
 /// paths to the overlay directories for a container
 pub const OverlayDirs = struct {
@@ -368,22 +369,20 @@ pub const OverlayDirs = struct {
 ///   ~/.local/share/yoq/containers/<id>/work
 ///   ~/.local/share/yoq/containers/<id>/rootfs  (merged mount point)
 pub fn createContainerDirs(container_id: []const u8) ContainerError!OverlayDirs {
-    const home = std.posix.getenv("HOME") orelse return ContainerError.CreateFailed;
-
     var dirs: OverlayDirs = undefined;
 
-    const upper_slice = std.fmt.bufPrint(&dirs.upper, "{s}/{s}/{s}/upper", .{
-        home, containers_subdir, container_id,
+    const upper_slice = paths.dataPathFmt(&dirs.upper, "{s}/{s}/upper", .{
+        containers_subdir, container_id,
     }) catch return ContainerError.CreateFailed;
     dirs.upper_len = upper_slice.len;
 
-    const work_slice = std.fmt.bufPrint(&dirs.work, "{s}/{s}/{s}/work", .{
-        home, containers_subdir, container_id,
+    const work_slice = paths.dataPathFmt(&dirs.work, "{s}/{s}/work", .{
+        containers_subdir, container_id,
     }) catch return ContainerError.CreateFailed;
     dirs.work_len = work_slice.len;
 
-    const merged_slice = std.fmt.bufPrint(&dirs.merged, "{s}/{s}/{s}/rootfs", .{
-        home, containers_subdir, container_id,
+    const merged_slice = paths.dataPathFmt(&dirs.merged, "{s}/{s}/rootfs", .{
+        containers_subdir, container_id,
     }) catch return ContainerError.CreateFailed;
     dirs.merged_len = merged_slice.len;
 
@@ -397,11 +396,9 @@ pub fn createContainerDirs(container_id: []const u8) ContainerError!OverlayDirs 
 
 /// remove all per-container directories
 pub fn cleanupContainerDirs(container_id: []const u8) void {
-    const home = std.posix.getenv("HOME") orelse return;
-
-    var path_buf: [512]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}", .{
-        home, containers_subdir, container_id,
+    var path_buf: [paths.max_path]u8 = undefined;
+    const dir_path = paths.dataPathFmt(&path_buf, "{s}/{s}", .{
+        containers_subdir, container_id,
     }) catch return;
 
     std.fs.cwd().deleteTree(dir_path) catch {};

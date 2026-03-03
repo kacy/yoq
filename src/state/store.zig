@@ -28,6 +28,15 @@ pub const ContainerRecord = struct {
     pid: ?i32,
     exit_code: ?u8,
     created_at: i64,
+
+    /// free all heap-allocated string fields
+    pub fn deinit(self: ContainerRecord, alloc: std.mem.Allocator) void {
+        alloc.free(self.id);
+        alloc.free(self.rootfs);
+        alloc.free(self.command);
+        alloc.free(self.hostname);
+        alloc.free(self.status);
+    }
 };
 
 /// row type for reading full container records from sqlite.
@@ -179,6 +188,15 @@ pub const ImageRecord = struct {
     config_digest: []const u8,
     total_size: i64,
     created_at: i64,
+
+    /// free all heap-allocated string fields
+    pub fn deinit(self: ImageRecord, alloc: std.mem.Allocator) void {
+        alloc.free(self.id);
+        alloc.free(self.repository);
+        alloc.free(self.tag);
+        alloc.free(self.manifest_digest);
+        alloc.free(self.config_digest);
+    }
 };
 
 /// row type for reading image records from sqlite

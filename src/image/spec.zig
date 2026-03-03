@@ -100,31 +100,27 @@ pub fn ParseResult(comptime T: type) type {
     };
 }
 
-/// parse an OCI manifest from JSON bytes.
+/// parse JSON bytes into a typed result. shared implementation for all
+/// OCI spec types — ignores unknown fields for forward compatibility.
 /// caller must call .deinit() on the result when done.
+pub fn parseJson(comptime T: type, alloc: std.mem.Allocator, json_bytes: []const u8) !ParseResult(T) {
+    const parsed = try std.json.parseFromSlice(T, alloc, json_bytes, .{
+        .ignore_unknown_fields = true,
+    });
+    return .{ .value = parsed.value, ._parsed = parsed };
+}
+
+/// convenience wrappers — named for readability at call sites
 pub fn parseManifest(alloc: std.mem.Allocator, json_bytes: []const u8) !ParseResult(Manifest) {
-    const parsed = try std.json.parseFromSlice(Manifest, alloc, json_bytes, .{
-        .ignore_unknown_fields = true,
-    });
-    return .{ .value = parsed.value, ._parsed = parsed };
+    return parseJson(Manifest, alloc, json_bytes);
 }
 
-/// parse an OCI image index from JSON bytes.
-/// caller must call .deinit() on the result when done.
 pub fn parseImageIndex(alloc: std.mem.Allocator, json_bytes: []const u8) !ParseResult(ImageIndex) {
-    const parsed = try std.json.parseFromSlice(ImageIndex, alloc, json_bytes, .{
-        .ignore_unknown_fields = true,
-    });
-    return .{ .value = parsed.value, ._parsed = parsed };
+    return parseJson(ImageIndex, alloc, json_bytes);
 }
 
-/// parse an OCI image config from JSON bytes.
-/// caller must call .deinit() on the result when done.
 pub fn parseImageConfig(alloc: std.mem.Allocator, json_bytes: []const u8) !ParseResult(ImageConfig) {
-    const parsed = try std.json.parseFromSlice(ImageConfig, alloc, json_bytes, .{
-        .ignore_unknown_fields = true,
-    });
-    return .{ .value = parsed.value, ._parsed = parsed };
+    return parseJson(ImageConfig, alloc, json_bytes);
 }
 
 /// check if a media type indicates an image index (multi-platform)

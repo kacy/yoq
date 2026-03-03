@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const sqlite = @import("sqlite");
+const paths = @import("../lib/paths.zig");
 
 pub const SchemaError = error{
     InitFailed,
@@ -45,16 +46,17 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
 /// build the default database path: ~/.local/share/yoq/yoq.db
 /// creates parent directories if needed.
 pub fn defaultDbPath(buf: *[512]u8) SchemaError![:0]const u8 {
-    const home = std.posix.getenv("HOME") orelse return SchemaError.HomeDirNotFound;
-    const dir_path = std.fmt.bufPrint(buf, "{s}/.local/share/yoq", .{home}) catch
-        return SchemaError.PathTooLong;
+    // ensure the data directory exists
+    paths.ensureDataDir("") catch return SchemaError.HomeDirNotFound;
 
-    // ensure the directory exists
-    std.fs.cwd().makePath(dir_path) catch {};
-
-    const path = std.fmt.bufPrintZ(buf, "{s}/.local/share/yoq/yoq.db", .{home}) catch
-        return SchemaError.PathTooLong;
-    return path;
+    const path = paths.dataPath(buf, "yoq.db") catch |err| return switch (err) {
+        error.HomeDirNotFound => SchemaError.HomeDirNotFound,
+        error.PathTooLong => SchemaError.PathTooLong,
+    };
+    // null-terminate for sqlite
+    if (path.len >= buf.len) return SchemaError.PathTooLong;
+    buf[path.len] = 0;
+    return buf[0..path.len :0];
 }
 
 // -- tests --
