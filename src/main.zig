@@ -1,6 +1,7 @@
 const std = @import("std");
 const store = @import("state/store.zig");
 const container = @import("runtime/container.zig");
+const process = @import("runtime/process.zig");
 const logs = @import("runtime/logs.zig");
 const spec = @import("image/spec.zig");
 const registry = @import("image/registry.zig");
@@ -31,9 +32,9 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "ps")) {
         cmdPs(alloc);
     } else if (std.mem.eql(u8, command, "stop")) {
-        cmdStop(&args);
+        cmdStop(&args, alloc);
     } else if (std.mem.eql(u8, command, "rm")) {
-        cmdRm(&args);
+        cmdRm(&args, alloc);
     } else if (std.mem.eql(u8, command, "logs")) {
         cmdLogs(&args, alloc);
     } else if (std.mem.eql(u8, command, "pull")) {
@@ -251,29 +252,78 @@ fn cmdPs(alloc: std.mem.Allocator) void {
     }
 }
 
-fn cmdStop(args: *std.process.ArgIterator) void {
+fn cmdStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const id = args.next() orelse {
         writeErr("usage: yoq stop <container-id>\n", .{});
         std.process.exit(1);
     };
-    write("stopping {s}...\n", .{id});
-    // on Linux: look up pid from state, send SIGTERM
-    writeErr("stop requires Linux\n", .{});
+
+    // load container record to get the pid
+    const record = store.load(alloc, id) catch {
+        writeErr("container not found: {s}\n", .{id});
+        std.process.exit(1);
+    };
+    defer {
+        alloc.free(record.id);
+        alloc.free(record.rootfs);
+        alloc.free(record.command);
+        alloc.free(record.hostname);
+        alloc.free(record.status);
+    }
+
+    if (!std.mem.eql(u8, record.status, "running")) {
+        writeErr("container {s} is not running (status: {s})\n", .{ id, record.status });
+        std.process.exit(1);
+    }
+
+    const pid = record.pid orelse {
+        writeErr("container {s} has no pid\n", .{id});
+        std.process.exit(1);
+    };
+
+    process.terminate(pid) catch {
+        writeErr("failed to stop container {s}\n", .{id});
+        std.process.exit(1);
+    };
+
+    store.updateStatus(id, "stopped", null, null) catch {};
+
+    write("{s}\n", .{id});
 }
 
-fn cmdRm(args: *std.process.ArgIterator) void {
+fn cmdRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const id = args.next() orelse {
         writeErr("usage: yoq rm <container-id>\n", .{});
         std.process.exit(1);
     };
 
-    store.remove(id) catch {
+    // check if the container is still running
+    if (store.load(alloc, id)) |record| {
+        defer {
+            alloc.free(record.id);
+            alloc.free(record.rootfs);
+            alloc.free(record.command);
+            alloc.free(record.hostname);
+            alloc.free(record.status);
+        }
+
+        if (std.mem.eql(u8, record.status, "running")) {
+            writeErr("cannot remove running container {s} — stop it first\n", .{id});
+            std.process.exit(1);
+        }
+    } else |_| {
         writeErr("container not found: {s}\n", .{id});
+        std.process.exit(1);
+    }
+
+    store.remove(id) catch {
+        writeErr("failed to remove container: {s}\n", .{id});
         std.process.exit(1);
     };
 
-    // clean up log file too
+    // clean up log file and container directories
     logs.deleteLogFile(id);
+    container.cleanupContainerDirs(id);
 
     write("{s}\n", .{id});
 }
