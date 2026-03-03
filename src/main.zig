@@ -752,6 +752,7 @@ comptime {
     _ = @import("state/schema.zig");
     _ = @import("lib/log.zig");
     _ = @import("lib/paths.zig");
+    _ = @import("lib/toml.zig");
     _ = @import("image/spec.zig");
     _ = @import("image/store.zig");
     _ = @import("image/registry.zig");
