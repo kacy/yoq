@@ -443,3 +443,91 @@ test "accessor returns null for wrong type" {
     try std.testing.expect(result.root.getBool("name") == null);
     try std.testing.expect(result.root.getString("missing") == null);
 }
+
+test "simple table" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc,
+        \\[server]
+        \\host = "localhost"
+        \\port = 8080
+    );
+    defer result.deinit();
+
+    const server = result.root.getTable("server").?;
+    try std.testing.expectEqualStrings("localhost", server.getString("host").?);
+    try std.testing.expectEqual(@as(i64, 8080), server.getInt("port").?);
+}
+
+test "dotted table path" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.db]
+        \\image = "postgres:15"
+    );
+    defer result.deinit();
+
+    const service = result.root.getTable("service").?;
+    const web = service.getTable("web").?;
+    const db = service.getTable("db").?;
+    try std.testing.expectEqualStrings("nginx:latest", web.getString("image").?);
+    try std.testing.expectEqualStrings("postgres:15", db.getString("image").?);
+}
+
+test "shared table prefix" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc,
+        \\[a.b]
+        \\x = 1
+        \\
+        \\[a.c]
+        \\y = 2
+        \\
+        \\[a]
+        \\z = 3
+    );
+    defer result.deinit();
+
+    const a = result.root.getTable("a").?;
+    try std.testing.expectEqual(@as(i64, 3), a.getInt("z").?);
+    try std.testing.expectEqual(@as(i64, 1), a.getTable("b").?.getInt("x").?);
+    try std.testing.expectEqual(@as(i64, 2), a.getTable("c").?.getInt("y").?);
+}
+
+test "multiple tables" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc,
+        \\name = "root"
+        \\
+        \\[alpha]
+        \\val = 1
+        \\
+        \\[beta]
+        \\val = 2
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("root", result.root.getString("name").?);
+    try std.testing.expectEqual(@as(i64, 1), result.root.getTable("alpha").?.getInt("val").?);
+    try std.testing.expectEqual(@as(i64, 2), result.root.getTable("beta").?.getInt("val").?);
+}
+
+test "empty table header error" {
+    const alloc = std.testing.allocator;
+    const result = parse(alloc, "[]");
+    try std.testing.expectError(ParseError.InvalidTableHeader, result);
+}
+
+test "table path with empty segment error" {
+    const alloc = std.testing.allocator;
+    const result = parse(alloc, "[a..b]");
+    try std.testing.expectError(ParseError.InvalidTableHeader, result);
+}
+
+test "table path conflicts with existing value" {
+    const alloc = std.testing.allocator;
+    const result = parse(alloc, "name = \"hello\"\n[name.sub]\nval = 1");
+    try std.testing.expectError(ParseError.DuplicateKey, result);
+}
