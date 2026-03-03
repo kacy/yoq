@@ -153,7 +153,7 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             .tag = ref.reference,
             .manifest_digest = pull_result.?.manifest_digest,
             .config_digest = "sha256:config",
-            .total_size = @intCast(pull_result.?.total_size),
+            .total_size = std.math.cast(i64, pull_result.?.total_size) orelse std.math.maxInt(i64),
             .created_at = std.time.timestamp(),
         }) catch {};
 
@@ -424,7 +424,7 @@ fn cmdPull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         .tag = ref.reference,
         .manifest_digest = result.manifest_digest,
         .config_digest = "sha256:config",
-        .total_size = @intCast(result.total_size),
+        .total_size = std.math.cast(i64, result.total_size) orelse std.math.maxInt(i64),
         .created_at = std.time.timestamp(),
     }) catch {
         writeErr("failed to save image record\n", .{});

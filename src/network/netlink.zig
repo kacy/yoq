@@ -12,6 +12,7 @@
 // missing ifaddrmsg/rtmsg structs.
 
 const std = @import("std");
+const math = std.math;
 const linux = std.os.linux;
 const posix = std.posix;
 
@@ -158,7 +159,7 @@ pub const MessageBuilder = struct {
 
         // write nlmsghdr
         const hdr: *linux.nlmsghdr = @ptrCast(@alignCast(&self.buf[self.pos]));
-        hdr.len = @intCast(total);
+        hdr.len = math.cast(u32, total) orelse return NetlinkError.BufferFull;
         hdr.type = msg_type;
         hdr.flags = flags;
         hdr.seq = 1;
@@ -182,7 +183,7 @@ pub const MessageBuilder = struct {
     /// add a rtattr with raw bytes value
     pub fn putAttr(self: *MessageBuilder, hdr: *linux.nlmsghdr, attr_type: u16, data: []const u8) NetlinkError!void {
         const rta_size = @sizeOf(RtAttr);
-        const attr_len: u16 = @intCast(rta_size + data.len);
+        const attr_len: u16 = math.cast(u16, rta_size + data.len) orelse return NetlinkError.BufferFull;
         const padded = nlmsgAlign(@as(usize, attr_len));
 
         if (self.pos + padded > self.buf.len) return NetlinkError.BufferFull;
@@ -202,7 +203,7 @@ pub const MessageBuilder = struct {
         }
 
         self.pos += padded;
-        hdr.len = @intCast(@as(usize, hdr.len) + padded);
+        hdr.len = math.cast(u32, @as(usize, hdr.len) + padded) orelse return NetlinkError.BufferFull;
     }
 
     /// add a rtattr with a u32 value
@@ -214,7 +215,7 @@ pub const MessageBuilder = struct {
     pub fn putAttrStr(self: *MessageBuilder, hdr: *linux.nlmsghdr, attr_type: u16, str: []const u8) NetlinkError!void {
         // netlink string attributes include the null terminator
         const rta_size = @sizeOf(RtAttr);
-        const attr_len: u16 = @intCast(rta_size + str.len + 1);
+        const attr_len: u16 = math.cast(u16, rta_size + str.len + 1) orelse return NetlinkError.BufferFull;
         const padded = nlmsgAlign(@as(usize, attr_len));
 
         if (self.pos + padded > self.buf.len) return NetlinkError.BufferFull;
@@ -232,7 +233,7 @@ pub const MessageBuilder = struct {
         }
 
         self.pos += padded;
-        hdr.len = @intCast(@as(usize, hdr.len) + padded);
+        hdr.len = math.cast(u32, @as(usize, hdr.len) + padded) orelse return NetlinkError.BufferFull;
     }
 
     /// start a nested attribute (e.g. IFLA_LINKINFO containing IFLA_INFO_KIND).
@@ -242,11 +243,11 @@ pub const MessageBuilder = struct {
         if (self.pos + rta_size > self.buf.len) return NetlinkError.BufferFull;
 
         const rta: *RtAttr = @ptrCast(@alignCast(&self.buf[self.pos]));
-        rta.len = @intCast(rta_size); // will be updated in endNested
+        rta.len = @sizeOf(RtAttr); // always 4 — will be updated in endNested
         rta.type = attr_type;
 
         self.pos += rta_size;
-        hdr.len = @intCast(@as(usize, hdr.len) + rta_size);
+        hdr.len = math.cast(u32, @as(usize, hdr.len) + rta_size) orelse return NetlinkError.BufferFull;
 
         return rta;
     }
@@ -255,7 +256,9 @@ pub const MessageBuilder = struct {
     pub fn endNested(self: *MessageBuilder, nested: *RtAttr) void {
         const start: usize = @intFromPtr(nested);
         const end: usize = @intFromPtr(&self.buf[self.pos]);
-        nested.len = @intCast(end - start);
+        // safe: nested attrs live inside a 4096-byte buffer, so the
+        // difference always fits in u16. use math.cast for defense-in-depth.
+        nested.len = math.cast(u16, end - start) orelse @sizeOf(RtAttr);
 
         // align position
         const aligned = nlmsgAlign(self.pos);
