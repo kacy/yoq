@@ -75,10 +75,18 @@ pub fn main() !void {
     }
 }
 
-fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    // parse flags before the target
+const RunFlags = struct {
+    port_maps: std.ArrayList(net_setup.PortMap),
+    networking_enabled: bool,
+    container_name: ?[]const u8,
+    target: []const u8,
+    user_argv: std.ArrayList([]const u8),
+};
+
+/// parse CLI flags for `yoq run`. consumes args up to and including the target,
+/// then collects remaining args as user command.
+fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFlags {
     var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
-    defer port_maps.deinit(alloc);
     var networking_enabled = true;
     var container_name: ?[]const u8 = null;
     var target: ?[]const u8 = null;
@@ -120,85 +128,102 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    // detect if target is an image reference or a local rootfs path.
-    // image references don't start with '/' or './'
-    const is_image = !std.mem.startsWith(u8, run_target, "/") and
-        !std.mem.startsWith(u8, run_target, "./");
-
-    // collect user-provided command + args from CLI
+    // collect user-provided command + args
     var user_argv: std.ArrayList([]const u8) = .empty;
-    defer user_argv.deinit(alloc);
     while (args.next()) |arg| {
         user_argv.append(alloc, arg) catch {};
     }
 
-    // these will be populated from the image config or defaults
-    var entrypoint: []const []const u8 = &.{};
-    var default_cmd: []const []const u8 = &.{};
-    var image_env: []const []const u8 = &.{};
-    var working_dir: []const u8 = "/";
-    var layer_paths: []const []const u8 = &.{};
-    var rootfs_str: []const u8 = run_target;
+    return .{
+        .port_maps = port_maps,
+        .networking_enabled = networking_enabled,
+        .container_name = container_name,
+        .target = run_target,
+        .user_argv = user_argv,
+    };
+}
 
-    // image pull state (deferred cleanup)
-    var pull_result: ?registry.PullResult = null;
-    defer if (pull_result) |*r| r.deinit();
-    var config_parsed: ?spec.ParseResult(spec.ImageConfig) = null;
-    defer if (config_parsed) |*c| c.deinit();
+const ImageResolution = struct {
+    rootfs: []const u8,
+    entrypoint: []const []const u8 = &.{},
+    default_cmd: []const []const u8 = &.{},
+    image_env: []const []const u8 = &.{},
+    working_dir: []const u8 = "/",
+    layer_paths: []const []const u8 = &.{},
+    pull_result: ?registry.PullResult = null,
+    config_parsed: ?spec.ParseResult(spec.ImageConfig) = null,
 
-    if (is_image) {
-        const ref = spec.parseImageRef(run_target);
+    fn deinit(self: *ImageResolution) void {
+        if (self.pull_result) |*r| r.deinit();
+        if (self.config_parsed) |*c| c.deinit();
+    }
+};
 
-        writeErr("pulling {s}...\n", .{run_target});
+/// pull an image and extract its config. returns the rootfs path,
+/// image defaults, and layer paths for overlayfs.
+fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageResolution {
+    const ref = spec.parseImageRef(target);
 
-        pull_result = registry.pull(alloc, ref) catch {
-            writeErr("failed to pull image: {s}\n", .{run_target});
-            std.process.exit(1);
-        };
+    writeErr("pulling {s}...\n", .{target});
 
-        config_parsed = spec.parseImageConfig(alloc, pull_result.?.config_bytes) catch {
-            writeErr("failed to parse image config\n", .{});
-            std.process.exit(1);
-        };
+    var result = ImageResolution{ .rootfs = target };
 
-        // extract defaults from image config
-        if (config_parsed.?.value.config) |cc| {
-            if (cc.Entrypoint) |ep| entrypoint = ep;
-            if (cc.Cmd) |cmd| default_cmd = cmd;
-            if (cc.Env) |env| image_env = env;
-            if (cc.WorkingDir) |wd| {
-                if (wd.len > 0) working_dir = wd;
-            }
+    result.pull_result = registry.pull(alloc, ref) catch {
+        writeErr("failed to pull image: {s}\n", .{target});
+        std.process.exit(1);
+    };
+
+    result.config_parsed = spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch {
+        writeErr("failed to parse image config\n", .{});
+        std.process.exit(1);
+    };
+
+    // extract defaults from image config
+    if (result.config_parsed.?.value.config) |cc| {
+        if (cc.Entrypoint) |ep| result.entrypoint = ep;
+        if (cc.Cmd) |cmd| result.default_cmd = cmd;
+        if (cc.Env) |env| result.image_env = env;
+        if (cc.WorkingDir) |wd| {
+            if (wd.len > 0) result.working_dir = wd;
         }
-
-        // extract layers for overlayfs
-        layer_paths = layer.assembleRootfs(alloc, pull_result.?.layer_digests) catch {
-            writeErr("failed to extract image layers\n", .{});
-            std.process.exit(1);
-        };
-
-        if (layer_paths.len > 0) {
-            rootfs_str = layer_paths[layer_paths.len - 1];
-        }
-
-        // save image record
-        store.saveImage(.{
-            .id = pull_result.?.manifest_digest,
-            .repository = ref.repository,
-            .tag = ref.reference,
-            .manifest_digest = pull_result.?.manifest_digest,
-            .config_digest = "sha256:config",
-            .total_size = @intCast(pull_result.?.total_size),
-            .created_at = std.time.timestamp(),
-        }) catch {};
-
-        writeErr("image pulled and extracted\n", .{});
     }
 
+    // extract layers for overlayfs
+    result.layer_paths = layer.assembleRootfs(alloc, result.pull_result.?.layer_digests) catch {
+        writeErr("failed to extract image layers\n", .{});
+        std.process.exit(1);
+    };
+
+    if (result.layer_paths.len > 0) {
+        result.rootfs = result.layer_paths[result.layer_paths.len - 1];
+    }
+
+    // save image record
+    oci.saveImageFromPull(ref, result.pull_result.?.manifest_digest, result.pull_result.?.total_size) catch {};
+
+    writeErr("image pulled and extracted\n", .{});
+    return result;
+}
+
+fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var flags = parseRunFlags(args, alloc);
+    defer flags.port_maps.deinit(alloc);
+    defer flags.user_argv.deinit(alloc);
+
+    // detect if target is an image reference or a local rootfs path
+    const is_image = !std.mem.startsWith(u8, flags.target, "/") and
+        !std.mem.startsWith(u8, flags.target, "./");
+
+    // resolve image config or use local rootfs
+    var img = if (is_image)
+        pullAndResolveImage(alloc, flags.target)
+    else
+        ImageResolution{ .rootfs = flags.target };
+    defer img.deinit();
+
     // resolve effective command per OCI spec
-    var resolved = oci.resolveCommand(alloc, entrypoint, default_cmd, user_argv.items);
+    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, flags.user_argv.items);
     defer resolved.args.deinit(alloc);
-    const effective_cmd = resolved.command;
 
     // generate container id
     var id_buf: [12]u8 = undefined;
@@ -208,9 +233,9 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // save container record
     store.save(.{
         .id = id,
-        .rootfs = rootfs_str,
-        .command = effective_cmd,
-        .hostname = container_name orelse "container",
+        .rootfs = img.rootfs,
+        .command = resolved.command,
+        .hostname = flags.container_name orelse "container",
         .status = "created",
         .pid = null,
         .exit_code = null,
@@ -223,8 +248,8 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s}\n", .{id});
 
     // build network config
-    const net_config: ?net_setup.NetworkConfig = if (networking_enabled)
-        .{ .port_maps = port_maps.items }
+    const net_config: ?net_setup.NetworkConfig = if (flags.networking_enabled)
+        .{ .port_maps = flags.port_maps.items }
     else
         null;
 
@@ -232,12 +257,12 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var c = container.Container{
         .config = .{
             .id = id,
-            .rootfs = rootfs_str,
-            .command = effective_cmd,
+            .rootfs = img.rootfs,
+            .command = resolved.command,
             .args = resolved.args.items,
-            .env = image_env,
-            .working_dir = working_dir,
-            .lower_dirs = layer_paths,
+            .env = img.image_env,
+            .working_dir = img.working_dir,
+            .lower_dirs = img.layer_paths,
             .network = net_config,
         },
         .status = .created,
@@ -468,15 +493,7 @@ fn cmdPull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 
     // save image record
-    store.saveImage(.{
-        .id = result.manifest_digest,
-        .repository = ref.repository,
-        .tag = ref.reference,
-        .manifest_digest = result.manifest_digest,
-        .config_digest = "sha256:config",
-        .total_size = @intCast(result.total_size),
-        .created_at = std.time.timestamp(),
-    }) catch {
+    oci.saveImageFromPull(ref, result.manifest_digest, result.total_size) catch {
         writeErr("failed to save image record\n", .{});
         std.process.exit(1);
     };
