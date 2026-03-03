@@ -61,6 +61,16 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    created_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS service_names (
+        \\    name TEXT NOT NULL,
+        \\    container_id TEXT NOT NULL,
+        \\    ip_address TEXT NOT NULL,
+        \\    registered_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (name, container_id)
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -133,6 +143,19 @@ test "init creates build_cache table" {
             " VALUES (?, ?, ?, ?, ?);",
         .{},
         .{ "sha256:cachekey", "sha256:layer", "sha256:diff", @as(i64, 4096), @as(i64, 1234567890) },
+    ) catch unreachable;
+}
+
+test "init creates service_names table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "web", "abc123", "10.42.0.2", @as(i64, 1234567890) },
     ) catch unreachable;
 }
 
