@@ -98,7 +98,7 @@ pub const SpawnResult = struct {
 pub fn spawn(
     ns_flags: NamespaceFlags,
     user_mapping: ?UserMapping,
-    child_fn: *const fn (arg: ?*anyopaque) callconv(.C) u8,
+    child_fn: *const fn (arg: ?*anyopaque) callconv(.c) u8,
     child_arg: ?*anyopaque,
 ) NamespaceError!SpawnResult {
     // create a pipe for parent-child synchronization.
@@ -130,10 +130,10 @@ pub fn spawn(
         pipe_read_fd: posix.fd_t,
         stdout_write_fd: posix.fd_t,
         stderr_write_fd: posix.fd_t,
-        real_fn: *const fn (arg: ?*anyopaque) callconv(.C) u8,
+        real_fn: *const fn (arg: ?*anyopaque) callconv(.c) u8,
         real_arg: ?*anyopaque,
 
-        fn trampoline(ctx_ptr: ?*anyopaque) callconv(.C) u8 {
+        fn trampoline(ctx_ptr: ?*anyopaque) callconv(.c) u8 {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
 
             // wait for parent to finish uid/gid mapping
@@ -163,7 +163,7 @@ pub fn spawn(
     var args = CloneArgs{
         .flags = ns_flags.toCloneFlags(),
         .exit_signal = linux.SIG.CHLD,
-        .stack = @intFromPtr(stack_mem),
+        .stack = @intFromPtr(stack_mem.ptr),
         .stack_size = stack_size,
     };
 
@@ -207,7 +207,7 @@ pub fn spawn(
 
     // free the child stack now that clone3 has copied it.
     // the child has its own copy in the new address space.
-    posix.munmap(@alignCast(stack_mem), stack_size);
+    posix.munmap(@alignCast(stack_mem));
 
     return SpawnResult{
         .pid = @intCast(pid),
