@@ -11,6 +11,8 @@ const ip = @import("network/ip.zig");
 const exec = @import("runtime/exec.zig");
 const dockerfile = @import("build/dockerfile.zig");
 const build_engine = @import("build/engine.zig");
+const manifest_loader = @import("manifest/loader.zig");
+const orchestrator = @import("manifest/orchestrator.zig");
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -52,6 +54,10 @@ pub fn main() !void {
         cmdExec(&args, alloc);
     } else if (std.mem.eql(u8, command, "build")) {
         cmdBuild(&args, alloc);
+    } else if (std.mem.eql(u8, command, "up")) {
+        cmdUp(&args, alloc);
+    } else if (std.mem.eql(u8, command, "down")) {
+        cmdDown(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -657,6 +663,146 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 }
 
+fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var manifest_path: []const u8 = manifest_loader.default_filename;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f")) {
+            manifest_path = args.next() orelse {
+                writeErr("-f requires a manifest path\n", .{});
+                std.process.exit(1);
+            };
+        }
+    }
+
+    // load and validate manifest
+    var manifest = manifest_loader.load(alloc, manifest_path) catch {
+        writeErr("failed to load manifest: {s}\n", .{manifest_path});
+        std.process.exit(1);
+    };
+    defer manifest.deinit();
+
+    // derive app name from cwd basename
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch {
+        writeErr("failed to resolve working directory\n", .{});
+        std.process.exit(1);
+    };
+    const app_name = std.fs.path.basename(cwd);
+
+    writeErr("starting {s} ({d} services)...\n", .{ app_name, manifest.services.len });
+
+    // install signal handlers for graceful shutdown
+    orchestrator.installSignalHandlers();
+
+    // create and run orchestrator
+    var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name);
+    defer orch.deinit();
+
+    orch.startAll() catch {
+        writeErr("failed to start services\n", .{});
+        std.process.exit(1);
+    };
+
+    writeErr("all services running. press ctrl-c to stop.\n", .{});
+
+    // block until shutdown signal or all services exit
+    orch.waitForShutdown();
+
+    writeErr("\nshutting down...\n", .{});
+    orch.stopAll();
+    writeErr("stopped\n", .{});
+}
+
+fn cmdDown(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var manifest_path: []const u8 = manifest_loader.default_filename;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f")) {
+            manifest_path = args.next() orelse {
+                writeErr("-f requires a manifest path\n", .{});
+                std.process.exit(1);
+            };
+        }
+    }
+
+    // load manifest to get service names and ordering
+    var manifest = manifest_loader.load(alloc, manifest_path) catch {
+        writeErr("failed to load manifest: {s}\n", .{manifest_path});
+        std.process.exit(1);
+    };
+    defer manifest.deinit();
+
+    // derive app name from cwd basename
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch {
+        writeErr("failed to resolve working directory\n", .{});
+        std.process.exit(1);
+    };
+    const app_name = std.fs.path.basename(cwd);
+
+    // find all containers belonging to this app
+    var ids = store.listAppContainerIds(alloc, app_name) catch {
+        writeErr("failed to query app containers\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (ids.items) |id| alloc.free(id);
+        ids.deinit(alloc);
+    }
+
+    if (ids.items.len == 0) {
+        writeErr("no running services found for {s}\n", .{app_name});
+        return;
+    }
+
+    // stop containers in reverse dependency order.
+    // iterate services in reverse (manifest is topo-sorted, so reverse = dependents first)
+    var i: usize = manifest.services.len;
+    while (i > 0) {
+        i -= 1;
+        const svc = manifest.services[i];
+
+        // find this service's container by app_name + hostname
+        const record = store.findAppContainer(alloc, app_name, svc.name) catch continue;
+        const rec = record orelse continue;
+        defer rec.deinit(alloc);
+
+        writeErr("stopping {s}...", .{svc.name});
+
+        if (std.mem.eql(u8, rec.status, "running")) {
+            if (rec.pid) |pid| {
+                process.terminate(pid) catch {
+                    process.kill(pid) catch {};
+                };
+
+                // wait briefly for process to exit
+                var waited: u32 = 0;
+                while (waited < 100) : (waited += 1) {
+                    const result = process.wait(pid, true) catch break;
+                    switch (result.status) {
+                        .running => std.time.sleep(100 * std.time.ns_per_ms),
+                        else => break,
+                    }
+                }
+            }
+        }
+
+        // clean up network resources
+        cleanupNetwork(rec.id, rec.ip_address, rec.veth_host);
+
+        // update status and clean up
+        store.updateStatus(rec.id, "stopped", null, null) catch {};
+        store.remove(rec.id) catch {};
+        logs.deleteLogFile(rec.id);
+        container.cleanupContainerDirs(rec.id);
+
+        writeErr(" stopped\n", .{});
+    }
+
+    writeErr("all services stopped\n", .{});
+}
+
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -665,6 +811,8 @@ fn printUsage() void {
         \\
         \\commands:
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
+        \\  up [-f manifest.toml]            start all services from manifest
+        \\  down [-f manifest.toml]          stop all services from manifest
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  ps                               list containers
@@ -821,4 +969,5 @@ comptime {
     _ = @import("build/engine.zig");
     _ = @import("manifest/spec.zig");
     _ = @import("manifest/loader.zig");
+    _ = @import("manifest/orchestrator.zig");
 }
