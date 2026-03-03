@@ -235,3 +235,45 @@ test "protocol conversion" {
     try std.testing.expectEqual(nat.Protocol.tcp, Protocol.tcp.toNat());
     try std.testing.expectEqual(nat.Protocol.udp, Protocol.udp.toNat());
 }
+
+test "writeNetworkFiles sets resolv.conf to bridge gateway" {
+    const alloc = std.testing.allocator;
+
+    // create a temporary directory for the rootfs
+    const tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const rootfs_path = tmp_dir.dir.realpath(".", &path_buf) catch return;
+
+    writeNetworkFiles(rootfs_path, .{ 10, 42, 0, 5 }, "myhost");
+
+    // read the resolv.conf we wrote
+    var resolv_path_buf: [600]u8 = undefined;
+    const resolv_path = std.fmt.bufPrint(&resolv_path_buf, "{s}/etc/resolv.conf", .{rootfs_path}) catch return;
+    const content = std.fs.cwd().readFileAlloc(alloc, resolv_path, 4096) catch return;
+    defer alloc.free(content);
+
+    // should point to bridge gateway, not 8.8.8.8
+    try std.testing.expect(std.mem.indexOf(u8, content, "10.42.0.1") != null);
+}
+
+test "writeNetworkFiles sets etc/hosts with hostname" {
+    const alloc = std.testing.allocator;
+
+    const tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const rootfs_path = tmp_dir.dir.realpath(".", &path_buf) catch return;
+
+    writeNetworkFiles(rootfs_path, .{ 10, 42, 0, 7 }, "dbserver");
+
+    var hosts_path_buf: [600]u8 = undefined;
+    const hosts_path = std.fmt.bufPrint(&hosts_path_buf, "{s}/etc/hosts", .{rootfs_path}) catch return;
+    const content = std.fs.cwd().readFileAlloc(alloc, hosts_path, 4096) catch return;
+    defer alloc.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "dbserver") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "10.42.0.7") != null);
+}
