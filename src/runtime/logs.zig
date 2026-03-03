@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const paths = @import("../lib/paths.zig");
 
 pub const LogError = error{
     CreateFailed,
@@ -20,20 +21,15 @@ pub const LogError = error{
     PathTooLong,
 };
 
-const logs_dir = ".local/share/yoq/logs";
+const logs_subdir = "logs";
 
 /// ensure the log directory exists and return a file handle for
 /// the container's log file. creates the file if it doesn't exist.
 pub fn createLogFile(container_id: []const u8) LogError!std.fs.File {
-    const home = std.posix.getenv("HOME") orelse "/tmp";
+    paths.ensureDataDir(logs_subdir) catch {};
 
-    var dir_buf: [512]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ home, logs_dir }) catch
-        return LogError.PathTooLong;
-    std.fs.cwd().makePath(dir_path) catch {};
-
-    var path_buf: [512]u8 = undefined;
-    const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}.log", .{ home, logs_dir, container_id }) catch
+    var path_buf: [paths.max_path]u8 = undefined;
+    const file_path = paths.dataPathFmt(&path_buf, "{s}/{s}.log", .{ logs_subdir, container_id }) catch
         return LogError.PathTooLong;
 
     return std.fs.cwd().createFile(file_path, .{}) catch
@@ -42,10 +38,8 @@ pub fn createLogFile(container_id: []const u8) LogError!std.fs.File {
 
 /// read the full log file for a container. caller owns the returned slice.
 pub fn readLogs(alloc: std.mem.Allocator, container_id: []const u8) LogError![]const u8 {
-    const home = std.posix.getenv("HOME") orelse "/tmp";
-
-    var path_buf: [512]u8 = undefined;
-    const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}.log", .{ home, logs_dir, container_id }) catch
+    var path_buf: [paths.max_path]u8 = undefined;
+    const file_path = paths.dataPathFmt(&path_buf, "{s}/{s}.log", .{ logs_subdir, container_id }) catch
         return LogError.PathTooLong;
 
     const file = std.fs.cwd().openFile(file_path, .{}) catch
@@ -87,11 +81,8 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
 
 /// delete the log file for a container
 pub fn deleteLogFile(container_id: []const u8) void {
-    const home = std.posix.getenv("HOME") orelse return;
-
-    var path_buf: [512]u8 = undefined;
-    const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}.log", .{ home, logs_dir, container_id }) catch return;
-
+    var path_buf: [paths.max_path]u8 = undefined;
+    const file_path = paths.dataPathFmt(&path_buf, "{s}/{s}.log", .{ logs_subdir, container_id }) catch return;
     std.fs.cwd().deleteFile(file_path) catch {};
 }
 
