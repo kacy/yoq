@@ -309,10 +309,7 @@ fn cmdPs(alloc: std.mem.Allocator) void {
 }
 
 fn cmdStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const id = args.next() orelse {
-        writeErr("usage: yoq stop <container-id>\n", .{});
-        std.process.exit(1);
-    };
+    const id = requireArg(args, "usage: yoq stop <container-id>\n");
 
     // load container record to get the pid
     const record = store.load(alloc, id) catch {
@@ -393,10 +390,7 @@ fn cmdExec(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 }
 
 fn cmdRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const id = args.next() orelse {
-        writeErr("usage: yoq rm <container-id>\n", .{});
-        std.process.exit(1);
-    };
+    const id = requireArg(args, "usage: yoq rm <container-id>\n");
 
     // load record to check status and get network info
     const record = store.load(alloc, id) catch {
@@ -410,27 +404,14 @@ fn cmdRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     }
 
-    // clean up network resources (veth + IP allocation)
-    cleanupNetwork(id, record.ip_address, record.veth_host);
+    cleanupStoppedContainer(id, record.ip_address, record.veth_host);
     record.deinit(alloc);
-
-    store.remove(id) catch {
-        writeErr("failed to remove container: {s}\n", .{id});
-        std.process.exit(1);
-    };
-
-    // clean up log file and container directories
-    logs.deleteLogFile(id);
-    container.cleanupContainerDirs(id);
 
     write("{s}\n", .{id});
 }
 
 fn cmdLogs(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const id = args.next() orelse {
-        writeErr("usage: yoq logs <container-id> [--tail N]\n", .{});
-        std.process.exit(1);
-    };
+    const id = requireArg(args, "usage: yoq logs <container-id> [--tail N]\n");
 
     // check for --tail flag
     var tail_lines: usize = 0;
@@ -467,10 +448,7 @@ fn cmdLogs(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 }
 
 fn cmdPull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const image_str = args.next() orelse {
-        writeErr("usage: yoq pull <image>\n", .{});
-        std.process.exit(1);
-    };
+    const image_str = requireArg(args, "usage: yoq pull <image>\n");
 
     const ref = spec.parseImageRef(image_str);
 
@@ -538,10 +516,7 @@ fn cmdImages(alloc: std.mem.Allocator) void {
 }
 
 fn cmdRmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const image_str = args.next() orelse {
-        writeErr("usage: yoq rmi <image>\n", .{});
-        std.process.exit(1);
-    };
+    const image_str = requireArg(args, "usage: yoq rmi <image>\n");
 
     // try to find the image by repository:tag
     const ref = spec.parseImageRef(image_str);
@@ -825,14 +800,9 @@ fn cmdDown(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             }
         }
 
-        // clean up network resources
-        cleanupNetwork(rec.id, rec.ip_address, rec.veth_host);
-
         // update status and clean up
         store.updateStatus(rec.id, "stopped", null, null) catch {};
-        store.remove(rec.id) catch {};
-        logs.deleteLogFile(rec.id);
-        container.cleanupContainerDirs(rec.id);
+        cleanupStoppedContainer(rec.id, rec.ip_address, rec.veth_host);
 
         writeErr(" stopped\n", .{});
     }
@@ -929,6 +899,24 @@ fn parsePortMap(str: []const u8) ?net_setup.PortMap {
     const container_port = std.fmt.parseInt(u16, str[colon_pos + 1 ..], 10) catch return null;
 
     return .{ .host_port = host_port, .container_port = container_port };
+}
+
+/// require the next CLI argument, or print usage and exit.
+/// used by commands that take a single required positional argument.
+fn requireArg(args: *std.process.ArgIterator, comptime usage: []const u8) []const u8 {
+    return args.next() orelse {
+        writeErr(usage, .{});
+        std.process.exit(1);
+    };
+}
+
+/// full cleanup for a stopped container: network, store record, logs, dirs.
+/// used by cmdRm and the per-service cleanup loop in cmdDown.
+fn cleanupStoppedContainer(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) void {
+    cleanupNetwork(id, ip_address, veth_host);
+    store.remove(id) catch {};
+    logs.deleteLogFile(id);
+    container.cleanupContainerDirs(id);
 }
 
 /// clean up network resources for a container (veth pair + IP allocation).
