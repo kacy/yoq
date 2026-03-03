@@ -983,6 +983,7 @@ comptime {
     _ = @import("state/store.zig");
     _ = @import("state/schema.zig");
     _ = @import("lib/cli.zig");
+    _ = @import("lib/exec_helpers.zig");
     _ = @import("lib/log.zig");
     _ = @import("lib/paths.zig");
     _ = @import("lib/toml.zig");

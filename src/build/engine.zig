@@ -28,6 +28,7 @@ const filesystem = @import("../runtime/filesystem.zig");
 const namespaces = @import("../runtime/namespaces.zig");
 const paths = @import("../lib/paths.zig");
 const log = @import("../lib/log.zig");
+const exec_helpers = @import("../lib/exec_helpers.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
 
 pub const BuildError = error{
@@ -664,15 +665,15 @@ fn execShellCommand(command: []const u8, env: []const []const u8) u8 {
 
     // argv: /bin/sh -c "command"
     var argv: [4]?[*:0]const u8 = .{null} ** 4;
-    argv[0] = packString(&str_buf, &str_pos, "/bin/sh") orelse return 127;
-    argv[1] = packString(&str_buf, &str_pos, "-c") orelse return 127;
-    argv[2] = packString(&str_buf, &str_pos, command) orelse return 127;
+    argv[0] = exec_helpers.packString(&str_buf, &str_pos, "/bin/sh") orelse return 127;
+    argv[1] = exec_helpers.packString(&str_buf, &str_pos, "-c") orelse return 127;
+    argv[2] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return 127;
 
     // envp
     var envp: [257]?[*:0]const u8 = .{null} ** 257;
     for (env, 0..) |e, i| {
         if (i >= envp.len - 1) break;
-        envp[i] = packString(&str_buf, &str_pos, e) orelse return 127;
+        envp[i] = exec_helpers.packString(&str_buf, &str_pos, e) orelse return 127;
     }
 
     _ = linux.syscall3(
@@ -683,16 +684,6 @@ fn execShellCommand(command: []const u8, env: []const []const u8) u8 {
     );
 
     return 127;
-}
-
-/// copy a string into a buffer and null-terminate it (same as container.zig)
-fn packString(buf: *[65536]u8, pos: *usize, src: []const u8) ?[*:0]const u8 {
-    if (pos.* + src.len + 1 > buf.len) return null;
-    @memcpy(buf[pos.*..][0..src.len], src);
-    buf[pos.* + src.len] = 0;
-    const result: [*:0]const u8 = @ptrCast(&buf[pos.*]);
-    pos.* += src.len + 1;
-    return result;
 }
 
 // -- OCI image production --

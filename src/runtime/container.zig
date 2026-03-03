@@ -18,6 +18,7 @@ const store = @import("../state/store.zig");
 const paths = @import("../lib/paths.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
+const exec_helpers = @import("../lib/exec_helpers.zig");
 
 pub const ContainerError = error{
     CreateFailed,
@@ -399,12 +400,12 @@ fn execCommand(command: []const u8, args: []const []const u8, env: []const []con
 
     // argv: command + args + null terminator (max 256 entries)
     var argv: [257]?[*:0]const u8 = .{null} ** 257;
-    argv[0] = packString(&str_buf, &str_pos, command) orelse return 127;
+    argv[0] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return 127;
 
     var argv_idx: usize = 1;
     for (args) |arg| {
         if (argv_idx >= argv.len - 1) break;
-        argv[argv_idx] = packString(&str_buf, &str_pos, arg) orelse return 127;
+        argv[argv_idx] = exec_helpers.packString(&str_buf, &str_pos, arg) orelse return 127;
         argv_idx += 1;
     }
 
@@ -412,7 +413,7 @@ fn execCommand(command: []const u8, args: []const []const u8, env: []const []con
     var envp: [257]?[*:0]const u8 = .{null} ** 257;
     for (env, 0..) |e, i| {
         if (i >= envp.len - 1) break;
-        envp[i] = packString(&str_buf, &str_pos, e) orelse return 127;
+        envp[i] = exec_helpers.packString(&str_buf, &str_pos, e) orelse return 127;
     }
 
     // replace this process with the container command
@@ -425,17 +426,6 @@ fn execCommand(command: []const u8, args: []const []const u8, env: []const []con
 
     // if we get here, exec failed
     return 127;
-}
-
-/// copy a string into a buffer and null-terminate it.
-/// returns a pointer suitable for execve argv/envp, or null if buffer is full.
-fn packString(buf: *[65536]u8, pos: *usize, src: []const u8) ?[*:0]const u8 {
-    if (pos.* + src.len + 1 > buf.len) return null;
-    @memcpy(buf[pos.*..][0..src.len], src);
-    buf[pos.* + src.len] = 0;
-    const result: [*:0]const u8 = @ptrCast(&buf[pos.*]);
-    pos.* += src.len + 1;
-    return result;
 }
 
 /// set the container hostname via the sethostname syscall
