@@ -614,4 +614,5 @@ comptime {
     _ = @import("network/ip.zig");
     _ = @import("network/nat.zig");
     _ = @import("network/setup.zig");
+    _ = @import("build/dockerfile.zig");
 }
