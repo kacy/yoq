@@ -405,6 +405,61 @@ pub fn storeBuildCache(entry: BuildCacheEntry) StoreError!void {
     ) catch return StoreError.WriteFailed;
 }
 
+// -- service names --
+
+/// register a service name for DNS discovery.
+/// if the same name+container_id already exists, it is replaced.
+pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_address: []const u8) StoreError!void {
+    var db = try openDb();
+    defer db.deinit();
+
+    db.exec(
+        "INSERT OR REPLACE INTO service_names (name, container_id, ip_address, registered_at)" ++
+            " VALUES (?, ?, ?, ?);",
+        .{},
+        .{ name, container_id, ip_address, @as(i64, std.time.timestamp()) },
+    ) catch return StoreError.WriteFailed;
+}
+
+/// unregister all service names for a container.
+/// called on container stop/rm.
+pub fn unregisterServiceName(container_id: []const u8) StoreError!void {
+    var db = try openDb();
+    defer db.deinit();
+
+    db.exec(
+        "DELETE FROM service_names WHERE container_id = ?;",
+        .{},
+        .{container_id},
+    ) catch return StoreError.WriteFailed;
+}
+
+/// row type for service name queries
+const ServiceNameRow = struct {
+    ip_address: sqlite.Text,
+};
+
+/// look up IP addresses for a service name.
+/// returns all IPs registered under this name (supports multiple containers).
+pub fn lookupServiceNames(alloc: std.mem.Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
+    var db = try openDb();
+    defer db.deinit();
+
+    var ips: std.ArrayList([]const u8) = .empty;
+
+    var stmt = db.prepare(
+        "SELECT ip_address FROM service_names WHERE name = ? ORDER BY registered_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(ServiceNameRow, .{name}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        ips.append(alloc, row.ip_address.data) catch return StoreError.ReadFailed;
+    }
+
+    return ips;
+}
+
 // -- tests --
 
 test "container record defaults" {
@@ -662,4 +717,65 @@ test "update status" {
     defer alloc.free(row.status.data);
     try std.testing.expectEqualStrings("running", row.status.data);
     try std.testing.expectEqual(@as(?i64, 1234), row.pid);
+}
+
+test "service name register and lookup" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO service_names (name, container_id, ip_address, registered_at)" ++
+            " VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "web", "abc123", "10.42.0.2", @as(i64, 100) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        ServiceNameRow,
+        alloc,
+        "SELECT ip_address FROM service_names WHERE name = ?;",
+        .{},
+        .{"web"},
+    ) catch unreachable).?;
+    defer alloc.free(row.ip_address.data);
+
+    try std.testing.expectEqualStrings("10.42.0.2", row.ip_address.data);
+}
+
+test "service name unregister removes entries" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO service_names (name, container_id, ip_address, registered_at)" ++
+            " VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "db", "xyz789", "10.42.0.3", @as(i64, 100) },
+    ) catch unreachable;
+
+    db.exec("DELETE FROM service_names WHERE container_id = ?;", .{}, .{"xyz789"}) catch unreachable;
+
+    const CountRow = struct { count: i64 };
+    const result = (db.one(CountRow, "SELECT COUNT(*) AS count FROM service_names;", .{}, .{}) catch unreachable).?;
+    try std.testing.expectEqual(@as(i64, 0), result.count);
+}
+
+test "service name lookup returns empty for unknown" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const alloc = std.testing.allocator;
+    const row = db.oneAlloc(
+        ServiceNameRow,
+        alloc,
+        "SELECT ip_address FROM service_names WHERE name = ?;",
+        .{},
+        .{"nonexistent"},
+    ) catch unreachable;
+
+    try std.testing.expect(row == null);
 }
