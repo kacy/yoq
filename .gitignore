@@ -3,3 +3,18 @@ zig-out/
 *.o
 *.so
 *.dylib
+
+# ide / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# runtime artifacts
+*.db
+*.log
+
+# secrets / config
+.env
+.env.*
