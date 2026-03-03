@@ -85,6 +85,16 @@ pub const SpawnResult = struct {
     stdout_fd: posix.fd_t,
     /// read end of the child's stderr pipe (parent reads from this)
     stderr_fd: posix.fd_t,
+    /// write end of the sync pipe. close this to signal the child
+    /// that setup (uid maps, networking) is complete and it can proceed.
+    ready_fd: posix.fd_t,
+
+    /// signal the child process that it can proceed.
+    /// call this after all parent-side setup (uid maps, networking) is done.
+    pub fn signalReady(self: *SpawnResult) void {
+        posix.close(self.ready_fd);
+        self.ready_fd = -1;
+    }
 };
 
 /// spawn a new process in isolated namespaces.
@@ -202,8 +212,8 @@ pub fn spawn(
         };
     }
 
-    // signal child that mappings are ready
-    posix.close(pipe_write);
+    // don't close pipe_write here — return it as ready_fd so the caller
+    // can do additional setup (networking) before signaling the child.
 
     // free the child stack now that clone3 has copied it.
     // the child has its own copy in the new address space.
@@ -213,6 +223,7 @@ pub fn spawn(
         .pid = @intCast(pid),
         .stdout_fd = stdout_pipe[0],
         .stderr_fd = stderr_pipe[0],
+        .ready_fd = pipe_write,
     };
 }
 
