@@ -741,3 +741,64 @@ test "array with escapes" {
     try std.testing.expectEqualStrings("-c", arr[1]);
     try std.testing.expectEqualStrings("echo \"hello\"", arr[2]);
 }
+
+test "full manifest format" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc,
+        \\# yoq manifest
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\command = ["/bin/sh", "-c", "echo hello"]
+        \\ports = ["80:8080", "443:8443"]
+        \\env = ["DEBUG=true", "PORT=8080"]
+        \\depends_on = ["db"]
+        \\working_dir = "/app"
+        \\
+        \\[service.db]
+        \\image = "postgres:15"
+        \\env = ["POSTGRES_PASSWORD=secret"]
+        \\
+        \\[volume.data]
+        \\driver = "local"
+    );
+    defer result.deinit();
+
+    // verify top-level structure
+    const service = result.root.getTable("service").?;
+    const volume = result.root.getTable("volume").?;
+
+    // verify web service
+    const web = service.getTable("web").?;
+    try std.testing.expectEqualStrings("nginx:latest", web.getString("image").?);
+    try std.testing.expectEqualStrings("/app", web.getString("working_dir").?);
+
+    const cmd = web.getArray("command").?;
+    try std.testing.expectEqual(@as(usize, 3), cmd.len);
+    try std.testing.expectEqualStrings("/bin/sh", cmd[0]);
+    try std.testing.expectEqualStrings("-c", cmd[1]);
+    try std.testing.expectEqualStrings("echo hello", cmd[2]);
+
+    const ports = web.getArray("ports").?;
+    try std.testing.expectEqual(@as(usize, 2), ports.len);
+    try std.testing.expectEqualStrings("80:8080", ports[0]);
+
+    const env = web.getArray("env").?;
+    try std.testing.expectEqual(@as(usize, 2), env.len);
+    try std.testing.expectEqualStrings("DEBUG=true", env[0]);
+
+    const deps = web.getArray("depends_on").?;
+    try std.testing.expectEqual(@as(usize, 1), deps.len);
+    try std.testing.expectEqualStrings("db", deps[0]);
+
+    // verify db service
+    const db = service.getTable("db").?;
+    try std.testing.expectEqualStrings("postgres:15", db.getString("image").?);
+    const db_env = db.getArray("env").?;
+    try std.testing.expectEqual(@as(usize, 1), db_env.len);
+    try std.testing.expectEqualStrings("POSTGRES_PASSWORD=secret", db_env[0]);
+
+    // verify volume
+    const data = volume.getTable("data").?;
+    try std.testing.expectEqualStrings("local", data.getString("driver").?);
+}
