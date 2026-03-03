@@ -766,4 +766,6 @@ comptime {
     _ = @import("build/dockerfile.zig");
     _ = @import("build/context.zig");
     _ = @import("build/engine.zig");
+    _ = @import("manifest/spec.zig");
+    _ = @import("manifest/loader.zig");
 }
