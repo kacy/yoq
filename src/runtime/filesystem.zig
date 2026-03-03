@@ -149,6 +149,62 @@ pub fn pivotRoot(new_root: []const u8) FilesystemError!void {
     if (syscall_util.isError(rc5)) return FilesystemError.UnmountFailed;
 }
 
+/// bind mount a host directory into the container's filesystem.
+///
+/// call this after mountOverlay but before pivotRoot — the source path
+/// must be visible (pre-pivot) and the target must exist in the merged fs.
+///
+/// builds the full target path as target_root/target. creates the target
+/// directory if it doesn't exist. uses a stack buffer for path construction
+/// rather than the threadlocal sentinelize (we need source and target
+/// simultaneously).
+pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8, read_only: bool) FilesystemError!void {
+    // build full target path: target_root + target
+    var target_buf: [4096]u8 = undefined;
+    var target_pos: usize = 0;
+
+    if (target_root.len + target.len + 1 >= target_buf.len) return FilesystemError.PathTooLong;
+
+    @memcpy(target_buf[0..target_root.len], target_root);
+    target_pos = target_root.len;
+
+    // ensure single separator between root and target
+    if (target_root.len > 0 and target_root[target_root.len - 1] != '/' and
+        (target.len == 0 or target[0] != '/'))
+    {
+        target_buf[target_pos] = '/';
+        target_pos += 1;
+    }
+
+    @memcpy(target_buf[target_pos..][0..target.len], target);
+    target_pos += target.len;
+    target_buf[target_pos] = 0;
+
+    const full_target: [*:0]const u8 = @ptrCast(&target_buf);
+
+    // null-terminate source path
+    var source_buf: [4096]u8 = undefined;
+    if (source.len >= source_buf.len) return FilesystemError.PathTooLong;
+    @memcpy(source_buf[0..source.len], source);
+    source_buf[source.len] = 0;
+    const source_z: [*:0]const u8 = @ptrCast(&source_buf);
+
+    // create target directory if it doesn't exist
+    std.fs.cwd().makePath(target_buf[0..target_pos]) catch return FilesystemError.MkdirFailed;
+
+    // bind mount: source -> full_target
+    var flags: u32 = linux.MS.BIND | linux.MS.REC;
+    const rc = linux.mount(source_z, full_target, null, flags, 0);
+    if (syscall_util.isError(rc)) return FilesystemError.MountFailed;
+
+    // remount read-only if requested (bind + ro requires a second mount call)
+    if (read_only) {
+        flags = linux.MS.BIND | linux.MS.REC | linux.MS.REMOUNT | linux.MS.RDONLY;
+        const rc2 = linux.mount(source_z, full_target, null, flags, 0);
+        if (syscall_util.isError(rc2)) return FilesystemError.MountFailed;
+    }
+}
+
 /// mount essential filesystems inside the container.
 /// call this after pivot_root.
 pub fn mountEssential() FilesystemError!void {
@@ -262,6 +318,23 @@ test "overlay path validation" {
     try std.testing.expect(!isValidOverlayPath("/path/with:colon"));
     try std.testing.expect(!isValidOverlayPath("/path/with,comma"));
     try std.testing.expect(!isValidOverlayPath("a:b"));
+}
+
+test "bindMount path construction" {
+    // we can't actually perform bind mounts in a test without root,
+    // but we can verify the path construction logic by checking that
+    // the function returns PathTooLong for oversized inputs
+
+    // path that's way too long should fail
+    const long_path = "a" ** 4096;
+    const result = bindMount("/root", long_path, "/target", false);
+    try std.testing.expectError(FilesystemError.PathTooLong, result);
+
+    // target_root + target too long should also fail
+    const long_root = "x" ** 2048;
+    const long_target = "y" ** 2048;
+    const result2 = bindMount(long_root, "/src", long_target, false);
+    try std.testing.expectError(FilesystemError.PathTooLong, result2);
 }
 
 test "sentinelize" {

@@ -386,6 +386,40 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
     // use manifest working_dir if set, else image default
     if (svc.working_dir) |wd| working_dir = wd;
 
+    // resolve bind mounts from manifest volumes
+    var bind_mounts: std.ArrayList(container.BindMount) = .empty;
+    defer bind_mounts.deinit(alloc);
+
+    // track resolved source paths so we can free them after start()
+    var resolved_sources: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (resolved_sources.items) |s| alloc.free(s);
+        resolved_sources.deinit(alloc);
+    }
+
+    for (svc.volumes) |vol| {
+        if (vol.kind != .bind) continue;
+
+        // resolve relative paths to absolute
+        var resolve_buf: [4096]u8 = undefined;
+        const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch {
+            log.warn("failed to resolve bind mount source: {s}", .{vol.source});
+            continue;
+        };
+
+        // dupe the resolved path so it outlives the stack buffer
+        const duped = alloc.dupe(u8, abs_source) catch continue;
+        resolved_sources.append(alloc, duped) catch {
+            alloc.free(duped);
+            continue;
+        };
+
+        bind_mounts.append(alloc, .{
+            .source = duped,
+            .target = vol.target,
+        }) catch {};
+    }
+
     // convert manifest port mappings to network PortMap
     var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
     defer port_maps.deinit(alloc);
@@ -432,6 +466,7 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
             .lower_dirs = layer_paths,
             .network = net_config,
             .hostname = svc.name,
+            .mounts = bind_mounts.items,
         },
         .status = .created,
         .pid = null,
