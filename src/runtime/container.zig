@@ -255,7 +255,7 @@ const ChildExecContext = struct {
 /// child process entry point (called after namespace creation).
 /// sets up filesystem, security, and execs the container command.
 /// returns 127 if exec fails (convention for "command not found").
-fn childMain(arg: ?*anyopaque) callconv(.C) u8 {
+fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
 
     // 1. set up filesystem

@@ -515,4 +515,5 @@ comptime {
     _ = @import("image/store.zig");
     _ = @import("image/registry.zig");
     _ = @import("image/layer.zig");
+    _ = @import("network/netlink.zig");
 }
