@@ -13,6 +13,7 @@ const linux = std.os.linux;
 
 const process = @import("process.zig");
 const syscall_util = @import("../lib/syscall.zig");
+const exec_helpers = @import("../lib/exec_helpers.zig");
 
 pub const ExecError = error{
     ContainerNotRunning,
@@ -165,12 +166,12 @@ fn execCommand(command: []const u8, args: []const []const u8, env: []const []con
 
     // argv: command + args + null terminator (max 256 entries)
     var argv: [257]?[*:0]const u8 = .{null} ** 257;
-    argv[0] = packString(&str_buf, &str_pos, command) orelse return 127;
+    argv[0] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return 127;
 
     var argv_idx: usize = 1;
     for (args) |arg| {
         if (argv_idx >= argv.len - 1) break;
-        argv[argv_idx] = packString(&str_buf, &str_pos, arg) orelse return 127;
+        argv[argv_idx] = exec_helpers.packString(&str_buf, &str_pos, arg) orelse return 127;
         argv_idx += 1;
     }
 
@@ -178,7 +179,7 @@ fn execCommand(command: []const u8, args: []const []const u8, env: []const []con
     var envp: [257]?[*:0]const u8 = .{null} ** 257;
     for (env, 0..) |e, i| {
         if (i >= envp.len - 1) break;
-        envp[i] = packString(&str_buf, &str_pos, e) orelse return 127;
+        envp[i] = exec_helpers.packString(&str_buf, &str_pos, e) orelse return 127;
     }
 
     // replace this process with the command
@@ -191,17 +192,6 @@ fn execCommand(command: []const u8, args: []const []const u8, env: []const []con
 
     // if we get here, exec failed
     return 127;
-}
-
-/// copy a string into a buffer and null-terminate it.
-/// returns a pointer suitable for execve argv/envp, or null if buffer is full.
-fn packString(buf: *[65536]u8, pos: *usize, src: []const u8) ?[*:0]const u8 {
-    if (pos.* + src.len + 1 > buf.len) return null;
-    @memcpy(buf[pos.*..][0..src.len], src);
-    buf[pos.* + src.len] = 0;
-    const result: [*:0]const u8 = @ptrCast(&buf[pos.*]);
-    pos.* += src.len + 1;
-    return result;
 }
 
 // -- tests --
@@ -243,11 +233,11 @@ test "pack string fills buffer correctly" {
     var buf: [65536]u8 = undefined;
     var pos: usize = 0;
 
-    const ptr = packString(&buf, &pos, "hello") orelse unreachable;
+    const ptr = exec_helpers.packString(&buf, &pos, "hello") orelse unreachable;
     try std.testing.expectEqualStrings("hello", std.mem.span(ptr));
     try std.testing.expectEqual(@as(usize, 6), pos); // 5 chars + null
 
-    const ptr2 = packString(&buf, &pos, "world") orelse unreachable;
+    const ptr2 = exec_helpers.packString(&buf, &pos, "world") orelse unreachable;
     try std.testing.expectEqualStrings("world", std.mem.span(ptr2));
     try std.testing.expectEqual(@as(usize, 12), pos);
 }
@@ -257,6 +247,6 @@ test "pack string returns null when buffer full" {
     var pos: usize = 65530;
 
     // try to pack a string that won't fit (7 chars + null = 8, but only 6 bytes left)
-    const result = packString(&buf, &pos, "toolong");
+    const result = exec_helpers.packString(&buf, &pos, "toolong");
     try std.testing.expect(result == null);
 }
