@@ -970,4 +970,5 @@ comptime {
     _ = @import("manifest/spec.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
+    _ = @import("dev/watcher.zig");
 }
