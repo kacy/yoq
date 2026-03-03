@@ -45,6 +45,9 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(alloc);
     defer args.deinit();
 
+    // clean up any containers that were left "running" after a crash
+    store.reconcileStaleContainers(alloc);
+
     // skip program name
     _ = args.next();
 

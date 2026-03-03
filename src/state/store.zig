@@ -200,6 +200,56 @@ pub fn updateNetwork(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]cons
     ) catch return StoreError.WriteFailed;
 }
 
+/// scan for containers marked as "running" whose PIDs are no longer alive.
+/// updates them to "stopped". call this on startup to clean up after crashes.
+pub fn reconcileStaleContainers(alloc: std.mem.Allocator) void {
+    var db = openDb() catch return;
+    defer db.deinit();
+
+    // find all containers with status = "running"
+    const RunningRow = struct { id: sqlite.Text, pid: ?i64 };
+    var stmt = db.prepare(
+        "SELECT id, pid FROM containers WHERE status = 'running';",
+    ) catch return;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(RunningRow, .{}) catch return;
+    while (iter.nextAlloc(alloc, .{}) catch null) |row| {
+        defer alloc.free(row.id.data);
+
+        if (row.pid) |pid_val| {
+            const pid = math.cast(i32, pid_val) orelse continue;
+            // check if the process is still alive with kill(pid, 0)
+            const rc = std.os.linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, pid))), 0);
+            if (!isProcessAlive(rc)) {
+                // process is gone — mark as stopped
+                db.exec(
+                    "UPDATE containers SET status = 'stopped', pid = NULL WHERE id = ?;",
+                    .{},
+                    .{row.id.data},
+                ) catch {};
+            }
+        } else {
+            // no PID recorded but status is running — stale
+            db.exec(
+                "UPDATE containers SET status = 'stopped' WHERE id = ?;",
+                .{},
+                .{row.id.data},
+            ) catch {};
+        }
+    }
+}
+
+fn isProcessAlive(kill_rc: usize) bool {
+    const signed: isize = @bitCast(kill_rc);
+    if (signed == 0) return true; // process exists
+    // ESRCH (3) means no such process
+    if (signed == -3) return false;
+    // EPERM (1) means process exists but we can't signal it
+    if (signed == -1) return true;
+    return false;
+}
+
 // -- image records --
 
 /// persisted image record
