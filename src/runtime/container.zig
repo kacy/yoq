@@ -6,12 +6,15 @@
 
 const std = @import("std");
 const posix = std.posix;
+const linux = std.os.linux;
 
 const namespaces = @import("namespaces.zig");
 const cgroups = @import("cgroups.zig");
 const filesystem = @import("filesystem.zig");
 const security = @import("security.zig");
 const process = @import("process.zig");
+const logs = @import("logs.zig");
+const store = @import("../state/store.zig");
 
 pub const ContainerError = error{
     CreateFailed,
@@ -58,6 +61,10 @@ pub const ContainerConfig = struct {
     namespaces: namespaces.NamespaceFlags = .{},
     /// environment variables (KEY=VALUE pairs)
     env: []const []const u8 = &.{},
+    /// working directory inside the container
+    working_dir: []const u8 = "/",
+    /// image layer paths for overlayfs (bottom to top)
+    lower_dirs: []const []const u8 = &.{},
 };
 
 /// a running or stopped container
@@ -105,7 +112,300 @@ pub const Container = struct {
 
         process.kill(pid) catch return ContainerError.StopFailed;
     }
+
+    /// start the container: set up filesystem, spawn process in namespaces,
+    /// capture logs, and block until the process exits.
+    pub fn start(self: *Container) ContainerError!void {
+        const config = self.config;
+        const has_overlay = config.lower_dirs.len > 0;
+
+        // create overlay directories if we have image layers
+        var dirs: ?OverlayDirs = null;
+        if (has_overlay) {
+            dirs = createContainerDirs(config.id) catch return ContainerError.StartFailed;
+        }
+
+        // build filesystem config for the child
+        const fs_config: filesystem.FilesystemConfig = if (dirs) |*d| .{
+            .lower_dirs = config.lower_dirs,
+            .upper_dir = d.upperPath(),
+            .work_dir = d.workPath(),
+            .merged_dir = d.mergedPath(),
+        } else .{
+            .lower_dirs = &.{},
+            .upper_dir = "",
+            .work_dir = "",
+            .merged_dir = "",
+        };
+
+        // prepare child execution context
+        // lives on our stack, gets copied to child's address space via clone3
+        var child_ctx = ChildExecContext{
+            .has_overlay = has_overlay,
+            .fs_config = fs_config,
+            .rootfs = config.rootfs,
+            .command = config.command,
+            .args = config.args,
+            .env = config.env,
+            .working_dir = config.working_dir,
+            .hostname = config.hostname,
+        };
+
+        // create cgroup (non-fatal — container runs without limits if this fails)
+        var cgroup: ?cgroups.Cgroup = cgroups.Cgroup.create(config.id) catch null;
+
+        // spawn the container process in isolated namespaces
+        const spawn_result = namespaces.spawn(
+            config.namespaces,
+            null,
+            childMain,
+            @ptrCast(&child_ctx),
+        ) catch {
+            if (has_overlay) cleanupContainerDirs(config.id);
+            if (cgroup) |*cg| cg.destroy() catch {};
+            return ContainerError.StartFailed;
+        };
+
+        self.pid = spawn_result.pid;
+        self.status = .running;
+
+        // add child to cgroup and set resource limits
+        if (cgroup) |*cg| {
+            cg.addProcess(spawn_result.pid) catch {};
+            cg.setLimits(config.limits) catch {};
+        }
+
+        // open log file and start capture threads
+        const log_file = logs.createLogFile(config.id) catch null;
+        const stdout_label: []const u8 = "stdout";
+        const stderr_label: []const u8 = "stderr";
+
+        var stdout_thread: ?std.Thread = null;
+        var stderr_thread: ?std.Thread = null;
+
+        if (log_file) |lf| {
+            stdout_thread = std.Thread.spawn(.{}, logs.captureStream, .{
+                lf, spawn_result.stdout_fd, stdout_label,
+            }) catch null;
+            stderr_thread = std.Thread.spawn(.{}, logs.captureStream, .{
+                lf, spawn_result.stderr_fd, stderr_label,
+            }) catch null;
+        }
+
+        // close pipe fds that aren't being captured by a thread
+        if (stdout_thread == null) posix.close(spawn_result.stdout_fd);
+        if (stderr_thread == null) posix.close(spawn_result.stderr_fd);
+
+        // update sqlite to "running"
+        store.updateStatus(config.id, "running", spawn_result.pid, null) catch {};
+
+        // block until the child exits
+        const wait_result = process.wait(spawn_result.pid, false) catch {
+            self.status = .stopped;
+            self.exit_code = 255;
+            store.updateStatus(config.id, "stopped", null, 255) catch {};
+            return;
+        };
+
+        // determine exit code
+        const exit_code: u8 = switch (wait_result.status) {
+            .exited => |code| code,
+            .signaled => 128,
+            .running => 0,
+        };
+
+        self.status = .stopped;
+        self.exit_code = exit_code;
+        self.pid = null;
+
+        // join log capture threads and close log file
+        if (stdout_thread) |t| t.join();
+        if (stderr_thread) |t| t.join();
+        if (log_file) |lf| lf.close();
+
+        // destroy cgroup
+        if (cgroup) |*cg| cg.destroy() catch {};
+
+        // update sqlite with final status
+        store.updateStatus(config.id, "stopped", null, exit_code) catch {};
+    }
 };
+
+// -- child process functions --
+//
+// these run inside the container's process after clone3.
+// no heap allocation — everything uses stack buffers.
+// this is critical because the heap is in an undefined state
+// after clone3 (shared allocator metadata, no fork handler).
+
+/// context passed to the child process after clone3.
+/// contains everything needed to set up the container environment and exec.
+const ChildExecContext = struct {
+    has_overlay: bool,
+    fs_config: filesystem.FilesystemConfig,
+    rootfs: []const u8,
+    command: []const u8,
+    args: []const []const u8,
+    env: []const []const u8,
+    working_dir: []const u8,
+    hostname: []const u8,
+};
+
+/// child process entry point (called after namespace creation).
+/// sets up filesystem, security, and execs the container command.
+/// returns 127 if exec fails (convention for "command not found").
+fn childMain(arg: ?*anyopaque) callconv(.C) u8 {
+    const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
+
+    // 1. set up filesystem
+    if (ctx.has_overlay) {
+        filesystem.mountOverlay(ctx.fs_config) catch return 1;
+        filesystem.pivotRoot(ctx.fs_config.merged_dir) catch return 1;
+    } else {
+        filesystem.pivotRoot(ctx.rootfs) catch return 1;
+    }
+
+    // 2. mount essential filesystems (/proc, /dev, /sys, /tmp)
+    filesystem.mountEssential() catch return 1;
+
+    // 3. set hostname
+    setHostname(ctx.hostname);
+
+    // 4. chdir to working directory (fall back to / if it doesn't exist)
+    posix.chdir(ctx.working_dir) catch {
+        posix.chdir("/") catch {};
+    };
+
+    // 5. apply security restrictions (capabilities + seccomp)
+    // must be after filesystem setup since mounting requires caps
+    security.apply() catch return 1;
+
+    // 6. exec the container command
+    return execCommand(ctx.command, ctx.args, ctx.env);
+}
+
+/// build null-terminated argv and envp arrays on the stack and call execve.
+/// uses a ~64KB stack buffer to avoid heap allocation in the child.
+/// returns 127 if exec fails.
+fn execCommand(command: []const u8, args: []const []const u8, env: []const []const u8) u8 {
+    var str_buf: [65536]u8 = undefined;
+    var str_pos: usize = 0;
+
+    // argv: command + args + null terminator (max 256 entries)
+    var argv: [257]?[*:0]const u8 = .{null} ** 257;
+    argv[0] = packString(&str_buf, &str_pos, command) orelse return 127;
+
+    var argv_idx: usize = 1;
+    for (args) |arg| {
+        if (argv_idx >= argv.len - 1) break;
+        argv[argv_idx] = packString(&str_buf, &str_pos, arg) orelse return 127;
+        argv_idx += 1;
+    }
+
+    // envp: env vars + null terminator (max 256 entries)
+    var envp: [257]?[*:0]const u8 = .{null} ** 257;
+    for (env, 0..) |e, i| {
+        if (i >= envp.len - 1) break;
+        envp[i] = packString(&str_buf, &str_pos, e) orelse return 127;
+    }
+
+    // replace this process with the container command
+    _ = linux.syscall3(
+        .execve,
+        @intFromPtr(argv[0].?),
+        @intFromPtr(&argv),
+        @intFromPtr(&envp),
+    );
+
+    // if we get here, exec failed
+    return 127;
+}
+
+/// copy a string into a buffer and null-terminate it.
+/// returns a pointer suitable for execve argv/envp, or null if buffer is full.
+fn packString(buf: *[65536]u8, pos: *usize, src: []const u8) ?[*:0]const u8 {
+    if (pos.* + src.len + 1 > buf.len) return null;
+    @memcpy(buf[pos.*..][0..src.len], src);
+    buf[pos.* + src.len] = 0;
+    const result: [*:0]const u8 = @ptrCast(&buf[pos.*]);
+    pos.* += src.len + 1;
+    return result;
+}
+
+/// set the container hostname via the sethostname syscall
+fn setHostname(name: []const u8) void {
+    if (name.len == 0) return;
+    _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
+}
+
+/// base directory for per-container overlay storage
+const containers_subdir = ".local/share/yoq/containers";
+
+/// paths to the overlay directories for a container
+pub const OverlayDirs = struct {
+    upper: [512]u8,
+    upper_len: usize,
+    work: [512]u8,
+    work_len: usize,
+    merged: [512]u8,
+    merged_len: usize,
+
+    pub fn upperPath(self: *const OverlayDirs) []const u8 {
+        return self.upper[0..self.upper_len];
+    }
+
+    pub fn workPath(self: *const OverlayDirs) []const u8 {
+        return self.work[0..self.work_len];
+    }
+
+    pub fn mergedPath(self: *const OverlayDirs) []const u8 {
+        return self.merged[0..self.merged_len];
+    }
+};
+
+/// create the per-container overlay directories:
+///   ~/.local/share/yoq/containers/<id>/upper
+///   ~/.local/share/yoq/containers/<id>/work
+///   ~/.local/share/yoq/containers/<id>/rootfs  (merged mount point)
+pub fn createContainerDirs(container_id: []const u8) ContainerError!OverlayDirs {
+    const home = std.posix.getenv("HOME") orelse return ContainerError.CreateFailed;
+
+    var dirs: OverlayDirs = undefined;
+
+    const upper_slice = std.fmt.bufPrint(&dirs.upper, "{s}/{s}/{s}/upper", .{
+        home, containers_subdir, container_id,
+    }) catch return ContainerError.CreateFailed;
+    dirs.upper_len = upper_slice.len;
+
+    const work_slice = std.fmt.bufPrint(&dirs.work, "{s}/{s}/{s}/work", .{
+        home, containers_subdir, container_id,
+    }) catch return ContainerError.CreateFailed;
+    dirs.work_len = work_slice.len;
+
+    const merged_slice = std.fmt.bufPrint(&dirs.merged, "{s}/{s}/{s}/rootfs", .{
+        home, containers_subdir, container_id,
+    }) catch return ContainerError.CreateFailed;
+    dirs.merged_len = merged_slice.len;
+
+    // create all three directories (makePath creates parents too)
+    std.fs.cwd().makePath(dirs.upperPath()) catch return ContainerError.CreateFailed;
+    std.fs.cwd().makePath(dirs.workPath()) catch return ContainerError.CreateFailed;
+    std.fs.cwd().makePath(dirs.mergedPath()) catch return ContainerError.CreateFailed;
+
+    return dirs;
+}
+
+/// remove all per-container directories
+pub fn cleanupContainerDirs(container_id: []const u8) void {
+    const home = std.posix.getenv("HOME") orelse return;
+
+    var path_buf: [512]u8 = undefined;
+    const dir_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}", .{
+        home, containers_subdir, container_id,
+    }) catch return;
+
+    std.fs.cwd().deleteTree(dir_path) catch {};
+}
 
 /// generate a short random container id (12 hex chars)
 pub fn generateId(buf: *[12]u8) void {
@@ -140,6 +440,8 @@ test "container config defaults" {
     try std.testing.expectEqualStrings("container", config.hostname);
     try std.testing.expectEqual(@as(usize, 0), config.args.len);
     try std.testing.expectEqual(@as(usize, 0), config.env.len);
+    try std.testing.expectEqualStrings("/", config.working_dir);
+    try std.testing.expectEqual(@as(usize, 0), config.lower_dirs.len);
 }
 
 test "generate id produces 12 hex chars" {
