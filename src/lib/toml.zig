@@ -142,7 +142,44 @@ pub fn parse(alloc: std.mem.Allocator, input: []const u8) ParseError!ParseResult
             return ParseError.EmptyKey;
         }
 
-        const raw_value = std.mem.trim(u8, line[eq_pos + 1 ..], " \t");
+        var raw_value = std.mem.trim(u8, line[eq_pos + 1 ..], " \t");
+
+        // handle multiline arrays: if value starts with '[' but doesn't
+        // contain ']', accumulate subsequent lines until the array closes
+        var multiline_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer multiline_buf.deinit(alloc);
+
+        if (raw_value.len > 0 and raw_value[0] == '[' and
+            std.mem.indexOfScalar(u8, raw_value, ']') == null)
+        {
+            multiline_buf.appendSlice(alloc, raw_value) catch return ParseError.OutOfMemory;
+
+            while (line_iter.next()) |cont_raw| {
+                line_num += 1;
+                const cont_no_cr = if (cont_raw.len > 0 and cont_raw[cont_raw.len - 1] == '\r')
+                    cont_raw[0 .. cont_raw.len - 1]
+                else
+                    cont_raw;
+                const cont = std.mem.trim(u8, cont_no_cr, " \t");
+
+                // skip empty lines and comments inside multiline arrays
+                if (cont.len == 0) continue;
+                if (cont[0] == '#') continue;
+
+                multiline_buf.appendSlice(alloc, cont) catch return ParseError.OutOfMemory;
+
+                if (std.mem.indexOfScalar(u8, cont, ']') != null) break;
+            }
+
+            // check if we actually found the closing bracket
+            if (std.mem.indexOfScalar(u8, multiline_buf.items, ']') == null) {
+                log.err("toml: line {d}: unterminated array", .{line_num});
+                return ParseError.UnterminatedArray;
+            }
+
+            raw_value = multiline_buf.items;
+        }
+
         const value = parseValue(alloc, raw_value, line_num) catch |e| return e;
 
         // check for duplicates before allocating the key
@@ -188,6 +225,9 @@ fn parseValue(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) ParseE
 
     // string
     if (raw[0] == '"') return parseString(alloc, raw, line_num);
+
+    // array
+    if (raw[0] == '[') return parseStringArray(alloc, raw, line_num);
 
     // boolean
     if (std.mem.eql(u8, raw, "true")) return Value{ .boolean = true };
@@ -252,6 +292,95 @@ fn parseInt(raw: []const u8, line_num: usize) ParseError!Value {
         return ParseError.InvalidValue;
     };
     return Value{ .integer = n };
+}
+
+fn parseStringArray(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) ParseError!Value {
+    // raw starts with '[' and should end with ']'
+    if (raw.len < 2 or raw[0] != '[') {
+        log.err("toml: line {d}: invalid array", .{line_num});
+        return ParseError.UnexpectedCharacter;
+    }
+
+    const close = std.mem.indexOfScalar(u8, raw, ']') orelse {
+        log.err("toml: line {d}: unterminated array", .{line_num});
+        return ParseError.UnterminatedArray;
+    };
+
+    const inner = std.mem.trim(u8, raw[1..close], " \t");
+
+    // empty array
+    if (inner.len == 0) {
+        const empty = alloc.alloc([]const u8, 0) catch return ParseError.OutOfMemory;
+        return Value{ .array = empty };
+    }
+
+    // parse comma-separated quoted strings
+    var items: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (items.items) |item| alloc.free(item);
+        items.deinit(alloc);
+    }
+
+    var pos: usize = 0;
+    while (pos < inner.len) {
+        // skip whitespace and commas
+        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == ',')) {
+            pos += 1;
+        }
+        if (pos >= inner.len) break;
+
+        if (inner[pos] != '"') {
+            log.err("toml: line {d}: expected '\"' in array element", .{line_num});
+            return ParseError.UnexpectedCharacter;
+        }
+
+        // parse the quoted string
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(alloc);
+
+        pos += 1; // skip opening quote
+        while (pos < inner.len) {
+            const c = inner[pos];
+            if (c == '"') {
+                pos += 1; // skip closing quote
+                const s = alloc.dupe(u8, buf.items) catch return ParseError.OutOfMemory;
+                buf.deinit(alloc);
+                items.append(alloc, s) catch {
+                    alloc.free(s);
+                    return ParseError.OutOfMemory;
+                };
+                break;
+            }
+            if (c == '\\') {
+                pos += 1;
+                if (pos >= inner.len) {
+                    log.err("toml: line {d}: unterminated escape in array string", .{line_num});
+                    return ParseError.UnterminatedString;
+                }
+                const escaped: u8 = switch (inner[pos]) {
+                    '\\' => '\\',
+                    '"' => '"',
+                    'n' => '\n',
+                    't' => '\t',
+                    else => {
+                        log.err("toml: line {d}: unknown escape in array string", .{line_num});
+                        return ParseError.UnexpectedCharacter;
+                    },
+                };
+                buf.append(alloc, escaped) catch return ParseError.OutOfMemory;
+            } else {
+                buf.append(alloc, c) catch return ParseError.OutOfMemory;
+            }
+            pos += 1;
+        } else {
+            // ran out of input without closing quote
+            log.err("toml: line {d}: unterminated string in array", .{line_num});
+            return ParseError.UnterminatedString;
+        }
+    }
+
+    const result = items.toOwnedSlice(alloc) catch return ParseError.OutOfMemory;
+    return Value{ .array = result };
 }
 
 fn resolveTablePath(root: *Table, alloc: std.mem.Allocator, line: []const u8, line_num: usize) ParseError!*Table {
@@ -530,4 +659,85 @@ test "table path conflicts with existing value" {
     const alloc = std.testing.allocator;
     const result = parse(alloc, "name = \"hello\"\n[name.sub]\nval = 1");
     try std.testing.expectError(ParseError.DuplicateKey, result);
+}
+
+test "inline string array" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "ports = [\"80:8080\", \"443:8443\"]");
+    defer result.deinit();
+
+    const arr = result.root.getArray("ports").?;
+    try std.testing.expectEqual(@as(usize, 2), arr.len);
+    try std.testing.expectEqualStrings("80:8080", arr[0]);
+    try std.testing.expectEqualStrings("443:8443", arr[1]);
+}
+
+test "single element array" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "tags = [\"latest\"]");
+    defer result.deinit();
+
+    const arr = result.root.getArray("tags").?;
+    try std.testing.expectEqual(@as(usize, 1), arr.len);
+    try std.testing.expectEqualStrings("latest", arr[0]);
+}
+
+test "empty array" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "items = []");
+    defer result.deinit();
+
+    const arr = result.root.getArray("items").?;
+    try std.testing.expectEqual(@as(usize, 0), arr.len);
+}
+
+test "multiline array" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc,
+        \\ports = [
+        \\  "80:8080",
+        \\  "443:8443"
+        \\]
+    );
+    defer result.deinit();
+
+    const arr = result.root.getArray("ports").?;
+    try std.testing.expectEqual(@as(usize, 2), arr.len);
+    try std.testing.expectEqualStrings("80:8080", arr[0]);
+    try std.testing.expectEqualStrings("443:8443", arr[1]);
+}
+
+test "multiline array with comments" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc,
+        \\env = [
+        \\  # database settings
+        \\  "DB_HOST=localhost",
+        \\  "DB_PORT=5432"
+        \\]
+    );
+    defer result.deinit();
+
+    const arr = result.root.getArray("env").?;
+    try std.testing.expectEqual(@as(usize, 2), arr.len);
+    try std.testing.expectEqualStrings("DB_HOST=localhost", arr[0]);
+    try std.testing.expectEqualStrings("DB_PORT=5432", arr[1]);
+}
+
+test "unterminated array error" {
+    const alloc = std.testing.allocator;
+    const result = parse(alloc, "items = [\"a\", \"b\"");
+    try std.testing.expectError(ParseError.UnterminatedArray, result);
+}
+
+test "array with escapes" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "cmds = [\"/bin/sh\", \"-c\", \"echo \\\"hello\\\"\"]");
+    defer result.deinit();
+
+    const arr = result.root.getArray("cmds").?;
+    try std.testing.expectEqual(@as(usize, 3), arr.len);
+    try std.testing.expectEqualStrings("/bin/sh", arr[0]);
+    try std.testing.expectEqualStrings("-c", arr[1]);
+    try std.testing.expectEqualStrings("echo \"hello\"", arr[2]);
 }
