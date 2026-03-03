@@ -8,6 +8,8 @@ const registry = @import("image/registry.zig");
 const layer = @import("image/layer.zig");
 const net_setup = @import("network/setup.zig");
 const ip = @import("network/ip.zig");
+const dockerfile = @import("build/dockerfile.zig");
+const build_engine = @import("build/engine.zig");
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -45,6 +47,8 @@ pub fn main() !void {
         cmdImages(alloc);
     } else if (std.mem.eql(u8, command, "rmi")) {
         cmdRmi(&args, alloc);
+    } else if (std.mem.eql(u8, command, "build")) {
+        cmdBuild(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -498,6 +502,98 @@ fn cmdRmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("untagged: {s}:{s}\n", .{ image.repository, image.tag });
 }
 
+fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var tag: ?[]const u8 = null;
+    var dockerfile_path: []const u8 = "Dockerfile";
+    var context_path: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-t")) {
+            tag = args.next() orelse {
+                writeErr("-t requires an image tag\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "-f")) {
+            dockerfile_path = args.next() orelse {
+                writeErr("-f requires a Dockerfile path\n", .{});
+                std.process.exit(1);
+            };
+        } else {
+            context_path = arg;
+        }
+    }
+
+    const ctx_dir = context_path orelse ".";
+
+    // resolve Dockerfile path relative to context directory
+    var df_path_buf: [4096]u8 = undefined;
+    const effective_df_path = if (std.mem.eql(u8, dockerfile_path, "Dockerfile"))
+        std.fmt.bufPrint(&df_path_buf, "{s}/Dockerfile", .{ctx_dir}) catch {
+            writeErr("path too long\n", .{});
+            std.process.exit(1);
+        }
+    else
+        dockerfile_path;
+
+    // read the Dockerfile
+    const content = std.fs.cwd().readFileAlloc(alloc, effective_df_path, 1024 * 1024) catch {
+        writeErr("cannot read {s}\n", .{effective_df_path});
+        std.process.exit(1);
+    };
+    defer alloc.free(content);
+
+    // parse
+    var parsed = dockerfile.parse(alloc, content) catch |err| {
+        switch (err) {
+            dockerfile.ParseError.UnknownInstruction => writeErr("unknown instruction in Dockerfile\n", .{}),
+            dockerfile.ParseError.EmptyInstruction => writeErr("empty instruction in Dockerfile\n", .{}),
+            dockerfile.ParseError.OutOfMemory => writeErr("out of memory\n", .{}),
+        }
+        std.process.exit(1);
+    };
+    defer parsed.deinit();
+
+    writeErr("building from {s} ({d} instructions)...\n", .{
+        effective_df_path, parsed.instructions.len,
+    });
+
+    // resolve context directory to absolute path
+    var abs_ctx_buf: [4096]u8 = undefined;
+    const abs_ctx = std.fs.cwd().realpath(ctx_dir, &abs_ctx_buf) catch {
+        writeErr("cannot resolve context directory: {s}\n", .{ctx_dir});
+        std.process.exit(1);
+    };
+
+    // build
+    var result = build_engine.build(alloc, parsed.instructions, abs_ctx, tag) catch |err| {
+        switch (err) {
+            build_engine.BuildError.NoFromInstruction => writeErr("Dockerfile must start with FROM\n", .{}),
+            build_engine.BuildError.PullFailed => writeErr("failed to pull base image\n", .{}),
+            build_engine.BuildError.RunStepFailed => writeErr("RUN step failed\n", .{}),
+            build_engine.BuildError.CopyStepFailed => writeErr("COPY step failed\n", .{}),
+            build_engine.BuildError.LayerFailed => writeErr("failed to create layer\n", .{}),
+            build_engine.BuildError.ImageStoreFailed => writeErr("failed to store image\n", .{}),
+            build_engine.BuildError.ParseFailed => writeErr("failed to parse Dockerfile\n", .{}),
+            build_engine.BuildError.CacheFailed => writeErr("cache error\n", .{}),
+        }
+        std.process.exit(1);
+    };
+    defer result.deinit();
+
+    const size_mb = result.total_size / (1024 * 1024);
+
+    if (tag) |t| {
+        write("built {s} ({d} layers, {d} MB)\n", .{ t, result.layer_count, size_mb });
+    } else {
+        // show short digest
+        const short_id = if (result.manifest_digest.len > 19)
+            result.manifest_digest[7..19]
+        else
+            result.manifest_digest;
+        write("built {s} ({d} layers, {d} MB)\n", .{ short_id, result.layer_count, size_mb });
+    }
+}
+
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -506,6 +602,7 @@ fn printUsage() void {
         \\
         \\commands:
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
+        \\  build [opts] <path>              build an image from a Dockerfile
         \\  ps                               list containers
         \\  logs <id>                        show container output
         \\  stop <id>                        stop a running container
@@ -519,6 +616,10 @@ fn printUsage() void {
         \\run options:
         \\  -p host:container         map host port to container port
         \\  --no-net                  disable networking
+        \\
+        \\build options:
+        \\  -t <tag>                  image tag (e.g. myapp:latest)
+        \\  -f <path>                 Dockerfile path (default: Dockerfile)
         \\
         \\other options:
         \\  logs --tail N             show last N lines only
