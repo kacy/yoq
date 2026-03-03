@@ -167,7 +167,8 @@ pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, hostname:
     var hosts_buf: [256]u8 = undefined;
     var ip_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(container_ip, &ip_buf);
-    const hosts = std.fmt.bufPrint(&hosts_buf,
+    const hosts = std.fmt.bufPrint(
+        &hosts_buf,
         "127.0.0.1\tlocalhost\n{s}\t{s}\n",
         .{ ip_str, hostname },
     ) catch return;
