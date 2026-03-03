@@ -332,6 +332,79 @@ pub fn removeImage(id: []const u8) StoreError!void {
         return StoreError.WriteFailed;
 }
 
+// -- build cache --
+
+/// a cached build step result
+pub const BuildCacheEntry = struct {
+    cache_key: []const u8,
+    layer_digest: []const u8,
+    diff_id: []const u8,
+    layer_size: i64,
+    created_at: i64,
+
+    pub fn deinit(self: BuildCacheEntry, alloc: std.mem.Allocator) void {
+        alloc.free(self.cache_key);
+        alloc.free(self.layer_digest);
+        alloc.free(self.diff_id);
+    }
+};
+
+/// sqlite row type for build_cache queries
+const BuildCacheRow = struct {
+    cache_key: sqlite.Text,
+    layer_digest: sqlite.Text,
+    diff_id: sqlite.Text,
+    layer_size: i64,
+    created_at: i64,
+};
+
+fn cacheRowToEntry(row: BuildCacheRow) BuildCacheEntry {
+    return BuildCacheEntry{
+        .cache_key = row.cache_key.data,
+        .layer_digest = row.layer_digest.data,
+        .diff_id = row.diff_id.data,
+        .layer_size = row.layer_size,
+        .created_at = row.created_at,
+    };
+}
+
+/// look up a build cache entry by cache key.
+/// returns null if no cached result exists.
+pub fn lookupBuildCache(alloc: std.mem.Allocator, cache_key: []const u8) StoreError!?BuildCacheEntry {
+    var db = try openDb();
+    defer db.deinit();
+
+    const row = (db.oneAlloc(
+        BuildCacheRow,
+        alloc,
+        "SELECT cache_key, layer_digest, diff_id, layer_size, created_at" ++
+            " FROM build_cache WHERE cache_key = ?;",
+        .{},
+        .{cache_key},
+    ) catch return StoreError.ReadFailed) orelse return null;
+
+    return cacheRowToEntry(row);
+}
+
+/// store a build cache entry. replaces existing entry with the same key.
+pub fn storeBuildCache(entry: BuildCacheEntry) StoreError!void {
+    var db = try openDb();
+    defer db.deinit();
+
+    db.exec(
+        "INSERT OR REPLACE INTO build_cache (cache_key, layer_digest, diff_id, layer_size, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{
+            entry.cache_key,
+            entry.layer_digest,
+            entry.diff_id,
+            entry.layer_size,
+            entry.created_at,
+        },
+    ) catch return StoreError.WriteFailed;
+}
+
 // -- tests --
 
 test "container record defaults" {
@@ -471,6 +544,99 @@ test "image record round-trip via sqlite" {
     try std.testing.expectEqualStrings("library/nginx", row.repository.data);
     try std.testing.expectEqualStrings("latest", row.tag.data);
     try std.testing.expectEqual(@as(i64, 2048), row.total_size);
+}
+
+test "build cache store and lookup" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    // insert a cache entry
+    db.exec(
+        "INSERT INTO build_cache (cache_key, layer_digest, diff_id, layer_size, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "sha256:key1", "sha256:layer1", "sha256:diff1", @as(i64, 4096), @as(i64, 1700000000) },
+    ) catch unreachable;
+
+    // read it back
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        BuildCacheRow,
+        alloc,
+        "SELECT cache_key, layer_digest, diff_id, layer_size, created_at" ++
+            " FROM build_cache WHERE cache_key = ?;",
+        .{},
+        .{"sha256:key1"},
+    ) catch unreachable).?;
+    defer {
+        alloc.free(row.cache_key.data);
+        alloc.free(row.layer_digest.data);
+        alloc.free(row.diff_id.data);
+    }
+
+    try std.testing.expectEqualStrings("sha256:key1", row.cache_key.data);
+    try std.testing.expectEqualStrings("sha256:layer1", row.layer_digest.data);
+    try std.testing.expectEqualStrings("sha256:diff1", row.diff_id.data);
+    try std.testing.expectEqual(@as(i64, 4096), row.layer_size);
+}
+
+test "build cache miss returns null row" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const alloc = std.testing.allocator;
+    const row = db.oneAlloc(
+        BuildCacheRow,
+        alloc,
+        "SELECT cache_key, layer_digest, diff_id, layer_size, created_at" ++
+            " FROM build_cache WHERE cache_key = ?;",
+        .{},
+        .{"sha256:nonexistent"},
+    ) catch unreachable;
+
+    try std.testing.expect(row == null);
+}
+
+test "build cache replace on conflict" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    // insert initial entry
+    db.exec(
+        "INSERT INTO build_cache (cache_key, layer_digest, diff_id, layer_size, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "sha256:key1", "sha256:old_layer", "sha256:old_diff", @as(i64, 1024), @as(i64, 100) },
+    ) catch unreachable;
+
+    // replace with new entry
+    db.exec(
+        "INSERT OR REPLACE INTO build_cache (cache_key, layer_digest, diff_id, layer_size, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "sha256:key1", "sha256:new_layer", "sha256:new_diff", @as(i64, 2048), @as(i64, 200) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        BuildCacheRow,
+        alloc,
+        "SELECT cache_key, layer_digest, diff_id, layer_size, created_at" ++
+            " FROM build_cache WHERE cache_key = ?;",
+        .{},
+        .{"sha256:key1"},
+    ) catch unreachable).?;
+    defer {
+        alloc.free(row.cache_key.data);
+        alloc.free(row.layer_digest.data);
+        alloc.free(row.diff_id.data);
+    }
+
+    try std.testing.expectEqualStrings("sha256:new_layer", row.layer_digest.data);
+    try std.testing.expectEqual(@as(i64, 2048), row.layer_size);
 }
 
 test "update status" {

@@ -51,6 +51,16 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    allocated_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS build_cache (
+        \\    cache_key TEXT PRIMARY KEY,
+        \\    layer_digest TEXT NOT NULL,
+        \\    diff_id TEXT NOT NULL,
+        \\    layer_size INTEGER NOT NULL,
+        \\    created_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -109,6 +119,20 @@ test "init creates ip_allocations table" {
         "INSERT INTO ip_allocations (container_id, ip_address, allocated_at) VALUES (?, ?, ?);",
         .{},
         .{ "abc123", "10.42.0.2", @as(i64, 1234567890) },
+    ) catch unreachable;
+}
+
+test "init creates build_cache table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO build_cache (cache_key, layer_digest, diff_id, layer_size, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "sha256:cachekey", "sha256:layer", "sha256:diff", @as(i64, 4096), @as(i64, 1234567890) },
     ) catch unreachable;
 }
 
