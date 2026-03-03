@@ -1,4 +1,6 @@
 const std = @import("std");
+const linux = std.os.linux;
+const posix = std.posix;
 const store = @import("state/store.zig");
 const container = @import("runtime/container.zig");
 const process = @import("runtime/process.zig");
@@ -8,6 +10,32 @@ const registry = @import("image/registry.zig");
 const layer = @import("image/layer.zig");
 const net_setup = @import("network/setup.zig");
 const ip = @import("network/ip.zig");
+
+// -- signal handling --
+//
+// tracks the running container so Ctrl-C (SIGINT) and SIGTERM
+// can cleanly stop it instead of orphaning the child process.
+// the pointer is only set while cmdRun is blocking in start().
+
+var active_container: ?*container.Container = null;
+
+fn handleSignal(_: c_int) callconv(.c) void {
+    if (active_container) |c| {
+        if (c.pid) |pid| {
+            process.terminate(pid) catch {};
+        }
+    }
+}
+
+fn installSignalHandlers() void {
+    const act = posix.Sigaction{
+        .handler = .{ .handler = handleSignal },
+        .mask = posix.empty_sigset,
+        .flags = .{ .RESTART = true },
+    };
+    posix.sigaction(posix.SIG.INT, &act, null) catch {};
+    posix.sigaction(posix.SIG.TERM, &act, null) catch {};
+}
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -244,10 +272,19 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         .created_at = std.time.timestamp(),
     };
 
+    // install signal handlers so Ctrl-C cleans up the container
+    // instead of leaving orphaned processes and network resources.
+    // c.pid is set early in start() before it blocks on wait().
+    active_container = &c;
+    installSignalHandlers();
+
     c.start() catch {
         writeErr("failed to start container\n", .{});
+        active_container = null;
         std.process.exit(1);
     };
+
+    active_container = null;
 
     // exit with the container's exit code
     std.process.exit(c.exit_code orelse 0);
