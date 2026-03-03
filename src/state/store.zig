@@ -8,6 +8,7 @@
 // touches the database directly.
 
 const std = @import("std");
+const math = std.math;
 const sqlite = @import("sqlite");
 const schema = @import("schema.zig");
 
@@ -74,8 +75,8 @@ fn rowToRecord(row: ContainerRow) ContainerRecord {
         .command = row.command.data,
         .hostname = row.hostname.data,
         .status = row.status.data,
-        .pid = if (row.pid) |p| @intCast(p) else null,
-        .exit_code = if (row.exit_code) |e| @intCast(e) else null,
+        .pid = if (row.pid) |p| math.cast(i32, p) else null,
+        .exit_code = if (row.exit_code) |e| math.cast(u8, e) else null,
         .ip_address = if (row.ip_address) |ip| ip.data else null,
         .veth_host = if (row.veth_host) |veth| veth.data else null,
         .created_at = row.created_at,

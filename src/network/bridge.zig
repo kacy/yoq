@@ -10,6 +10,7 @@
 // we setns() into /proc/<pid>/ns/net, do the work, then setns() back.
 
 const std = @import("std");
+const math = std.math;
 const linux = std.os.linux;
 const posix = std.posix;
 const nl = @import("netlink.zig");
@@ -144,7 +145,7 @@ pub fn createVethPair(host_name: []const u8, peer_name: []const u8, bridge_name:
     if (mb.pos + aligned_size > nl.buf_size) return BridgeError.VethCreateFailed;
     @memset(mb.buf[mb.pos..][0..aligned_size], 0);
     mb.pos += aligned_size;
-    hdr.len = @intCast(@as(usize, hdr.len) + aligned_size);
+    hdr.len = math.cast(u32, @as(usize, hdr.len) + aligned_size) orelse return BridgeError.VethCreateFailed;
 
     mb.putAttrStr(hdr, nl.IFLA.IFNAME, peer_name) catch return BridgeError.VethCreateFailed;
 
@@ -181,7 +182,8 @@ pub fn moveToNamespace(if_name: []const u8, pid: posix.pid_t) BridgeError!void {
     info.index = @bitCast(idx);
 
     // IFLA_NET_NS_PID moves the interface to the target's net namespace
-    mb.putAttrU32(hdr, nl.IFLA.NET_NS_PID, @intCast(pid)) catch return BridgeError.NamespaceFailed;
+    const pid_u32 = math.cast(u32, pid) orelse return BridgeError.NamespaceFailed;
+    mb.putAttrU32(hdr, nl.IFLA.NET_NS_PID, pid_u32) catch return BridgeError.NamespaceFailed;
 
     nl.sendAndCheck(fd, mb.message()) catch return BridgeError.NamespaceFailed;
 }

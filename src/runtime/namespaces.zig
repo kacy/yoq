@@ -7,6 +7,7 @@
 // supported namespaces: PID, NET, MNT, UTS, IPC, USER, CGROUP.
 
 const std = @import("std");
+const math = std.math;
 const linux = std.os.linux;
 const posix = std.posix;
 const syscall_util = @import("../lib/syscall.zig");
@@ -206,7 +207,11 @@ pub fn spawn(
             .outer_uid = std.os.linux.getuid(),
             .outer_gid = std.os.linux.getgid(),
         };
-        writeUserMapping(@intCast(pid), mapping) catch {
+        const child_pid: posix.pid_t = math.cast(posix.pid_t, pid) orelse {
+            posix.close(pipe_write);
+            return NamespaceError.CloneFailed;
+        };
+        writeUserMapping(child_pid, mapping) catch {
             posix.close(pipe_write);
             return NamespaceError.WriteFailed;
         };
@@ -220,7 +225,7 @@ pub fn spawn(
     posix.munmap(@alignCast(stack_mem));
 
     return SpawnResult{
-        .pid = @intCast(pid),
+        .pid = math.cast(posix.pid_t, pid) orelse return NamespaceError.CloneFailed,
         .stdout_fd = stdout_pipe[0],
         .stderr_fd = stderr_pipe[0],
         .ready_fd = pipe_write,
