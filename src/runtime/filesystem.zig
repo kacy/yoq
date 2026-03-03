@@ -11,6 +11,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const syscall_util = @import("../lib/syscall.zig");
+const log = @import("../lib/log.zig");
 
 pub const FilesystemError = error{
     MountFailed,
@@ -38,6 +39,24 @@ pub const FilesystemConfig = struct {
 /// upper_dir is the writable layer. work_dir is overlay's scratch space.
 /// the merged result appears at merged_dir.
 pub fn mountOverlay(config: FilesystemConfig) FilesystemError!void {
+    // validate paths don't contain characters that break overlayfs mount options.
+    // ':' is the lowerdir separator, ',' separates mount options — either
+    // character in a path would corrupt the options string.
+    for (config.lower_dirs) |dir| {
+        if (!isValidOverlayPath(dir)) {
+            log.warn("overlayfs: lower dir contains invalid characters: {s}", .{dir});
+            return FilesystemError.MountFailed;
+        }
+    }
+    if (!isValidOverlayPath(config.upper_dir)) {
+        log.warn("overlayfs: upper dir contains invalid characters: {s}", .{config.upper_dir});
+        return FilesystemError.MountFailed;
+    }
+    if (!isValidOverlayPath(config.work_dir)) {
+        log.warn("overlayfs: work dir contains invalid characters: {s}", .{config.work_dir});
+        return FilesystemError.MountFailed;
+    }
+
     // build overlayfs mount options:
     // "lowerdir=layer1:layer2,upperdir=upper,workdir=work"
     var opts_buf: [4096]u8 = undefined;
@@ -197,6 +216,15 @@ fn mkdirIfNeeded(path: []const u8) !void {
     };
 }
 
+/// check that a path doesn't contain ':' or ',' which would break
+/// overlayfs mount options parsing.
+fn isValidOverlayPath(path: []const u8) bool {
+    for (path) |c| {
+        if (c == ':' or c == ',') return false;
+    }
+    return true;
+}
+
 /// make a zero-terminated copy of a path for syscalls
 fn sentinelize(path: *const []const u8) ![:0]const u8 {
     // we use a thread-local buffer to avoid allocation
@@ -223,6 +251,17 @@ test "overlay options building" {
     try std.testing.expectEqual(@as(usize, 2), config.lower_dirs.len);
     try std.testing.expectEqualStrings("/layers/base", config.lower_dirs[0]);
     try std.testing.expectEqualStrings("/layers/app", config.lower_dirs[1]);
+}
+
+test "overlay path validation" {
+    // normal hex-digest paths are fine
+    try std.testing.expect(isValidOverlayPath("/home/user/.local/share/yoq/layers/sha256/abcdef1234"));
+    try std.testing.expect(isValidOverlayPath("/tmp/overlay/upper"));
+
+    // ':' and ',' would break mount options
+    try std.testing.expect(!isValidOverlayPath("/path/with:colon"));
+    try std.testing.expect(!isValidOverlayPath("/path/with,comma"));
+    try std.testing.expect(!isValidOverlayPath("a:b"));
 }
 
 test "sentinelize" {
