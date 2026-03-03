@@ -616,4 +616,5 @@ comptime {
     _ = @import("network/setup.zig");
     _ = @import("build/dockerfile.zig");
     _ = @import("build/context.zig");
+    _ = @import("build/engine.zig");
 }
