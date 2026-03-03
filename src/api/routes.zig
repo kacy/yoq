@@ -13,6 +13,7 @@ const store = @import("../state/store.zig");
 const process = @import("../runtime/process.zig");
 const logs = @import("../runtime/logs.zig");
 const container = @import("../runtime/container.zig");
+const json_helpers = @import("../lib/json_helpers.zig");
 
 pub const Response = struct {
     status: http.StatusCode,
@@ -158,7 +159,7 @@ fn handleGetLogs(alloc: std.mem.Allocator, id: []const u8) Response {
     const writer = json_buf.writer(alloc);
 
     writer.writeAll("{\"logs\":\"") catch return internalError();
-    writeJsonEscaped(writer, log_data) catch return internalError();
+    json_helpers.writeJsonEscaped(writer, log_data) catch return internalError();
     writer.writeAll("\"}") catch return internalError();
 
     const body = json_buf.toOwnedSlice(alloc) catch return internalError();
@@ -281,11 +282,11 @@ fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void {
     try writer.writeAll("{\"id\":\"");
     try writer.writeAll(record.id);
     try writer.writeAll("\",\"command\":\"");
-    try writeJsonEscaped(writer, record.command);
+    try json_helpers.writeJsonEscaped(writer, record.command);
     try writer.writeAll("\",\"status\":\"");
     try writer.writeAll(record.status);
     try writer.writeAll("\",\"hostname\":\"");
-    try writeJsonEscaped(writer, record.hostname);
+    try json_helpers.writeJsonEscaped(writer, record.hostname);
     try writer.writeAll("\",\"pid\":");
     if (record.pid) |pid| {
         try std.fmt.format(writer, "{d}", .{pid});
@@ -300,37 +301,16 @@ fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void {
 /// write an image record as a JSON object
 fn writeImageJson(writer: anytype, img: store.ImageRecord) !void {
     try writer.writeAll("{\"id\":\"");
-    try writeJsonEscaped(writer, img.id);
+    try json_helpers.writeJsonEscaped(writer, img.id);
     try writer.writeAll("\",\"repository\":\"");
-    try writeJsonEscaped(writer, img.repository);
+    try json_helpers.writeJsonEscaped(writer, img.repository);
     try writer.writeAll("\",\"tag\":\"");
-    try writeJsonEscaped(writer, img.tag);
+    try json_helpers.writeJsonEscaped(writer, img.tag);
     try writer.writeAll("\",\"size\":");
     try std.fmt.format(writer, "{d}", .{img.total_size});
     try writer.writeAll(",\"created_at\":");
     try std.fmt.format(writer, "{d}", .{img.created_at});
     try writer.writeByte('}');
-}
-
-/// write a string with JSON escaping (backslash, quotes, control chars)
-fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    // other control characters — use \u00XX
-                    try std.fmt.format(writer, "\\u{x:0>4}", .{c});
-                } else {
-                    try writer.writeByte(c);
-                }
-            },
-        }
-    }
 }
 
 /// extract an ID from a path like "{id}/suffix".
@@ -434,7 +414,7 @@ test "writeJsonEscaped" {
     defer buf.deinit(std.testing.allocator);
     const writer = buf.writer(std.testing.allocator);
 
-    try writeJsonEscaped(writer, "hello \"world\"\nline2");
+    try json_helpers.writeJsonEscaped(writer, "hello \"world\"\nline2");
     try std.testing.expectEqualStrings("hello \\\"world\\\"\\nline2", buf.items);
 }
 
@@ -443,6 +423,6 @@ test "writeJsonEscaped with backslash" {
     defer buf.deinit(std.testing.allocator);
     const writer = buf.writer(std.testing.allocator);
 
-    try writeJsonEscaped(writer, "path\\to\\file");
+    try json_helpers.writeJsonEscaped(writer, "path\\to\\file");
     try std.testing.expectEqualStrings("path\\\\to\\\\file", buf.items);
 }
