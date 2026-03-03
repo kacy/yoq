@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const blob_store = @import("store.zig");
+const paths = @import("../lib/paths.zig");
 
 pub const LayerError = error{
     ExtractionFailed,
@@ -22,7 +23,7 @@ pub const LayerError = error{
 
 /// cache directory for extracted layers
 const layer_subdir = "layers/sha256";
-const max_path = 512;
+const max_path = paths.max_path;
 
 /// extract a single layer (gzipped tarball) from the blob store
 /// into a cached directory. returns the path to the extracted directory.
@@ -87,18 +88,13 @@ pub fn assembleRootfs(alloc: std.mem.Allocator, layer_digests: []const []const u
 /// get the filesystem path for an extracted layer
 fn layerPath(digest: blob_store.Digest, buf: *[max_path]u8) LayerError![]const u8 {
     const hex = digest.hex();
-    const home = std.posix.getenv("HOME") orelse return LayerError.HomeDirNotFound;
-    return std.fmt.bufPrint(buf, "{s}/.local/share/yoq/{s}/{s}", .{
-        home, layer_subdir, hex,
-    }) catch return LayerError.PathTooLong;
+    return paths.dataPathFmt(buf, "{s}/{s}", .{ layer_subdir, hex }) catch
+        return LayerError.PathTooLong;
 }
 
 /// get the layer cache directory
 fn layerDir(buf: *[max_path]u8) LayerError![]const u8 {
-    const home = std.posix.getenv("HOME") orelse return LayerError.HomeDirNotFound;
-    return std.fmt.bufPrint(buf, "{s}/.local/share/yoq/{s}", .{
-        home, layer_subdir,
-    }) catch return LayerError.PathTooLong;
+    return paths.dataPath(buf, layer_subdir) catch return LayerError.PathTooLong;
 }
 
 /// extract a gzipped tarball to a directory.

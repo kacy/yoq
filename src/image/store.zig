@@ -10,6 +10,7 @@
 // (which images are pulled, tags, etc.) lives in state/store.zig.
 
 const std = @import("std");
+const paths = @import("../lib/paths.zig");
 
 pub const BlobError = error{
     WriteFailed,
@@ -23,8 +24,7 @@ pub const BlobError = error{
 /// the base directory for all blob storage
 const blob_subdir = "blobs/sha256";
 
-/// maximum path length we'll handle
-const max_path = 512;
+const max_path = paths.max_path;
 
 /// write a blob to the store. returns the sha256 digest.
 /// if a blob with the same digest already exists, this is a no-op.
@@ -120,19 +120,13 @@ pub fn deleteBlob(digest: Digest) BlobError!void {
 /// get the filesystem path for a blob
 pub fn blobPath(digest: Digest, buf: *[max_path]u8) BlobError![]const u8 {
     const hex = digest.hex();
-    const home = std.posix.getenv("HOME") orelse return BlobError.HomeDirNotFound;
-    const path = std.fmt.bufPrint(buf, "{s}/.local/share/yoq/{s}/{s}", .{
-        home, blob_subdir, hex,
-    }) catch return BlobError.PathTooLong;
-    return path;
+    return paths.dataPathFmt(buf, "{s}/{s}", .{ blob_subdir, hex }) catch
+        return BlobError.PathTooLong;
 }
 
 /// get the blob store directory
 fn blobDir(buf: *[max_path]u8) BlobError![]const u8 {
-    const home = std.posix.getenv("HOME") orelse return BlobError.HomeDirNotFound;
-    return std.fmt.bufPrint(buf, "{s}/.local/share/yoq/{s}", .{
-        home, blob_subdir,
-    }) catch return BlobError.PathTooLong;
+    return paths.dataPath(buf, blob_subdir) catch return BlobError.PathTooLong;
 }
 
 // -- digest type --
