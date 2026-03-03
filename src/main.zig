@@ -8,6 +8,7 @@ const registry = @import("image/registry.zig");
 const layer = @import("image/layer.zig");
 const net_setup = @import("network/setup.zig");
 const ip = @import("network/ip.zig");
+const exec = @import("runtime/exec.zig");
 const dockerfile = @import("build/dockerfile.zig");
 const build_engine = @import("build/engine.zig");
 
@@ -47,6 +48,8 @@ pub fn main() !void {
         cmdImages(alloc);
     } else if (std.mem.eql(u8, command, "rmi")) {
         cmdRmi(&args, alloc);
+    } else if (std.mem.eql(u8, command, "exec")) {
+        cmdExec(&args, alloc);
     } else if (std.mem.eql(u8, command, "build")) {
         cmdBuild(&args, alloc);
     } else {
@@ -333,6 +336,54 @@ fn cmdStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s}\n", .{id});
 }
 
+fn cmdExec(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const id = args.next() orelse {
+        writeErr("usage: yoq exec <container-id> <command> [args...]\n", .{});
+        std.process.exit(1);
+    };
+
+    const record = store.load(alloc, id) catch {
+        writeErr("container not found: {s}\n", .{id});
+        std.process.exit(1);
+    };
+    defer record.deinit(alloc);
+
+    if (!std.mem.eql(u8, record.status, "running")) {
+        writeErr("container {s} is not running (status: {s})\n", .{ id, record.status });
+        std.process.exit(1);
+    }
+
+    const pid = record.pid orelse {
+        writeErr("container {s} has no pid\n", .{id});
+        std.process.exit(1);
+    };
+
+    const command = args.next() orelse {
+        writeErr("usage: yoq exec <container-id> <command> [args...]\n", .{});
+        std.process.exit(1);
+    };
+
+    // collect remaining args
+    var exec_args: std.ArrayList([]const u8) = .empty;
+    defer exec_args.deinit(alloc);
+    while (args.next()) |arg| {
+        exec_args.append(alloc, arg) catch {};
+    }
+
+    const exit_code = exec.execInContainer(.{
+        .pid = pid,
+        .command = command,
+        .args = exec_args.items,
+        .env = &.{},
+        .working_dir = "/",
+    }) catch {
+        writeErr("failed to exec in container {s}\n", .{id});
+        std.process.exit(1);
+    };
+
+    std.process.exit(exit_code);
+}
+
 fn cmdRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const id = args.next() orelse {
         writeErr("usage: yoq rm <container-id>\n", .{});
@@ -615,6 +666,7 @@ fn printUsage() void {
         \\commands:
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
         \\  build [opts] <path>              build an image from a Dockerfile
+        \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  ps                               list containers
         \\  logs <id>                        show container output
         \\  stop <id>                        stop a running container
@@ -747,6 +799,7 @@ comptime {
     _ = @import("runtime/filesystem.zig");
     _ = @import("runtime/security.zig");
     _ = @import("runtime/process.zig");
+    _ = @import("runtime/exec.zig");
     _ = @import("runtime/logs.zig");
     _ = @import("state/store.zig");
     _ = @import("state/schema.zig");
