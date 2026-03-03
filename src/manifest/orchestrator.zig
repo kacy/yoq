@@ -17,6 +17,7 @@
 const std = @import("std");
 const posix = std.posix;
 
+const cli = @import("../lib/cli.zig");
 const spec = @import("spec.zig");
 const image_spec = @import("../image/spec.zig");
 const registry = @import("../image/registry.zig");
@@ -603,15 +604,7 @@ fn sigHandler(_: c_int) callconv(.c) void {
     shutdown_requested.store(true, .release);
 }
 
-// -- helpers --
-
-fn writeErr(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
-    const out = &w.interface;
-    out.print(fmt, args) catch {};
-    out.flush() catch {};
-}
+const writeErr = cli.writeErr;
 
 // -- tests --
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli = @import("lib/cli.zig");
 const store = @import("state/store.zig");
 const container = @import("runtime/container.zig");
 const process = @import("runtime/process.zig");
@@ -16,6 +17,9 @@ const orchestrator = @import("manifest/orchestrator.zig");
 const watcher_mod = @import("dev/watcher.zig");
 const manifest_spec = @import("manifest/spec.zig");
 const api_server = @import("api/server.zig");
+
+const write = cli.write;
+const writeErr = cli.writeErr;
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -915,22 +919,6 @@ fn printUsage() void {
     , .{});
 }
 
-fn write(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
-    const out = &w.interface;
-    out.print(fmt, args) catch {};
-    out.flush() catch {};
-}
-
-fn writeErr(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
-    const out = &w.interface;
-    out.print(fmt, args) catch {};
-    out.flush() catch {};
-}
-
 /// validate a container name as an RFC 1123 DNS label.
 /// must be 1-63 chars, alphanumeric or hyphens, no leading/trailing hyphen.
 fn isValidContainerName(name: []const u8) bool {
@@ -1026,6 +1014,7 @@ comptime {
     _ = @import("runtime/logs.zig");
     _ = @import("state/store.zig");
     _ = @import("state/schema.zig");
+    _ = @import("lib/cli.zig");
     _ = @import("lib/log.zig");
     _ = @import("lib/paths.zig");
     _ = @import("lib/toml.zig");
