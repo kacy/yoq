@@ -1,0 +1,519 @@
+// loader — manifest TOML parser
+//
+// reads a manifest.toml file and returns typed spec structs.
+// handles field parsing (ports, env, volumes), validation,
+// and dependency ordering (topological sort).
+//
+// load flow:
+//   1. parse TOML
+//   2. iterate [service.*] subtables → parseService() each one
+//   3. iterate [volume.*] subtables → parseVolume() each one
+//   4. validate dependencies and required fields
+//   5. topological sort services by depends_on
+//   6. return Manifest with services in dependency order
+
+const std = @import("std");
+const spec = @import("spec.zig");
+const toml = @import("../lib/toml.zig");
+const log = @import("../lib/log.zig");
+
+pub const LoadError = error{
+    FileNotFound,
+    ReadFailed,
+    ParseFailed,
+    MissingImage,
+    InvalidPortMapping,
+    InvalidEnvVar,
+    InvalidVolumeMount,
+    UnknownDependency,
+    CircularDependency,
+    NoServices,
+    OutOfMemory,
+};
+
+pub const default_filename = "manifest.toml";
+
+/// parse a manifest from a TOML string.
+/// returns a Manifest with services in dependency order.
+/// caller must call result.deinit() when done.
+pub fn loadFromString(alloc: std.mem.Allocator, content: []const u8) LoadError!spec.Manifest {
+    var parsed = toml.parse(alloc, content) catch {
+        log.err("manifest: failed to parse TOML", .{});
+        return LoadError.ParseFailed;
+    };
+    defer parsed.deinit();
+
+    return buildManifest(alloc, &parsed.root);
+}
+
+// -- internal --
+
+/// build a Manifest from a parsed TOML root table
+fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!spec.Manifest {
+    // parse services from [service.*] subtables
+    var services: std.ArrayListUnmanaged(spec.Service) = .empty;
+    defer {
+        for (services.items) |svc| svc.deinit(alloc);
+        services.deinit(alloc);
+    }
+
+    if (root.getTable("service")) |service_table| {
+        for (service_table.entries.keys(), service_table.entries.values()) |name, val| {
+            switch (val) {
+                .table => |tbl| {
+                    const svc = try parseService(alloc, name, tbl);
+                    services.append(alloc, svc) catch return LoadError.OutOfMemory;
+                },
+                else => {},
+            }
+        }
+    }
+
+    if (services.items.len == 0) {
+        log.err("manifest: no services defined", .{});
+        return LoadError.NoServices;
+    }
+
+    // parse volumes from [volume.*] subtables
+    var volumes: std.ArrayListUnmanaged(spec.Volume) = .empty;
+    defer {
+        for (volumes.items) |vol| vol.deinit(alloc);
+        volumes.deinit(alloc);
+    }
+
+    if (root.getTable("volume")) |volume_table| {
+        for (volume_table.entries.keys(), volume_table.entries.values()) |name, val| {
+            switch (val) {
+                .table => |tbl| {
+                    const vol = try parseVolume(alloc, name, tbl);
+                    volumes.append(alloc, vol) catch return LoadError.OutOfMemory;
+                },
+                else => {},
+            }
+        }
+    }
+
+    // take ownership — clear the arraylists so the defers don't free
+    const owned_services = services.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+    errdefer {
+        for (owned_services) |svc| svc.deinit(alloc);
+        alloc.free(owned_services);
+    }
+
+    const owned_volumes = volumes.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+    errdefer {
+        for (owned_volumes) |vol| vol.deinit(alloc);
+        alloc.free(owned_volumes);
+    }
+
+    return spec.Manifest{
+        .services = owned_services,
+        .volumes = owned_volumes,
+        .alloc = alloc,
+    };
+}
+
+/// parse a single service from its TOML subtable
+fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Service {
+    // image is required
+    const image_raw = table.getString("image") orelse {
+        log.err("manifest: service '{s}' is missing required field 'image'", .{name});
+        return LoadError.MissingImage;
+    };
+
+    // parse optional fields
+    const command = try parseStringArray(alloc, table.getArray("command"));
+    errdefer {
+        for (command) |cmd| alloc.free(cmd);
+        alloc.free(command);
+    }
+
+    const ports = try parsePortMappings(alloc, table.getArray("ports"));
+    errdefer alloc.free(ports);
+
+    const env = try parseEnvVars(alloc, table.getArray("env"));
+    errdefer {
+        for (env) |e| alloc.free(e);
+        alloc.free(env);
+    }
+
+    const depends_on = try parseStringArray(alloc, table.getArray("depends_on"));
+    errdefer {
+        for (depends_on) |dep| alloc.free(dep);
+        alloc.free(depends_on);
+    }
+
+    const volume_mounts = try parseVolumeMounts(alloc, table.getArray("volumes"));
+    errdefer {
+        for (volume_mounts) |vm| vm.deinit(alloc);
+        alloc.free(volume_mounts);
+    }
+
+    const working_dir: ?[]const u8 = if (table.getString("working_dir")) |wd|
+        alloc.dupe(u8, wd) catch return LoadError.OutOfMemory
+    else
+        null;
+    errdefer if (working_dir) |wd| alloc.free(wd);
+
+    return .{
+        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
+        .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
+        .command = command,
+        .ports = ports,
+        .env = env,
+        .depends_on = depends_on,
+        .working_dir = working_dir,
+        .volumes = volume_mounts,
+    };
+}
+
+/// parse a volume definition from its TOML subtable
+fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Volume {
+    const driver = table.getString("driver") orelse "local";
+
+    return .{
+        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
+        .driver = alloc.dupe(u8, driver) catch return LoadError.OutOfMemory,
+    };
+}
+
+// -- field parsing helpers --
+
+/// dupe an optional TOML string array into owned slices
+fn parseStringArray(alloc: std.mem.Allocator, raw: ?[]const []const u8) LoadError![]const []const u8 {
+    const items = raw orelse {
+        return alloc.alloc([]const u8, 0) catch return LoadError.OutOfMemory;
+    };
+
+    var result: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (result.items) |s| alloc.free(s);
+        result.deinit(alloc);
+    }
+
+    for (items) |item| {
+        const duped = alloc.dupe(u8, item) catch return LoadError.OutOfMemory;
+        result.append(alloc, duped) catch {
+            alloc.free(duped);
+            return LoadError.OutOfMemory;
+        };
+    }
+
+    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+}
+
+/// parse port mapping strings like "80:8080" into PortMapping structs
+fn parsePortMappings(alloc: std.mem.Allocator, raw: ?[]const []const u8) LoadError![]const spec.PortMapping {
+    const items = raw orelse {
+        return alloc.alloc(spec.PortMapping, 0) catch return LoadError.OutOfMemory;
+    };
+
+    var result: std.ArrayListUnmanaged(spec.PortMapping) = .empty;
+    errdefer result.deinit(alloc);
+
+    for (items) |item| {
+        const mapping = parseOnePort(item) orelse {
+            log.err("manifest: invalid port mapping: '{s}'", .{item});
+            return LoadError.InvalidPortMapping;
+        };
+        result.append(alloc, mapping) catch return LoadError.OutOfMemory;
+    }
+
+    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+}
+
+/// parse a single "host:container" port string
+fn parseOnePort(s: []const u8) ?spec.PortMapping {
+    const colon = std.mem.indexOfScalar(u8, s, ':') orelse return null;
+    if (colon == 0 or colon >= s.len - 1) return null;
+
+    const host_port = std.fmt.parseInt(u16, s[0..colon], 10) catch return null;
+    const container_port = std.fmt.parseInt(u16, s[colon + 1 ..], 10) catch return null;
+
+    return .{ .host_port = host_port, .container_port = container_port };
+}
+
+/// validate and dupe env var strings (must contain '=' with non-empty key)
+fn parseEnvVars(alloc: std.mem.Allocator, raw: ?[]const []const u8) LoadError![]const []const u8 {
+    const items = raw orelse {
+        return alloc.alloc([]const u8, 0) catch return LoadError.OutOfMemory;
+    };
+
+    var result: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (result.items) |s| alloc.free(s);
+        result.deinit(alloc);
+    }
+
+    for (items) |item| {
+        if (!validateEnvVar(item)) {
+            log.err("manifest: invalid env var: '{s}'", .{item});
+            return LoadError.InvalidEnvVar;
+        }
+        const duped = alloc.dupe(u8, item) catch return LoadError.OutOfMemory;
+        result.append(alloc, duped) catch {
+            alloc.free(duped);
+            return LoadError.OutOfMemory;
+        };
+    }
+
+    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+}
+
+/// check that an env var string has the form "KEY=VALUE" with a non-empty key
+fn validateEnvVar(s: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, s, '=') orelse return false;
+    return eq > 0; // key must be non-empty, value can be empty
+}
+
+/// parse volume mount strings like "./src:/app" into VolumeMount structs
+fn parseVolumeMounts(alloc: std.mem.Allocator, raw: ?[]const []const u8) LoadError![]const spec.VolumeMount {
+    const items = raw orelse {
+        return alloc.alloc(spec.VolumeMount, 0) catch return LoadError.OutOfMemory;
+    };
+
+    var result: std.ArrayListUnmanaged(spec.VolumeMount) = .empty;
+    errdefer {
+        for (result.items) |vm| vm.deinit(alloc);
+        result.deinit(alloc);
+    }
+
+    for (items) |item| {
+        const mount = try parseOneVolumeMount(alloc, item);
+        result.append(alloc, mount) catch {
+            mount.deinit(alloc);
+            return LoadError.OutOfMemory;
+        };
+    }
+
+    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+}
+
+/// parse a single "source:target" volume mount string.
+/// bind detection: source starts with /, ./, or ../ → bind, otherwise → named.
+fn parseOneVolumeMount(alloc: std.mem.Allocator, s: []const u8) LoadError!spec.VolumeMount {
+    const colon = std.mem.indexOfScalar(u8, s, ':') orelse {
+        log.err("manifest: invalid volume mount (missing ':'): '{s}'", .{s});
+        return LoadError.InvalidVolumeMount;
+    };
+    if (colon == 0 or colon >= s.len - 1) {
+        log.err("manifest: invalid volume mount: '{s}'", .{s});
+        return LoadError.InvalidVolumeMount;
+    }
+
+    const source = s[0..colon];
+    const target = s[colon + 1 ..];
+
+    const kind: spec.VolumeMount.Kind = if (std.mem.startsWith(u8, source, "/") or
+        std.mem.startsWith(u8, source, "./") or
+        std.mem.startsWith(u8, source, "../"))
+        .bind
+    else
+        .named;
+
+    return .{
+        .source = alloc.dupe(u8, source) catch return LoadError.OutOfMemory,
+        .target = alloc.dupe(u8, target) catch return LoadError.OutOfMemory,
+        .kind = kind,
+    };
+}
+
+// -- tests --
+
+test "minimal manifest — one service with just image" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.services.len);
+    try std.testing.expectEqualStrings("web", manifest.services[0].name);
+    try std.testing.expectEqualStrings("nginx:latest", manifest.services[0].image);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].command.len);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].ports.len);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].env.len);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].depends_on.len);
+    try std.testing.expect(manifest.services[0].working_dir == null);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].volumes.len);
+    try std.testing.expectEqual(@as(usize, 0), manifest.volumes.len);
+}
+
+test "full service — all fields populated" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\command = ["/bin/sh", "-c", "echo hello"]
+        \\ports = ["80:8080", "443:8443"]
+        \\env = ["DEBUG=true", "PORT=8080"]
+        \\depends_on = ["db"]
+        \\working_dir = "/app"
+        \\volumes = ["./src:/app", "data:/var/data"]
+        \\
+        \\[service.db]
+        \\image = "postgres:15"
+    );
+    defer manifest.deinit();
+
+    // find web service (order may vary before topo sort is added)
+    const web = manifest.serviceByName("web").?;
+
+    try std.testing.expectEqualStrings("nginx:latest", web.image);
+
+    try std.testing.expectEqual(@as(usize, 3), web.command.len);
+    try std.testing.expectEqualStrings("/bin/sh", web.command[0]);
+    try std.testing.expectEqualStrings("-c", web.command[1]);
+    try std.testing.expectEqualStrings("echo hello", web.command[2]);
+
+    try std.testing.expectEqual(@as(usize, 2), web.ports.len);
+    try std.testing.expectEqual(@as(u16, 80), web.ports[0].host_port);
+    try std.testing.expectEqual(@as(u16, 8080), web.ports[0].container_port);
+    try std.testing.expectEqual(@as(u16, 443), web.ports[1].host_port);
+    try std.testing.expectEqual(@as(u16, 8443), web.ports[1].container_port);
+
+    try std.testing.expectEqual(@as(usize, 2), web.env.len);
+    try std.testing.expectEqualStrings("DEBUG=true", web.env[0]);
+    try std.testing.expectEqualStrings("PORT=8080", web.env[1]);
+
+    try std.testing.expectEqual(@as(usize, 1), web.depends_on.len);
+    try std.testing.expectEqualStrings("db", web.depends_on[0]);
+
+    try std.testing.expectEqualStrings("/app", web.working_dir.?);
+
+    try std.testing.expectEqual(@as(usize, 2), web.volumes.len);
+    try std.testing.expectEqualStrings("./src", web.volumes[0].source);
+    try std.testing.expectEqualStrings("/app", web.volumes[0].target);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.bind, web.volumes[0].kind);
+    try std.testing.expectEqualStrings("data", web.volumes[1].source);
+    try std.testing.expectEqualStrings("/var/data", web.volumes[1].target);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.named, web.volumes[1].kind);
+}
+
+test "volume parsing — driver defaults to local" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.data]
+        \\
+        \\[volume.logs]
+        \\driver = "tmpfs"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), manifest.volumes.len);
+
+    // find volumes by name (order matches TOML insertion order)
+    var found_data = false;
+    var found_logs = false;
+    for (manifest.volumes) |vol| {
+        if (std.mem.eql(u8, vol.name, "data")) {
+            try std.testing.expectEqualStrings("local", vol.driver);
+            found_data = true;
+        }
+        if (std.mem.eql(u8, vol.name, "logs")) {
+            try std.testing.expectEqualStrings("tmpfs", vol.driver);
+            found_logs = true;
+        }
+    }
+    try std.testing.expect(found_data);
+    try std.testing.expect(found_logs);
+}
+
+test "port parsing — valid formats" {
+    const p1 = parseOnePort("80:8080").?;
+    try std.testing.expectEqual(@as(u16, 80), p1.host_port);
+    try std.testing.expectEqual(@as(u16, 8080), p1.container_port);
+
+    const p2 = parseOnePort("443:443").?;
+    try std.testing.expectEqual(@as(u16, 443), p2.host_port);
+    try std.testing.expectEqual(@as(u16, 443), p2.container_port);
+}
+
+test "port parsing — invalid formats" {
+    try std.testing.expect(parseOnePort("invalid") == null);
+    try std.testing.expect(parseOnePort(":80") == null);
+    try std.testing.expect(parseOnePort("80:") == null);
+    try std.testing.expect(parseOnePort("99999:80") == null);
+    try std.testing.expect(parseOnePort("80:99999") == null);
+}
+
+test "env var validation" {
+    try std.testing.expect(validateEnvVar("KEY=VALUE"));
+    try std.testing.expect(validateEnvVar("KEY="));
+    try std.testing.expect(validateEnvVar("K=V=W"));
+    try std.testing.expect(!validateEnvVar("NOEQUALS"));
+    try std.testing.expect(!validateEnvVar("=VALUE"));
+    try std.testing.expect(!validateEnvVar(""));
+}
+
+test "volume mount kind detection" {
+    const alloc = std.testing.allocator;
+
+    const bind1 = try parseOneVolumeMount(alloc, "./src:/app");
+    defer bind1.deinit(alloc);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.bind, bind1.kind);
+
+    const bind2 = try parseOneVolumeMount(alloc, "/data:/mnt");
+    defer bind2.deinit(alloc);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.bind, bind2.kind);
+
+    const bind3 = try parseOneVolumeMount(alloc, "../config:/etc/app");
+    defer bind3.deinit(alloc);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.bind, bind3.kind);
+
+    const named = try parseOneVolumeMount(alloc, "myvolume:/var/data");
+    defer named.deinit(alloc);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.named, named.kind);
+}
+
+test "missing image returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\command = ["/bin/sh"]
+    );
+    try std.testing.expectError(LoadError.MissingImage, result);
+}
+
+test "no services returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc, "# empty manifest\n");
+    try std.testing.expectError(LoadError.NoServices, result);
+}
+
+test "invalid port mapping returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\ports = ["not-a-port"]
+    );
+    try std.testing.expectError(LoadError.InvalidPortMapping, result);
+}
+
+test "invalid env var returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\env = ["NOEQUALS"]
+    );
+    try std.testing.expectError(LoadError.InvalidEnvVar, result);
+}
+
+test "invalid volume mount returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\volumes = ["no-colon"]
+    );
+    try std.testing.expectError(LoadError.InvalidVolumeMount, result);
+}
