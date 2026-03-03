@@ -18,6 +18,7 @@ const bridge = @import("bridge.zig");
 const ip = @import("ip.zig");
 const nat = @import("nat.zig");
 const schema = @import("../state/schema.zig");
+const log = @import("../lib/log.zig");
 
 pub const SetupError = error{
     BridgeFailed,
@@ -108,15 +109,21 @@ pub fn setupContainer(
     };
 
     // 6. NAT setup (non-fatal — containers still work on the bridge without NAT)
-    nat.enableForwarding() catch {};
-    nat.ensureMasquerade(bridge.default_bridge, "10.42.0.0/16") catch {};
+    nat.enableForwarding() catch |e| {
+        log.warn("failed to enable IP forwarding: {}", .{e});
+    };
+    nat.ensureMasquerade(bridge.default_bridge, "10.42.0.0/16") catch |e| {
+        log.warn("failed to set up masquerade on {s}: {}", .{ bridge.default_bridge, e });
+    };
 
     // 7. port mappings
     var ip_str_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(container_ip, &ip_str_buf);
 
     for (config.port_maps) |pm| {
-        nat.addPortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat()) catch {};
+        nat.addPortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat()) catch |e| {
+            log.warn("failed to add port map {}:{} for {s}: {}", .{ pm.host_port, pm.container_port, container_id, e });
+        };
     }
 
     // build result
@@ -167,7 +174,8 @@ pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, hostname:
     var hosts_buf: [256]u8 = undefined;
     var ip_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(container_ip, &ip_buf);
-    const hosts = std.fmt.bufPrint(&hosts_buf,
+    const hosts = std.fmt.bufPrint(
+        &hosts_buf,
         "127.0.0.1\tlocalhost\n{s}\t{s}\n",
         .{ ip_str, hostname },
     ) catch return;

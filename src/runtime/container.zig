@@ -17,6 +17,7 @@ const logs = @import("logs.zig");
 const store = @import("../state/store.zig");
 const paths = @import("../lib/paths.zig");
 const net_setup = @import("../network/setup.zig");
+const log = @import("../lib/log.zig");
 
 pub const ContainerError = error{
     CreateFailed,
@@ -157,7 +158,10 @@ pub const Container = struct {
         };
 
         // create cgroup (non-fatal — container runs without limits if this fails)
-        var cgroup: ?cgroups.Cgroup = cgroups.Cgroup.create(config.id) catch null;
+        var cgroup: ?cgroups.Cgroup = cgroups.Cgroup.create(config.id) catch |e| blk: {
+            log.warn("cgroup setup failed for {s}: {}", .{ config.id, e });
+            break :blk null;
+        };
 
         // spawn the container process in isolated namespaces.
         // the child blocks until we call signalReady(), giving us time
@@ -178,8 +182,12 @@ pub const Container = struct {
 
         // add child to cgroup and set resource limits
         if (cgroup) |*cg| {
-            cg.addProcess(spawn_result.pid) catch {};
-            cg.setLimits(config.limits) catch {};
+            cg.addProcess(spawn_result.pid) catch |e| {
+                log.warn("failed to add process to cgroup for {s}: {}", .{ config.id, e });
+            };
+            cg.setLimits(config.limits) catch |e| {
+                log.warn("failed to set cgroup limits for {s}: {}", .{ config.id, e });
+            };
         }
 
         // set up container networking (non-fatal — container works without it)
@@ -194,7 +202,9 @@ pub const Container = struct {
                     // persist network info in the database
                     var ip_buf: [16]u8 = undefined;
                     const ip_str = @import("../network/ip.zig").formatIp(info.ip, &ip_buf);
-                    store.updateNetwork(config.id, ip_str, info.vethName()) catch {};
+                    store.updateNetwork(config.id, ip_str, info.vethName()) catch |e| {
+                        log.warn("failed to persist network info for {s}: {}", .{ config.id, e });
+                    };
 
                     // write resolv.conf and hosts into the rootfs
                     if (dirs) |*overlay_dirs| {
@@ -235,7 +245,9 @@ pub const Container = struct {
         if (stderr_thread == null) posix.close(spawn_result.stderr_fd);
 
         // update sqlite to "running"
-        store.updateStatus(config.id, "running", spawn_result.pid, null) catch {};
+        store.updateStatus(config.id, "running", spawn_result.pid, null) catch |e| {
+            log.warn("failed to update status for {s}: {}", .{ config.id, e });
+        };
 
         // block until the child exits
         const wait_result = process.wait(spawn_result.pid, false) catch {
@@ -276,7 +288,9 @@ pub const Container = struct {
         if (cgroup) |*cg| cg.destroy() catch {};
 
         // update sqlite with final status
-        store.updateStatus(config.id, "stopped", null, exit_code) catch {};
+        store.updateStatus(config.id, "stopped", null, exit_code) catch |e| {
+            log.warn("failed to update final status for {s}: {}", .{ config.id, e });
+        };
     }
 };
 
