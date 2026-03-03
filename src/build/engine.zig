@@ -28,6 +28,7 @@ const filesystem = @import("../runtime/filesystem.zig");
 const namespaces = @import("../runtime/namespaces.zig");
 const paths = @import("../lib/paths.zig");
 const log = @import("../lib/log.zig");
+const json_helpers = @import("../lib/json_helpers.zig");
 
 pub const BuildError = error{
     ParseFailed,
@@ -775,7 +776,7 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
         for (state.env.items, 0..) |env, i| {
             if (i > 0) try writer.writeAll(",");
             try writer.writeByte('"');
-            try writeJsonEscaped(writer, env);
+            try json_helpers.writeJsonEscaped(writer, env);
             try writer.writeByte('"');
         }
         try writer.writeAll("]");
@@ -790,7 +791,7 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
             try writer.writeAll(cmd);
         } else {
             try writer.writeAll("\"Cmd\":[\"/bin/sh\",\"-c\",\"");
-            try writeJsonEscaped(writer, cmd);
+            try json_helpers.writeJsonEscaped(writer, cmd);
             try writer.writeAll("\"]");
         }
         first = false;
@@ -804,7 +805,7 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
             try writer.writeAll(ep);
         } else {
             try writer.writeAll("\"Entrypoint\":[\"");
-            try writeJsonEscaped(writer, ep);
+            try json_helpers.writeJsonEscaped(writer, ep);
             try writer.writeAll("\"]");
         }
         first = false;
@@ -814,7 +815,7 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
     if (!std.mem.eql(u8, state.workdir, "/")) {
         if (!first) try writer.writeAll(",");
         try writer.writeAll("\"WorkingDir\":\"");
-        try writeJsonEscaped(writer, state.workdir);
+        try json_helpers.writeJsonEscaped(writer, state.workdir);
         try writer.writeByte('"');
         first = false;
     }
@@ -823,7 +824,7 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
     if (state.user) |u| {
         if (!first) try writer.writeAll(",");
         try writer.writeAll("\"User\":\"");
-        try writeJsonEscaped(writer, u);
+        try json_helpers.writeJsonEscaped(writer, u);
         try writer.writeByte('"');
         first = false;
     }
@@ -882,19 +883,6 @@ fn buildManifestJson(
     try writer.writeAll("]}");
 
     return try buf.toOwnedSlice();
-}
-
-fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => try writer.writeByte(c),
-        }
-    }
 }
 
 // -- tests --
@@ -1015,7 +1003,7 @@ test "json escaping" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     defer buf.deinit();
 
-    try writeJsonEscaped(buf.writer(), "hello \"world\"\nfoo\\bar");
+    try json_helpers.writeJsonEscaped(buf.writer(), "hello \"world\"\nfoo\\bar");
     try std.testing.expectEqualStrings("hello \\\"world\\\"\\nfoo\\\\bar", buf.items);
 }
 
