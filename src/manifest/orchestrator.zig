@@ -529,14 +529,17 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         // container exited on its own (crash or normal exit) — wait for
         // either a restart signal or shutdown
         orch.states[idx].status = .stopped;
+        var got_restart = false;
         while (!shutdown_requested.load(.acquire)) {
             if (orch.restart_requested[idx].load(.acquire)) {
                 orch.restart_requested[idx].store(false, .release);
                 writeErr("restarting {s}...\n", .{svc.name});
+                got_restart = true;
                 break;
             }
             std.time.sleep(200 * std.time.ns_per_ms);
-        } else break; // shutdown requested, exit loop
+        }
+        if (!got_restart) break;
     }
 
     orch.states[idx].status = .stopped;
