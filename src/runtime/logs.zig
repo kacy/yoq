@@ -12,6 +12,7 @@
 const std = @import("std");
 const posix = std.posix;
 const paths = @import("../lib/paths.zig");
+const log_mux = @import("../dev/log_mux.zig");
 
 pub const LogError = error{
     CreateFailed,
@@ -132,7 +133,16 @@ pub fn writeLogLine(log_file: std.fs.File, stream: []const u8, line: []const u8)
 /// blocking read loop that captures output from a pipe fd and writes
 /// it to the log file line by line. intended to run in a separate thread.
 /// reads until the pipe is closed (EOF).
-pub fn captureStream(log_file: std.fs.File, pipe_fd: posix.fd_t, stream_label: []const u8) void {
+///
+/// when dev_service is non-null, each line is also written to stderr
+/// with a colored service name prefix (for dev mode log multiplexing).
+pub fn captureStream(
+    log_file: std.fs.File,
+    pipe_fd: posix.fd_t,
+    stream_label: []const u8,
+    dev_service: ?[]const u8,
+    dev_color: usize,
+) void {
     var buf: [4096]u8 = undefined;
     var leftover: [4096]u8 = undefined;
     var leftover_len: usize = 0;
@@ -151,15 +161,23 @@ pub fn captureStream(log_file: std.fs.File, pipe_fd: posix.fd_t, stream_label: [
                     const chunk_len = i - start;
                     if (chunk_len > 0 and leftover_len + chunk_len <= leftover.len) {
                         @memcpy(leftover[leftover_len .. leftover_len + chunk_len], buf[start..i]);
-                        writeLogLine(log_file, stream_label, leftover[0 .. leftover_len + chunk_len]);
+                        const line = leftover[0 .. leftover_len + chunk_len];
+                        writeLogLine(log_file, stream_label, line);
+                        if (dev_service) |svc| log_mux.writeLine(svc, dev_color, line);
                     } else {
                         // buffer full or no new data — write what we have
                         writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
-                        if (chunk_len > 0) writeLogLine(log_file, stream_label, buf[start..i]);
+                        if (dev_service) |svc| log_mux.writeLine(svc, dev_color, leftover[0..leftover_len]);
+                        if (chunk_len > 0) {
+                            writeLogLine(log_file, stream_label, buf[start..i]);
+                            if (dev_service) |svc| log_mux.writeLine(svc, dev_color, buf[start..i]);
+                        }
                     }
                     leftover_len = 0;
                 } else {
-                    writeLogLine(log_file, stream_label, buf[start..i]);
+                    const line = buf[start..i];
+                    writeLogLine(log_file, stream_label, line);
+                    if (dev_service) |svc| log_mux.writeLine(svc, dev_color, line);
                 }
                 start = i + 1;
             }
@@ -178,6 +196,7 @@ pub fn captureStream(log_file: std.fs.File, pipe_fd: posix.fd_t, stream_label: [
     // flush any remaining data
     if (leftover_len > 0) {
         writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
+        if (dev_service) |svc| log_mux.writeLine(svc, dev_color, leftover[0..leftover_len]);
     }
 
     posix.close(pipe_fd);
