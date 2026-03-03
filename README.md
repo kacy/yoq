@@ -8,7 +8,7 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 ## status
 
-phases 1-4 complete: container primitives, OCI images, networking, and build engine.
+phases 1-4 complete: container primitives, OCI images, networking, and build engine. phase 5 (manifest + dev mode) is underway.
 
 containers run in isolated namespaces with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. images are pulled from any OCI registry (Docker Hub, GHCR, etc.), extracted, and cached locally with layer deduplication.
 
@@ -16,21 +16,23 @@ networking gives each container its own IP on a bridge network (10.42.0.0/16), w
 
 the build engine parses Dockerfiles (FROM, RUN, COPY, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR) and produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order.
 
+phase 5 work has started with a TOML parser for manifest files — the foundation for `yoq up` multi-service orchestration.
+
 what works on Linux (kernel 6.1+):
 - `yoq run nginx:latest` — pulls, extracts, and runs a container
 - `yoq run -p 8080:80 nginx:latest` — with host port mapping
 - `yoq run -p 8080:80 -p 443:443 nginx:latest` — multiple port mappings
 - `yoq run --no-net alpine /bin/sh` — run without networking
+- `yoq run --name db postgres:latest` — assign a name for DNS service discovery
 - `yoq run alpine:latest /bin/echo hello` — run with a custom command
+- `yoq build .` — build an image from a Dockerfile
+- `yoq build -t myapp:latest .` — build with a tag
+- `yoq build -f custom.Dockerfile .` — build from a custom Dockerfile
 - `yoq ps` — list containers with status and network info
 - `yoq logs <id>` — view captured stdout/stderr with timestamps
 - `yoq logs <id> --tail 20` — last 20 lines
 - `yoq stop <id>` — send SIGTERM to a running container
 - `yoq rm <id>` — remove a stopped container and clean up
-- `yoq run --name db postgres:latest` — assign a name for DNS service discovery
-- `yoq build .` — build an image from a Dockerfile
-- `yoq build -t myapp:latest .` — build with a tag
-- `yoq build -f custom.Dockerfile .` — build from a custom Dockerfile
 - `yoq pull <image>` — pull and cache an image
 - `yoq images` / `yoq rmi <image>` — manage local images
 
@@ -101,11 +103,12 @@ src/
   lib/
     log.zig              structured logging
     paths.zig            XDG data directory helpers
+    toml.zig             TOML parser for manifest files
     syscall.zig          low-level syscall wrappers
 ```
 
 ## what's next
 
-- **phase 5: manifest + dev mode** — TOML manifest for multi-service apps, `yoq up --dev` with hot reload
+- **phase 5: manifest + dev mode** — TOML parser done, next: manifest spec types, orchestrator, `yoq up` / `yoq down`, dev mode with hot reload
 - **phase 6: clustering** — Raft consensus, multi-node scheduling, WireGuard mesh networking
 - **phase 7: production** — health checks, rolling updates, secrets, TLS, eBPF observability
