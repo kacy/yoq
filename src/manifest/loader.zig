@@ -93,12 +93,16 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
-    // take ownership — clear the arraylists so the defers don't free
-    const owned_services = services.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
-    errdefer {
-        for (owned_services) |svc| svc.deinit(alloc);
-        alloc.free(owned_services);
-    }
+    // validate that all depends_on entries reference real services
+    try validateDependencies(services.items);
+
+    // topological sort — returns services in dependency order
+    const sorted = try sortByDependency(alloc, services.items);
+    errdefer alloc.free(sorted);
+
+    // the sorted array owns the services now — clear the original list
+    // so the defer doesn't double-free
+    services.items.len = 0;
 
     const owned_volumes = volumes.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
     errdefer {
@@ -107,7 +111,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
     }
 
     return spec.Manifest{
-        .services = owned_services,
+        .services = sorted,
         .volumes = owned_volumes,
         .alloc = alloc,
     };
@@ -175,6 +179,98 @@ fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
         .driver = alloc.dupe(u8, driver) catch return LoadError.OutOfMemory,
     };
+}
+
+// -- dependency validation and ordering --
+
+/// check that all depends_on entries reference services that exist
+fn validateDependencies(services: []const spec.Service) LoadError!void {
+    for (services) |svc| {
+        for (svc.depends_on) |dep| {
+            var found = false;
+            for (services) |other| {
+                if (std.mem.eql(u8, other.name, dep)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                log.err("manifest: service '{s}' depends on unknown service '{s}'", .{ svc.name, dep });
+                return LoadError.UnknownDependency;
+            }
+            // also check for self-dependency
+            if (std.mem.eql(u8, svc.name, dep)) {
+                log.err("manifest: service '{s}' depends on itself", .{svc.name});
+                return LoadError.CircularDependency;
+            }
+        }
+    }
+}
+
+/// topological sort using Kahn's algorithm.
+/// returns a new slice with services in dependency order (dependencies first).
+/// detects cycles — returns CircularDependency if the graph has one.
+fn sortByDependency(alloc: std.mem.Allocator, services: []const spec.Service) LoadError![]const spec.Service {
+    const n = services.len;
+
+    // build name → index mapping
+    var name_to_idx: std.StringHashMapUnmanaged(usize) = .empty;
+    defer name_to_idx.deinit(alloc);
+
+    for (services, 0..) |svc, i| {
+        name_to_idx.put(alloc, svc.name, i) catch return LoadError.OutOfMemory;
+    }
+
+    // compute in-degrees (number of dependencies for each service)
+    const in_degree = alloc.alloc(usize, n) catch return LoadError.OutOfMemory;
+    defer alloc.free(in_degree);
+    @memset(in_degree, 0);
+
+    for (services) |svc| {
+        const idx = name_to_idx.get(svc.name).?;
+        in_degree[idx] = svc.depends_on.len;
+    }
+
+    // initialize queue with services that have no dependencies
+    var queue: std.ArrayListUnmanaged(usize) = .empty;
+    defer queue.deinit(alloc);
+
+    for (in_degree, 0..) |deg, i| {
+        if (deg == 0) {
+            queue.append(alloc, i) catch return LoadError.OutOfMemory;
+        }
+    }
+
+    // BFS — process services in dependency order
+    var sorted: std.ArrayListUnmanaged(spec.Service) = .empty;
+    defer sorted.deinit(alloc);
+
+    var queue_pos: usize = 0;
+    while (queue_pos < queue.items.len) {
+        const idx = queue.items[queue_pos];
+        queue_pos += 1;
+        sorted.append(alloc, services[idx]) catch return LoadError.OutOfMemory;
+
+        // for each service that depends on the one we just added,
+        // decrement its in-degree and enqueue if it reaches zero
+        for (services, 0..) |svc, i| {
+            for (svc.depends_on) |dep| {
+                if (std.mem.eql(u8, dep, services[idx].name)) {
+                    in_degree[i] -= 1;
+                    if (in_degree[i] == 0) {
+                        queue.append(alloc, i) catch return LoadError.OutOfMemory;
+                    }
+                }
+            }
+        }
+    }
+
+    if (sorted.items.len != n) {
+        log.err("manifest: circular dependency detected among services", .{});
+        return LoadError.CircularDependency;
+    }
+
+    return sorted.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
 }
 
 // -- field parsing helpers --
@@ -516,4 +612,103 @@ test "invalid volume mount returns error" {
         \\volumes = ["no-colon"]
     );
     try std.testing.expectError(LoadError.InvalidVolumeMount, result);
+}
+
+test "unknown dependency returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["nonexistent"]
+    );
+    try std.testing.expectError(LoadError.UnknownDependency, result);
+}
+
+test "self-dependency returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["web"]
+    );
+    try std.testing.expectError(LoadError.CircularDependency, result);
+}
+
+test "circular dependency returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["api"]
+        \\
+        \\[service.api]
+        \\image = "node:20"
+        \\depends_on = ["web"]
+    );
+    try std.testing.expectError(LoadError.CircularDependency, result);
+}
+
+test "dependency ordering — db before web" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["db"]
+        \\
+        \\[service.db]
+        \\image = "postgres:15"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), manifest.services.len);
+    // db has no dependencies, so it should come first
+    try std.testing.expectEqualStrings("db", manifest.services[0].name);
+    try std.testing.expectEqualStrings("web", manifest.services[1].name);
+}
+
+test "dependency ordering — three service chain" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.frontend]
+        \\image = "nginx:latest"
+        \\depends_on = ["api"]
+        \\
+        \\[service.api]
+        \\image = "node:20"
+        \\depends_on = ["db"]
+        \\
+        \\[service.db]
+        \\image = "postgres:15"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), manifest.services.len);
+    // db → api → frontend
+    try std.testing.expectEqualStrings("db", manifest.services[0].name);
+    try std.testing.expectEqualStrings("api", manifest.services[1].name);
+    try std.testing.expectEqualStrings("frontend", manifest.services[2].name);
+}
+
+test "dependency ordering — independent services stay stable" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.alpha]
+        \\image = "scratch"
+        \\
+        \\[service.beta]
+        \\image = "scratch"
+        \\
+        \\[service.gamma]
+        \\image = "scratch"
+    );
+    defer manifest.deinit();
+
+    // no dependencies — all have in-degree 0, should come out in insertion order
+    try std.testing.expectEqual(@as(usize, 3), manifest.services.len);
+    try std.testing.expectEqualStrings("alpha", manifest.services[0].name);
+    try std.testing.expectEqualStrings("beta", manifest.services[1].name);
+    try std.testing.expectEqualStrings("gamma", manifest.services[2].name);
 }
