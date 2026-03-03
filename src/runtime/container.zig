@@ -82,6 +82,10 @@ pub const ContainerConfig = struct {
     network: ?net_setup.NetworkConfig = null,
     /// bind mounts (host path -> container path)
     mounts: []const BindMount = &.{},
+    /// dev mode: service name for colored log output (null = no dev output)
+    dev_service_name: ?[]const u8 = null,
+    /// dev mode: color index for this service
+    dev_color_idx: usize = 0,
 };
 
 /// a running or stopped container
@@ -246,13 +250,13 @@ pub const Container = struct {
 
         if (log_file) |lf| {
             stdout_thread = std.Thread.spawn(.{}, logs.captureStream, .{
-                lf, spawn_result.stdout_fd, stdout_label,
+                lf, spawn_result.stdout_fd, stdout_label, config.dev_service_name, config.dev_color_idx,
             }) catch |err| blk: {
                 log.warn("failed to spawn stdout capture thread: {}", .{err});
                 break :blk null;
             };
             stderr_thread = std.Thread.spawn(.{}, logs.captureStream, .{
-                lf, spawn_result.stderr_fd, stderr_label,
+                lf, spawn_result.stderr_fd, stderr_label, config.dev_service_name, config.dev_color_idx,
             }) catch |err| blk: {
                 log.warn("failed to spawn stderr capture thread: {}", .{err});
                 break :blk null;
