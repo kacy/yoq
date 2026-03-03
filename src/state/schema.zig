@@ -41,6 +41,14 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    created_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS ip_allocations (
+        \\    container_id TEXT PRIMARY KEY,
+        \\    ip_address TEXT NOT NULL UNIQUE,
+        \\    allocated_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -86,6 +94,19 @@ test "init creates images table" {
             " VALUES (?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{ "sha256:abc", "library/nginx", "latest", "sha256:abc", "sha256:def", @as(i64, 1024), @as(i64, 1234567890) },
+    ) catch unreachable;
+}
+
+test "init creates ip_allocations table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO ip_allocations (container_id, ip_address, allocated_at) VALUES (?, ?, ?);",
+        .{},
+        .{ "abc123", "10.42.0.2", @as(i64, 1234567890) },
     ) catch unreachable;
 }
 
