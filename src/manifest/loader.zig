@@ -33,6 +33,27 @@ pub const LoadError = error{
 
 pub const default_filename = "manifest.toml";
 
+/// load a manifest from a file path.
+/// reads the file, parses it, and returns a typed Manifest.
+/// caller must call result.deinit() when done.
+pub fn load(alloc: std.mem.Allocator, path: []const u8) LoadError!spec.Manifest {
+    const content = std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024) catch |err| {
+        switch (err) {
+            error.FileNotFound => {
+                log.err("manifest: file not found: {s}", .{path});
+                return LoadError.FileNotFound;
+            },
+            else => {
+                log.err("manifest: failed to read: {s}", .{path});
+                return LoadError.ReadFailed;
+            },
+        }
+    };
+    defer alloc.free(content);
+
+    return loadFromString(alloc, content);
+}
+
 /// parse a manifest from a TOML string.
 /// returns a Manifest with services in dependency order.
 /// caller must call result.deinit() when done.
@@ -711,4 +732,165 @@ test "dependency ordering — independent services stay stable" {
     try std.testing.expectEqualStrings("alpha", manifest.services[0].name);
     try std.testing.expectEqualStrings("beta", manifest.services[1].name);
     try std.testing.expectEqualStrings("gamma", manifest.services[2].name);
+}
+
+test "load from file — not found" {
+    const alloc = std.testing.allocator;
+    const result = load(alloc, "/tmp/yoq_test_nonexistent_manifest.toml");
+    try std.testing.expectError(LoadError.FileNotFound, result);
+}
+
+test "load from file — writes and reads back" {
+    const alloc = std.testing.allocator;
+
+    const content =
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\ports = ["80:8080"]
+    ;
+
+    // write a temp file
+    const path = "/tmp/yoq_test_manifest.toml";
+    const file = std.fs.cwd().createFile(path, .{}) catch return;
+    defer std.fs.cwd().deleteFile(path) catch {};
+    file.writeAll(content) catch return;
+    file.close();
+
+    var manifest = try load(alloc, path);
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.services.len);
+    try std.testing.expectEqualStrings("web", manifest.services[0].name);
+    try std.testing.expectEqual(@as(u16, 80), manifest.services[0].ports[0].host_port);
+}
+
+test "full integration — target manifest format" {
+    const alloc = std.testing.allocator;
+
+    // this is the manifest format that `yoq up` will use
+    var manifest = try loadFromString(alloc,
+        \\# yoq manifest for a web app with database
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\command = ["/bin/sh", "-c", "nginx -g 'daemon off;'"]
+        \\ports = ["80:8080", "443:8443"]
+        \\env = ["UPSTREAM=api:3000", "DEBUG=false"]
+        \\depends_on = ["api"]
+        \\working_dir = "/usr/share/nginx"
+        \\
+        \\[service.api]
+        \\image = "node:20-slim"
+        \\command = ["node", "server.js"]
+        \\ports = ["3000:3000"]
+        \\env = ["DATABASE_URL=postgres://db:5432/app", "NODE_ENV=production"]
+        \\depends_on = ["db"]
+        \\working_dir = "/app"
+        \\volumes = ["./src:/app", "node_modules:/app/node_modules"]
+        \\
+        \\[service.db]
+        \\image = "postgres:15"
+        \\env = ["POSTGRES_PASSWORD=secret", "POSTGRES_DB=app"]
+        \\volumes = ["pgdata:/var/lib/postgresql/data"]
+        \\
+        \\[volume.pgdata]
+        \\driver = "local"
+        \\
+        \\[volume.node_modules]
+    );
+    defer manifest.deinit();
+
+    // -- verify service count and dependency order --
+    try std.testing.expectEqual(@as(usize, 3), manifest.services.len);
+    try std.testing.expectEqualStrings("db", manifest.services[0].name);
+    try std.testing.expectEqualStrings("api", manifest.services[1].name);
+    try std.testing.expectEqualStrings("web", manifest.services[2].name);
+
+    // -- verify db service --
+    const db = manifest.serviceByName("db").?;
+    try std.testing.expectEqualStrings("postgres:15", db.image);
+    try std.testing.expectEqual(@as(usize, 0), db.command.len);
+    try std.testing.expectEqual(@as(usize, 0), db.ports.len);
+    try std.testing.expectEqual(@as(usize, 2), db.env.len);
+    try std.testing.expectEqualStrings("POSTGRES_PASSWORD=secret", db.env[0]);
+    try std.testing.expectEqual(@as(usize, 0), db.depends_on.len);
+    try std.testing.expect(db.working_dir == null);
+    try std.testing.expectEqual(@as(usize, 1), db.volumes.len);
+    try std.testing.expectEqualStrings("pgdata", db.volumes[0].source);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.named, db.volumes[0].kind);
+
+    // -- verify api service --
+    const api = manifest.serviceByName("api").?;
+    try std.testing.expectEqualStrings("node:20-slim", api.image);
+    try std.testing.expectEqual(@as(usize, 2), api.command.len);
+    try std.testing.expectEqualStrings("node", api.command[0]);
+    try std.testing.expectEqualStrings("server.js", api.command[1]);
+    try std.testing.expectEqual(@as(usize, 1), api.ports.len);
+    try std.testing.expectEqual(@as(u16, 3000), api.ports[0].host_port);
+    try std.testing.expectEqual(@as(u16, 3000), api.ports[0].container_port);
+    try std.testing.expectEqualStrings("/app", api.working_dir.?);
+    try std.testing.expectEqual(@as(usize, 2), api.volumes.len);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.bind, api.volumes[0].kind);
+    try std.testing.expectEqual(spec.VolumeMount.Kind.named, api.volumes[1].kind);
+
+    // -- verify web service --
+    const web = manifest.serviceByName("web").?;
+    try std.testing.expectEqualStrings("nginx:latest", web.image);
+    try std.testing.expectEqual(@as(usize, 3), web.command.len);
+    try std.testing.expectEqual(@as(usize, 2), web.ports.len);
+    try std.testing.expectEqual(@as(usize, 2), web.env.len);
+    try std.testing.expectEqual(@as(usize, 1), web.depends_on.len);
+    try std.testing.expectEqualStrings("api", web.depends_on[0]);
+
+    // -- verify volumes --
+    try std.testing.expectEqual(@as(usize, 2), manifest.volumes.len);
+
+    var found_pgdata = false;
+    var found_node_modules = false;
+    for (manifest.volumes) |vol| {
+        if (std.mem.eql(u8, vol.name, "pgdata")) {
+            try std.testing.expectEqualStrings("local", vol.driver);
+            found_pgdata = true;
+        }
+        if (std.mem.eql(u8, vol.name, "node_modules")) {
+            // no driver specified → defaults to "local"
+            try std.testing.expectEqualStrings("local", vol.driver);
+            found_node_modules = true;
+        }
+    }
+    try std.testing.expect(found_pgdata);
+    try std.testing.expect(found_node_modules);
+}
+
+test "edge case — no volumes section" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), manifest.volumes.len);
+}
+
+test "edge case — empty arrays" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\command = []
+        \\ports = []
+        \\env = []
+        \\depends_on = []
+        \\volumes = []
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].command.len);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].ports.len);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].env.len);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].depends_on.len);
+    try std.testing.expectEqual(@as(usize, 0), manifest.services[0].volumes.len);
 }
