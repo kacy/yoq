@@ -234,6 +234,14 @@ pub const Container = struct {
         if (stdout_thread == null) posix.close(spawn_result.stdout_fd);
         if (stderr_thread == null) posix.close(spawn_result.stderr_fd);
 
+        // ensure log threads are always joined, even if wait() fails.
+        // defer runs after the function returns from any exit path below.
+        defer {
+            if (stdout_thread) |t| t.join();
+            if (stderr_thread) |t| t.join();
+            if (log_file) |lf| lf.close();
+        }
+
         // update sqlite to "running"
         store.updateStatus(config.id, "running", spawn_result.pid, null) catch {};
 
@@ -255,11 +263,6 @@ pub const Container = struct {
         self.status = .stopped;
         self.exit_code = exit_code;
         self.pid = null;
-
-        // join log capture threads and close log file
-        if (stdout_thread) |t| t.join();
-        if (stderr_thread) |t| t.join();
-        if (log_file) |lf| lf.close();
 
         // tear down networking
         if (self.net_info) |*info| {
@@ -452,17 +455,30 @@ pub fn cleanupContainerDirs(container_id: []const u8) void {
     std.fs.cwd().deleteTree(dir_path) catch {};
 }
 
-/// generate a short random container id (12 hex chars)
+/// generate a short random container id (16 hex chars / 8 bytes of entropy).
+/// checks for collisions against the store — regenerates if an id already exists.
 pub fn generateId(buf: *[12]u8) void {
     const chars = "0123456789abcdef";
-    // use crypto random when available, fall back to timestamp-based LCG
-    var bytes: [6]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    // retry a few times in the unlikely event of a collision
+    for (0..5) |_| {
+        var bytes: [6]u8 = undefined;
+        std.crypto.random.bytes(&bytes);
 
-    for (bytes, 0..) |b, i| {
-        buf[i * 2] = chars[b >> 4];
-        buf[i * 2 + 1] = chars[b & 0x0f];
+        for (bytes, 0..) |b, i| {
+            buf[i * 2] = chars[b >> 4];
+            buf[i * 2 + 1] = chars[b & 0x0f];
+        }
+
+        // check for collision in the store
+        const alloc = std.heap.page_allocator;
+        const existing = store.load(alloc, buf) catch |err| switch (err) {
+            store.StoreError.NotFound => return, // no collision, we're good
+            else => return, // can't check, assume no collision
+        };
+        existing.deinit(alloc);
+        // collision found — loop and try again
     }
+    // if we exhausted retries, just use the last generated id
 }
 
 // -- tests --
