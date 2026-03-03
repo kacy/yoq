@@ -61,10 +61,16 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
     defer port_maps.deinit(alloc);
     var networking_enabled = true;
+    var container_name: ?[]const u8 = null;
     var target: ?[]const u8 = null;
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "-p")) {
+        if (std.mem.eql(u8, arg, "--name")) {
+            container_name = args.next() orelse {
+                writeErr("--name requires a container name\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "-p")) {
             const port_str = args.next() orelse {
                 writeErr("-p requires host_port:container_port\n", .{});
                 std.process.exit(1);
@@ -85,7 +91,7 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 
     const run_target = target orelse {
-        writeErr("usage: yoq run [-p host:container] [--no-net] <image|rootfs> [command]\n", .{});
+        writeErr("usage: yoq run [--name <name>] [-p host:container] [--no-net] <image|rootfs> [command]\n", .{});
         std.process.exit(1);
     };
 
@@ -212,7 +218,7 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         .id = id,
         .rootfs = rootfs_str,
         .command = effective_cmd,
-        .hostname = "container",
+        .hostname = container_name orelse "container",
         .status = "created",
         .pid = null,
         .exit_code = null,
@@ -614,6 +620,7 @@ fn printUsage() void {
         \\  help                             show this help
         \\
         \\run options:
+        \\  --name <name>             assign a name (used for DNS service discovery)
         \\  -p host:container         map host port to container port
         \\  --no-net                  disable networking
         \\
