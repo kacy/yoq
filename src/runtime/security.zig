@@ -107,8 +107,9 @@ fn dropCapabilities() SecurityError!void {
 /// capabilities through exec. also required for unprivileged
 /// seccomp filter installation.
 fn setNoNewPrivs() SecurityError!void {
-    _ = posix.prctl(.SET_NO_NEW_PRIVS, .{ 1, 0, 0, 0 }) catch
-        return SecurityError.PrctlFailed;
+    const PR_SET_NO_NEW_PRIVS = 38;
+    const rc = linux.syscall5(.prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    if (syscall_util.isError(rc)) return SecurityError.PrctlFailed;
 }
 
 /// install a seccomp-bpf filter that blocks dangerous syscalls.
@@ -185,14 +186,22 @@ fn bpfJump(code: u16, k: u32, jt: u8, jf: u8) SockFilter {
     return .{ .code = code, .jt = jt, .jf = jf, .k = k };
 }
 
-/// get the AUDIT_ARCH value for the current target
+/// get the AUDIT_ARCH value for the current target.
+/// hardcoded because linux.AUDIT.ARCH.current hits an elf.EM enum bug in zig 0.15.
 fn archValue() u32 {
-    return linux.AUDIT.ARCH.current;
+    const arch = @import("builtin").cpu.arch;
+    return switch (arch) {
+        .x86_64 => 0xC000003E,
+        .aarch64 => 0xC00000B7,
+        .x86 => 0x40000003,
+        .arm => 0x40000028,
+        else => @compileError("unsupported architecture for seccomp"),
+    };
 }
 
 /// get syscall number for the current architecture
 fn syscallNum(sc: linux.SYS) u32 {
-    return @intFromEnum(sc);
+    return @intCast(@intFromEnum(sc));
 }
 
 // -- tests --
