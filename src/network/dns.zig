@@ -449,7 +449,7 @@ fn forwardQuery(
 // -- helpers --
 
 fn readU16(buf: *const [2]u8) u16 {
-    return std.mem.bigToNative(u16, @as(*const u16, @alignCast(@ptrCast(buf))).*);
+    return (@as(u16, buf[0]) << 8) | @as(u16, buf[1]);
 }
 
 fn writeU16(buf: *[2]u8, val: u16) void {
