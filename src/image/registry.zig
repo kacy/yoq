@@ -94,6 +94,14 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
         return RegistryError.BlobNotFound;
     errdefer alloc.free(config_bytes);
 
+    // verify config blob integrity against manifest digest
+    const config_computed = blob_store.computeDigest(config_bytes);
+    if (blob_store.Digest.parse(manifest.config.digest)) |expected| {
+        if (!config_computed.eql(expected)) {
+            return RegistryError.DigestMismatch;
+        }
+    }
+
     // step 5: download all layer blobs (stored in blob store)
     var layer_digests: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
