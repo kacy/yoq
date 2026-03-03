@@ -59,6 +59,9 @@ pub const PullResult = struct {
 /// pull an image from a registry.
 /// downloads the manifest, config, and all layer blobs.
 /// layer blobs are stored in the blob store; config and manifest are returned.
+///
+/// uses errdefer chains so each allocation is automatically cleaned up
+/// on any subsequent failure — no manual cleanup blocks needed.
 pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!PullResult {
     var client: std.http.Client = .{ .allocator = alloc };
     defer client.deinit();
@@ -76,53 +79,37 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     const manifest_result = fetchManifest(alloc, &client, image_ref.host, repository, image_ref.reference, token) catch
         return RegistryError.ManifestNotFound;
     const manifest_bytes = manifest_result.body;
+    errdefer alloc.free(manifest_bytes);
     const manifest_digest_str = manifest_result.digest;
+    errdefer if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
 
     // step 3: parse the manifest
-    var parsed = spec.parseManifest(alloc, manifest_bytes) catch {
-        alloc.free(manifest_bytes);
-        if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
+    var parsed = spec.parseManifest(alloc, manifest_bytes) catch
         return RegistryError.ParseError;
-    };
     defer parsed.deinit();
     const manifest = parsed.value;
 
     // step 4: download the config blob
-    const config_bytes = fetchBlob(alloc, &client, image_ref.host, repository, manifest.config.digest, token) catch {
-        alloc.free(manifest_bytes);
-        if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
+    const config_bytes = fetchBlob(alloc, &client, image_ref.host, repository, manifest.config.digest, token) catch
         return RegistryError.BlobNotFound;
-    };
+    errdefer alloc.free(config_bytes);
 
     // step 5: download all layer blobs (stored in blob store)
     var layer_digests: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (layer_digests.items) |d| alloc.free(d);
+        layer_digests.deinit(alloc);
+    }
     var total_size: u64 = 0;
 
     for (manifest.layers) |l| {
-        downloadLayerBlob(alloc, &client, image_ref.host, repository, l.digest, token) catch {
-            for (layer_digests.items) |d| alloc.free(d);
-            layer_digests.deinit(alloc);
-            alloc.free(manifest_bytes);
-            alloc.free(config_bytes);
-            if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
+        downloadLayerBlob(alloc, &client, image_ref.host, repository, l.digest, token) catch
             return RegistryError.BlobNotFound;
-        };
 
-        const digest_copy = alloc.dupe(u8, l.digest) catch {
-            for (layer_digests.items) |d| alloc.free(d);
-            layer_digests.deinit(alloc);
-            alloc.free(manifest_bytes);
-            alloc.free(config_bytes);
-            if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
+        const digest_copy = alloc.dupe(u8, l.digest) catch
             return RegistryError.NetworkError;
-        };
         layer_digests.append(alloc, digest_copy) catch {
             alloc.free(digest_copy);
-            for (layer_digests.items) |d| alloc.free(d);
-            layer_digests.deinit(alloc);
-            alloc.free(manifest_bytes);
-            alloc.free(config_bytes);
-            if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
             return RegistryError.NetworkError;
         };
         total_size += l.size;
@@ -132,14 +119,8 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
         .manifest_digest = manifest_digest_str,
         .manifest_bytes = manifest_bytes,
         .config_bytes = config_bytes,
-        .layer_digests = layer_digests.toOwnedSlice(alloc) catch {
-            for (layer_digests.items) |d| alloc.free(d);
-            layer_digests.deinit(alloc);
-            alloc.free(manifest_bytes);
-            alloc.free(config_bytes);
-            if (manifest_digest_str.len > 0) alloc.free(manifest_digest_str);
-            return RegistryError.NetworkError;
-        },
+        .layer_digests = layer_digests.toOwnedSlice(alloc) catch
+            return RegistryError.NetworkError,
         .total_size = total_size,
         .alloc = alloc,
     };
@@ -325,10 +306,7 @@ fn fetchManifest(
     };
 
     var auth_buf: [8192]u8 = undefined;
-    const auth_value = if (token.value.len > 0)
-        std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token.value}) catch return error.AuthFailed
-    else
-        "";
+    const auth_value = authHeaderValue(token, &auth_buf);
 
     const uri = std.Uri.parse(url) catch return error.ManifestNotFound;
 
@@ -447,6 +425,13 @@ fn resolveImageIndex(
     return fetchManifest(alloc, client, host, repository, digest, token);
 }
 
+/// format a bearer authorization header value from a token.
+/// returns "" if the token is empty (no auth needed).
+fn authHeaderValue(token: Token, buf: *[8192]u8) []const u8 {
+    if (token.value.len == 0) return "";
+    return std.fmt.bufPrint(buf, "Bearer {s}", .{token.value}) catch "";
+}
+
 /// fetch a blob (config or layer) from the registry
 fn fetchBlob(
     alloc: std.mem.Allocator,
@@ -464,10 +449,7 @@ fn fetchBlob(
     ) catch return error.BlobNotFound;
 
     var auth_buf: [8192]u8 = undefined;
-    const auth_value = if (token.value.len > 0)
-        std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token.value}) catch return error.AuthFailed
-    else
-        "";
+    const auth_value = authHeaderValue(token, &auth_buf);
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     defer aw.deinit();
