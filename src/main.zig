@@ -7,6 +7,7 @@ const logs = @import("runtime/logs.zig");
 const spec = @import("image/spec.zig");
 const registry = @import("image/registry.zig");
 const layer = @import("image/layer.zig");
+const oci = @import("image/oci.zig");
 const net_setup = @import("network/setup.zig");
 const ip = @import("network/ip.zig");
 const exec = @import("runtime/exec.zig");
@@ -194,43 +195,10 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         writeErr("image pulled and extracted\n", .{});
     }
 
-    // resolve the effective command per OCI spec:
-    //   effective_argv = entrypoint ++ (user_override or default_cmd)
-    // if nothing specified, fall back to /bin/sh
-    const effective_args: []const []const u8 = if (user_argv.items.len > 0)
-        user_argv.items
-    else
-        default_cmd;
-
-    const effective_cmd: []const u8 = if (entrypoint.len > 0)
-        entrypoint[0]
-    else if (effective_args.len > 0)
-        effective_args[0]
-    else
-        "/bin/sh";
-
-    // build the full args list: entrypoint[1..] ++ effective_args
-    // (or effective_args[1..] if no entrypoint)
-    var full_args: std.ArrayList([]const u8) = .empty;
-    defer full_args.deinit(alloc);
-
-    if (entrypoint.len > 1) {
-        for (entrypoint[1..]) |ep_arg| {
-            full_args.append(alloc, ep_arg) catch {};
-        }
-    }
-
-    if (entrypoint.len > 0) {
-        // entrypoint is set — append all of effective_args
-        for (effective_args) |arg| {
-            full_args.append(alloc, arg) catch {};
-        }
-    } else if (effective_args.len > 1) {
-        // no entrypoint — effective_args[0] is the command, rest are args
-        for (effective_args[1..]) |arg| {
-            full_args.append(alloc, arg) catch {};
-        }
-    }
+    // resolve effective command per OCI spec
+    var resolved = oci.resolveCommand(alloc, entrypoint, default_cmd, user_argv.items);
+    defer resolved.args.deinit(alloc);
+    const effective_cmd = resolved.command;
 
     // generate container id
     var id_buf: [12]u8 = undefined;
@@ -266,7 +234,7 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             .id = id,
             .rootfs = rootfs_str,
             .command = effective_cmd,
-            .args = full_args.items,
+            .args = resolved.args.items,
             .env = image_env,
             .working_dir = working_dir,
             .lower_dirs = layer_paths,
@@ -1022,6 +990,7 @@ comptime {
     _ = @import("image/store.zig");
     _ = @import("image/registry.zig");
     _ = @import("image/layer.zig");
+    _ = @import("image/oci.zig");
     _ = @import("network/netlink.zig");
     _ = @import("network/bridge.zig");
     _ = @import("network/dns.zig");
