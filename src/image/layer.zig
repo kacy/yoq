@@ -68,21 +68,21 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) LayerError
 /// extracts each layer and returns the list of layer directory paths
 /// (ordered from bottom to top, suitable for overlayfs lower_dirs).
 pub fn assembleRootfs(alloc: std.mem.Allocator, layer_digests: []const []const u8) LayerError![]const []const u8 {
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    var layer_paths: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
-        for (paths.items) |p| alloc.free(p);
-        paths.deinit(alloc);
+        for (layer_paths.items) |p| alloc.free(p);
+        layer_paths.deinit(alloc);
     }
 
     for (layer_digests) |digest| {
         const path = extractLayer(alloc, digest) catch return LayerError.AssemblyFailed;
-        paths.append(alloc, path) catch {
+        layer_paths.append(alloc, path) catch {
             alloc.free(path);
             return LayerError.AssemblyFailed;
         };
     }
 
-    return paths.toOwnedSlice(alloc) catch return LayerError.AssemblyFailed;
+    return layer_paths.toOwnedSlice(alloc) catch return LayerError.AssemblyFailed;
 }
 
 /// get the filesystem path for an extracted layer
@@ -155,7 +155,7 @@ test "extract layer — missing blob returns error" {
 
 test "assemble rootfs — empty layer list" {
     const alloc = std.testing.allocator;
-    const paths = try assembleRootfs(alloc, &.{});
-    defer alloc.free(paths);
-    try std.testing.expectEqual(@as(usize, 0), paths.len);
+    const layer_paths = try assembleRootfs(alloc, &.{});
+    defer alloc.free(layer_paths);
+    try std.testing.expectEqual(@as(usize, 0), layer_paths.len);
 }

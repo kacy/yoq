@@ -49,10 +49,14 @@ pub fn defaultDbPath(buf: *[512]u8) SchemaError![:0]const u8 {
     // ensure the data directory exists
     paths.ensureDataDir("") catch return SchemaError.HomeDirNotFound;
 
-    const home = std.posix.getenv("HOME") orelse return SchemaError.HomeDirNotFound;
-    const path = std.fmt.bufPrintZ(buf, "{s}/.local/share/yoq/yoq.db", .{home}) catch
-        return SchemaError.PathTooLong;
-    return path;
+    const path = paths.dataPath(buf, "yoq.db") catch |err| return switch (err) {
+        error.HomeDirNotFound => SchemaError.HomeDirNotFound,
+        error.PathTooLong => SchemaError.PathTooLong,
+    };
+    // null-terminate for sqlite
+    if (path.len >= buf.len) return SchemaError.PathTooLong;
+    buf[path.len] = 0;
+    return buf[0..path.len :0];
 }
 
 // -- tests --

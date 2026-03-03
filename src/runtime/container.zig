@@ -340,7 +340,7 @@ fn setHostname(name: []const u8) void {
 }
 
 /// base directory for per-container overlay storage
-const containers_subdir = ".local/share/yoq/containers";
+const containers_subdir = "containers";
 
 /// paths to the overlay directories for a container
 pub const OverlayDirs = struct {
