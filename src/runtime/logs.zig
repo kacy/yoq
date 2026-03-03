@@ -88,6 +88,10 @@ pub fn deleteLogFile(container_id: []const u8) void {
 
 /// write a single log line with timestamp and stream label.
 /// format: "2026-03-01T23:15:42Z stdout | line content\n"
+///
+/// builds the entire log line in a single buffer and writes it with one
+/// writeAll call. single writes under PIPE_BUF (4096) are atomic on Linux,
+/// preventing interleaved output when stdout/stderr threads write concurrently.
 pub fn writeLogLine(log_file: std.fs.File, stream: []const u8, line: []const u8) void {
     const ts = std.time.timestamp();
     const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
@@ -95,8 +99,11 @@ pub fn writeLogLine(log_file: std.fs.File, stream: []const u8, line: []const u8)
     const year_day = epoch_seconds.getEpochDay().calculateYearDay();
     const month_day = year_day.calculateMonthDay();
 
-    var buf: [4096]u8 = undefined;
-    const header = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z {s} | ", .{
+    var buf: [8192]u8 = undefined;
+    var pos: usize = 0;
+
+    // format header directly into buf
+    const header = std.fmt.bufPrint(buf[pos..], "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z {s} | ", .{
         year_day.year,
         @as(u32, @intFromEnum(month_day.month)),
         @as(u32, month_day.day_index) + 1,
@@ -105,13 +112,21 @@ pub fn writeLogLine(log_file: std.fs.File, stream: []const u8, line: []const u8)
         day_seconds.getSecondsIntoMinute(),
         stream,
     }) catch return;
+    pos += header.len;
 
-    log_file.writeAll(header) catch return;
-    log_file.writeAll(line) catch return;
-    // ensure the line ends with a newline
-    if (line.len == 0 or line[line.len - 1] != '\n') {
-        log_file.writeAll("\n") catch return;
+    // append line content
+    const copy_len = @min(line.len, buf.len - pos - 1); // reserve 1 for newline
+    @memcpy(buf[pos..][0..copy_len], line[0..copy_len]);
+    pos += copy_len;
+
+    // ensure trailing newline
+    if (copy_len == 0 or line[copy_len - 1] != '\n') {
+        buf[pos] = '\n';
+        pos += 1;
     }
+
+    // single atomic write
+    log_file.writeAll(buf[0..pos]) catch return;
 }
 
 /// blocking read loop that captures output from a pipe fd and writes
