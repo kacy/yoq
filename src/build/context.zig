@@ -328,3 +328,67 @@ test "hash missing file returns error" {
     const result = hashFiles(alloc, dir_path, "nonexistent.txt");
     try std.testing.expectError(ContextError.NotFound, result);
 }
+
+test "hash includes filename in digest" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // two files with identical content but different names
+    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "same content" });
+    try tmp.dir.writeFile(.{ .sub_path = "b.txt", .data = "same content" });
+
+    var path_buf: [4096]u8 = undefined;
+    const dir_path = try tmp.dir.realpath(".", &path_buf);
+
+    const d1 = try hashFiles(alloc, dir_path, "a.txt");
+    const d2 = try hashFiles(alloc, dir_path, "b.txt");
+
+    // digests should differ because the filename is part of the hash
+    try std.testing.expect(!d1.eql(d2));
+}
+
+test "copy file to directory destination" {
+    var src = std.testing.tmpDir(.{});
+    defer src.cleanup();
+    try src.dir.writeFile(.{ .sub_path = "app.js", .data = "console.log('hi');" });
+
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+    try dst.dir.makeDir("app");
+
+    var src_buf: [4096]u8 = undefined;
+    var dst_buf: [4096]u8 = undefined;
+    const src_path = try src.dir.realpath(".", &src_buf);
+    const dst_path = try dst.dir.realpath(".", &dst_buf);
+
+    // trailing slash means "copy into this directory"
+    try copyFiles(src_path, "app.js", dst_path, "/app/");
+
+    // file should end up as app/app.js (basename preserved)
+    const content = try dst.dir.readFileAlloc(std.testing.allocator, "app/app.js", 1024);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("console.log('hi');", content);
+}
+
+test "copy to nested destination creates parents" {
+    var src = std.testing.tmpDir(.{});
+    defer src.cleanup();
+    try src.dir.writeFile(.{ .sub_path = "config.toml", .data = "[server]\nport = 8080" });
+
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+
+    var src_buf: [4096]u8 = undefined;
+    var dst_buf: [4096]u8 = undefined;
+    const src_path = try src.dir.realpath(".", &src_buf);
+    const dst_path = try dst.dir.realpath(".", &dst_buf);
+
+    // deep nested path — parent dirs must be created
+    try copyFiles(src_path, "config.toml", dst_path, "/deep/nested/config.toml");
+
+    const content = try dst.dir.readFileAlloc(std.testing.allocator, "deep/nested/config.toml", 1024);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("[server]\nport = 8080", content);
+}

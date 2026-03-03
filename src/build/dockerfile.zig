@@ -374,3 +374,38 @@ test "windows line endings" {
     try std.testing.expectEqualStrings("alpine:latest", result.instructions[0].args);
     try std.testing.expectEqualStrings("echo hi", result.instructions[1].args);
 }
+
+test "trailing continuation at eof" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nRUN echo hello \\");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.from, result.instructions[0].kind);
+    try std.testing.expectEqual(InstructionKind.run, result.instructions[1].kind);
+    // the backslash is stripped and a trailing space is appended during continuation join
+    try std.testing.expect(std.mem.indexOf(u8, result.instructions[1].args, "echo hello") != null);
+}
+
+test "from with as alias" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM node:20 AS builder\nRUN echo build");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.from, result.instructions[0].kind);
+    // parser preserves the full string including AS — engine handles stripping
+    try std.testing.expectEqualStrings("node:20 AS builder", result.instructions[0].args);
+    try std.testing.expectEqual(InstructionKind.run, result.instructions[1].kind);
+    try std.testing.expectEqualStrings("echo build", result.instructions[1].args);
+}
+
+test "extra whitespace between keyword and args" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM    ubuntu:24.04\nRUN\t\techo hello");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqualStrings("ubuntu:24.04", result.instructions[0].args);
+    try std.testing.expectEqualStrings("echo hello", result.instructions[1].args);
+}

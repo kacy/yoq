@@ -1012,3 +1012,117 @@ test "json escaping" {
     try writeJsonEscaped(buf.writer(), "hello \"world\"\nfoo\\bar");
     try std.testing.expectEqualStrings("hello \\\"world\\\"\\nfoo\\\\bar", buf.items);
 }
+
+test "cache key differs with different parent digest" {
+    const alloc = std.testing.allocator;
+
+    var state1 = BuildState.init(alloc);
+    defer state1.deinit();
+    state1.parent_digest = try alloc.dupe(u8, "sha256:aaaa");
+
+    var state2 = BuildState.init(alloc);
+    defer state2.deinit();
+    state2.parent_digest = try alloc.dupe(u8, "sha256:bbbb");
+
+    const key1 = try computeCacheKey(alloc, "RUN", "echo hello", &state1);
+    defer alloc.free(key1);
+    const key2 = try computeCacheKey(alloc, "RUN", "echo hello", &state2);
+    defer alloc.free(key2);
+
+    try std.testing.expect(!std.mem.eql(u8, key1, key2));
+}
+
+test "cache key differs between instruction types" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    const key1 = try computeCacheKey(alloc, "RUN", "echo hello", &state);
+    defer alloc.free(key1);
+    const key2 = try computeCacheKey(alloc, "COPY", "echo hello", &state);
+    defer alloc.free(key2);
+
+    try std.testing.expect(!std.mem.eql(u8, key1, key2));
+}
+
+test "config json with entrypoint and user" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    state.entrypoint = try alloc.dupe(u8, "node");
+    state.user = try alloc.dupe(u8, "nobody");
+
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+
+    // shell form entrypoint gets wrapped in a JSON array (single element)
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Entrypoint\":[\"node\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"User\":\"nobody\"") != null);
+}
+
+test "config json with json form cmd and entrypoint" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    state.cmd = try alloc.dupe(u8, "[\"node\", \"server.js\"]");
+    state.entrypoint = try alloc.dupe(u8, "[\"docker-entrypoint.sh\"]");
+
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+
+    // JSON form should be passed through verbatim (not wrapped in /bin/sh -c)
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Cmd\":[\"node\", \"server.js\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Entrypoint\":[\"docker-entrypoint.sh\"]") != null);
+    // should NOT contain /bin/sh
+    try std.testing.expect(std.mem.indexOf(u8, json, "/bin/sh") == null);
+}
+
+test "manifest json with multiple layers" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    // add 3 layers with different digests and sizes
+    const digests = [_][]const u8{ "sha256:aaa111", "sha256:bbb222", "sha256:ccc333" };
+    const sizes = [_]u64{ 1024, 2048, 4096 };
+    const diff_ids = [_][]const u8{ "sha256:ddd111", "sha256:ddd222", "sha256:ddd333" };
+
+    for (digests, sizes, diff_ids) |d, s, di| {
+        const ld = try alloc.dupe(u8, d);
+        try state.layer_digests.append(alloc, ld);
+        try state.layer_sizes.append(alloc, s);
+        const did = try alloc.dupe(u8, di);
+        try state.diff_ids.append(alloc, did);
+    }
+
+    const config_digest = blob_store.computeDigest("test config");
+    const json = try buildManifestJson(alloc, &state, config_digest, 200);
+    defer alloc.free(json);
+
+    // all 3 layer digests should appear
+    for (digests) |d| {
+        try std.testing.expect(std.mem.indexOf(u8, json, d) != null);
+    }
+
+    // all 3 sizes should appear
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"size\":1024") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"size\":2048") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"size\":4096") != null);
+}
+
+test "parse copy args — single word" {
+    const result = parseCopyArgs("myfile.txt");
+    try std.testing.expectEqualStrings("myfile.txt", result.src);
+    try std.testing.expectEqualStrings("myfile.txt", result.dest);
+}
+
+test "first instruction not from returns error" {
+    const alloc = std.testing.allocator;
+    const instructions = [_]dockerfile.Instruction{
+        .{ .kind = .run, .args = "echo hello", .line_number = 1 },
+    };
+    const result = build(alloc, &instructions, ".", null);
+    try std.testing.expectError(BuildError.NoFromInstruction, result);
+}

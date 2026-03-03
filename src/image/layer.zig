@@ -429,3 +429,33 @@ test "create layer from dir — deterministic digest" {
     blob_store.deleteBlob(result1.compressed_digest) catch {};
     blob_store.deleteBlob(result2.compressed_digest) catch {};
 }
+
+test "different content produces different layer digests" {
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+    const alloc = std.testing.allocator;
+
+    var tmp1 = std.testing.tmpDir(.{});
+    defer tmp1.cleanup();
+    try tmp1.dir.writeFile(.{ .sub_path = "file.txt", .data = "content alpha" });
+
+    var path_buf1: [max_path]u8 = undefined;
+    const dir1 = try tmp1.dir.realpath(".", &path_buf1);
+
+    var tmp2 = std.testing.tmpDir(.{});
+    defer tmp2.cleanup();
+    try tmp2.dir.writeFile(.{ .sub_path = "file.txt", .data = "content beta" });
+
+    var path_buf2: [max_path]u8 = undefined;
+    const dir2 = try tmp2.dir.realpath(".", &path_buf2);
+
+    const result1 = (try createLayerFromDir(alloc, dir1)).?;
+    const result2 = (try createLayerFromDir(alloc, dir2)).?;
+
+    // different content should produce different uncompressed digests
+    try std.testing.expect(!result1.uncompressed_digest.eql(result2.uncompressed_digest));
+
+    // clean up
+    blob_store.deleteBlob(result1.compressed_digest) catch {};
+    blob_store.deleteBlob(result2.compressed_digest) catch {};
+}
