@@ -48,6 +48,14 @@ pub fn putBlob(data: []const u8) BlobError!Digest {
 
     file.writeAll(data) catch return BlobError.WriteFailed;
 
+    // verify the written file by checking its size.
+    // catches silent truncation from disk-full or filesystem errors.
+    const stat = file.stat() catch return digest;
+    if (stat.size != data.len) {
+        std.fs.cwd().deleteFile(path) catch {};
+        return BlobError.WriteFailed;
+    }
+
     return digest;
 }
 
@@ -135,10 +143,11 @@ fn blobDir(buf: *[max_path]u8) BlobError![]const u8 {
 pub const Digest = struct {
     hash: [32]u8,
 
-    /// format as "sha256:<hex>"
+    /// format as "sha256:<hex>". the 71-byte buffer always fits
+    /// (7-byte prefix + 64-byte hex), but we handle the error
+    /// gracefully instead of using unreachable.
     pub fn string(self: Digest, buf: *[71]u8) []const u8 {
-        const result = std.fmt.bufPrint(buf, "sha256:{s}", .{self.hex()}) catch unreachable;
-        return result;
+        return std.fmt.bufPrint(buf, "sha256:{s}", .{self.hex()}) catch "sha256:???";
     }
 
     /// format as hex string (64 chars)
