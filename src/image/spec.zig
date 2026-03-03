@@ -185,6 +185,37 @@ pub fn parseImageRef(ref: []const u8) ImageRef {
     };
 }
 
+/// validate an image reference's components for safe URL construction.
+/// rejects characters that could cause URL injection or path traversal.
+/// follows OCI distribution spec character restrictions:
+///   host: [a-zA-Z0-9.-:]
+///   repository: [a-zA-Z0-9._/-]
+///   reference (tag/digest): [a-zA-Z0-9._:-]
+pub fn validateImageRef(ref: ImageRef) bool {
+    for (ref.host) |c| {
+        if (!isHostChar(c)) return false;
+    }
+    for (ref.repository) |c| {
+        if (!isRepoChar(c)) return false;
+    }
+    for (ref.reference) |c| {
+        if (!isRefChar(c)) return false;
+    }
+    return ref.host.len > 0 and ref.repository.len > 0 and ref.reference.len > 0;
+}
+
+fn isHostChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == ':';
+}
+
+fn isRepoChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '/' or c == '-';
+}
+
+fn isRefChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == ':' or c == '-';
+}
+
 // -- tests --
 
 test "parse image ref — simple" {
@@ -323,6 +354,34 @@ test "parse image index" {
     try std.testing.expectEqual(@as(usize, 2), index.manifests.len);
     try std.testing.expectEqualStrings("amd64", index.manifests[0].platform.?.architecture);
     try std.testing.expectEqualStrings("arm64", index.manifests[1].platform.?.architecture);
+}
+
+test "validate image ref — normal refs pass" {
+    try std.testing.expect(validateImageRef(parseImageRef("nginx:latest")));
+    try std.testing.expect(validateImageRef(parseImageRef("ghcr.io/owner/repo:v1.2")));
+    try std.testing.expect(validateImageRef(parseImageRef("localhost:5000/myimage:dev")));
+    try std.testing.expect(validateImageRef(parseImageRef("ubuntu")));
+}
+
+test "validate image ref — rejects injection characters" {
+    // path traversal
+    try std.testing.expect(!validateImageRef(.{
+        .host = "registry-1.docker.io",
+        .repository = "../../admin",
+        .reference = "latest",
+    }));
+    // newline injection
+    try std.testing.expect(!validateImageRef(.{
+        .host = "evil.com\r\nHost: real.com",
+        .repository = "nginx",
+        .reference = "latest",
+    }));
+    // space in host
+    try std.testing.expect(!validateImageRef(.{
+        .host = "evil .com",
+        .repository = "nginx",
+        .reference = "latest",
+    }));
 }
 
 test "media type detection" {

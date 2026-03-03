@@ -63,6 +63,10 @@ pub const PullResult = struct {
 /// uses errdefer chains so each allocation is automatically cleaned up
 /// on any subsequent failure — no manual cleanup blocks needed.
 pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!PullResult {
+    // validate the image reference before constructing any URLs.
+    // prevents SSRF via crafted host/repository/reference values.
+    if (!spec.validateImageRef(image_ref)) return RegistryError.ParseError;
+
     var client: std.http.Client = .{ .allocator = alloc };
     defer client.deinit();
 
