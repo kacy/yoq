@@ -305,8 +305,9 @@ pub fn startResolver() void {
 
     if (resolver_running) return;
 
-    // create UDP socket
-    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch |e| {
+    // create UDP socket with CLOEXEC so it isn't inherited by child
+    // processes (e.g. iptables spawned during container setup)
+    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0) catch |e| {
         log.warn("dns: failed to create socket: {}", .{e});
         return;
     };
