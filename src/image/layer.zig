@@ -283,8 +283,28 @@ fn layerDir(buf: *[max_path]u8) LayerError![]const u8 {
     return paths.dataPath(buf, layer_subdir) catch return LayerError.PathTooLong;
 }
 
+/// check whether a tar entry path is safe to extract.
+/// rejects absolute paths and paths containing ".." components,
+/// which could write outside the extraction directory.
+fn isSafeTarPath(name: []const u8) bool {
+    if (name.len == 0) return true; // empty name is fine (root directory)
+    if (name[0] == '/') return false; // absolute path
+
+    var it = std.mem.splitScalar(u8, name, '/');
+    while (it.next()) |component| {
+        if (std.mem.eql(u8, component, "..")) return false;
+    }
+
+    return true;
+}
+
 /// extract a gzipped tarball to a directory.
 /// this is the core extraction logic: gzip decompress → tar extract.
+///
+/// uses manual tar iteration instead of pipeToFileSystem so we can
+/// validate each entry's path before writing. entries with ".." path
+/// components or absolute paths are skipped — a malicious layer tarball
+/// cannot write outside the extraction directory.
 fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     const file = try std.fs.cwd().openFile(gz_path, .{});
     defer file.close();
@@ -304,16 +324,85 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     var dest_dir = try std.fs.cwd().openDir(dest_path, .{});
     defer dest_dir.close();
 
-    // extract tar contents to the directory
-    try std.tar.pipeToFileSystem(dest_dir, &decompress.reader, .{
-        .mode_mode = .executable_bit_only,
-        // OCI layers sometimes have unsupported file types (block devices, etc.)
-        // use diagnostics to skip them instead of failing
-        .diagnostics = null,
+    // iterate tar entries manually so we can validate paths
+    var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(&decompress.reader, .{
+        .file_name_buffer = &file_name_buffer,
+        .link_name_buffer = &link_name_buffer,
     });
+
+    while (try it.next()) |entry| {
+        if (!isSafeTarPath(entry.name)) continue;
+
+        switch (entry.kind) {
+            .directory => {
+                if (entry.name.len > 0) {
+                    dest_dir.makePath(entry.name) catch {};
+                }
+            },
+            .file => {
+                const mode: std.fs.File.Mode = if (entry.mode & 0o100 != 0)
+                    0o755
+                else
+                    0o644;
+                const fs_file = createDirAndFile(dest_dir, entry.name, mode) catch continue;
+                defer fs_file.close();
+                var write_buf: [4096]u8 = undefined;
+                var file_writer = fs_file.writer(&write_buf);
+                it.streamRemaining(entry, &file_writer.interface) catch continue;
+                file_writer.interface.flush() catch {};
+            },
+            .sym_link => {
+                createDirAndSymlink(dest_dir, entry.link_name, entry.name) catch {};
+            },
+        }
+    }
+}
+
+/// create parent directories as needed and open a file for writing.
+fn createDirAndFile(dir: std.fs.Dir, name: []const u8, mode: std.fs.File.Mode) !std.fs.File {
+    return dir.createFile(name, .{ .exclusive = true, .mode = mode }) catch |err| {
+        if (err == error.FileNotFound) {
+            if (std.fs.path.dirname(name)) |dir_name| {
+                try dir.makePath(dir_name);
+                return try dir.createFile(name, .{ .exclusive = true, .mode = mode });
+            }
+        }
+        return err;
+    };
+}
+
+/// create parent directories as needed and create a symlink.
+fn createDirAndSymlink(dir: std.fs.Dir, link_name: []const u8, file_name: []const u8) !void {
+    dir.symLink(link_name, file_name, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            if (std.fs.path.dirname(file_name)) |dir_name| {
+                try dir.makePath(dir_name);
+                return try dir.symLink(link_name, file_name, .{});
+            }
+        }
+        return err;
+    };
 }
 
 // -- tests --
+
+test "tar path validation — safe paths" {
+    try std.testing.expect(isSafeTarPath("usr/bin/hello"));
+    try std.testing.expect(isSafeTarPath("etc/config.toml"));
+    try std.testing.expect(isSafeTarPath("a/b/c"));
+    try std.testing.expect(isSafeTarPath("")); // root directory
+    try std.testing.expect(isSafeTarPath("single_file"));
+}
+
+test "tar path validation — unsafe paths rejected" {
+    try std.testing.expect(!isSafeTarPath("../../etc/shadow"));
+    try std.testing.expect(!isSafeTarPath("usr/../../../etc/passwd"));
+    try std.testing.expect(!isSafeTarPath("/etc/passwd"));
+    try std.testing.expect(!isSafeTarPath("foo/../../bar"));
+    try std.testing.expect(!isSafeTarPath(".."));
+}
 
 test "layer path format" {
     const home = std.posix.getenv("HOME") orelse return;
