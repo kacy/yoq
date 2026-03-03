@@ -13,6 +13,8 @@ const dockerfile = @import("build/dockerfile.zig");
 const build_engine = @import("build/engine.zig");
 const manifest_loader = @import("manifest/loader.zig");
 const orchestrator = @import("manifest/orchestrator.zig");
+const watcher_mod = @import("dev/watcher.zig");
+const manifest_spec = @import("manifest/spec.zig");
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -665,6 +667,7 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
 fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
+    var dev_mode = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f")) {
@@ -672,6 +675,8 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 writeErr("-f requires a manifest path\n", .{});
                 std.process.exit(1);
             };
+        } else if (std.mem.eql(u8, arg, "--dev")) {
+            dev_mode = true;
         }
     }
 
@@ -690,7 +695,11 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     };
     const app_name = std.fs.path.basename(cwd);
 
-    writeErr("starting {s} ({d} services)...\n", .{ app_name, manifest.services.len });
+    if (dev_mode) {
+        writeErr("starting {s} in dev mode ({d} services)...\n", .{ app_name, manifest.services.len });
+    } else {
+        writeErr("starting {s} ({d} services)...\n", .{ app_name, manifest.services.len });
+    }
 
     // install signal handlers for graceful shutdown
     orchestrator.installSignalHandlers();
@@ -698,18 +707,54 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // create and run orchestrator
     var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name);
     defer orch.deinit();
+    orch.dev_mode = dev_mode;
 
     orch.startAll() catch {
         writeErr("failed to start services\n", .{});
         std.process.exit(1);
     };
 
-    writeErr("all services running. press ctrl-c to stop.\n", .{});
+    // in dev mode, set up file watcher for bind-mounted volumes
+    var w: ?watcher_mod.Watcher = null;
+    var watcher_thread: ?std.Thread = null;
+
+    if (dev_mode) {
+        w = watcher_mod.Watcher.init() catch null;
+
+        if (w != null) {
+            // add watches for each service's bind-mounted volumes
+            for (manifest.services, 0..) |svc, i| {
+                for (svc.volumes) |vol| {
+                    if (vol.kind != .bind) continue;
+
+                    // resolve relative source path to absolute
+                    var resolve_buf: [4096]u8 = undefined;
+                    const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch continue;
+
+                    w.?.addRecursive(abs_source, i) catch {};
+                }
+            }
+
+            // spawn watcher thread
+            watcher_thread = std.Thread.spawn(.{}, orchestrator.watcherThread, .{
+                &orch, &w.?,
+            }) catch null;
+        }
+
+        writeErr("all services running. watching for changes...\n", .{});
+    } else {
+        writeErr("all services running. press ctrl-c to stop.\n", .{});
+    }
 
     // block until shutdown signal or all services exit
     orch.waitForShutdown();
 
     writeErr("\nshutting down...\n", .{});
+
+    // clean up watcher before stopping services (closes fd, unblocks watcher thread)
+    if (w) |*watcher| watcher.deinit();
+    if (watcher_thread) |t| t.join();
+
     orch.stopAll();
     writeErr("stopped\n", .{});
 }
@@ -811,7 +856,7 @@ fn printUsage() void {
         \\
         \\commands:
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
-        \\  up [-f manifest.toml]            start all services from manifest
+        \\  up [-f manifest.toml] [--dev]     start services (--dev: watch + restart)
         \\  down [-f manifest.toml]          stop all services from manifest
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
