@@ -28,9 +28,13 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    exit_code INTEGER,
         \\    ip_address TEXT,
         \\    veth_host TEXT,
+        \\    app_name TEXT,
         \\    created_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    // migration for existing databases — add app_name column if missing
+    db.exec("ALTER TABLE containers ADD COLUMN app_name TEXT;", .{}, .{}) catch {};
 
     db.exec(
         \\CREATE TABLE IF NOT EXISTS images (

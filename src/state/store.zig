@@ -29,6 +29,7 @@ pub const ContainerRecord = struct {
     exit_code: ?u8,
     ip_address: ?[]const u8 = null,
     veth_host: ?[]const u8 = null,
+    app_name: ?[]const u8 = null,
     created_at: i64,
 
     /// free all heap-allocated string fields
@@ -38,8 +39,9 @@ pub const ContainerRecord = struct {
         alloc.free(self.command);
         alloc.free(self.hostname);
         alloc.free(self.status);
-        if (self.ip_address) |ip| alloc.free(ip);
+        if (self.ip_address) |ip_val| alloc.free(ip_val);
         if (self.veth_host) |veth| alloc.free(veth);
+        if (self.app_name) |app| alloc.free(app);
     }
 };
 
@@ -56,6 +58,7 @@ const ContainerRow = struct {
     exit_code: ?i64,
     ip_address: ?sqlite.Text,
     veth_host: ?sqlite.Text,
+    app_name: ?sqlite.Text,
     created_at: i64,
 };
 
@@ -76,8 +79,9 @@ fn rowToRecord(row: ContainerRow) ContainerRecord {
         .status = row.status.data,
         .pid = if (row.pid) |p| @intCast(p) else null,
         .exit_code = if (row.exit_code) |e| @intCast(e) else null,
-        .ip_address = if (row.ip_address) |ip| ip.data else null,
+        .ip_address = if (row.ip_address) |ip_val| ip_val.data else null,
         .veth_host = if (row.veth_host) |veth| veth.data else null,
+        .app_name = if (row.app_name) |app| app.data else null,
         .created_at = row.created_at,
     };
 }
@@ -107,8 +111,8 @@ pub fn save(record: ContainerRecord) StoreError!void {
     const exit_code: ?i64 = if (record.exit_code) |e| @intCast(e) else null;
 
     db.exec(
-        "INSERT OR REPLACE INTO containers (id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, created_at)" ++
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT OR REPLACE INTO containers (id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -120,6 +124,7 @@ pub fn save(record: ContainerRecord) StoreError!void {
             exit_code,
             record.ip_address,
             record.veth_host,
+            record.app_name,
             record.created_at,
         },
     ) catch return StoreError.WriteFailed;
@@ -134,7 +139,7 @@ pub fn load(alloc: std.mem.Allocator, id: []const u8) StoreError!ContainerRecord
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
-        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, created_at" ++
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
             " FROM containers WHERE id = ?;",
         .{},
         .{id},
@@ -197,6 +202,46 @@ pub fn updateNetwork(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]cons
         .{},
         .{ ip_address, veth_host, id },
     ) catch return StoreError.WriteFailed;
+}
+
+// -- app queries --
+
+/// list container IDs belonging to an app, newest first.
+/// caller owns the returned list and strings.
+pub fn listAppContainerIds(alloc: std.mem.Allocator, app_name: []const u8) StoreError!std.ArrayList([]const u8) {
+    var db = try openDb();
+    defer db.deinit();
+
+    var ids: std.ArrayList([]const u8) = .empty;
+
+    var stmt = db.prepare("SELECT id FROM containers WHERE app_name = ? ORDER BY created_at DESC;") catch
+        return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(IdRow, .{app_name}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        ids.append(alloc, row.id.data) catch return StoreError.ReadFailed;
+    }
+
+    return ids;
+}
+
+/// find a container by app_name + hostname (service name).
+/// returns null if not found. caller owns the returned record.
+pub fn findAppContainer(alloc: std.mem.Allocator, app_name: []const u8, hostname: []const u8) StoreError!?ContainerRecord {
+    var db = try openDb();
+    defer db.deinit();
+
+    const row = (db.oneAlloc(
+        ContainerRow,
+        alloc,
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
+            " FROM containers WHERE app_name = ? AND hostname = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{ app_name, hostname },
+    ) catch return StoreError.ReadFailed) orelse return null;
+
+    return rowToRecord(row);
 }
 
 // -- image records --
@@ -497,26 +542,23 @@ test "save and load round-trip via sqlite" {
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
-        "SELECT id, rootfs, command, hostname, status, pid, exit_code, created_at FROM containers WHERE id = ?;",
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
+            " FROM containers WHERE id = ?;",
         .{},
         .{"abc123"},
     ) catch unreachable).?;
-    defer {
-        alloc.free(row.id.data);
-        alloc.free(row.rootfs.data);
-        alloc.free(row.command.data);
-        alloc.free(row.hostname.data);
-        alloc.free(row.status.data);
-    }
+    const record = rowToRecord(row);
+    defer record.deinit(alloc);
 
-    try std.testing.expectEqualStrings("abc123", row.id.data);
-    try std.testing.expectEqualStrings("/tmp/rootfs", row.rootfs.data);
-    try std.testing.expectEqualStrings("/bin/sh", row.command.data);
-    try std.testing.expectEqualStrings("myhost", row.hostname.data);
-    try std.testing.expectEqualStrings("running", row.status.data);
-    try std.testing.expectEqual(@as(?i64, 42), row.pid);
-    try std.testing.expect(row.exit_code == null);
-    try std.testing.expectEqual(@as(i64, 1234567890), row.created_at);
+    try std.testing.expectEqualStrings("abc123", record.id);
+    try std.testing.expectEqualStrings("/tmp/rootfs", record.rootfs);
+    try std.testing.expectEqualStrings("/bin/sh", record.command);
+    try std.testing.expectEqualStrings("myhost", record.hostname);
+    try std.testing.expectEqualStrings("running", record.status);
+    try std.testing.expectEqual(@as(?i32, 42), record.pid);
+    try std.testing.expect(record.exit_code == null);
+    try std.testing.expect(record.app_name == null);
+    try std.testing.expectEqual(@as(i64, 1234567890), record.created_at);
 }
 
 test "list ids returns newest first" {
@@ -778,4 +820,148 @@ test "service name lookup returns empty for unknown" {
     ) catch unreachable;
 
     try std.testing.expect(row == null);
+}
+
+test "app_name stored and retrieved" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, hostname, status, app_name, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "app1", "/r", "/sh", "web", "running", "myapp", @as(i64, 100) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        ContainerRow,
+        alloc,
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
+            " FROM containers WHERE id = ?;",
+        .{},
+        .{"app1"},
+    ) catch unreachable).?;
+    const record = rowToRecord(row);
+    defer record.deinit(alloc);
+
+    try std.testing.expectEqualStrings("myapp", record.app_name.?);
+    try std.testing.expectEqualStrings("web", record.hostname);
+}
+
+test "app_name null by default" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, created_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "noapp", "/r", "/sh", @as(i64, 100) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        ContainerRow,
+        alloc,
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
+            " FROM containers WHERE id = ?;",
+        .{},
+        .{"noapp"},
+    ) catch unreachable).?;
+    const record = rowToRecord(row);
+    defer record.deinit(alloc);
+
+    try std.testing.expect(record.app_name == null);
+}
+
+test "list app container ids" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    // insert containers for two different apps
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, hostname, app_name, created_at) VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "a1", "/r", "/sh", "web", "myapp", @as(i64, 100) },
+    ) catch unreachable;
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, hostname, app_name, created_at) VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "a2", "/r", "/sh", "db", "myapp", @as(i64, 200) },
+    ) catch unreachable;
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, hostname, app_name, created_at) VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "b1", "/r", "/sh", "api", "other", @as(i64, 150) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+
+    // query for myapp — should get a2 first (newest), then a1
+    var stmt = db.prepare("SELECT id FROM containers WHERE app_name = ? ORDER BY created_at DESC;") catch unreachable;
+    defer stmt.deinit();
+
+    var ids: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (ids.items) |id| alloc.free(id);
+        ids.deinit(alloc);
+    }
+
+    var iter = stmt.iterator(IdRow, .{"myapp"}) catch unreachable;
+    while (iter.nextAlloc(alloc, .{}) catch unreachable) |row| {
+        ids.append(alloc, row.id.data) catch unreachable;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), ids.items.len);
+    try std.testing.expectEqualStrings("a2", ids.items[0]);
+    try std.testing.expectEqualStrings("a1", ids.items[1]);
+}
+
+test "find app container by hostname" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, hostname, status, app_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "f1", "/r", "/sh", "web", "running", "myapp", @as(i64, 100) },
+    ) catch unreachable;
+    db.exec(
+        "INSERT INTO containers (id, rootfs, command, hostname, status, app_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "f2", "/r", "/sh", "db", "running", "myapp", @as(i64, 200) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+
+    // find the db container
+    const row = (db.oneAlloc(
+        ContainerRow,
+        alloc,
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
+            " FROM containers WHERE app_name = ? AND hostname = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{ "myapp", "db" },
+    ) catch unreachable).?;
+    const record = rowToRecord(row);
+    defer record.deinit(alloc);
+
+    try std.testing.expectEqualStrings("f2", record.id);
+    try std.testing.expectEqualStrings("db", record.hostname);
+    try std.testing.expectEqualStrings("myapp", record.app_name.?);
+
+    // look for nonexistent service
+    const missing = db.oneAlloc(
+        ContainerRow,
+        alloc,
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
+            " FROM containers WHERE app_name = ? AND hostname = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{ "myapp", "cache" },
+    ) catch unreachable;
+    try std.testing.expect(missing == null);
 }
