@@ -200,13 +200,15 @@ pub fn spawn(
     posix.close(stdout_pipe[1]);
     posix.close(stderr_pipe[1]);
 
+    const child_pid: posix.pid_t = @intCast(pid);
+
     // set up user namespace mappings if requested
     if (ns_flags.user) {
         const mapping = user_mapping orelse UserMapping{
             .outer_uid = std.os.linux.getuid(),
             .outer_gid = std.os.linux.getgid(),
         };
-        writeUserMapping(@intCast(pid), mapping) catch {
+        writeUserMapping(child_pid, mapping) catch {
             posix.close(pipe_write);
             return NamespaceError.WriteFailed;
         };
@@ -220,7 +222,7 @@ pub fn spawn(
     posix.munmap(@alignCast(stack_mem));
 
     return SpawnResult{
-        .pid = @intCast(pid),
+        .pid = child_pid,
         .stdout_fd = stdout_pipe[0],
         .stderr_fd = stderr_pipe[0],
         .ready_fd = pipe_write,
