@@ -132,13 +132,17 @@ pub fn captureStream(log_file: std.fs.File, pipe_fd: posix.fd_t, stream_label: [
         while (i < n) : (i += 1) {
             if (buf[i] == '\n') {
                 if (leftover_len > 0) {
-                    // combine leftover + current chunk
-                    writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
-                    leftover_len = 0;
-                    // also write the rest of this line
-                    if (start < i) {
-                        writeLogLine(log_file, stream_label, buf[start..i]);
+                    // combine leftover + current chunk into one line
+                    const chunk_len = i - start;
+                    if (chunk_len > 0 and leftover_len + chunk_len <= leftover.len) {
+                        @memcpy(leftover[leftover_len .. leftover_len + chunk_len], buf[start..i]);
+                        writeLogLine(log_file, stream_label, leftover[0 .. leftover_len + chunk_len]);
+                    } else {
+                        // buffer full or no new data — write what we have
+                        writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
+                        if (chunk_len > 0) writeLogLine(log_file, stream_label, buf[start..i]);
                     }
+                    leftover_len = 0;
                 } else {
                     writeLogLine(log_file, stream_label, buf[start..i]);
                 }
