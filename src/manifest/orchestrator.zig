@@ -26,6 +26,8 @@ const process = @import("../runtime/process.zig");
 const store = @import("../state/store.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
+const watcher_mod = @import("../dev/watcher.zig");
+const logs = @import("../runtime/logs.zig");
 
 pub const OrchestratorError = error{
     PullFailed,
@@ -56,6 +58,8 @@ pub const Orchestrator = struct {
     manifest: *spec.Manifest,
     app_name: []const u8,
     states: []ServiceState,
+    dev_mode: bool = false,
+    restart_requested: []std.atomic.Value(bool),
 
     pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) Orchestrator {
         const states = alloc.alloc(ServiceState, manifest.services.len) catch &.{};
@@ -67,17 +71,26 @@ pub const Orchestrator = struct {
             };
         }
 
+        const restart_flags = alloc.alloc(std.atomic.Value(bool), manifest.services.len) catch &.{};
+        for (restart_flags) |*f| {
+            f.* = std.atomic.Value(bool).init(false);
+        }
+
         return .{
             .alloc = alloc,
             .manifest = manifest,
             .app_name = app_name,
             .states = states,
+            .restart_requested = restart_flags,
         };
     }
 
     pub fn deinit(self: *Orchestrator) void {
         if (self.states.len > 0) {
             self.alloc.free(self.states);
+        }
+        if (self.restart_requested.len > 0) {
+            self.alloc.free(self.restart_requested);
         }
     }
 
@@ -258,10 +271,10 @@ pub const Orchestrator = struct {
 };
 
 /// runs a single service in its own thread.
-/// blocks until the container exits.
+/// in normal mode: runs once, then exits.
+/// in dev mode: restarts the container whenever restart_requested is set.
 fn serviceThread(orch: *Orchestrator, idx: usize) void {
     const svc = orch.manifest.services[idx];
-    const id = orch.states[idx].container_id;
     const alloc = orch.alloc;
 
     // resolve image config for defaults
@@ -432,58 +445,132 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         }) catch {};
     }
 
-    // save container record with app_name
-    store.save(.{
-        .id = id[0..],
-        .rootfs = rootfs_str,
-        .command = effective_cmd,
-        .hostname = svc.name,
-        .status = "created",
-        .pid = null,
-        .exit_code = null,
-        .app_name = orch.app_name,
-        .created_at = std.time.timestamp(),
-    }) catch {
-        orch.states[idx].status = .failed;
-        return;
-    };
-
-    // build network config
+    // build network config (reused across restarts)
     const net_config: ?net_setup.NetworkConfig = if (port_maps.items.len > 0)
         .{ .port_maps = port_maps.items }
     else
         .{};
 
-    // create and start container
-    var c = container.Container{
-        .config = .{
-            .id = id[0..],
+    // main run loop — runs once in normal mode, loops in dev mode
+    while (true) {
+        // generate a fresh container id for each run
+        var id_buf: [12]u8 = undefined;
+        container.generateId(&id_buf);
+        const id = id_buf[0..];
+
+        // copy id into orchestrator state so stopAll can find it
+        @memcpy(&orch.states[idx].container_id, id);
+
+        // save container record with app_name
+        store.save(.{
+            .id = id,
             .rootfs = rootfs_str,
             .command = effective_cmd,
-            .args = full_args.items,
-            .env = merged_env.items,
-            .working_dir = working_dir,
-            .lower_dirs = layer_paths,
-            .network = net_config,
             .hostname = svc.name,
-            .mounts = bind_mounts.items,
-        },
-        .status = .created,
-        .pid = null,
-        .exit_code = null,
-        .created_at = std.time.timestamp(),
-    };
+            .status = "created",
+            .pid = null,
+            .exit_code = null,
+            .app_name = orch.app_name,
+            .created_at = std.time.timestamp(),
+        }) catch {
+            orch.states[idx].status = .failed;
+            return;
+        };
 
-    // mark as running once the container starts (Container.start sets status internally)
-    orch.states[idx].status = .running;
+        // create and start container
+        var c = container.Container{
+            .config = .{
+                .id = id,
+                .rootfs = rootfs_str,
+                .command = effective_cmd,
+                .args = full_args.items,
+                .env = merged_env.items,
+                .working_dir = working_dir,
+                .lower_dirs = layer_paths,
+                .network = net_config,
+                .hostname = svc.name,
+                .mounts = bind_mounts.items,
+                .dev_service_name = if (orch.dev_mode) svc.name else null,
+                .dev_color_idx = idx,
+            },
+            .status = .created,
+            .pid = null,
+            .exit_code = null,
+            .created_at = std.time.timestamp(),
+        };
 
-    // this blocks until the container exits
-    c.start() catch {
-        orch.states[idx].status = .failed;
-        return;
-    };
+        // mark as running once the container starts
+        orch.states[idx].status = .running;
+
+        // this blocks until the container exits
+        c.start() catch {
+            orch.states[idx].status = .failed;
+            return;
+        };
+
+        // clean up this container's resources before potentially restarting
+        logs.deleteLogFile(id);
+        container.cleanupContainerDirs(id);
+        store.remove(id) catch {};
+
+        // in normal mode, we're done after one run
+        if (!orch.dev_mode) break;
+
+        // in dev mode, check if we should restart or wait
+        if (shutdown_requested.load(.acquire)) break;
+
+        if (orch.restart_requested[idx].load(.acquire)) {
+            // restart was requested by the watcher — clear flag and loop
+            orch.restart_requested[idx].store(false, .release);
+            writeErr("restarting {s}...\n", .{svc.name});
+            continue;
+        }
+
+        // container exited on its own (crash or normal exit) — wait for
+        // either a restart signal or shutdown
+        orch.states[idx].status = .stopped;
+        while (!shutdown_requested.load(.acquire)) {
+            if (orch.restart_requested[idx].load(.acquire)) {
+                orch.restart_requested[idx].store(false, .release);
+                writeErr("restarting {s}...\n", .{svc.name});
+                break;
+            }
+            std.time.sleep(200 * std.time.ns_per_ms);
+        } else break; // shutdown requested, exit loop
+    }
 
     orch.states[idx].status = .stopped;
+}
+
+/// watcher thread for dev mode — monitors bind-mounted directories
+/// and triggers container restarts when files change.
+pub fn watcherThread(orch: *Orchestrator, w: *watcher_mod.Watcher) void {
+    while (!shutdown_requested.load(.acquire)) {
+        const service_idx = w.waitForChange() orelse break;
+
+        if (shutdown_requested.load(.acquire)) break;
+
+        const svc = orch.manifest.services[service_idx];
+        writeErr("change detected in {s}, restarting...\n", .{svc.name});
+
+        // stop the running container by sending SIGTERM to its process
+        const id = orch.states[service_idx].container_id;
+        const record = store.load(orch.alloc, id[0..]) catch {
+            // container might already be stopped
+            orch.restart_requested[service_idx].store(true, .release);
+            continue;
+        };
+        defer record.deinit(orch.alloc);
+
+        if (record.pid) |pid| {
+            process.terminate(pid) catch {
+                process.kill(pid) catch {};
+            };
+        }
+
+        // signal the service thread to restart
+        orch.restart_requested[service_idx].store(true, .release);
+    }
 }
 
 /// extract the key part from a "KEY=VALUE" env var string
