@@ -971,4 +971,5 @@ comptime {
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
     _ = @import("dev/log_mux.zig");
+    _ = @import("dev/watcher.zig");
 }
