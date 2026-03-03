@@ -156,12 +156,11 @@ pub fn teardownContainer(
 /// write /etc/resolv.conf and /etc/hosts into a container's rootfs.
 /// called with the merged overlay path before the container starts.
 pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, hostname: []const u8) void {
-    // write /etc/resolv.conf — use host's DNS for now
-    writeFileInRootfs(rootfs_path, "etc/resolv.conf",
-        \\nameserver 8.8.8.8
-        \\nameserver 8.8.4.4
-        \\
-    );
+    // write /etc/resolv.conf — copy from host, fall back to public DNS
+    var resolv_buf: [512]u8 = undefined;
+    const resolv_content = readHostResolvConf(&resolv_buf) orelse
+        "nameserver 8.8.8.8\nnameserver 8.8.4.4\n";
+    writeFileInRootfs(rootfs_path, "etc/resolv.conf", resolv_content);
 
     // write /etc/hosts
     var hosts_buf: [256]u8 = undefined;
@@ -188,6 +187,16 @@ fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const 
     const file = std.fs.cwd().createFile(full_path, .{}) catch return;
     defer file.close();
     file.writeAll(content) catch {};
+}
+
+/// read /etc/resolv.conf from the host into a buffer.
+/// returns null if the file can't be read or is empty.
+fn readHostResolvConf(buf: *[512]u8) ?[]const u8 {
+    const file = std.fs.cwd().openFile("/etc/resolv.conf", .{}) catch return null;
+    defer file.close();
+    const n = file.readAll(buf) catch return null;
+    if (n == 0) return null;
+    return buf[0..n];
 }
 
 // -- tests --
