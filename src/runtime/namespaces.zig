@@ -123,6 +123,15 @@ pub fn spawn(
     const stdout_pipe = posix.pipe() catch return NamespaceError.PipeFailed;
     const stderr_pipe = posix.pipe() catch return NamespaceError.PipeFailed;
 
+    errdefer {
+        posix.close(pipe_read);
+        posix.close(pipe_write);
+        posix.close(stdout_pipe[0]);
+        posix.close(stdout_pipe[1]);
+        posix.close(stderr_pipe[0]);
+        posix.close(stderr_pipe[1]);
+    }
+
     // allocate child stack. clone3 needs an explicit stack for the child.
     const stack_size: usize = 1024 * 1024; // 1MB
     const stack_mem = posix.mmap(
@@ -133,6 +142,7 @@ pub fn spawn(
         -1,
         0,
     ) catch return NamespaceError.CloneFailed;
+    defer posix.munmap(@alignCast(stack_mem));
 
     // pack child context into a struct on the stack so child_fn can access it.
     // we pass the pipe read fd and the real child function through a trampoline.
@@ -216,10 +226,6 @@ pub fn spawn(
 
     // don't close pipe_write here — return it as ready_fd so the caller
     // can do additional setup (networking) before signaling the child.
-
-    // free the child stack now that clone3 has copied it.
-    // the child has its own copy in the new address space.
-    posix.munmap(@alignCast(stack_mem));
 
     return SpawnResult{
         .pid = child_pid,
