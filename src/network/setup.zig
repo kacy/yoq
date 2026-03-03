@@ -15,6 +15,7 @@ const posix = std.posix;
 const sqlite = @import("sqlite");
 
 const bridge = @import("bridge.zig");
+const dns = @import("dns.zig");
 const ip = @import("ip.zig");
 const nat = @import("nat.zig");
 const schema = @import("../state/schema.zig");
@@ -83,6 +84,7 @@ pub fn setupContainer(
     pid: posix.pid_t,
     config: NetworkConfig,
     db: *sqlite.Db,
+    hostname: []const u8,
 ) SetupError!NetworkInfo {
     // 1. create bridge (idempotent)
     bridge.ensureBridge(bridge.default_bridge) catch return SetupError.BridgeFailed;
@@ -126,6 +128,10 @@ pub fn setupContainer(
         };
     }
 
+    // register with DNS resolver for service discovery
+    dns.startResolver();
+    dns.registerService(hostname, container_id, container_ip);
+
     // build result
     var info = NetworkInfo{
         .ip = container_ip,
@@ -138,13 +144,16 @@ pub fn setupContainer(
 }
 
 /// tear down networking for a container.
-/// removes port mappings, deletes veth pair, releases IP.
+/// removes port mappings, deletes veth pair, releases IP, unregisters DNS.
 pub fn teardownContainer(
     container_id: []const u8,
     net_info: *const NetworkInfo,
     config: NetworkConfig,
     db: *sqlite.Db,
 ) void {
+    // unregister from DNS
+    dns.unregisterService(container_id);
+
     // remove port mapping rules
     var ip_str_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(net_info.ip, &ip_str_buf);
@@ -163,10 +172,11 @@ pub fn teardownContainer(
 /// write /etc/resolv.conf and /etc/hosts into a container's rootfs.
 /// called with the merged overlay path before the container starts.
 pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, hostname: []const u8) void {
-    // write /etc/resolv.conf — use host's DNS for now
+    // write /etc/resolv.conf — use the bridge gateway DNS resolver
+    // for service discovery, with 8.8.8.8 as fallback
     writeFileInRootfs(rootfs_path, "etc/resolv.conf",
+        \\nameserver 10.42.0.1
         \\nameserver 8.8.8.8
-        \\nameserver 8.8.4.4
         \\
     );
 

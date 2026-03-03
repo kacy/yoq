@@ -196,7 +196,7 @@ pub const Container = struct {
             defer if (db) |*d| d.deinit();
 
             if (db) |*d| {
-                if (net_setup.setupContainer(config.id, spawn_result.pid, net_config, d)) |info| {
+                if (net_setup.setupContainer(config.id, spawn_result.pid, net_config, d, config.hostname)) |info| {
                     self.net_info = info;
 
                     // persist network info in the database

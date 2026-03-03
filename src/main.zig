@@ -719,6 +719,7 @@ comptime {
     _ = @import("image/layer.zig");
     _ = @import("network/netlink.zig");
     _ = @import("network/bridge.zig");
+    _ = @import("network/dns.zig");
     _ = @import("network/ip.zig");
     _ = @import("network/nat.zig");
     _ = @import("network/setup.zig");
