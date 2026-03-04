@@ -11,7 +11,6 @@
 // containers work without NAT (just no internet or port mapping).
 
 const std = @import("std");
-const posix = std.posix;
 const cmd = @import("../lib/cmd.zig");
 
 pub const NatError = error{
