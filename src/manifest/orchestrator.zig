@@ -30,6 +30,7 @@ const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const logs = @import("../runtime/logs.zig");
+const health = @import("health.zig");
 
 pub const OrchestratorError = error{
     PullFailed,
@@ -42,6 +43,7 @@ pub const ServiceState = struct {
     container_id: [12]u8,
     thread: ?std.Thread,
     status: Status,
+    health_status: ?health.HealthStatus = null,
 
     pub const Status = enum {
         pending,
@@ -151,11 +153,52 @@ pub const Orchestrator = struct {
             const id = self.states[i].container_id;
             writeErr("started {s} ({s})\n", .{ svc.name, id[0..] });
         }
+
+        // phase 3: register health checks and start checker thread.
+        // brief delay to let container networking finish setup —
+        // the service thread sets status=running then enters c.start()
+        // which does network setup synchronously before blocking.
+        self.registerHealthChecks();
+    }
+
+    /// register services for health checking and start the checker thread.
+    fn registerHealthChecks(self: *Orchestrator) void {
+        var has_checks = false;
+
+        for (self.manifest.services, 0..) |svc, i| {
+            const hc = svc.health_check orelse continue;
+            has_checks = true;
+
+            // look up the container's IP from the store
+            const id = self.states[i].container_id;
+            const record = store.load(self.alloc, id[0..]) catch continue;
+            defer record.deinit(self.alloc);
+
+            const container_ip = if (record.ip_address) |ip_str|
+                parseIpAddress(ip_str)
+            else
+                [4]u8{ 0, 0, 0, 0 };
+
+            health.registerService(svc.name, id, container_ip, hc);
+            self.states[i].health_status = .starting;
+        }
+
+        if (has_checks) {
+            health.startChecker();
+        }
     }
 
     /// stop all running services in reverse dependency order.
     pub fn stopAll(self: *Orchestrator) void {
+        // stop health checker first so it doesn't see partially-stopped services
+        health.stopChecker();
+
         const services = self.manifest.services;
+
+        // unregister all services from health checking
+        for (services) |svc| {
+            health.unregisterService(svc.name);
+        }
 
         // reverse order — dependents first
         var i: usize = services.len;
@@ -444,10 +487,14 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         };
     }
 
+    // if the service has a health check, skip DNS registration on startup.
+    // the health checker will register it after the first successful check.
+    const has_health_check = svc.health_check != null;
+
     const net_config: ?net_setup.NetworkConfig = if (port_maps.items.len > 0)
-        .{ .port_maps = port_maps.items }
+        .{ .port_maps = port_maps.items, .skip_dns = has_health_check }
     else
-        .{};
+        .{ .skip_dns = has_health_check };
 
     // main run loop — runs once in normal mode, loops in dev mode
     while (true) {
@@ -574,6 +621,32 @@ pub fn watcherThread(orch: *Orchestrator, w: *watcher_mod.Watcher) void {
     }
 }
 
+/// parse a dotted IP string like "10.42.0.5" into a 4-byte array.
+/// returns all zeros on parse failure.
+fn parseIpAddress(s: []const u8) [4]u8 {
+    var result: [4]u8 = .{ 0, 0, 0, 0 };
+    var octet_idx: usize = 0;
+    var current: u16 = 0;
+
+    for (s) |c| {
+        if (c == '.') {
+            if (octet_idx >= 3 or current > 255) return .{ 0, 0, 0, 0 };
+            result[octet_idx] = @intCast(current);
+            octet_idx += 1;
+            current = 0;
+        } else if (c >= '0' and c <= '9') {
+            current = current * 10 + (c - '0');
+        } else {
+            return .{ 0, 0, 0, 0 };
+        }
+    }
+
+    if (octet_idx != 3 or current > 255) return .{ 0, 0, 0, 0 };
+    result[3] = @intCast(current);
+
+    return result;
+}
+
 /// extract the key part from a "KEY=VALUE" env var string
 fn envKey(env_var: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, env_var, '=')) |eq| {
@@ -624,4 +697,19 @@ test "ServiceState defaults" {
 
 test "shutdown_requested starts false" {
     try std.testing.expect(!shutdown_requested.load(.acquire));
+}
+
+test "parseIpAddress — valid IPs" {
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 5 }, parseIpAddress("10.42.0.5"));
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, parseIpAddress("127.0.0.1"));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("0.0.0.0"));
+    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, parseIpAddress("255.255.255.255"));
+}
+
+test "parseIpAddress — invalid IPs return zeros" {
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress(""));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("not an ip"));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("256.0.0.1"));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("10.42"));
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("10.42.0.5.6"));
 }
