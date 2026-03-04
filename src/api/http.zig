@@ -23,6 +23,7 @@ pub const StatusCode = enum(u16) {
     bad_request = 400,
     not_found = 404,
     method_not_allowed = 405,
+    too_many_requests = 429,
     internal_server_error = 500,
 
     pub fn phrase(self: StatusCode) []const u8 {
@@ -33,6 +34,7 @@ pub const StatusCode = enum(u16) {
             .bad_request => "Bad Request",
             .not_found => "Not Found",
             .method_not_allowed => "Method Not Allowed",
+            .too_many_requests => "Too Many Requests",
             .internal_server_error => "Internal Server Error",
         };
     }
@@ -323,6 +325,7 @@ test "status code phrases" {
     try std.testing.expectEqualStrings("Not Found", StatusCode.not_found.phrase());
     try std.testing.expectEqualStrings("Internal Server Error", StatusCode.internal_server_error.phrase());
     try std.testing.expectEqualStrings("Method Not Allowed", StatusCode.method_not_allowed.phrase());
+    try std.testing.expectEqualStrings("Too Many Requests", StatusCode.too_many_requests.phrase());
 }
 
 test "format response with empty body" {
