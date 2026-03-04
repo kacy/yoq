@@ -1865,6 +1865,7 @@ comptime {
     _ = @import("network/ip.zig");
     _ = @import("network/nat.zig");
     _ = @import("network/setup.zig");
+    _ = @import("network/wireguard.zig");
     _ = @import("build/dockerfile.zig");
     _ = @import("build/context.zig");
     _ = @import("build/engine.zig");
