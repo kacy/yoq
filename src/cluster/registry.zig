@@ -23,12 +23,28 @@ pub const Assignment = agent_types.Assignment;
 // using fixed-size buffers avoids allocation in the hot path.
 
 /// generate SQL to register a new agent.
+/// when node_id/wg_public_key/overlay_ip are provided, the agent is registered
+/// with wireguard networking support. otherwise falls back to the base columns.
 pub fn registerSql(
     buf: []u8,
     id: []const u8,
     address: []const u8,
     resources: AgentResources,
     now: i64,
+) ![]const u8 {
+    return registerSqlFull(buf, id, address, resources, now, null, null, null);
+}
+
+/// generate SQL to register a new agent with optional wireguard fields.
+pub fn registerSqlFull(
+    buf: []u8,
+    id: []const u8,
+    address: []const u8,
+    resources: AgentResources,
+    now: i64,
+    node_id: ?u8,
+    wg_public_key: ?[]const u8,
+    overlay_ip: ?[]const u8,
 ) ![]const u8 {
     // escape user-controlled values to prevent SQL injection.
     // committed SQL is replicated via raft to ALL nodes, so a single
@@ -37,6 +53,18 @@ pub fn registerSql(
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
     var addr_esc_buf: [512]u8 = undefined;
     const addr_esc = try sql_escape.escapeSqlString(&addr_esc_buf, address);
+
+    if (node_id) |nid| {
+        var key_esc_buf: [128]u8 = undefined;
+        const key_esc = try sql_escape.escapeSqlString(&key_esc_buf, wg_public_key orelse "");
+        var ip_esc_buf: [64]u8 = undefined;
+        const ip_esc = try sql_escape.escapeSqlString(&ip_esc_buf, overlay_ip orelse "");
+
+        return std.fmt.bufPrint(buf,
+            \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip)
+            \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}');
+        , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc });
+    }
 
     return std.fmt.bufPrint(buf,
         \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at)
@@ -348,6 +376,35 @@ test "registerSql generates valid SQL" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "INSERT INTO agents") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "10.0.0.5:7701") != null);
+}
+
+test "registerSqlFull includes wireguard columns" {
+    var buf: [2048]u8 = undefined;
+    const sql = try registerSqlFull(&buf, "abc123def456", "10.0.0.5:7701", .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+    }, 1000, 3, "base64pubkey==", "10.40.0.3");
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "node_id") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "wg_public_key") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "overlay_ip") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "base64pubkey==") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "10.40.0.3") != null);
+}
+
+test "registerSqlFull without wireguard falls back to base columns" {
+    var buf: [2048]u8 = undefined;
+    const sql = try registerSqlFull(&buf, "abc123def456", "10.0.0.5:7701", .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+    }, 1000, null, null, null);
+
+    // should NOT have wireguard columns
+    try std.testing.expect(std.mem.indexOf(u8, sql, "node_id") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "wg_public_key") == null);
+    // but should still have the base columns
+    try std.testing.expect(std.mem.indexOf(u8, sql, "INSERT INTO agents") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
 }
 
 test "registerSql escapes single quotes in address" {
