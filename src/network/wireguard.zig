@@ -248,6 +248,117 @@ pub fn deleteInterface(name: []const u8) WireguardError!void {
     exec(&args) catch return WireguardError.DeviceDeleteFailed;
 }
 
+// -- peer management --
+
+/// add a peer to a WireGuard interface.
+///
+/// equivalent to:
+///   wg set <name> peer <pubkey> allowed-ips <ips> [endpoint <ep>] persistent-keepalive <ka>
+pub fn addPeer(name: []const u8, peer: PeerConfig) WireguardError!void {
+    const args = buildAddPeerArgs(name, peer);
+    exec(&args) catch return WireguardError.PeerAddFailed;
+}
+
+/// remove a peer from a WireGuard interface.
+///
+/// equivalent to: wg set <name> peer <pubkey> remove
+pub fn removePeer(name: []const u8, public_key: []const u8) WireguardError!void {
+    const args = buildRemovePeerArgs(name, public_key);
+    exec(&args) catch return WireguardError.PeerRemoveFailed;
+}
+
+// -- network operations (netlink) --
+
+/// assign an overlay IP address to a WireGuard interface.
+/// uses netlink RTM_NEWADDR (same pattern as bridge.zig's addAddress).
+pub fn assignOverlayIp(name: []const u8, overlay_ip: [4]u8) WireguardError!void {
+    const fd = nl.openSocket() catch return WireguardError.AddressFailed;
+    defer posix.close(fd);
+
+    const if_index = nl.getIfIndex(fd, name) catch return WireguardError.AddressFailed;
+    if (if_index == 0) return WireguardError.AddressFailed;
+
+    var buf: [nl.buf_size]u8 align(4) = undefined;
+    var mb = nl.MessageBuilder.init(&buf);
+
+    const hdr = mb.putHeader(
+        .RTM_NEWADDR,
+        nl.NLM_F.REQUEST | nl.NLM_F.ACK | nl.NLM_F.CREATE | nl.NLM_F.EXCL,
+        nl.IfAddrMsg,
+    ) catch return WireguardError.AddressFailed;
+
+    const addr_msg = mb.getPayload(hdr, nl.IfAddrMsg);
+    addr_msg.family = nl.AF.INET;
+    addr_msg.prefixlen = 24;
+    addr_msg.scope = nl.RT_SCOPE.UNIVERSE;
+    addr_msg.index = if_index;
+
+    mb.putAttr(hdr, nl.IFA.LOCAL, &overlay_ip) catch return WireguardError.AddressFailed;
+    mb.putAttr(hdr, nl.IFA.ADDRESS, &overlay_ip) catch return WireguardError.AddressFailed;
+
+    nl.sendAndCheck(fd, mb.message()) catch return WireguardError.AddressFailed;
+}
+
+/// add a route for a remote node's container subnet through the WireGuard tunnel.
+/// uses netlink RTM_NEWROUTE with a specific destination prefix.
+///
+/// for example, to route 10.42.1.0/24 via 10.40.0.2 (the remote node's
+/// overlay IP on the WireGuard interface).
+pub fn addRoute(dest: [4]u8, prefix_len: u8, via: [4]u8) WireguardError!void {
+    const fd = nl.openSocket() catch return WireguardError.RouteFailed;
+    defer posix.close(fd);
+
+    var buf: [nl.buf_size]u8 align(4) = undefined;
+    var mb = nl.MessageBuilder.init(&buf);
+
+    const hdr = mb.putHeader(
+        .RTM_NEWROUTE,
+        nl.NLM_F.REQUEST | nl.NLM_F.ACK | nl.NLM_F.CREATE,
+        nl.RtMsg,
+    ) catch return WireguardError.RouteFailed;
+
+    const rt = mb.getPayload(hdr, nl.RtMsg);
+    rt.family = nl.AF.INET;
+    rt.dst_len = prefix_len;
+    rt.table = nl.RT_TABLE.MAIN;
+    rt.protocol = nl.RTPROT.BOOT;
+    rt.scope = nl.RT_SCOPE.UNIVERSE;
+    rt.type = nl.RTN.UNICAST;
+
+    mb.putAttr(hdr, nl.RTA.DST, &dest) catch return WireguardError.RouteFailed;
+    mb.putAttr(hdr, nl.RTA.GATEWAY, &via) catch return WireguardError.RouteFailed;
+
+    nl.sendAndCheck(fd, mb.message()) catch return WireguardError.RouteFailed;
+}
+
+/// remove a route for a remote node's container subnet.
+/// uses netlink RTM_DELROUTE.
+pub fn removeRoute(dest: [4]u8, prefix_len: u8) WireguardError!void {
+    const fd = nl.openSocket() catch return WireguardError.RouteFailed;
+    defer posix.close(fd);
+
+    var buf: [nl.buf_size]u8 align(4) = undefined;
+    var mb = nl.MessageBuilder.init(&buf);
+
+    const hdr = mb.putHeader(
+        .RTM_DELROUTE,
+        nl.NLM_F.REQUEST | nl.NLM_F.ACK,
+        nl.RtMsg,
+    ) catch return WireguardError.RouteFailed;
+
+    const rt = mb.getPayload(hdr, nl.RtMsg);
+    rt.family = nl.AF.INET;
+    rt.dst_len = prefix_len;
+    rt.table = nl.RT_TABLE.MAIN;
+    rt.protocol = nl.RTPROT.BOOT;
+    rt.scope = nl.RT_SCOPE.UNIVERSE;
+    rt.type = nl.RTN.UNICAST;
+
+    mb.putAttr(hdr, nl.RTA.DST, &dest) catch return WireguardError.RouteFailed;
+
+    nl.sendAndCheck(fd, mb.message()) catch return WireguardError.RouteFailed;
+}
+
 // -- key generation --
 
 /// generate an X25519 keypair for WireGuard.
