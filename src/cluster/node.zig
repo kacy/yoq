@@ -27,6 +27,7 @@ const log_mod = @import("log.zig");
 const state_machine_mod = @import("state_machine.zig");
 const types = @import("raft_types.zig");
 const agent_registry = @import("registry.zig");
+const scheduler = @import("scheduler.zig");
 const logger = @import("../lib/log.zig");
 
 const Raft = raft_mod.Raft;
@@ -219,10 +220,11 @@ pub const Node = struct {
                 self.raft.tick();
                 self.processActions();
 
-                // every 300 ticks (~30s), check for stale agents (leader only)
                 self.tick_count +%= 1;
-                if (self.tick_count % 300 == 0 and self.raft.role == .leader) {
-                    self.checkAgentHealth();
+                if (self.raft.role == .leader) {
+                    if (self.tick_count % 300 == 0) self.checkAgentHealth(); // ~30s
+                    if (self.tick_count % 100 == 0) self.reconcileOrphanedAssignments(); // ~10s
+                    if (self.tick_count % 3600 == 0) self.cleanupDeadAgents(); // ~6 min
                 }
             }
             std.Thread.sleep(100 * std.time.ns_per_ms);
@@ -250,8 +252,95 @@ pub const Node = struct {
                 const sql = agent_registry.markOfflineSql(&sql_buf, agent.id) catch continue;
                 _ = self.raft.propose(sql) catch |e| {
                     logger.warn("failed to propose agent offline status: {}", .{e});
+                    continue;
+                };
+
+                // orphan the agent's active assignments so they can be rescheduled
+                var orphan_buf: [256]u8 = undefined;
+                const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent.id) catch continue;
+                _ = self.raft.propose(orphan_sql) catch |e| {
+                    logger.warn("failed to propose assignment orphaning for agent {s}: {}", .{ agent.id, e });
                 };
             }
+        }
+    }
+
+    /// reschedule orphaned assignments onto active agents.
+    /// orphans are assignments with agent_id = '' that were detached
+    /// when their agent went offline. called with self.mu held.
+    fn reconcileOrphanedAssignments(self: *Node) void {
+        const orphans = agent_registry.getOrphanedAssignments(self.alloc, &self.state_machine.db) catch return;
+        defer {
+            for (orphans) |a| a.deinit(self.alloc);
+            self.alloc.free(orphans);
+        }
+
+        if (orphans.len == 0) return;
+
+        const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
+        defer {
+            for (agents) |a| a.deinit(self.alloc);
+            self.alloc.free(agents);
+        }
+
+        // build placement requests from orphaned assignments
+        var requests = self.alloc.alloc(scheduler.PlacementRequest, orphans.len) catch return;
+        defer self.alloc.free(requests);
+
+        for (orphans, 0..) |orphan, i| {
+            requests[i] = .{
+                .image = orphan.image,
+                .command = orphan.command,
+                .cpu_limit = orphan.cpu_limit,
+                .memory_limit_mb = orphan.memory_limit_mb,
+            };
+        }
+
+        const placements = scheduler.schedule(self.alloc, requests, agents) catch return;
+        defer self.alloc.free(placements);
+
+        for (placements, 0..) |placement, i| {
+            if (placement) |p| {
+                var sql_buf: [256]u8 = undefined;
+                const sql = agent_registry.reassignSql(&sql_buf, orphans[i].id, p.agent_id) catch continue;
+                _ = self.raft.propose(sql) catch |e| {
+                    logger.warn("failed to propose reassignment for {s}: {}", .{ orphans[i].id, e });
+                };
+            }
+        }
+    }
+
+    /// remove agents that have been offline for more than 1 hour.
+    /// cleans up their remaining terminal assignments first.
+    /// called with self.mu held.
+    fn cleanupDeadAgents(self: *Node) void {
+        const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
+        defer {
+            for (agents) |a| a.deinit(self.alloc);
+            self.alloc.free(agents);
+        }
+
+        const now = std.time.timestamp();
+        const dead_timeout: i64 = 3600; // 1 hour
+
+        for (agents) |agent| {
+            if (!std.mem.eql(u8, agent.status, "offline")) continue;
+            if (now - agent.last_heartbeat <= dead_timeout) continue;
+
+            // delete remaining terminal assignments
+            var assign_buf: [256]u8 = undefined;
+            const assign_sql = agent_registry.deleteAgentAssignmentsSql(&assign_buf, agent.id) catch continue;
+            _ = self.raft.propose(assign_sql) catch |e| {
+                logger.warn("failed to propose assignment cleanup for dead agent {s}: {}", .{ agent.id, e });
+                continue;
+            };
+
+            // remove the agent record
+            var remove_buf: [256]u8 = undefined;
+            const remove_sql = agent_registry.removeSql(&remove_buf, agent.id) catch continue;
+            _ = self.raft.propose(remove_sql) catch |e| {
+                logger.warn("failed to propose removal of dead agent {s}: {}", .{ agent.id, e });
+            };
         }
     }
 
