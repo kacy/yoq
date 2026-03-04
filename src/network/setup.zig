@@ -34,6 +34,10 @@ pub const SetupError = error{
 pub const NetworkConfig = struct {
     enabled: bool = true,
     port_maps: []const PortMap = &.{},
+    /// when true, skip DNS registration on startup. used for services
+    /// with health checks — DNS is registered by the health checker
+    /// only after the service becomes healthy (readiness gating).
+    skip_dns: bool = false,
 };
 
 /// port mapping from host to container
@@ -128,9 +132,13 @@ pub fn setupContainer(
         };
     }
 
-    // register with DNS resolver for service discovery
+    // register with DNS resolver for service discovery.
+    // skip if the service has a health check — the health checker will
+    // register it only after it becomes healthy (readiness gating).
     dns.startResolver();
-    dns.registerService(hostname, container_id, container_ip);
+    if (!config.skip_dns) {
+        dns.registerService(hostname, container_id, container_ip);
+    }
 
     // build result
     var info = NetworkInfo{
