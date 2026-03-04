@@ -38,6 +38,10 @@ pub const NetworkConfig = struct {
     /// with health checks — DNS is registered by the health checker
     /// only after the service becomes healthy (readiness gating).
     skip_dns: bool = false,
+    /// cluster node ID for per-node subnet allocation.
+    /// null means single-node mode (flat 10.42.0.0/16).
+    /// 1-254 means cluster mode (10.42.{node_id}.0/24 per node).
+    node_id: ?u8 = null,
 };
 
 /// port mapping from host to container
@@ -90,11 +94,28 @@ pub fn setupContainer(
     db: *sqlite.Db,
     hostname: []const u8,
 ) SetupError!NetworkInfo {
-    // 1. create bridge (idempotent)
-    bridge.ensureBridge(bridge.default_bridge) catch return SetupError.BridgeFailed;
+    // determine subnet config based on node_id.
+    // null = single-node mode (flat /16), otherwise per-node /24.
+    const subnet_config: ?ip.SubnetConfig = if (config.node_id) |nid|
+        ip.subnetForNode(nid)
+    else
+        null;
 
-    // 2. allocate IP
-    const container_ip = ip.allocate(db, container_id) catch return SetupError.IpAllocationFailed;
+    // 1. create bridge (idempotent)
+    if (subnet_config) |sc| {
+        bridge.ensureBridgeWithConfig(.{
+            .gateway_ip = sc.gateway,
+            .prefix_len = sc.prefix_len,
+        }) catch return SetupError.BridgeFailed;
+    } else {
+        bridge.ensureBridge(bridge.default_bridge) catch return SetupError.BridgeFailed;
+    }
+
+    // 2. allocate IP — from node subnet if in cluster mode
+    const container_ip = if (subnet_config) |sc|
+        ip.allocateWithSubnet(db, container_id, sc) catch return SetupError.IpAllocationFailed
+    else
+        ip.allocate(db, container_id) catch return SetupError.IpAllocationFailed;
     errdefer ip.release(db, container_id) catch {};
 
     // 3. create veth pair
@@ -110,9 +131,15 @@ pub fn setupContainer(
     bridge.moveToNamespace("eth0", pid) catch return SetupError.VethFailed;
 
     // 5. configure inside container namespace
-    bridge.configureContainer(pid, container_ip, bridge.gateway_ip) catch {
-        return SetupError.ConfigFailed;
-    };
+    if (subnet_config) |sc| {
+        bridge.configurableContainer(pid, container_ip, sc.gateway, sc.prefix_len) catch {
+            return SetupError.ConfigFailed;
+        };
+    } else {
+        bridge.configureContainer(pid, container_ip, bridge.gateway_ip) catch {
+            return SetupError.ConfigFailed;
+        };
+    }
 
     // 6. NAT setup (non-fatal — containers still work on the bridge without NAT)
     nat.enableForwarding() catch |e| {
@@ -289,4 +316,16 @@ test "writeNetworkFiles sets etc/hosts with hostname" {
 
     try std.testing.expect(std.mem.indexOf(u8, content, "dbserver") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "10.42.0.7") != null);
+}
+
+test "NetworkConfig defaults to single-node mode" {
+    const config = NetworkConfig{};
+    try std.testing.expect(config.node_id == null);
+    try std.testing.expect(config.enabled);
+}
+
+test "NetworkConfig with node_id for cluster mode" {
+    const config = NetworkConfig{ .node_id = 5 };
+    try std.testing.expectEqual(@as(?u8, 5), config.node_id);
+    try std.testing.expect(config.enabled);
 }

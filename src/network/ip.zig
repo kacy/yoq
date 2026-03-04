@@ -5,6 +5,12 @@
 // allocates sequentially from 10.42.0.2, filling gaps left by
 // released addresses.
 //
+// in multi-node (cluster) mode, each node gets a /24 subnet:
+//   node 1: 10.42.1.0/24 (containers get 10.42.1.2 — 10.42.1.254)
+//   node 2: 10.42.2.0/24 (containers get 10.42.2.2 — 10.42.2.254)
+//   ...
+// node_id 0 means single-node mode — uses the flat 10.42.0.0/16.
+//
 // all allocation state lives in the ip_allocations SQLite table,
 // so it survives restarts and is consistent with the rest of
 // the container state.
@@ -20,6 +26,45 @@ pub const IpError = error{
     SubnetExhausted,
     DbOpenFailed,
 };
+
+/// per-node subnet configuration.
+/// each node in a cluster gets its own /24 within the 10.42.0.0/16 space,
+/// so container IPs never collide across nodes.
+pub const SubnetConfig = struct {
+    node_id: u8,
+    base: [4]u8,
+    gateway: [4]u8,
+    prefix_len: u8,
+    range_start: [4]u8,
+    range_end: [4]u8,
+};
+
+/// return the subnet config for a given node.
+///
+/// node_id 0 is special: single-node mode, uses the full 10.42.0.0/16.
+/// node_id 1-254: each gets 10.42.{node_id}.0/24.
+pub fn subnetForNode(node_id: u8) SubnetConfig {
+    if (node_id == 0) {
+        // single-node mode — flat /16, same as the original behavior
+        return .{
+            .node_id = 0,
+            .base = .{ 10, 42, 0, 0 },
+            .gateway = .{ 10, 42, 0, 1 },
+            .prefix_len = 16,
+            .range_start = .{ 10, 42, 0, 2 },
+            .range_end = .{ 10, 42, 255, 254 },
+        };
+    }
+
+    return .{
+        .node_id = node_id,
+        .base = .{ 10, 42, node_id, 0 },
+        .gateway = .{ 10, 42, node_id, 1 },
+        .prefix_len = 24,
+        .range_start = .{ 10, 42, node_id, 2 },
+        .range_end = .{ 10, 42, node_id, 254 },
+    };
+}
 
 /// allocate the next available IP for a container.
 /// finds the lowest unused address in 10.42.0.2 — 10.42.255.254.
@@ -70,6 +115,63 @@ pub fn allocate(db: *sqlite.Db, container_id: []const u8) IpError![4]u8 {
     ) catch return IpError.AllocationFailed;
 
     return ip;
+}
+
+/// allocate the next available IP from a specific subnet.
+/// used in cluster mode where each node has its own /24 range.
+/// walks the range from config.range_start to config.range_end,
+/// skipping any IPs already in ip_allocations.
+pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: SubnetConfig) IpError![4]u8 {
+    var current = config.range_start;
+
+    while (true) {
+        var ip_buf: [16]u8 = undefined;
+        const ip_str = formatIp(current, &ip_buf);
+
+        const ExistsRow = struct { count: i64 };
+        const exists = (db.one(
+            ExistsRow,
+            "SELECT COUNT(*) AS count FROM ip_allocations WHERE ip_address = ?;",
+            .{},
+            .{ip_str},
+        ) catch return IpError.AllocationFailed) orelse return IpError.AllocationFailed;
+
+        if (exists.count == 0) {
+            // found a free address — insert it
+            var insert_buf: [16]u8 = undefined;
+            const insert_str = formatIp(current, &insert_buf);
+
+            db.exec(
+                "INSERT INTO ip_allocations (container_id, ip_address, allocated_at) VALUES (?, ?, ?);",
+                .{},
+                .{ container_id, insert_str, @as(i64, std.time.timestamp()) },
+            ) catch return IpError.AllocationFailed;
+
+            return current;
+        }
+
+        // move to next address, but stay within the subnet range
+        if (!incrementWithinRange(&current, config.range_end)) {
+            return IpError.SubnetExhausted;
+        }
+    }
+}
+
+/// increment IP within a bounded range.
+/// returns false if we've reached range_end (exhausted).
+fn incrementWithinRange(current: *[4]u8, range_end: [4]u8) bool {
+    // check if we're already at the end of the range
+    if (std.mem.eql(u8, current, &range_end)) return false;
+
+    // simple increment: bump last octet, roll over if needed
+    if (current[3] < 254) {
+        current[3] += 1;
+        return true;
+    }
+
+    // for /24 subnets, we don't roll over to the next /24
+    // (that would be a different node's subnet)
+    return false;
 }
 
 /// release an IP allocation for a container
@@ -260,4 +362,103 @@ test "lookup returns error for unknown container" {
 
     const alloc = std.testing.allocator;
     try std.testing.expectError(IpError.NotFound, lookup(&db, alloc, "nonexistent"));
+}
+
+test "subnetForNode(0) returns flat /16 for single-node mode" {
+    const config = subnetForNode(0);
+    try std.testing.expectEqual(@as(u8, 0), config.node_id);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 0 }, config.base);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 1 }, config.gateway);
+    try std.testing.expectEqual(@as(u8, 16), config.prefix_len);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 2 }, config.range_start);
+    try std.testing.expectEqual([4]u8{ 10, 42, 255, 254 }, config.range_end);
+}
+
+test "subnetForNode(1) returns correct /24 subnet" {
+    const config = subnetForNode(1);
+    try std.testing.expectEqual(@as(u8, 1), config.node_id);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 0 }, config.base);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 1 }, config.gateway);
+    try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 2 }, config.range_start);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 254 }, config.range_end);
+}
+
+test "subnetForNode(254) returns correct /24 subnet" {
+    const config = subnetForNode(254);
+    try std.testing.expectEqual(@as(u8, 254), config.node_id);
+    try std.testing.expectEqual([4]u8{ 10, 42, 254, 0 }, config.base);
+    try std.testing.expectEqual([4]u8{ 10, 42, 254, 1 }, config.gateway);
+    try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
+    try std.testing.expectEqual([4]u8{ 10, 42, 254, 2 }, config.range_start);
+    try std.testing.expectEqual([4]u8{ 10, 42, 254, 254 }, config.range_end);
+}
+
+test "allocateWithSubnet allocates from correct range" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const config = subnetForNode(3);
+    const ip1 = try allocateWithSubnet(&db, "c1", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 3, 2 }, ip1);
+
+    const ip2 = try allocateWithSubnet(&db, "c2", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 3, 3 }, ip2);
+}
+
+test "allocateWithSubnet stays within node subnet" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    // use a tiny range for testing: only 2 addresses available
+    const config = SubnetConfig{
+        .node_id = 5,
+        .base = .{ 10, 42, 5, 0 },
+        .gateway = .{ 10, 42, 5, 1 },
+        .prefix_len = 24,
+        .range_start = .{ 10, 42, 5, 2 },
+        .range_end = .{ 10, 42, 5, 3 },
+    };
+
+    const ip1 = try allocateWithSubnet(&db, "c1", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 5, 2 }, ip1);
+
+    const ip2 = try allocateWithSubnet(&db, "c2", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 5, 3 }, ip2);
+
+    // third allocation should fail — range exhausted
+    try std.testing.expectError(IpError.SubnetExhausted, allocateWithSubnet(&db, "c3", config));
+}
+
+test "allocateWithSubnet fills gaps after release" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const config = subnetForNode(7);
+
+    _ = try allocateWithSubnet(&db, "c1", config); // .2
+    _ = try allocateWithSubnet(&db, "c2", config); // .3
+    _ = try allocateWithSubnet(&db, "c3", config); // .4
+
+    try release(&db, "c2");
+
+    // should fill the gap at .3
+    const ip4 = try allocateWithSubnet(&db, "c4", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 7, 3 }, ip4);
+}
+
+test "incrementWithinRange stops at range end" {
+    var current = [4]u8{ 10, 42, 1, 254 };
+    const range_end = [4]u8{ 10, 42, 1, 254 };
+    try std.testing.expect(!incrementWithinRange(&current, range_end));
+}
+
+test "incrementWithinRange increments within range" {
+    var current = [4]u8{ 10, 42, 1, 10 };
+    const range_end = [4]u8{ 10, 42, 1, 254 };
+    try std.testing.expect(incrementWithinRange(&current, range_end));
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 11 }, current);
 }
