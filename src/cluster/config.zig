@@ -77,6 +77,12 @@ fn parseIpv4(s: []const u8) ![4]u8 {
     return result;
 }
 
+/// how many committed entries since the last snapshot before we
+/// trigger a new one. 10000 is a reasonable default — snapshots
+/// are cheap (sqlite backup API) and keep the log from growing
+/// unbounded.
+pub const snapshot_threshold: u64 = 10000;
+
 /// get the default data directory for cluster state
 pub fn defaultDataDir(buf: *[512]u8) ![]const u8 {
     paths.ensureDataDir("cluster") catch return ConfigError.DataDirFailed;
