@@ -22,6 +22,7 @@ const routes = @import("api/routes.zig");
 const cluster_node = @import("cluster/node.zig");
 const cluster_config = @import("cluster/config.zig");
 const cluster_agent = @import("cluster/agent.zig");
+const http_client = @import("cluster/http_client.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -645,6 +646,7 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var dev_mode = false;
+    var server_addr: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f")) {
@@ -654,6 +656,11 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             };
         } else if (std.mem.eql(u8, arg, "--dev")) {
             dev_mode = true;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                std.process.exit(1);
+            };
         }
     }
 
@@ -663,6 +670,12 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
     defer manifest.deinit();
+
+    // if --server is set, deploy to cluster instead of running locally
+    if (server_addr) |addr| {
+        deployToCluster(alloc, addr, &manifest);
+        return;
+    }
 
     // derive app name from cwd basename
     var cwd_buf: [4096]u8 = undefined;
@@ -737,6 +750,81 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     orch.stopAll();
     writeErr("stopped\n", .{});
+}
+
+/// deploy manifest services to a cluster server via POST /deploy.
+fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *const manifest_spec.Manifest) void {
+    // parse host:port
+    var server_ip: [4]u8 = .{ 127, 0, 0, 1 };
+    var server_port: u16 = 7700;
+
+    if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
+        server_ip = parseIpv4(addr_str[0..colon]) orelse {
+            writeErr("invalid server address: {s}\n", .{addr_str});
+            std.process.exit(1);
+        };
+        server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
+            writeErr("invalid port in server address: {s}\n", .{addr_str});
+            std.process.exit(1);
+        };
+    } else {
+        server_ip = parseIpv4(addr_str) orelse {
+            writeErr("invalid server address: {s}\n", .{addr_str});
+            std.process.exit(1);
+        };
+    }
+
+    // build JSON body: {"services":[{"image":"...","command":"...","cpu_limit":N,"memory_limit_mb":N},...]}
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeAll("{\"services\":[") catch {
+        writeErr("failed to build deploy request\n", .{});
+        std.process.exit(1);
+    };
+
+    for (manifest.services, 0..) |svc, i| {
+        if (i > 0) writer.writeByte(',') catch {};
+
+        // join command args into a single string
+        var cmd_buf: [1024]u8 = undefined;
+        var cmd_len: usize = 0;
+        for (svc.command, 0..) |arg, j| {
+            if (j > 0) {
+                if (cmd_len < cmd_buf.len) {
+                    cmd_buf[cmd_len] = ' ';
+                    cmd_len += 1;
+                }
+            }
+            const copy_len = @min(arg.len, cmd_buf.len - cmd_len);
+            @memcpy(cmd_buf[cmd_len..][0..copy_len], arg[0..copy_len]);
+            cmd_len += copy_len;
+        }
+
+        std.fmt.format(writer, "{{\"image\":\"{s}\",\"command\":\"{s}\",\"cpu_limit\":1000,\"memory_limit_mb\":256}}", .{
+            svc.image,
+            cmd_buf[0..cmd_len],
+        }) catch {};
+    }
+
+    writer.writeAll("]}") catch {};
+
+    writeErr("deploying {d} services to cluster {s}...\n", .{ manifest.services.len, addr_str });
+
+    // POST to /deploy
+    var resp = http_client.post(alloc, server_ip, server_port, "/deploy", json_buf.items) catch {
+        writeErr("failed to connect to cluster server\n", .{});
+        std.process.exit(1);
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code == 200) {
+        write("{s}\n", .{resp.body});
+    } else {
+        writeErr("deploy failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+        std.process.exit(1);
+    }
 }
 
 fn cmdDown(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -1087,6 +1175,7 @@ fn printUsage() void {
         \\commands:
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
         \\  up [-f manifest.toml] [--dev]     start services (--dev: watch + restart)
+        \\     [--server host:port]           deploy to cluster instead of locally
         \\  down [-f manifest.toml]          stop all services from manifest
         \\  serve [--port PORT]             start the API server (default: 7700)
         \\  init-server [opts]              start a cluster server node
@@ -1322,4 +1411,5 @@ comptime {
     _ = @import("cluster/registry.zig");
     _ = @import("cluster/http_client.zig");
     _ = @import("cluster/agent.zig");
+    _ = @import("cluster/scheduler.zig");
 }

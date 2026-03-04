@@ -16,6 +16,7 @@ const container = @import("../runtime/container.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
 const cluster_node = @import("../cluster/node.zig");
 const agent_registry = @import("../cluster/registry.zig");
+const scheduler = @import("../cluster/scheduler.zig");
 
 /// cluster node reference (set by server when running in cluster mode)
 pub var cluster: ?*cluster_node.Node = null;
@@ -48,6 +49,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     if (request.method == .POST) {
         if (std.mem.eql(u8, path, "/cluster/propose")) return handleClusterPropose(alloc, request);
         if (std.mem.eql(u8, path, "/agents/register")) return handleAgentRegister(alloc, request);
+        if (std.mem.eql(u8, path, "/deploy")) return handleDeploy(alloc, request);
     }
 
     // /agents/{id} routes
@@ -534,6 +536,107 @@ fn handleAgentDrain(alloc: std.mem.Allocator, id: []const u8) Response {
         .body = "{\"status\":\"draining\"}",
         .allocated = false,
     };
+}
+
+fn handleDeploy(alloc: std.mem.Allocator, request: http.Request) Response {
+    const node = cluster orelse return badRequest("not running in cluster mode");
+
+    if (request.body.len == 0) return badRequest("missing request body");
+
+    // parse deployment request: {"services":[{"image":"...","command":"...","cpu_limit":N,"memory_limit_mb":N},...]}
+    // for now, parse a simple flat list of services from the body
+    var requests: std.ArrayListUnmanaged(scheduler.PlacementRequest) = .empty;
+    defer requests.deinit(alloc);
+
+    // simple parser: find each {"image":"...",...} block
+    var pos: usize = 0;
+    while (pos < request.body.len) {
+        const block_start = std.mem.indexOfPos(u8, request.body, pos, "{\"image\":\"") orelse break;
+
+        // find the end of this block
+        const block_end = std.mem.indexOfPos(u8, request.body, block_start + 1, "}") orelse break;
+        const block = request.body[block_start .. block_end + 1];
+
+        const image = extractJsonString(block, "image") orelse {
+            pos = block_end + 1;
+            continue;
+        };
+        const command = extractJsonString(block, "command") orelse "";
+        const cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000;
+        const memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256;
+
+        requests.append(alloc, .{
+            .image = image,
+            .command = command,
+            .cpu_limit = cpu_limit,
+            .memory_limit_mb = memory_limit_mb,
+        }) catch return internalError();
+
+        pos = block_end + 1;
+    }
+
+    if (requests.items.len == 0) return badRequest("no services to deploy");
+
+    // get active agents
+    const db = node.stateMachineDb();
+    const agents = agent_registry.listAgents(alloc, db) catch return internalError();
+    defer {
+        for (agents) |a| a.deinit(alloc);
+        alloc.free(agents);
+    }
+
+    if (agents.len == 0) {
+        return .{
+            .status = .bad_request,
+            .body = "{\"error\":\"no agents available\"}",
+            .allocated = false,
+        };
+    }
+
+    // run scheduler
+    const placements = scheduler.schedule(alloc, requests.items, agents) catch return internalError();
+    defer alloc.free(placements);
+
+    // propose assignments through raft
+    var placed: usize = 0;
+    var failed: usize = 0;
+
+    for (placements) |maybe_placement| {
+        if (maybe_placement) |placement| {
+            var id_buf: [12]u8 = undefined;
+            scheduler.generateAssignmentId(&id_buf);
+
+            var sql_buf: [1024]u8 = undefined;
+            const sql = scheduler.assignmentSql(
+                &sql_buf,
+                &id_buf,
+                placement.agent_id,
+                requests.items[placement.request_idx],
+                std.time.timestamp(),
+            ) catch {
+                failed += 1;
+                continue;
+            };
+
+            _ = node.propose(sql) catch {
+                failed += 1;
+                continue;
+            };
+            placed += 1;
+        } else {
+            failed += 1;
+        }
+    }
+
+    // build response
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    std.fmt.format(writer, "{{\"placed\":{d},\"failed\":{d}}}", .{ placed, failed }) catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void {
