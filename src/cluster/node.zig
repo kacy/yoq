@@ -26,6 +26,7 @@ const transport_mod = @import("transport.zig");
 const log_mod = @import("log.zig");
 const state_machine_mod = @import("state_machine.zig");
 const types = @import("raft_types.zig");
+const agent_registry = @import("registry.zig");
 
 const Raft = raft_mod.Raft;
 const Action = raft_mod.Action;
@@ -63,6 +64,7 @@ pub const Node = struct {
     state_machine: StateMachine,
     mu: std.Thread.Mutex,
     running: std.atomic.Value(bool),
+    tick_count: u32,
     tick_thread: ?std.Thread,
     recv_thread: ?std.Thread,
 
@@ -121,6 +123,7 @@ pub const Node = struct {
             .state_machine = sm,
             .mu = .{},
             .running = std.atomic.Value(bool).init(false),
+            .tick_count = 0,
             .tick_thread = null,
             .recv_thread = null,
         };
@@ -214,8 +217,38 @@ pub const Node = struct {
 
                 self.raft.tick();
                 self.processActions();
+
+                // every 300 ticks (~30s), check for stale agents (leader only)
+                self.tick_count +%= 1;
+                if (self.tick_count % 300 == 0 and self.raft.role == .leader) {
+                    self.checkAgentHealth();
+                }
             }
             std.Thread.sleep(100 * std.time.ns_per_ms);
+        }
+    }
+
+    /// mark agents as offline if they haven't sent a heartbeat in 30 seconds.
+    /// only runs on the leader node. called with self.mu held.
+    fn checkAgentHealth(self: *Node) void {
+        const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
+        defer {
+            for (agents) |a| a.deinit(self.alloc);
+            self.alloc.free(agents);
+        }
+
+        const now = std.time.timestamp();
+        const timeout: i64 = 30; // seconds
+
+        for (agents) |agent| {
+            // only check active agents — already drained/offline agents are fine
+            if (!std.mem.eql(u8, agent.status, "active")) continue;
+
+            if (now - agent.last_heartbeat > timeout) {
+                var sql_buf: [256]u8 = undefined;
+                const sql = agent_registry.markOfflineSql(&sql_buf, agent.id) catch continue;
+                _ = self.raft.propose(sql) catch {};
+            }
         }
     }
 
