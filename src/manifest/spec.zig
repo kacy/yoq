@@ -45,6 +45,7 @@ pub const Service = struct {
     depends_on: []const []const u8,
     working_dir: ?[]const u8,
     volumes: []const VolumeMount,
+    health_check: ?HealthCheck = null,
 
     pub fn deinit(self: Service, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
@@ -65,6 +66,47 @@ pub const Service = struct {
 
         for (self.volumes) |vol| vol.deinit(alloc);
         alloc.free(self.volumes);
+
+        if (self.health_check) |hc| hc.deinit(alloc);
+    }
+};
+
+/// the type of health check to perform.
+/// http: connect and send a GET request, check for 2xx response.
+/// tcp: connect to a port, success if connection is accepted.
+/// exec: run a command inside the container, success if exit code is 0.
+pub const CheckType = union(enum) {
+    http: struct {
+        path: []const u8,
+        port: u16,
+    },
+    tcp: struct {
+        port: u16,
+    },
+    exec: struct {
+        command: []const []const u8,
+    },
+};
+
+/// health check configuration for a service.
+/// attached to a service definition in the manifest. the health checker
+/// uses these parameters to periodically probe the service.
+pub const HealthCheck = struct {
+    check_type: CheckType,
+    interval: u32 = 10, // seconds between checks
+    timeout: u32 = 5, // seconds before check times out
+    retries: u32 = 3, // consecutive failures before unhealthy
+    start_period: u32 = 0, // grace period after container start (seconds)
+
+    pub fn deinit(self: HealthCheck, alloc: std.mem.Allocator) void {
+        switch (self.check_type) {
+            .http => |h| alloc.free(h.path),
+            .exec => |e| {
+                for (e.command) |cmd| alloc.free(cmd);
+                alloc.free(e.command);
+            },
+            .tcp => {},
+        }
     }
 };
 
@@ -170,6 +212,16 @@ test "deinit frees all memory" {
         .depends_on = deps,
         .working_dir = try alloc.dupe(u8, "/app"),
         .volumes = vol_mounts,
+        .health_check = .{
+            .check_type = .{ .http = .{
+                .path = try alloc.dupe(u8, "/health"),
+                .port = 8080,
+            } },
+            .interval = 10,
+            .timeout = 5,
+            .retries = 3,
+            .start_period = 0,
+        },
     };
 
     const volumes = try alloc.alloc(Volume, 1);
@@ -188,6 +240,51 @@ test "deinit frees all memory" {
     manifest.deinit();
 }
 
+test "health check defaults" {
+    const hc = HealthCheck{
+        .check_type = .{ .tcp = .{ .port = 5432 } },
+    };
+    try std.testing.expectEqual(@as(u32, 10), hc.interval);
+    try std.testing.expectEqual(@as(u32, 5), hc.timeout);
+    try std.testing.expectEqual(@as(u32, 3), hc.retries);
+    try std.testing.expectEqual(@as(u32, 0), hc.start_period);
+}
+
+test "health check deinit frees http path" {
+    const alloc = std.testing.allocator;
+
+    var hc = HealthCheck{
+        .check_type = .{ .http = .{
+            .path = try alloc.dupe(u8, "/health"),
+            .port = 8080,
+        } },
+    };
+    hc.deinit(alloc);
+    // testing allocator catches leaks
+}
+
+test "health check deinit frees exec command" {
+    const alloc = std.testing.allocator;
+
+    const cmds = try alloc.alloc([]const u8, 2);
+    cmds[0] = try alloc.dupe(u8, "pg_isready");
+    cmds[1] = try alloc.dupe(u8, "-h localhost");
+
+    var hc = HealthCheck{
+        .check_type = .{ .exec = .{ .command = cmds } },
+    };
+    hc.deinit(alloc);
+}
+
+test "health check tcp deinit is no-op" {
+    const alloc = std.testing.allocator;
+
+    var hc = HealthCheck{
+        .check_type = .{ .tcp = .{ .port = 5432 } },
+    };
+    hc.deinit(alloc);
+}
+
 /// helper for tests — creates a minimal service with an allocated name
 fn testService(alloc: std.mem.Allocator, name: []const u8) !Service {
     return .{
@@ -199,5 +296,6 @@ fn testService(alloc: std.mem.Allocator, name: []const u8) !Service {
         .depends_on = try alloc.alloc([]const u8, 0),
         .working_dir = null,
         .volumes = try alloc.alloc(VolumeMount, 0),
+        .health_check = null,
     };
 }
