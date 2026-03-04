@@ -8,6 +8,7 @@ const spec = @import("image/spec.zig");
 const registry = @import("image/registry.zig");
 const layer = @import("image/layer.zig");
 const oci = @import("image/oci.zig");
+const blob_store = @import("image/store.zig");
 const net_setup = @import("network/setup.zig");
 const ip = @import("network/ip.zig");
 const exec = @import("runtime/exec.zig");
@@ -228,8 +229,21 @@ fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageResolu
         result.rootfs = result.layer_paths[result.layer_paths.len - 1];
     }
 
-    // save image record
-    oci.saveImageFromPull(ref, result.pull_result.?.manifest_digest, result.pull_result.?.total_size) catch |e| {
+    // compute config digest from config bytes
+    const pr = result.pull_result.?;
+    const cfg_computed = blob_store.computeDigest(pr.config_bytes);
+    var cfg_digest_buf: [71]u8 = undefined;
+    const cfg_digest_str = cfg_computed.string(&cfg_digest_buf);
+
+    // save image record (stores manifest/config blobs and metadata)
+    oci.saveImageFromPull(
+        ref,
+        pr.manifest_digest,
+        pr.manifest_bytes,
+        pr.config_bytes,
+        cfg_digest_str,
+        pr.total_size,
+    ) catch |e| {
         writeErr("warning: failed to save image record: {}\n", .{e});
     };
 
@@ -506,8 +520,20 @@ fn cmdPull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         alloc.free(layer_paths);
     }
 
-    // save image record
-    oci.saveImageFromPull(ref, result.manifest_digest, result.total_size) catch {
+    // compute config digest from config bytes
+    const config_computed = blob_store.computeDigest(result.config_bytes);
+    var config_digest_buf: [71]u8 = undefined;
+    const config_digest_str = config_computed.string(&config_digest_buf);
+
+    // save image record (stores manifest/config blobs and metadata)
+    oci.saveImageFromPull(
+        ref,
+        result.manifest_digest,
+        result.manifest_bytes,
+        result.config_bytes,
+        config_digest_str,
+        result.total_size,
+    ) catch {
         writeErr("failed to save image record\n", .{});
         std.process.exit(1);
     };
