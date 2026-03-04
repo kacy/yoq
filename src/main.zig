@@ -79,6 +79,10 @@ pub fn main() !void {
         cmdJoin(&args, alloc);
     } else if (std.mem.eql(u8, command, "cluster")) {
         cmdCluster(&args, alloc);
+    } else if (std.mem.eql(u8, command, "nodes")) {
+        cmdNodes(&args, alloc);
+    } else if (std.mem.eql(u8, command, "drain")) {
+        cmdDrain(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -1166,6 +1170,138 @@ fn cmdClusterStatus(alloc: std.mem.Allocator) void {
     _ = alloc;
 }
 
+fn cmdNodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var server_addr: [4]u8 = .{ 127, 0, 0, 1 };
+    var server_port: u16 = 7700;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--server")) {
+            const addr_str = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                std.process.exit(1);
+            };
+            if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
+                server_addr = parseIpv4(addr_str[0..colon]) orelse {
+                    writeErr("invalid server address: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+                server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
+                    writeErr("invalid port: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+            } else {
+                server_addr = parseIpv4(addr_str) orelse {
+                    writeErr("invalid server address: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+            }
+        }
+    }
+
+    var resp = http_client.get(alloc, server_addr, server_port, "/agents") catch {
+        writeErr("failed to connect to server\n", .{});
+        std.process.exit(1);
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("server returned status {d}\n", .{resp.status_code});
+        std.process.exit(1);
+    }
+
+    // parse and display agent list as a table
+    // response is a JSON array: [{"id":"...","status":"...","cpu_cores":N,...},...]
+    write("{s:<14} {s:<10} {s:<12} {s:<16} {s}\n", .{ "ID", "STATUS", "CPU", "MEMORY", "CONTAINERS" });
+    write("{s:->14} {s:->10} {s:->12} {s:->16} {s:->10}\n", .{ "", "", "", "", "" });
+
+    // simple parser: walk through JSON array finding each object
+    var pos: usize = 0;
+    while (pos < resp.body.len) {
+        const obj_start = std.mem.indexOfPos(u8, resp.body, pos, "{\"id\":\"") orelse break;
+        const obj_end = std.mem.indexOfPos(u8, resp.body, obj_start + 1, "}") orelse break;
+        const obj = resp.body[obj_start .. obj_end + 1];
+
+        const id = extractJsonString(obj, "id") orelse "?";
+        const status = extractJsonString(obj, "status") orelse "?";
+        const cpu_cores = extractJsonInt(obj, "cpu_cores") orelse 0;
+        const cpu_used = extractJsonInt(obj, "cpu_used") orelse 0;
+        const memory_mb = extractJsonInt(obj, "memory_mb") orelse 0;
+        const memory_used = extractJsonInt(obj, "memory_used_mb") orelse 0;
+        const containers = extractJsonInt(obj, "containers") orelse 0;
+
+        // format CPU as "used/total" in millicores
+        var cpu_buf: [24]u8 = undefined;
+        const cpu_str = std.fmt.bufPrint(&cpu_buf, "{d}/{d}", .{ cpu_used, cpu_cores * 1000 }) catch "?";
+
+        var mem_buf: [24]u8 = undefined;
+        const mem_str = std.fmt.bufPrint(&mem_buf, "{d}/{d}MB", .{ memory_used, memory_mb }) catch "?";
+
+        var cnt_buf: [12]u8 = undefined;
+        const cnt_str = std.fmt.bufPrint(&cnt_buf, "{d}", .{containers}) catch "?";
+
+        write("{s:<14} {s:<10} {s:<12} {s:<16} {s}\n", .{ id, status, cpu_str, mem_str, cnt_str });
+
+        pos = obj_end + 1;
+    }
+}
+
+fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var node_id: ?[]const u8 = null;
+    var server_addr: [4]u8 = .{ 127, 0, 0, 1 };
+    var server_port: u16 = 7700;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--server")) {
+            const addr_str = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                std.process.exit(1);
+            };
+            if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
+                server_addr = parseIpv4(addr_str[0..colon]) orelse {
+                    writeErr("invalid server address: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+                server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
+                    writeErr("invalid port: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+            } else {
+                server_addr = parseIpv4(addr_str) orelse {
+                    writeErr("invalid server address: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+            }
+        } else {
+            node_id = arg;
+        }
+    }
+
+    const id = node_id orelse {
+        writeErr("usage: yoq drain <node-id> [--server host:port]\n", .{});
+        std.process.exit(1);
+    };
+
+    // POST /agents/{id}/drain
+    var path_buf: [128]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/drain", .{id}) catch {
+        writeErr("node ID too long\n", .{});
+        std.process.exit(1);
+    };
+
+    var resp = http_client.post(alloc, server_addr, server_port, path, "") catch {
+        writeErr("failed to connect to server\n", .{});
+        std.process.exit(1);
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code == 200) {
+        write("node {s} marked for draining\n", .{id});
+    } else {
+        writeErr("drain failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+        std.process.exit(1);
+    }
+}
+
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -1181,6 +1317,8 @@ fn printUsage() void {
         \\  init-server [opts]              start a cluster server node
         \\  join <host> --token <token>     join a cluster as an agent node
         \\  cluster status                  show cluster node status
+        \\  nodes [--server host:port]       list cluster agent nodes
+        \\  drain <id> [--server host:port]  drain an agent node
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  ps                               list containers
@@ -1282,6 +1420,37 @@ fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_host: 
 }
 
 /// parse a dotted IPv4 address string into 4 bytes.
+// -- JSON extraction helpers --
+// minimal JSON field extraction for CLI commands that parse API responses.
+
+fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
+
+    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    const value_start = start_pos + needle.len;
+    const value_end = std.mem.indexOfPos(u8, json, value_start, "\"") orelse return null;
+
+    return json[value_start..value_end];
+}
+
+fn extractJsonInt(json: []const u8, key: []const u8) ?i64 {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
+
+    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    var pos = start_pos + needle.len;
+
+    // skip whitespace
+    while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
+
+    var end = pos;
+    while (end < json.len and json[end] >= '0' and json[end] <= '9') : (end += 1) {}
+
+    if (end == pos) return null;
+    return std.fmt.parseInt(i64, json[pos..end], 10) catch return null;
+}
+
 fn parseIpv4(s: []const u8) ?[4]u8 {
     var result: [4]u8 = undefined;
     var part: u8 = 0;
