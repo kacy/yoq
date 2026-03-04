@@ -362,6 +362,10 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse
         return badRequest("missing memory_mb field");
 
+    if (!validateClusterInput(address)) {
+        return badRequest("invalid address");
+    }
+
     if (!agent_registry.validateToken(token, expected_token)) {
         return .{
             .status = .bad_request,
@@ -565,6 +569,16 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request) Response {
         const cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000;
         const memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256;
 
+        // validate user-controlled fields before they reach SQL generation
+        if (!validateClusterInput(image)) {
+            pos = block_end + 1;
+            continue;
+        }
+        if (command.len > 0 and !validateClusterInput(command)) {
+            pos = block_end + 1;
+            continue;
+        }
+
         requests.append(alloc, .{
             .image = image,
             .command = command,
@@ -716,6 +730,20 @@ fn extractJsonInt(json: []const u8, key: []const u8) ?i64 {
 
     if (end == pos) return null;
     return std.fmt.parseInt(i64, json[pos..end], 10) catch return null;
+}
+
+// -- input validation --
+
+/// reject values containing SQL metacharacters or control characters.
+/// defense-in-depth: SQL generation also escapes, but rejecting at the
+/// API boundary is the first line of defense.
+fn validateClusterInput(value: []const u8) bool {
+    if (value.len == 0 or value.len > 256) return false;
+    for (value) |c| {
+        if (c == '\'' or c == '"' or c == ';' or c == '\\') return false;
+        if (c < 0x20) return false; // control characters
+    }
+    return true;
 }
 
 // -- response helpers --
@@ -937,6 +965,26 @@ test "dispatch agent heartbeat routing" {
     defer if (resp.allocated) std.testing.allocator.free(resp.body);
 
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "validateClusterInput accepts normal values" {
+    try std.testing.expect(validateClusterInput("10.0.0.5:7701"));
+    try std.testing.expect(validateClusterInput("nginx:latest"));
+    try std.testing.expect(validateClusterInput("/bin/sh -c echo hello"));
+}
+
+test "validateClusterInput rejects dangerous values" {
+    try std.testing.expect(!validateClusterInput("'; DROP TABLE agents; --"));
+    try std.testing.expect(!validateClusterInput("image\"name"));
+    try std.testing.expect(!validateClusterInput("cmd;rm -rf /"));
+    try std.testing.expect(!validateClusterInput("path\\to\\thing"));
+    try std.testing.expect(!validateClusterInput("")); // empty
+    try std.testing.expect(!validateClusterInput("a" ** 257)); // too long
+}
+
+test "validateClusterInput rejects control characters" {
+    try std.testing.expect(!validateClusterInput("hello\x00world"));
+    try std.testing.expect(!validateClusterInput("line\nbreak"));
 }
 
 test "dispatch agent drain routing" {
