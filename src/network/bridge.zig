@@ -323,10 +323,12 @@ fn addDefaultRoute(fd: posix.fd_t, gw: *const [4]u8) BridgeError!void {
 // -- naming helpers --
 
 /// generate the host-side veth name from a container id.
-/// format: "veth_" + first 6 chars of container id.
-/// writes into a fixed buffer and returns the used slice.
+/// format: "veth_" + first 10 chars of container id.
+/// linux interface names are limited to 15 chars (IFNAMSIZ - 1).
+/// "veth_" is 5 chars, leaving room for 10 ID chars. using 10 instead
+/// of 6 reduces collision probability from ~1/16M to ~1/1T.
 pub fn vethName(container_id: []const u8, buf: *[32]u8) []const u8 {
-    const id_chars = @min(container_id.len, 6);
+    const id_chars = @min(container_id.len, 10);
     const name = std.fmt.bufPrint(buf, "veth_{s}", .{container_id[0..id_chars]}) catch "veth_err";
     return name;
 }
@@ -336,7 +338,7 @@ pub fn vethName(container_id: []const u8, buf: *[32]u8) []const u8 {
 test "veth name generation" {
     var buf: [32]u8 = undefined;
     const name = vethName("abc123def456", &buf);
-    try std.testing.expectEqualStrings("veth_abc123", name);
+    try std.testing.expectEqualStrings("veth_abc123def4", name);
 }
 
 test "veth name short id" {
