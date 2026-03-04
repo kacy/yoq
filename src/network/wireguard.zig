@@ -161,6 +161,95 @@ fn portStr(port: u16) []const u8 {
     return std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch "0";
 }
 
+// -- exec helper --
+
+/// run a command with the given arguments.
+/// returns ExecFailed if spawn or wait fails, or if exit code is non-zero.
+fn exec(args: *const ArgList) WireguardError!void {
+    var count: usize = 0;
+    for (args) |arg| {
+        if (arg == null) break;
+        count += 1;
+    }
+
+    var argv: [max_args][]const u8 = undefined;
+    for (0..count) |i| {
+        argv[i] = args[i].?;
+    }
+
+    var child = std.process.Child.init(argv[0..count], std.heap.page_allocator);
+    child.stdin_behavior = .Close;
+    child.stdout_behavior = .Close;
+    child.stderr_behavior = .Close;
+
+    child.spawn() catch return WireguardError.ExecFailed;
+    const result = child.wait() catch return WireguardError.ExecFailed;
+
+    if (result.Exited != 0) return WireguardError.ExecFailed;
+}
+
+// -- interface management --
+
+/// create a WireGuard interface, set its private key and listen port, and bring it up.
+///
+/// this writes the private key to a temporary file (deleted immediately after),
+/// matching WireGuard's requirement that `wg set` reads the key from a file path.
+///
+/// equivalent to:
+///   ip link add <name> type wireguard
+///   wg set <name> private-key /tmp/yoq-wg-<random> listen-port <port>
+///   ip link set <name> up
+pub fn createInterface(name: []const u8, private_key: []const u8, listen_port: u16) WireguardError!void {
+    // step 1: create the wireguard interface
+    const create_args = buildCreateArgs(name);
+    exec(&create_args) catch return WireguardError.DeviceCreateFailed;
+
+    // step 2: write private key to a temp file
+    // wg set requires reading the key from a file path
+    var tmp_path_buf: [64]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/yoq-wg-{d}", .{std.crypto.random.int(u32)}) catch
+        return WireguardError.DeviceCreateFailed;
+
+    // write the key, configure wg, then delete the file
+    const tmp_file = std.fs.cwd().createFile(tmp_path, .{ .mode = 0o600 }) catch
+        return WireguardError.DeviceCreateFailed;
+
+    tmp_file.writeAll(private_key) catch {
+        tmp_file.close();
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return WireguardError.DeviceCreateFailed;
+    };
+    tmp_file.close();
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    // step 3: configure the interface with wg set
+    const wg_args = buildWgSetArgs(name, tmp_path, listen_port);
+    exec(&wg_args) catch {
+        // try to clean up the interface we created
+        const del_args = buildDeleteArgs(name);
+        exec(&del_args) catch {};
+        return WireguardError.DeviceCreateFailed;
+    };
+
+    // step 4: bring the interface up
+    const up_args = buildLinkUpArgs(name);
+    exec(&up_args) catch {
+        const del_args = buildDeleteArgs(name);
+        exec(&del_args) catch {};
+        return WireguardError.DeviceCreateFailed;
+    };
+}
+
+/// delete a WireGuard interface.
+///
+/// equivalent to: ip link del <name>
+pub fn deleteInterface(name: []const u8) WireguardError!void {
+    const args = buildDeleteArgs(name);
+    exec(&args) catch return WireguardError.DeviceDeleteFailed;
+}
+
+// -- key generation --
+
 /// generate an X25519 keypair for WireGuard.
 /// uses zig's std.crypto — no external tools needed.
 pub fn generateKeyPair() WireguardError!KeyPair {
