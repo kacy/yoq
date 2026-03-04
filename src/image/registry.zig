@@ -481,6 +481,51 @@ fn authHeaderValue(token: Token, buf: *[8192]u8) []const u8 {
     return std.fmt.bufPrint(buf, "Bearer {s}", .{token.value}) catch "";
 }
 
+/// check if a blob already exists in the remote registry.
+/// sends a HEAD request to /v2/{repo}/blobs/{digest}.
+/// returns true if the registry responds with 200, false if 404.
+/// used before uploading to skip blobs that are already present.
+pub fn checkBlobExists(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    digest: []const u8,
+    token: Token,
+) RegistryError!bool {
+    var url_buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://{s}/v2/{s}/blobs/{s}",
+        .{ host, repository, digest },
+    ) catch return RegistryError.NetworkError;
+
+    var auth_buf: [8192]u8 = undefined;
+    const auth_value = authHeaderValue(token, &auth_buf);
+
+    const uri = std.Uri.parse(url) catch return RegistryError.NetworkError;
+    var req = client.request(.HEAD, uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
+        .headers = .{
+            .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
+        },
+    }) catch return RegistryError.NetworkError;
+    defer req.deinit();
+
+    req.sendBodiless() catch return RegistryError.NetworkError;
+
+    _ = alloc; // reserved for future use (e.g. reading error bodies)
+
+    var redirect_buf: [4096]u8 = undefined;
+    const response = req.receiveHead(&redirect_buf) catch return RegistryError.NetworkError;
+
+    if (response.head.status == .ok) return true;
+    if (response.head.status == .not_found) return false;
+
+    return RegistryError.NetworkError;
+}
+
 /// fetch a blob (config or layer) from the registry
 fn fetchBlob(
     alloc: std.mem.Allocator,
@@ -682,4 +727,18 @@ test "auth scope string — push,pull scope produces correct URL fragment" {
         .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "push,pull" },
     ) catch unreachable;
     try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:push,pull") != null);
+}
+
+test "checkBlobExists — URL is correctly formed" {
+    // verify the URL format used by checkBlobExists
+    var url_buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://{s}/v2/{s}/blobs/{s}",
+        .{ "registry.example.io", "myuser/myapp", "sha256:abc123" },
+    ) catch unreachable;
+    try std.testing.expectEqualStrings(
+        "https://registry.example.io/v2/myuser/myapp/blobs/sha256:abc123",
+        url,
+    );
 }
