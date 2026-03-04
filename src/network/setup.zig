@@ -400,7 +400,8 @@ fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const 
 // names are answered without leaving the kernel, while unknown names
 // fall through to the userspace resolver.
 
-/// try to load the DNS interceptor on the bridge. non-fatal.
+/// try to load BPF programs on the bridge. non-fatal.
+/// loads the DNS interceptor and load balancer if BPF is available.
 fn loadDnsInterceptorOnBridge() void {
     // look up the bridge interface index
     const sock = nl.openSocket() catch return;
@@ -413,6 +414,11 @@ fn loadDnsInterceptorOnBridge() void {
         // BPF not available — fall back to userspace-only DNS.
         // this is expected on systems without CAP_BPF or old kernels.
         log.info("ebpf DNS interceptor not loaded (falling back to userspace): {}", .{e});
+        return; // if DNS interceptor fails, skip LB too
+    };
+
+    ebpf.loadLoadBalancer(if_index) catch |e| {
+        log.info("ebpf load balancer not loaded: {}", .{e});
     };
 }
 
