@@ -18,6 +18,9 @@ const orchestrator = @import("manifest/orchestrator.zig");
 const watcher_mod = @import("dev/watcher.zig");
 const manifest_spec = @import("manifest/spec.zig");
 const api_server = @import("api/server.zig");
+const routes = @import("api/routes.zig");
+const cluster_node = @import("cluster/node.zig");
+const cluster_config = @import("cluster/config.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -68,6 +71,10 @@ pub fn main() !void {
         cmdDown(&args, alloc);
     } else if (std.mem.eql(u8, command, "serve")) {
         cmdServe(&args, alloc);
+    } else if (std.mem.eql(u8, command, "init-server")) {
+        cmdInitServer(&args, alloc);
+    } else if (std.mem.eql(u8, command, "cluster")) {
+        cmdCluster(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -839,6 +846,159 @@ fn cmdServe(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     server.run();
 }
 
+fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var node_id: u64 = 1;
+    var raft_port: u16 = 9700;
+    var api_port: u16 = 7700;
+    var peers_str: []const u8 = "";
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--id")) {
+            const id_str = args.next() orelse {
+                writeErr("--id requires a node ID\n", .{});
+                std.process.exit(1);
+            };
+            node_id = std.fmt.parseInt(u64, id_str, 10) catch {
+                writeErr("invalid node id: {s}\n", .{id_str});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--port")) {
+            const port_str = args.next() orelse {
+                writeErr("--port requires a port number\n", .{});
+                std.process.exit(1);
+            };
+            raft_port = std.fmt.parseInt(u16, port_str, 10) catch {
+                writeErr("invalid port: {s}\n", .{port_str});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--api-port")) {
+            const port_str = args.next() orelse {
+                writeErr("--api-port requires a port number\n", .{});
+                std.process.exit(1);
+            };
+            api_port = std.fmt.parseInt(u16, port_str, 10) catch {
+                writeErr("invalid port: {s}\n", .{port_str});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--peers")) {
+            peers_str = args.next() orelse {
+                writeErr("--peers requires peer list\n", .{});
+                std.process.exit(1);
+            };
+        }
+    }
+
+    // resolve data directory
+    var data_dir_buf: [512]u8 = undefined;
+    const data_dir = cluster_config.defaultDataDir(&data_dir_buf) catch {
+        writeErr("failed to create cluster data directory\n", .{});
+        std.process.exit(1);
+    };
+
+    // parse peers
+    const peers = cluster_config.parsePeers(alloc, peers_str) catch {
+        writeErr("invalid peers format. use: id@host:port,id@host:port\n", .{});
+        std.process.exit(1);
+    };
+    defer alloc.free(peers);
+
+    writeErr("starting server node {d} on :{d} (api :{d}) with {d} peers\n", .{
+        node_id, raft_port, api_port, peers.len,
+    });
+
+    // initialize raft node
+    var node = cluster_node.Node.init(alloc, .{
+        .id = node_id,
+        .port = raft_port,
+        .peers = peers,
+        .data_dir = data_dir,
+    }) catch {
+        writeErr("failed to initialize raft node\n", .{});
+        std.process.exit(1);
+    };
+    defer node.deinit();
+
+    node.start() catch {
+        writeErr("failed to start raft node\n", .{});
+        std.process.exit(1);
+    };
+
+    // set cluster node for API routes
+    routes.cluster = &node;
+    defer {
+        routes.cluster = null;
+    }
+
+    // start API server
+    var server = api_server.Server.init(alloc, api_port) catch {
+        writeErr("failed to start API server on port {d}\n", .{api_port});
+        std.process.exit(1);
+    };
+    defer server.deinit();
+
+    orchestrator.installSignalHandlers();
+    server.run();
+
+    node.stop();
+}
+
+fn cmdCluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const subcommand = args.next() orelse {
+        writeErr("usage: yoq cluster <status>\n", .{});
+        std.process.exit(1);
+    };
+
+    if (std.mem.eql(u8, subcommand, "status")) {
+        cmdClusterStatus(alloc);
+    } else {
+        writeErr("unknown cluster subcommand: {s}\n", .{subcommand});
+        std.process.exit(1);
+    }
+}
+
+fn cmdClusterStatus(alloc: std.mem.Allocator) void {
+    // query the local API server for cluster status
+    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch {
+        writeErr("failed to create socket\n", .{});
+        return;
+    };
+    defer std.posix.close(fd);
+
+    const timeout = std.posix.timeval{ .sec = 2, .usec = 0 };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+
+    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 7700);
+    std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {
+        writeErr("cannot connect to API server at localhost:7700\n", .{});
+        return;
+    };
+
+    const request = "GET /cluster/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    _ = std.posix.write(fd, request) catch {
+        writeErr("failed to send request\n", .{});
+        return;
+    };
+
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = std.posix.read(fd, buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+
+    // find body (after \r\n\r\n)
+    const response = buf[0..total];
+    if (std.mem.indexOf(u8, response, "\r\n\r\n")) |body_start| {
+        write("{s}\n", .{response[body_start + 4 ..]});
+    } else {
+        writeErr("invalid response from server\n", .{});
+    }
+
+    _ = alloc;
+}
+
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -850,6 +1010,8 @@ fn printUsage() void {
         \\  up [-f manifest.toml] [--dev]     start services (--dev: watch + restart)
         \\  down [-f manifest.toml]          stop all services from manifest
         \\  serve [--port PORT]             start the API server (default: 7700)
+        \\  init-server [opts]              start a cluster server node
+        \\  cluster status                  show cluster node status
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  ps                               list containers
@@ -870,6 +1032,12 @@ fn printUsage() void {
         \\build options:
         \\  -t <tag>                  image tag (e.g. myapp:latest)
         \\  -f <path>                 Dockerfile path (default: Dockerfile)
+        \\
+        \\cluster options:
+        \\  --id <id>                 node ID (default: 1)
+        \\  --port <port>             raft port (default: 9700)
+        \\  --api-port <port>         API port (default: 7700)
+        \\  --peers <peers>           peers (e.g. 2@10.0.0.2:9700,3@10.0.0.3:9700)
         \\
         \\other options:
         \\  logs --tail N             show last N lines only
@@ -1024,4 +1192,5 @@ comptime {
     _ = @import("cluster/transport.zig");
     _ = @import("cluster/state_machine.zig");
     _ = @import("cluster/node.zig");
+    _ = @import("cluster/config.zig");
 }

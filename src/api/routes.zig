@@ -14,6 +14,10 @@ const process = @import("../runtime/process.zig");
 const logs = @import("../runtime/logs.zig");
 const container = @import("../runtime/container.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
+const cluster_node = @import("../cluster/node.zig");
+
+/// cluster node reference (set by server when running in cluster mode)
+pub var cluster: ?*cluster_node.Node = null;
 
 pub const Response = struct {
     status: http.StatusCode,
@@ -33,6 +37,11 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
         if (std.mem.eql(u8, path, "/version")) return handleVersion();
         if (std.mem.eql(u8, path, "/containers")) return handleListContainers(alloc);
         if (std.mem.eql(u8, path, "/images")) return handleListImages(alloc);
+        if (std.mem.eql(u8, path, "/cluster/status")) return handleClusterStatus(alloc);
+    }
+
+    if (request.method == .POST) {
+        if (std.mem.eql(u8, path, "/cluster/propose")) return handleClusterPropose(alloc, request);
     }
 
     // /containers/{id} routes
@@ -248,6 +257,61 @@ fn handleRemoveImage(id: []const u8) Response {
     return .{
         .status = .ok,
         .body = "{\"status\":\"removed\"}",
+        .allocated = false,
+    };
+}
+
+fn handleClusterStatus(alloc: std.mem.Allocator) Response {
+    const node = cluster orelse {
+        return .{
+            .status = .ok,
+            .body = "{\"cluster\":false}",
+            .allocated = false,
+        };
+    };
+
+    const role_str = switch (node.role()) {
+        .follower => "follower",
+        .candidate => "candidate",
+        .leader => "leader",
+    };
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeAll("{\"cluster\":true") catch return internalError();
+    std.fmt.format(writer, ",\"id\":{d}", .{node.config.id}) catch return internalError();
+    writer.writeAll(",\"role\":\"") catch return internalError();
+    writer.writeAll(role_str) catch return internalError();
+    writer.writeByte('"') catch return internalError();
+    std.fmt.format(writer, ",\"term\":{d}", .{node.currentTerm()}) catch return internalError();
+    std.fmt.format(writer, ",\"peers\":{d}", .{node.config.peers.len}) catch return internalError();
+    writer.writeByte('}') catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleClusterPropose(alloc: std.mem.Allocator, request: http.Request) Response {
+    _ = alloc;
+    const node = cluster orelse {
+        return badRequest("not running in cluster mode");
+    };
+
+    if (request.body.len == 0) return badRequest("missing request body");
+
+    _ = node.propose(request.body) catch {
+        return .{
+            .status = .bad_request,
+            .body = "{\"error\":\"not leader\"}",
+            .allocated = false,
+        };
+    };
+
+    return .{
+        .status = .ok,
+        .body = "{\"status\":\"proposed\"}",
         .allocated = false,
     };
 }
