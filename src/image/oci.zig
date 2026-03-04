@@ -7,6 +7,7 @@
 const std = @import("std");
 const image_spec = @import("spec.zig");
 const store = @import("../state/store.zig");
+const blob_store = @import("store.zig");
 
 pub const ResolvedCommand = struct {
     command: []const u8,
@@ -60,19 +61,27 @@ pub fn resolveCommand(
 }
 
 /// save an image record after a successful pull.
-/// consolidates the common pattern of building an ImageRecord from
-/// a parsed image reference and pull results.
+/// stores manifest and config blobs in the content-addressable store,
+/// then records metadata in sqlite for later lookup (e.g. for push).
 pub fn saveImageFromPull(
     ref: image_spec.ImageRef,
     manifest_digest: []const u8,
+    manifest_bytes: []const u8,
+    config_bytes: []const u8,
+    config_digest: []const u8,
     total_size: usize,
 ) store.StoreError!void {
+    // persist manifest and config blobs so they can be read back for push.
+    // putBlob is idempotent — if the blob already exists, it's a no-op.
+    _ = blob_store.putBlob(manifest_bytes) catch return store.StoreError.WriteFailed;
+    _ = blob_store.putBlob(config_bytes) catch return store.StoreError.WriteFailed;
+
     return store.saveImage(.{
         .id = manifest_digest,
         .repository = ref.repository,
         .tag = ref.reference,
         .manifest_digest = manifest_digest,
-        .config_digest = "sha256:config",
+        .config_digest = config_digest,
         .total_size = @intCast(total_size),
         .created_at = std.time.timestamp(),
     });

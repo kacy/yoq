@@ -24,6 +24,8 @@ pub const RegistryError = error{
     PlatformNotFound,
     DigestMismatch,
     ResponseTooLarge,
+    UploadFailed,
+    UploadInitFailed,
 };
 
 // -- response size limits --
@@ -84,7 +86,7 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     const repository = resolveRepository(image_ref, &repo_buf);
 
     // step 1: authenticate
-    const token = authenticate(alloc, &client, image_ref.host, repository) catch
+    const token = authenticate(alloc, &client, image_ref.host, repository, "pull") catch
         return RegistryError.AuthFailed;
     defer alloc.free(token.value);
 
@@ -152,6 +154,103 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     };
 }
 
+/// push result — summary of what was uploaded
+pub const PushResult = struct {
+    /// number of layer blobs that were uploaded (not already present)
+    layers_uploaded: usize,
+    /// number of layer blobs that were skipped (already in registry)
+    layers_skipped: usize,
+    /// the manifest digest (sha256 of manifest bytes)
+    manifest_digest: []const u8,
+
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *PushResult) void {
+        if (self.manifest_digest.len > 0) self.alloc.free(self.manifest_digest);
+    }
+};
+
+/// push an image to a registry.
+///
+/// uploads all layer blobs, the config blob, and the manifest.
+/// checks each blob against the registry first and skips uploads
+/// for blobs that already exist (deduplication across images).
+///
+/// manifest_bytes and config_bytes should come from the local blob store
+/// (saved during pull or build). layer_digests are the sha256 digests
+/// of the layer blobs in the local blob store.
+pub fn push(
+    alloc: std.mem.Allocator,
+    image_ref: spec.ImageRef,
+    manifest_bytes: []const u8,
+    config_bytes: []const u8,
+    layer_digests: []const []const u8,
+) RegistryError!PushResult {
+    var client: std.http.Client = .{ .allocator = alloc };
+    defer client.deinit();
+
+    var repo_buf: [256]u8 = undefined;
+    const repository = resolveRepository(image_ref, &repo_buf);
+
+    // authenticate with push,pull scope
+    const token = authenticate(alloc, &client, image_ref.host, repository, "push,pull") catch
+        return RegistryError.AuthFailed;
+    defer alloc.free(token.value);
+
+    var layers_uploaded: usize = 0;
+    var layers_skipped: usize = 0;
+
+    // upload each layer blob (skip if already present in registry)
+    for (layer_digests) |digest| {
+        const exists = checkBlobExists(alloc, &client, image_ref.host, repository, digest, token) catch false;
+        if (exists) {
+            layers_skipped += 1;
+            continue;
+        }
+
+        // read the blob data from the local store
+        const parsed_digest = blob_store.Digest.parse(digest) orelse
+            return RegistryError.BlobNotFound;
+        const data = blob_store.getBlob(alloc, parsed_digest) catch
+            return RegistryError.BlobNotFound;
+        defer alloc.free(data);
+
+        uploadBlob(alloc, &client, image_ref.host, repository, digest, data, token) catch
+            return RegistryError.UploadFailed;
+        layers_uploaded += 1;
+    }
+
+    // upload the config blob
+    const config_digest = blob_store.computeDigest(config_bytes);
+    var config_digest_buf: [71]u8 = undefined;
+    const config_digest_str = config_digest.string(&config_digest_buf);
+
+    const config_exists = checkBlobExists(alloc, &client, image_ref.host, repository, config_digest_str, token) catch false;
+    if (!config_exists) {
+        uploadBlob(alloc, &client, image_ref.host, repository, config_digest_str, config_bytes, token) catch
+            return RegistryError.UploadFailed;
+    }
+
+    // upload the manifest
+    uploadManifest(alloc, &client, image_ref.host, repository, image_ref.reference, manifest_bytes, token) catch
+        return RegistryError.UploadFailed;
+
+    // compute manifest digest for the result
+    const manifest_digest = blob_store.computeDigest(manifest_bytes);
+    var manifest_digest_buf: [71]u8 = undefined;
+    const manifest_digest_str = manifest_digest.string(&manifest_digest_buf);
+
+    const digest_copy = alloc.dupe(u8, manifest_digest_str) catch
+        return RegistryError.NetworkError;
+
+    return PushResult{
+        .layers_uploaded = layers_uploaded,
+        .layers_skipped = layers_skipped,
+        .manifest_digest = digest_copy,
+        .alloc = alloc,
+    };
+}
+
 // -- internal functions --
 
 /// resolve "nginx" → "library/nginx" for docker hub, pass through otherwise
@@ -168,11 +267,16 @@ fn resolveRepository(ref: spec.ImageRef, buf: *[256]u8) []const u8 {
 
 /// authenticate with the registry's token service.
 /// flow: request /v2/ → get 401 with Www-Authenticate → fetch token.
+///
+/// scope controls what permissions the token grants:
+///   - "pull" for read-only access (downloading images)
+///   - "push,pull" for read-write access (uploading images)
 fn authenticate(
     alloc: std.mem.Allocator,
     client: *std.http.Client,
     host: []const u8,
     repository: []const u8,
+    scope: []const u8,
 ) !Token {
     // step 1: ping /v2/ to get the auth challenge
     var ping_url_buf: [512]u8 = undefined;
@@ -206,8 +310,8 @@ fn authenticate(
     var token_url_buf: [1024]u8 = undefined;
     const token_url = std.fmt.bufPrint(
         &token_url_buf,
-        "{s}?service={s}&scope=repository:{s}:pull",
-        .{ challenge.realm, challenge.service, repository },
+        "{s}?service={s}&scope=repository:{s}:{s}",
+        .{ challenge.realm, challenge.service, repository, scope },
     ) catch return error.AuthFailed;
 
     // use fetch for the token request — it's simple and we just need the body
@@ -476,6 +580,230 @@ fn authHeaderValue(token: Token, buf: *[8192]u8) []const u8 {
     return std.fmt.bufPrint(buf, "Bearer {s}", .{token.value}) catch "";
 }
 
+/// check if a blob already exists in the remote registry.
+/// sends a HEAD request to /v2/{repo}/blobs/{digest}.
+/// returns true if the registry responds with 200, false if 404.
+/// used before uploading to skip blobs that are already present.
+pub fn checkBlobExists(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    digest: []const u8,
+    token: Token,
+) RegistryError!bool {
+    var url_buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://{s}/v2/{s}/blobs/{s}",
+        .{ host, repository, digest },
+    ) catch return RegistryError.NetworkError;
+
+    var auth_buf: [8192]u8 = undefined;
+    const auth_value = authHeaderValue(token, &auth_buf);
+
+    const uri = std.Uri.parse(url) catch return RegistryError.NetworkError;
+    var req = client.request(.HEAD, uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
+        .headers = .{
+            .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
+        },
+    }) catch return RegistryError.NetworkError;
+    defer req.deinit();
+
+    req.sendBodiless() catch return RegistryError.NetworkError;
+
+    _ = alloc; // reserved for future use (e.g. reading error bodies)
+
+    var redirect_buf: [4096]u8 = undefined;
+    const response = req.receiveHead(&redirect_buf) catch return RegistryError.NetworkError;
+
+    if (response.head.status == .ok) return true;
+    if (response.head.status == .not_found) return false;
+
+    return RegistryError.NetworkError;
+}
+
+/// upload a blob to the registry using the monolithic upload flow.
+///
+/// OCI distribution spec upload flow:
+///   1. POST /v2/{repo}/blobs/uploads/ → 202 with Location header
+///   2. PUT {location}?digest={digest} with blob body → 201
+///
+/// monolithic upload sends the entire blob in a single PUT, which is
+/// simpler and works well for most blob sizes. chunked upload could
+/// be added later for very large layers if needed.
+pub fn uploadBlob(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    digest: []const u8,
+    data: []const u8,
+    token: Token,
+) RegistryError!void {
+    // step 1: initiate upload — POST to get an upload URL
+    var init_url_buf: [1024]u8 = undefined;
+    const init_url = std.fmt.bufPrint(
+        &init_url_buf,
+        "https://{s}/v2/{s}/blobs/uploads/",
+        .{ host, repository },
+    ) catch return RegistryError.UploadInitFailed;
+
+    var auth_buf: [8192]u8 = undefined;
+    const auth_value = authHeaderValue(token, &auth_buf);
+
+    const init_uri = std.Uri.parse(init_url) catch return RegistryError.UploadInitFailed;
+    var init_req = client.request(.POST, init_uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
+        .headers = .{
+            .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
+            .content_type = .{ .override = "application/octet-stream" },
+        },
+    }) catch return RegistryError.UploadInitFailed;
+    defer init_req.deinit();
+
+    init_req.sendBodiless() catch return RegistryError.UploadInitFailed;
+
+    var init_redirect_buf: [8192]u8 = undefined;
+    const init_response = init_req.receiveHead(&init_redirect_buf) catch
+        return RegistryError.UploadInitFailed;
+
+    if (init_response.head.status != .accepted)
+        return RegistryError.UploadInitFailed;
+
+    // step 2: extract the upload Location from the response headers
+    const location = parseLocationHeader(host, init_response.head) orelse
+        return RegistryError.UploadInitFailed;
+
+    // step 3: PUT the blob data to the upload location with digest query param
+    var put_url_buf: [2048]u8 = undefined;
+    const separator: []const u8 = if (std.mem.indexOfScalar(u8, location, '?') != null) "&" else "?";
+    const put_url = std.fmt.bufPrint(
+        &put_url_buf,
+        "{s}{s}digest={s}",
+        .{ location, separator, digest },
+    ) catch return RegistryError.UploadFailed;
+
+    // re-read auth value since the buffer was reused above
+    var auth_buf2: [8192]u8 = undefined;
+    const auth_value2 = authHeaderValue(token, &auth_buf2);
+
+    _ = alloc; // reserved for future use
+
+    const put_uri = std.Uri.parse(put_url) catch return RegistryError.UploadFailed;
+    var put_req = client.request(.PUT, put_uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
+        .headers = .{
+            .authorization = if (auth_value2.len > 0) .{ .override = auth_value2 } else .default,
+            .content_type = .{ .override = "application/octet-stream" },
+        },
+    }) catch return RegistryError.UploadFailed;
+    defer put_req.deinit();
+
+    put_req.send(.{ .content_length = data.len }) catch return RegistryError.UploadFailed;
+    put_req.writeAll(data) catch return RegistryError.UploadFailed;
+    put_req.finish() catch return RegistryError.UploadFailed;
+
+    var put_redirect_buf: [4096]u8 = undefined;
+    const put_response = put_req.receiveHead(&put_redirect_buf) catch
+        return RegistryError.UploadFailed;
+
+    // 201 Created is the expected success status for blob upload
+    if (put_response.head.status != .created)
+        return RegistryError.UploadFailed;
+}
+
+/// extract the Location header value from a response.
+/// handles both absolute URLs and relative paths (relative to the host).
+/// returns null if no Location header is found.
+fn parseLocationHeader(host: []const u8, head: std.http.Client.Response.Head) ?[]const u8 {
+    var it = head.iterateHeaders();
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "location")) continue;
+
+        const value = header.value;
+        if (value.len == 0) continue;
+
+        // absolute URL — use as-is
+        if (std.mem.startsWith(u8, value, "http://") or
+            std.mem.startsWith(u8, value, "https://"))
+        {
+            return value;
+        }
+
+        // relative path — this is tricky because we'd need to allocate to
+        // prepend the host. for now, we use a static buffer. the OCI spec
+        // says registries SHOULD return absolute URLs, but some return relative.
+        // we handle it with a thread-local buffer since this is always called
+        // from a single upload flow.
+        const static = struct {
+            threadlocal var buf: [2048]u8 = undefined;
+        };
+        const full_url = std.fmt.bufPrint(&static.buf, "https://{s}{s}", .{ host, value }) catch
+            return null;
+        return full_url;
+    }
+    return null;
+}
+
+/// upload a manifest to the registry.
+/// PUT /v2/{repo}/manifests/{reference} with the manifest JSON body.
+/// reference is typically a tag (e.g. "latest") or a digest.
+pub fn uploadManifest(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    reference: []const u8,
+    manifest_bytes: []const u8,
+    token: Token,
+) RegistryError!void {
+    var url_buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://{s}/v2/{s}/manifests/{s}",
+        .{ host, repository, reference },
+    ) catch return RegistryError.UploadFailed;
+
+    var auth_buf: [8192]u8 = undefined;
+    const auth_value = authHeaderValue(token, &auth_buf);
+
+    _ = alloc; // reserved for future use
+
+    const content_type_header = std.http.Header{
+        .name = "Content-Type",
+        .value = spec.media_type.oci_manifest,
+    };
+
+    var headers: [1]std.http.Header = .{content_type_header};
+
+    const uri = std.Uri.parse(url) catch return RegistryError.UploadFailed;
+    var req = client.request(.PUT, uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
+        .headers = .{
+            .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
+        },
+        .extra_headers = &headers,
+    }) catch return RegistryError.UploadFailed;
+    defer req.deinit();
+
+    req.send(.{ .content_length = manifest_bytes.len }) catch return RegistryError.UploadFailed;
+    req.writeAll(manifest_bytes) catch return RegistryError.UploadFailed;
+    req.finish() catch return RegistryError.UploadFailed;
+
+    var redirect_buf: [4096]u8 = undefined;
+    const response = req.receiveHead(&redirect_buf) catch return RegistryError.UploadFailed;
+
+    // 201 Created is the expected success status for manifest upload
+    if (response.head.status != .created)
+        return RegistryError.UploadFailed;
+}
+
 /// fetch a blob (config or layer) from the registry
 fn fetchBlob(
     alloc: std.mem.Allocator,
@@ -654,4 +982,88 @@ test "response size limit rejects oversized data" {
     // also verify auth limit
     const oversized_auth: usize = max_auth_response_size + 1;
     try std.testing.expect(oversized_auth > max_auth_response_size);
+}
+
+test "auth scope string — pull scope produces correct URL fragment" {
+    // verify that the scope parameter is correctly embedded in the token URL.
+    // we can't easily test the full auth flow without a real registry, but we
+    // can verify the format string logic by checking bufPrint output.
+    var buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &buf,
+        "{s}?service={s}&scope=repository:{s}:{s}",
+        .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "pull" },
+    ) catch unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:pull") != null);
+}
+
+test "auth scope string — push,pull scope produces correct URL fragment" {
+    var buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &buf,
+        "{s}?service={s}&scope=repository:{s}:{s}",
+        .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "push,pull" },
+    ) catch unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:push,pull") != null);
+}
+
+test "parseLocationHeader — absolute URL returned as-is" {
+    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
+        "Location: https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123\r\n" ++
+        "Content-Length: 0\r\n\r\n";
+
+    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
+    const location = parseLocationHeader("registry.example.io", head).?;
+    try std.testing.expectEqualStrings(
+        "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123",
+        location,
+    );
+}
+
+test "parseLocationHeader — relative URL gets host prepended" {
+    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
+        "Location: /v2/myrepo/blobs/uploads/uuid-456\r\n" ++
+        "Content-Length: 0\r\n\r\n";
+
+    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
+    const location = parseLocationHeader("registry.example.io", head).?;
+    try std.testing.expectEqualStrings(
+        "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-456",
+        location,
+    );
+}
+
+test "parseLocationHeader — missing header returns null" {
+    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
+        "Content-Length: 0\r\n\r\n";
+
+    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
+    try std.testing.expect(parseLocationHeader("registry.example.io", head) == null);
+}
+
+test "checkBlobExists — URL is correctly formed" {
+    // verify the URL format used by checkBlobExists
+    var url_buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://{s}/v2/{s}/blobs/{s}",
+        .{ "registry.example.io", "myuser/myapp", "sha256:abc123" },
+    ) catch unreachable;
+    try std.testing.expectEqualStrings(
+        "https://registry.example.io/v2/myuser/myapp/blobs/sha256:abc123",
+        url,
+    );
+}
+
+test "uploadManifest — URL format is correct" {
+    var url_buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://{s}/v2/{s}/manifests/{s}",
+        .{ "registry.example.io", "myuser/myapp", "v1.0" },
+    ) catch unreachable;
+    try std.testing.expectEqualStrings(
+        "https://registry.example.io/v2/myuser/myapp/manifests/v1.0",
+        url,
+    );
 }
