@@ -632,7 +632,7 @@ test "log replication: leader sends entries, follower appends" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    var a1 = leader.drainActions();
+    const a1 = leader.drainActions();
     defer alloc.free(a1);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
@@ -705,13 +705,13 @@ test "commit advancement when majority matches" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    var ea = leader.drainActions();
+    const ea = leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    var la = leader.drainActions();
+    const la = leader.drainActions();
     defer {
         for (la) |action| {
             if (action == .send_append_entries) {
@@ -726,7 +726,7 @@ test "commit advancement when majority matches" {
     const idx = try leader.propose("cmd1");
     try testing.expectEqual(@as(LogIndex, 1), idx);
 
-    var pa = leader.drainActions();
+    const pa = leader.drainActions();
     defer {
         for (pa) |action| {
             if (action == .send_append_entries) {
@@ -778,7 +778,7 @@ test "election timeout triggers new election with higher term" {
     }
     const term1 = raft.currentTerm();
     try testing.expectEqual(Role.candidate, raft.role);
-    var a1 = raft.drainActions();
+    const a1 = raft.drainActions();
     defer alloc.free(a1);
 
     // no votes received, timeout again -> new election with higher term
@@ -789,7 +789,7 @@ test "election timeout triggers new election with higher term" {
     try testing.expect(term2 > term1);
     try testing.expectEqual(Role.candidate, raft.role);
 
-    var a2 = raft.drainActions();
+    const a2 = raft.drainActions();
     defer alloc.free(a2);
 }
 
@@ -823,7 +823,7 @@ test "log conflict: follower truncates on mismatch" {
     try testing.expectEqual(@as(Term, 2), entry.term);
     try testing.expectEqualStrings("new", entry.data);
 
-    var a = follower.drainActions();
+    const a = follower.drainActions();
     defer alloc.free(a);
 }
 
