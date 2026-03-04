@@ -55,7 +55,8 @@ pub fn heartbeatSql(
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
 
     return std.fmt.bufPrint(buf,
-        \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, last_heartbeat = {d}
+        \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, last_heartbeat = {d},
+        \\ status = CASE WHEN status = 'offline' THEN 'active' ELSE status END
         \\ WHERE id = '{s}';
     , .{ resources.cpu_used, resources.memory_used_mb, resources.containers, now, id_esc });
 }
@@ -282,7 +283,7 @@ test "registerSql escapes single quotes in address" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "10.0.0.5''; DROP TABLE agents; --") != null);
 }
 
-test "heartbeatSql generates valid SQL" {
+test "heartbeatSql generates valid SQL with status recovery" {
     var buf: [512]u8 = undefined;
     const sql = try heartbeatSql(&buf, "abc123def456", .{
         .cpu_cores = 4,
@@ -294,6 +295,101 @@ test "heartbeatSql generates valid SQL" {
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "UPDATE agents SET") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
+    // should include CASE expression for status recovery
+    try std.testing.expect(std.mem.indexOf(u8, sql, "CASE WHEN status = 'offline' THEN 'active' ELSE status END") != null);
+}
+
+test "heartbeatSql restores offline agent to active" {
+    var db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    }) catch return;
+    defer db.deinit();
+
+    db.exec(
+        \\CREATE TABLE agents (
+        \\    id TEXT PRIMARY KEY,
+        \\    address TEXT NOT NULL,
+        \\    status TEXT NOT NULL DEFAULT 'active',
+        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
+        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
+        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
+        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
+        \\    containers INTEGER NOT NULL DEFAULT 0,
+        \\    last_heartbeat INTEGER NOT NULL,
+        \\    registered_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return;
+
+    // insert an offline agent
+    db.exec(
+        \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, last_heartbeat, registered_at)
+        \\ VALUES ('test12345678', '10.0.0.1:7701', 'offline', 4, 8192, 1000, 1000);
+    , .{}, .{}) catch return;
+
+    // apply heartbeat — should restore to active
+    var sql_buf: [512]u8 = undefined;
+    const sql = heartbeatSql(&sql_buf, "test12345678", .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+        .cpu_used = 1,
+        .memory_used_mb = 2048,
+        .containers = 2,
+    }, 2000) catch return;
+    db.execDynamic(sql, .{}, .{}) catch return;
+
+    const alloc = std.testing.allocator;
+    const agent = (try getAgent(alloc, &db, "test12345678")).?;
+    defer agent.deinit(alloc);
+
+    try std.testing.expectEqualStrings("active", agent.status);
+    try std.testing.expectEqual(@as(i64, 2000), agent.last_heartbeat);
+}
+
+test "heartbeatSql preserves draining status" {
+    var db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    }) catch return;
+    defer db.deinit();
+
+    db.exec(
+        \\CREATE TABLE agents (
+        \\    id TEXT PRIMARY KEY,
+        \\    address TEXT NOT NULL,
+        \\    status TEXT NOT NULL DEFAULT 'active',
+        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
+        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
+        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
+        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
+        \\    containers INTEGER NOT NULL DEFAULT 0,
+        \\    last_heartbeat INTEGER NOT NULL,
+        \\    registered_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return;
+
+    // insert a draining agent
+    db.exec(
+        \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, last_heartbeat, registered_at)
+        \\ VALUES ('test12345678', '10.0.0.1:7701', 'draining', 4, 8192, 1000, 1000);
+    , .{}, .{}) catch return;
+
+    // apply heartbeat — should NOT override draining
+    var sql_buf: [512]u8 = undefined;
+    const sql = heartbeatSql(&sql_buf, "test12345678", .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+        .cpu_used = 1,
+        .memory_used_mb = 2048,
+        .containers = 2,
+    }, 2000) catch return;
+    db.execDynamic(sql, .{}, .{}) catch return;
+
+    const alloc = std.testing.allocator;
+    const agent = (try getAgent(alloc, &db, "test12345678")).?;
+    defer agent.deinit(alloc);
+
+    try std.testing.expectEqualStrings("draining", agent.status);
 }
 
 test "drainSql generates valid SQL" {
