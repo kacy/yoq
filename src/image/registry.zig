@@ -24,6 +24,8 @@ pub const RegistryError = error{
     PlatformNotFound,
     DigestMismatch,
     ResponseTooLarge,
+    UploadFailed,
+    UploadInitFailed,
 };
 
 // -- response size limits --
@@ -526,6 +528,131 @@ pub fn checkBlobExists(
     return RegistryError.NetworkError;
 }
 
+/// upload a blob to the registry using the monolithic upload flow.
+///
+/// OCI distribution spec upload flow:
+///   1. POST /v2/{repo}/blobs/uploads/ → 202 with Location header
+///   2. PUT {location}?digest={digest} with blob body → 201
+///
+/// monolithic upload sends the entire blob in a single PUT, which is
+/// simpler and works well for most blob sizes. chunked upload could
+/// be added later for very large layers if needed.
+pub fn uploadBlob(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    digest: []const u8,
+    data: []const u8,
+    token: Token,
+) RegistryError!void {
+    // step 1: initiate upload — POST to get an upload URL
+    var init_url_buf: [1024]u8 = undefined;
+    const init_url = std.fmt.bufPrint(
+        &init_url_buf,
+        "https://{s}/v2/{s}/blobs/uploads/",
+        .{ host, repository },
+    ) catch return RegistryError.UploadInitFailed;
+
+    var auth_buf: [8192]u8 = undefined;
+    const auth_value = authHeaderValue(token, &auth_buf);
+
+    const init_uri = std.Uri.parse(init_url) catch return RegistryError.UploadInitFailed;
+    var init_req = client.request(.POST, init_uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
+        .headers = .{
+            .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
+            .content_type = .{ .override = "application/octet-stream" },
+        },
+    }) catch return RegistryError.UploadInitFailed;
+    defer init_req.deinit();
+
+    init_req.sendBodiless() catch return RegistryError.UploadInitFailed;
+
+    var init_redirect_buf: [8192]u8 = undefined;
+    const init_response = init_req.receiveHead(&init_redirect_buf) catch
+        return RegistryError.UploadInitFailed;
+
+    if (init_response.head.status != .accepted)
+        return RegistryError.UploadInitFailed;
+
+    // step 2: extract the upload Location from the response headers
+    const location = parseLocationHeader(host, init_response.head) orelse
+        return RegistryError.UploadInitFailed;
+
+    // step 3: PUT the blob data to the upload location with digest query param
+    var put_url_buf: [2048]u8 = undefined;
+    const separator: []const u8 = if (std.mem.indexOfScalar(u8, location, '?') != null) "&" else "?";
+    const put_url = std.fmt.bufPrint(
+        &put_url_buf,
+        "{s}{s}digest={s}",
+        .{ location, separator, digest },
+    ) catch return RegistryError.UploadFailed;
+
+    // re-read auth value since the buffer was reused above
+    var auth_buf2: [8192]u8 = undefined;
+    const auth_value2 = authHeaderValue(token, &auth_buf2);
+
+    _ = alloc; // reserved for future use
+
+    const put_uri = std.Uri.parse(put_url) catch return RegistryError.UploadFailed;
+    var put_req = client.request(.PUT, put_uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
+        .headers = .{
+            .authorization = if (auth_value2.len > 0) .{ .override = auth_value2 } else .default,
+            .content_type = .{ .override = "application/octet-stream" },
+        },
+    }) catch return RegistryError.UploadFailed;
+    defer put_req.deinit();
+
+    put_req.send(.{ .content_length = data.len }) catch return RegistryError.UploadFailed;
+    put_req.writeAll(data) catch return RegistryError.UploadFailed;
+    put_req.finish() catch return RegistryError.UploadFailed;
+
+    var put_redirect_buf: [4096]u8 = undefined;
+    const put_response = put_req.receiveHead(&put_redirect_buf) catch
+        return RegistryError.UploadFailed;
+
+    // 201 Created is the expected success status for blob upload
+    if (put_response.head.status != .created)
+        return RegistryError.UploadFailed;
+}
+
+/// extract the Location header value from a response.
+/// handles both absolute URLs and relative paths (relative to the host).
+/// returns null if no Location header is found.
+fn parseLocationHeader(host: []const u8, head: std.http.Client.Response.Head) ?[]const u8 {
+    var it = head.iterateHeaders();
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "location")) continue;
+
+        const value = header.value;
+        if (value.len == 0) continue;
+
+        // absolute URL — use as-is
+        if (std.mem.startsWith(u8, value, "http://") or
+            std.mem.startsWith(u8, value, "https://"))
+        {
+            return value;
+        }
+
+        // relative path — this is tricky because we'd need to allocate to
+        // prepend the host. for now, we use a static buffer. the OCI spec
+        // says registries SHOULD return absolute URLs, but some return relative.
+        // we handle it with a thread-local buffer since this is always called
+        // from a single upload flow.
+        const static = struct {
+            threadlocal var buf: [2048]u8 = undefined;
+        };
+        const full_url = std.fmt.bufPrint(&static.buf, "https://{s}{s}", .{ host, value }) catch
+            return null;
+        return full_url;
+    }
+    return null;
+}
+
 /// fetch a blob (config or layer) from the registry
 fn fetchBlob(
     alloc: std.mem.Allocator,
@@ -727,6 +854,40 @@ test "auth scope string — push,pull scope produces correct URL fragment" {
         .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "push,pull" },
     ) catch unreachable;
     try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:push,pull") != null);
+}
+
+test "parseLocationHeader — absolute URL returned as-is" {
+    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
+        "Location: https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123\r\n" ++
+        "Content-Length: 0\r\n\r\n";
+
+    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
+    const location = parseLocationHeader("registry.example.io", head).?;
+    try std.testing.expectEqualStrings(
+        "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123",
+        location,
+    );
+}
+
+test "parseLocationHeader — relative URL gets host prepended" {
+    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
+        "Location: /v2/myrepo/blobs/uploads/uuid-456\r\n" ++
+        "Content-Length: 0\r\n\r\n";
+
+    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
+    const location = parseLocationHeader("registry.example.io", head).?;
+    try std.testing.expectEqualStrings(
+        "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-456",
+        location,
+    );
+}
+
+test "parseLocationHeader — missing header returns null" {
+    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
+        "Content-Length: 0\r\n\r\n";
+
+    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
+    try std.testing.expect(parseLocationHeader("registry.example.io", head) == null);
 }
 
 test "checkBlobExists — URL is correctly formed" {
