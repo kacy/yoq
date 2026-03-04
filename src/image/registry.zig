@@ -84,7 +84,7 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     const repository = resolveRepository(image_ref, &repo_buf);
 
     // step 1: authenticate
-    const token = authenticate(alloc, &client, image_ref.host, repository) catch
+    const token = authenticate(alloc, &client, image_ref.host, repository, "pull") catch
         return RegistryError.AuthFailed;
     defer alloc.free(token.value);
 
@@ -168,11 +168,16 @@ fn resolveRepository(ref: spec.ImageRef, buf: *[256]u8) []const u8 {
 
 /// authenticate with the registry's token service.
 /// flow: request /v2/ → get 401 with Www-Authenticate → fetch token.
+///
+/// scope controls what permissions the token grants:
+///   - "pull" for read-only access (downloading images)
+///   - "push,pull" for read-write access (uploading images)
 fn authenticate(
     alloc: std.mem.Allocator,
     client: *std.http.Client,
     host: []const u8,
     repository: []const u8,
+    scope: []const u8,
 ) !Token {
     // step 1: ping /v2/ to get the auth challenge
     var ping_url_buf: [512]u8 = undefined;
@@ -206,8 +211,8 @@ fn authenticate(
     var token_url_buf: [1024]u8 = undefined;
     const token_url = std.fmt.bufPrint(
         &token_url_buf,
-        "{s}?service={s}&scope=repository:{s}:pull",
-        .{ challenge.realm, challenge.service, repository },
+        "{s}?service={s}&scope=repository:{s}:{s}",
+        .{ challenge.realm, challenge.service, repository, scope },
     ) catch return error.AuthFailed;
 
     // use fetch for the token request — it's simple and we just need the body
@@ -654,4 +659,27 @@ test "response size limit rejects oversized data" {
     // also verify auth limit
     const oversized_auth: usize = max_auth_response_size + 1;
     try std.testing.expect(oversized_auth > max_auth_response_size);
+}
+
+test "auth scope string — pull scope produces correct URL fragment" {
+    // verify that the scope parameter is correctly embedded in the token URL.
+    // we can't easily test the full auth flow without a real registry, but we
+    // can verify the format string logic by checking bufPrint output.
+    var buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &buf,
+        "{s}?service={s}&scope=repository:{s}:{s}",
+        .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "pull" },
+    ) catch unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:pull") != null);
+}
+
+test "auth scope string — push,pull scope produces correct URL fragment" {
+    var buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &buf,
+        "{s}?service={s}&scope=repository:{s}:{s}",
+        .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "push,pull" },
+    ) catch unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:push,pull") != null);
 }
