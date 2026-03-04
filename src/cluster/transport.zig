@@ -4,8 +4,16 @@
 // (low volume heartbeats + occasional log entries) so blocking TCP
 // with short timeouts is fine — no need for io_uring here.
 //
-// wire format:
+// wire format (unauthenticated):
 //   [4B length] [1B type] [payload...]
+//
+// wire format (authenticated, when shared_key is set):
+//   [4B length] [32B HMAC-SHA256] [1B type] [payload...]
+//
+// the HMAC is computed over [type byte + payload]. the 32-byte tag is
+// prepended to the body. the length prefix covers hmac + type + payload.
+// on receive, the HMAC is verified using constant-time comparison before
+// the message is decoded. connections are dropped on mismatch.
 //
 // message types:
 //   0x01 = RequestVote
@@ -37,11 +45,14 @@ const AppendEntriesReply = types.AppendEntriesReply;
 const InstallSnapshotArgs = types.InstallSnapshotArgs;
 const InstallSnapshotReply = types.InstallSnapshotReply;
 
+const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+
 pub const TransportError = error{
     ConnectFailed,
     SendFailed,
     ReceiveFailed,
     InvalidMessage,
+    AuthenticationFailed,
     PeerNotFound,
 };
 
@@ -81,6 +92,12 @@ pub const Transport = struct {
     listen_fd: posix.socket_t,
     peers: std.AutoHashMap(NodeId, PeerAddr),
 
+    /// optional shared key for HMAC authentication on raft messages.
+    /// when null, messages are sent/received without authentication
+    /// (single-node mode or during initial bootstrap).
+    /// when set, all messages include a 32-byte HMAC-SHA256 tag.
+    shared_key: ?[32]u8,
+
     pub fn init(alloc: std.mem.Allocator, port: u16) !Transport {
         const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
         errdefer posix.close(fd);
@@ -97,6 +114,7 @@ pub const Transport = struct {
             .alloc = alloc,
             .listen_fd = fd,
             .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+            .shared_key = null,
         };
     }
 
@@ -116,6 +134,9 @@ pub const Transport = struct {
     ///
     /// snapshot messages use dynamic allocation since they can be megabytes.
     /// all other RPCs use a fixed stack buffer.
+    ///
+    /// when shared_key is set, computes HMAC-SHA256 over [type + payload]
+    /// and prepends the 32-byte tag to the body before sending.
     pub fn send(self: *Transport, target: NodeId, msg: Message) TransportError!void {
         const peer = self.peers.get(target) orelse return TransportError.PeerNotFound;
 
@@ -125,7 +146,10 @@ pub const Transport = struct {
                 return TransportError.SendFailed;
             defer self.alloc.free(encoded);
 
-            self.sendBytes(peer, encoded) catch return TransportError.SendFailed;
+            const final = self.applyHmac(encoded) catch return TransportError.SendFailed;
+            defer if (final.ptr != encoded.ptr) self.alloc.free(final);
+
+            self.sendBytes(peer, final) catch return TransportError.SendFailed;
             return;
         }
 
@@ -133,7 +157,30 @@ pub const Transport = struct {
         var buf: [8192]u8 = undefined;
         const len = encode(&buf, msg) catch return TransportError.SendFailed;
 
-        self.sendBytes(peer, buf[0..len]) catch return TransportError.SendFailed;
+        const final = self.applyHmac(buf[0..len]) catch return TransportError.SendFailed;
+        defer if (final.ptr != buf[0..len].ptr) self.alloc.free(final);
+
+        self.sendBytes(peer, final) catch return TransportError.SendFailed;
+    }
+
+    /// if shared_key is set, compute HMAC over the body portion of `data`
+    /// (everything after the 4-byte length prefix) and produce a new buffer
+    /// with the HMAC inserted: [4B new_length] [32B HMAC] [type + payload].
+    /// returns `data` unchanged if no key is configured.
+    fn applyHmac(self: *Transport, data: []const u8) ![]const u8 {
+        const key = self.shared_key orelse return data;
+        if (data.len < 5) return TransportError.SendFailed;
+
+        const body = data[4..]; // type + payload
+        var hmac_tag: [32]u8 = undefined;
+        HmacSha256.create(&hmac_tag, body, &key);
+
+        const new_len: u32 = @intCast(body.len + 32); // hmac + original body
+        const out = try self.alloc.alloc(u8, 4 + 32 + body.len);
+        std.mem.writeInt(u32, out[0..4], new_len, .little);
+        @memcpy(out[4..36], &hmac_tag);
+        @memcpy(out[36..], body);
+        return out;
     }
 
     /// open a TCP connection to a peer and send the bytes.
@@ -162,6 +209,9 @@ pub const Transport = struct {
 
     /// accept a connection and read one message. non-blocking on accept.
     /// returns null if no connection is pending.
+    ///
+    /// when shared_key is set, verifies HMAC before decoding. drops the
+    /// connection (returns AuthenticationFailed) on mismatch.
     pub fn receive(self: *Transport, alloc: std.mem.Allocator) TransportError!?ReceivedMessage {
         var client_addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
@@ -191,7 +241,24 @@ pub const Transport = struct {
 
         readExact(client_fd, body) catch return TransportError.ReceiveFailed;
 
-        const msg = decode(alloc, body) catch return TransportError.InvalidMessage;
+        // if HMAC authentication is enabled, verify before decoding
+        const payload = if (self.shared_key) |key| blk: {
+            // authenticated format: [32B HMAC] [1B type] [payload...]
+            if (body.len < 33) return TransportError.AuthenticationFailed;
+
+            const received_hmac = body[0..32];
+            const signed_data = body[32..]; // type + payload
+
+            var expected: [32]u8 = undefined;
+            HmacSha256.create(&expected, signed_data, &key);
+            if (!std.crypto.timing_safe.eql([32]u8, received_hmac.*, expected)) {
+                return TransportError.AuthenticationFailed;
+            }
+
+            break :blk signed_data;
+        } else body;
+
+        const msg = decode(alloc, payload) catch return TransportError.InvalidMessage;
 
         return ReceivedMessage{
             .from_addr = std.net.Address{ .any = client_addr },
@@ -760,4 +827,89 @@ test "decode rejects truncated install snapshot reply" {
 
     const result = decode(alloc, &buf);
     try std.testing.expectError(error.InvalidMessage, result);
+}
+
+// -- HMAC authentication tests --
+
+test "hmac round-trip: compute and verify succeeds" {
+    const key: [32]u8 = "test-key-for-hmac-verification!!".*;
+    const message = [_]u8{msg_request_vote} ++ [_]u8{0} ** 32;
+
+    // compute HMAC
+    var tag: [32]u8 = undefined;
+    HmacSha256.create(&tag, &message, &key);
+
+    // verify should succeed
+    var expected: [32]u8 = undefined;
+    HmacSha256.create(&expected, &message, &key);
+    try std.testing.expect(std.crypto.timing_safe.eql([32]u8, tag, expected));
+}
+
+test "hmac rejects message with wrong key" {
+    const key_a: [32]u8 = "key-aaaaaaaaaaaaaaaaaaaaaaaaaaaa".*;
+    const key_b: [32]u8 = "key-bbbbbbbbbbbbbbbbbbbbbbbbbbbb".*;
+    const message = [_]u8{msg_append_entries} ++ [_]u8{1} ** 44;
+
+    var tag_a: [32]u8 = undefined;
+    HmacSha256.create(&tag_a, &message, &key_a);
+    var tag_b: [32]u8 = undefined;
+    HmacSha256.create(&tag_b, &message, &key_b);
+
+    // tags from different keys must not match
+    try std.testing.expect(!std.crypto.timing_safe.eql([32]u8, tag_a, tag_b));
+}
+
+test "applyHmac produces correct authenticated format" {
+    const alloc = std.testing.allocator;
+
+    // build a small message: [4B length] [1B type] [data]
+    var plain: [10]u8 = undefined;
+    std.mem.writeInt(u32, plain[0..4], 6, .little); // body len = 6
+    plain[4] = msg_request_vote_reply;
+    @memset(plain[5..], 0xAB);
+
+    var transport = Transport{
+        .alloc = alloc,
+        .listen_fd = -1,
+        .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .shared_key = "test-key-32-bytes-exactly-here!!".*,
+    };
+    defer transport.peers.deinit();
+
+    const authenticated = try transport.applyHmac(&plain);
+    defer alloc.free(authenticated);
+
+    // result should be: [4B new_length] [32B HMAC] [original body]
+    try std.testing.expectEqual(@as(usize, 4 + 32 + 6), authenticated.len);
+
+    // the new length should be 32 + 6 = 38
+    const new_len = std.mem.readInt(u32, authenticated[0..4], .little);
+    try std.testing.expectEqual(@as(u32, 38), new_len);
+
+    // verify the HMAC matches what we expect
+    const body = plain[4..]; // type + payload
+    var expected_hmac: [32]u8 = undefined;
+    HmacSha256.create(&expected_hmac, body, &transport.shared_key.?);
+    try std.testing.expectEqualSlices(u8, &expected_hmac, authenticated[4..36]);
+
+    // the original body should be preserved after the HMAC
+    try std.testing.expectEqualSlices(u8, body, authenticated[36..]);
+}
+
+test "applyHmac returns data unchanged when no key" {
+    const alloc = std.testing.allocator;
+
+    var plain = [_]u8{ 0x06, 0x00, 0x00, 0x00, msg_request_vote, 0, 0, 0, 0, 0 };
+
+    var transport = Transport{
+        .alloc = alloc,
+        .listen_fd = -1,
+        .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .shared_key = null,
+    };
+    defer transport.peers.deinit();
+
+    const result = try transport.applyHmac(&plain);
+    // should return the same pointer — no allocation
+    try std.testing.expectEqual(@as(*const u8, &plain[0]), &result[0]);
 }
