@@ -125,6 +125,40 @@ pub const RT_TABLE = struct {
     pub const MAIN: u8 = 254;
 };
 
+/// TC (traffic control) attribute types (TCA_*)
+pub const TCA = struct {
+    pub const KIND: u16 = 1;
+    pub const OPTIONS: u16 = 2;
+    pub const BPF_FD: u16 = 1;
+    pub const BPF_NAME: u16 = 2;
+    pub const BPF_FLAGS: u16 = 3;
+    pub const BPF_FLAGS_GEN: u16 = 4;
+};
+
+/// TC handle/parent constants
+pub const TC_H = struct {
+    pub const INGRESS: u32 = 0xFFFFFFF1;
+    pub const CLSACT: u32 = 0xFFFF0000;
+    pub const MIN_INGRESS: u32 = 0xFFF2;
+    pub const MIN_EGRESS: u32 = 0xFFF3;
+};
+
+/// TC BPF flags
+pub const TCA_BPF = struct {
+    pub const FLAG_ACT_DIRECT: u32 = 1;
+};
+
+/// from linux/pkt_sched.h — used for TC qdisc/filter operations
+pub const TcMsg = extern struct {
+    family: u8,
+    _pad1: u8,
+    _pad2: u16,
+    ifindex: i32,
+    handle: u32,
+    parent: u32,
+    info: u32,
+};
+
 /// interface flags
 pub const IFF = struct {
     pub const UP: u32 = 0x1;
@@ -451,4 +485,32 @@ test "nested attributes" {
     // inner attr: rtattr (4) + "bridge\0" (7) = 11, aligned to 12
     // nested total: 4 + 12 = 16
     try std.testing.expectEqual(@as(u16, 16), nested.len);
+}
+
+test "tcmsg struct layout" {
+    // TcMsg must be 20 bytes to match the kernel's tc_msg
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(TcMsg));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(TcMsg, "family"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(TcMsg, "ifindex"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(TcMsg, "handle"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(TcMsg, "parent"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(TcMsg, "info"));
+}
+
+test "tc message builder" {
+    var buf: [buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&buf);
+
+    // build a TC qdisc add message (similar to what ebpf.zig does)
+    const hdr = try mb.putHeader(.RTM_NEWQDISC, NLM_F.REQUEST | NLM_F.ACK | NLM_F.CREATE, TcMsg);
+    const tc = mb.getPayload(hdr, TcMsg);
+    tc.family = 0;
+    tc.ifindex = 5;
+    tc.handle = TC_H.CLSACT;
+    tc.parent = TC_H.INGRESS;
+
+    try mb.putAttrStr(hdr, TCA.KIND, "clsact");
+
+    // header (16) + TcMsg (20) = 36, plus "clsact\0" attr (4 + 7 = 11, aligned 12) = 48
+    try std.testing.expectEqual(@as(u32, 48), hdr.len);
 }
