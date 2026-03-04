@@ -146,10 +146,13 @@ pub const Server = struct {
     alloc: std.mem.Allocator,
     listen_fd: posix.fd_t,
     port: u16,
+    bind_addr: [4]u8,
 
     /// create a server bound to the given port.
-    /// sets up the socket, binds, and starts listening.
-    pub fn init(alloc: std.mem.Allocator, port: u16) ServerError!Server {
+    /// bind_addr controls the listen address:
+    ///   - .{ 127, 0, 0, 1 } for single-node mode (localhost only)
+    ///   - .{ 0, 0, 0, 0 }   for cluster mode (all interfaces)
+    pub fn init(alloc: std.mem.Allocator, port: u16, bind_addr: [4]u8) ServerError!Server {
         // create TCP socket
         const fd = posix.socket(
             posix.AF.INET,
@@ -162,8 +165,7 @@ pub const Server = struct {
         const optval: c_int = 1;
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&optval)) catch {};
 
-        // bind to 0.0.0.0:port
-        const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+        const addr = std.net.Address.initIp4(bind_addr, port);
         posix.bind(fd, &addr.any, addr.getOsSockLen()) catch return ServerError.BindFailed;
 
         // start listening with a backlog of 128
@@ -173,6 +175,7 @@ pub const Server = struct {
             .alloc = alloc,
             .listen_fd = fd,
             .port = port,
+            .bind_addr = bind_addr,
         };
     }
 
@@ -183,7 +186,11 @@ pub const Server = struct {
     /// run the server event loop. blocks until shutdown is requested.
     /// tries io_uring first, falls back to blocking accept.
     pub fn run(self: *Server) void {
-        log.info("listening on 0.0.0.0:{d}", .{self.port});
+        log.info("listening on {d}.{d}.{d}.{d}:{d}", .{
+            self.bind_addr[0], self.bind_addr[1],
+            self.bind_addr[2], self.bind_addr[3],
+            self.port,
+        });
 
         // try io_uring first
         if (self.runIoUring()) return;
@@ -363,7 +370,7 @@ fn writeAll(fd: posix.fd_t, data: []const u8) void {
 
 test "server init and deinit" {
     // use port 0 to let the OS assign a free port
-    var server = Server.init(std.testing.allocator, 0) catch {
+    var server = Server.init(std.testing.allocator, 0, .{ 127, 0, 0, 1 }) catch {
         // socket creation might fail in restricted environments
         return;
     };
@@ -371,6 +378,7 @@ test "server init and deinit" {
 
     // the listen fd should be valid
     try std.testing.expect(server.listen_fd >= 0);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, server.bind_addr);
 }
 
 // -- rate limiter tests --
