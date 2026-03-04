@@ -57,6 +57,10 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     if (path.len > "/agents/".len and std.mem.startsWith(u8, path, "/agents/")) {
         const rest = path["/agents/".len..];
 
+        // validate the ID portion of the path (everything before the first /)
+        const agent_id_end = std.mem.indexOf(u8, rest, "/") orelse rest.len;
+        if (!validateContainerId(rest[0..agent_id_end])) return badRequest("invalid agent id");
+
         if (matchSubpath(rest, "/heartbeat")) |id| {
             if (request.method != .POST) return methodNotAllowed();
             return handleAgentHeartbeat(alloc, request, id);
@@ -82,6 +86,10 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     // /containers/{id} routes
     if (path.len > "/containers/".len and std.mem.startsWith(u8, path, "/containers/")) {
         const rest = path["/containers/".len..];
+
+        // validate the ID portion of the path
+        const container_id_end = std.mem.indexOf(u8, rest, "/") orelse rest.len;
+        if (!validateContainerId(rest[0..container_id_end])) return badRequest("invalid container id");
 
         // /containers/{id}/logs
         if (matchSubpath(rest, "/logs")) |id| {
@@ -755,6 +763,18 @@ fn validateClusterInput(value: []const u8) bool {
     return true;
 }
 
+/// validate that a container or agent ID from a URL path is safe.
+/// IDs are always 12 hex chars from generateId(), but the API accepts
+/// arbitrary strings from HTTP requests. defense-in-depth: reject
+/// anything that isn't lowercase hex.
+fn validateContainerId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 64) return false;
+    for (id) |c| {
+        if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'))) return false;
+    }
+    return true;
+}
+
 // -- response helpers --
 
 fn notFound() Response {
@@ -1042,6 +1062,43 @@ test "dispatch agent drain routing" {
     cluster = null;
     const req = (try http.parseRequest(
         "POST /agents/abc123/drain HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "validateContainerId accepts valid hex ids" {
+    try std.testing.expect(validateContainerId("abc123def456"));
+    try std.testing.expect(validateContainerId("0123456789ab"));
+    try std.testing.expect(validateContainerId("deadbeef"));
+}
+
+test "validateContainerId rejects invalid ids" {
+    try std.testing.expect(!validateContainerId("")); // empty
+    try std.testing.expect(!validateContainerId("ABCDEF")); // uppercase
+    try std.testing.expect(!validateContainerId("abc-123")); // hyphen
+    try std.testing.expect(!validateContainerId("abc_123")); // underscore
+    try std.testing.expect(!validateContainerId("../etc")); // path traversal
+    try std.testing.expect(!validateContainerId("abc;rm")); // injection
+    try std.testing.expect(!validateContainerId("a" ** 65)); // too long
+}
+
+test "dispatch rejects non-hex container id" {
+    const req = (try http.parseRequest(
+        "GET /containers/INVALID! HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "dispatch rejects non-hex agent id" {
+    cluster = null;
+    const req = (try http.parseRequest(
+        "POST /agents/NOT-HEX!/heartbeat HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
     )).?;
     const resp = dispatch(req, std.testing.allocator);
     defer if (resp.allocated) std.testing.allocator.free(resp.body);
