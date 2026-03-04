@@ -409,7 +409,8 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
 
     if (request.body.len == 0) return badRequest("missing request body");
 
-    // parse JSON body manually: {"token":"...","address":"...","cpu_cores":N,"memory_mb":N}
+    // parse JSON body: {"token":"...","address":"...","cpu_cores":N,"memory_mb":N}
+    // optional WG fields: "wg_public_key":"...", "wg_listen_port":N
     const token = extractJsonString(request.body, "token") orelse
         return badRequest("missing token field");
     const address = extractJsonString(request.body, "address") orelse
@@ -418,6 +419,10 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
         return badRequest("missing cpu_cores field");
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse
         return badRequest("missing memory_mb field");
+
+    // optional wireguard fields
+    const wg_public_key = extractJsonString(request.body, "wg_public_key");
+    const wg_listen_port = extractJsonInt(request.body, "wg_listen_port");
 
     if (!validateClusterInput(address)) {
         return badRequest("invalid address");
@@ -435,9 +440,61 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
     var id_buf: [12]u8 = undefined;
     agent_registry.generateAgentId(&id_buf);
 
-    // generate SQL and propose through raft
-    var sql_buf: [1024]u8 = undefined;
-    const sql = agent_registry.registerSql(
+    // if wireguard info is provided, assign a node_id and compute networking
+    var assigned_node_id: ?u8 = null;
+    var overlay_ip_str: ?[]const u8 = null;
+    var overlay_ip_buf: [16]u8 = undefined;
+    var container_subnet_buf: [20]u8 = undefined;
+    var container_subnet: ?[]const u8 = null;
+    var endpoint_buf: [64]u8 = undefined;
+    var endpoint: ?[]const u8 = null;
+
+    if (wg_public_key) |pub_key| {
+        if (!validateClusterInput(pub_key)) {
+            return badRequest("invalid wg_public_key");
+        }
+
+        const db = node.stateMachineDb();
+        const nid = agent_registry.assignNodeId(db) catch {
+            return .{
+                .status = .internal_server_error,
+                .body = "{\"error\":\"no available node_id\"}",
+                .allocated = false,
+            };
+        };
+        assigned_node_id = nid;
+
+        // overlay_ip: 10.40.0.{node_id}
+        overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.0.{d}", .{nid}) catch null;
+
+        // container_subnet: 10.42.{node_id}.0/24
+        container_subnet = std.fmt.bufPrint(&container_subnet_buf, "10.42.{d}.0/24", .{nid}) catch null;
+
+        // endpoint: {address}:{wg_listen_port}
+        const port: u16 = if (wg_listen_port) |p| @intCast(p) else 51820;
+        endpoint = std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;
+
+        // propose wireguard peer record through raft
+        if (endpoint != null and overlay_ip_str != null and container_subnet != null) {
+            var peer_sql_buf: [1024]u8 = undefined;
+            const peer_sql = agent_registry.wireguardPeerSql(
+                &peer_sql_buf,
+                nid,
+                &id_buf,
+                pub_key,
+                endpoint.?,
+                overlay_ip_str.?,
+                container_subnet.?,
+            ) catch {
+                return internalError();
+            };
+            _ = node.propose(peer_sql) catch {};
+        }
+    }
+
+    // generate SQL and propose agent registration through raft
+    var sql_buf: [2048]u8 = undefined;
+    const sql = agent_registry.registerSqlFull(
         &sql_buf,
         &id_buf,
         address,
@@ -446,6 +503,9 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
             .memory_mb = @intCast(memory_mb),
         },
         std.time.timestamp(),
+        assigned_node_id,
+        wg_public_key,
+        overlay_ip_str,
     ) catch return internalError();
 
     _ = node.propose(sql) catch {
@@ -456,13 +516,63 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
         };
     };
 
-    // return the agent ID
+    // build response JSON
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
     const writer = json_buf.writer(alloc);
+
     writer.writeAll("{\"id\":\"") catch return internalError();
     writer.writeAll(&id_buf) catch return internalError();
-    writer.writeAll("\"}") catch return internalError();
+    writer.writeByte('"') catch return internalError();
+
+    if (assigned_node_id) |nid| {
+        std.fmt.format(writer, ",\"node_id\":{d}", .{nid}) catch return internalError();
+    }
+    if (overlay_ip_str) |oip| {
+        writer.writeAll(",\"overlay_ip\":\"") catch return internalError();
+        writer.writeAll(oip) catch return internalError();
+        writer.writeByte('"') catch return internalError();
+    }
+
+    // include existing peers so the new agent can configure its WireGuard interface
+    if (assigned_node_id != null) {
+        const db = node.stateMachineDb();
+        const peers = agent_registry.listWireguardPeers(alloc, db) catch {
+            // non-fatal — agent can fetch peers later
+            writer.writeByte('}') catch return internalError();
+            const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+            return .{ .status = .ok, .body = body, .allocated = true };
+        };
+        defer {
+            for (peers) |p| p.deinit(alloc);
+            alloc.free(peers);
+        }
+
+        writer.writeAll(",\"peers\":[") catch return internalError();
+        var first = true;
+        for (peers) |peer| {
+            // skip the agent itself (it was just inserted above)
+            if (peer.node_id == @as(i64, assigned_node_id.?)) continue;
+
+            if (!first) writer.writeByte(',') catch return internalError();
+            first = false;
+
+            writer.writeAll("{\"node_id\":") catch return internalError();
+            std.fmt.format(writer, "{d}", .{peer.node_id}) catch return internalError();
+            writer.writeAll(",\"public_key\":\"") catch return internalError();
+            json_helpers.writeJsonEscaped(writer, peer.public_key) catch return internalError();
+            writer.writeAll("\",\"endpoint\":\"") catch return internalError();
+            json_helpers.writeJsonEscaped(writer, peer.endpoint) catch return internalError();
+            writer.writeAll("\",\"overlay_ip\":\"") catch return internalError();
+            json_helpers.writeJsonEscaped(writer, peer.overlay_ip) catch return internalError();
+            writer.writeAll("\",\"container_subnet\":\"") catch return internalError();
+            json_helpers.writeJsonEscaped(writer, peer.container_subnet) catch return internalError();
+            writer.writeAll("\"}") catch return internalError();
+        }
+        writer.writeByte(']') catch return internalError();
+    }
+
+    writer.writeByte('}') catch return internalError();
 
     const body = json_buf.toOwnedSlice(alloc) catch return internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
@@ -880,6 +990,23 @@ fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void {
     try std.fmt.format(writer, "{d}", .{agent.containers});
     try writer.writeAll(",\"last_heartbeat\":");
     try std.fmt.format(writer, "{d}", .{agent.last_heartbeat});
+
+    // include wireguard fields when present
+    if (agent.node_id) |nid| {
+        try writer.writeAll(",\"node_id\":");
+        try std.fmt.format(writer, "{d}", .{nid});
+    }
+    if (agent.wg_public_key) |key| {
+        try writer.writeAll(",\"wg_public_key\":\"");
+        try json_helpers.writeJsonEscaped(writer, key);
+        try writer.writeByte('"');
+    }
+    if (agent.overlay_ip) |oip| {
+        try writer.writeAll(",\"overlay_ip\":\"");
+        try json_helpers.writeJsonEscaped(writer, oip);
+        try writer.writeByte('"');
+    }
+
     try writer.writeByte('}');
 }
 
