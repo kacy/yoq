@@ -295,7 +295,7 @@ const upstream_port: u16 = 53;
 
 var resolver_thread: ?std.Thread = null;
 var resolver_socket: ?posix.socket_t = null;
-var resolver_running: bool = false;
+var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var resolver_mutex: std.Thread.Mutex = .{};
 
 /// start the DNS resolver thread. idempotent — safe to call multiple times.
@@ -303,7 +303,7 @@ pub fn startResolver() void {
     resolver_mutex.lock();
     defer resolver_mutex.unlock();
 
-    if (resolver_running) return;
+    if (resolver_running.load(.acquire)) return;
 
     // create UDP socket with CLOEXEC so it isn't inherited by child
     // processes (e.g. iptables spawned during container setup)
@@ -325,11 +325,11 @@ pub fn startResolver() void {
     };
 
     resolver_socket = sock;
-    resolver_running = true;
+    resolver_running.store(true, .release);
 
     resolver_thread = std.Thread.spawn(.{}, resolverLoop, .{sock}) catch |e| {
         log.warn("dns: failed to spawn resolver thread: {}", .{e});
-        resolver_running = false;
+        resolver_running.store(false, .release);
         posix.close(sock);
         resolver_socket = null;
         return;
@@ -342,12 +342,12 @@ pub fn startResolver() void {
 pub fn stopResolver() void {
     resolver_mutex.lock();
 
-    if (!resolver_running) {
+    if (!resolver_running.load(.acquire)) {
         resolver_mutex.unlock();
         return;
     }
 
-    resolver_running = false;
+    resolver_running.store(false, .release);
 
     // close the socket to unblock recvfrom
     if (resolver_socket) |sock| {
@@ -370,13 +370,13 @@ pub fn stopResolver() void {
 fn resolverLoop(sock: posix.socket_t) void {
     var recv_buf: [512]u8 = undefined;
 
-    while (resolver_running) {
+    while (resolver_running.load(.acquire)) {
         var client_addr: posix.sockaddr.in = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
 
         const n = posix.recvfrom(sock, &recv_buf, 0, @ptrCast(&client_addr), &addr_len) catch {
             // socket closed or error — check if we should stop
-            if (!resolver_running) break;
+            if (!resolver_running.load(.acquire)) break;
             continue;
         };
 
