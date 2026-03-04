@@ -469,6 +469,7 @@ fn processRun(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) Bu
         .command = args,
         .env = state.env.items,
         .workdir = state.workdir,
+        .shell = state.shell,
     };
 
     // spawn the build container in namespaces
@@ -1033,7 +1034,7 @@ fn processOnbuild(args: []const u8) void {
 // -- cache helpers --
 
 fn computeCacheKey(alloc: std.mem.Allocator, instruction: []const u8, args: []const u8, state: *const BuildState) ![]const u8 {
-    // cache key = sha256(instruction + "\n" + args + "\n" + parent_digest + "\n" + sorted_env)
+    // cache key = sha256(instruction + "\n" + args + "\n" + parent_digest + "\n" + env + shell)
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(instruction);
     hasher.update("\n");
@@ -1045,6 +1046,14 @@ fn computeCacheKey(alloc: std.mem.Allocator, instruction: []const u8, args: []co
     // include environment in cache key (already ordered by insertion)
     for (state.env.items) |env| {
         hasher.update(env);
+        hasher.update("\n");
+    }
+
+    // include shell in cache key — a different shell produces different
+    // RUN results even with the same command
+    if (state.shell) |sh| {
+        hasher.update("shell:");
+        hasher.update(sh);
         hasher.update("\n");
     }
 
@@ -1196,6 +1205,8 @@ const BuildChildContext = struct {
     command: []const u8,
     env: []const []const u8,
     workdir: []const u8,
+    /// custom shell from SHELL instruction, null means use default /bin/sh -c
+    shell: ?[]const u8,
 };
 
 fn buildChildMain(arg: ?*anyopaque) callconv(.c) u8 {
@@ -1221,20 +1232,43 @@ fn buildChildMain(arg: ?*anyopaque) callconv(.c) u8 {
         posix.chdir("/") catch {};
     };
 
-    // exec: /bin/sh -c "<command>"
-    return execShellCommand(ctx.command, ctx.env);
+    // exec command using the configured shell (or /bin/sh -c by default)
+    return execShellCommand(ctx.command, ctx.env, ctx.shell);
 }
 
-/// execute a shell command via /bin/sh -c
-fn execShellCommand(command: []const u8, env: []const []const u8) u8 {
+/// execute a command using the specified shell (or /bin/sh -c by default).
+/// the shell parameter is in JSON array form: ["/bin/bash", "-c"]
+fn execShellCommand(command: []const u8, env: []const []const u8, shell: ?[]const u8) u8 {
     var str_buf: [65536]u8 = undefined;
     var str_pos: usize = 0;
 
-    // argv: /bin/sh -c "command"
-    var argv: [4]?[*:0]const u8 = .{null} ** 4;
-    argv[0] = exec_helpers.packString(&str_buf, &str_pos, "/bin/sh") orelse return 127;
-    argv[1] = exec_helpers.packString(&str_buf, &str_pos, "-c") orelse return 127;
-    argv[2] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return 127;
+    // parse shell from JSON form if provided, otherwise use default
+    var argv: [16]?[*:0]const u8 = .{null} ** 16;
+    var argv_len: usize = 0;
+
+    if (shell) |sh| {
+        // parse JSON array form: ["/bin/bash", "-c"]
+        // simple parser: strip brackets, split on commas, strip quotes
+        const trimmed = std.mem.trim(u8, sh, " \t[]");
+        var iter = std.mem.splitScalar(u8, trimmed, ',');
+        while (iter.next()) |entry| {
+            if (argv_len >= argv.len - 2) break; // leave room for command + null
+            const part = std.mem.trim(u8, entry, " \t\"");
+            if (part.len == 0) continue;
+            argv[argv_len] = exec_helpers.packString(&str_buf, &str_pos, part) orelse return 127;
+            argv_len += 1;
+        }
+    }
+
+    // fall back to /bin/sh -c if shell wasn't set or parsing produced nothing
+    if (argv_len == 0) {
+        argv[0] = exec_helpers.packString(&str_buf, &str_pos, "/bin/sh") orelse return 127;
+        argv[1] = exec_helpers.packString(&str_buf, &str_pos, "-c") orelse return 127;
+        argv_len = 2;
+    }
+
+    // append the command as the final argument
+    argv[argv_len] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return 127;
 
     // envp
     var envp: [257]?[*:0]const u8 = .{null} ** 257;
@@ -2234,4 +2268,111 @@ test "findStageByRef — not found" {
 
     const found2 = findStageByRef(&stages, &states, "5");
     try std.testing.expect(found2 == null);
+}
+
+// -- SHELL affecting RUN tests --
+
+test "processShell sets shell that would be used by RUN" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    // default: no shell set
+    try std.testing.expect(state.shell == null);
+
+    // after SHELL instruction
+    processShell(alloc, &state, "[\"/bin/bash\", \"-c\"]");
+    try std.testing.expectEqualStrings("[\"/bin/bash\", \"-c\"]", state.shell.?);
+
+    // BuildChildContext would receive this shell
+    const child_ctx = BuildChildContext{
+        .layer_dirs = &.{},
+        .upper_dir = "/tmp",
+        .work_dir = "/tmp",
+        .merged_dir = "/tmp",
+        .command = "echo hello",
+        .env = &.{},
+        .workdir = "/",
+        .shell = state.shell,
+    };
+    try std.testing.expectEqualStrings("[\"/bin/bash\", \"-c\"]", child_ctx.shell.?);
+}
+
+test "shell does not leak across stages" {
+    const alloc = std.testing.allocator;
+
+    // stage 1: sets SHELL
+    var state1 = BuildState.init(alloc);
+    defer state1.deinit();
+    processShell(alloc, &state1, "[\"/bin/bash\", \"-c\"]");
+
+    // stage 2: fresh state, shell should be null
+    var state2 = BuildState.init(alloc);
+    defer state2.deinit();
+
+    try std.testing.expectEqualStrings("[\"/bin/bash\", \"-c\"]", state1.shell.?);
+    try std.testing.expect(state2.shell == null);
+}
+
+test "shell resets to default when null" {
+    // verify that a BuildChildContext with null shell means default /bin/sh -c
+    const child_ctx = BuildChildContext{
+        .layer_dirs = &.{},
+        .upper_dir = "/tmp",
+        .work_dir = "/tmp",
+        .merged_dir = "/tmp",
+        .command = "echo hello",
+        .env = &.{},
+        .workdir = "/",
+        .shell = null,
+    };
+    try std.testing.expect(child_ctx.shell == null);
+}
+
+test "shell with powershell-style args" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    // some Dockerfiles use SHELL for Windows-style shells
+    processShell(alloc, &state, "[\"/usr/bin/env\", \"bash\", \"-c\"]");
+    try std.testing.expectEqualStrings("[\"/usr/bin/env\", \"bash\", \"-c\"]", state.shell.?);
+}
+
+test "cache key changes when shell changes" {
+    const alloc = std.testing.allocator;
+
+    var state1 = BuildState.init(alloc);
+    defer state1.deinit();
+
+    var state2 = BuildState.init(alloc);
+    defer state2.deinit();
+    state2.shell = try alloc.dupe(u8, "[\"/bin/bash\", \"-c\"]");
+
+    // same RUN command, different shell — should produce different cache keys
+    const key1 = try computeCacheKey(alloc, "RUN", "echo hello", &state1);
+    defer alloc.free(key1);
+    const key2 = try computeCacheKey(alloc, "RUN", "echo hello", &state2);
+    defer alloc.free(key2);
+
+    try std.testing.expect(!std.mem.eql(u8, key1, key2));
+}
+
+test "cache key same when shell is same" {
+    const alloc = std.testing.allocator;
+
+    var state1 = BuildState.init(alloc);
+    defer state1.deinit();
+    state1.shell = try alloc.dupe(u8, "[\"/bin/bash\", \"-c\"]");
+
+    var state2 = BuildState.init(alloc);
+    defer state2.deinit();
+    state2.shell = try alloc.dupe(u8, "[\"/bin/bash\", \"-c\"]");
+
+    const key1 = try computeCacheKey(alloc, "RUN", "echo hello", &state1);
+    defer alloc.free(key1);
+    const key2 = try computeCacheKey(alloc, "RUN", "echo hello", &state2);
+    defer alloc.free(key2);
+
+    try std.testing.expectEqualStrings(key1, key2);
 }
