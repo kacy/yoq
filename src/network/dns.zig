@@ -13,12 +13,17 @@
 // the in-memory registry is the hot path for lookups. the SQLite
 // service_names table provides persistence across restarts.
 //
+// in cluster mode, lookups that miss the local registry fall through
+// to the replicated service_names table (via cluster_db), providing
+// transparent cross-node DNS resolution.
+//
 // thread model: single resolver thread, blocking recvfrom().
 // the mutex around the registry is fine — critical section is
 // an array scan + 4-byte IP copy.
 
 const std = @import("std");
 const posix = std.posix;
+const sqlite = @import("sqlite");
 const log = @import("../lib/log.zig");
 const ip_mod = @import("ip.zig");
 
@@ -50,6 +55,47 @@ var registry: [max_services]ServiceEntry = [_]ServiceEntry{.{
 }} ** max_services;
 var registry_count: usize = 0;
 var registry_mutex: std.Thread.Mutex = .{};
+
+// -- cluster DNS --
+//
+// optional reference to the replicated state machine DB. when set,
+// lookups that miss the local in-memory registry fall through to
+// the service_names table, enabling cross-node name resolution.
+// the DB is owned by the raft state machine — we just read from it.
+
+var cluster_db: ?*sqlite.Db = null;
+
+/// set the cluster database for cross-node DNS lookups.
+/// called during agent startup after raft state machine is initialized.
+/// pass null to disable cluster lookups (single-node mode).
+pub fn setClusterDb(db: ?*sqlite.Db) void {
+    cluster_db = db;
+}
+
+/// look up a service name in the replicated cluster database.
+/// queries the service_names table for the IP address.
+/// returns null if the name isn't found or the DB isn't available.
+pub fn lookupClusterService(name: []const u8) ?[4]u8 {
+    const db = cluster_db orelse return null;
+
+    const Row = struct { ip_address: sqlite.Text };
+
+    // query the service_names table for the most recently registered
+    // entry with this name. multiple containers may share a name
+    // (replicas), so we take the latest registration.
+    var stmt = db.prepare(
+        "SELECT ip_address FROM service_names WHERE name = ? ORDER BY registered_at DESC LIMIT 1;",
+    ) catch return null;
+    defer stmt.deinit();
+
+    const row = stmt.oneAlloc(Row, std.heap.page_allocator, .{}, .{name}) catch return null;
+    if (row) |r| {
+        defer std.heap.page_allocator.free(r.ip_address.data);
+        return ip_mod.parseIp(r.ip_address.data);
+    }
+
+    return null;
+}
 
 /// register a service name for a container IP.
 /// if the same name already exists, the IP is updated (last-write-wins).
@@ -157,25 +203,31 @@ fn detectNameConflict(name: []const u8, new_container_id: []const u8, _: [4]u8) 
 }
 
 /// look up the IP for a service name. returns null if not found.
+/// checks the local in-memory registry first, then falls through to
+/// the cluster database if available (cross-node resolution).
 /// if multiple containers share a name, returns the last registered (last-write-wins).
-fn lookupService(name: []const u8) ?[4]u8 {
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+pub fn lookupService(name: []const u8) ?[4]u8 {
+    // check local in-memory registry first (hot path)
+    {
+        registry_mutex.lock();
+        defer registry_mutex.unlock();
 
-    // scan backwards to get the most recently registered entry
-    var i: usize = max_services;
-    while (i > 0) {
-        i -= 1;
-        const entry = &registry[i];
-        if (entry.active and
-            entry.name_len == name.len and
-            std.mem.eql(u8, entry.name[0..entry.name_len], name))
-        {
-            return entry.ip;
+        // scan backwards to get the most recently registered entry
+        var i: usize = max_services;
+        while (i > 0) {
+            i -= 1;
+            const entry = &registry[i];
+            if (entry.active and
+                entry.name_len == name.len and
+                std.mem.eql(u8, entry.name[0..entry.name_len], name))
+            {
+                return entry.ip;
+            }
         }
     }
 
-    return null;
+    // not found locally — try the cluster database for cross-node resolution
+    return lookupClusterService(name);
 }
 
 // -- DNS wire format --
@@ -1078,4 +1130,120 @@ test "ipToU32 — correct conversion" {
     try std.testing.expectEqual(@as(u32, 0x08080808), ipToU32(.{ 8, 8, 8, 8 }));
     try std.testing.expectEqual(@as(u32, 0x00000000), ipToU32(.{ 0, 0, 0, 0 }));
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), ipToU32(.{ 255, 255, 255, 255 }));
+}
+
+// -- cluster DNS tests --
+
+test "lookupClusterService returns null when no cluster db" {
+    // ensure cluster_db is null (default state)
+    const prev = cluster_db;
+    cluster_db = null;
+    defer cluster_db = prev;
+
+    try std.testing.expect(lookupClusterService("anything") == null);
+}
+
+test "setClusterDb sets and clears the db reference" {
+    const prev = cluster_db;
+    defer cluster_db = prev;
+
+    setClusterDb(null);
+    try std.testing.expect(cluster_db == null);
+
+    // we can't easily create a real sqlite.Db in tests without the
+    // schema module, but we can verify the setter works with null
+    setClusterDb(null);
+    try std.testing.expect(cluster_db == null);
+}
+
+test "lookupClusterService resolves from service_names table" {
+    const schema = @import("../state/schema.zig");
+
+    var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;
+    defer db.deinit();
+    schema.init(&db) catch return;
+
+    // insert a service name entry
+    db.exec(
+        "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "remote-db", "ctr_remote", "10.42.3.5", @as(i64, 1000) },
+    ) catch return;
+
+    // set up cluster db reference
+    const prev = cluster_db;
+    defer cluster_db = prev;
+    cluster_db = &db;
+
+    const result = lookupClusterService("remote-db");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 3, 5 }, result.?);
+}
+
+test "lookupClusterService returns null for unknown name" {
+    const schema = @import("../state/schema.zig");
+
+    var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;
+    defer db.deinit();
+    schema.init(&db) catch return;
+
+    const prev = cluster_db;
+    defer cluster_db = prev;
+    cluster_db = &db;
+
+    try std.testing.expect(lookupClusterService("nonexistent") == null);
+}
+
+test "lookupService falls through to cluster db" {
+    const schema = @import("../state/schema.zig");
+
+    resetRegistryForTest();
+
+    var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;
+    defer db.deinit();
+    schema.init(&db) catch return;
+
+    // register a service only in the cluster db, not locally
+    db.exec(
+        "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "cluster-svc", "ctr_remote", "10.42.5.10", @as(i64, 1000) },
+    ) catch return;
+
+    const prev = cluster_db;
+    defer cluster_db = prev;
+    cluster_db = &db;
+
+    // lookupService should find it via the cluster db fallback
+    const result = lookupService("cluster-svc");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 5, 10 }, result.?);
+}
+
+test "lookupService prefers local registry over cluster db" {
+    const schema = @import("../state/schema.zig");
+
+    resetRegistryForTest();
+
+    var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;
+    defer db.deinit();
+    schema.init(&db) catch return;
+
+    // register the same name locally and in the cluster db with different IPs
+    registerService("web", "ctr_local", .{ 10, 42, 1, 10 });
+
+    db.exec(
+        "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "web", "ctr_remote", "10.42.5.10", @as(i64, 1000) },
+    ) catch return;
+
+    const prev = cluster_db;
+    defer cluster_db = prev;
+    cluster_db = &db;
+
+    // should return the local IP, not the cluster one
+    const result = lookupService("web");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 10 }, result.?);
 }

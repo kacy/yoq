@@ -615,8 +615,23 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
         };
     };
 
-    // look up agent status so the agent knows if it's being drained
+    // look up agent status so the agent knows if it's being drained.
+    // also include the wireguard peers_count so the agent can detect
+    // membership changes and reconcile its peer list.
     const db = node.stateMachineDb();
+
+    // count wireguard peers for the agent to compare against
+    const peers_count: i64 = blk: {
+        const CountRow = struct { count: i64 };
+        const count_result = (db.one(
+            CountRow,
+            "SELECT COUNT(*) AS count FROM wireguard_peers;",
+            .{},
+            .{},
+        ) catch break :blk 0) orelse break :blk 0;
+        break :blk count_result.count;
+    };
+
     const agent = agent_registry.getAgent(alloc, db, id) catch {
         return .{ .status = .ok, .body = "{\"status\":\"ok\"}", .allocated = false };
     };
@@ -628,7 +643,7 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
         const writer = json_buf.writer(alloc);
         writer.writeAll("{\"status\":\"") catch return internalError();
         writer.writeAll(a.status) catch return internalError();
-        writer.writeAll("\"}") catch return internalError();
+        writer.print("\",\"peers_count\":{d}}}", .{peers_count}) catch return internalError();
         const body = json_buf.toOwnedSlice(alloc) catch return internalError();
         return .{ .status = .ok, .body = body, .allocated = true };
     }

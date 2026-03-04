@@ -28,6 +28,7 @@ const image_spec = @import("../image/spec.zig");
 const store = @import("../state/store.zig");
 const logs = @import("../runtime/logs.zig");
 const wireguard = @import("../network/wireguard.zig");
+const setup = @import("../network/setup.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentResources = agent_types.AgentResources;
@@ -47,6 +48,9 @@ pub const ContainerState = enum {
     stopped,
     failed,
 };
+
+// max peers in the wireguard mesh — matches max node_id (1-254).
+const max_peers = 254;
 
 pub const Agent = struct {
     alloc: Allocator,
@@ -68,6 +72,19 @@ pub const Agent = struct {
     wg_keypair: ?wireguard.KeyPair = null,
     overlay_ip: ?[4]u8 = null,
     wg_listen_port: u16 = 51820,
+
+    /// number of peers we currently have configured in the wireguard mesh.
+    /// compared against the server's peers_count on each heartbeat to detect
+    /// membership changes. when they differ, we re-fetch the full peer list
+    /// and reconcile.
+    known_peers_count: u32 = 0,
+
+    /// public keys of currently configured wireguard peers.
+    /// used by reconcilePeers to detect which peers to add/remove.
+    /// fixed capacity of 254 matches the max node count (node_id 1-254).
+    known_peer_keys: [max_peers][44]u8 = undefined,
+    known_peer_key_lens: [max_peers]u8 = [_]u8{0} ** max_peers,
+    known_peer_nodes: [max_peers]u8 = [_]u8{0} ** max_peers,
 
     pub fn init(alloc: Allocator, server_addr: [4]u8, server_port: u16, token: []const u8) Agent {
         return .{
@@ -254,7 +271,144 @@ pub const Agent = struct {
                     self.running.store(false, .release);
                 }
             }
+
+            // check if the peer list has changed. the server includes
+            // peers_count in the heartbeat response so the agent can
+            // detect membership changes without polling the full list
+            // every cycle.
+            if (self.node_id != null) {
+                if (extractJsonInt(resp.body, "peers_count")) |count| {
+                    const server_count: u32 = if (count >= 0 and count <= max_peers)
+                        @intCast(count)
+                    else
+                        0;
+
+                    if (server_count != self.known_peers_count) {
+                        log.info("peer count changed ({d} -> {d}), reconciling", .{
+                            self.known_peers_count, server_count,
+                        });
+                        self.reconcilePeers();
+                    }
+                }
+            }
         }
+    }
+
+    /// fetch the full peer list from the server and reconcile with
+    /// our local wireguard configuration. adds new peers and removes
+    /// peers that are no longer in the server's list.
+    fn reconcilePeers(self: *Agent) void {
+        var resp = self.fetchPeers() orelse return;
+        defer resp.deinit(self.alloc);
+
+        // parse peer objects from the response.
+        // each peer is: {"node_id":N,"public_key":"...","endpoint":"...","overlay_ip":"...","container_subnet":"..."}
+        var new_count: u32 = 0;
+        var new_keys: [max_peers][44]u8 = undefined;
+        var new_key_lens: [max_peers]u8 = [_]u8{0} ** max_peers;
+        var new_nodes: [max_peers]u8 = [_]u8{0} ** max_peers;
+
+        var iter = json_helpers.extractJsonObjects(resp.body);
+        while (iter.next()) |obj| {
+            if (new_count >= max_peers) break;
+
+            const pub_key = extractJsonString(obj, "public_key") orelse continue;
+            const overlay_str = extractJsonString(obj, "overlay_ip") orelse continue;
+            const node_id_val = extractJsonInt(obj, "node_id") orelse continue;
+            const endpoint = extractJsonString(obj, "endpoint") orelse "";
+
+            // skip ourselves
+            if (self.node_id) |our_id| {
+                if (node_id_val == our_id) continue;
+            }
+
+            const peer_node: u8 = if (node_id_val >= 1 and node_id_val <= 254)
+                @intCast(node_id_val)
+            else
+                continue;
+
+            const overlay_ip = parseOverlayIp(overlay_str) orelse continue;
+
+            // check if this peer is already configured
+            var found = false;
+            for (0..self.known_peers_count) |i| {
+                const existing_key = self.known_peer_keys[i][0..self.known_peer_key_lens[i]];
+                if (pub_key.len == existing_key.len and
+                    std.mem.eql(u8, pub_key, existing_key))
+                {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                // new peer — add it
+                log.info("adding peer node_id={d}", .{peer_node});
+                setup.addClusterPeer(.{
+                    .public_key = pub_key,
+                    .endpoint = endpoint,
+                    .overlay_ip = overlay_ip,
+                    .container_subnet_node = peer_node,
+                }) catch |e| {
+                    log.warn("failed to add cluster peer (node {d}): {}", .{ peer_node, e });
+                };
+            }
+
+            // track this peer in the new list
+            if (pub_key.len <= 44) {
+                const idx = new_count;
+                @memcpy(new_keys[idx][0..pub_key.len], pub_key);
+                new_key_lens[idx] = @intCast(pub_key.len);
+                new_nodes[idx] = peer_node;
+                new_count += 1;
+            }
+        }
+
+        // remove peers that are no longer in the server's list
+        for (0..self.known_peers_count) |i| {
+            const old_key = self.known_peer_keys[i][0..self.known_peer_key_lens[i]];
+            const old_node = self.known_peer_nodes[i];
+
+            var still_present = false;
+            for (0..new_count) |j| {
+                const new_key = new_keys[j][0..new_key_lens[j]];
+                if (old_key.len == new_key.len and std.mem.eql(u8, old_key, new_key)) {
+                    still_present = true;
+                    break;
+                }
+            }
+
+            if (!still_present) {
+                log.info("removing peer node_id={d}", .{old_node});
+                setup.removeClusterPeer(.{
+                    .public_key = old_key,
+                    .endpoint = "", // not needed for removal
+                    .overlay_ip = .{ 10, 40, 0, old_node },
+                    .container_subnet_node = old_node,
+                });
+            }
+        }
+
+        // update our local tracking state
+        self.known_peers_count = new_count;
+        for (0..new_count) |i| {
+            self.known_peer_keys[i] = new_keys[i];
+            self.known_peer_key_lens[i] = new_key_lens[i];
+            self.known_peer_nodes[i] = new_nodes[i];
+        }
+
+        log.info("peer reconciliation complete ({d} peers)", .{new_count});
+    }
+
+    /// GET /wireguard/peers from the server.
+    fn fetchPeers(self: *Agent) ?http_client.Response {
+        return http_client.getWithAuth(
+            self.alloc,
+            self.server_addr,
+            self.server_port,
+            "/wireguard/peers",
+            self.token,
+        ) catch return null;
     }
 
     /// fetch assignments from the server and start containers for any
@@ -616,4 +770,16 @@ test "parseOverlayIp invalid" {
     try std.testing.expect(parseOverlayIp("10.42.0") == null);
     try std.testing.expect(parseOverlayIp("") == null);
     try std.testing.expect(parseOverlayIp("999.0.0.1") == null);
+}
+
+test "Agent init peer tracking defaults to zero" {
+    const alloc = std.testing.allocator;
+    var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
+    defer agent.local_containers.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), agent.known_peers_count);
+}
+
+test "max_peers matches node_id range" {
+    try std.testing.expectEqual(@as(usize, 254), max_peers);
 }
