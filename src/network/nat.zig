@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const cmd = @import("../lib/cmd.zig");
 
 pub const NatError = error{
     ExecFailed,
@@ -59,15 +60,21 @@ pub fn addPortMap(
     container_port: u16,
     protocol: Protocol,
 ) NatError!void {
+    var port_buf: [8]u8 = undefined;
+    var dest_buf: [32]u8 = undefined;
+
     // DNAT rule
-    const dnat_args = buildDnatArgs(.add, host_port, container_ip, container_port, protocol);
+    const dnat_args = buildDnatArgs(.add, host_port, container_ip, container_port, protocol, &port_buf, &dest_buf);
     _ = exec(&dnat_args) catch return NatError.ExecFailed;
 
     // FORWARD rule
-    const fwd_args = buildForwardArgs(.add, container_ip, container_port, protocol);
+    var fwd_port_buf: [8]u8 = undefined;
+    const fwd_args = buildForwardArgs(.add, container_ip, container_port, protocol, &fwd_port_buf);
     _ = exec(&fwd_args) catch {
         // try to clean up the DNAT rule we just added
-        const cleanup = buildDnatArgs(.delete, host_port, container_ip, container_port, protocol);
+        var cleanup_port_buf: [8]u8 = undefined;
+        var cleanup_dest_buf: [32]u8 = undefined;
+        const cleanup = buildDnatArgs(.delete, host_port, container_ip, container_port, protocol, &cleanup_port_buf, &cleanup_dest_buf);
         _ = exec(&cleanup) catch {};
         return NatError.ExecFailed;
     };
@@ -80,10 +87,13 @@ pub fn removePortMap(
     container_port: u16,
     protocol: Protocol,
 ) void {
-    const dnat_args = buildDnatArgs(.delete, host_port, container_ip, container_port, protocol);
+    var port_buf: [8]u8 = undefined;
+    var dest_buf: [32]u8 = undefined;
+    const dnat_args = buildDnatArgs(.delete, host_port, container_ip, container_port, protocol, &port_buf, &dest_buf);
     _ = exec(&dnat_args) catch {};
 
-    const fwd_args = buildForwardArgs(.delete, container_ip, container_port, protocol);
+    var fwd_port_buf: [8]u8 = undefined;
+    const fwd_args = buildForwardArgs(.delete, container_ip, container_port, protocol, &fwd_port_buf);
     _ = exec(&fwd_args) catch {};
 }
 
@@ -114,8 +124,8 @@ fn actionFlag(action: Action) []const u8 {
     };
 }
 
-const max_args = 16;
-const ArgList = [max_args]?[]const u8;
+const max_args = cmd.max_args;
+const ArgList = cmd.ArgList;
 
 fn buildMasqueradeArgs(action: Action, bridge: []const u8, subnet: []const u8) ArgList {
     var args: ArgList = .{null} ** max_args;
@@ -140,12 +150,12 @@ fn buildDnatArgs(
     container_ip: []const u8,
     container_port: u16,
     protocol: Protocol,
+    port_buf: *[8]u8,
+    dest_buf: *[32]u8,
 ) ArgList {
     var args: ArgList = .{null} ** max_args;
-    // format port and destination strings
-    // we use thread-local buffers since these are only valid during exec
-    const host_port_str = portStr(host_port);
-    const dest_str = destStr(container_ip, container_port);
+    const host_port_str = cmd.portStr(port_buf, host_port);
+    const dest_str = destStr(dest_buf, container_ip, container_port);
 
     args[0] = "iptables";
     args[1] = "-t";
@@ -168,9 +178,10 @@ fn buildForwardArgs(
     container_ip: []const u8,
     container_port: u16,
     protocol: Protocol,
+    port_buf: *[8]u8,
 ) ArgList {
     var args: ArgList = .{null} ** max_args;
-    const port_str = portStr(container_port);
+    const port_str = cmd.portStr(port_buf, container_port);
 
     args[0] = "iptables";
     args[1] = actionFlag(action);
@@ -186,47 +197,16 @@ fn buildForwardArgs(
     return args;
 }
 
-// -- string formatting helpers --
-// use thread-local buffers since these are consumed immediately by exec
+// -- string formatting --
 
-threadlocal var port_buf: [8]u8 = undefined;
-threadlocal var dest_buf: [32]u8 = undefined;
-
-fn portStr(port: u16) []const u8 {
-    return std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch "0";
-}
-
-fn destStr(ip: []const u8, port: u16) []const u8 {
-    return std.fmt.bufPrint(&dest_buf, "{s}:{d}", .{ ip, port }) catch "0.0.0.0:0";
+fn destStr(buf: *[32]u8, ip: []const u8, port: u16) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}:{d}", .{ ip, port }) catch "0.0.0.0:0";
 }
 
 // -- exec helper --
 
-/// run iptables with the given arguments.
-/// returns the exit code, or ExecFailed if spawn fails.
 fn exec(args: *const ArgList) NatError!void {
-    // count non-null args
-    var count: usize = 0;
-    for (args) |arg| {
-        if (arg == null) break;
-        count += 1;
-    }
-
-    // build argv for Child
-    var argv: [max_args][]const u8 = undefined;
-    for (0..count) |i| {
-        argv[i] = args[i].?;
-    }
-
-    var child = std.process.Child.init(argv[0..count], std.heap.page_allocator);
-    child.stdin_behavior = .Close;
-    child.stdout_behavior = .Close;
-    child.stderr_behavior = .Close;
-
-    child.spawn() catch return NatError.ExecFailed;
-    const result = child.wait() catch return NatError.ExecFailed;
-
-    if (result.Exited != 0) return NatError.ExecFailed;
+    cmd.exec(args) catch return NatError.ExecFailed;
 }
 
 // -- tests --
@@ -259,7 +239,9 @@ test "masquerade delete uses -D flag" {
 }
 
 test "dnat args construction" {
-    const args = buildDnatArgs(.add, 8080, "10.42.0.2", 80, .tcp);
+    var port_buf: [8]u8 = undefined;
+    var dest_buf: [32]u8 = undefined;
+    const args = buildDnatArgs(.add, 8080, "10.42.0.2", 80, .tcp, &port_buf, &dest_buf);
     try std.testing.expectEqualStrings("iptables", args[0].?);
     try std.testing.expectEqualStrings("-t", args[1].?);
     try std.testing.expectEqualStrings("nat", args[2].?);
@@ -277,7 +259,8 @@ test "dnat args construction" {
 }
 
 test "forward args construction" {
-    const args = buildForwardArgs(.add, "10.42.0.5", 3000, .udp);
+    var port_buf: [8]u8 = undefined;
+    const args = buildForwardArgs(.add, "10.42.0.5", 3000, .udp, &port_buf);
     try std.testing.expectEqualStrings("iptables", args[0].?);
     try std.testing.expectEqualStrings("-A", args[1].?);
     try std.testing.expectEqualStrings("FORWARD", args[2].?);
@@ -298,13 +281,17 @@ test "protocol strings" {
 }
 
 test "dnat args with port 1" {
-    const args = buildDnatArgs(.add, 1, "10.42.0.2", 80, .tcp);
+    var port_buf: [8]u8 = undefined;
+    var dest_buf: [32]u8 = undefined;
+    const args = buildDnatArgs(.add, 1, "10.42.0.2", 80, .tcp, &port_buf, &dest_buf);
     try std.testing.expectEqualStrings("1", args[8].?);
     try std.testing.expectEqualStrings("10.42.0.2:80", args[12].?);
 }
 
 test "dnat args with port 65535" {
-    const args = buildDnatArgs(.add, 65535, "10.42.0.2", 65535, .tcp);
+    var port_buf: [8]u8 = undefined;
+    var dest_buf: [32]u8 = undefined;
+    const args = buildDnatArgs(.add, 65535, "10.42.0.2", 65535, .tcp, &port_buf, &dest_buf);
     try std.testing.expectEqualStrings("65535", args[8].?);
     try std.testing.expectEqualStrings("10.42.0.2:65535", args[12].?);
 }

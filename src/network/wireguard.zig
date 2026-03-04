@@ -11,6 +11,7 @@
 const std = @import("std");
 const posix = std.posix;
 const nl = @import("netlink.zig");
+const cmd = @import("../lib/cmd.zig");
 
 pub const WireguardError = error{
     KeyGenFailed,
@@ -57,8 +58,8 @@ pub const PeerConfig = struct {
 // separate from exec so we can test argument construction
 // (same pattern as nat.zig).
 
-const max_args = 20;
-const ArgList = [max_args]?[]const u8;
+const max_args = cmd.max_args;
+const ArgList = cmd.ArgList;
 
 /// build args for: ip link add <name> type wireguard
 fn buildCreateArgs(name: []const u8) ArgList {
@@ -83,7 +84,7 @@ fn buildDeleteArgs(name: []const u8) ArgList {
 }
 
 /// build args for: wg set <name> private-key <path> listen-port <port>
-fn buildWgSetArgs(name: []const u8, private_key_path: []const u8, listen_port: u16) ArgList {
+fn buildWgSetArgs(name: []const u8, private_key_path: []const u8, listen_port: u16, port_buf: *[8]u8) ArgList {
     var args: ArgList = .{null} ** max_args;
     args[0] = "wg";
     args[1] = "set";
@@ -91,12 +92,12 @@ fn buildWgSetArgs(name: []const u8, private_key_path: []const u8, listen_port: u
     args[3] = "private-key";
     args[4] = private_key_path;
     args[5] = "listen-port";
-    args[6] = portStr(listen_port);
+    args[6] = cmd.portStr(port_buf, listen_port);
     return args;
 }
 
 /// build args for: wg set <name> peer <pubkey> allowed-ips <ips> [endpoint <ep>] persistent-keepalive <ka>
-fn buildAddPeerArgs(name: []const u8, peer: PeerConfig) ArgList {
+fn buildAddPeerArgs(name: []const u8, peer: PeerConfig, ka_buf: *[8]u8) ArgList {
     var args: ArgList = .{null} ** max_args;
     var i: usize = 0;
 
@@ -124,7 +125,7 @@ fn buildAddPeerArgs(name: []const u8, peer: PeerConfig) ArgList {
 
     args[i] = "persistent-keepalive";
     i += 1;
-    args[i] = portStr(peer.persistent_keepalive);
+    args[i] = cmd.portStr(ka_buf, peer.persistent_keepalive);
 
     return args;
 }
@@ -152,40 +153,10 @@ fn buildLinkUpArgs(name: []const u8) ArgList {
     return args;
 }
 
-// -- string formatting helpers --
-// use thread-local buffers since these are consumed immediately by exec
-
-threadlocal var port_buf: [8]u8 = undefined;
-
-fn portStr(port: u16) []const u8 {
-    return std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch "0";
-}
-
 // -- exec helper --
 
-/// run a command with the given arguments.
-/// returns ExecFailed if spawn or wait fails, or if exit code is non-zero.
 fn exec(args: *const ArgList) WireguardError!void {
-    var count: usize = 0;
-    for (args) |arg| {
-        if (arg == null) break;
-        count += 1;
-    }
-
-    var argv: [max_args][]const u8 = undefined;
-    for (0..count) |i| {
-        argv[i] = args[i].?;
-    }
-
-    var child = std.process.Child.init(argv[0..count], std.heap.page_allocator);
-    child.stdin_behavior = .Close;
-    child.stdout_behavior = .Close;
-    child.stderr_behavior = .Close;
-
-    child.spawn() catch return WireguardError.ExecFailed;
-    const result = child.wait() catch return WireguardError.ExecFailed;
-
-    if (result.Exited != 0) return WireguardError.ExecFailed;
+    cmd.exec(args) catch return WireguardError.ExecFailed;
 }
 
 // -- interface management --
@@ -223,7 +194,8 @@ pub fn createInterface(name: []const u8, private_key: []const u8, listen_port: u
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
     // step 3: configure the interface with wg set
-    const wg_args = buildWgSetArgs(name, tmp_path, listen_port);
+    var port_buf: [8]u8 = undefined;
+    const wg_args = buildWgSetArgs(name, tmp_path, listen_port, &port_buf);
     exec(&wg_args) catch {
         // try to clean up the interface we created
         const del_args = buildDeleteArgs(name);
@@ -255,7 +227,8 @@ pub fn deleteInterface(name: []const u8) WireguardError!void {
 /// equivalent to:
 ///   wg set <name> peer <pubkey> allowed-ips <ips> [endpoint <ep>] persistent-keepalive <ka>
 pub fn addPeer(name: []const u8, peer: PeerConfig) WireguardError!void {
-    const args = buildAddPeerArgs(name, peer);
+    var ka_buf: [8]u8 = undefined;
+    const args = buildAddPeerArgs(name, peer, &ka_buf);
     exec(&args) catch return WireguardError.PeerAddFailed;
 }
 
@@ -456,7 +429,8 @@ test "buildDeleteArgs produces correct ip link del command" {
 }
 
 test "buildWgSetArgs produces correct wg set command" {
-    const args = buildWgSetArgs("wg0", "/tmp/wg-key", 51820);
+    var port_buf: [8]u8 = undefined;
+    const args = buildWgSetArgs("wg0", "/tmp/wg-key", 51820, &port_buf);
     try std.testing.expectEqualStrings("wg", args[0].?);
     try std.testing.expectEqualStrings("set", args[1].?);
     try std.testing.expectEqualStrings("wg0", args[2].?);
@@ -474,7 +448,8 @@ test "buildAddPeerArgs with endpoint" {
         .allowed_ips = "10.42.1.0/24",
         .persistent_keepalive = 25,
     };
-    const args = buildAddPeerArgs("wg0", peer);
+    var ka_buf: [8]u8 = undefined;
+    const args = buildAddPeerArgs("wg0", peer, &ka_buf);
     try std.testing.expectEqualStrings("wg", args[0].?);
     try std.testing.expectEqualStrings("set", args[1].?);
     try std.testing.expectEqualStrings("wg0", args[2].?);
@@ -496,7 +471,8 @@ test "buildAddPeerArgs without endpoint" {
         .allowed_ips = "10.42.1.0/24,10.40.0.1/32",
         .persistent_keepalive = 30,
     };
-    const args = buildAddPeerArgs("wg0", peer);
+    var ka_buf: [8]u8 = undefined;
+    const args = buildAddPeerArgs("wg0", peer, &ka_buf);
     try std.testing.expectEqualStrings("wg", args[0].?);
     try std.testing.expectEqualStrings("set", args[1].?);
     try std.testing.expectEqualStrings("wg0", args[2].?);
