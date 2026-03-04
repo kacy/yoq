@@ -159,6 +159,14 @@ pub fn pivotRoot(new_root: []const u8) FilesystemError!void {
 /// rather than the threadlocal sentinelize (we need source and target
 /// simultaneously).
 pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8, read_only: bool) FilesystemError!void {
+    // reject targets with ".." components to prevent escaping the container rootfs.
+    // in cluster mode a remote deploy request could specify arbitrary mount targets,
+    // so we validate at the filesystem layer as defense-in-depth.
+    if (!isPathSafe(target)) {
+        log.warn("bind mount target contains directory traversal: {s}", .{target});
+        return FilesystemError.MountFailed;
+    }
+
     // build full target path: target_root + target
     var target_buf: [4096]u8 = undefined;
     var target_pos: usize = 0;
@@ -272,6 +280,17 @@ fn mkdirIfNeeded(path: []const u8) !void {
     };
 }
 
+/// check that a path doesn't contain ".." as a path component.
+/// rejects "/../", leading "../", trailing "/..", and exact match "..".
+/// does NOT reject ".." inside filenames (e.g. "foo..bar" is fine).
+fn isPathSafe(path: []const u8) bool {
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |component| {
+        if (std.mem.eql(u8, component, "..")) return false;
+    }
+    return true;
+}
+
 /// check that a path doesn't contain ':' or ',' which would break
 /// overlayfs mount options parsing.
 fn isValidOverlayPath(path: []const u8) bool {
@@ -335,6 +354,23 @@ test "bindMount path construction" {
     const long_target = "y" ** 2048;
     const result2 = bindMount(long_root, "/src", long_target, false);
     try std.testing.expectError(FilesystemError.PathTooLong, result2);
+}
+
+test "isPathSafe accepts normal paths" {
+    try std.testing.expect(isPathSafe("/usr/local/bin"));
+    try std.testing.expect(isPathSafe("relative/path"));
+    try std.testing.expect(isPathSafe("/"));
+    try std.testing.expect(isPathSafe(""));
+    try std.testing.expect(isPathSafe("/foo..bar/baz")); // ".." inside a filename is fine
+    try std.testing.expect(isPathSafe("a...b"));
+}
+
+test "isPathSafe rejects directory traversal" {
+    try std.testing.expect(!isPathSafe("../etc"));
+    try std.testing.expect(!isPathSafe("/foo/../bar"));
+    try std.testing.expect(!isPathSafe("/foo/.."));
+    try std.testing.expect(!isPathSafe(".."));
+    try std.testing.expect(!isPathSafe("../../etc/shadow"));
 }
 
 test "sentinelize" {
