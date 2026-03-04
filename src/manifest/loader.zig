@@ -1364,3 +1364,178 @@ test "restart policy — parseRestartPolicy unit tests" {
     try std.testing.expectEqual(spec.RestartPolicy.on_failure, try parseRestartPolicy("test", "on_failure"));
     try std.testing.expectError(LoadError.InvalidRestartPolicy, parseRestartPolicy("test", "bogus"));
 }
+
+// -- variable substitution tests --
+
+test "expandVariables — plain text unchanged" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "hello world");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("hello world", result);
+}
+
+test "expandVariables — empty string" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "expandVariables — escaped dollar sign" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "price is $$5");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("price is $5", result);
+}
+
+test "expandVariables — double escaped dollar" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "$$$$");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("$$", result);
+}
+
+test "expandVariables — env var from environment" {
+    const alloc = std.testing.allocator;
+
+    // PATH should always be set in a normal environment
+    const result = try expandVariables(alloc, "path is ${PATH}");
+    defer alloc.free(result);
+
+    // we can't predict the exact value but it should not contain "${PATH}"
+    try std.testing.expect(!std.mem.containsAtLeast(u8, result, 1, "${PATH}"));
+    try std.testing.expect(std.mem.startsWith(u8, result, "path is "));
+}
+
+test "expandVariables — undefined var becomes empty" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "prefix${YOQ_TEST_UNDEFINED_VAR_12345}suffix");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("prefixsuffix", result);
+}
+
+test "expandVariables — default value when var is undefined" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "${YOQ_TEST_UNDEFINED_VAR_12345:-fallback}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("fallback", result);
+}
+
+test "expandVariables — default value with empty default" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "${YOQ_TEST_UNDEFINED_VAR_12345:-}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "expandVariables — unclosed brace emitted literally" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "hello ${UNCLOSED");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("hello ${UNCLOSED", result);
+}
+
+test "expandVariables — bare dollar emitted literally" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "cost $5");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("cost $5", result);
+}
+
+test "expandVariables — dollar at end of string" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "end$");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("end$", result);
+}
+
+test "expandVariables — empty var name" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "${}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "expandVariables — empty var name with default" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "${:-hello}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "expandVariables — multiple variables in one string" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "${YOQ_TEST_UNDEF_A:-alpha}-${YOQ_TEST_UNDEF_B:-beta}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("alpha-beta", result);
+}
+
+test "expandVariables — nested braces not supported (inner brace closes)" {
+    const alloc = std.testing.allocator;
+    // ${FOO${BAR}} — the first } closes the outer ${
+    // so this becomes: value of "FOO${BAR" + literal "}"
+    const result = try expandVariables(alloc, "${YOQ_TEST_UNDEF:-${inner}}");
+    defer alloc.free(result);
+    // the first } closes at "YOQ_TEST_UNDEF:-${inner", which has default "${inner"
+    try std.testing.expectEqualStrings("${inner}", result);
+}
+
+test "expandVariables — default value containing colon" {
+    const alloc = std.testing.allocator;
+    const result = try expandVariables(alloc, "${YOQ_TEST_UNDEF:-postgres://host:5432/db}");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("postgres://host:5432/db", result);
+}
+
+test "variable substitution in manifest — image field" {
+    const alloc = std.testing.allocator;
+
+    // use a default value since the test env won't have this var set
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "${YOQ_TEST_IMAGE:-nginx:alpine}"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqualStrings("nginx:alpine", manifest.services[0].image);
+}
+
+test "variable substitution in manifest — env vars" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\env = ["DB_HOST=${YOQ_TEST_DB:-localhost}", "PORT=${YOQ_TEST_PORT:-3000}"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqualStrings("DB_HOST=localhost", manifest.services[0].env[0]);
+    try std.testing.expectEqualStrings("PORT=3000", manifest.services[0].env[1]);
+}
+
+test "variable substitution in manifest — escaped dollar" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\env = ["PRICE=$$5"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqualStrings("PRICE=$5", manifest.services[0].env[0]);
+}
+
+test "variable substitution in manifest — working_dir" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\working_dir = "${YOQ_TEST_WD:-/app}"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqualStrings("/app", manifest.services[0].working_dir.?);
+}
