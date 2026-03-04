@@ -1018,4 +1018,6 @@ comptime {
     _ = @import("api/http.zig");
     _ = @import("api/routes.zig");
     _ = @import("api/server.zig");
+    _ = @import("cluster/raft_types.zig");
+    _ = @import("cluster/log.zig");
 }
