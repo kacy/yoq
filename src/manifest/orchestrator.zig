@@ -63,8 +63,8 @@ pub const Orchestrator = struct {
     dev_mode: bool = false,
     restart_requested: []std.atomic.Value(bool),
 
-    pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) Orchestrator {
-        const states = alloc.alloc(ServiceState, manifest.services.len) catch &.{};
+    pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) !Orchestrator {
+        const states = try alloc.alloc(ServiceState, manifest.services.len);
         for (states) |*s| {
             s.* = .{
                 .container_id = undefined,
@@ -73,7 +73,7 @@ pub const Orchestrator = struct {
             };
         }
 
-        const restart_flags = alloc.alloc(std.atomic.Value(bool), manifest.services.len) catch &.{};
+        const restart_flags = try alloc.alloc(std.atomic.Value(bool), manifest.services.len);
         for (restart_flags) |*f| {
             f.* = std.atomic.Value(bool).init(false);
         }
@@ -204,7 +204,7 @@ pub const Orchestrator = struct {
             }
             if (all_done) break;
 
-            std.time.sleep(200 * std.time.ns_per_ms);
+            std.Thread.sleep(200 * std.time.ns_per_ms);
         }
     }
 
@@ -259,7 +259,7 @@ pub const Orchestrator = struct {
             const now = @as(u64, @intCast(std.time.nanoTimestamp()));
             if (now - start > timeout_ns) return false;
 
-            std.time.sleep(100 * std.time.ns_per_ms);
+            std.Thread.sleep(100 * std.time.ns_per_ms);
         }
     }
 };
@@ -527,7 +527,7 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
                 got_restart = true;
                 break;
             }
-            std.time.sleep(200 * std.time.ns_per_ms);
+            std.Thread.sleep(200 * std.time.ns_per_ms);
         }
         if (!got_restart) break;
     }
@@ -582,11 +582,11 @@ pub var shutdown_requested: std.atomic.Value(bool) = .init(false);
 pub fn installSignalHandlers() void {
     const act = posix.Sigaction{
         .handler = .{ .handler = sigHandler },
-        .mask = posix.empty_sigset,
+        .mask = posix.sigemptyset(),
         .flags = 0,
     };
-    posix.sigaction(posix.SIG.INT, &act, null) catch {};
-    posix.sigaction(posix.SIG.TERM, &act, null) catch {};
+    posix.sigaction(posix.SIG.INT, &act, null);
+    posix.sigaction(posix.SIG.TERM, &act, null);
 }
 
 fn sigHandler(_: c_int) callconv(.c) void {

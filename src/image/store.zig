@@ -118,7 +118,7 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
 
     // verify digest before committing
     const actual = hasher.finalResult();
-    if (actual != expected_digest.hash) {
+    if (!std.mem.eql(u8, &actual, &expected_digest.hash)) {
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return BlobError.HashMismatch;
     }
