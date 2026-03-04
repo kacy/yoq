@@ -340,8 +340,8 @@ pub const Node = struct {
     }
 
     /// remove agents that have been offline for more than 1 hour.
-    /// cleans up their remaining terminal assignments first.
-    /// called with self.mu held.
+    /// cleans up their remaining terminal assignments, wireguard peers,
+    /// and the agent record itself. called with self.mu held.
     fn cleanupDeadAgents(self: *Node) void {
         const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
         defer {
@@ -363,6 +363,19 @@ pub const Node = struct {
                 logger.warn("failed to propose assignment cleanup for dead agent {s}: {}", .{ agent.id, e });
                 continue;
             };
+
+            // remove wireguard peer entry if the agent had a node_id.
+            // this cleans up the wireguard_peers table so other agents
+            // won't try to route traffic to a dead node.
+            if (agent.node_id) |nid| {
+                if (nid >= 1 and nid <= 254) {
+                    var wg_buf: [256]u8 = undefined;
+                    const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(nid)) catch continue;
+                    _ = self.raft.propose(wg_sql) catch |e| {
+                        logger.warn("failed to remove wireguard peer for dead agent {s}: {}", .{ agent.id, e });
+                    };
+                }
+            }
 
             // remove the agent record
             var remove_buf: [256]u8 = undefined;
