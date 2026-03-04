@@ -228,6 +228,31 @@ test "lookup returns allocated IP" {
     try std.testing.expectEqual(ip, found);
 }
 
+test "parseIp rejects empty octets" {
+    try std.testing.expect(parseIp("10..0.1") == null);
+}
+
+test "formatIp max values" {
+    var buf: [16]u8 = undefined;
+    const str = formatIp(.{ 255, 255, 255, 255 }, &buf);
+    try std.testing.expectEqualStrings("255.255.255.255", str);
+}
+
+test "allocate and release round-trip" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const ip1 = try allocate(&db, "rt_test");
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 2 }, ip1);
+
+    try release(&db, "rt_test");
+
+    // re-allocating should get the same IP back (fills the gap)
+    const ip2 = try allocate(&db, "rt_test2");
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 2 }, ip2);
+}
+
 test "lookup returns error for unknown container" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
