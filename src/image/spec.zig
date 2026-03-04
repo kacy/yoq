@@ -55,6 +55,21 @@ pub const ContainerConfig = struct {
     Entrypoint: ?[]const []const u8 = null,
     ExposedPorts: ?std.json.Value = null,
     User: ?[]const u8 = null,
+    Volumes: ?std.json.Value = null,
+    Shell: ?[]const []const u8 = null,
+    StopSignal: ?[]const u8 = null,
+    Healthcheck: ?Healthcheck = null,
+};
+
+/// healthcheck configuration from the image config.
+/// matches the OCI / Docker image spec format.
+pub const Healthcheck = struct {
+    Test: ?[]const []const u8 = null,
+    Interval: ?i64 = null,
+    Timeout: ?i64 = null,
+    StartPeriod: ?i64 = null,
+    StartInterval: ?i64 = null,
+    Retries: ?i64 = null,
 };
 
 /// rootfs description in the image config
@@ -347,4 +362,85 @@ test "media type detection" {
     try std.testing.expect(isManifestMediaType(media_type.manifest_v2));
     try std.testing.expect(isManifestMediaType(media_type.oci_manifest));
     try std.testing.expect(!isManifestMediaType(media_type.oci_index));
+}
+
+test "parse image config with volumes and shell" {
+    const json =
+        \\{
+        \\  "architecture": "amd64",
+        \\  "os": "linux",
+        \\  "config": {
+        \\    "Cmd": ["/bin/sh"],
+        \\    "Volumes": {"/data": {}, "/logs": {}},
+        \\    "Shell": ["/bin/bash", "-c"],
+        \\    "StopSignal": "SIGTERM"
+        \\  }
+        \\}
+    ;
+
+    const alloc = std.testing.allocator;
+    var result = try parseImageConfig(alloc, json);
+    defer result.deinit();
+    const cc = result.value.config.?;
+
+    // volumes parsed as json value (object with empty struct values)
+    try std.testing.expect(cc.Volumes != null);
+
+    // shell
+    try std.testing.expectEqual(@as(usize, 2), cc.Shell.?.len);
+    try std.testing.expectEqualStrings("/bin/bash", cc.Shell.?[0]);
+    try std.testing.expectEqualStrings("-c", cc.Shell.?[1]);
+
+    // stop signal
+    try std.testing.expectEqualStrings("SIGTERM", cc.StopSignal.?);
+}
+
+test "parse image config with healthcheck" {
+    const json =
+        \\{
+        \\  "architecture": "amd64",
+        \\  "os": "linux",
+        \\  "config": {
+        \\    "Healthcheck": {
+        \\      "Test": ["CMD-SHELL", "curl -f http://localhost/ || exit 1"],
+        \\      "Interval": 30000000000,
+        \\      "Timeout": 10000000000,
+        \\      "Retries": 3
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const alloc = std.testing.allocator;
+    var result = try parseImageConfig(alloc, json);
+    defer result.deinit();
+    const hc = result.value.config.?.Healthcheck.?;
+
+    try std.testing.expectEqual(@as(usize, 2), hc.Test.?.len);
+    try std.testing.expectEqualStrings("CMD-SHELL", hc.Test.?[0]);
+    try std.testing.expectEqual(@as(i64, 30000000000), hc.Interval.?);
+    try std.testing.expectEqual(@as(i64, 10000000000), hc.Timeout.?);
+    try std.testing.expectEqual(@as(i64, 3), hc.Retries.?);
+}
+
+test "parse image config — new fields default to null" {
+    const json =
+        \\{
+        \\  "architecture": "amd64",
+        \\  "os": "linux",
+        \\  "config": {
+        \\    "Cmd": ["/bin/sh"]
+        \\  }
+        \\}
+    ;
+
+    const alloc = std.testing.allocator;
+    var result = try parseImageConfig(alloc, json);
+    defer result.deinit();
+    const cc = result.value.config.?;
+
+    try std.testing.expect(cc.Volumes == null);
+    try std.testing.expect(cc.Shell == null);
+    try std.testing.expect(cc.StopSignal == null);
+    try std.testing.expect(cc.Healthcheck == null);
 }
