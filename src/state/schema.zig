@@ -103,6 +103,23 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    created_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS deployments (
+        \\    id TEXT PRIMARY KEY,
+        \\    service_name TEXT NOT NULL,
+        \\    manifest_hash TEXT NOT NULL,
+        \\    config_snapshot TEXT NOT NULL DEFAULT '',
+        \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    message TEXT,
+        \\    created_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE INDEX IF NOT EXISTS idx_deployments_service
+        \\    ON deployments (service_name, created_at DESC);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -214,6 +231,20 @@ test "init creates assignments table" {
         "INSERT INTO assignments (id, agent_id, image, created_at) VALUES (?, ?, ?, ?);",
         .{},
         .{ "assign001", "agent001", "nginx:latest", @as(i64, 1000) },
+    ) catch unreachable;
+}
+
+test "init creates deployments table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep001", "web", "sha256:abc", "{}", "completed", @as(i64, 1000) },
     ) catch unreachable;
 }
 
