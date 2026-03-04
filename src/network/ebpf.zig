@@ -26,6 +26,7 @@ const log = @import("../lib/log.zig");
 
 pub const EbpfError = error{
     MapCreateFailed,
+    MapUpdateFailed,
     ProgramLoadFailed,
     AttachFailed,
     DetachFailed,
@@ -67,7 +68,7 @@ pub fn mapLookup(map_fd: posix.fd_t, key: []const u8, value: []u8) bool {
 pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) EbpfError!void {
     BPF.map_update_elem(map_fd, key, value, BPF.ANY) catch |e| {
         log.warn("ebpf: map_update failed: {}", .{e});
-        return EbpfError.MapCreateFailed;
+        return EbpfError.MapUpdateFailed;
     };
 }
 
@@ -259,12 +260,11 @@ fn addBpfFilter(
         .egress => nl.TC_H.CLSACT | nl.TC_H.MIN_EGRESS,
     };
 
-    // protocol field goes in the upper 16 bits of info (network byte order)
-    // priority goes in the lower 16 bits
-    const eth_p_all: u32 = 0x0003;
+    // info encodes priority (upper 16 bits) and protocol (lower 16, network byte order).
+    // ETH_P_ALL = 0x0003, priority = 1.
+    const eth_p_all: u16 = 0x0003;
     const priority: u32 = 1;
-    const info: u32 = (std.mem.nativeToBig(u16, @truncate(eth_p_all)) |
-        @as(u32, 0)) | (priority << 16);
+    const info: u32 = (priority << 16) | @as(u32, std.mem.nativeToBig(u16, eth_p_all));
 
     const hdr = try mb.putHeader(
         .RTM_NEWTFILTER,
