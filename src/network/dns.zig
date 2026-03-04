@@ -125,7 +125,7 @@ pub fn unregisterService(container_id: []const u8) void {
 /// check if a service name is currently held by a different container.
 /// returns the existing entry's info if it would be a reassignment, null otherwise.
 /// caller must hold registry_mutex.
-fn detectNameConflict(name: []const u8, new_container_id: []const u8, new_ip: [4]u8) ?struct { ip: [4]u8, container_id: [12]u8, container_id_len: u8 } {
+fn detectNameConflict(name: []const u8, new_container_id: []const u8, _: [4]u8) ?struct { ip: [4]u8, container_id: [12]u8, container_id_len: u8 } {
     const new_cid_len = @min(new_container_id.len, 12);
 
     // scan backwards to find the most recent entry with this name
@@ -137,25 +137,19 @@ fn detectNameConflict(name: []const u8, new_container_id: []const u8, new_ip: [4
             entry.name_len == name.len and
             std.mem.eql(u8, entry.name[0..entry.name_len], name))
         {
-            // same container updating its own entry — not a conflict
+            // same container — not a conflict (IP update is normal)
             if (entry.container_id_len == new_cid_len and
                 std.mem.eql(u8, entry.container_id[0..entry.container_id_len], new_container_id[0..new_cid_len]))
             {
                 return null;
             }
 
-            // different container or different IP — this is a reassignment
-            if (!std.mem.eql(u8, &entry.ip, &new_ip) or
-                entry.container_id_len != new_cid_len or
-                !std.mem.eql(u8, entry.container_id[0..entry.container_id_len], new_container_id[0..new_cid_len]))
-            {
-                return .{
-                    .ip = entry.ip,
-                    .container_id = entry.container_id,
-                    .container_id_len = entry.container_id_len,
-                };
-            }
-            return null;
+            // different container claiming the same name — reassignment
+            return .{
+                .ip = entry.ip,
+                .container_id = entry.container_id,
+                .container_id_len = entry.container_id_len,
+            };
         }
     }
 
