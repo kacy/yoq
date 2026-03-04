@@ -5,6 +5,12 @@
 // allocates sequentially from 10.42.0.2, filling gaps left by
 // released addresses.
 //
+// in multi-node (cluster) mode, each node gets a /24 subnet:
+//   node 1: 10.42.1.0/24 (containers get 10.42.1.2 — 10.42.1.254)
+//   node 2: 10.42.2.0/24 (containers get 10.42.2.2 — 10.42.2.254)
+//   ...
+// node_id 0 means single-node mode — uses the flat 10.42.0.0/16.
+//
 // all allocation state lives in the ip_allocations SQLite table,
 // so it survives restarts and is consistent with the rest of
 // the container state.
@@ -20,6 +26,45 @@ pub const IpError = error{
     SubnetExhausted,
     DbOpenFailed,
 };
+
+/// per-node subnet configuration.
+/// each node in a cluster gets its own /24 within the 10.42.0.0/16 space,
+/// so container IPs never collide across nodes.
+pub const SubnetConfig = struct {
+    node_id: u8,
+    base: [4]u8,
+    gateway: [4]u8,
+    prefix_len: u8,
+    range_start: [4]u8,
+    range_end: [4]u8,
+};
+
+/// return the subnet config for a given node.
+///
+/// node_id 0 is special: single-node mode, uses the full 10.42.0.0/16.
+/// node_id 1-254: each gets 10.42.{node_id}.0/24.
+pub fn subnetForNode(node_id: u8) SubnetConfig {
+    if (node_id == 0) {
+        // single-node mode — flat /16, same as the original behavior
+        return .{
+            .node_id = 0,
+            .base = .{ 10, 42, 0, 0 },
+            .gateway = .{ 10, 42, 0, 1 },
+            .prefix_len = 16,
+            .range_start = .{ 10, 42, 0, 2 },
+            .range_end = .{ 10, 42, 255, 254 },
+        };
+    }
+
+    return .{
+        .node_id = node_id,
+        .base = .{ 10, 42, node_id, 0 },
+        .gateway = .{ 10, 42, node_id, 1 },
+        .prefix_len = 24,
+        .range_start = .{ 10, 42, node_id, 2 },
+        .range_end = .{ 10, 42, node_id, 254 },
+    };
+}
 
 /// allocate the next available IP for a container.
 /// finds the lowest unused address in 10.42.0.2 — 10.42.255.254.
@@ -260,4 +305,34 @@ test "lookup returns error for unknown container" {
 
     const alloc = std.testing.allocator;
     try std.testing.expectError(IpError.NotFound, lookup(&db, alloc, "nonexistent"));
+}
+
+test "subnetForNode(0) returns flat /16 for single-node mode" {
+    const config = subnetForNode(0);
+    try std.testing.expectEqual(@as(u8, 0), config.node_id);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 0 }, config.base);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 1 }, config.gateway);
+    try std.testing.expectEqual(@as(u8, 16), config.prefix_len);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 2 }, config.range_start);
+    try std.testing.expectEqual([4]u8{ 10, 42, 255, 254 }, config.range_end);
+}
+
+test "subnetForNode(1) returns correct /24 subnet" {
+    const config = subnetForNode(1);
+    try std.testing.expectEqual(@as(u8, 1), config.node_id);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 0 }, config.base);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 1 }, config.gateway);
+    try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 2 }, config.range_start);
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 254 }, config.range_end);
+}
+
+test "subnetForNode(254) returns correct /24 subnet" {
+    const config = subnetForNode(254);
+    try std.testing.expectEqual(@as(u8, 254), config.node_id);
+    try std.testing.expectEqual([4]u8{ 10, 42, 254, 0 }, config.base);
+    try std.testing.expectEqual([4]u8{ 10, 42, 254, 1 }, config.gateway);
+    try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
+    try std.testing.expectEqual([4]u8{ 10, 42, 254, 2 }, config.range_start);
+    try std.testing.expectEqual([4]u8{ 10, 42, 254, 254 }, config.range_end);
 }
