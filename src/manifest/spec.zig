@@ -36,6 +36,17 @@ pub const Manifest = struct {
     }
 };
 
+/// restart policy for a service — controls what happens when the
+/// container exits. mirrors common container restart semantics:
+///   none:       don't restart (default)
+///   always:     restart unconditionally
+///   on_failure: restart only on non-zero exit code
+pub const RestartPolicy = enum {
+    none,
+    always,
+    on_failure,
+};
+
 pub const Service = struct {
     name: []const u8,
     image: []const u8,
@@ -46,6 +57,7 @@ pub const Service = struct {
     working_dir: ?[]const u8,
     volumes: []const VolumeMount,
     health_check: ?HealthCheck = null,
+    restart: RestartPolicy = .none,
 
     pub fn deinit(self: Service, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
@@ -283,6 +295,20 @@ test "health check tcp deinit is no-op" {
         .check_type = .{ .tcp = .{ .port = 5432 } },
     };
     hc.deinit(alloc);
+}
+
+test "restart policy defaults to none" {
+    const svc = Service{
+        .name = "test",
+        .image = "scratch",
+        .command = &.{},
+        .ports = &.{},
+        .env = &.{},
+        .depends_on = &.{},
+        .working_dir = null,
+        .volumes = &.{},
+    };
+    try std.testing.expectEqual(RestartPolicy.none, svc.restart);
 }
 
 /// helper for tests — creates a minimal service with an allocated name
