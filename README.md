@@ -8,34 +8,61 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 ## status
 
-phases 1-4 complete: container primitives, OCI images, networking, and build engine. phase 5 (manifest + dev mode) is underway.
+phases 1-6 are complete.
 
-containers run in isolated namespaces with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. images are pulled from any OCI registry (Docker Hub, GHCR, etc.), extracted, and cached locally with layer deduplication.
+**container runtime & images (phases 1-2):** containers run in isolated namespaces with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. images are pulled from any OCI registry (Docker Hub, GHCR, etc.), extracted, and cached locally with layer deduplication.
 
-networking gives each container its own IP on a bridge network (10.42.0.0/16), with NAT for outbound traffic and port mapping for inbound. DNS service discovery lets containers find each other by name — a userspace resolver on the bridge gateway answers A record queries for registered service names and forwards everything else upstream.
+**networking (phase 3):** each container gets its own IP on a bridge network (10.42.0.0/16), with NAT for outbound traffic and port mapping for inbound. a userspace DNS resolver on the bridge gateway handles service discovery — containers find each other by name.
 
-the build engine parses Dockerfiles (FROM, RUN, COPY, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR) and produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order.
+**build engine (phase 4):** Dockerfile parser (FROM, RUN, COPY, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR) produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order.
 
-phase 5 work has started with manifest spec types (services, volumes, ports), a TOML manifest loader with validation and dependency ordering, and container exec support. the foundation for `yoq up` multi-service orchestration is in place.
+**manifest + dev mode (phase 5):** TOML manifest format defines multi-service applications with dependency ordering. `yoq up` starts all services, `yoq down` stops them in reverse order. dev mode (`--dev`) watches source directories with inotify and hot-restarts containers on file changes. colored log multiplexing prefixes output with service names.
 
-what works on Linux (kernel 6.1+):
-- `yoq run nginx:latest` — pulls, extracts, and runs a container
-- `yoq run -p 8080:80 nginx:latest` — with host port mapping
-- `yoq run -p 8080:80 -p 443:443 nginx:latest` — multiple port mappings
-- `yoq run --no-net alpine /bin/sh` — run without networking
-- `yoq run --name db postgres:latest` — assign a name for DNS service discovery
-- `yoq run alpine:latest /bin/echo hello` — run with a custom command
-- `yoq build .` — build an image from a Dockerfile
-- `yoq build -t myapp:latest .` — build with a tag
-- `yoq build -f custom.Dockerfile .` — build from a custom Dockerfile
-- `yoq ps` — list containers with status and network info
-- `yoq logs <id>` — view captured stdout/stderr with timestamps
-- `yoq logs <id> --tail 20` — last 20 lines
-- `yoq stop <id>` — send SIGTERM to a running container
-- `yoq rm <id>` — remove a stopped container and clean up
-- `yoq pull <image>` — pull and cache an image
-- `yoq images` / `yoq rmi <image>` — manage local images
-- `yoq exec <id> <cmd> [args...]` — run a command inside a running container
+**clustering (phase 6):** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. the API server exposes 15 endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`.
+
+## what works
+
+Linux kernel 6.1+ required. commands grouped by function:
+
+```
+# containers
+yoq run <image|rootfs> [command]     pull and run a container
+yoq ps                               list containers
+yoq stop <id>                        stop a running container
+yoq rm <id>                          remove a stopped container
+yoq logs <id> [--tail N]             view container output
+yoq exec <id> <cmd> [args...]        run a command in a running container
+
+# images
+yoq pull <image>                     pull an image from a registry
+yoq images                           list pulled images
+yoq rmi <image>                      remove a pulled image
+
+# build
+yoq build [-t tag] [-f Dockerfile] . build an image from a Dockerfile
+
+# manifest
+yoq up [-f manifest.toml]            start services from manifest
+yoq up --dev                         dev mode: watch + hot restart
+yoq up --server host:port            deploy to cluster
+yoq down [-f manifest.toml]          stop all services
+
+# server
+yoq serve [--port PORT]              start the API server
+
+# cluster
+yoq init-server [--id N] [--port P]  start a cluster server node
+    [--api-port P] [--peers ...]
+    [--token TOKEN]
+yoq join <host> --token <token>      join cluster as agent node
+yoq cluster status                   show cluster node status
+yoq nodes [--server host:port]       list cluster agent nodes
+yoq drain <id> [--server host:port]  drain an agent node
+
+# meta
+yoq version                          print version
+yoq help                             show help
+```
 
 ## requirements
 
@@ -48,73 +75,75 @@ what works on Linux (kernel 6.1+):
 make build
 ```
 
-## usage
-
-```
-yoq run <image> [command]           # pull and run a container
-yoq run -p 8080:80 nginx:latest    # map host port to container port
-yoq run --name db postgres:latest  # assign a name for DNS discovery
-yoq run --no-net alpine /bin/sh    # run without networking
-yoq run ./rootfs /bin/sh           # run from a local rootfs directory
-yoq build .                        # build an image from a Dockerfile
-yoq build -t myapp:latest .        # build with a tag
-yoq build -f custom.Dockerfile .   # build from a custom Dockerfile
-yoq ps                             # list containers
-yoq logs <id>                      # view container output
-yoq logs <id> --tail 20            # last 20 lines
-yoq stop <id>                      # stop a running container
-yoq rm <id>                        # remove a stopped container
-yoq pull <image>                   # pull an image from a registry
-yoq images                         # list pulled images
-yoq rmi <image>                    # remove a pulled image
-yoq exec <id> <cmd> [args...]      # run a command in a running container
-```
-
 ## architecture
 
 ```
 src/
-  main.zig              CLI entry point, argument parsing
+  main.zig                CLI entry point, argument parsing
   runtime/
-    container.zig        container lifecycle (create/start/stop/rm)
-    namespaces.zig       clone3, user/pid/net/mnt namespace setup
-    cgroups.zig          cgroups v2 (cpu, memory, pids limits)
-    filesystem.zig       overlayfs, pivot_root, bind mounts
-    security.zig         seccomp filters, capability dropping
-    process.zig          process supervision, signal handling
-    logs.zig             stdout/stderr capture to files
-    exec.zig             execute commands in running containers
+    container.zig          container lifecycle (create/start/stop/rm)
+    namespaces.zig         clone3, user/pid/net/mnt namespace setup
+    cgroups.zig            cgroups v2 (cpu, memory, pids limits)
+    filesystem.zig         overlayfs, pivot_root, bind mounts
+    security.zig           seccomp filters, capability dropping
+    process.zig            process supervision, signal handling
+    logs.zig               stdout/stderr capture to files
+    exec.zig               execute commands in running containers
   image/
-    registry.zig         OCI registry client (token auth, manifests, blobs)
-    store.zig            content-addressable blob storage
-    layer.zig            layer extraction and deduplication
-    spec.zig             OCI image/manifest spec types
+    registry.zig           OCI registry client (token auth, manifests, blobs)
+    store.zig              content-addressable blob storage
+    layer.zig              layer extraction and deduplication
+    spec.zig               OCI image/manifest spec types
+    oci.zig                OCI image config resolution
   network/
-    setup.zig            network orchestrator (bridge + veth + NAT)
-    bridge.zig           bridge and veth pair management via netlink
-    netlink.zig          raw netlink socket interface
-    ip.zig               IP allocation from sqlite pool
-    nat.zig              iptables NAT, forwarding, port mapping
-    dns.zig              userspace DNS resolver for service discovery
+    setup.zig              network orchestrator (bridge + veth + NAT)
+    bridge.zig             bridge and veth pair management via netlink
+    netlink.zig            raw netlink socket interface
+    ip.zig                 IP allocation from sqlite pool
+    nat.zig                iptables NAT, forwarding, port mapping
+    dns.zig                userspace DNS resolver for service discovery
   build/
-    dockerfile.zig       Dockerfile parser (FROM, RUN, COPY, ENV, etc.)
-    engine.zig           build engine with content-hash caching
-    context.zig          build context file hashing and copying
-  state/
-    store.zig            sqlite container/image metadata
-    schema.zig           database schema and migrations
-  lib/
-    log.zig              structured logging
-    paths.zig            XDG data directory helpers
-    toml.zig             TOML parser for manifest files
-    syscall.zig          low-level syscall wrappers
+    dockerfile.zig         Dockerfile parser (FROM, RUN, COPY, ENV, etc.)
+    engine.zig             build engine with content-hash caching
+    context.zig            build context file hashing and copying
   manifest/
-    spec.zig             manifest type definitions (services, volumes, ports)
-    loader.zig           TOML manifest parser with dependency ordering
+    spec.zig               manifest type definitions (services, volumes, ports)
+    loader.zig             TOML manifest parser with dependency ordering
+    orchestrator.zig       service lifecycle and dependency management
+  dev/
+    watcher.zig            inotify file watcher for dev mode
+    log_mux.zig            colored log multiplexing by service name
+  cluster/
+    raft.zig               raft consensus (leader election, log replication)
+    raft_types.zig         raft protocol types and constants
+    log.zig                persistent raft log (SQLite-backed)
+    transport.zig          TCP transport for node-to-node communication
+    state_machine.zig      applies committed entries to replicated SQLite DB
+    node.zig               server node management (raft + state machine)
+    config.zig             cluster configuration and peer parsing
+    registry.zig           server-side agent registry
+    agent_types.zig        shared agent/assignment types
+    agent.zig              worker node agent (heartbeat, resource reporting)
+    http_client.zig        HTTP client for agent-server communication
+    scheduler.zig          bin-packing container placement
+  api/
+    http.zig               HTTP request/response parsing
+    routes.zig             API route dispatch and handlers
+    server.zig             HTTP server (io_uring + blocking fallback)
+  state/
+    store.zig              sqlite container/image metadata
+    schema.zig             database schema and migrations
+  lib/
+    log.zig                structured logging
+    paths.zig              XDG data directory helpers
+    toml.zig               TOML parser for manifest files
+    cli.zig                CLI output helpers
+    json_helpers.zig       JSON encoding utilities
+    exec_helpers.zig       process exec helpers
+    syscall.zig            low-level syscall wrappers
 ```
 
 ## what's next
 
-- **phase 5: manifest + dev mode** — manifest spec types and loader done, next: orchestrator (`yoq up` / `yoq down`), dev mode with hot reload
-- **phase 6: clustering** — Raft consensus, multi-node scheduling, WireGuard mesh networking
+- **remaining phase 6:** WireGuard mesh for cross-node networking, agent container reconciliation
 - **phase 7: production** — health checks, rolling updates, secrets, TLS, eBPF observability
