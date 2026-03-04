@@ -349,3 +349,50 @@ test "termAt" {
     try std.testing.expectEqual(@as(Term, 3), log.termAt(1));
     try std.testing.expectEqual(@as(Term, 5), log.termAt(2));
 }
+
+test "truncateFrom then append replaces entries" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    const alloc = std.testing.allocator;
+
+    try log.append(.{ .index = 1, .term = 1, .data = "a" });
+    try log.append(.{ .index = 2, .term = 1, .data = "b" });
+    try log.append(.{ .index = 3, .term = 1, .data = "c" });
+
+    // leader conflict: truncate from index 2 and write new entries
+    log.truncateFrom(2);
+    try log.append(.{ .index = 2, .term = 2, .data = "new_b" });
+
+    try std.testing.expectEqual(@as(LogIndex, 2), log.lastIndex());
+    try std.testing.expectEqual(@as(Term, 2), log.termAt(2));
+
+    const entry = (try log.getEntry(alloc, 2)).?;
+    defer alloc.free(entry.data);
+    try std.testing.expectEqualStrings("new_b", entry.data);
+
+    // old entry 3 should be gone
+    try std.testing.expect((try log.getEntry(alloc, 3)) == null);
+}
+
+test "getEntries with from greater than to returns empty" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    const alloc = std.testing.allocator;
+
+    try log.append(.{ .index = 1, .term = 1, .data = "a" });
+    try log.append(.{ .index = 2, .term = 1, .data = "b" });
+
+    const entries = try log.getEntries(alloc, 5, 3);
+    defer alloc.free(entries);
+    try std.testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+test "termAt beyond last entry returns zero" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    try log.append(.{ .index = 1, .term = 3, .data = "x" });
+    try log.append(.{ .index = 2, .term = 5, .data = "y" });
+
+    try std.testing.expectEqual(@as(Term, 0), log.termAt(99));
+}

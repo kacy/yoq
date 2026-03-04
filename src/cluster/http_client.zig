@@ -145,3 +145,13 @@ test "parseStatusCode rejects garbage" {
 test "parseStatusCode rejects empty" {
     try std.testing.expectError(error.InvalidResponse, parseStatusCode(""));
 }
+
+test "parseStatusCode extracts 100" {
+    const code = try parseStatusCode("HTTP/1.1 100 Continue\r\n");
+    try std.testing.expectEqual(@as(u16, 100), code);
+}
+
+test "parseStatusCode extracts 500" {
+    const code = try parseStatusCode("HTTP/1.1 500 Internal Server Error\r\n");
+    try std.testing.expectEqual(@as(u16, 500), code);
+}

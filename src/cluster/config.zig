@@ -122,3 +122,27 @@ test "parseIpv4 localhost" {
     const addr = try parseIpv4("127.0.0.1");
     try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, addr);
 }
+
+test "parsePeers rejects missing @ separator" {
+    const alloc = std.testing.allocator;
+    const result = parsePeers(alloc, "2_10.0.0.2:9700");
+    try std.testing.expectError(ConfigError.InvalidPeerFormat, result);
+}
+
+test "parsePeers rejects missing port" {
+    const alloc = std.testing.allocator;
+    const result = parsePeers(alloc, "2@10.0.0.2");
+    try std.testing.expectError(ConfigError.InvalidPeerFormat, result);
+}
+
+test "parseIpv4 boundary values" {
+    const zero = try parseIpv4("0.0.0.0");
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, zero);
+
+    const max = try parseIpv4("255.255.255.255");
+    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, max);
+}
+
+test "parseIpv4 rejects too few octets" {
+    try std.testing.expectError(error.InvalidFormat, parseIpv4("10.42.0"));
+}
