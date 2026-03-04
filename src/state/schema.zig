@@ -140,6 +140,18 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     db.exec("ALTER TABLE agents ADD COLUMN node_id INTEGER;", .{}, .{}) catch {};
     db.exec("ALTER TABLE agents ADD COLUMN wg_public_key TEXT;", .{}, .{}) catch {};
     db.exec("ALTER TABLE agents ADD COLUMN overlay_ip TEXT;", .{}, .{}) catch {};
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS wireguard_peers (
+        \\    node_id INTEGER NOT NULL,
+        \\    agent_id TEXT NOT NULL,
+        \\    public_key TEXT NOT NULL,
+        \\    endpoint TEXT NOT NULL,
+        \\    overlay_ip TEXT NOT NULL,
+        \\    container_subnet TEXT NOT NULL,
+        \\    PRIMARY KEY (node_id)
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -386,4 +398,18 @@ test "default columns" {
     try std.testing.expectEqualStrings("created", row.status.data);
     try std.testing.expect(row.pid == null);
     try std.testing.expect(row.exit_code == null);
+}
+
+test "init creates wireguard_peers table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO wireguard_peers (node_id, agent_id, public_key, endpoint, overlay_ip, container_subnet)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ @as(i64, 1), "agent-001", "dGVzdHB1YmtleQ==", "10.0.0.2:51820", "10.40.0.2", "10.42.1.0/24" },
+    ) catch unreachable;
 }
