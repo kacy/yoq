@@ -19,6 +19,8 @@ const health = @import("../manifest/health.zig");
 const cluster_node = @import("../cluster/node.zig");
 const agent_registry = @import("../cluster/registry.zig");
 const scheduler = @import("../cluster/scheduler.zig");
+const sqlite = @import("sqlite");
+const secrets = @import("../state/secrets.zig");
 
 /// cluster node reference (set by server when running in cluster mode)
 pub var cluster: ?*cluster_node.Node = null;
@@ -109,6 +111,21 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
             const id = rest;
             if (request.method == .GET) return handleGetContainer(alloc, id);
             if (request.method == .DELETE) return handleRemoveContainer(alloc, id);
+            return methodNotAllowed();
+        }
+    }
+
+    // /v1/secrets routes
+    if (std.mem.eql(u8, path, "/v1/secrets")) {
+        if (request.method == .GET) return handleListSecrets(alloc);
+        if (request.method == .POST) return handleSetSecret(alloc, request);
+        return methodNotAllowed();
+    }
+    if (path.len > "/v1/secrets/".len and std.mem.startsWith(u8, path, "/v1/secrets/")) {
+        const name = path["/v1/secrets/".len..];
+        if (std.mem.indexOf(u8, name, "/") == null and name.len > 0) {
+            if (request.method == .GET) return handleGetSecret(alloc, name);
+            if (request.method == .DELETE) return handleDeleteSecret(alloc, name);
             return methodNotAllowed();
         }
     }
@@ -706,6 +723,122 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request) Response {
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
+// -- secret handlers --
+
+/// open a secrets store backed by a fresh database connection.
+/// caller owns both the returned store and must call closeSecretsStore when done.
+/// the db is heap-allocated so the store's internal pointer remains valid.
+fn openSecretsStore(alloc: std.mem.Allocator) ?secrets.SecretsStore {
+    const db_ptr = alloc.create(sqlite.Db) catch return null;
+    db_ptr.* = store.openDb() catch {
+        alloc.destroy(db_ptr);
+        return null;
+    };
+    return secrets.SecretsStore.init(db_ptr, alloc) catch {
+        db_ptr.deinit();
+        alloc.destroy(db_ptr);
+        return null;
+    };
+}
+
+/// clean up a secrets store opened with openSecretsStore.
+fn closeSecretsStore(alloc: std.mem.Allocator, sec: *secrets.SecretsStore) void {
+    sec.db.deinit();
+    alloc.destroy(sec.db);
+}
+
+fn handleListSecrets(alloc: std.mem.Allocator) Response {
+    var sec = openSecretsStore(alloc) orelse return internalError();
+    defer closeSecretsStore(alloc, &sec);
+
+    var names = sec.list() catch return internalError();
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return internalError();
+    for (names.items, 0..) |name, i| {
+        if (i > 0) writer.writeByte(',') catch return internalError();
+        writer.writeByte('"') catch return internalError();
+        json_helpers.writeJsonEscaped(writer, name) catch return internalError();
+        writer.writeByte('"') catch return internalError();
+    }
+    writer.writeByte(']') catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleGetSecret(alloc: std.mem.Allocator, name: []const u8) Response {
+    var sec = openSecretsStore(alloc) orelse return internalError();
+    defer closeSecretsStore(alloc, &sec);
+
+    const value = sec.get(name) catch |err| {
+        if (err == secrets.SecretsError.NotFound) return notFound();
+        return internalError();
+    };
+    defer {
+        std.crypto.secureZero(u8, value);
+        alloc.free(value);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeAll("{\"name\":\"") catch return internalError();
+    json_helpers.writeJsonEscaped(writer, name) catch return internalError();
+    writer.writeAll("\",\"value\":\"") catch return internalError();
+    json_helpers.writeJsonEscaped(writer, value) catch return internalError();
+    writer.writeAll("\"}") catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleSetSecret(alloc: std.mem.Allocator, request: http.Request) Response {
+    if (request.body.len == 0) return badRequest("missing request body");
+
+    const name = extractJsonString(request.body, "name") orelse
+        return badRequest("missing name field");
+    const value = extractJsonString(request.body, "value") orelse
+        return badRequest("missing value field");
+
+    if (name.len == 0) return badRequest("name cannot be empty");
+
+    var sec = openSecretsStore(alloc) orelse return internalError();
+    defer closeSecretsStore(alloc, &sec);
+
+    sec.set(name, value) catch return internalError();
+
+    return .{
+        .status = .ok,
+        .body = "{\"status\":\"ok\"}",
+        .allocated = false,
+    };
+}
+
+fn handleDeleteSecret(alloc: std.mem.Allocator, name: []const u8) Response {
+    var sec = openSecretsStore(alloc) orelse return internalError();
+    defer closeSecretsStore(alloc, &sec);
+
+    sec.remove(name) catch |err| {
+        if (err == secrets.SecretsError.NotFound) return notFound();
+        return internalError();
+    };
+
+    return .{
+        .status = .ok,
+        .body = "{\"status\":\"removed\"}",
+        .allocated = false,
+    };
+}
+
 fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void {
     try writer.writeAll("{\"id\":\"");
     try writer.writeAll(agent.id);
@@ -1140,4 +1273,55 @@ test "dispatch rejects non-hex agent id" {
     defer if (resp.allocated) std.testing.allocator.free(resp.body);
 
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "dispatch GET /v1/secrets routes correctly" {
+    const req = (try http.parseRequest("GET /v1/secrets HTTP/1.1\r\nHost: localhost\r\n\r\n")).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    // will return internal_server_error because no DB is configured,
+    // but it proves the routing reached the handler
+    try std.testing.expect(resp.status == .ok or resp.status == .internal_server_error);
+}
+
+test "dispatch POST /v1/secrets with missing body returns bad request" {
+    const req = (try http.parseRequest(
+        "POST /v1/secrets HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "dispatch GET /v1/secrets/mykey routes correctly" {
+    const req = (try http.parseRequest(
+        "GET /v1/secrets/mykey HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    // will fail to open DB, but routing is correct
+    try std.testing.expect(resp.status == .not_found or resp.status == .internal_server_error);
+}
+
+test "dispatch DELETE /v1/secrets/mykey routes correctly" {
+    const req = (try http.parseRequest(
+        "DELETE /v1/secrets/mykey HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    // will fail to open DB, but routing is correct
+    try std.testing.expect(resp.status == .not_found or resp.status == .internal_server_error);
+}
+
+test "dispatch PUT /v1/secrets returns method not allowed" {
+    const req = (try http.parseRequest(
+        "PUT /v1/secrets HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+
+    try std.testing.expectEqual(http.StatusCode.method_not_allowed, resp.status);
 }
