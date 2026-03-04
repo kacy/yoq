@@ -154,6 +154,103 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     };
 }
 
+/// push result — summary of what was uploaded
+pub const PushResult = struct {
+    /// number of layer blobs that were uploaded (not already present)
+    layers_uploaded: usize,
+    /// number of layer blobs that were skipped (already in registry)
+    layers_skipped: usize,
+    /// the manifest digest (sha256 of manifest bytes)
+    manifest_digest: []const u8,
+
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *PushResult) void {
+        if (self.manifest_digest.len > 0) self.alloc.free(self.manifest_digest);
+    }
+};
+
+/// push an image to a registry.
+///
+/// uploads all layer blobs, the config blob, and the manifest.
+/// checks each blob against the registry first and skips uploads
+/// for blobs that already exist (deduplication across images).
+///
+/// manifest_bytes and config_bytes should come from the local blob store
+/// (saved during pull or build). layer_digests are the sha256 digests
+/// of the layer blobs in the local blob store.
+pub fn push(
+    alloc: std.mem.Allocator,
+    image_ref: spec.ImageRef,
+    manifest_bytes: []const u8,
+    config_bytes: []const u8,
+    layer_digests: []const []const u8,
+) RegistryError!PushResult {
+    var client: std.http.Client = .{ .allocator = alloc };
+    defer client.deinit();
+
+    var repo_buf: [256]u8 = undefined;
+    const repository = resolveRepository(image_ref, &repo_buf);
+
+    // authenticate with push,pull scope
+    const token = authenticate(alloc, &client, image_ref.host, repository, "push,pull") catch
+        return RegistryError.AuthFailed;
+    defer alloc.free(token.value);
+
+    var layers_uploaded: usize = 0;
+    var layers_skipped: usize = 0;
+
+    // upload each layer blob (skip if already present in registry)
+    for (layer_digests) |digest| {
+        const exists = checkBlobExists(alloc, &client, image_ref.host, repository, digest, token) catch false;
+        if (exists) {
+            layers_skipped += 1;
+            continue;
+        }
+
+        // read the blob data from the local store
+        const parsed_digest = blob_store.Digest.parse(digest) orelse
+            return RegistryError.BlobNotFound;
+        const data = blob_store.getBlob(alloc, parsed_digest) catch
+            return RegistryError.BlobNotFound;
+        defer alloc.free(data);
+
+        uploadBlob(alloc, &client, image_ref.host, repository, digest, data, token) catch
+            return RegistryError.UploadFailed;
+        layers_uploaded += 1;
+    }
+
+    // upload the config blob
+    const config_digest = blob_store.computeDigest(config_bytes);
+    var config_digest_buf: [71]u8 = undefined;
+    const config_digest_str = config_digest.string(&config_digest_buf);
+
+    const config_exists = checkBlobExists(alloc, &client, image_ref.host, repository, config_digest_str, token) catch false;
+    if (!config_exists) {
+        uploadBlob(alloc, &client, image_ref.host, repository, config_digest_str, config_bytes, token) catch
+            return RegistryError.UploadFailed;
+    }
+
+    // upload the manifest
+    uploadManifest(alloc, &client, image_ref.host, repository, image_ref.reference, manifest_bytes, token) catch
+        return RegistryError.UploadFailed;
+
+    // compute manifest digest for the result
+    const manifest_digest = blob_store.computeDigest(manifest_bytes);
+    var manifest_digest_buf: [71]u8 = undefined;
+    const manifest_digest_str = manifest_digest.string(&manifest_digest_buf);
+
+    const digest_copy = alloc.dupe(u8, manifest_digest_str) catch
+        return RegistryError.NetworkError;
+
+    return PushResult{
+        .layers_uploaded = layers_uploaded,
+        .layers_skipped = layers_skipped,
+        .manifest_digest = digest_copy,
+        .alloc = alloc,
+    };
+}
+
 // -- internal functions --
 
 /// resolve "nginx" → "library/nginx" for docker hub, pass through otherwise
