@@ -19,6 +19,7 @@
 const std = @import("std");
 const types = @import("raft_types.zig");
 const persistent_log = @import("log.zig");
+const logger = @import("../lib/log.zig");
 
 const NodeId = types.NodeId;
 const Term = types.Term;
@@ -191,7 +192,9 @@ pub const Raft = struct {
             } else if (self.role == .candidate) {
                 // another node won the election in our term
                 self.role = .follower;
-                self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch {};
+                self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch |e| {
+                    logger.warn("raft: failed to queue become_follower action: {}", .{e});
+                };
             }
             self.ticks_since_event = 0;
         }
@@ -235,7 +238,9 @@ pub const Raft = struct {
                 self.commit_index = new_commit;
                 self.actions.append(self.alloc, .{
                     .commit_entries = .{ .up_to = new_commit },
-                }) catch {};
+                }) catch |e| {
+                    logger.warn("raft: failed to queue commit action: {}", .{e});
+                };
             }
         }
 
@@ -345,7 +350,9 @@ pub const Raft = struct {
                         .last_log_term = last_term,
                     },
                 },
-            }) catch {};
+            }) catch |e| {
+                logger.warn("raft: failed to queue vote request: {}", .{e});
+            };
         }
     }
 
@@ -360,7 +367,9 @@ pub const Raft = struct {
             self.match_index[i] = 0;
         }
 
-        self.actions.append(self.alloc, .become_leader) catch {};
+        self.actions.append(self.alloc, .become_leader) catch |e| {
+            logger.warn("raft: failed to queue become_leader action: {}", .{e});
+        };
 
         // send initial empty append entries (heartbeat) to assert leadership
         self.sendHeartbeats();
@@ -412,7 +421,9 @@ pub const Raft = struct {
                     .leader_commit = self.commit_index,
                 },
             },
-        }) catch {};
+        }) catch |e| {
+            logger.warn("raft: failed to queue append entries: {}", .{e});
+        };
     }
 
     fn advanceCommitIndex(self: *Raft) void {
@@ -436,7 +447,9 @@ pub const Raft = struct {
                 self.commit_index = n;
                 self.actions.append(self.alloc, .{
                     .commit_entries = .{ .up_to = n },
-                }) catch {};
+                }) catch |e| {
+                    logger.warn("raft: failed to queue commit action: {}", .{e});
+                };
                 break;
             }
         }

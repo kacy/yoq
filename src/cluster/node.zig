@@ -27,6 +27,7 @@ const log_mod = @import("log.zig");
 const state_machine_mod = @import("state_machine.zig");
 const types = @import("raft_types.zig");
 const agent_registry = @import("registry.zig");
+const logger = @import("../lib/log.zig");
 
 const Raft = raft_mod.Raft;
 const Action = raft_mod.Action;
@@ -247,7 +248,9 @@ pub const Node = struct {
             if (now - agent.last_heartbeat > timeout) {
                 var sql_buf: [256]u8 = undefined;
                 const sql = agent_registry.markOfflineSql(&sql_buf, agent.id) catch continue;
-                _ = self.raft.propose(sql) catch {};
+                _ = self.raft.propose(sql) catch |e| {
+                    logger.warn("failed to propose agent offline status: {}", .{e});
+                };
             }
         }
     }
@@ -280,7 +283,9 @@ pub const Node = struct {
                 // address alone, so we use the candidate_id from the request)
                 self.transport.send(args.candidate_id, .{
                     .request_vote_reply = reply,
-                }) catch {};
+                }) catch |e| {
+                    logger.warn("failed to send vote reply to node {}: {}", .{ args.candidate_id, e });
+                };
             },
             .request_vote_reply => |reply| {
                 // we don't have a direct sender ID, but replies only matter
@@ -291,7 +296,9 @@ pub const Node = struct {
                 const reply = self.raft.handleAppendEntries(args);
                 self.transport.send(args.leader_id, .{
                     .append_entries_reply = reply,
-                }) catch {};
+                }) catch |e| {
+                    logger.warn("failed to send append entries reply to node {}: {}", .{ args.leader_id, e });
+                };
                 // free entries data
                 for (args.entries) |e| self.alloc.free(e.data);
                 self.alloc.free(args.entries);
@@ -312,19 +319,27 @@ pub const Node = struct {
         for (actions) |action| {
             switch (action) {
                 .send_request_vote => |rv| {
-                    self.transport.send(rv.target, .{ .request_vote = rv.args }) catch {};
+                    self.transport.send(rv.target, .{ .request_vote = rv.args }) catch |e| {
+                        logger.warn("failed to send vote request to node {}: {}", .{ rv.target, e });
+                    };
                 },
                 .send_append_entries => |ae| {
-                    self.transport.send(ae.target, .{ .append_entries = ae.args }) catch {};
+                    self.transport.send(ae.target, .{ .append_entries = ae.args }) catch |e| {
+                        logger.warn("failed to send append entries to node {}: {}", .{ ae.target, e });
+                    };
                     // free duplicated entries
                     for (ae.args.entries) |e| self.alloc.free(e.data);
                     if (ae.args.entries.len > 0) self.alloc.free(ae.args.entries);
                 },
                 .send_request_vote_reply => |rv| {
-                    self.transport.send(rv.target, .{ .request_vote_reply = rv.reply }) catch {};
+                    self.transport.send(rv.target, .{ .request_vote_reply = rv.reply }) catch |e| {
+                        logger.warn("failed to send vote reply to node {}: {}", .{ rv.target, e });
+                    };
                 },
                 .send_append_entries_reply => |ae| {
-                    self.transport.send(ae.target, .{ .append_entries_reply = ae.reply }) catch {};
+                    self.transport.send(ae.target, .{ .append_entries_reply = ae.reply }) catch |e| {
+                        logger.warn("failed to send append entries reply to node {}: {}", .{ ae.target, e });
+                    };
                 },
                 .commit_entries => |commit| {
                     self.state_machine.applyUpTo(&self.log, self.alloc, commit.up_to);
