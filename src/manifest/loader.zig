@@ -154,7 +154,6 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) LoadError![]
     return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
 }
 
-
 // -- internal --
 
 /// build a Manifest from a parsed TOML root table
