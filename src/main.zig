@@ -983,7 +983,8 @@ fn cmdServe(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         }
     }
 
-    var server = api_server.Server.init(alloc, port) catch {
+    // single-node mode: bind to localhost only — no auth needed
+    var server = api_server.Server.init(alloc, port, .{ 127, 0, 0, 1 }) catch {
         writeErr("failed to start server on port {d}\n", .{port});
         std.process.exit(1);
     };
@@ -1084,8 +1085,13 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         routes.join_token = null;
     }
 
-    // start API server
-    var server = api_server.Server.init(alloc, api_port) catch {
+    // start API server — cluster mode binds to all interfaces since
+    // agents on other nodes need to reach this server.
+    // set api_token so all endpoints (except health/version) require auth.
+    routes.api_token = token;
+    defer routes.api_token = null;
+
+    var server = api_server.Server.init(alloc, api_port, .{ 0, 0, 0, 0 }) catch {
         writeErr("failed to start API server on port {d}\n", .{api_port});
         std.process.exit(1);
     };

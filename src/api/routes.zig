@@ -28,6 +28,12 @@ pub var cluster: ?*cluster_node.Node = null;
 /// join token for agent registration (set by cmdInitServer)
 pub var join_token: ?[]const u8 = null;
 
+/// API bearer token for authentication (set when running in cluster mode).
+/// when null, all endpoints are accessible without auth (single-node mode,
+/// API listens on localhost only). when set, all endpoints except /health
+/// and /version require a valid Authorization: Bearer <token> header.
+pub var api_token: ?[]const u8 = null;
+
 pub const Response = struct {
     status: http.StatusCode,
     body: []const u8,
@@ -39,6 +45,22 @@ pub const Response = struct {
 /// the caller must free response.body if response.allocated is true.
 pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     const path = request.path_only;
+
+    // bearer token authentication — when api_token is set, require auth
+    // on all endpoints except /health and /version (used for probes).
+    if (api_token) |expected_token| {
+        const is_public = std.mem.eql(u8, path, "/health") or
+            std.mem.eql(u8, path, "/version");
+
+        if (!is_public) {
+            const provided = extractBearerToken(&request) orelse {
+                return unauthorized();
+            };
+            if (!std.mem.eql(u8, provided, expected_token)) {
+                return unauthorized();
+            }
+        }
+    }
 
     // static routes (no allocation needed)
     if (request.method == .GET) {
@@ -915,6 +937,10 @@ fn notFound() Response {
     return .{ .status = .not_found, .body = "{\"error\":\"not found\"}", .allocated = false };
 }
 
+fn unauthorized() Response {
+    return .{ .status = .unauthorized, .body = "{\"error\":\"unauthorized\"}", .allocated = false };
+}
+
 fn methodNotAllowed() Response {
     return .{ .status = .method_not_allowed, .body = "{\"error\":\"method not allowed\"}", .allocated = false };
 }
@@ -930,6 +956,19 @@ fn badRequest(comptime message: []const u8) Response {
         .body = "{\"error\":\"" ++ message ++ "\"}",
         .allocated = false,
     };
+}
+
+/// extract the bearer token from an Authorization header.
+/// expects format: "Authorization: Bearer <token>"
+/// returns the token string, or null if the header is missing or malformed.
+pub fn extractBearerToken(request: *const http.Request) ?[]const u8 {
+    const auth_value = http.findHeaderValue(request.headers_raw, "Authorization") orelse return null;
+
+    const prefix = "Bearer ";
+    if (auth_value.len <= prefix.len) return null;
+    if (!std.mem.startsWith(u8, auth_value, prefix)) return null;
+
+    return auth_value[prefix.len..];
 }
 
 // -- JSON serialization helpers --
@@ -1324,4 +1363,82 @@ test "dispatch PUT /v1/secrets returns method not allowed" {
     const resp = dispatch(req, std.testing.allocator);
 
     try std.testing.expectEqual(http.StatusCode.method_not_allowed, resp.status);
+}
+
+// -- bearer token authentication tests --
+
+test "dispatch returns 401 for missing auth on protected endpoint when api_token is set" {
+    // save and restore api_token
+    const saved = api_token;
+    defer api_token = saved;
+    api_token = "test-secret-token";
+
+    const req = (try http.parseRequest(
+        "GET /containers HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+
+    try std.testing.expectEqual(http.StatusCode.unauthorized, resp.status);
+}
+
+test "dispatch returns 401 for wrong token on protected endpoint" {
+    const saved = api_token;
+    defer api_token = saved;
+    api_token = "correct-token";
+
+    const req = (try http.parseRequest(
+        "GET /containers HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong-token\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+
+    try std.testing.expectEqual(http.StatusCode.unauthorized, resp.status);
+}
+
+test "dispatch allows unauthenticated /health when api_token is set" {
+    const saved = api_token;
+    defer api_token = saved;
+    api_token = "test-secret-token";
+
+    const req = (try http.parseRequest(
+        "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+
+    try std.testing.expectEqual(http.StatusCode.ok, resp.status);
+}
+
+test "dispatch allows unauthenticated /version when api_token is set" {
+    const saved = api_token;
+    defer api_token = saved;
+    api_token = "test-secret-token";
+
+    const req = (try http.parseRequest(
+        "GET /version HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+
+    try std.testing.expectEqual(http.StatusCode.ok, resp.status);
+}
+
+test "extractBearerToken parses valid bearer token" {
+    const req = (try http.parseRequest(
+        "GET /test HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer my-token\r\n\r\n",
+    )).?;
+    const token = extractBearerToken(&req);
+    try std.testing.expect(token != null);
+    try std.testing.expectEqualStrings("my-token", token.?);
+}
+
+test "extractBearerToken returns null for missing header" {
+    const req = (try http.parseRequest(
+        "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    try std.testing.expect(extractBearerToken(&req) == null);
+}
+
+test "extractBearerToken returns null for non-bearer auth" {
+    const req = (try http.parseRequest(
+        "GET /test HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic abc123\r\n\r\n",
+    )).?;
+    try std.testing.expect(extractBearerToken(&req) == null);
 }

@@ -31,23 +31,42 @@ pub const Response = struct {
 };
 
 /// send an HTTP GET request and return the response.
+/// if auth_token is provided, includes an Authorization: Bearer header.
 pub fn get(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8) HttpClientError!Response {
-    // format request
+    return getWithAuth(alloc, addr, port, path, null);
+}
+
+/// send an HTTP GET request with optional bearer token auth.
+pub fn getWithAuth(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, auth_token: ?[]const u8) HttpClientError!Response {
     var req_buf: [1024]u8 = undefined;
-    const request = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", .{path}) catch
-        return HttpClientError.SendFailed;
+    const request = if (auth_token) |token|
+        std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {s}\r\n\r\n", .{ path, token }) catch
+            return HttpClientError.SendFailed
+    else
+        std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", .{path}) catch
+            return HttpClientError.SendFailed;
 
     return doRequest(alloc, addr, port, request);
 }
 
 /// send an HTTP POST request with a body and return the response.
 pub fn post(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []const u8) HttpClientError!Response {
-    // format request
+    return postWithAuth(alloc, addr, port, path, body, null);
+}
+
+/// send an HTTP POST request with optional bearer token auth.
+pub fn postWithAuth(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []const u8, auth_token: ?[]const u8) HttpClientError!Response {
     var req_buf: [2048]u8 = undefined;
-    const request = std.fmt.bufPrint(&req_buf,
-        "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\n\r\n{s}",
-        .{ path, body.len, body },
-    ) catch return HttpClientError.SendFailed;
+    const request = if (auth_token) |token|
+        std.fmt.bufPrint(&req_buf,
+            "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\nAuthorization: Bearer {s}\r\n\r\n{s}",
+            .{ path, body.len, token, body },
+        ) catch return HttpClientError.SendFailed
+    else
+        std.fmt.bufPrint(&req_buf,
+            "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\n\r\n{s}",
+            .{ path, body.len, body },
+        ) catch return HttpClientError.SendFailed;
 
     return doRequest(alloc, addr, port, request);
 }
