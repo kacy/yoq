@@ -70,6 +70,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
         if (std.mem.eql(u8, path, "/images")) return handleListImages(alloc);
         if (std.mem.eql(u8, path, "/cluster/status")) return handleClusterStatus(alloc);
         if (std.mem.eql(u8, path, "/agents")) return handleListAgents(alloc);
+        if (std.mem.eql(u8, path, "/wireguard/peers")) return handleWireguardPeers(alloc);
     }
 
     if (request.method == .POST) {
@@ -662,6 +663,33 @@ fn handleListAgents(alloc: std.mem.Allocator) Response {
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
+fn handleWireguardPeers(alloc: std.mem.Allocator) Response {
+    const node = cluster orelse {
+        return .{ .status = .ok, .body = "[]", .allocated = false };
+    };
+
+    const db = node.stateMachineDb();
+    const peers = agent_registry.listWireguardPeers(alloc, db) catch return internalError();
+    defer {
+        for (peers) |p| p.deinit(alloc);
+        alloc.free(peers);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return internalError();
+    for (peers, 0..) |peer, i| {
+        if (i > 0) writer.writeByte(',') catch return internalError();
+        writeWireguardPeerJson(writer, peer) catch return internalError();
+    }
+    writer.writeByte(']') catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
 fn handleAgentAssignments(alloc: std.mem.Allocator, agent_id: []const u8) Response {
     const node = cluster orelse return badRequest("not running in cluster mode");
 
@@ -1026,6 +1054,22 @@ fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignment) !
     try writer.writeAll(",\"memory_limit_mb\":");
     try std.fmt.format(writer, "{d}", .{assignment.memory_limit_mb});
     try writer.writeByte('}');
+}
+
+fn writeWireguardPeerJson(writer: anytype, peer: agent_registry.WireguardPeer) !void {
+    try writer.writeAll("{\"node_id\":");
+    try std.fmt.format(writer, "{d}", .{peer.node_id});
+    try writer.writeAll(",\"agent_id\":\"");
+    try json_helpers.writeJsonEscaped(writer, peer.agent_id);
+    try writer.writeAll("\",\"public_key\":\"");
+    try json_helpers.writeJsonEscaped(writer, peer.public_key);
+    try writer.writeAll("\",\"endpoint\":\"");
+    try json_helpers.writeJsonEscaped(writer, peer.endpoint);
+    try writer.writeAll("\",\"overlay_ip\":\"");
+    try json_helpers.writeJsonEscaped(writer, peer.overlay_ip);
+    try writer.writeAll("\",\"container_subnet\":\"");
+    try json_helpers.writeJsonEscaped(writer, peer.container_subnet);
+    try writer.writeAll("\"}");
 }
 
 // use shared JSON extraction helpers
