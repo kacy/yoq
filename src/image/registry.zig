@@ -653,6 +653,60 @@ fn parseLocationHeader(host: []const u8, head: std.http.Client.Response.Head) ?[
     return null;
 }
 
+/// upload a manifest to the registry.
+/// PUT /v2/{repo}/manifests/{reference} with the manifest JSON body.
+/// reference is typically a tag (e.g. "latest") or a digest.
+pub fn uploadManifest(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    reference: []const u8,
+    manifest_bytes: []const u8,
+    token: Token,
+) RegistryError!void {
+    var url_buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://{s}/v2/{s}/manifests/{s}",
+        .{ host, repository, reference },
+    ) catch return RegistryError.UploadFailed;
+
+    var auth_buf: [8192]u8 = undefined;
+    const auth_value = authHeaderValue(token, &auth_buf);
+
+    _ = alloc; // reserved for future use
+
+    const content_type_header = std.http.Header{
+        .name = "Content-Type",
+        .value = spec.media_type.oci_manifest,
+    };
+
+    var headers: [1]std.http.Header = .{content_type_header};
+
+    const uri = std.Uri.parse(url) catch return RegistryError.UploadFailed;
+    var req = client.request(.PUT, uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
+        .headers = .{
+            .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
+        },
+        .extra_headers = &headers,
+    }) catch return RegistryError.UploadFailed;
+    defer req.deinit();
+
+    req.send(.{ .content_length = manifest_bytes.len }) catch return RegistryError.UploadFailed;
+    req.writeAll(manifest_bytes) catch return RegistryError.UploadFailed;
+    req.finish() catch return RegistryError.UploadFailed;
+
+    var redirect_buf: [4096]u8 = undefined;
+    const response = req.receiveHead(&redirect_buf) catch return RegistryError.UploadFailed;
+
+    // 201 Created is the expected success status for manifest upload
+    if (response.head.status != .created)
+        return RegistryError.UploadFailed;
+}
+
 /// fetch a blob (config or layer) from the registry
 fn fetchBlob(
     alloc: std.mem.Allocator,
@@ -900,6 +954,19 @@ test "checkBlobExists — URL is correctly formed" {
     ) catch unreachable;
     try std.testing.expectEqualStrings(
         "https://registry.example.io/v2/myuser/myapp/blobs/sha256:abc123",
+        url,
+    );
+}
+
+test "uploadManifest — URL format is correct" {
+    var url_buf: [1024]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://{s}/v2/{s}/manifests/{s}",
+        .{ "registry.example.io", "myuser/myapp", "v1.0" },
+    ) catch unreachable;
+    try std.testing.expectEqualStrings(
+        "https://registry.example.io/v2/myuser/myapp/manifests/v1.0",
         url,
     );
 }
