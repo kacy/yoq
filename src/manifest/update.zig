@@ -172,22 +172,24 @@ pub fn performRollingUpdate(
         };
     }
 
-    // record deployment start
-    const deployment_id = generateDeploymentId(alloc) catch {
-        return UpdateError.StoreFailed;
-    };
-    defer alloc.free(deployment_id);
+    // record deployment start (best-effort — the update proceeds even if
+    // we can't write to the store, since the actual container work matters
+    // more than the audit trail)
+    const deployment_id = generateDeploymentId(alloc) catch null;
+    defer if (deployment_id) |did| alloc.free(did);
 
-    recordDeployment(
-        deployment_id,
-        context.service_name,
-        context.manifest_hash,
-        context.config_snapshot,
-        .in_progress,
-        null,
-    ) catch {
-        return UpdateError.StoreFailed;
-    };
+    if (deployment_id) |did| {
+        recordDeployment(
+            did,
+            context.service_name,
+            context.manifest_hash,
+            context.config_snapshot,
+            .in_progress,
+            null,
+        ) catch {
+            log.warn("update: failed to record deployment start", .{});
+        };
+    }
 
     log.info("update: starting rolling update for {s} ({d} containers, parallelism={d})", .{
         context.service_name,
@@ -198,10 +200,6 @@ pub fn performRollingUpdate(
     // track new containers we've started (for rollback if needed)
     var new_container_ids = std.ArrayList([12]u8).init(alloc);
     defer new_container_ids.deinit();
-
-    // track which old containers we've stopped (for rollback)
-    var stopped_old = std.ArrayList(usize).init(alloc);
-    defer stopped_old.deinit();
 
     var progress = UpdateProgress{
         .total_containers = total,
@@ -244,12 +242,10 @@ pub fn performRollingUpdate(
         // if all starts failed, handle the failure
         if (batch_new_ids.items.len == 0) {
             return handleBatchFailure(
-                alloc,
                 strategy,
                 context,
                 deployment_id,
                 &new_container_ids,
-                &stopped_old,
                 &progress,
                 "all containers failed to start",
             );
@@ -265,12 +261,10 @@ pub fn performRollingUpdate(
 
             if (!all_healthy) {
                 return handleBatchFailure(
-                    alloc,
                     strategy,
                     context,
                     deployment_id,
                     &new_container_ids,
-                    &stopped_old,
                     &progress,
                     "health checks failed for new containers",
                 );
@@ -280,14 +274,11 @@ pub fn performRollingUpdate(
         // step 3: stop old containers in this batch
         for (batch_start..batch_end) |i| {
             const old_id = context.old_container_ids[i];
-            if (context.callbacks.stopContainer(old_id)) {
-                stopped_old.append(i) catch {};
-                progress.replaced += 1;
-            } else {
+            if (!context.callbacks.stopContainer(old_id)) {
                 log.warn("update: failed to stop old container {s}", .{old_id});
                 // not fatal — the new container is already running
-                progress.replaced += 1;
             }
+            progress.replaced += 1;
         }
 
         // step 4: delay between batches (if configured and not the last batch)
@@ -303,7 +294,9 @@ pub fn performRollingUpdate(
     progress.status = .completed;
     progress.message = null;
 
-    updateDeploymentStatus(deployment_id, .completed, null) catch {};
+    if (deployment_id) |did| {
+        updateDeploymentStatus(did, .completed, null) catch {};
+    }
 
     log.info("update: rolling update completed for {s} ({d} containers replaced)", .{
         context.service_name,
@@ -338,17 +331,13 @@ pub fn rollback(
 
 /// handle a batch failure: either rollback or pause based on strategy
 fn handleBatchFailure(
-    alloc: std.mem.Allocator,
     strategy: UpdateStrategy,
     context: *const UpdateContext,
-    deployment_id: []const u8,
+    deployment_id: ?[]const u8,
     new_container_ids: *std.ArrayList([12]u8),
-    stopped_old: *std.ArrayList(usize),
     progress: *UpdateProgress,
     reason: []const u8,
 ) UpdateError {
-    _ = stopped_old;
-
     log.warn("update: batch failed for {s}: {s}", .{ context.service_name, reason });
 
     switch (strategy.failure_action) {
@@ -366,9 +355,10 @@ fn handleBatchFailure(
 
             progress.status = .rolled_back;
             progress.message = reason;
-            _ = alloc;
 
-            updateDeploymentStatus(deployment_id, .rolled_back, reason) catch {};
+            if (deployment_id) |did| {
+                updateDeploymentStatus(did, .rolled_back, reason) catch {};
+            }
 
             return UpdateError.BatchFailed;
         },
@@ -376,7 +366,9 @@ fn handleBatchFailure(
             progress.status = .failed;
             progress.message = reason;
 
-            updateDeploymentStatus(deployment_id, .failed, reason) catch {};
+            if (deployment_id) |did| {
+                updateDeploymentStatus(did, .failed, reason) catch {};
+            }
 
             return UpdateError.UpdatePaused;
         },
@@ -412,11 +404,15 @@ fn waitForHealth(
 
 /// generate a unique deployment ID (12-char hex string like container IDs)
 fn generateDeploymentId(alloc: std.mem.Allocator) ![]const u8 {
-    var buf: [6]u8 = undefined;
-    std.crypto.random.bytes(&buf);
+    const chars = "0123456789abcdef";
+    var bytes: [6]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
 
     const hex = try alloc.alloc(u8, 12);
-    _ = std.fmt.bufPrint(hex, "{s}", .{std.fmt.fmtSliceHexLower(&buf)}) catch unreachable;
+    for (bytes, 0..) |b, i| {
+        hex[i * 2] = chars[b >> 4];
+        hex[i * 2 + 1] = chars[b & 0x0f];
+    }
     return hex;
 }
 
