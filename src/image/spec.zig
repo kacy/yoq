@@ -102,6 +102,11 @@ pub const media_type = struct {
 
 // -- parsing helpers --
 
+/// maximum JSON nesting depth we'll accept. OCI manifests are shallow
+/// documents (typically 3-4 levels deep). a limit of 64 is extremely
+/// generous while preventing stack exhaustion from maliciously nested JSON.
+const max_json_depth: usize = 64;
+
 /// parse result wraps the parsed value and the arena that owns its memory.
 /// caller must call deinit() when done with the value.
 pub fn ParseResult(comptime T: type) type {
@@ -115,10 +120,45 @@ pub fn ParseResult(comptime T: type) type {
     };
 }
 
+/// check that JSON nesting depth doesn't exceed our limit.
+/// scans the raw bytes counting `[` and `{` as depth increases,
+/// `]` and `}` as decreases. skips characters inside strings.
+/// returns error if depth exceeds max_json_depth.
+fn checkJsonDepth(json_bytes: []const u8) !void {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+
+    for (json_bytes) |c| {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\' and in_string) {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (in_string) continue;
+
+        if (c == '{' or c == '[') {
+            depth += 1;
+            if (depth > max_json_depth) return error.JsonDepthExceeded;
+        } else if (c == '}' or c == ']') {
+            depth -|= 1; // saturating subtract, malformed JSON handled by parser
+        }
+    }
+}
+
 /// parse JSON bytes into a typed result. shared implementation for all
 /// OCI spec types — ignores unknown fields for forward compatibility.
+/// enforces a depth limit to prevent stack exhaustion from crafted input.
 /// caller must call .deinit() on the result when done.
 pub fn parseJson(comptime T: type, alloc: std.mem.Allocator, json_bytes: []const u8) !ParseResult(T) {
+    try checkJsonDepth(json_bytes);
     const parsed = try std.json.parseFromSlice(T, alloc, json_bytes, .{
         .ignore_unknown_fields = true,
     });
@@ -443,4 +483,47 @@ test "parse image config — new fields default to null" {
     try std.testing.expect(cc.Shell == null);
     try std.testing.expect(cc.StopSignal == null);
     try std.testing.expect(cc.Healthcheck == null);
+}
+
+test "json depth limit — normal manifest passes" {
+    // a typical manifest has ~3 levels of nesting, well within our limit
+    const json =
+        \\{
+        \\  "schemaVersion": 2,
+        \\  "config": {
+        \\    "mediaType": "application/vnd.oci.image.config.v1+json",
+        \\    "digest": "sha256:aaaa",
+        \\    "size": 100
+        \\  },
+        \\  "layers": [
+        \\    {
+        \\      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        \\      "digest": "sha256:bbbb",
+        \\      "size": 200
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    // should not error — depth is only ~3
+    try checkJsonDepth(json);
+}
+
+test "json depth limit — excessive nesting rejected" {
+    // build a JSON string with nesting depth > 64: [[[[...]]]]
+    // each level is just one byte, so 65 bytes is enough to exceed depth 64
+    var buf: [128]u8 = undefined;
+    for (0..65) |i| {
+        buf[i] = '[';
+    }
+    const result = checkJsonDepth(buf[0..65]);
+    try std.testing.expectError(error.JsonDepthExceeded, result);
+}
+
+test "json depth limit — strings with braces don't count" {
+    // braces inside JSON strings should not affect depth counting
+    const json =
+        \\{"key": "value with { and [ characters }]"}
+    ;
+    try checkJsonDepth(json);
 }
