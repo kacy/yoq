@@ -362,6 +362,10 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse
         return badRequest("missing memory_mb field");
 
+    if (!validateClusterInput(address)) {
+        return badRequest("invalid address");
+    }
+
     if (!agent_registry.validateToken(token, expected_token)) {
         return .{
             .status = .bad_request,
@@ -565,6 +569,16 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request) Response {
         const cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000;
         const memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256;
 
+        // validate user-controlled fields before they reach SQL generation
+        if (!validateClusterInput(image)) {
+            pos = block_end + 1;
+            continue;
+        }
+        if (command.len > 0 and !validateClusterInput(command)) {
+            pos = block_end + 1;
+            continue;
+        }
+
         requests.append(alloc, .{
             .image = image,
             .command = command,
@@ -679,43 +693,22 @@ fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignment) !
     try writer.writeByte('}');
 }
 
-// -- JSON extraction helpers --
-// minimal JSON field extraction for known request shapes.
-// avoids pulling in a full parser for simple key-value lookups.
+// use shared JSON extraction helpers
+const extractJsonString = json_helpers.extractJsonString;
+const extractJsonInt = json_helpers.extractJsonInt;
 
-/// extract a string value from a JSON object: {"key":"value"}
-fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
-    // search for "key":"
-    var search_buf: [128]u8 = undefined;
-    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
+// -- input validation --
 
-    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
-    const value_start = start_pos + needle.len;
-
-    // find closing quote (no escape handling needed for our simple values)
-    const value_end = std.mem.indexOfPos(u8, json, value_start, "\"") orelse return null;
-
-    return json[value_start..value_end];
-}
-
-/// extract an integer value from a JSON object: {"key":123}
-fn extractJsonInt(json: []const u8, key: []const u8) ?i64 {
-    var search_buf: [128]u8 = undefined;
-    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
-
-    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
-    const value_start = start_pos + needle.len;
-
-    // skip whitespace
-    var pos = value_start;
-    while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
-
-    // find end of number
-    var end = pos;
-    while (end < json.len and (json[end] >= '0' and json[end] <= '9')) : (end += 1) {}
-
-    if (end == pos) return null;
-    return std.fmt.parseInt(i64, json[pos..end], 10) catch return null;
+/// reject values containing SQL metacharacters or control characters.
+/// defense-in-depth: SQL generation also escapes, but rejecting at the
+/// API boundary is the first line of defense.
+fn validateClusterInput(value: []const u8) bool {
+    if (value.len == 0 or value.len > 256) return false;
+    for (value) |c| {
+        if (c == '\'' or c == '"' or c == ';' or c == '\\') return false;
+        if (c < 0x20) return false; // control characters
+    }
+    return true;
 }
 
 // -- response helpers --
@@ -893,20 +886,6 @@ test "writeJsonEscaped with backslash" {
     try std.testing.expectEqualStrings("path\\\\to\\\\file", buf.items);
 }
 
-test "extractJsonString" {
-    const json = "{\"token\":\"my-secret\",\"address\":\"10.0.0.5:7701\"}";
-    try std.testing.expectEqualStrings("my-secret", extractJsonString(json, "token").?);
-    try std.testing.expectEqualStrings("10.0.0.5:7701", extractJsonString(json, "address").?);
-    try std.testing.expect(extractJsonString(json, "missing") == null);
-}
-
-test "extractJsonInt" {
-    const json = "{\"cpu_cores\":4,\"memory_mb\":8192}";
-    try std.testing.expectEqual(@as(i64, 4), extractJsonInt(json, "cpu_cores").?);
-    try std.testing.expectEqual(@as(i64, 8192), extractJsonInt(json, "memory_mb").?);
-    try std.testing.expect(extractJsonInt(json, "missing") == null);
-}
-
 test "dispatch GET agents without cluster returns empty" {
     cluster = null;
     const req = (try http.parseRequest("GET /agents HTTP/1.1\r\nHost: localhost\r\n\r\n")).?;
@@ -937,6 +916,26 @@ test "dispatch agent heartbeat routing" {
     defer if (resp.allocated) std.testing.allocator.free(resp.body);
 
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "validateClusterInput accepts normal values" {
+    try std.testing.expect(validateClusterInput("10.0.0.5:7701"));
+    try std.testing.expect(validateClusterInput("nginx:latest"));
+    try std.testing.expect(validateClusterInput("/bin/sh -c echo hello"));
+}
+
+test "validateClusterInput rejects dangerous values" {
+    try std.testing.expect(!validateClusterInput("'; DROP TABLE agents; --"));
+    try std.testing.expect(!validateClusterInput("image\"name"));
+    try std.testing.expect(!validateClusterInput("cmd;rm -rf /"));
+    try std.testing.expect(!validateClusterInput("path\\to\\thing"));
+    try std.testing.expect(!validateClusterInput("")); // empty
+    try std.testing.expect(!validateClusterInput("a" ** 257)); // too long
+}
+
+test "validateClusterInput rejects control characters" {
+    try std.testing.expect(!validateClusterInput("hello\x00world"));
+    try std.testing.expect(!validateClusterInput("line\nbreak"));
 }
 
 test "dispatch agent drain routing" {

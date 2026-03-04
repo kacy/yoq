@@ -22,6 +22,12 @@ const routes = @import("routes.zig");
 const log = @import("../lib/log.zig");
 const orchestrator = @import("../manifest/orchestrator.zig");
 
+// connection limit — prevents thread exhaustion under load or attack.
+// 128 is generous for a management API where most operations complete
+// in milliseconds.
+const max_connections: u32 = 128;
+var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
 pub const ServerError = error{
     BindFailed,
     ListenFailed,
@@ -142,15 +148,29 @@ pub const Server = struct {
 
     /// spawn a detached worker thread to handle a single connection.
     fn spawnWorker(self: *Server, client_fd: posix.fd_t) void {
+        // reject if at connection limit
+        const current = active_connections.load(.acquire);
+        if (current >= max_connections) {
+            posix.close(client_fd);
+            return;
+        }
+        _ = active_connections.fetchAdd(1, .acq_rel);
+
         const alloc = self.alloc;
-        const thread = std.Thread.spawn(.{}, handleConnection, .{ alloc, client_fd }) catch {
-            // if we can't spawn a thread, close the connection
+        const thread = std.Thread.spawn(.{}, connectionWrapper, .{ alloc, client_fd }) catch {
+            _ = active_connections.fetchSub(1, .acq_rel);
             posix.close(client_fd);
             return;
         };
         thread.detach();
     }
 };
+
+/// wrapper that decrements the connection counter on exit.
+fn connectionWrapper(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
+    defer _ = active_connections.fetchSub(1, .acq_rel);
+    handleConnection(alloc, client_fd);
+}
 
 /// handle a single HTTP connection. runs in a worker thread.
 /// reads the request, dispatches to route handler, writes response, closes.

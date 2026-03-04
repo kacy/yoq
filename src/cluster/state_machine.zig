@@ -15,13 +15,13 @@ const std = @import("std");
 const sqlite = @import("sqlite");
 const types = @import("raft_types.zig");
 const schema = @import("../state/schema.zig");
+const log = @import("../lib/log.zig");
 
 const LogEntry = types.LogEntry;
 const LogIndex = types.LogIndex;
 
 pub const StateMachineError = error{
     DbOpenFailed,
-    ApplyFailed,
 };
 
 pub const StateMachine = struct {
@@ -63,25 +63,32 @@ pub const StateMachine = struct {
 
     /// apply a committed log entry by executing its data as SQL.
     /// entries must be applied in order; skips if already applied.
-    pub fn apply(self: *StateMachine, entry: LogEntry) StateMachineError!void {
+    ///
+    /// always advances last_applied, even if the SQL fails. a committed
+    /// entry is "applied" regardless — skipping bad entries prevents one
+    /// malformed entry from blocking all subsequent entries across the
+    /// entire cluster.
+    pub fn apply(self: *StateMachine, entry: LogEntry) void {
         if (entry.index <= self.last_applied) return;
 
-        self.db.execDynamic(entry.data, .{}, .{}) catch return StateMachineError.ApplyFailed;
+        self.db.execDynamic(entry.data, .{}, .{}) catch {
+            log.warn("state machine: failed to apply entry {d}, skipping", .{entry.index});
+        };
         self.last_applied = entry.index;
     }
 
     /// apply all entries up to the given index.
     pub fn applyUpTo(
         self: *StateMachine,
-        log: *@import("log.zig").Log,
+        raft_log: *@import("log.zig").Log,
         alloc: std.mem.Allocator,
         up_to: LogIndex,
     ) void {
         var idx = self.last_applied + 1;
         while (idx <= up_to) : (idx += 1) {
-            const entry = (log.getEntry(alloc, idx) catch continue) orelse continue;
+            const entry = (raft_log.getEntry(alloc, idx) catch continue) orelse continue;
             defer alloc.free(entry.data);
-            self.apply(entry) catch {};
+            self.apply(entry);
         }
     }
 };
@@ -93,13 +100,13 @@ test "apply executes SQL statement" {
     defer sm.deinit();
 
     // create a table via state machine
-    try sm.apply(.{
+    sm.apply(.{
         .index = 1,
         .term = 1,
         .data = "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);",
     });
 
-    try sm.apply(.{
+    sm.apply(.{
         .index = 2,
         .term = 1,
         .data = "INSERT INTO kv (key, value) VALUES ('x', '42');",
@@ -125,18 +132,61 @@ test "apply skips already-applied entries" {
     var sm = try StateMachine.initMemory();
     defer sm.deinit();
 
-    try sm.apply(.{
+    sm.apply(.{
         .index = 1,
         .term = 1,
         .data = "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);",
     });
 
     // applying the same index again should be a no-op (not fail with "table exists")
-    try sm.apply(.{
+    sm.apply(.{
         .index = 1,
         .term = 1,
         .data = "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);",
     });
 
     try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+}
+
+test "apply advances past bad SQL" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    sm.apply(.{
+        .index = 1,
+        .term = 1,
+        .data = "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);",
+    });
+
+    // entry 2 is invalid SQL — should log warning but advance last_applied
+    sm.apply(.{
+        .index = 2,
+        .term = 1,
+        .data = "THIS IS NOT VALID SQL AT ALL",
+    });
+
+    try std.testing.expectEqual(@as(LogIndex, 2), sm.last_applied);
+
+    // entry 3 should still work
+    sm.apply(.{
+        .index = 3,
+        .term = 1,
+        .data = "INSERT INTO kv (key, value) VALUES ('y', '99');",
+    });
+
+    try std.testing.expectEqual(@as(LogIndex, 3), sm.last_applied);
+
+    // verify the data from entry 3 was actually written
+    const Row = struct { value: sqlite.Text };
+    const alloc = std.testing.allocator;
+    const row = (sm.db.oneAlloc(
+        Row,
+        alloc,
+        "SELECT value FROM kv WHERE key = ?;",
+        .{},
+        .{"y"},
+    ) catch unreachable).?;
+    defer alloc.free(row.value.data);
+
+    try std.testing.expectEqualStrings("99", row.value.data);
 }

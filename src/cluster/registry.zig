@@ -11,6 +11,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const agent_types = @import("agent_types.zig");
+const sql_escape = @import("../lib/sql.zig");
 
 const Allocator = std.mem.Allocator;
 pub const AgentRecord = agent_types.AgentRecord;
@@ -29,10 +30,18 @@ pub fn registerSql(
     resources: AgentResources,
     now: i64,
 ) ![]const u8 {
+    // escape user-controlled values to prevent SQL injection.
+    // committed SQL is replicated via raft to ALL nodes, so a single
+    // injection would corrupt the entire cluster.
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+    var addr_esc_buf: [512]u8 = undefined;
+    const addr_esc = try sql_escape.escapeSqlString(&addr_esc_buf, address);
+
     return std.fmt.bufPrint(buf,
         \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at)
         \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d});
-    , .{ id, address, resources.cpu_cores, resources.memory_mb, now, now });
+    , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now });
 }
 
 /// generate SQL to update an agent's heartbeat and resource usage.
@@ -42,33 +51,45 @@ pub fn heartbeatSql(
     resources: AgentResources,
     now: i64,
 ) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+
     return std.fmt.bufPrint(buf,
         \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, last_heartbeat = {d}
         \\ WHERE id = '{s}';
-    , .{ resources.cpu_used, resources.memory_used_mb, resources.containers, now, id });
+    , .{ resources.cpu_used, resources.memory_used_mb, resources.containers, now, id_esc });
 }
 
 /// generate SQL to mark an agent as draining.
 pub fn drainSql(buf: []u8, id: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+
     return std.fmt.bufPrint(buf,
         "UPDATE agents SET status = 'draining' WHERE id = '{s}';",
-        .{id},
+        .{id_esc},
     );
 }
 
 /// generate SQL to mark an agent as offline.
 pub fn markOfflineSql(buf: []u8, id: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+
     return std.fmt.bufPrint(buf,
         "UPDATE agents SET status = 'offline' WHERE id = '{s}';",
-        .{id},
+        .{id_esc},
     );
 }
 
 /// generate SQL to remove an agent.
 pub fn removeSql(buf: []u8, id: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+
     return std.fmt.bufPrint(buf,
         "DELETE FROM agents WHERE id = '{s}';",
-        .{id},
+        .{id_esc},
     );
 }
 
@@ -232,6 +253,20 @@ test "registerSql generates valid SQL" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "INSERT INTO agents") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "10.0.0.5:7701") != null);
+}
+
+test "registerSql escapes single quotes in address" {
+    var buf: [1024]u8 = undefined;
+    const sql = try registerSql(&buf, "abc123def456", "10.0.0.5'; DROP TABLE agents; --", .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+    }, 1000);
+
+    // the single quote should be doubled, not passed through raw
+    try std.testing.expect(std.mem.indexOf(u8, sql, "DROP TABLE") == null or
+        std.mem.indexOf(u8, sql, "''") != null);
+    // verify the escaped value is in the SQL
+    try std.testing.expect(std.mem.indexOf(u8, sql, "10.0.0.5''; DROP TABLE agents; --") != null);
 }
 
 test "heartbeatSql generates valid SQL" {

@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const agent_types = @import("agent_types.zig");
+const sql_escape = @import("../lib/sql.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentRecord = agent_types.AgentRecord;
@@ -97,10 +98,16 @@ pub fn assignmentSql(
     request: PlacementRequest,
     now: i64,
 ) ![]const u8 {
+    // escape user-controlled values (image and command come from API requests)
+    var img_esc_buf: [512]u8 = undefined;
+    const img_esc = try sql_escape.escapeSqlString(&img_esc_buf, request.image);
+    var cmd_esc_buf: [512]u8 = undefined;
+    const cmd_esc = try sql_escape.escapeSqlString(&cmd_esc_buf, request.command);
+
     return std.fmt.bufPrint(buf,
         \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at)
         \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d});
-    , .{ id, agent_id, request.image, request.command, request.cpu_limit, request.memory_limit_mb, now });
+    , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, now });
 }
 
 /// generate a random hex assignment ID.

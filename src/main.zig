@@ -23,6 +23,7 @@ const cluster_node = @import("cluster/node.zig");
 const cluster_config = @import("cluster/config.zig");
 const cluster_agent = @import("cluster/agent.zig");
 const http_client = @import("cluster/http_client.zig");
+const json_helpers = @import("lib/json_helpers.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -1420,36 +1421,9 @@ fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_host: 
 }
 
 /// parse a dotted IPv4 address string into 4 bytes.
-// -- JSON extraction helpers --
-// minimal JSON field extraction for CLI commands that parse API responses.
-
-fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
-    var search_buf: [128]u8 = undefined;
-    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
-
-    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
-    const value_start = start_pos + needle.len;
-    const value_end = std.mem.indexOfPos(u8, json, value_start, "\"") orelse return null;
-
-    return json[value_start..value_end];
-}
-
-fn extractJsonInt(json: []const u8, key: []const u8) ?i64 {
-    var search_buf: [128]u8 = undefined;
-    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
-
-    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
-    var pos = start_pos + needle.len;
-
-    // skip whitespace
-    while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
-
-    var end = pos;
-    while (end < json.len and json[end] >= '0' and json[end] <= '9') : (end += 1) {}
-
-    if (end == pos) return null;
-    return std.fmt.parseInt(i64, json[pos..end], 10) catch return null;
-}
+// use shared JSON extraction helpers
+const extractJsonString = json_helpers.extractJsonString;
+const extractJsonInt = json_helpers.extractJsonInt;
 
 fn parseIpv4(s: []const u8) ?[4]u8 {
     var result: [4]u8 = undefined;
@@ -1547,6 +1521,7 @@ comptime {
     _ = @import("lib/paths.zig");
     _ = @import("lib/toml.zig");
     _ = @import("lib/json_helpers.zig");
+    _ = @import("lib/sql.zig");
     _ = @import("image/spec.zig");
     _ = @import("image/store.zig");
     _ = @import("image/registry.zig");
