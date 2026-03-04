@@ -851,6 +851,7 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
     var raft_port: u16 = 9700;
     var api_port: u16 = 7700;
     var peers_str: []const u8 = "";
+    var token: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--id")) {
@@ -883,6 +884,11 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         } else if (std.mem.eql(u8, arg, "--peers")) {
             peers_str = args.next() orelse {
                 writeErr("--peers requires peer list\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--token")) {
+            token = args.next() orelse {
+                writeErr("--token requires a join token\n", .{});
                 std.process.exit(1);
             };
         }
@@ -923,10 +929,12 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         std.process.exit(1);
     };
 
-    // set cluster node for API routes
+    // set cluster node and join token for API routes
     routes.cluster = &node;
+    routes.join_token = token;
     defer {
         routes.cluster = null;
+        routes.join_token = null;
     }
 
     // start API server
@@ -1038,6 +1046,7 @@ fn printUsage() void {
         \\  --port <port>             raft port (default: 9700)
         \\  --api-port <port>         API port (default: 7700)
         \\  --peers <peers>           peers (e.g. 2@10.0.0.2:9700,3@10.0.0.3:9700)
+        \\  --token <token>           join token for agent authentication
         \\
         \\other options:
         \\  logs --tail N             show last N lines only
@@ -1193,4 +1202,6 @@ comptime {
     _ = @import("cluster/state_machine.zig");
     _ = @import("cluster/node.zig");
     _ = @import("cluster/config.zig");
+    _ = @import("cluster/agent_types.zig");
+    _ = @import("cluster/registry.zig");
 }

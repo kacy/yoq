@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const sqlite = @import("sqlite");
 const raft_mod = @import("raft.zig");
 const transport_mod = @import("transport.zig");
 const log_mod = @import("log.zig");
@@ -176,6 +177,13 @@ pub const Node = struct {
         defer self.mu.unlock();
 
         return self.raft.propose(data) catch return NodeError.NotLeader;
+    }
+
+    /// get a pointer to the state machine's replicated database.
+    /// used by API routes for read queries on cluster state (agents, assignments).
+    /// caller must not hold the lock across long operations.
+    pub fn stateMachineDb(self: *Node) *sqlite.Db {
+        return &self.state_machine.db;
     }
 
     pub fn isLeader(self: *Node) bool {
