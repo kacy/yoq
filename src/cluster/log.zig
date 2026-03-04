@@ -6,6 +6,11 @@
 //
 // the raft paper requires that current_term, voted_for, and log
 // entries survive restarts. this module handles all three.
+//
+// snapshot awareness: after a snapshot is taken and log entries are
+// truncated, the log may be empty. queries like lastIndex() and
+// lastTerm() fall back to the snapshot metadata in that case, so
+// the rest of the raft algorithm doesn't need special cases.
 
 const std = @import("std");
 const sqlite = @import("sqlite");
@@ -15,6 +20,7 @@ const Term = types.Term;
 const LogIndex = types.LogIndex;
 const NodeId = types.NodeId;
 const LogEntry = types.LogEntry;
+const SnapshotMeta = types.SnapshotMeta;
 
 pub const LogError = error{
     DbOpenFailed,
@@ -99,6 +105,47 @@ pub const Log = struct {
         ) catch {};
     }
 
+    // -- snapshot metadata --
+    //
+    // after a snapshot is taken, we record what index/term it covers.
+    // this lets snapshot-aware queries (lastIndex, lastTerm, termAt)
+    // return correct values even when the log has been truncated.
+
+    pub fn getSnapshotMeta(self: *Log) ?SnapshotMeta {
+        const Row = struct {
+            last_included_index: i64,
+            last_included_term: i64,
+            data_len: i64,
+        };
+        const row = (self.db.one(
+            Row,
+            "SELECT last_included_index, last_included_term, data_len FROM snapshot_meta WHERE id = 1;",
+            .{},
+            .{},
+        ) catch return null) orelse return null;
+
+        // no snapshot yet — the row exists but with all zeros
+        if (row.last_included_index == 0) return null;
+
+        return SnapshotMeta{
+            .last_included_index = @intCast(row.last_included_index),
+            .last_included_term = @intCast(row.last_included_term),
+            .data_len = @intCast(row.data_len),
+        };
+    }
+
+    pub fn setSnapshotMeta(self: *Log, meta: SnapshotMeta) void {
+        self.db.exec(
+            "UPDATE snapshot_meta SET last_included_index = ?, last_included_term = ?, data_len = ? WHERE id = 1;",
+            .{},
+            .{
+                @as(i64, @intCast(meta.last_included_index)),
+                @as(i64, @intCast(meta.last_included_term)),
+                @as(i64, @intCast(meta.data_len)),
+            },
+        ) catch {};
+    }
+
     // -- log operations --
 
     pub fn append(self: *Log, entry: LogEntry) LogError!void {
@@ -129,6 +176,8 @@ pub const Log = struct {
         };
     }
 
+    /// returns the highest log index. if the log is empty but a snapshot
+    /// exists, returns the snapshot's last_included_index.
     pub fn lastIndex(self: *Log) LogIndex {
         const Row = struct { max_index: ?i64 };
         const row = (self.db.one(
@@ -136,34 +185,66 @@ pub const Log = struct {
             "SELECT MAX(log_index) AS max_index FROM raft_log;",
             .{},
             .{},
-        ) catch return 0) orelse return 0;
-        return if (row.max_index) |m| @intCast(m) else 0;
+        ) catch return self.snapshotLastIndex()) orelse return self.snapshotLastIndex();
+
+        if (row.max_index) |m| {
+            return @intCast(m);
+        }
+
+        // log is empty — fall back to snapshot
+        return self.snapshotLastIndex();
     }
 
+    /// returns the term of the last log entry. if the log is empty but a
+    /// snapshot exists, returns the snapshot's last_included_term.
     pub fn lastTerm(self: *Log) Term {
-        const last = self.lastIndex();
-        if (last == 0) return 0;
-        const Row = struct { term: i64 };
-        const row = (self.db.one(
-            Row,
-            "SELECT term FROM raft_log WHERE log_index = ?;",
-            .{},
-            .{@as(i64, @intCast(last))},
-        ) catch return 0) orelse return 0;
-        return @intCast(row.term);
+        const last = self.lastLogIndex();
+        if (last > 0) {
+            const Row = struct { term: i64 };
+            const row = (self.db.one(
+                Row,
+                "SELECT term FROM raft_log WHERE log_index = ?;",
+                .{},
+                .{@as(i64, @intCast(last))},
+            ) catch return 0) orelse return 0;
+            return @intCast(row.term);
+        }
+
+        // log is empty — fall back to snapshot
+        if (self.getSnapshotMeta()) |meta| {
+            return meta.last_included_term;
+        }
+        return 0;
     }
 
-    /// get the term for a specific log index (needed for consistency checks)
+    /// get the term for a specific log index (needed for consistency checks).
+    /// if the index matches the snapshot's last_included_index, returns the
+    /// snapshot's term — this covers the case where the entry was truncated
+    /// after snapshotting.
     pub fn termAt(self: *Log, index: LogIndex) Term {
         if (index == 0) return 0;
+
+        // first try the log itself
         const Row = struct { term: i64 };
-        const row = (self.db.one(
+        const row = self.db.one(
             Row,
             "SELECT term FROM raft_log WHERE log_index = ?;",
             .{},
             .{@as(i64, @intCast(index))},
-        ) catch return 0) orelse return 0;
-        return @intCast(row.term);
+        ) catch return 0;
+
+        if (row) |r| {
+            return @intCast(r.term);
+        }
+
+        // not in log — check if the snapshot covers this index
+        if (self.getSnapshotMeta()) |meta| {
+            if (index == meta.last_included_index) {
+                return meta.last_included_term;
+            }
+        }
+
+        return 0;
     }
 
     /// remove all entries from index onwards (inclusive).
@@ -171,6 +252,17 @@ pub const Log = struct {
     pub fn truncateFrom(self: *Log, index: LogIndex) void {
         self.db.exec(
             "DELETE FROM raft_log WHERE log_index >= ?;",
+            .{},
+            .{@as(i64, @intCast(index))},
+        ) catch {};
+    }
+
+    /// remove all entries up to and including the given index.
+    /// used after a snapshot is taken to reclaim space — we no longer
+    /// need entries that are covered by the snapshot.
+    pub fn truncateUpTo(self: *Log, index: LogIndex) void {
+        self.db.exec(
+            "DELETE FROM raft_log WHERE log_index <= ?;",
             .{},
             .{@as(i64, @intCast(index))},
         ) catch {};
@@ -202,6 +294,29 @@ pub const Log = struct {
 
         return entries.toOwnedSlice(alloc) catch return LogError.ReadFailed;
     }
+
+    // -- internal helpers --
+
+    /// the highest index actually present in the log table (ignoring snapshots).
+    /// used internally to distinguish "log has entries" from "only snapshot".
+    fn lastLogIndex(self: *Log) LogIndex {
+        const Row = struct { max_index: ?i64 };
+        const row = (self.db.one(
+            Row,
+            "SELECT MAX(log_index) AS max_index FROM raft_log;",
+            .{},
+            .{},
+        ) catch return 0) orelse return 0;
+        return if (row.max_index) |m| @intCast(m) else 0;
+    }
+
+    /// snapshot fallback for lastIndex
+    fn snapshotLastIndex(self: *Log) LogIndex {
+        if (self.getSnapshotMeta()) |meta| {
+            return meta.last_included_index;
+        }
+        return 0;
+    }
 };
 
 // -- schema --
@@ -229,6 +344,23 @@ fn initSchema(db: *sqlite.Db) !void {
         \\    data BLOB NOT NULL
         \\);
     , .{}, .{}) catch return error.InitFailed;
+
+    // snapshot metadata — single row, like raft_state.
+    // records the last log entry included in the most recent snapshot.
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS snapshot_meta (
+        \\    id INTEGER PRIMARY KEY CHECK (id = 1),
+        \\    last_included_index INTEGER NOT NULL DEFAULT 0,
+        \\    last_included_term INTEGER NOT NULL DEFAULT 0,
+        \\    data_len INTEGER NOT NULL DEFAULT 0
+        \\);
+    , .{}, .{}) catch return error.InitFailed;
+
+    db.exec(
+        "INSERT OR IGNORE INTO snapshot_meta (id) VALUES (1);",
+        .{},
+        .{},
+    ) catch return error.InitFailed;
 }
 
 // -- tests --
@@ -395,4 +527,170 @@ test "termAt beyond last entry returns zero" {
     try log.append(.{ .index = 2, .term = 5, .data = "y" });
 
     try std.testing.expectEqual(@as(Term, 0), log.termAt(99));
+}
+
+// -- snapshot-aware tests --
+
+test "snapshot meta persistence" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    // no snapshot initially
+    try std.testing.expect(log.getSnapshotMeta() == null);
+
+    log.setSnapshotMeta(.{
+        .last_included_index = 100,
+        .last_included_term = 5,
+        .data_len = 4096,
+    });
+
+    const meta = log.getSnapshotMeta().?;
+    try std.testing.expectEqual(@as(LogIndex, 100), meta.last_included_index);
+    try std.testing.expectEqual(@as(Term, 5), meta.last_included_term);
+    try std.testing.expectEqual(@as(u64, 4096), meta.data_len);
+}
+
+test "lastIndex falls back to snapshot when log is empty" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    try std.testing.expectEqual(@as(LogIndex, 0), log.lastIndex());
+
+    // set snapshot metadata without any log entries
+    log.setSnapshotMeta(.{
+        .last_included_index = 50,
+        .last_included_term = 3,
+        .data_len = 1024,
+    });
+
+    try std.testing.expectEqual(@as(LogIndex, 50), log.lastIndex());
+}
+
+test "lastTerm falls back to snapshot when log is empty" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    log.setSnapshotMeta(.{
+        .last_included_index = 50,
+        .last_included_term = 3,
+        .data_len = 1024,
+    });
+
+    try std.testing.expectEqual(@as(Term, 3), log.lastTerm());
+}
+
+test "lastIndex prefers log entries over snapshot" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    log.setSnapshotMeta(.{
+        .last_included_index = 50,
+        .last_included_term = 3,
+        .data_len = 1024,
+    });
+
+    // add an entry beyond the snapshot
+    try log.append(.{ .index = 51, .term = 3, .data = "after snapshot" });
+
+    try std.testing.expectEqual(@as(LogIndex, 51), log.lastIndex());
+}
+
+test "lastTerm prefers log entries over snapshot" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    log.setSnapshotMeta(.{
+        .last_included_index = 50,
+        .last_included_term = 3,
+        .data_len = 1024,
+    });
+
+    try log.append(.{ .index = 51, .term = 4, .data = "new term" });
+
+    try std.testing.expectEqual(@as(Term, 4), log.lastTerm());
+}
+
+test "termAt returns snapshot term for snapshot boundary index" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    log.setSnapshotMeta(.{
+        .last_included_index = 50,
+        .last_included_term = 3,
+        .data_len = 1024,
+    });
+
+    // index 50 was truncated but snapshot covers it
+    try std.testing.expectEqual(@as(Term, 3), log.termAt(50));
+
+    // index 49 is not in log or at snapshot boundary
+    try std.testing.expectEqual(@as(Term, 0), log.termAt(49));
+}
+
+test "truncateUpTo removes entries up to index" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    const alloc = std.testing.allocator;
+
+    try log.append(.{ .index = 1, .term = 1, .data = "a" });
+    try log.append(.{ .index = 2, .term = 1, .data = "b" });
+    try log.append(.{ .index = 3, .term = 2, .data = "c" });
+    try log.append(.{ .index = 4, .term = 2, .data = "d" });
+
+    log.truncateUpTo(2);
+
+    // entries 1 and 2 should be gone
+    try std.testing.expect((try log.getEntry(alloc, 1)) == null);
+    try std.testing.expect((try log.getEntry(alloc, 2)) == null);
+
+    // entries 3 and 4 should remain
+    const entry3 = (try log.getEntry(alloc, 3)).?;
+    defer alloc.free(entry3.data);
+    try std.testing.expectEqualStrings("c", entry3.data);
+
+    const entry4 = (try log.getEntry(alloc, 4)).?;
+    defer alloc.free(entry4.data);
+    try std.testing.expectEqualStrings("d", entry4.data);
+}
+
+test "truncateUpTo with snapshot preserves lastIndex" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    try log.append(.{ .index = 1, .term = 1, .data = "a" });
+    try log.append(.{ .index = 2, .term = 1, .data = "b" });
+    try log.append(.{ .index = 3, .term = 2, .data = "c" });
+
+    // snapshot at index 2, then truncate
+    log.setSnapshotMeta(.{
+        .last_included_index = 2,
+        .last_included_term = 1,
+        .data_len = 512,
+    });
+    log.truncateUpTo(2);
+
+    // lastIndex should still be 3 (from the log)
+    try std.testing.expectEqual(@as(LogIndex, 3), log.lastIndex());
+
+    // termAt(2) should return snapshot term
+    try std.testing.expectEqual(@as(Term, 1), log.termAt(2));
+}
+
+test "truncateUpTo all entries with snapshot" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    try log.append(.{ .index = 1, .term = 1, .data = "a" });
+    try log.append(.{ .index = 2, .term = 1, .data = "b" });
+
+    log.setSnapshotMeta(.{
+        .last_included_index = 2,
+        .last_included_term = 1,
+        .data_len = 512,
+    });
+    log.truncateUpTo(2);
+
+    // log is empty but snapshot provides the answer
+    try std.testing.expectEqual(@as(LogIndex, 2), log.lastIndex());
+    try std.testing.expectEqual(@as(Term, 1), log.lastTerm());
 }

@@ -56,6 +56,32 @@ pub const AppendEntriesReply = struct {
     match_index: LogIndex,
 };
 
+// -- snapshot types --
+//
+// the third RPC in raft: InstallSnapshot. used by the leader to bring
+// a far-behind follower up to date by sending a full state snapshot
+// instead of replaying potentially millions of log entries.
+
+/// metadata about a snapshot. stored alongside the log so that
+/// snapshot-aware queries can answer correctly after log truncation.
+pub const SnapshotMeta = struct {
+    last_included_index: LogIndex,
+    last_included_term: Term,
+    data_len: u64,
+};
+
+pub const InstallSnapshotArgs = struct {
+    term: Term,
+    leader_id: NodeId,
+    last_included_index: LogIndex,
+    last_included_term: Term,
+    data: []const u8,
+};
+
+pub const InstallSnapshotReply = struct {
+    term: Term,
+};
+
 // -- tests --
 
 test "role default" {
@@ -95,4 +121,34 @@ test "append entries args with empty entries" {
         .leader_commit = 0,
     };
     try std.testing.expectEqual(@as(usize, 0), args.entries.len);
+}
+
+test "snapshot meta creation" {
+    const meta = SnapshotMeta{
+        .last_included_index = 100,
+        .last_included_term = 5,
+        .data_len = 4096,
+    };
+    try std.testing.expectEqual(@as(LogIndex, 100), meta.last_included_index);
+    try std.testing.expectEqual(@as(Term, 5), meta.last_included_term);
+    try std.testing.expectEqual(@as(u64, 4096), meta.data_len);
+}
+
+test "install snapshot args" {
+    const args = InstallSnapshotArgs{
+        .term = 7,
+        .leader_id = 1,
+        .last_included_index = 50,
+        .last_included_term = 4,
+        .data = "snapshot bytes",
+    };
+    try std.testing.expectEqual(@as(Term, 7), args.term);
+    try std.testing.expectEqual(@as(NodeId, 1), args.leader_id);
+    try std.testing.expectEqual(@as(LogIndex, 50), args.last_included_index);
+    try std.testing.expectEqualStrings("snapshot bytes", args.data);
+}
+
+test "install snapshot reply" {
+    const reply = InstallSnapshotReply{ .term = 7 };
+    try std.testing.expectEqual(@as(Term, 7), reply.term);
 }
