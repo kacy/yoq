@@ -74,6 +74,7 @@ pub fn build(b: *std.Build) void {
     // list of BPF programs to compile
     const bpf_programs = [_][]const u8{
         "test_prog",
+        "dns_intercept",
     };
 
     for (bpf_programs) |prog| {
