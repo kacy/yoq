@@ -26,6 +26,7 @@ pub const LoadError = error{
     InvalidEnvVar,
     InvalidVolumeMount,
     InvalidHealthCheck,
+    InvalidRestartPolicy,
     UnknownDependency,
     CircularDependency,
     NoServices,
@@ -184,6 +185,8 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
     const health_check = try parseHealthCheck(alloc, name, table.getTable("health_check"));
     errdefer if (health_check) |hc| hc.deinit(alloc);
 
+    const restart = try parseRestartPolicy(name, table.getString("restart"));
+
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
         .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
@@ -194,6 +197,7 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
         .working_dir = working_dir,
         .volumes = volume_mounts,
         .health_check = health_check,
+        .restart = restart,
     };
 }
 
@@ -438,6 +442,22 @@ fn parseOneVolumeMount(alloc: std.mem.Allocator, s: []const u8) LoadError!spec.V
         .target = alloc.dupe(u8, target) catch return LoadError.OutOfMemory,
         .kind = kind,
     };
+}
+
+// -- restart policy parsing --
+
+/// parse the restart policy string into a RestartPolicy enum.
+/// valid values: "none", "always", "on_failure".
+/// returns .none when no value is specified (the default).
+fn parseRestartPolicy(service_name: []const u8, raw: ?[]const u8) LoadError!spec.RestartPolicy {
+    const value = raw orelse return .none;
+
+    if (std.mem.eql(u8, value, "none")) return .none;
+    if (std.mem.eql(u8, value, "always")) return .always;
+    if (std.mem.eql(u8, value, "on_failure")) return .on_failure;
+
+    log.err("manifest: service '{s}' has invalid restart policy '{s}' (expected none, always, or on_failure)", .{ service_name, value });
+    return LoadError.InvalidRestartPolicy;
 }
 
 // -- health check parsing --
@@ -1186,4 +1206,75 @@ test "health check — exec empty command returns error" {
         \\command = []
     );
     try std.testing.expectError(LoadError.InvalidHealthCheck, result);
+}
+
+// -- restart policy parsing tests --
+
+test "restart policy — defaults to none when not specified" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(spec.RestartPolicy.none, manifest.services[0].restart);
+}
+
+test "restart policy — always" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\restart = "always"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(spec.RestartPolicy.always, manifest.services[0].restart);
+}
+
+test "restart policy — on_failure" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\restart = "on_failure"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(spec.RestartPolicy.on_failure, manifest.services[0].restart);
+}
+
+test "restart policy — none (explicit)" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\restart = "none"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(spec.RestartPolicy.none, manifest.services[0].restart);
+}
+
+test "restart policy — invalid value returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\restart = "invalid"
+    );
+    try std.testing.expectError(LoadError.InvalidRestartPolicy, result);
+}
+
+test "restart policy — parseRestartPolicy unit tests" {
+    try std.testing.expectEqual(spec.RestartPolicy.none, try parseRestartPolicy("test", null));
+    try std.testing.expectEqual(spec.RestartPolicy.none, try parseRestartPolicy("test", "none"));
+    try std.testing.expectEqual(spec.RestartPolicy.always, try parseRestartPolicy("test", "always"));
+    try std.testing.expectEqual(spec.RestartPolicy.on_failure, try parseRestartPolicy("test", "on_failure"));
+    try std.testing.expectError(LoadError.InvalidRestartPolicy, parseRestartPolicy("test", "bogus"));
 }
