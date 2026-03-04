@@ -202,9 +202,14 @@ fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const 
         std.fs.cwd().makePath(dir) catch {};
     }
 
-    const file = std.fs.cwd().createFile(full_path, .{}) catch return;
+    const file = std.fs.cwd().createFile(full_path, .{}) catch |e| {
+        log.warn("failed to create {s}: {}", .{ full_path, e });
+        return;
+    };
     defer file.close();
-    file.writeAll(content) catch {};
+    file.writeAll(content) catch |e| {
+        log.warn("failed to write {s}: {}", .{ full_path, e });
+    };
 }
 
 // -- tests --

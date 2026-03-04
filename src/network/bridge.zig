@@ -13,6 +13,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const nl = @import("netlink.zig");
+const log = @import("../lib/log.zig");
 
 pub const BridgeError = error{
     CreateFailed,
@@ -238,13 +239,17 @@ pub fn configureContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8) BridgeError!vo
     setns(target_ns.handle) catch return BridgeError.NamespaceFailed;
 
     // do all configuration, then restore namespace
-    defer setns(self_ns.handle) catch {};
+    defer setns(self_ns.handle) catch {
+        log.warn("failed to restore host network namespace", .{});
+    };
 
     const fd = nl.openSocket() catch return BridgeError.CreateFailed;
     defer posix.close(fd);
 
     // bring up loopback
-    bringUpLoopback(fd) catch {};
+    bringUpLoopback(fd) catch |e| {
+        log.warn("failed to bring up loopback: {}", .{e});
+    };
 
     // bring up eth0 and assign IP
     const eth0_idx = nl.getIfIndex(fd, "eth0") catch return BridgeError.InterfaceNotFound;
@@ -268,7 +273,9 @@ fn setns(fd: posix.fd_t) !void {
 fn bringUpLoopback(fd: posix.fd_t) !void {
     const lo_idx = nl.getIfIndex(fd, "lo") catch return;
     if (lo_idx == 0) return;
-    nl.setLinkUp(fd, lo_idx) catch {};
+    nl.setLinkUp(fd, lo_idx) catch |e| {
+        log.warn("failed to set loopback up: {}", .{e});
+    };
 }
 
 // -- shared netlink helpers --

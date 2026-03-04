@@ -407,7 +407,9 @@ fn handleQuery(
     if (lookupService(name)) |service_ip| {
         var response_buf: [512]u8 = undefined;
         if (buildResponse(query, query.len, service_ip, &response_buf)) |resp_len| {
-            _ = posix.sendto(sock, response_buf[0..resp_len], 0, @ptrCast(client_addr), addr_len) catch {};
+            _ = posix.sendto(sock, response_buf[0..resp_len], 0, @ptrCast(client_addr), addr_len) catch |e| {
+                log.warn("dns: failed to send response: {}", .{e});
+            };
             return;
         }
     }
@@ -429,7 +431,9 @@ fn forwardQuery(
 
     // set a timeout so we don't block forever
     const timeout = posix.timeval{ .sec = 2, .usec = 0 };
-    posix.setsockopt(upstream_sock, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    posix.setsockopt(upstream_sock, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |e| {
+        log.warn("dns: failed to set upstream socket timeout: {}", .{e});
+    };
 
     const upstream_addr = posix.sockaddr.in{
         .port = std.mem.nativeToBig(u16, upstream_port),
@@ -449,7 +453,9 @@ fn forwardQuery(
     if (response_buf[0] != query[0] or response_buf[1] != query[1]) return;
 
     // relay response to original client
-    _ = posix.sendto(sock, response_buf[0..resp_n], 0, @ptrCast(client_addr), addr_len) catch {};
+    _ = posix.sendto(sock, response_buf[0..resp_n], 0, @ptrCast(client_addr), addr_len) catch |e| {
+        log.warn("dns: failed to relay upstream response: {}", .{e});
+    };
 }
 
 // -- helpers --

@@ -234,21 +234,39 @@ fn writeTarFromDir(dir_path: []const u8, tar_path: []const u8) !blob_store.Diges
     while (try walker.next()) |entry| {
         switch (entry.kind) {
             .directory => {
-                tar_writer.writeDir(entry.path, .{}) catch continue;
+                tar_writer.writeDir(entry.path, .{}) catch |e| {
+                    log.warn("tar: failed to write dir entry '{s}': {}", .{ entry.path, e });
+                    continue;
+                };
             },
             .file => {
-                var file = dir.openFile(entry.path, .{}) catch continue;
+                var file = dir.openFile(entry.path, .{}) catch |e| {
+                    log.warn("tar: failed to open '{s}': {}", .{ entry.path, e });
+                    continue;
+                };
                 defer file.close();
                 var file_read_buf: [4096]u8 = undefined;
                 var reader = file.reader(&file_read_buf);
-                const stat = file.stat() catch continue;
-                tar_writer.writeFile(entry.path, &reader, stat.mtime) catch continue;
+                const stat = file.stat() catch |e| {
+                    log.warn("tar: failed to stat '{s}': {}", .{ entry.path, e });
+                    continue;
+                };
+                tar_writer.writeFile(entry.path, &reader, stat.mtime) catch |e| {
+                    log.warn("tar: failed to write file '{s}': {}", .{ entry.path, e });
+                    continue;
+                };
             },
             .sym_link => {
                 // read symlink target
                 var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const link_target = dir.readLink(entry.path, &link_buf) catch continue;
-                tar_writer.writeLink(entry.path, link_target, .{}) catch continue;
+                const link_target = dir.readLink(entry.path, &link_buf) catch |e| {
+                    log.warn("tar: failed to read symlink '{s}': {}", .{ entry.path, e });
+                    continue;
+                };
+                tar_writer.writeLink(entry.path, link_target, .{}) catch |e| {
+                    log.warn("tar: failed to write symlink '{s}': {}", .{ entry.path, e });
+                    continue;
+                };
             },
             else => continue,
         }
@@ -343,7 +361,9 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
         switch (entry.kind) {
             .directory => {
                 if (entry.name.len > 0) {
-                    dest_dir.makePath(entry.name) catch {};
+                    dest_dir.makePath(entry.name) catch |e| {
+                        log.warn("extract: failed to create dir '{s}': {}", .{ entry.name, e });
+                    };
                 }
             },
             .file => {
@@ -351,15 +371,25 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                     0o755
                 else
                     0o644;
-                const fs_file = createDirAndFile(dest_dir, entry.name, mode) catch continue;
+                const fs_file = createDirAndFile(dest_dir, entry.name, mode) catch |e| {
+                    log.warn("extract: failed to create file '{s}': {}", .{ entry.name, e });
+                    continue;
+                };
                 defer fs_file.close();
                 var write_buf: [4096]u8 = undefined;
                 var file_writer = fs_file.writer(&write_buf);
-                it.streamRemaining(entry, &file_writer.interface) catch continue;
-                file_writer.interface.flush() catch {};
+                it.streamRemaining(entry, &file_writer.interface) catch |e| {
+                    log.warn("extract: failed to write file '{s}': {}", .{ entry.name, e });
+                    continue;
+                };
+                file_writer.interface.flush() catch |e| {
+                    log.warn("extract: failed to flush '{s}': {}", .{ entry.name, e });
+                };
             },
             .sym_link => {
-                createDirAndSymlink(dest_dir, entry.link_name, entry.name) catch {};
+                createDirAndSymlink(dest_dir, entry.link_name, entry.name) catch |e| {
+                    log.warn("extract: failed to create symlink '{s}': {}", .{ entry.name, e });
+                };
             },
         }
     }
