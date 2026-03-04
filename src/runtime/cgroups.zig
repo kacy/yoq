@@ -17,9 +17,19 @@ pub const CgroupError = error{
     DeleteFailed,
     NotSupported,
     InvalidLimit,
+    LimitBelowMinimum,
 };
 
-/// resource limits for a container's cgroup
+/// minimum memory limit: 4 MB. anything less is unusable and likely a mistake.
+const min_memory_bytes: u64 = 4 * 1024 * 1024;
+
+/// minimum pids limit. at least one process is required to run anything.
+const min_pids: u32 = 1;
+
+/// resource limits for a container's cgroup.
+///
+/// defaults are safe for most workloads: 512 MB memory, 4096 pids.
+/// use ResourceLimits.unlimited for explicit opt-out of defaults.
 pub const ResourceLimits = struct {
     /// cpu weight (1-10000, default 100). relative to other cgroups.
     cpu_weight: ?u16 = null,
@@ -30,13 +40,37 @@ pub const ResourceLimits = struct {
     cpu_max_period: u64 = 100_000,
 
     /// memory limit in bytes. container gets OOM killed if exceeded.
-    memory_max: ?u64 = null,
+    /// default: 512 MB.
+    memory_max: ?u64 = 512 * 1024 * 1024,
 
     /// memory high watermark in bytes. triggers reclaim pressure.
     memory_high: ?u64 = null,
 
     /// max number of processes/threads.
-    pids_max: ?u32 = null,
+    /// default: 4096.
+    pids_max: ?u32 = 4096,
+
+    /// explicit opt-out of all resource limits. use this when you
+    /// intentionally want no limits (e.g. trusted workloads or benchmarks).
+    pub const unlimited = ResourceLimits{
+        .cpu_weight = null,
+        .cpu_max_usec = null,
+        .cpu_max_period = 100_000,
+        .memory_max = null,
+        .memory_high = null,
+        .pids_max = null,
+    };
+
+    /// validate that limits are above safe minimums.
+    /// returns LimitBelowMinimum if memory_max < 4 MB or pids_max < 1.
+    pub fn validate(self: ResourceLimits) CgroupError!void {
+        if (self.memory_max) |mem| {
+            if (mem < min_memory_bytes) return CgroupError.LimitBelowMinimum;
+        }
+        if (self.pids_max) |pids| {
+            if (pids < min_pids) return CgroupError.LimitBelowMinimum;
+        }
+    }
 };
 
 /// PSI (pressure stall information) metrics
@@ -225,9 +259,35 @@ fn parsePsiAvg10(line: []const u8) !f64 {
 test "resource limits defaults" {
     const limits: ResourceLimits = .{};
     try std.testing.expect(limits.cpu_weight == null);
+    try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024), limits.memory_max.?);
+    try std.testing.expectEqual(@as(u32, 4096), limits.pids_max.?);
+    try std.testing.expectEqual(@as(u64, 100_000), limits.cpu_max_period);
+}
+
+test "resource limits unlimited has null values" {
+    const limits = ResourceLimits.unlimited;
+    try std.testing.expect(limits.cpu_weight == null);
     try std.testing.expect(limits.memory_max == null);
     try std.testing.expect(limits.pids_max == null);
-    try std.testing.expectEqual(@as(u64, 100_000), limits.cpu_max_period);
+}
+
+test "resource limits validation rejects low memory" {
+    const limits = ResourceLimits{ .memory_max = 1024 }; // 1 KB, way below 4 MB minimum
+    try std.testing.expectError(CgroupError.LimitBelowMinimum, limits.validate());
+}
+
+test "resource limits validation rejects zero pids" {
+    const limits = ResourceLimits{ .pids_max = 0 };
+    try std.testing.expectError(CgroupError.LimitBelowMinimum, limits.validate());
+}
+
+test "resource limits validation accepts defaults" {
+    const limits: ResourceLimits = .{};
+    try limits.validate();
+}
+
+test "resource limits validation accepts unlimited" {
+    try ResourceLimits.unlimited.validate();
 }
 
 test "resource limits validation" {
