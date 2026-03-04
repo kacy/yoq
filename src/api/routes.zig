@@ -71,6 +71,12 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
             if (request.method != .POST) return methodNotAllowed();
             return handleAgentDrain(alloc, id);
         }
+
+        // /agents/{id}/assignments/{assignment_id}/status
+        if (matchAssignmentStatusPath(rest)) |ids| {
+            if (request.method != .POST) return methodNotAllowed();
+            return handleAssignmentStatusUpdate(alloc, request, ids.agent_id, ids.assignment_id);
+        }
     }
 
     // /containers/{id} routes
@@ -523,6 +529,41 @@ fn handleAgentAssignments(alloc: std.mem.Allocator, agent_id: []const u8) Respon
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
+fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Request, agent_id: []const u8, assignment_id: []const u8) Response {
+    _ = agent_id;
+    const node = cluster orelse return badRequest("not running in cluster mode");
+
+    if (request.body.len == 0) return badRequest("missing request body");
+
+    const status = extractJsonString(request.body, "status") orelse
+        return badRequest("missing status field");
+
+    // validate status value
+    const valid_statuses = [_][]const u8{ "running", "stopped", "failed" };
+    var valid = false;
+    for (valid_statuses) |s| {
+        if (std.mem.eql(u8, status, s)) {
+            valid = true;
+            break;
+        }
+    }
+    if (!valid) return badRequest("invalid status value");
+
+    var sql_buf: [256]u8 = undefined;
+    const sql = agent_registry.updateAssignmentStatusSql(&sql_buf, assignment_id, status) catch return internalError();
+
+    _ = node.propose(sql) catch {
+        return .{
+            .status = .internal_server_error,
+            .body = "{\"error\":\"not leader\"}",
+            .allocated = false,
+        };
+    };
+
+    const body = std.fmt.allocPrint(alloc, "{{\"ok\":true,\"status\":\"{s}\"}}", .{status}) catch return internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
 fn handleAgentDrain(alloc: std.mem.Allocator, id: []const u8) Response {
     _ = alloc;
     const node = cluster orelse return badRequest("not running in cluster mode");
@@ -775,6 +816,34 @@ fn writeImageJson(writer: anytype, img: store.ImageRecord) !void {
     try writer.writeByte('}');
 }
 
+const AssignmentIds = struct {
+    agent_id: []const u8,
+    assignment_id: []const u8,
+};
+
+/// extract agent and assignment IDs from a path like
+/// "{agent_id}/assignments/{assignment_id}/status".
+fn matchAssignmentStatusPath(rest: []const u8) ?AssignmentIds {
+    const slash = std.mem.indexOf(u8, rest, "/") orelse return null;
+    const agent_id = rest[0..slash];
+    if (agent_id.len == 0) return null;
+
+    const after = rest[slash..];
+    const prefix = "/assignments/";
+    if (!std.mem.startsWith(u8, after, prefix)) return null;
+
+    const remaining = after[prefix.len..];
+    // find the next slash before "/status"
+    const slash2 = std.mem.indexOf(u8, remaining, "/") orelse return null;
+    const assignment_id = remaining[0..slash2];
+    if (assignment_id.len == 0) return null;
+
+    const suffix = remaining[slash2..];
+    if (!std.mem.eql(u8, suffix, "/status")) return null;
+
+    return .{ .agent_id = agent_id, .assignment_id = assignment_id };
+}
+
 /// extract an ID from a path like "{id}/suffix".
 /// returns the id portion if the suffix matches, null otherwise.
 fn matchSubpath(rest: []const u8, suffix: []const u8) ?[]const u8 {
@@ -939,6 +1008,34 @@ test "validateClusterInput rejects dangerous values" {
 test "validateClusterInput rejects control characters" {
     try std.testing.expect(!validateClusterInput("hello\x00world"));
     try std.testing.expect(!validateClusterInput("line\nbreak"));
+}
+
+test "matchAssignmentStatusPath" {
+    const result = matchAssignmentStatusPath("abc123/assignments/def456/status");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("abc123", result.?.agent_id);
+    try std.testing.expectEqualStrings("def456", result.?.assignment_id);
+
+    // missing /status suffix
+    try std.testing.expect(matchAssignmentStatusPath("abc123/assignments/def456") == null);
+    // no assignment id
+    try std.testing.expect(matchAssignmentStatusPath("abc123/assignments//status") == null);
+    // no agent id
+    try std.testing.expect(matchAssignmentStatusPath("/assignments/def456/status") == null);
+    // wrong prefix
+    try std.testing.expect(matchAssignmentStatusPath("abc123/other/def456/status") == null);
+}
+
+test "dispatch assignment status update routing" {
+    cluster = null;
+    const req = (try http.parseRequest(
+        "POST /agents/abc123/assignments/def456/status HTTP/1.1\r\nHost: localhost\r\nContent-Length: 20\r\n\r\n{\"status\":\"running\"}",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    // no cluster configured, so returns bad_request
+    try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
 }
 
 test "dispatch agent drain routing" {
