@@ -5,7 +5,8 @@
 // comments, and the standard instruction set.
 //
 // supported instructions:
-//   FROM, RUN, COPY, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG, USER, LABEL
+//   FROM, RUN, COPY, ADD, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG,
+//   USER, LABEL, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD
 
 const std = @import("std");
 
@@ -13,6 +14,7 @@ pub const InstructionKind = enum {
     from,
     run,
     copy,
+    add,
     env,
     expose,
     entrypoint,
@@ -21,6 +23,11 @@ pub const InstructionKind = enum {
     arg,
     user,
     label,
+    volume,
+    shell,
+    healthcheck,
+    stopsignal,
+    onbuild,
 };
 
 pub const Instruction = struct {
@@ -196,6 +203,7 @@ fn matchKeyword(keyword: []const u8) ?InstructionKind {
     if (std.mem.eql(u8, lower, "from")) return .from;
     if (std.mem.eql(u8, lower, "run")) return .run;
     if (std.mem.eql(u8, lower, "copy")) return .copy;
+    if (std.mem.eql(u8, lower, "add")) return .add;
     if (std.mem.eql(u8, lower, "env")) return .env;
     if (std.mem.eql(u8, lower, "expose")) return .expose;
     if (std.mem.eql(u8, lower, "entrypoint")) return .entrypoint;
@@ -204,6 +212,11 @@ fn matchKeyword(keyword: []const u8) ?InstructionKind {
     if (std.mem.eql(u8, lower, "arg")) return .arg;
     if (std.mem.eql(u8, lower, "user")) return .user;
     if (std.mem.eql(u8, lower, "label")) return .label;
+    if (std.mem.eql(u8, lower, "volume")) return .volume;
+    if (std.mem.eql(u8, lower, "shell")) return .shell;
+    if (std.mem.eql(u8, lower, "healthcheck")) return .healthcheck;
+    if (std.mem.eql(u8, lower, "stopsignal")) return .stopsignal;
+    if (std.mem.eql(u8, lower, "onbuild")) return .onbuild;
     return null;
 }
 
@@ -280,8 +293,14 @@ test "parse all instruction types" {
         \\WORKDIR /app
         \\USER node
         \\COPY package.json .
+        \\ADD archive.tar.gz /app/
         \\RUN npm install
         \\EXPOSE 3000
+        \\VOLUME /data
+        \\SHELL ["/bin/bash", "-c"]
+        \\HEALTHCHECK CMD curl -f http://localhost/
+        \\STOPSIGNAL SIGTERM
+        \\ONBUILD RUN echo trigger
         \\ENTRYPOINT ["node"]
         \\CMD ["server.js"]
     ;
@@ -289,7 +308,7 @@ test "parse all instruction types" {
     var result = try parse(alloc, content);
     defer result.deinit();
 
-    try std.testing.expectEqual(@as(usize, 11), result.instructions.len);
+    try std.testing.expectEqual(@as(usize, 17), result.instructions.len);
     try std.testing.expectEqual(InstructionKind.from, result.instructions[0].kind);
     try std.testing.expectEqual(InstructionKind.arg, result.instructions[1].kind);
     try std.testing.expectEqual(InstructionKind.label, result.instructions[2].kind);
@@ -297,10 +316,16 @@ test "parse all instruction types" {
     try std.testing.expectEqual(InstructionKind.workdir, result.instructions[4].kind);
     try std.testing.expectEqual(InstructionKind.user, result.instructions[5].kind);
     try std.testing.expectEqual(InstructionKind.copy, result.instructions[6].kind);
-    try std.testing.expectEqual(InstructionKind.run, result.instructions[7].kind);
-    try std.testing.expectEqual(InstructionKind.expose, result.instructions[8].kind);
-    try std.testing.expectEqual(InstructionKind.entrypoint, result.instructions[9].kind);
-    try std.testing.expectEqual(InstructionKind.cmd, result.instructions[10].kind);
+    try std.testing.expectEqual(InstructionKind.add, result.instructions[7].kind);
+    try std.testing.expectEqual(InstructionKind.run, result.instructions[8].kind);
+    try std.testing.expectEqual(InstructionKind.expose, result.instructions[9].kind);
+    try std.testing.expectEqual(InstructionKind.volume, result.instructions[10].kind);
+    try std.testing.expectEqual(InstructionKind.shell, result.instructions[11].kind);
+    try std.testing.expectEqual(InstructionKind.healthcheck, result.instructions[12].kind);
+    try std.testing.expectEqual(InstructionKind.stopsignal, result.instructions[13].kind);
+    try std.testing.expectEqual(InstructionKind.onbuild, result.instructions[14].kind);
+    try std.testing.expectEqual(InstructionKind.entrypoint, result.instructions[15].kind);
+    try std.testing.expectEqual(InstructionKind.cmd, result.instructions[16].kind);
 }
 
 test "case insensitive keywords" {
@@ -408,4 +433,106 @@ test "extra whitespace between keyword and args" {
     try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
     try std.testing.expectEqualStrings("ubuntu:24.04", result.instructions[0].args);
     try std.testing.expectEqualStrings("echo hello", result.instructions[1].args);
+}
+
+test "parse ADD instruction" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nADD archive.tar.gz /app/");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.add, result.instructions[1].kind);
+    try std.testing.expectEqualStrings("archive.tar.gz /app/", result.instructions[1].args);
+}
+
+test "parse VOLUME instruction" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nVOLUME /data");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.volume, result.instructions[1].kind);
+    try std.testing.expectEqualStrings("/data", result.instructions[1].args);
+}
+
+test "parse VOLUME json form" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nVOLUME [\"/data\", \"/logs\"]");
+    defer result.deinit();
+
+    try std.testing.expectEqual(InstructionKind.volume, result.instructions[1].kind);
+    try std.testing.expect(isJsonForm(result.instructions[1].args));
+}
+
+test "parse SHELL instruction" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nSHELL [\"/bin/bash\", \"-c\"]");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.shell, result.instructions[1].kind);
+    try std.testing.expectEqualStrings("[\"/bin/bash\", \"-c\"]", result.instructions[1].args);
+}
+
+test "parse HEALTHCHECK instruction" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nHEALTHCHECK CMD curl -f http://localhost/");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.healthcheck, result.instructions[1].kind);
+    try std.testing.expectEqualStrings("CMD curl -f http://localhost/", result.instructions[1].args);
+}
+
+test "parse HEALTHCHECK NONE" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nHEALTHCHECK NONE");
+    defer result.deinit();
+
+    try std.testing.expectEqual(InstructionKind.healthcheck, result.instructions[1].kind);
+    try std.testing.expectEqualStrings("NONE", result.instructions[1].args);
+}
+
+test "parse STOPSIGNAL instruction" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nSTOPSIGNAL SIGTERM");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.stopsignal, result.instructions[1].kind);
+    try std.testing.expectEqualStrings("SIGTERM", result.instructions[1].args);
+}
+
+test "parse ONBUILD instruction" {
+    const alloc = std.testing.allocator;
+    var result = try parse(alloc, "FROM alpine:latest\nONBUILD RUN echo triggered");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.onbuild, result.instructions[1].kind);
+    try std.testing.expectEqualStrings("RUN echo triggered", result.instructions[1].args);
+}
+
+test "new directives case insensitive" {
+    const alloc = std.testing.allocator;
+    const content =
+        \\FROM alpine:latest
+        \\add file.txt /app/
+        \\volume /data
+        \\Shell ["/bin/bash", "-c"]
+        \\healthcheck CMD curl localhost
+        \\StopSignal SIGINT
+        \\onBuild RUN echo hi
+    ;
+
+    var result = try parse(alloc, content);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 7), result.instructions.len);
+    try std.testing.expectEqual(InstructionKind.add, result.instructions[1].kind);
+    try std.testing.expectEqual(InstructionKind.volume, result.instructions[2].kind);
+    try std.testing.expectEqual(InstructionKind.shell, result.instructions[3].kind);
+    try std.testing.expectEqual(InstructionKind.healthcheck, result.instructions[4].kind);
+    try std.testing.expectEqual(InstructionKind.stopsignal, result.instructions[5].kind);
+    try std.testing.expectEqual(InstructionKind.onbuild, result.instructions[6].kind);
 }
