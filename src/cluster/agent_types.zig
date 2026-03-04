@@ -51,10 +51,18 @@ pub const AgentRecord = struct {
     last_heartbeat: i64,
     registered_at: i64,
 
+    // wireguard / cluster networking fields (null for agents registered
+    // before WireGuard support, or agents that didn't provide WG info)
+    node_id: ?i64 = null,
+    wg_public_key: ?[]const u8 = null,
+    overlay_ip: ?[]const u8 = null,
+
     pub fn deinit(self: AgentRecord, alloc: Allocator) void {
         alloc.free(self.id);
         alloc.free(self.address);
         alloc.free(self.status);
+        if (self.wg_public_key) |k| alloc.free(k);
+        if (self.overlay_ip) |o| alloc.free(o);
     }
 };
 
@@ -98,4 +106,57 @@ test "agent resources defaults" {
     try std.testing.expectEqual(@as(u32, 0), res.cpu_used);
     try std.testing.expectEqual(@as(u64, 0), res.memory_used_mb);
     try std.testing.expectEqual(@as(u32, 0), res.containers);
+}
+
+test "agent record wireguard fields default to null" {
+    const alloc = std.testing.allocator;
+    const id = try alloc.dupe(u8, "test12345678");
+    const addr = try alloc.dupe(u8, "10.0.0.1:7701");
+    const status = try alloc.dupe(u8, "active");
+
+    const record = AgentRecord{
+        .id = id,
+        .address = addr,
+        .status = status,
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+        .cpu_used = 0,
+        .memory_used_mb = 0,
+        .containers = 0,
+        .last_heartbeat = 1000,
+        .registered_at = 1000,
+    };
+    defer record.deinit(alloc);
+
+    try std.testing.expect(record.node_id == null);
+    try std.testing.expect(record.wg_public_key == null);
+    try std.testing.expect(record.overlay_ip == null);
+}
+
+test "agent record deinit frees wireguard fields" {
+    const alloc = std.testing.allocator;
+    const id = try alloc.dupe(u8, "test12345678");
+    const addr = try alloc.dupe(u8, "10.0.0.1:7701");
+    const status = try alloc.dupe(u8, "active");
+    const wg_key = try alloc.dupe(u8, "base64pubkey==");
+    const overlay = try alloc.dupe(u8, "10.40.0.3");
+
+    const record = AgentRecord{
+        .id = id,
+        .address = addr,
+        .status = status,
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+        .cpu_used = 0,
+        .memory_used_mb = 0,
+        .containers = 0,
+        .last_heartbeat = 1000,
+        .registered_at = 1000,
+        .node_id = 3,
+        .wg_public_key = wg_key,
+        .overlay_ip = overlay,
+    };
+    // deinit should free all 5 slices (id, address, status, wg_public_key, overlay_ip)
+    // testing allocator will detect leaks if any aren't freed
+    record.deinit(alloc);
 }
