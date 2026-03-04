@@ -17,6 +17,7 @@ const manifest_loader = @import("manifest/loader.zig");
 const orchestrator = @import("manifest/orchestrator.zig");
 const watcher_mod = @import("dev/watcher.zig");
 const manifest_spec = @import("manifest/spec.zig");
+const health = @import("manifest/health.zig");
 const api_server = @import("api/server.zig");
 const routes = @import("api/routes.zig");
 const cluster_node = @import("cluster/node.zig");
@@ -1567,6 +1568,7 @@ comptime {
     _ = @import("manifest/spec.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
+    _ = @import("manifest/health.zig");
     _ = @import("dev/log_mux.zig");
     _ = @import("dev/watcher.zig");
     _ = @import("api/http.zig");
