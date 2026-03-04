@@ -157,6 +157,38 @@ pub fn deleteBlob(digest: Digest) BlobError!void {
     std.fs.cwd().deleteFile(path) catch return BlobError.NotFound;
 }
 
+/// verify a cached blob's integrity by re-hashing its contents.
+/// returns true if the blob exists and its contents match the expected digest.
+/// returns false if the blob is missing, unreadable, or corrupted.
+pub fn verifyBlob(digest: Digest) bool {
+    var path_buf: [max_path]u8 = undefined;
+    const path = blobPath(digest, &path_buf) catch return false;
+
+    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    defer file.close();
+
+    // hash the file contents in chunks to avoid loading the entire blob into memory
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = file.read(&buf) catch return false;
+        if (n == 0) break;
+        hasher.update(buf[0..n]);
+    }
+
+    const actual = hasher.finalResult();
+    return std.mem.eql(u8, &actual, &digest.hash);
+}
+
+/// remove a blob file from the store without error.
+/// intended for cleaning up corrupted cache entries — silently ignores
+/// any errors (missing file, permission issues, etc.)
+pub fn removeBlob(digest: Digest) void {
+    var path_buf: [max_path]u8 = undefined;
+    const path = blobPath(digest, &path_buf) catch return;
+    std.fs.cwd().deleteFile(path) catch {};
+}
+
 /// get the filesystem path for a blob
 pub fn blobPath(digest: Digest, buf: *[max_path]u8) BlobError![]const u8 {
     const hex = digest.hex();
@@ -277,4 +309,46 @@ test "put blob is idempotent" {
 test "has blob returns false for missing" {
     const digest = computeDigest("definitely not stored");
     try std.testing.expect(!hasBlob(digest));
+}
+
+test "verify blob — valid blob passes" {
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+
+    const data = "verify blob test content";
+    const digest = try putBlob(data);
+    defer deleteBlob(digest) catch {};
+
+    try std.testing.expect(verifyBlob(digest));
+}
+
+test "verify blob — corrupted blob fails" {
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+
+    // store a valid blob first
+    const data = "original content for corruption test";
+    const digest = try putBlob(data);
+    defer removeBlob(digest);
+
+    // overwrite the file with different content to simulate corruption
+    var path_buf: [max_path]u8 = undefined;
+    const path = try blobPath(digest, &path_buf);
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+    try file.writeAll("corrupted data");
+
+    // verification should fail — the hash no longer matches
+    try std.testing.expect(!verifyBlob(digest));
+}
+
+test "verify blob — missing blob returns false" {
+    const digest = computeDigest("blob that was never stored");
+    try std.testing.expect(!verifyBlob(digest));
+}
+
+test "remove blob — silently handles missing blob" {
+    const digest = computeDigest("never stored blob for remove test");
+    // should not crash or return an error
+    removeBlob(digest);
 }
