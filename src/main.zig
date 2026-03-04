@@ -128,7 +128,9 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFl
                 writeErr("invalid port mapping: {s}\n", .{port_str});
                 std.process.exit(1);
             };
-            port_maps.append(alloc, pm) catch {};
+            port_maps.append(alloc, pm) catch |e| {
+                writeErr("failed to add port mapping: {}\n", .{e});
+            };
         } else if (std.mem.eql(u8, arg, "--no-net")) {
             networking_enabled = false;
         } else if (std.mem.eql(u8, arg, "--net")) {
@@ -147,7 +149,9 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFl
     // collect user-provided command + args
     var user_argv: std.ArrayList([]const u8) = .empty;
     while (args.next()) |arg| {
-        user_argv.append(alloc, arg) catch {};
+        user_argv.append(alloc, arg) catch |e| {
+            writeErr("failed to add command argument: {}\n", .{e});
+        };
     }
 
     return .{
@@ -215,7 +219,9 @@ fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageResolu
     }
 
     // save image record
-    oci.saveImageFromPull(ref, result.pull_result.?.manifest_digest, result.pull_result.?.total_size) catch {};
+    oci.saveImageFromPull(ref, result.pull_result.?.manifest_digest, result.pull_result.?.total_size) catch |e| {
+        writeErr("warning: failed to save image record: {}\n", .{e});
+    };
 
     writeErr("image pulled and extracted\n", .{});
     return result;
@@ -352,7 +358,9 @@ fn cmdStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // clean up network resources
     cleanupNetwork(id, record.ip_address, record.veth_host);
 
-    store.updateStatus(id, "stopped", null, null) catch {};
+    store.updateStatus(id, "stopped", null, null) catch |e| {
+        writeErr("warning: failed to update container status: {}\n", .{e});
+    };
 
     write("{s}\n", .{id});
 }
@@ -388,7 +396,9 @@ fn cmdExec(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var exec_args: std.ArrayList([]const u8) = .empty;
     defer exec_args.deinit(alloc);
     while (args.next()) |arg| {
-        exec_args.append(alloc, arg) catch {};
+        exec_args.append(alloc, arg) catch |e| {
+            writeErr("failed to add exec argument: {}\n", .{e});
+        };
     }
 
     const exit_code = exec.execInContainer(.{
@@ -729,7 +739,9 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                     var resolve_buf: [4096]u8 = undefined;
                     const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch continue;
 
-                    w.?.addRecursive(abs_source, i) catch {};
+                    w.?.addRecursive(abs_source, i) catch |e| {
+                        writeErr("warning: failed to watch {s}: {}\n", .{ vol.source, e });
+                    };
                 }
             }
 
@@ -907,7 +919,9 @@ fn cmdDown(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         }
 
         // update status and clean up
-        store.updateStatus(rec.id, "stopped", null, null) catch {};
+        store.updateStatus(rec.id, "stopped", null, null) catch |e| {
+            writeErr("warning: failed to update status for {s}: {}\n", .{ svc.name, e });
+        };
         cleanupStoppedContainer(rec.id, rec.ip_address, rec.veth_host);
 
         writeErr(" stopped\n", .{});
@@ -1394,7 +1408,9 @@ fn requireArg(args: *std.process.ArgIterator, comptime usage: []const u8) []cons
 /// used by cmdRm and the per-service cleanup loop in cmdDown.
 fn cleanupStoppedContainer(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) void {
     cleanupNetwork(id, ip_address, veth_host);
-    store.remove(id) catch {};
+    store.remove(id) catch |e| {
+        writeErr("warning: failed to remove container record {s}: {}\n", .{ id, e });
+    };
     logs.deleteLogFile(id);
     container.cleanupContainerDirs(id);
 }
