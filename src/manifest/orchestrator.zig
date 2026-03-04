@@ -28,6 +28,7 @@ const process = @import("../runtime/process.zig");
 const store = @import("../state/store.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
+const ip_mod = @import("../network/ip.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const logs = @import("../runtime/logs.zig");
 const health = @import("health.zig");
@@ -175,7 +176,7 @@ pub const Orchestrator = struct {
             defer record.deinit(self.alloc);
 
             const container_ip = if (record.ip_address) |ip_str|
-                parseIpAddress(ip_str)
+                ip_mod.parseIp(ip_str) orelse [4]u8{ 0, 0, 0, 0 }
             else
                 [4]u8{ 0, 0, 0, 0 };
 
@@ -680,31 +681,6 @@ pub fn watcherThread(orch: *Orchestrator, w: *watcher_mod.Watcher) void {
     }
 }
 
-/// parse a dotted IP string like "10.42.0.5" into a 4-byte array.
-/// returns all zeros on parse failure.
-fn parseIpAddress(s: []const u8) [4]u8 {
-    var result: [4]u8 = .{ 0, 0, 0, 0 };
-    var octet_idx: usize = 0;
-    var current: u16 = 0;
-
-    for (s) |c| {
-        if (c == '.') {
-            if (octet_idx >= 3 or current > 255) return .{ 0, 0, 0, 0 };
-            result[octet_idx] = @intCast(current);
-            octet_idx += 1;
-            current = 0;
-        } else if (c >= '0' and c <= '9') {
-            current = current * 10 + (c - '0');
-        } else {
-            return .{ 0, 0, 0, 0 };
-        }
-    }
-
-    if (octet_idx != 3 or current > 255) return .{ 0, 0, 0, 0 };
-    result[3] = @intCast(current);
-
-    return result;
-}
 
 /// extract the key part from a "KEY=VALUE" env var string
 fn envKey(env_var: []const u8) []const u8 {
@@ -758,20 +734,6 @@ test "shutdown_requested starts false" {
     try std.testing.expect(!shutdown_requested.load(.acquire));
 }
 
-test "parseIpAddress — valid IPs" {
-    try std.testing.expectEqual([4]u8{ 10, 42, 0, 5 }, parseIpAddress("10.42.0.5"));
-    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, parseIpAddress("127.0.0.1"));
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("0.0.0.0"));
-    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, parseIpAddress("255.255.255.255"));
-}
-
-test "parseIpAddress — invalid IPs return zeros" {
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress(""));
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("not an ip"));
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("256.0.0.1"));
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("10.42"));
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("10.42.0.5.6"));
-}
 
 // -- restart policy tests --
 

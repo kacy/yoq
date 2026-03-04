@@ -909,7 +909,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
     var server_port: u16 = 7700;
 
     if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
-        server_ip = parseIpv4(addr_str[0..colon]) orelse {
+        server_ip = ip.parseIp(addr_str[0..colon]) orelse {
             writeErr("invalid server address: {s}\n", .{addr_str});
             std.process.exit(1);
         };
@@ -918,7 +918,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
             std.process.exit(1);
         };
     } else {
-        server_ip = parseIpv4(addr_str) orelse {
+        server_ip = ip.parseIp(addr_str) orelse {
             writeErr("invalid server address: {s}\n", .{addr_str});
             std.process.exit(1);
         };
@@ -1241,7 +1241,7 @@ fn cmdJoin(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     };
 
     // parse server address
-    const server_addr = parseIpv4(host) orelse {
+    const server_addr = ip.parseIp(host) orelse {
         writeErr("invalid server address: {s}\n", .{host});
         std.process.exit(1);
     };
@@ -1341,7 +1341,7 @@ fn cmdNodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 std.process.exit(1);
             };
             if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
-                server_addr = parseIpv4(addr_str[0..colon]) orelse {
+                server_addr = ip.parseIp(addr_str[0..colon]) orelse {
                     writeErr("invalid server address: {s}\n", .{addr_str});
                     std.process.exit(1);
                 };
@@ -1350,7 +1350,7 @@ fn cmdNodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                     std.process.exit(1);
                 };
             } else {
-                server_addr = parseIpv4(addr_str) orelse {
+                server_addr = ip.parseIp(addr_str) orelse {
                     writeErr("invalid server address: {s}\n", .{addr_str});
                     std.process.exit(1);
                 };
@@ -1417,7 +1417,7 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 std.process.exit(1);
             };
             if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
-                server_addr = parseIpv4(addr_str[0..colon]) orelse {
+                server_addr = ip.parseIp(addr_str[0..colon]) orelse {
                     writeErr("invalid server address: {s}\n", .{addr_str});
                     std.process.exit(1);
                 };
@@ -1426,7 +1426,7 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                     std.process.exit(1);
                 };
             } else {
-                server_addr = parseIpv4(addr_str) orelse {
+                server_addr = ip.parseIp(addr_str) orelse {
                     writeErr("invalid server address: {s}\n", .{addr_str});
                     std.process.exit(1);
                 };
@@ -1855,36 +1855,9 @@ fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_host: 
     }
 }
 
-/// parse a dotted IPv4 address string into 4 bytes.
 // use shared JSON extraction helpers
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
-
-fn parseIpv4(s: []const u8) ?[4]u8 {
-    var result: [4]u8 = undefined;
-    var part: u8 = 0;
-    var idx: usize = 0;
-
-    for (s) |c| {
-        if (c == '.') {
-            if (idx >= 3) return null;
-            result[idx] = part;
-            idx += 1;
-            part = 0;
-        } else if (c >= '0' and c <= '9') {
-            const digit = c - '0';
-            const next = @as(u16, part) * 10 + digit;
-            if (next > 255) return null;
-            part = @intCast(next);
-        } else {
-            return null;
-        }
-    }
-
-    if (idx != 3) return null;
-    result[3] = part;
-    return result;
-}
 
 test "smoke test" {
     try std.testing.expect(true);
@@ -1909,23 +1882,6 @@ test "valid container names" {
     try std.testing.expect(isValidContainerName("my-service-1"));
     try std.testing.expect(isValidContainerName("A"));
     try std.testing.expect(isValidContainerName("abc123"));
-}
-
-test "parse ipv4 valid" {
-    const addr = parseIpv4("10.0.0.1").?;
-    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, addr);
-}
-
-test "parse ipv4 localhost" {
-    const addr = parseIpv4("127.0.0.1").?;
-    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, addr);
-}
-
-test "parse ipv4 invalid" {
-    try std.testing.expect(parseIpv4("not.an.ip") == null);
-    try std.testing.expect(parseIpv4("256.0.0.1") == null);
-    try std.testing.expect(parseIpv4("1.2.3") == null);
-    try std.testing.expect(parseIpv4("") == null);
 }
 
 test "invalid container names" {
