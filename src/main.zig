@@ -571,6 +571,8 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var tag: ?[]const u8 = null;
     var dockerfile_path: []const u8 = "Dockerfile";
     var context_path: ?[]const u8 = null;
+    var build_args_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer build_args_list.deinit(alloc);
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-t")) {
@@ -581,6 +583,15 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         } else if (std.mem.eql(u8, arg, "-f")) {
             dockerfile_path = args.next() orelse {
                 writeErr("-f requires a Dockerfile path\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--build-arg")) {
+            const ba = args.next() orelse {
+                writeErr("--build-arg requires KEY=VALUE\n", .{});
+                std.process.exit(1);
+            };
+            build_args_list.append(alloc, ba) catch {
+                writeErr("out of memory\n", .{});
                 std.process.exit(1);
             };
         } else {
@@ -630,7 +641,11 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     };
 
     // build
-    var result = build_engine.build(alloc, parsed.instructions, abs_ctx, tag) catch |err| {
+    const cli_args: ?[]const []const u8 = if (build_args_list.items.len > 0)
+        build_args_list.items
+    else
+        null;
+    var result = build_engine.build(alloc, parsed.instructions, abs_ctx, tag, cli_args) catch |err| {
         switch (err) {
             build_engine.BuildError.NoFromInstruction => writeErr("Dockerfile must start with FROM\n", .{}),
             build_engine.BuildError.PullFailed => writeErr("failed to pull base image\n", .{}),
