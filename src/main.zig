@@ -26,6 +26,8 @@ const cluster_config = @import("cluster/config.zig");
 const cluster_agent = @import("cluster/agent.zig");
 const http_client = @import("cluster/http_client.zig");
 const json_helpers = @import("lib/json_helpers.zig");
+const sqlite = @import("sqlite");
+const secrets = @import("state/secrets.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -90,6 +92,8 @@ pub fn main() !void {
         cmdRollback(&args, alloc);
     } else if (std.mem.eql(u8, command, "history")) {
         cmdHistory(&args, alloc);
+    } else if (std.mem.eql(u8, command, "secret")) {
+        cmdSecret(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -1424,6 +1428,198 @@ fn truncate(s: []const u8, max_len: usize) []const u8 {
     return s[0..max_len];
 }
 
+// -- secret commands --
+
+fn cmdSecret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const subcmd = args.next() orelse {
+        writeErr(
+            \\usage: yoq secret <command> [options]
+            \\
+            \\commands:
+            \\  set <name> [--value <val>]  store a secret (reads stdin if no --value)
+            \\  get <name>                  print decrypted value
+            \\  rm <name>                   remove a secret
+            \\  list                        list secret names
+            \\  rotate <name>               re-encrypt with current key
+            \\
+        , .{});
+        std.process.exit(1);
+    };
+
+    if (std.mem.eql(u8, subcmd, "set")) {
+        cmdSecretSet(args, alloc);
+    } else if (std.mem.eql(u8, subcmd, "get")) {
+        cmdSecretGet(args, alloc);
+    } else if (std.mem.eql(u8, subcmd, "rm")) {
+        cmdSecretRm(args, alloc);
+    } else if (std.mem.eql(u8, subcmd, "list")) {
+        cmdSecretList(alloc);
+    } else if (std.mem.eql(u8, subcmd, "rotate")) {
+        cmdSecretRotate(args, alloc);
+    } else {
+        writeErr("unknown secret command: {s}\n", .{subcmd});
+        std.process.exit(1);
+    }
+}
+
+fn cmdSecretSet(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var name: ?[]const u8 = null;
+    var value_flag: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--value")) {
+            value_flag = args.next() orelse {
+                writeErr("--value requires a value\n", .{});
+                std.process.exit(1);
+            };
+        } else if (name == null) {
+            name = arg;
+        }
+    }
+
+    const secret_name = name orelse {
+        writeErr("usage: yoq secret set <name> [--value <val>]\n", .{});
+        std.process.exit(1);
+    };
+
+    // get value from --value flag or stdin
+    const value = if (value_flag) |v|
+        v
+    else blk: {
+        // read from stdin
+        const stdin_data = std.io.getStdIn().readToEndAlloc(alloc, 1024 * 1024) catch {
+            writeErr("failed to read from stdin\n", .{});
+            std.process.exit(1);
+        };
+        // trim trailing newline — users typically pipe from echo or here-string
+        break :blk std.mem.trimRight(u8, stdin_data, "\n\r");
+    };
+
+    var sec_store = openSecretsStore(alloc);
+    defer closeSecretsStore(alloc, &sec_store);
+
+    sec_store.set(secret_name, value) catch {
+        writeErr("failed to store secret\n", .{});
+        std.process.exit(1);
+    };
+
+    write("{s}\n", .{secret_name});
+}
+
+fn cmdSecretGet(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const name = requireArg(args, "usage: yoq secret get <name>\n");
+
+    var sec_store = openSecretsStore(alloc);
+    defer closeSecretsStore(alloc, &sec_store);
+
+    const value = sec_store.get(name) catch |err| {
+        if (err == secrets.SecretsError.NotFound) {
+            writeErr("secret not found: {s}\n", .{name});
+        } else {
+            writeErr("failed to read secret\n", .{});
+        }
+        std.process.exit(1);
+    };
+    defer {
+        // zero before freeing — don't leave secrets in freed memory
+        std.crypto.secureZero(u8, value);
+        alloc.free(value);
+    }
+
+    write("{s}\n", .{value});
+}
+
+fn cmdSecretRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const name = requireArg(args, "usage: yoq secret rm <name>\n");
+
+    var sec_store = openSecretsStore(alloc);
+    defer closeSecretsStore(alloc, &sec_store);
+
+    sec_store.remove(name) catch |err| {
+        if (err == secrets.SecretsError.NotFound) {
+            writeErr("secret not found: {s}\n", .{name});
+        } else {
+            writeErr("failed to remove secret\n", .{});
+        }
+        std.process.exit(1);
+    };
+
+    write("{s}\n", .{name});
+}
+
+fn cmdSecretList(alloc: std.mem.Allocator) void {
+    var sec_store = openSecretsStore(alloc);
+    defer closeSecretsStore(alloc, &sec_store);
+
+    var names = sec_store.list() catch {
+        writeErr("failed to list secrets\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+
+    if (names.items.len == 0) {
+        write("no secrets\n", .{});
+        return;
+    }
+
+    for (names.items) |name| {
+        write("{s}\n", .{name});
+    }
+}
+
+fn cmdSecretRotate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const name = requireArg(args, "usage: yoq secret rotate <name>\n");
+
+    var sec_store = openSecretsStore(alloc);
+    defer closeSecretsStore(alloc, &sec_store);
+
+    sec_store.rotate(name) catch |err| {
+        if (err == secrets.SecretsError.NotFound) {
+            writeErr("secret not found: {s}\n", .{name});
+        } else {
+            writeErr("failed to rotate secret\n", .{});
+        }
+        std.process.exit(1);
+    };
+
+    write("{s}\n", .{name});
+}
+
+/// open a SecretsStore with a heap-allocated database connection.
+/// exits on failure — used by CLI commands where there's nothing to recover from.
+/// caller must call closeSecretsStore() when done.
+fn openSecretsStore(alloc: std.mem.Allocator) secrets.SecretsStore {
+    const db_ptr = alloc.create(sqlite.Db) catch {
+        writeErr("failed to allocate database\n", .{});
+        std.process.exit(1);
+    };
+    db_ptr.* = store.openDb() catch {
+        alloc.destroy(db_ptr);
+        writeErr("failed to open database\n", .{});
+        std.process.exit(1);
+    };
+
+    return secrets.SecretsStore.init(db_ptr, alloc) catch |err| {
+        db_ptr.deinit();
+        alloc.destroy(db_ptr);
+        if (err == secrets.SecretsError.HomeDirNotFound) {
+            writeErr("HOME directory not found\n", .{});
+        } else {
+            writeErr("failed to initialize secrets store\n", .{});
+        }
+        std.process.exit(1);
+    };
+}
+
+/// close a secrets store opened with openSecretsStore.
+fn closeSecretsStore(alloc: std.mem.Allocator, sec: *secrets.SecretsStore) void {
+    sec.db.deinit();
+    alloc.destroy(sec.db);
+}
+
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -1441,6 +1637,11 @@ fn printUsage() void {
         \\  cluster status                  show cluster node status
         \\  nodes [--server host:port]       list cluster agent nodes
         \\  drain <id> [--server host:port]  drain an agent node
+        \\  secret set <name> [--value val] store a secret (reads stdin if no --value)
+        \\  secret get <name>               print decrypted value
+        \\  secret rm <name>                remove a secret
+        \\  secret list                     list secret names
+        \\  secret rotate <name>            re-encrypt with current key
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  ps                               list containers
