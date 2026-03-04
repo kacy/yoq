@@ -87,12 +87,13 @@ pub const Agent = struct {
             .{ self.token, resources.cpu_cores, resources.memory_mb },
         ) catch return AgentError.RegisterFailed;
 
-        var resp = http_client.post(
+        var resp = http_client.postWithAuth(
             self.alloc,
             self.server_addr,
             self.server_port,
             "/agents/register",
             body,
+            self.token,
         ) catch return AgentError.RegisterFailed;
         defer resp.deinit(self.alloc);
 
@@ -182,12 +183,13 @@ pub const Agent = struct {
         var path_buf: [64]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/heartbeat", .{self.id}) catch return;
 
-        var resp = http_client.post(
+        var resp = http_client.postWithAuth(
             self.alloc,
             self.server_addr,
             self.server_port,
             path,
             body,
+            self.token,
         ) catch return;
         defer resp.deinit(self.alloc);
 
@@ -270,11 +272,12 @@ pub const Agent = struct {
         var path_buf: [64]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/assignments", .{self.id}) catch return null;
 
-        return http_client.get(
+        return http_client.getWithAuth(
             self.alloc,
             self.server_addr,
             self.server_port,
             path,
+            self.token,
         ) catch return null;
     }
 
@@ -386,12 +389,13 @@ pub const Agent = struct {
         var body_buf: [64]u8 = undefined;
         const body = std.fmt.bufPrint(&body_buf, "{{\"status\":\"{s}\"}}", .{status}) catch return;
 
-        var resp = http_client.post(
+        var resp = http_client.postWithAuth(
             self.alloc,
             self.server_addr,
             self.server_port,
             path,
             body,
+            self.token,
         ) catch {
             log.warn("failed to report status '{s}' for assignment {s}", .{ status, assignment_id });
             return;
