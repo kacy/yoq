@@ -18,6 +18,7 @@
 const std = @import("std");
 const posix = std.posix;
 const spec = @import("spec.zig");
+const dns = @import("../network/dns.zig");
 const log = @import("../lib/log.zig");
 
 // -- public types --
@@ -36,8 +37,10 @@ pub const ServiceHealth = struct {
     last_error: ?[]const u8,
     started_at: ?i64, // when the service was first registered
 
-    /// the service name and container IP, used for checks
+    /// the service name, container ID, and container IP, used for checks
+    /// and DNS registration/unregistration.
     service_name: []const u8,
+    container_id: [12]u8,
     container_ip: [4]u8,
     config: spec.HealthCheck,
 };
@@ -58,6 +61,7 @@ var health_mutex: std.Thread.Mutex = .{};
 /// the service starts in "starting" status.
 pub fn registerService(
     service_name: []const u8,
+    container_id: [12]u8,
     container_ip: [4]u8,
     config: spec.HealthCheck,
 ) void {
@@ -75,6 +79,7 @@ pub fn registerService(
                 .last_error = null,
                 .started_at = std.time.timestamp(),
                 .service_name = service_name,
+                .container_id = container_id,
                 .container_ip = container_ip,
                 .config = config,
             };
@@ -197,6 +202,7 @@ fn checkerLoop() void {
                 to_check[check_count] = .{
                     .index = i,
                     .container_ip = entry.container_ip,
+                    .container_id = entry.container_id,
                     .config = entry.config,
                     .service_name = entry.service_name,
                 };
@@ -227,6 +233,7 @@ fn checkerLoop() void {
 const CheckItem = struct {
     index: usize,
     container_ip: [4]u8,
+    container_id: [12]u8,
     config: spec.HealthCheck,
     service_name: []const u8,
 };
@@ -235,6 +242,10 @@ const CheckItem = struct {
 
 /// update a service's health state based on a check result.
 /// implements the state machine transitions described at the top of this file.
+///
+/// when a service transitions to healthy, it is registered with DNS for
+/// service discovery (readiness gating). when it transitions to unhealthy,
+/// it is unregistered so traffic stops flowing to it.
 ///
 /// must be called with health_mutex held.
 fn updateState(entry: *ServiceHealth, success: bool) void {
@@ -247,10 +258,12 @@ fn updateState(entry: *ServiceHealth, success: bool) void {
             .starting => {
                 entry.status = .healthy;
                 log.info("health: {s} is now healthy", .{entry.service_name});
+                dnsRegister(entry);
             },
             .unhealthy => {
                 entry.status = .healthy;
                 log.info("health: {s} recovered, now healthy", .{entry.service_name});
+                dnsRegister(entry);
             },
             .healthy => {},
         }
@@ -273,11 +286,26 @@ fn updateState(entry: *ServiceHealth, success: bool) void {
                     log.warn("health: {s} is now unhealthy (after {d} consecutive failures)", .{
                         entry.service_name, entry.config.retries,
                     });
+                    dnsUnregister(entry);
                 }
             },
             .unhealthy => {},
         }
     }
+}
+
+/// register a healthy service with DNS for service discovery.
+/// called when a service transitions to healthy status.
+fn dnsRegister(entry: *const ServiceHealth) void {
+    dns.registerService(entry.service_name, &entry.container_id, entry.container_ip);
+    log.info("health: registered {s} in DNS", .{entry.service_name});
+}
+
+/// unregister an unhealthy service from DNS.
+/// called when a service transitions to unhealthy status.
+fn dnsUnregister(entry: *const ServiceHealth) void {
+    dns.unregisterService(&entry.container_id);
+    log.info("health: unregistered {s} from DNS", .{entry.service_name});
 }
 
 // -- check implementations --
@@ -484,7 +512,7 @@ test "isHttp2xx — malformed responses" {
 test "register and get status" {
     resetForTest();
 
-    registerService("web", .{ 10, 42, 0, 5 }, .{
+    registerService("web", "abcdef123456".*, .{ 10, 42, 0, 5 }, .{
         .check_type = .{ .tcp = .{ .port = 8080 } },
     });
 
@@ -496,7 +524,7 @@ test "register and get status" {
 test "unregister removes service" {
     resetForTest();
 
-    registerService("web", .{ 10, 42, 0, 5 }, .{
+    registerService("web", "abcdef123456".*, .{ 10, 42, 0, 5 }, .{
         .check_type = .{ .tcp = .{ .port = 8080 } },
     });
     unregisterService("web");
@@ -512,7 +540,7 @@ test "get status returns null for unknown service" {
 test "getServiceHealth returns full state" {
     resetForTest();
 
-    registerService("api", .{ 10, 42, 0, 10 }, .{
+    registerService("api", "abcdef123456".*, .{ 10, 42, 0, 10 }, .{
         .check_type = .{ .http = .{
             .path = "/health",
             .port = 3000,
@@ -520,11 +548,11 @@ test "getServiceHealth returns full state" {
         .interval = 15,
     });
 
-    const health = getServiceHealth("api");
-    try std.testing.expect(health != null);
-    try std.testing.expectEqual(HealthStatus.starting, health.?.status);
-    try std.testing.expectEqual(@as(u32, 15), health.?.config.interval);
-    try std.testing.expect(health.?.started_at != null);
+    const sh = getServiceHealth("api");
+    try std.testing.expect(sh != null);
+    try std.testing.expectEqual(HealthStatus.starting, sh.?.status);
+    try std.testing.expectEqual(@as(u32, 15), sh.?.config.interval);
+    try std.testing.expect(sh.?.started_at != null);
 }
 
 // -- test helpers --
@@ -538,6 +566,7 @@ fn testEntry(status: HealthStatus) ServiceHealth {
         .last_error = null,
         .started_at = null,
         .service_name = "test-svc",
+        .container_id = "abcdef123456".*,
         .container_ip = .{ 10, 42, 0, 1 },
         .config = .{
             .check_type = .{ .tcp = .{ .port = 8080 } },
