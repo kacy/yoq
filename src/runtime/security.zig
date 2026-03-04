@@ -340,7 +340,7 @@ test "capability mask verification detects mismatch" {
     }
 
     // matching data should pass
-    var matching = expected;
+    const matching = expected;
     for (0..2) |i| {
         try std.testing.expectEqual(expected[i].effective, matching[i].effective);
         try std.testing.expectEqual(expected[i].permitted, matching[i].permitted);

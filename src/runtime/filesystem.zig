@@ -19,6 +19,7 @@ pub const FilesystemError = error{
     UnmountFailed,
     MkdirFailed,
     PathTooLong,
+    SymlinkNotAllowed,
 };
 
 /// configuration for a container's filesystem
@@ -57,19 +58,39 @@ pub fn mountOverlay(config: FilesystemConfig) FilesystemError!void {
         return FilesystemError.MountFailed;
     }
 
+    // verify overlay paths are not symlinks. a symlink could redirect
+    // the overlay mount to an attacker-controlled location, bypassing
+    // the container's filesystem isolation.
+    for (config.lower_dirs) |dir| {
+        if (isSymlink(dir)) {
+            log.warn("overlayfs: lower dir is a symlink: {s}", .{dir});
+            return FilesystemError.SymlinkNotAllowed;
+        }
+    }
+    if (isSymlink(config.upper_dir)) {
+        log.warn("overlayfs: upper dir is a symlink: {s}", .{config.upper_dir});
+        return FilesystemError.SymlinkNotAllowed;
+    }
+    if (isSymlink(config.work_dir)) {
+        log.warn("overlayfs: work dir is a symlink: {s}", .{config.work_dir});
+        return FilesystemError.SymlinkNotAllowed;
+    }
+
     // build overlayfs mount options:
     // "lowerdir=layer1:layer2,upperdir=upper,workdir=work"
     var opts_buf: [4096]u8 = undefined;
     var pos: usize = 0;
 
-    // lowerdir=
+    // lowerdir= prefix — bounds check before copy
     const lowerdir_prefix = "lowerdir=";
+    if (lowerdir_prefix.len >= opts_buf.len) return FilesystemError.PathTooLong;
     @memcpy(opts_buf[pos..][0..lowerdir_prefix.len], lowerdir_prefix);
     pos += lowerdir_prefix.len;
 
     // join lower dirs with ':'
     for (config.lower_dirs, 0..) |dir, i| {
         if (i > 0) {
+            if (pos >= opts_buf.len) return FilesystemError.PathTooLong;
             opts_buf[pos] = ':';
             pos += 1;
         }
@@ -291,6 +312,22 @@ fn isPathSafe(path: []const u8) bool {
     return true;
 }
 
+/// check if a path is a symlink using lstat().
+/// returns true if the path exists and is a symlink, false otherwise.
+/// errors (e.g. path doesn't exist) are treated as "not a symlink"
+/// since the mount will fail later with a clear error anyway.
+fn isSymlink(path: []const u8) bool {
+    if (path.len >= 4096) return false;
+    var path_buf: [4096]u8 = undefined;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    const path_z: [*:0]const u8 = @ptrCast(&path_buf);
+    var stat_buf: linux.Stat = undefined;
+    const rc = linux.lstat(path_z, &stat_buf);
+    if (syscall_util.isError(rc)) return false;
+    return stat_buf.mode & linux.S.IFMT == linux.S.IFLNK;
+}
+
 /// check that a path doesn't contain ':' or ',' which would break
 /// overlayfs mount options parsing.
 fn isValidOverlayPath(path: []const u8) bool {
@@ -390,4 +427,29 @@ test "sentinelize" {
     const result = try sentinelize(&path);
     try std.testing.expectEqualStrings("/test/path", result);
     try std.testing.expectEqual(@as(u8, 0), result.ptr[result.len]);
+}
+
+test "isSymlink detects symlinks" {
+    // create a temp directory with a real dir and a symlink
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("realdir");
+    try tmp.dir.symLink("realdir", "linkdir", .{});
+
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_path = try tmp.dir.realpath("realdir", &real_buf);
+    try std.testing.expect(!isSymlink(real_path));
+
+    // for the symlink, we need the path without resolving it.
+    // realpath resolves symlinks, so we build the path manually.
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_path = try tmp.dir.realpath(".", &base_buf);
+    var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/linkdir", .{base_path}) catch unreachable;
+    try std.testing.expect(isSymlink(link_path));
+}
+
+test "isSymlink returns false for non-existent path" {
+    try std.testing.expect(!isSymlink("/nonexistent/path/that/does/not/exist"));
 }
