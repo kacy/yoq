@@ -4,21 +4,25 @@ a single binary that replaces Docker + Kubernetes + Istio + Helm for 90% of team
 
 ## what
 
-yoq combines container runtime, orchestration, networking, and service mesh into one static binary. built on modern Linux primitives (cgroups v2, eBPF, WireGuard, io_uring) instead of the 2013-era stack everything else is built on.
+yoq combines container runtime, orchestration, networking, and service mesh into one static binary. built on modern Linux primitives (cgroups v2, io_uring) instead of the 2013-era stack everything else is built on. networking currently uses iptables and a userspace DNS resolver; eBPF programs for DNS interception, load balancing, and observability are planned but not yet implemented.
 
 ## status
 
-phases 1-6 are complete.
+~21k lines of Zig, ~460 tests. phases 1-6 are substantially implemented with some gaps noted below.
 
-**container runtime & images (phases 1-2):** containers run in isolated namespaces with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. images are pulled from any OCI registry (Docker Hub, GHCR, etc.), extracted, and cached locally with layer deduplication.
+**container runtime (phase 1) — ~95%:** containers run in isolated namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. process supervision, log capture, and exec into running containers all work. gap: rootless containers via user namespaces (currently requires root).
 
-**networking (phase 3):** each container gets its own IP on a bridge network (10.42.0.0/16), with NAT for outbound traffic and port mapping for inbound. a userspace DNS resolver on the bridge gateway handles service discovery — containers find each other by name.
+**OCI images (phase 2) — ~90%:** images are pulled from any OCI registry (Docker Hub, GHCR, etc.) with token auth, extracted, and cached locally with layer deduplication. content-addressable blob store. gap: image push is not implemented (pull only).
 
-**build engine (phase 4):** Dockerfile parser (FROM, RUN, COPY, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR) produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order.
+**networking (phase 3) — ~70%:** each container gets its own IP on a bridge network (10.42.0.0/16), with iptables NAT for outbound traffic and port mapping for inbound. a userspace DNS resolver on the bridge gateway handles service discovery — containers find each other by name. gap: no eBPF programs (dns interception, load balancing, port mapping, metrics, network policy are all planned but not implemented). no load balancing across replicas.
 
-**manifest + dev mode (phase 5):** TOML manifest format defines multi-service applications with dependency ordering. `yoq up` starts all services, `yoq down` stops them in reverse order. dev mode (`--dev`) watches source directories with inotify and hot-restarts containers on file changes. colored log multiplexing prefixes output with service names.
+**build engine (phase 4) — ~75%:** Dockerfile parser (FROM, RUN, COPY, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR) produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order. gap: TOML-based declarative build manifest not implemented.
 
-**clustering (phase 6):** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. the API server exposes 15 endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`.
+**manifest + dev mode (phase 5) — ~80%:** TOML manifest format defines multi-service applications with dependency ordering. `yoq up` starts all services, `yoq down` stops them in reverse order. dev mode (`--dev`) watches source directories with inotify and hot-restarts containers on file changes. colored log multiplexing prefixes output with service names. gaps: workers and crons not implemented in manifest spec, secret references not supported, `up <service>` (start individual service) not implemented.
+
+**clustering (phase 6) — ~70%:** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. the API server exposes 15 endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`. gaps: raft snapshots not implemented (log grows unbounded), WireGuard mesh for cross-node networking not started, cross-node service discovery doesn't work.
+
+**production features (phase 7) — ~10%:** basic input validation at the API boundary. everything else is unimplemented: health checks, readiness probes, rolling updates, secrets store, TLS/ACME, eBPF observability, network policies.
 
 ## what works
 
@@ -146,5 +150,25 @@ src/
 
 ## what's next
 
-- **remaining phase 6:** WireGuard mesh for cross-node networking
-- **phase 7: production** — health checks, rolling updates, secrets, TLS, eBPF observability
+### high priority (unblocks production use)
+
+- health checks and readiness probes (HTTP, TCP, exec)
+- rolling updates with automatic rollback
+- secrets store (encrypted at rest, mounted as files or env vars)
+- raft snapshots (log grows unbounded without them)
+
+### medium priority (completes phase promises)
+
+- WireGuard mesh for cross-node networking
+- eBPF networking (DNS interception, load balancing, port mapping)
+- TOML declarative build manifest
+- workers and crons in manifest spec
+
+### lower priority (polish)
+
+- rootless containers via user namespaces
+- image push to registries
+- TLS termination with ACME
+- eBPF observability (request count, latency, error rate)
+- network policies (eBPF-based allow/deny)
+- PSI-based resource monitoring with auto-tuning
