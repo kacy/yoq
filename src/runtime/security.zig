@@ -114,6 +114,11 @@ fn setNoNewPrivs() SecurityError!void {
 
 /// syscalls blocked inside containers. adding or removing entries here
 /// automatically updates the BPF filter — no manual offset counting needed.
+///
+/// note: ioctl is NOT blocked here. blocking it breaks terminal I/O, socket
+/// operations, and most real-world programs. Docker handles this with BPF
+/// argument inspection (filtering specific ioctl commands), which is a
+/// significantly larger project. for now, ioctl remains allowed.
 const blocked_syscalls = [_]linux.SYS{
     .kexec_load, // load a new kernel
     .reboot, // reboot the host
@@ -131,6 +136,18 @@ const blocked_syscalls = [_]linux.SYS{
     .open_by_handle_at, // bypass DAC with file handles
     .userfaultfd, // userfault file descriptor (used in exploits)
     .keyctl, // kernel keyring manipulation
+
+    // filesystem namespace escape vectors. these are safe to block because
+    // security.apply() runs AFTER filesystem setup (pivot_root, mounts) is done.
+    .unshare, // create new namespaces (escape isolation)
+    .mount, // mount filesystems
+    .umount2, // unmount filesystems
+    .pivot_root, // change root filesystem
+    .open_tree, // open a mount for moving (new mount API)
+    .move_mount, // move a mount to a new location (new mount API)
+    .fsopen, // open a filesystem context (new mount API)
+    .fsmount, // create a mount from fs context (new mount API)
+    .fsconfig, // configure a filesystem context (new mount API)
 };
 
 /// install a seccomp-bpf filter that blocks dangerous syscalls.
@@ -276,6 +293,23 @@ test "default caps all in low word" {
 test "blocked_syscalls includes critical entries" {
     const critical = [_]linux.SYS{ .kexec_load, .reboot, .ptrace, .bpf };
     for (critical) |sc| {
+        var found = false;
+        for (blocked_syscalls) |blocked| {
+            if (blocked == sc) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "blocked_syscalls includes filesystem namespace escape vectors" {
+    const fs_escape = [_]linux.SYS{
+        .unshare, .mount, .umount2, .pivot_root,
+        .open_tree, .move_mount, .fsopen, .fsmount, .fsconfig,
+    };
+    for (fs_escape) |sc| {
         var found = false;
         for (blocked_syscalls) |blocked| {
             if (blocked == sc) {
