@@ -3,7 +3,12 @@
 // provides name resolution for containers on the yoq bridge network.
 // runs a UDP listener on the bridge gateway (10.42.0.1:53) that answers
 // A record queries for registered service names. unknown names are
-// forwarded to an upstream DNS server (8.8.8.8).
+// forwarded to an upstream DNS server read from /etc/resolv.conf
+// (falls back to 8.8.8.8 if unavailable).
+//
+// security: upstream DNS responses are validated against the expected
+// source address and port to prevent spoofing. service name reassignments
+// are logged as warnings for conflict visibility.
 //
 // the in-memory registry is the hot path for lookups. the SQLite
 // service_names table provides persistence across restarts.
@@ -68,6 +73,19 @@ pub fn registerService(name: []const u8, container_id: []const u8, container_ip:
         }
     }
 
+    // check if the name already belongs to a different container.
+    // this happens during replica scaling or container replacement.
+    // we keep last-write-wins behavior but log the reassignment.
+    if (detectNameConflict(name, container_id, container_ip)) |prev| {
+        log.warn("dns: service name '{s}' reassigned from {d}.{d}.{d}.{d} ({s}) to {d}.{d}.{d}.{d} ({s})", .{
+            name,
+            prev.ip[0],   prev.ip[1],   prev.ip[2],   prev.ip[3],
+            prev.container_id[0..prev.container_id_len],
+            container_ip[0], container_ip[1], container_ip[2], container_ip[3],
+            container_id[0..@min(container_id.len, 12)],
+        });
+    }
+
     // find a free slot
     for (&registry) |*entry| {
         if (!entry.active) {
@@ -102,6 +120,46 @@ pub fn unregisterService(container_id: []const u8) void {
             registry_count -= 1;
         }
     }
+}
+
+/// check if a service name is currently held by a different container.
+/// returns the existing entry's info if it would be a reassignment, null otherwise.
+/// caller must hold registry_mutex.
+fn detectNameConflict(name: []const u8, new_container_id: []const u8, new_ip: [4]u8) ?struct { ip: [4]u8, container_id: [12]u8, container_id_len: u8 } {
+    const new_cid_len = @min(new_container_id.len, 12);
+
+    // scan backwards to find the most recent entry with this name
+    var i: usize = max_services;
+    while (i > 0) {
+        i -= 1;
+        const entry = &registry[i];
+        if (entry.active and
+            entry.name_len == name.len and
+            std.mem.eql(u8, entry.name[0..entry.name_len], name))
+        {
+            // same container updating its own entry — not a conflict
+            if (entry.container_id_len == new_cid_len and
+                std.mem.eql(u8, entry.container_id[0..entry.container_id_len], new_container_id[0..new_cid_len]))
+            {
+                return null;
+            }
+
+            // different container or different IP — this is a reassignment
+            if (!std.mem.eql(u8, &entry.ip, &new_ip) or
+                entry.container_id_len != new_cid_len or
+                !std.mem.eql(u8, entry.container_id[0..entry.container_id_len], new_container_id[0..new_cid_len]))
+            {
+                return .{
+                    .ip = entry.ip,
+                    .container_id = entry.container_id,
+                    .container_id_len = entry.container_id_len,
+                };
+            }
+            return null;
+        }
+    }
+
+    return null;
 }
 
 /// look up the IP for a service name. returns null if not found.
@@ -290,8 +348,98 @@ pub fn buildNxDomain(query_buf: []const u8, query_len: usize, response_buf: *[51
 // -- resolver thread --
 
 const listen_port: u16 = 53;
-const upstream_dns = [4]u8{ 8, 8, 8, 8 };
 const upstream_port: u16 = 53;
+
+// upstream DNS server, read from /etc/resolv.conf at startup.
+// falls back to 8.8.8.8 if resolv.conf is missing or unparseable.
+var upstream_dns: [4]u8 = .{ 8, 8, 8, 8 };
+var upstream_initialized: bool = false;
+
+/// read /etc/resolv.conf and extract the first nameserver address.
+/// called once at resolver startup. idempotent.
+fn initUpstreamDns() void {
+    if (upstream_initialized) return;
+    upstream_initialized = true;
+
+    const content = std.fs.cwd().readFileAlloc(
+        std.heap.page_allocator,
+        "/etc/resolv.conf",
+        4096,
+    ) catch {
+        log.info("dns: /etc/resolv.conf not readable, using 8.8.8.8", .{});
+        return;
+    };
+    defer std.heap.page_allocator.free(content);
+
+    if (parseResolvConf(content)) |addr| {
+        upstream_dns = addr;
+        log.info("dns: upstream resolver set to {d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] });
+    } else {
+        log.info("dns: no valid nameserver in resolv.conf, using 8.8.8.8", .{});
+    }
+}
+
+/// parse the first nameserver line from resolv.conf content.
+/// returns the IPv4 address as a 4-byte array, or null if none found.
+pub fn parseResolvConf(content: []const u8) ?[4]u8 {
+    var pos: usize = 0;
+    while (pos < content.len) {
+        // find end of current line
+        const line_end = std.mem.indexOfPos(u8, content, pos, "\n") orelse content.len;
+        const line = content[pos..line_end];
+        pos = if (line_end < content.len) line_end + 1 else content.len;
+
+        // skip comments and blank lines
+        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
+
+        // look for "nameserver" prefix
+        const prefix = "nameserver";
+        if (trimmed.len <= prefix.len) continue;
+        if (!std.mem.eql(u8, trimmed[0..prefix.len], prefix)) continue;
+
+        // must be followed by whitespace
+        if (trimmed[prefix.len] != ' ' and trimmed[prefix.len] != '\t') continue;
+
+        // extract the address string
+        const addr_str = std.mem.trimLeft(u8, trimmed[prefix.len..], " \t");
+        // trim trailing whitespace and carriage return
+        const addr_clean = std.mem.trimRight(u8, addr_str, " \t\r");
+
+        if (addr_clean.len == 0) continue;
+
+        // parse dotted-quad IPv4 address
+        if (parseIpv4(addr_clean)) |addr| return addr;
+    }
+
+    return null;
+}
+
+/// parse a dotted-quad IPv4 address string like "192.168.1.1" into a 4-byte array.
+fn parseIpv4(s: []const u8) ?[4]u8 {
+    var result: [4]u8 = undefined;
+    var octet_idx: usize = 0;
+    var start: usize = 0;
+
+    for (s, 0..) |c, i| {
+        if (c == '.') {
+            if (octet_idx >= 3) return null; // too many dots
+            const octet = std.fmt.parseInt(u8, s[start..i], 10) catch return null;
+            result[octet_idx] = octet;
+            octet_idx += 1;
+            start = i + 1;
+        } else if (c < '0' or c > '9') {
+            return null; // non-numeric character
+        }
+    }
+
+    // parse last octet
+    if (octet_idx != 3) return null; // not enough dots
+    const last = std.fmt.parseInt(u8, s[start..], 10) catch return null;
+    result[3] = last;
+
+    return result;
+}
 
 var resolver_thread: ?std.Thread = null;
 var resolver_socket: ?posix.socket_t = null;
@@ -304,6 +452,9 @@ pub fn startResolver() void {
     defer resolver_mutex.unlock();
 
     if (resolver_running.load(.acquire)) return;
+
+    // read upstream DNS from resolv.conf on first start
+    initUpstreamDns();
 
     // create UDP socket with CLOEXEC so it isn't inherited by child
     // processes (e.g. iptables spawned during container setup)
@@ -419,6 +570,8 @@ fn handleQuery(
 }
 
 /// forward a DNS query to the upstream resolver and relay the response.
+/// validates that the response comes from the expected upstream address
+/// to prevent DNS spoofing from unexpected sources.
 fn forwardQuery(
     sock: posix.socket_t,
     query: []const u8,
@@ -435,17 +588,39 @@ fn forwardQuery(
         log.warn("dns: failed to set upstream socket timeout: {}", .{e});
     };
 
+    // build upstream address from the configured DNS server
+    const expected_addr = ipToU32(upstream_dns);
+    const expected_port = std.mem.nativeToBig(u16, upstream_port);
+
     const upstream_addr = posix.sockaddr.in{
-        .port = std.mem.nativeToBig(u16, upstream_port),
-        .addr = std.mem.nativeToBig(u32, (@as(u32, 8) << 24) | (@as(u32, 8) << 16) | (@as(u32, 8) << 8) | 8),
+        .port = expected_port,
+        .addr = std.mem.nativeToBig(u32, expected_addr),
     };
 
     // send query to upstream
     _ = posix.sendto(upstream_sock, query, 0, @ptrCast(&upstream_addr), @sizeOf(posix.sockaddr.in)) catch return;
 
-    // receive response
+    // receive response with source address validation
     var response_buf: [512]u8 = undefined;
-    const resp_n = posix.recvfrom(upstream_sock, &response_buf, 0, null, null) catch return;
+    var resp_addr: posix.sockaddr.in = undefined;
+    var resp_addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+
+    const resp_n = posix.recvfrom(
+        upstream_sock,
+        &response_buf,
+        0,
+        @ptrCast(&resp_addr),
+        &resp_addr_len,
+    ) catch return;
+
+    // validate source address matches the upstream server we queried.
+    // drop responses from unexpected sources — could be spoofed.
+    if (resp_addr.addr != upstream_addr.addr or resp_addr.port != upstream_addr.port) {
+        log.warn("dns: dropping response from unexpected source (expected {d}.{d}.{d}.{d}:{d})", .{
+            upstream_dns[0], upstream_dns[1], upstream_dns[2], upstream_dns[3], upstream_port,
+        });
+        return;
+    }
 
     // verify the response's transaction ID matches our query.
     // drop mismatched responses — could be stale or spoofed.
@@ -456,6 +631,11 @@ fn forwardQuery(
     _ = posix.sendto(sock, response_buf[0..resp_n], 0, @ptrCast(client_addr), addr_len) catch |e| {
         log.warn("dns: failed to relay upstream response: {}", .{e});
     };
+}
+
+/// convert a 4-byte IP to a u32 in host byte order.
+fn ipToU32(ip: [4]u8) u32 {
+    return (@as(u32, ip[0]) << 24) | (@as(u32, ip[1]) << 16) | (@as(u32, ip[2]) << 8) | @as(u32, ip[3]);
 }
 
 // -- helpers --
@@ -765,4 +945,143 @@ fn resetRegistryForTest() void {
         entry.active = false;
     }
     registry_count = 0;
+}
+
+// -- resolv.conf parsing tests --
+
+test "parseResolvConf — standard resolv.conf" {
+    const content =
+        \\# generated by NetworkManager
+        \\nameserver 10.0.0.1
+        \\nameserver 8.8.4.4
+        \\search local
+    ;
+    const result = parseResolvConf(content).?;
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, result);
+}
+
+test "parseResolvConf — leading whitespace" {
+    const content = "  nameserver 192.168.1.1\n";
+    const result = parseResolvConf(content).?;
+    try std.testing.expectEqual([4]u8{ 192, 168, 1, 1 }, result);
+}
+
+test "parseResolvConf — tabs as separator" {
+    const content = "nameserver\t172.16.0.1\n";
+    const result = parseResolvConf(content).?;
+    try std.testing.expectEqual([4]u8{ 172, 16, 0, 1 }, result);
+}
+
+test "parseResolvConf — empty file" {
+    try std.testing.expect(parseResolvConf("") == null);
+}
+
+test "parseResolvConf — only comments" {
+    const content =
+        \\# this file has no nameservers
+        \\; another comment style
+    ;
+    try std.testing.expect(parseResolvConf(content) == null);
+}
+
+test "parseResolvConf — no nameserver lines" {
+    const content =
+        \\search example.com
+        \\domain example.com
+    ;
+    try std.testing.expect(parseResolvConf(content) == null);
+}
+
+test "parseResolvConf — skips IPv6 nameserver" {
+    const content =
+        \\nameserver ::1
+        \\nameserver 10.0.0.1
+    ;
+    // ::1 is not valid IPv4, so it should be skipped
+    const result = parseResolvConf(content).?;
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, result);
+}
+
+test "parseResolvConf — carriage return line endings" {
+    const content = "nameserver 1.2.3.4\r\nnameserver 5.6.7.8\r\n";
+    const result = parseResolvConf(content).?;
+    try std.testing.expectEqual([4]u8{ 1, 2, 3, 4 }, result);
+}
+
+test "parseResolvConf — malformed IP address" {
+    const content = "nameserver not.an.ip.address\nnameserver 10.0.0.1\n";
+    // should skip the bad one and return the valid one
+    const result = parseResolvConf(content).?;
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, result);
+}
+
+test "parseResolvConf — nameserver without space is not matched" {
+    const content = "nameserver_extra 10.0.0.1\nnameserver 10.0.0.2\n";
+    const result = parseResolvConf(content).?;
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 2 }, result);
+}
+
+// -- name conflict detection tests --
+
+test "detectNameConflict — different container same name" {
+    resetRegistryForTest();
+
+    registerService("db", "ctr_old", .{ 10, 42, 0, 10 });
+
+    // calling detectNameConflict directly requires holding the mutex
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+
+    const conflict = detectNameConflict("db", "ctr_new", .{ 10, 42, 0, 20 });
+    try std.testing.expect(conflict != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 10 }, conflict.?.ip);
+}
+
+test "detectNameConflict — same container is not a conflict" {
+    resetRegistryForTest();
+
+    registerService("web", "ctr_001", .{ 10, 42, 0, 10 });
+
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+
+    const conflict = detectNameConflict("web", "ctr_001", .{ 10, 42, 0, 20 });
+    try std.testing.expect(conflict == null);
+}
+
+test "detectNameConflict — unknown name is not a conflict" {
+    resetRegistryForTest();
+
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+
+    const conflict = detectNameConflict("new_svc", "ctr_001", .{ 10, 42, 0, 10 });
+    try std.testing.expect(conflict == null);
+}
+
+// -- IPv4 parsing tests --
+
+test "parseIpv4 — valid addresses" {
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpv4("0.0.0.0").?);
+    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, parseIpv4("255.255.255.255").?);
+    try std.testing.expectEqual([4]u8{ 192, 168, 1, 1 }, parseIpv4("192.168.1.1").?);
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, parseIpv4("10.0.0.1").?);
+}
+
+test "parseIpv4 — invalid addresses" {
+    try std.testing.expect(parseIpv4("") == null);
+    try std.testing.expect(parseIpv4("1.2.3") == null);
+    try std.testing.expect(parseIpv4("1.2.3.4.5") == null);
+    try std.testing.expect(parseIpv4("256.0.0.1") == null);
+    try std.testing.expect(parseIpv4("abc.def.ghi.jkl") == null);
+    try std.testing.expect(parseIpv4("1.2.3.") == null);
+}
+
+// -- ipToU32 tests --
+
+test "ipToU32 — correct conversion" {
+    try std.testing.expectEqual(@as(u32, 0x0A2A0001), ipToU32(.{ 10, 42, 0, 1 }));
+    try std.testing.expectEqual(@as(u32, 0x08080808), ipToU32(.{ 8, 8, 8, 8 }));
+    try std.testing.expectEqual(@as(u32, 0x00000000), ipToU32(.{ 0, 0, 0, 0 }));
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), ipToU32(.{ 255, 255, 255, 255 }));
 }
