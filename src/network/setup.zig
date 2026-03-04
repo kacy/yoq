@@ -240,7 +240,7 @@ test "writeNetworkFiles sets resolv.conf to bridge gateway" {
     const alloc = std.testing.allocator;
 
     // create a temporary directory for the rootfs
-    const tmp_dir = std.testing.tmpDir(.{});
+    var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
     var path_buf: [512]u8 = undefined;
@@ -261,7 +261,7 @@ test "writeNetworkFiles sets resolv.conf to bridge gateway" {
 test "writeNetworkFiles sets etc/hosts with hostname" {
     const alloc = std.testing.allocator;
 
-    const tmp_dir = std.testing.tmpDir(.{});
+    var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
     var path_buf: [512]u8 = undefined;

@@ -127,7 +127,7 @@ pub const Transport = struct {
         var client_addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
 
-        const client_fd = posix.accept(self.listen_fd, &client_addr, &addr_len, .{}) catch |err| {
+        const client_fd = posix.accept(self.listen_fd, &client_addr, &addr_len, 0) catch |err| {
             return switch (err) {
                 error.WouldBlock => null,
                 else => TransportError.ReceiveFailed,

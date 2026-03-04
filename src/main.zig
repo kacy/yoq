@@ -21,6 +21,8 @@ const api_server = @import("api/server.zig");
 const routes = @import("api/routes.zig");
 const cluster_node = @import("cluster/node.zig");
 const cluster_config = @import("cluster/config.zig");
+const cluster_agent = @import("cluster/agent.zig");
+const http_client = @import("cluster/http_client.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -73,6 +75,8 @@ pub fn main() !void {
         cmdServe(&args, alloc);
     } else if (std.mem.eql(u8, command, "init-server")) {
         cmdInitServer(&args, alloc);
+    } else if (std.mem.eql(u8, command, "join")) {
+        cmdJoin(&args, alloc);
     } else if (std.mem.eql(u8, command, "cluster")) {
         cmdCluster(&args, alloc);
     } else {
@@ -642,6 +646,7 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var dev_mode = false;
+    var server_addr: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f")) {
@@ -651,6 +656,11 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             };
         } else if (std.mem.eql(u8, arg, "--dev")) {
             dev_mode = true;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                std.process.exit(1);
+            };
         }
     }
 
@@ -660,6 +670,12 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
     defer manifest.deinit();
+
+    // if --server is set, deploy to cluster instead of running locally
+    if (server_addr) |addr| {
+        deployToCluster(alloc, addr, &manifest);
+        return;
+    }
 
     // derive app name from cwd basename
     var cwd_buf: [4096]u8 = undefined;
@@ -734,6 +750,81 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     orch.stopAll();
     writeErr("stopped\n", .{});
+}
+
+/// deploy manifest services to a cluster server via POST /deploy.
+fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *const manifest_spec.Manifest) void {
+    // parse host:port
+    var server_ip: [4]u8 = .{ 127, 0, 0, 1 };
+    var server_port: u16 = 7700;
+
+    if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
+        server_ip = parseIpv4(addr_str[0..colon]) orelse {
+            writeErr("invalid server address: {s}\n", .{addr_str});
+            std.process.exit(1);
+        };
+        server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
+            writeErr("invalid port in server address: {s}\n", .{addr_str});
+            std.process.exit(1);
+        };
+    } else {
+        server_ip = parseIpv4(addr_str) orelse {
+            writeErr("invalid server address: {s}\n", .{addr_str});
+            std.process.exit(1);
+        };
+    }
+
+    // build JSON body: {"services":[{"image":"...","command":"...","cpu_limit":N,"memory_limit_mb":N},...]}
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeAll("{\"services\":[") catch {
+        writeErr("failed to build deploy request\n", .{});
+        std.process.exit(1);
+    };
+
+    for (manifest.services, 0..) |svc, i| {
+        if (i > 0) writer.writeByte(',') catch {};
+
+        // join command args into a single string
+        var cmd_buf: [1024]u8 = undefined;
+        var cmd_len: usize = 0;
+        for (svc.command, 0..) |arg, j| {
+            if (j > 0) {
+                if (cmd_len < cmd_buf.len) {
+                    cmd_buf[cmd_len] = ' ';
+                    cmd_len += 1;
+                }
+            }
+            const copy_len = @min(arg.len, cmd_buf.len - cmd_len);
+            @memcpy(cmd_buf[cmd_len..][0..copy_len], arg[0..copy_len]);
+            cmd_len += copy_len;
+        }
+
+        std.fmt.format(writer, "{{\"image\":\"{s}\",\"command\":\"{s}\",\"cpu_limit\":1000,\"memory_limit_mb\":256}}", .{
+            svc.image,
+            cmd_buf[0..cmd_len],
+        }) catch {};
+    }
+
+    writer.writeAll("]}") catch {};
+
+    writeErr("deploying {d} services to cluster {s}...\n", .{ manifest.services.len, addr_str });
+
+    // POST to /deploy
+    var resp = http_client.post(alloc, server_ip, server_port, "/deploy", json_buf.items) catch {
+        writeErr("failed to connect to cluster server\n", .{});
+        std.process.exit(1);
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code == 200) {
+        write("{s}\n", .{resp.body});
+    } else {
+        writeErr("deploy failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+        std.process.exit(1);
+    }
 }
 
 fn cmdDown(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -851,6 +942,7 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
     var raft_port: u16 = 9700;
     var api_port: u16 = 7700;
     var peers_str: []const u8 = "";
+    var token: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--id")) {
@@ -883,6 +975,11 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         } else if (std.mem.eql(u8, arg, "--peers")) {
             peers_str = args.next() orelse {
                 writeErr("--peers requires peer list\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--token")) {
+            token = args.next() orelse {
+                writeErr("--token requires a join token\n", .{});
                 std.process.exit(1);
             };
         }
@@ -923,10 +1020,12 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         std.process.exit(1);
     };
 
-    // set cluster node for API routes
+    // set cluster node and join token for API routes
     routes.cluster = &node;
+    routes.join_token = token;
     defer {
         routes.cluster = null;
+        routes.join_token = null;
     }
 
     // start API server
@@ -940,6 +1039,74 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
     server.run();
 
     node.stop();
+}
+
+fn cmdJoin(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var server_host: ?[]const u8 = null;
+    var token: ?[]const u8 = null;
+    var api_port: u16 = 7700;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--token")) {
+            token = args.next() orelse {
+                writeErr("--token requires a join token\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--port")) {
+            const port_str = args.next() orelse {
+                writeErr("--port requires a port number\n", .{});
+                std.process.exit(1);
+            };
+            api_port = std.fmt.parseInt(u16, port_str, 10) catch {
+                writeErr("invalid port: {s}\n", .{port_str});
+                std.process.exit(1);
+            };
+        } else {
+            server_host = arg;
+        }
+    }
+
+    const host = server_host orelse {
+        writeErr("usage: yoq join <server-host> --token <token> [--port <api-port>]\n", .{});
+        std.process.exit(1);
+    };
+
+    const join_token = token orelse {
+        writeErr("--token is required\n", .{});
+        std.process.exit(1);
+    };
+
+    // parse server address
+    const server_addr = parseIpv4(host) orelse {
+        writeErr("invalid server address: {s}\n", .{host});
+        std.process.exit(1);
+    };
+
+    writeErr("joining cluster at {s}:{d}...\n", .{ host, api_port });
+
+    var agent = cluster_agent.Agent.init(alloc, server_addr, api_port, join_token);
+
+    // register with server
+    agent.register() catch {
+        writeErr("failed to register with server\n", .{});
+        std.process.exit(1);
+    };
+
+    writeErr("joined cluster as agent {s}\n", .{agent.id});
+
+    // start heartbeat loop
+    agent.start() catch {
+        writeErr("failed to start agent loop\n", .{});
+        std.process.exit(1);
+    };
+
+    // install signal handlers for graceful shutdown
+    orchestrator.installSignalHandlers();
+
+    // block until shutdown signal
+    agent.wait();
+
+    writeErr("agent stopped\n", .{});
 }
 
 fn cmdCluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -1008,9 +1175,11 @@ fn printUsage() void {
         \\commands:
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
         \\  up [-f manifest.toml] [--dev]     start services (--dev: watch + restart)
+        \\     [--server host:port]           deploy to cluster instead of locally
         \\  down [-f manifest.toml]          stop all services from manifest
         \\  serve [--port PORT]             start the API server (default: 7700)
         \\  init-server [opts]              start a cluster server node
+        \\  join <host> --token <token>     join a cluster as an agent node
         \\  cluster status                  show cluster node status
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
@@ -1038,6 +1207,7 @@ fn printUsage() void {
         \\  --port <port>             raft port (default: 9700)
         \\  --api-port <port>         API port (default: 7700)
         \\  --peers <peers>           peers (e.g. 2@10.0.0.2:9700,3@10.0.0.3:9700)
+        \\  --token <token>           join token for agent authentication
         \\
         \\other options:
         \\  logs --tail N             show last N lines only
@@ -1111,6 +1281,33 @@ fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_host: 
     }
 }
 
+/// parse a dotted IPv4 address string into 4 bytes.
+fn parseIpv4(s: []const u8) ?[4]u8 {
+    var result: [4]u8 = undefined;
+    var part: u8 = 0;
+    var idx: usize = 0;
+
+    for (s) |c| {
+        if (c == '.') {
+            if (idx >= 3) return null;
+            result[idx] = part;
+            idx += 1;
+            part = 0;
+        } else if (c >= '0' and c <= '9') {
+            const digit = c - '0';
+            const next = @as(u16, part) * 10 + digit;
+            if (next > 255) return null;
+            part = @intCast(next);
+        } else {
+            return null;
+        }
+    }
+
+    if (idx != 3) return null;
+    result[3] = part;
+    return result;
+}
+
 test "smoke test" {
     try std.testing.expect(true);
 }
@@ -1134,6 +1331,23 @@ test "valid container names" {
     try std.testing.expect(isValidContainerName("my-service-1"));
     try std.testing.expect(isValidContainerName("A"));
     try std.testing.expect(isValidContainerName("abc123"));
+}
+
+test "parse ipv4 valid" {
+    const addr = parseIpv4("10.0.0.1").?;
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, addr);
+}
+
+test "parse ipv4 localhost" {
+    const addr = parseIpv4("127.0.0.1").?;
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, addr);
+}
+
+test "parse ipv4 invalid" {
+    try std.testing.expect(parseIpv4("not.an.ip") == null);
+    try std.testing.expect(parseIpv4("256.0.0.1") == null);
+    try std.testing.expect(parseIpv4("1.2.3") == null);
+    try std.testing.expect(parseIpv4("") == null);
 }
 
 test "invalid container names" {
@@ -1193,4 +1407,9 @@ comptime {
     _ = @import("cluster/state_machine.zig");
     _ = @import("cluster/node.zig");
     _ = @import("cluster/config.zig");
+    _ = @import("cluster/agent_types.zig");
+    _ = @import("cluster/registry.zig");
+    _ = @import("cluster/http_client.zig");
+    _ = @import("cluster/agent.zig");
+    _ = @import("cluster/scheduler.zig");
 }

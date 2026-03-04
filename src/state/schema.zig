@@ -75,6 +75,34 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    PRIMARY KEY (name, container_id)
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS agents (
+        \\    id TEXT PRIMARY KEY,
+        \\    address TEXT NOT NULL,
+        \\    status TEXT NOT NULL DEFAULT 'active',
+        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
+        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
+        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
+        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
+        \\    containers INTEGER NOT NULL DEFAULT 0,
+        \\    last_heartbeat INTEGER NOT NULL,
+        \\    registered_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS assignments (
+        \\    id TEXT PRIMARY KEY,
+        \\    agent_id TEXT NOT NULL,
+        \\    image TEXT NOT NULL,
+        \\    command TEXT NOT NULL DEFAULT '',
+        \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    cpu_limit INTEGER NOT NULL DEFAULT 1000,
+        \\    memory_limit_mb INTEGER NOT NULL DEFAULT 256,
+        \\    created_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -160,6 +188,32 @@ test "init creates service_names table" {
         "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
         .{},
         .{ "web", "abc123", "10.42.0.2", @as(i64, 1234567890) },
+    ) catch unreachable;
+}
+
+test "init creates agents table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO agents (id, address, last_heartbeat, registered_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "agent001", "10.0.0.1:7701", @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
+test "init creates assignments table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO assignments (id, agent_id, image, created_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "assign001", "agent001", "nginx:latest", @as(i64, 1000) },
     ) catch unreachable;
 }
 
