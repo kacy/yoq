@@ -126,11 +126,20 @@ pub const Agent = struct {
     }
 
     /// signal the agent to stop and wait for the loop thread to exit.
+    /// securely zeroes the join token to prevent it lingering in memory.
     pub fn stop(self: *Agent) void {
         self.running.store(false, .release);
         if (self.loop_thread) |t| {
             t.join();
             self.loop_thread = null;
+        }
+
+        // zero the token so it doesn't linger in memory after shutdown.
+        // the token slice points into caller-owned memory, but we still
+        // want to wipe our reference to prevent accidental leaks.
+        if (self.token.len > 0) {
+            const token_ptr: [*]u8 = @constCast(self.token.ptr);
+            std.crypto.secureZero(u8, token_ptr[0..self.token.len]);
         }
 
         // clean up the local containers map
