@@ -808,7 +808,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
     };
 
     for (manifest.services, 0..) |svc, i| {
-        if (i > 0) writer.writeByte(',') catch {};
+        if (i > 0) writer.writeByte(',') catch break;
 
         // join command args into a single string
         var cmd_buf: [1024]u8 = undefined;
@@ -825,13 +825,19 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
             cmd_len += copy_len;
         }
 
-        std.fmt.format(writer, "{{\"image\":\"{s}\",\"command\":\"{s}\",\"cpu_limit\":1000,\"memory_limit_mb\":256}}", .{
-            svc.image,
-            cmd_buf[0..cmd_len],
-        }) catch {};
+        // use JSON escaping for image and command values — they could contain
+        // quotes or special characters that would produce malformed JSON
+        writer.writeAll("{\"image\":\"") catch break;
+        json_helpers.writeJsonEscaped(writer, svc.image) catch break;
+        writer.writeAll("\",\"command\":\"") catch break;
+        json_helpers.writeJsonEscaped(writer, cmd_buf[0..cmd_len]) catch break;
+        writer.writeAll("\",\"cpu_limit\":1000,\"memory_limit_mb\":256}") catch break;
     }
 
-    writer.writeAll("]}") catch {};
+    writer.writeAll("]}") catch {
+        writeErr("failed to build deploy request\n", .{});
+        std.process.exit(1);
+    };
 
     writeErr("deploying {d} services to cluster {s}...\n", .{ manifest.services.len, addr_str });
 
