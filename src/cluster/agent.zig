@@ -20,6 +20,7 @@ const posix = std.posix;
 const http_client = @import("http_client.zig");
 const agent_types = @import("agent_types.zig");
 const cli = @import("../lib/cli.zig");
+const json_helpers = @import("../lib/json_helpers.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentResources = agent_types.AgentResources;
@@ -201,17 +202,8 @@ pub fn getSystemResources() AgentResources {
     };
 }
 
-/// extract a string value from a JSON object: {"key":"value"}
-fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
-    var search_buf: [128]u8 = undefined;
-    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
-
-    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
-    const value_start = start_pos + needle.len;
-    const value_end = std.mem.indexOfPos(u8, json, value_start, "\"") orelse return null;
-
-    return json[value_start..value_end];
-}
+// use shared JSON extraction helper
+const extractJsonString = json_helpers.extractJsonString;
 
 // -- tests --
 
@@ -221,9 +213,4 @@ test "getSystemResources returns reasonable values" {
     try std.testing.expect(res.memory_mb >= 1);
 }
 
-test "extractJsonString" {
-    const json = "{\"id\":\"abc123def456\",\"status\":\"ok\"}";
-    try std.testing.expectEqualStrings("abc123def456", extractJsonString(json, "id").?);
-    try std.testing.expectEqualStrings("ok", extractJsonString(json, "status").?);
-    try std.testing.expect(extractJsonString(json, "missing") == null);
-}
+// extractJsonString tests are in json_helpers.zig
