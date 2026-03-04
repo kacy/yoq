@@ -113,7 +113,7 @@ pub const Agent = struct {
             writeErr("failed to generate wireguard keypair\n", .{});
             return AgentError.RegisterFailed;
         };
-        const pub_key = kp.publicKeySlice();
+        const pub_key = &kp.public_key;
 
         // detect our local IP for the wireguard endpoint
         var local_ip_buf: [16]u8 = undefined;

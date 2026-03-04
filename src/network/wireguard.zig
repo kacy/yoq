@@ -29,19 +29,10 @@ const encoded_key_len = 44;
 
 /// a WireGuard keypair with base64-encoded keys.
 /// generated locally using X25519 — no shelling out needed.
+/// X25519 keys are always 32 bytes, which base64-encodes to exactly 44 chars.
 pub const KeyPair = struct {
     private_key: [encoded_key_len]u8,
     public_key: [encoded_key_len]u8,
-    private_key_len: usize,
-    public_key_len: usize,
-
-    pub fn privateKeySlice(self: *const KeyPair) []const u8 {
-        return self.private_key[0..self.private_key_len];
-    }
-
-    pub fn publicKeySlice(self: *const KeyPair) []const u8 {
-        return self.public_key[0..self.public_key_len];
-    }
 };
 
 /// configuration for a WireGuard peer (remote node).
@@ -343,11 +334,8 @@ pub fn generateKeyPair() WireguardError!KeyPair {
     var kp: KeyPair = undefined;
     const encoder = std.base64.standard.Encoder;
 
-    const priv_slice = encoder.encode(&kp.private_key, &raw_kp.secret_key);
-    kp.private_key_len = priv_slice.len;
-
-    const pub_slice = encoder.encode(&kp.public_key, &raw_kp.public_key);
-    kp.public_key_len = pub_slice.len;
+    _ = encoder.encode(&kp.private_key, &raw_kp.secret_key);
+    _ = encoder.encode(&kp.public_key, &raw_kp.public_key);
 
     return kp;
 }
@@ -357,19 +345,19 @@ pub fn generateKeyPair() WireguardError!KeyPair {
 test "generateKeyPair returns valid base64 keys" {
     const kp = try generateKeyPair();
 
-    // base64 of 32 bytes = 44 chars (with padding)
-    try std.testing.expectEqual(@as(usize, 44), kp.private_key_len);
-    try std.testing.expectEqual(@as(usize, 44), kp.public_key_len);
+    // X25519 base64 is always exactly 44 chars
+    try std.testing.expectEqual(@as(usize, 44), kp.private_key.len);
+    try std.testing.expectEqual(@as(usize, 44), kp.public_key.len);
 
     // should be valid base64 — decode should succeed
     const decoder = std.base64.standard.Decoder;
     var priv_decoded: [32]u8 = undefined;
-    decoder.decode(&priv_decoded, kp.privateKeySlice()) catch {
+    decoder.decode(&priv_decoded, &kp.private_key) catch {
         return error.KeyGenFailed;
     };
 
     var pub_decoded: [32]u8 = undefined;
-    decoder.decode(&pub_decoded, kp.publicKeySlice()) catch {
+    decoder.decode(&pub_decoded, &kp.public_key) catch {
         return error.KeyGenFailed;
     };
 }
@@ -379,9 +367,9 @@ test "generateKeyPair returns different keys each call" {
     const kp2 = try generateKeyPair();
 
     // private keys should differ (astronomically unlikely to match)
-    try std.testing.expect(!std.mem.eql(u8, kp1.privateKeySlice(), kp2.privateKeySlice()));
+    try std.testing.expect(!std.mem.eql(u8, &kp1.private_key, &kp2.private_key));
     // public keys should also differ
-    try std.testing.expect(!std.mem.eql(u8, kp1.publicKeySlice(), kp2.publicKeySlice()));
+    try std.testing.expect(!std.mem.eql(u8, &kp1.public_key, &kp2.public_key));
 }
 
 test "base64 round-trip: decode then re-encode matches" {
@@ -392,20 +380,12 @@ test "base64 round-trip: decode then re-encode matches" {
 
     // round-trip private key
     var raw: [32]u8 = undefined;
-    decoder.decode(&raw, kp.privateKeySlice()) catch {
+    decoder.decode(&raw, &kp.private_key) catch {
         return error.KeyGenFailed;
     };
     var re_encoded: [encoded_key_len]u8 = undefined;
     const result = encoder.encode(&re_encoded, &raw);
-    try std.testing.expectEqualStrings(kp.privateKeySlice(), result);
-}
-
-test "KeyPair slice accessors" {
-    const kp = try generateKeyPair();
-
-    // slices should be the correct length
-    try std.testing.expectEqual(@as(usize, 44), kp.privateKeySlice().len);
-    try std.testing.expectEqual(@as(usize, 44), kp.publicKeySlice().len);
+    try std.testing.expectEqualStrings(&kp.private_key, result);
 }
 
 test "buildCreateArgs produces correct ip link add command" {
