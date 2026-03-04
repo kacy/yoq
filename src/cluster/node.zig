@@ -11,6 +11,12 @@
 //
 // thread safety: all raft state access goes through self.mu.
 //
+// snapshots: the tick loop periodically checks if enough entries have
+// been committed since the last snapshot. when the threshold is exceeded,
+// it triggers a snapshot via the state machine and notifies raft.
+// incoming InstallSnapshot RPCs are routed to raft, and the resulting
+// apply_snapshot actions restore the state machine from the snapshot data.
+//
 // usage:
 //   var node = try Node.init(alloc, config);
 //   defer node.deinit();
@@ -37,6 +43,7 @@ const Log = log_mod.Log;
 const StateMachine = state_machine_mod.StateMachine;
 const NodeId = types.NodeId;
 const LogIndex = types.LogIndex;
+const SnapshotMeta = types.SnapshotMeta;
 
 pub const NodeConfig = struct {
     id: NodeId,
@@ -57,6 +64,11 @@ pub const NodeError = error{
     NotLeader,
 };
 
+// how many committed entries between automatic snapshots.
+// 1000 entries keeps the raft log bounded while avoiding
+// too-frequent snapshot I/O. at ~1 entry/sec this is ~16 min.
+const snapshot_threshold: u64 = 1000;
+
 pub const Node = struct {
     alloc: std.mem.Allocator,
     config: NodeConfig,
@@ -69,6 +81,10 @@ pub const Node = struct {
     tick_count: u32,
     tick_thread: ?std.Thread,
     recv_thread: ?std.Thread,
+
+    // the commit index at the time of the last snapshot.
+    // used to decide when a new snapshot is needed.
+    last_snapshot_index: LogIndex,
 
     pub fn init(alloc: std.mem.Allocator, config: NodeConfig) !Node {
         // open persistent log
@@ -116,6 +132,13 @@ pub const Node = struct {
         // we need to fix up the pointer after the node is moved
         _ = &raft;
 
+        // recover last_snapshot_index from persisted metadata so we
+        // don't take a redundant snapshot immediately after restart
+        const initial_snap_index: LogIndex = if (log.getSnapshotMeta()) |meta|
+            meta.last_included_index
+        else
+            0;
+
         return .{
             .alloc = alloc,
             .config = config,
@@ -128,6 +151,7 @@ pub const Node = struct {
             .tick_count = 0,
             .tick_thread = null,
             .recv_thread = null,
+            .last_snapshot_index = initial_snap_index,
         };
     }
 
@@ -226,6 +250,11 @@ pub const Node = struct {
                     if (self.tick_count % 100 == 0) self.reconcileOrphanedAssignments(); // ~10s
                     if (self.tick_count % 3600 == 0) self.cleanupDeadAgents(); // ~6 min
                 }
+
+                // check if we should take a snapshot. this applies to all
+                // roles — followers snapshot their own state too, which
+                // keeps the log bounded on every node.
+                self.maybeSnapshot();
             }
             std.Thread.sleep(100 * std.time.ns_per_ms);
         }
@@ -344,6 +373,41 @@ pub const Node = struct {
         }
     }
 
+    /// check if enough entries have been committed since the last snapshot
+    /// to warrant taking a new one. called with self.mu held.
+    fn maybeSnapshot(self: *Node) void {
+        const commit_index = self.raft.commit_index;
+        if (commit_index <= self.last_snapshot_index) return;
+        if (commit_index - self.last_snapshot_index < snapshot_threshold) return;
+
+        const term = self.log.termAt(commit_index);
+        if (term == 0) return; // shouldn't happen, but be safe
+
+        // build snapshot file path: <data_dir>/snapshot.dat
+        var snap_path_buf: [512]u8 = undefined;
+        const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/snapshot.dat", .{self.config.data_dir}) catch return;
+
+        const meta = SnapshotMeta{
+            .last_included_index = commit_index,
+            .last_included_term = term,
+            .data_len = 0, // filled by takeSnapshot
+        };
+
+        self.state_machine.takeSnapshot(snap_path, meta) catch |e| {
+            logger.warn("snapshot: failed to take snapshot at index {}: {}", .{ commit_index, e });
+            return;
+        };
+
+        // tell raft about the snapshot so it can send it to lagging followers
+        self.raft.onSnapshotComplete(meta);
+
+        // truncate log entries that are now covered by the snapshot
+        self.log.truncateUpTo(commit_index);
+
+        self.last_snapshot_index = commit_index;
+        logger.info("snapshot: completed at index {}, term {}", .{ commit_index, term });
+    }
+
     fn recvLoop(self: *Node) void {
         while (self.running.load(.acquire)) {
             const msg = self.transport.receive(self.alloc) catch {
@@ -398,6 +462,26 @@ pub const Node = struct {
                 // will need enhancement later for proper peer tracking
                 self.raft.handleAppendEntriesReply(0, reply);
             },
+            .install_snapshot => |args| {
+                const commit_before = self.raft.commit_index;
+                const reply = self.raft.handleInstallSnapshot(args);
+                self.transport.send(args.leader_id, .{
+                    .install_snapshot_reply = reply,
+                }) catch |e| {
+                    logger.warn("failed to send snapshot reply to node {}: {}", .{ args.leader_id, e });
+                };
+
+                // ownership: args.data was heap-allocated by transport decode.
+                // if the snapshot was accepted (commit_index advanced), the
+                // apply_snapshot action will free it during processActions().
+                // if rejected (stale term, old snapshot), free it here.
+                if (self.raft.commit_index == commit_before) {
+                    self.alloc.free(@constCast(args.data));
+                }
+            },
+            .install_snapshot_reply => |reply| {
+                self.raft.handleInstallSnapshotReply(0, reply);
+            },
         }
     }
 
@@ -435,8 +519,97 @@ pub const Node = struct {
                 },
                 .become_leader => {},
                 .become_follower => {},
+
+                .send_install_snapshot => |snap| {
+                    // the raft module produces this action with empty data.
+                    // we need to read the snapshot file and fill in the data
+                    // before sending it over the wire.
+                    self.sendSnapshot(snap.target, snap.args);
+                },
+                .send_install_snapshot_reply => |snap| {
+                    self.transport.send(snap.target, .{
+                        .install_snapshot_reply = snap.reply,
+                    }) catch |e| {
+                        logger.warn("failed to send snapshot reply to node {}: {}", .{ snap.target, e });
+                    };
+                },
+                .apply_snapshot => |snap| {
+                    // restore the state machine from the received snapshot bytes.
+                    // ownership: the data was heap-allocated by transport decode
+                    // (via alloc.dupe in the install_snapshot decode path) and
+                    // passed through raft's handleInstallSnapshot into this action.
+                    // we free it here after restoring.
+                    defer self.alloc.free(@constCast(snap.data));
+
+                    const meta = self.state_machine.restoreFromBytes(snap.data) catch |e| {
+                        logger.warn("snapshot: failed to restore from bytes: {}", .{e});
+                        continue;
+                    };
+
+                    // update the raft log to reflect the snapshot
+                    self.log.setSnapshotMeta(meta);
+                    self.log.truncateUpTo(meta.last_included_index);
+                    self.last_snapshot_index = meta.last_included_index;
+
+                    logger.info("snapshot: restored state machine to index {}", .{meta.last_included_index});
+                },
+                .take_snapshot => |snap| {
+                    // build snapshot path
+                    var snap_path_buf: [512]u8 = undefined;
+                    const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/snapshot.dat", .{self.config.data_dir}) catch continue;
+
+                    const meta = SnapshotMeta{
+                        .last_included_index = snap.up_to_index,
+                        .last_included_term = snap.term,
+                        .data_len = 0,
+                    };
+
+                    self.state_machine.takeSnapshot(snap_path, meta) catch |e| {
+                        logger.warn("snapshot: failed to take snapshot at index {}: {}", .{ snap.up_to_index, e });
+                        continue;
+                    };
+
+                    self.raft.onSnapshotComplete(meta);
+                    self.log.truncateUpTo(snap.up_to_index);
+                    self.last_snapshot_index = snap.up_to_index;
+
+                    logger.info("snapshot: completed at index {}, term {}", .{ snap.up_to_index, snap.term });
+                },
             }
         }
+    }
+
+    /// read the snapshot file from disk and send it to a lagging follower.
+    /// the raft module produces send_install_snapshot actions with empty data;
+    /// this method fills in the data from the snapshot file on disk.
+    fn sendSnapshot(self: *Node, target: NodeId, args: types.InstallSnapshotArgs) void {
+        // read the snapshot file. it contains a header + sqlite bytes
+        // in the format written by StateMachine.takeSnapshot().
+        var snap_path_buf: [512]u8 = undefined;
+        const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/snapshot.dat", .{self.config.data_dir}) catch return;
+
+        const data = std.fs.cwd().readFileAlloc(
+            self.alloc,
+            snap_path,
+            64 * 1024 * 1024, // 64MB max
+        ) catch |e| {
+            logger.warn("snapshot: failed to read snapshot file for node {}: {}", .{ target, e });
+            return;
+        };
+        defer self.alloc.free(data);
+
+        // send the snapshot with the actual data
+        self.transport.send(target, .{
+            .install_snapshot = .{
+                .term = args.term,
+                .leader_id = args.leader_id,
+                .last_included_index = args.last_included_index,
+                .last_included_term = args.last_included_term,
+                .data = data,
+            },
+        }) catch |e| {
+            logger.warn("failed to send snapshot to node {}: {}", .{ target, e });
+        };
     }
 };
 
