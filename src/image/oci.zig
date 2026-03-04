@@ -127,6 +127,22 @@ test "user args only" {
     try std.testing.expectEqualStrings("-la", result.args.items[0]);
 }
 
+test "user args completely replace default cmd" {
+    const alloc = std.testing.allocator;
+    const ep: []const []const u8 = &.{"/entrypoint.sh"};
+    const cmd: []const []const u8 = &.{ "default", "args" };
+    const user: []const []const u8 = &.{ "custom", "override" };
+    var result = resolveCommand(alloc, ep, cmd, user);
+    defer result.args.deinit(alloc);
+
+    // entrypoint is still the command binary
+    try std.testing.expectEqualStrings("/entrypoint.sh", result.command);
+    // user args should completely replace default cmd
+    try std.testing.expectEqual(@as(usize, 2), result.args.items.len);
+    try std.testing.expectEqualStrings("custom", result.args.items[0]);
+    try std.testing.expectEqualStrings("override", result.args.items[1]);
+}
+
 test "empty falls back to /bin/sh" {
     const alloc = std.testing.allocator;
     var result = resolveCommand(alloc, &.{}, &.{}, &.{});
