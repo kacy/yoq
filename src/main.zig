@@ -65,6 +65,8 @@ pub fn main() !void {
         cmdLogs(&args, alloc);
     } else if (std.mem.eql(u8, command, "pull")) {
         cmdPull(&args, alloc);
+    } else if (std.mem.eql(u8, command, "push")) {
+        cmdPush(&args, alloc);
     } else if (std.mem.eql(u8, command, "images")) {
         cmdImages(alloc);
     } else if (std.mem.eql(u8, command, "rmi")) {
@@ -544,6 +546,80 @@ fn cmdPull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         image_str,
         result.layer_digests.len,
         size_mb,
+    });
+}
+
+fn cmdPush(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const source_str = requireArg(args, "usage: yoq push <source> [target]\n");
+
+    // optional target — if not given, push to the same ref
+    const target_str = args.next() orelse source_str;
+
+    // look up the source image in the local store
+    const source_ref = spec.parseImageRef(source_str);
+    const image_record = store.findImage(alloc, source_ref.repository, source_ref.reference) catch {
+        writeErr("image not found: {s}\n", .{source_str});
+        writeErr("pull or build the image first, then push\n", .{});
+        std.process.exit(1);
+    };
+    defer image_record.deinit(alloc);
+
+    // read manifest bytes from the blob store
+    const manifest_parsed_digest = blob_store.Digest.parse(image_record.manifest_digest) orelse {
+        writeErr("invalid manifest digest in image record\n", .{});
+        std.process.exit(1);
+    };
+    const manifest_bytes = blob_store.getBlob(alloc, manifest_parsed_digest) catch {
+        writeErr("failed to read manifest from blob store\n", .{});
+        writeErr("the image may be corrupted — try pulling again\n", .{});
+        std.process.exit(1);
+    };
+    defer alloc.free(manifest_bytes);
+
+    // read config bytes from the blob store
+    const config_parsed_digest = blob_store.Digest.parse(image_record.config_digest) orelse {
+        writeErr("invalid config digest in image record\n", .{});
+        std.process.exit(1);
+    };
+    const config_bytes = blob_store.getBlob(alloc, config_parsed_digest) catch {
+        writeErr("failed to read config from blob store\n", .{});
+        writeErr("the image may be corrupted — try pulling again\n", .{});
+        std.process.exit(1);
+    };
+    defer alloc.free(config_bytes);
+
+    // parse manifest to get layer digests
+    var parsed_manifest = spec.parseManifest(alloc, manifest_bytes) catch {
+        writeErr("failed to parse image manifest\n", .{});
+        std.process.exit(1);
+    };
+    defer parsed_manifest.deinit();
+
+    // collect layer digests
+    var layer_digest_strs: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer layer_digest_strs.deinit(alloc);
+    for (parsed_manifest.value.layers) |l| {
+        layer_digest_strs.append(alloc, l.digest) catch {
+            writeErr("out of memory\n", .{});
+            std.process.exit(1);
+        };
+    }
+
+    // parse the target reference for pushing
+    const target_ref = spec.parseImageRef(target_str);
+
+    writeErr("pushing {s}...\n", .{target_str});
+
+    var result = registry.push(alloc, target_ref, manifest_bytes, config_bytes, layer_digest_strs.items) catch |e| {
+        writeErr("failed to push image: {}\n", .{e});
+        std.process.exit(1);
+    };
+    defer result.deinit();
+
+    write("{s}: pushed ({d} layers uploaded, {d} skipped)\n", .{
+        target_str,
+        result.layers_uploaded,
+        result.layers_skipped,
     });
 }
 
@@ -1681,6 +1757,7 @@ fn printUsage() void {
         \\  stop <id>                        stop a running container
         \\  rm <id>                          remove a stopped container
         \\  pull <image>                     pull an image from a registry
+        \\  push <source> [target]           push an image to a registry
         \\  images                           list pulled images
         \\  rollback <service>               rollback to previous deployment
         \\  history <service>                show deployment history
