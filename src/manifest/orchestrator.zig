@@ -445,8 +445,13 @@ fn resolveServiceVolumes(alloc: std.mem.Allocator, volumes: []const spec.VolumeM
 }
 
 /// runs a single service in its own thread.
-/// in normal mode: runs once, then exits.
-/// in dev mode: restarts the container whenever restart_requested is set.
+/// handles three modes of operation:
+///   - normal mode with restart policy (none/always/on_failure)
+///   - dev mode (restarts on file change via restart_requested flag)
+///
+/// restart policy uses exponential backoff: 1s → 2s → 4s → ... → 30s max.
+/// backoff resets when the container runs for longer than 10 seconds,
+/// indicating a healthy start rather than a crash loop.
 fn serviceThread(orch: *Orchestrator, idx: usize) void {
     const svc = orch.manifest.services[idx];
     const alloc = orch.alloc;
@@ -496,7 +501,12 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
     else
         .{ .skip_dns = has_health_check };
 
-    // main run loop — runs once in normal mode, loops in dev mode
+    // exponential backoff state for restart policies.
+    // starts at 1s, doubles each restart, caps at 30s.
+    // resets when the container runs for longer than 10s (healthy start).
+    var backoff_ms: u64 = initial_backoff_ms;
+
+    // main run loop
     while (true) {
         // generate a fresh container id for each run
         var id_buf: [12]u8 = undefined;
@@ -547,48 +557,97 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         // mark as running once the container starts
         orch.states[idx].status = .running;
 
+        const start_time = std.time.nanoTimestamp();
+
         // this blocks until the container exits
         c.start() catch {
             orch.states[idx].status = .failed;
             return;
         };
 
+        const run_duration_ns = std.time.nanoTimestamp() - start_time;
+        const exit_code = c.exit_code orelse 255;
+
         // clean up this container's resources before potentially restarting
         logs.deleteLogFile(id);
         container.cleanupContainerDirs(id);
         store.remove(id) catch {};
 
-        // in normal mode, we're done after one run
-        if (!orch.dev_mode) break;
-
-        // in dev mode, check if we should restart or wait
+        // check for shutdown first — always takes priority
         if (shutdown_requested.load(.acquire)) break;
 
-        if (orch.restart_requested[idx].load(.acquire)) {
-            // restart was requested by the watcher — clear flag and loop
-            orch.restart_requested[idx].store(false, .release);
-            writeErr("restarting {s}...\n", .{svc.name});
-            continue;
-        }
-
-        // container exited on its own (crash or normal exit) — wait for
-        // either a restart signal or shutdown
-        orch.states[idx].status = .stopped;
-        var got_restart = false;
-        while (!shutdown_requested.load(.acquire)) {
+        // decide whether to restart based on mode and policy
+        if (orch.dev_mode) {
+            // dev mode: restart on file watcher signal
             if (orch.restart_requested[idx].load(.acquire)) {
                 orch.restart_requested[idx].store(false, .release);
                 writeErr("restarting {s}...\n", .{svc.name});
-                got_restart = true;
-                break;
+                continue;
             }
-            std.Thread.sleep(200 * std.time.ns_per_ms);
+
+            // container exited on its own — wait for watcher signal or shutdown
+            orch.states[idx].status = .stopped;
+            var got_restart = false;
+            while (!shutdown_requested.load(.acquire)) {
+                if (orch.restart_requested[idx].load(.acquire)) {
+                    orch.restart_requested[idx].store(false, .release);
+                    writeErr("restarting {s}...\n", .{svc.name});
+                    got_restart = true;
+                    break;
+                }
+                std.Thread.sleep(200 * std.time.ns_per_ms);
+            }
+            if (!got_restart) break;
+        } else {
+            // normal mode: check restart policy
+            const should_restart = switch (svc.restart) {
+                .none => false,
+                .always => true,
+                .on_failure => exit_code != 0,
+            };
+
+            if (!should_restart) break;
+
+            // reset backoff if the container ran long enough to be considered healthy
+            if (run_duration_ns >= healthy_run_threshold_ns) {
+                backoff_ms = initial_backoff_ms;
+            }
+
+            writeErr("{s} exited (code {d}), restarting in {d}ms...\n", .{
+                svc.name, exit_code, backoff_ms,
+            });
+
+            // sleep for backoff duration, checking for shutdown periodically
+            var slept_ms: u64 = 0;
+            while (slept_ms < backoff_ms) {
+                if (shutdown_requested.load(.acquire)) break;
+                const remaining = backoff_ms - slept_ms;
+                const sleep_chunk = @min(remaining, 200);
+                std.Thread.sleep(sleep_chunk * std.time.ns_per_ms);
+                slept_ms += sleep_chunk;
+            }
+
+            if (shutdown_requested.load(.acquire)) break;
+
+            // increase backoff for next time (exponential, capped)
+            backoff_ms = @min(backoff_ms * 2, max_backoff_ms);
         }
-        if (!got_restart) break;
     }
 
     orch.states[idx].status = .stopped;
 }
+
+// -- restart policy constants --
+
+/// initial backoff delay when restarting a service (1 second)
+const initial_backoff_ms: u64 = 1_000;
+
+/// maximum backoff delay (30 seconds)
+const max_backoff_ms: u64 = 30_000;
+
+/// how long a container must run before we consider it a healthy start
+/// and reset the backoff timer (10 seconds)
+const healthy_run_threshold_ns: i128 = 10 * std.time.ns_per_s;
 
 /// watcher thread for dev mode — monitors bind-mounted directories
 /// and triggers container restarts when files change.
@@ -712,4 +771,100 @@ test "parseIpAddress — invalid IPs return zeros" {
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("256.0.0.1"));
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("10.42"));
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpAddress("10.42.0.5.6"));
+}
+
+// -- restart policy tests --
+
+test "restart policy constants are sensible" {
+    // backoff starts at 1s
+    try std.testing.expectEqual(@as(u64, 1_000), initial_backoff_ms);
+    // max backoff is 30s
+    try std.testing.expectEqual(@as(u64, 30_000), max_backoff_ms);
+    // healthy threshold is 10s
+    try std.testing.expectEqual(@as(i128, 10 * std.time.ns_per_s), healthy_run_threshold_ns);
+    // initial < max (otherwise backoff would never increase)
+    try std.testing.expect(initial_backoff_ms < max_backoff_ms);
+}
+
+test "exponential backoff progression" {
+    // simulate the backoff progression that happens in serviceThread
+    var backoff: u64 = initial_backoff_ms;
+
+    try std.testing.expectEqual(@as(u64, 1_000), backoff);
+
+    backoff = @min(backoff * 2, max_backoff_ms);
+    try std.testing.expectEqual(@as(u64, 2_000), backoff);
+
+    backoff = @min(backoff * 2, max_backoff_ms);
+    try std.testing.expectEqual(@as(u64, 4_000), backoff);
+
+    backoff = @min(backoff * 2, max_backoff_ms);
+    try std.testing.expectEqual(@as(u64, 8_000), backoff);
+
+    backoff = @min(backoff * 2, max_backoff_ms);
+    try std.testing.expectEqual(@as(u64, 16_000), backoff);
+
+    // next step would be 32000, but capped at 30000
+    backoff = @min(backoff * 2, max_backoff_ms);
+    try std.testing.expectEqual(@as(u64, 30_000), backoff);
+
+    // stays capped
+    backoff = @min(backoff * 2, max_backoff_ms);
+    try std.testing.expectEqual(@as(u64, 30_000), backoff);
+}
+
+test "restart policy decision logic" {
+    // simulate the should_restart decision from serviceThread
+    const RestartPolicy = spec.RestartPolicy;
+
+    // none: never restart regardless of exit code
+    {
+        const policy = RestartPolicy.none;
+        try std.testing.expect(!(switch (policy) {
+            .none => false,
+            .always => true,
+            .on_failure => @as(u8, 0) != 0,
+        }));
+        try std.testing.expect(!(switch (policy) {
+            .none => false,
+            .always => true,
+            .on_failure => @as(u8, 1) != 0,
+        }));
+    }
+
+    // always: restart regardless of exit code
+    {
+        const policy = RestartPolicy.always;
+        try std.testing.expect(switch (policy) {
+            .none => false,
+            .always => true,
+            .on_failure => @as(u8, 0) != 0,
+        });
+    }
+
+    // on_failure: restart only on non-zero exit
+    {
+        const policy = RestartPolicy.on_failure;
+        // exit code 0 — don't restart
+        const exit_code_0: u8 = 0;
+        try std.testing.expect(!(switch (policy) {
+            .none => false,
+            .always => true,
+            .on_failure => exit_code_0 != 0,
+        }));
+        // exit code 1 — restart
+        const exit_code_1: u8 = 1;
+        try std.testing.expect(switch (policy) {
+            .none => false,
+            .always => true,
+            .on_failure => exit_code_1 != 0,
+        });
+        // exit code 128 (signal) — restart
+        const exit_code_128: u8 = 128;
+        try std.testing.expect(switch (policy) {
+            .none => false,
+            .always => true,
+            .on_failure => exit_code_128 != 0,
+        });
+    }
 }
