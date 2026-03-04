@@ -186,12 +186,19 @@ pub const Agent = struct {
     }
 
     /// signal the agent to stop and wait for the loop thread to exit.
-    /// securely zeroes the join token to prevent it lingering in memory.
+    /// tears down the wireguard interface and securely zeroes the join token.
     pub fn stop(self: *Agent) void {
         self.running.store(false, .release);
         if (self.loop_thread) |t| {
             t.join();
             self.loop_thread = null;
+        }
+
+        // tear down wireguard interface if we set one up during registration.
+        // deleting the interface also removes all peers and routes, so this
+        // is a clean single-step teardown.
+        if (self.node_id != null) {
+            setup.teardownClusterNetworking();
         }
 
         // zero the token so it doesn't linger in memory after shutdown.
