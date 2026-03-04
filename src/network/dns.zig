@@ -165,6 +165,8 @@ pub fn unregisterService(container_id: []const u8) void {
             entry.container_id_len == cid_len and
             std.mem.eql(u8, entry.container_id[0..entry.container_id_len], container_id[0..cid_len]))
         {
+            // remove from LB backends before removing from DNS map
+            deleteBpfBackend(entry.name[0..entry.name_len], entry.ip);
             deleteBpfMap(entry.name[0..entry.name_len]);
             entry.active = false;
             registry_count -= 1;
@@ -174,13 +176,26 @@ pub fn unregisterService(container_id: []const u8) void {
 
 // -- BPF map sync --
 //
-// when a DNS interceptor is loaded, keep the BPF service_names map
-// in sync with the in-memory registry. these are best-effort —
-// if BPF isn't loaded, they're no-ops.
+// when BPF programs are loaded, keep their maps in sync with the
+// in-memory registry. the DNS interceptor maps service names to IPs.
+// the load balancer maps service VIPs to backend lists.
+// these are best-effort — if BPF isn't loaded, they're no-ops.
 
 fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
+    // update DNS interceptor map (name → IP)
     if (ebpf.getDnsInterceptor()) |interceptor| {
         interceptor.updateService(name, ip_addr);
+    }
+
+    // update load balancer backends.
+    // the VIP is the first IP registered for this name — we use
+    // the DNS interceptor's IP as the VIP. each new container with
+    // the same name becomes a backend behind that VIP.
+    if (ebpf.getLoadBalancer()) |lb| {
+        // find the VIP (first registered IP for this name).
+        // we need the VIP to know which backends entry to update.
+        const vip = getServiceVip(name) orelse ip_addr;
+        lb.addBackend(vip, ip_addr);
     }
 }
 
@@ -188,6 +203,29 @@ fn deleteBpfMap(name: []const u8) void {
     if (ebpf.getDnsInterceptor()) |interceptor| {
         interceptor.deleteService(name);
     }
+}
+
+/// delete a specific service name + IP pair from BPF maps.
+/// used by unregisterService to remove individual backends.
+fn deleteBpfBackend(name: []const u8, ip_addr: [4]u8) void {
+    if (ebpf.getLoadBalancer()) |lb| {
+        const vip = getServiceVip(name) orelse ip_addr;
+        lb.removeBackend(vip, ip_addr);
+    }
+}
+
+/// find the first registered IP for a service name (the "VIP").
+/// caller must hold registry_mutex.
+fn getServiceVip(name: []const u8) ?[4]u8 {
+    for (&registry) |*entry| {
+        if (entry.active and
+            entry.name_len == name.len and
+            std.mem.eql(u8, entry.name[0..entry.name_len], name))
+        {
+            return entry.ip;
+        }
+    }
+    return null;
 }
 
 /// check if a service name is currently held by a different container.

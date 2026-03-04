@@ -75,6 +75,7 @@ pub fn build(b: *std.Build) void {
     const bpf_programs = [_][]const u8{
         "test_prog",
         "dns_intercept",
+        "lb",
     };
 
     for (bpf_programs) |prog| {

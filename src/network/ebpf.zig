@@ -400,6 +400,186 @@ pub fn getDnsInterceptor() ?*const DnsInterceptor {
     return null;
 }
 
+// -- load balancer --
+//
+// round-robin load balancing across multiple backends for a service.
+// the backends_map stores service VIP → backend IP list. when a
+// service has multiple containers, connections are distributed
+// across them via atomic round-robin with connection affinity.
+
+const lb_prog = @import("bpf/lb.zig");
+
+/// maximum backends per service (must match struct service_backends in lb.c)
+pub const max_backends = 16;
+
+/// backend list as stored in the BPF map.
+/// matches the C struct service_backends layout exactly.
+pub const ServiceBackends = extern struct {
+    count: u32,
+    ips: [max_backends]u32, // network byte order
+};
+
+/// state for the loaded load balancer program.
+pub const LoadBalancer = struct {
+    prog_fd: posix.fd_t,
+    backends_fd: posix.fd_t,
+    conntrack_fd: posix.fd_t,
+    rr_counter_fd: posix.fd_t,
+    if_index: u32,
+
+    /// add a backend IP for a service VIP.
+    /// if the service doesn't exist yet, creates it with one backend.
+    /// if it already exists, appends the backend to the list.
+    pub fn addBackend(self: *const LoadBalancer, vip: [4]u8, backend_ip: [4]u8) void {
+        const vip_net = ipToNetworkOrder(vip);
+        const backend_net = ipToNetworkOrder(backend_ip);
+
+        var backends: ServiceBackends = undefined;
+        const key = std.mem.asBytes(&vip_net);
+
+        if (mapLookup(self.backends_fd, key, std.mem.asBytes(&backends))) {
+            // service exists — add backend if not already present
+            if (backends.count >= max_backends) return;
+
+            // check for duplicate
+            for (0..backends.count) |i| {
+                if (backends.ips[i] == backend_net) return;
+            }
+
+            backends.ips[backends.count] = backend_net;
+            backends.count += 1;
+        } else {
+            // new service
+            backends = std.mem.zeroes(ServiceBackends);
+            backends.count = 1;
+            backends.ips[0] = backend_net;
+        }
+
+        mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch {};
+    }
+
+    /// remove a backend IP from a service.
+    /// if this was the last backend, removes the service entry entirely.
+    pub fn removeBackend(self: *const LoadBalancer, vip: [4]u8, backend_ip: [4]u8) void {
+        const vip_net = ipToNetworkOrder(vip);
+        const backend_net = ipToNetworkOrder(backend_ip);
+
+        var backends: ServiceBackends = undefined;
+        const key = std.mem.asBytes(&vip_net);
+
+        if (!mapLookup(self.backends_fd, key, std.mem.asBytes(&backends))) return;
+
+        // find and remove the backend
+        var found: bool = false;
+        for (0..backends.count) |i| {
+            if (backends.ips[i] == backend_net) {
+                // shift remaining entries down
+                var j: u32 = @intCast(i);
+                while (j + 1 < backends.count) : (j += 1) {
+                    backends.ips[j] = backends.ips[j + 1];
+                }
+                backends.count -= 1;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) return;
+
+        if (backends.count == 0) {
+            // last backend — remove the service entry
+            mapDelete(self.backends_fd, key);
+        } else {
+            mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch {};
+        }
+    }
+
+    pub fn deinit(self: *LoadBalancer) void {
+        detachTC(self.if_index) catch {};
+        posix.close(self.prog_fd);
+        posix.close(self.backends_fd);
+        posix.close(self.conntrack_fd);
+        posix.close(self.rr_counter_fd);
+    }
+};
+
+/// global load balancer instance.
+var load_balancer: ?LoadBalancer = null;
+
+/// load and attach the load balancer BPF program.
+pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
+    if (load_balancer != null) return;
+
+    // create maps
+    const backends_fd = try createMap(
+        @enumFromInt(lb_prog.maps[0].map_type),
+        lb_prog.maps[0].key_size,
+        lb_prog.maps[0].value_size,
+        lb_prog.maps[0].max_entries,
+    );
+    errdefer posix.close(backends_fd);
+
+    const conntrack_fd = try createMap(
+        @enumFromInt(lb_prog.maps[1].map_type),
+        lb_prog.maps[1].key_size,
+        lb_prog.maps[1].value_size,
+        lb_prog.maps[1].max_entries,
+    );
+    errdefer posix.close(conntrack_fd);
+
+    const rr_counter_fd = try createMap(
+        @enumFromInt(lb_prog.maps[2].map_type),
+        lb_prog.maps[2].key_size,
+        lb_prog.maps[2].value_size,
+        lb_prog.maps[2].max_entries,
+    );
+    errdefer posix.close(rr_counter_fd);
+
+    var map_fds = [_]posix.fd_t{ backends_fd, conntrack_fd, rr_counter_fd };
+    const prog_fd = loadProgram(lb_prog, &map_fds) catch |e| {
+        return e;
+    };
+    errdefer posix.close(prog_fd);
+
+    // attach to bridge ingress (the qdisc should already exist from DNS interceptor)
+    try attachTC(bridge_if_index, .ingress, prog_fd);
+
+    load_balancer = .{
+        .prog_fd = prog_fd,
+        .backends_fd = backends_fd,
+        .conntrack_fd = conntrack_fd,
+        .rr_counter_fd = rr_counter_fd,
+        .if_index = bridge_if_index,
+    };
+
+    log.info("ebpf: load balancer loaded on ifindex {d}", .{bridge_if_index});
+}
+
+/// unload the load balancer.
+pub fn unloadLoadBalancer() void {
+    if (load_balancer) |*lb| {
+        lb.deinit();
+        load_balancer = null;
+        log.info("ebpf: load balancer unloaded", .{});
+    }
+}
+
+/// get the active load balancer, if loaded.
+pub fn getLoadBalancer() ?*const LoadBalancer {
+    if (load_balancer) |*lb| {
+        return lb;
+    }
+    return null;
+}
+
+/// convert a 4-byte IP to a u32 in network byte order.
+fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
+    return @as(u32, ip_bytes[0]) |
+        (@as(u32, ip_bytes[1]) << 8) |
+        (@as(u32, ip_bytes[2]) << 16) |
+        (@as(u32, ip_bytes[3]) << 24);
+}
+
 // -- capability check --
 
 /// check if BPF is supported on this system.
@@ -475,6 +655,34 @@ test "dns_intercept bytecode has expected structure" {
     try std.testing.expectEqual(@as(u32, 64), dns_intercept.maps[0].key_size);
     try std.testing.expectEqual(@as(u32, 4), dns_intercept.maps[0].value_size);
     try std.testing.expect(dns_intercept.insns.len >= 2);
+}
+
+test "ipToNetworkOrder converts correctly" {
+    // 10.42.0.5 → bytes in memory order
+    const ip = [4]u8{ 10, 42, 0, 5 };
+    const net = ipToNetworkOrder(ip);
+    // in network byte order (big-endian), 10.42.0.5 = 0x0A2A0005
+    // but ipToNetworkOrder stores it as-is in memory layout for BPF:
+    // byte[0]=10 at lowest address
+    const bytes = std.mem.asBytes(&net);
+    try std.testing.expectEqual(@as(u8, 10), bytes[0]);
+    try std.testing.expectEqual(@as(u8, 42), bytes[1]);
+    try std.testing.expectEqual(@as(u8, 0), bytes[2]);
+    try std.testing.expectEqual(@as(u8, 5), bytes[3]);
+}
+
+test "ServiceBackends struct size matches BPF map value" {
+    // must match lb.c: struct service_backends
+    // count (4) + ips[16] (64) = 68 bytes
+    try std.testing.expectEqual(@as(usize, 68), @sizeOf(ServiceBackends));
+    try std.testing.expectEqual(@as(u32, 68), lb_prog.maps[0].value_size);
+}
+
+test "lb_prog bytecode has expected maps" {
+    try std.testing.expectEqual(@as(usize, 3), lb_prog.maps.len);
+    try std.testing.expectEqualStrings("backends_map", lb_prog.maps[0].name);
+    try std.testing.expectEqualStrings("conntrack_map", lb_prog.maps[1].name);
+    try std.testing.expectEqualStrings("rr_counter", lb_prog.maps[2].name);
 }
 
 test "createMap returns fd or error" {
