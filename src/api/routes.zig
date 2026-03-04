@@ -1095,6 +1095,26 @@ test "dispatch rejects non-hex container id" {
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
 }
 
+test "validateContainerId accepts exactly 64 chars" {
+    const id_64 = "a" ** 64;
+    try std.testing.expect(validateContainerId(id_64));
+}
+
+test "validateClusterInput rejects tab character" {
+    try std.testing.expect(!validateClusterInput("hello\tworld"));
+}
+
+test "dispatch deploy without cluster returns error" {
+    cluster = null;
+    const req = (try http.parseRequest(
+        "POST /deploy HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
 test "dispatch rejects non-hex agent id" {
     cluster = null;
     const req = (try http.parseRequest(
