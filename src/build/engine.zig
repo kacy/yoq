@@ -77,6 +77,10 @@ const BuildState = struct {
     user: ?[]const u8 = null,
     exposed_ports: std.ArrayListUnmanaged([]const u8) = .empty,
     labels: std.ArrayListUnmanaged([]const u8) = .empty,
+    volumes: std.ArrayListUnmanaged([]const u8) = .empty,
+    shell: ?[]const u8 = null,
+    stop_signal: ?[]const u8 = null,
+    healthcheck: ?[]const u8 = null,
 
     /// digest of the "current" image state — starts as base image digest,
     /// updates after each layer-producing step. used for cache key computation.
@@ -98,10 +102,15 @@ const BuildState = struct {
         self.env.deinit(self.alloc);
         self.exposed_ports.deinit(self.alloc);
         self.labels.deinit(self.alloc);
+        for (self.volumes.items) |v| self.alloc.free(v);
+        self.volumes.deinit(self.alloc);
         if (self.cmd) |c| self.alloc.free(c);
         if (self.entrypoint) |e| self.alloc.free(e);
         if (!std.mem.eql(u8, self.workdir, "/")) self.alloc.free(self.workdir);
         if (self.user) |u| self.alloc.free(u);
+        if (self.shell) |s| self.alloc.free(s);
+        if (self.stop_signal) |s| self.alloc.free(s);
+        if (self.healthcheck) |h| self.alloc.free(h);
         if (self.parent_digest.len > 0) self.alloc.free(self.parent_digest);
     }
 
@@ -146,6 +155,7 @@ pub fn build(
             .from => try processFrom(alloc, &state, inst.args),
             .run => try processRun(alloc, &state, inst.args),
             .copy => try processCopy(alloc, &state, inst.args, context_dir),
+            .add => try processAdd(alloc, &state, inst.args, context_dir),
             .env => processEnv(alloc, &state, inst.args),
             .workdir => processWorkdir(alloc, &state, inst.args),
             .cmd => processCmd(alloc, &state, inst.args),
@@ -153,6 +163,11 @@ pub fn build(
             .expose => processExpose(alloc, &state, inst.args),
             .user => processUser(alloc, &state, inst.args),
             .label => processLabel(alloc, &state, inst.args),
+            .volume => processVolume(alloc, &state, inst.args),
+            .shell => processShell(alloc, &state, inst.args),
+            .healthcheck => processHealthcheck(alloc, &state, inst.args),
+            .stopsignal => processStopsignal(alloc, &state, inst.args),
+            .onbuild => processOnbuild(inst.args),
             .arg => {}, // ARG is handled at parse time in a full implementation
         }
     }
@@ -479,6 +494,79 @@ fn processLabel(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) 
     state.labels.append(alloc, owned) catch {
         alloc.free(owned);
     };
+}
+
+fn processAdd(alloc: std.mem.Allocator, state: *BuildState, args: []const u8, context_dir: []const u8) BuildError!void {
+    // ADD is treated as an alias for COPY. tar auto-extraction and URL
+    // fetch are not yet implemented — those are niche features we can
+    // add later without changing the interface.
+    log.info("ADD {s} (treated as COPY)", .{args});
+    return processCopy(alloc, state, args, context_dir);
+}
+
+fn processVolume(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
+    // VOLUME is metadata only — stored in the image config so the runtime
+    // knows which paths should be mounted as volumes.
+    log.info("VOLUME {s}", .{args});
+
+    if (dockerfile.isJsonForm(args)) {
+        // JSON form: VOLUME ["/data", "/logs"]
+        // parse individual paths out of the array
+        const trimmed = std.mem.trim(u8, args, " \t[]");
+        var iter = std.mem.splitScalar(u8, trimmed, ',');
+        while (iter.next()) |entry| {
+            const path = std.mem.trim(u8, entry, " \t\"");
+            if (path.len == 0) continue;
+            const owned = alloc.dupe(u8, path) catch continue;
+            state.volumes.append(alloc, owned) catch {
+                alloc.free(owned);
+            };
+        }
+    } else {
+        // space-separated form: VOLUME /data /logs
+        var iter = std.mem.tokenizeAny(u8, args, " \t");
+        while (iter.next()) |path| {
+            const owned = alloc.dupe(u8, path) catch continue;
+            state.volumes.append(alloc, owned) catch {
+                alloc.free(owned);
+            };
+        }
+    }
+}
+
+fn processShell(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
+    // SHELL sets the default shell for subsequent RUN instructions.
+    // the args should be in JSON form: ["/bin/bash", "-c"]
+    log.info("SHELL {s}", .{args});
+    const owned = alloc.dupe(u8, args) catch return;
+    if (state.shell) |old| alloc.free(old);
+    state.shell = owned;
+}
+
+fn processHealthcheck(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
+    // HEALTHCHECK is metadata only — stored in the image config for the
+    // runtime to use. we store the raw args string and let the runtime
+    // parse the details (interval, timeout, retries, command).
+    log.info("HEALTHCHECK {s}", .{args});
+    const owned = alloc.dupe(u8, args) catch return;
+    if (state.healthcheck) |old| alloc.free(old);
+    state.healthcheck = owned;
+}
+
+fn processStopsignal(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
+    // STOPSIGNAL sets the signal sent to the container on stop.
+    // metadata only — stored in the image config.
+    log.info("STOPSIGNAL {s}", .{args});
+    const owned = alloc.dupe(u8, args) catch return;
+    if (state.stop_signal) |old| alloc.free(old);
+    state.stop_signal = owned;
+}
+
+fn processOnbuild(args: []const u8) void {
+    // ONBUILD triggers are rarely used and complex to implement properly
+    // (they require storing instructions that run when this image is used
+    // as a base). log a warning and skip for now.
+    log.warn("ONBUILD is not yet supported, skipping: {s}", .{args});
 }
 
 // -- cache helpers --
@@ -820,6 +908,58 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
         first = false;
     }
 
+    // Volumes — OCI format is {"path":{}} for each volume
+    if (state.volumes.items.len > 0) {
+        if (!first) try writer.writeAll(",");
+        try writer.writeAll("\"Volumes\":{");
+        for (state.volumes.items, 0..) |vol, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writer.writeByte('"');
+            try json_helpers.writeJsonEscaped(writer, vol);
+            try writer.writeAll("\":{}");
+        }
+        try writer.writeAll("}");
+        first = false;
+    }
+
+    // Shell
+    if (state.shell) |sh| {
+        if (!first) try writer.writeAll(",");
+        if (dockerfile.isJsonForm(sh)) {
+            try writer.writeAll("\"Shell\":");
+            try writer.writeAll(sh);
+        } else {
+            // shouldn't happen (SHELL requires JSON form), but handle gracefully
+            try writer.writeAll("\"Shell\":[\"");
+            try json_helpers.writeJsonEscaped(writer, sh);
+            try writer.writeAll("\"]");
+        }
+        first = false;
+    }
+
+    // StopSignal
+    if (state.stop_signal) |sig| {
+        if (!first) try writer.writeAll(",");
+        try writer.writeAll("\"StopSignal\":\"");
+        try json_helpers.writeJsonEscaped(writer, sig);
+        try writer.writeByte('"');
+        first = false;
+    }
+
+    // Healthcheck
+    if (state.healthcheck) |hc| {
+        if (!first) try writer.writeAll(",");
+        try writer.writeAll("\"Healthcheck\":{\"Test\":[\"CMD-SHELL\",\"");
+        // strip the leading "CMD " prefix if present
+        const cmd_str = if (std.mem.startsWith(u8, hc, "CMD "))
+            hc[4..]
+        else
+            hc;
+        try json_helpers.writeJsonEscaped(writer, cmd_str);
+        try writer.writeAll("\"]}");
+        first = false;
+    }
+
     try writer.writeAll("}");
 
     // rootfs section
@@ -1131,4 +1271,160 @@ test "cache key determinism with empty command" {
     defer alloc.free(key2);
 
     try std.testing.expectEqualStrings(key1, key2);
+}
+
+test "processVolume — space-separated paths" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processVolume(alloc, &state, "/data /logs /cache");
+
+    try std.testing.expectEqual(@as(usize, 3), state.volumes.items.len);
+    try std.testing.expectEqualStrings("/data", state.volumes.items[0]);
+    try std.testing.expectEqualStrings("/logs", state.volumes.items[1]);
+    try std.testing.expectEqualStrings("/cache", state.volumes.items[2]);
+}
+
+test "processVolume — json form" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processVolume(alloc, &state, "[\"/data\", \"/logs\"]");
+
+    try std.testing.expectEqual(@as(usize, 2), state.volumes.items.len);
+    try std.testing.expectEqualStrings("/data", state.volumes.items[0]);
+    try std.testing.expectEqualStrings("/logs", state.volumes.items[1]);
+}
+
+test "processVolume — single path" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processVolume(alloc, &state, "/data");
+
+    try std.testing.expectEqual(@as(usize, 1), state.volumes.items.len);
+    try std.testing.expectEqualStrings("/data", state.volumes.items[0]);
+}
+
+test "processShell sets shell" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processShell(alloc, &state, "[\"/bin/bash\", \"-c\"]");
+    try std.testing.expectEqualStrings("[\"/bin/bash\", \"-c\"]", state.shell.?);
+}
+
+test "processShell replaces previous shell" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processShell(alloc, &state, "[\"/bin/bash\", \"-c\"]");
+    processShell(alloc, &state, "[\"/bin/zsh\", \"-c\"]");
+    try std.testing.expectEqualStrings("[\"/bin/zsh\", \"-c\"]", state.shell.?);
+}
+
+test "processStopsignal sets signal" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processStopsignal(alloc, &state, "SIGTERM");
+    try std.testing.expectEqualStrings("SIGTERM", state.stop_signal.?);
+}
+
+test "processStopsignal replaces previous signal" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processStopsignal(alloc, &state, "SIGTERM");
+    processStopsignal(alloc, &state, "SIGKILL");
+    try std.testing.expectEqualStrings("SIGKILL", state.stop_signal.?);
+}
+
+test "processHealthcheck stores command" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processHealthcheck(alloc, &state, "CMD curl -f http://localhost/");
+    try std.testing.expectEqualStrings("CMD curl -f http://localhost/", state.healthcheck.?);
+}
+
+test "processHealthcheck replaces previous" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processHealthcheck(alloc, &state, "CMD curl -f http://localhost/");
+    processHealthcheck(alloc, &state, "NONE");
+    try std.testing.expectEqualStrings("NONE", state.healthcheck.?);
+}
+
+test "config json with volumes" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    const v1 = try alloc.dupe(u8, "/data");
+    try state.volumes.append(alloc, v1);
+    const v2 = try alloc.dupe(u8, "/logs");
+    try state.volumes.append(alloc, v2);
+
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Volumes\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"/data\":{}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"/logs\":{}") != null);
+}
+
+test "config json with shell" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    state.shell = try alloc.dupe(u8, "[\"/bin/bash\", \"-c\"]");
+
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Shell\":[\"/bin/bash\", \"-c\"]") != null);
+}
+
+test "config json with stop signal" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    state.stop_signal = try alloc.dupe(u8, "SIGTERM");
+
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"StopSignal\":\"SIGTERM\"") != null);
+}
+
+test "config json with healthcheck" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    state.healthcheck = try alloc.dupe(u8, "CMD curl -f http://localhost/");
+
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Healthcheck\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"Test\":[\"CMD-SHELL\",\"curl -f http://localhost/\"]") != null);
+}
+
+test "processOnbuild does not crash" {
+    // just verify it doesn't panic — ONBUILD logs a warning and skips
+    processOnbuild("RUN echo triggered");
 }
