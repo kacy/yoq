@@ -141,6 +141,83 @@ const BuildState = struct {
     }
 };
 
+/// a build stage — one per FROM instruction in a multi-stage build.
+/// each stage has its own name (optional), index, and instruction range.
+const BuildStage = struct {
+    /// stage name from "FROM ... AS name", null if unnamed
+    name: ?[]const u8,
+    /// 0-based stage index
+    index: usize,
+    /// slice of instructions belonging to this stage (starts with FROM)
+    instructions: []const dockerfile.Instruction,
+};
+
+/// split instructions into stages at FROM boundaries.
+/// each stage starts with a FROM instruction.
+fn splitIntoStages(alloc: std.mem.Allocator, instructions: []const dockerfile.Instruction) ![]BuildStage {
+    var stages: std.ArrayListUnmanaged(BuildStage) = .empty;
+    errdefer stages.deinit(alloc);
+
+    var current_start: usize = 0;
+    var stage_index: usize = 0;
+
+    for (instructions, 0..) |inst, i| {
+        if (inst.kind == .from and i > 0) {
+            // close out the previous stage
+            try stages.append(alloc, .{
+                .name = parseStageName(instructions[current_start].args),
+                .index = stage_index,
+                .instructions = instructions[current_start..i],
+            });
+            current_start = i;
+            stage_index += 1;
+        }
+    }
+
+    // append the final stage
+    if (current_start < instructions.len) {
+        try stages.append(alloc, .{
+            .name = parseStageName(instructions[current_start].args),
+            .index = stage_index,
+            .instructions = instructions[current_start..],
+        });
+    }
+
+    return try stages.toOwnedSlice(alloc);
+}
+
+/// extract stage name from FROM args: "image:tag AS name" -> "name"
+fn parseStageName(from_args: []const u8) ?[]const u8 {
+    // look for " AS " or " as " (case-insensitive)
+    if (std.mem.indexOf(u8, from_args, " AS ") orelse std.mem.indexOf(u8, from_args, " as ")) |idx| {
+        const name = std.mem.trim(u8, from_args[idx + 4 ..], " \t");
+        if (name.len > 0) return name;
+    }
+    return null;
+}
+
+/// find a completed stage by name or index string.
+/// returns the stage's layer digests if found.
+fn findStageByRef(
+    stages: []const BuildStage,
+    completed_states: []const BuildState,
+    ref: []const u8,
+) ?*const BuildState {
+    // try to match by name first
+    for (stages, 0..) |stage, i| {
+        if (i >= completed_states.len) break;
+        if (stage.name) |name| {
+            if (std.mem.eql(u8, name, ref)) return &completed_states[i];
+        }
+    }
+
+    // try to parse as stage index
+    const idx = std.fmt.parseInt(usize, ref, 10) catch return null;
+    if (idx < completed_states.len) return &completed_states[idx];
+
+    return null;
+}
+
 /// build an image from a Dockerfile.
 ///
 /// instructions: parsed Dockerfile instructions
@@ -158,8 +235,45 @@ pub fn build(
         return BuildError.NoFromInstruction;
     }
 
+    // split into stages for multi-stage builds
+    const stages = splitIntoStages(alloc, instructions) catch
+        return BuildError.ParseFailed;
+    defer alloc.free(stages);
+
+    // process each stage, keeping completed states around for COPY --from
+    var completed_states: std.ArrayListUnmanaged(BuildState) = .empty;
+    defer {
+        for (completed_states.items) |*s| s.deinit();
+        completed_states.deinit(alloc);
+    }
+
+    for (stages) |stage| {
+        const state = try buildStage(alloc, stage, context_dir, cli_build_args, stages, completed_states.items);
+        completed_states.append(alloc, state) catch {
+            var s = state;
+            s.deinit();
+            return BuildError.ImageStoreFailed;
+        };
+    }
+
+    // produce image from the final stage only
+    if (completed_states.items.len == 0) return BuildError.NoFromInstruction;
+    var final_state = &completed_states.items[completed_states.items.len - 1];
+    return produceImage(alloc, final_state, tag);
+}
+
+/// process a single build stage — returns the completed BuildState.
+/// caller takes ownership and must call deinit() when done.
+fn buildStage(
+    alloc: std.mem.Allocator,
+    stage: BuildStage,
+    context_dir: []const u8,
+    cli_build_args: ?[]const []const u8,
+    stages: []const BuildStage,
+    completed_states: []const BuildState,
+) BuildError!BuildState {
     var state = BuildState.init(alloc);
-    defer state.deinit();
+    errdefer state.deinit();
 
     // seed build args from CLI --build-arg flags
     if (cli_build_args) |args| {
@@ -178,9 +292,9 @@ pub fn build(
         }
     }
 
-    // process each instruction
-    for (instructions) |inst| {
-        // expand build args in instruction arguments (except for ARG itself)
+    // process instructions for this stage
+    for (stage.instructions) |inst| {
+        // expand build args (except for ARG itself)
         const effective_args = if (inst.kind != .arg)
             expandArgs(alloc, inst.args, &state.build_args) catch inst.args
         else
@@ -191,8 +305,8 @@ pub fn build(
         switch (inst.kind) {
             .from => try processFrom(alloc, &state, effective_args),
             .run => try processRun(alloc, &state, effective_args),
-            .copy => try processCopy(alloc, &state, effective_args, context_dir),
-            .add => try processAdd(alloc, &state, effective_args, context_dir),
+            .copy => try processCopyMultiStage(alloc, &state, effective_args, context_dir, stages, completed_states),
+            .add => try processAddMultiStage(alloc, &state, effective_args, context_dir, stages, completed_states),
             .env => processEnv(alloc, &state, effective_args),
             .workdir => processWorkdir(alloc, &state, effective_args),
             .cmd => processCmd(alloc, &state, effective_args),
@@ -209,8 +323,7 @@ pub fn build(
         }
     }
 
-    // produce the OCI image (config + manifest) and store it
-    return produceImage(alloc, &state, tag);
+    return state;
 }
 
 // -- instruction handlers --
@@ -678,6 +791,172 @@ pub fn expandArgs(
     return try result.toOwnedSlice(alloc);
 }
 
+fn processCopyMultiStage(
+    alloc: std.mem.Allocator,
+    state: *BuildState,
+    args: []const u8,
+    context_dir: []const u8,
+    stages: []const BuildStage,
+    completed_states: []const BuildState,
+) BuildError!void {
+    const split = parseCopyArgs(args);
+
+    if (split.from_stage) |stage_ref| {
+        // COPY --from=stage — copy from a previous build stage
+        return processCopyFromStage(alloc, state, split.src, split.dest, stage_ref, stages, completed_states);
+    }
+
+    // regular COPY from build context
+    return processCopy(alloc, state, args, context_dir);
+}
+
+fn processAddMultiStage(
+    alloc: std.mem.Allocator,
+    state: *BuildState,
+    args: []const u8,
+    context_dir: []const u8,
+    stages: []const BuildStage,
+    completed_states: []const BuildState,
+) BuildError!void {
+    // ADD with --from= is unusual but technically valid
+    const split = parseCopyArgs(args);
+
+    if (split.from_stage) |stage_ref| {
+        log.info("ADD --from={s} {s} (treated as COPY --from)", .{ stage_ref, args });
+        return processCopyFromStage(alloc, state, split.src, split.dest, stage_ref, stages, completed_states);
+    }
+
+    // regular ADD from build context
+    log.info("ADD {s} (treated as COPY)", .{args});
+    return processCopy(alloc, state, args, context_dir);
+}
+
+/// copy files from a previous build stage's filesystem.
+/// extracts the source stage's layers into a temporary overlay,
+/// then copies the requested files into a new layer.
+fn processCopyFromStage(
+    alloc: std.mem.Allocator,
+    state: *BuildState,
+    src: []const u8,
+    dest: []const u8,
+    stage_ref: []const u8,
+    stages: []const BuildStage,
+    completed_states: []const BuildState,
+) BuildError!void {
+    log.info("COPY --from={s} {s} {s}", .{ stage_ref, src, dest });
+
+    // find the source stage
+    const source_state = findStageByRef(stages, completed_states, stage_ref) orelse {
+        log.err("COPY --from={s}: stage not found", .{stage_ref});
+        return BuildError.CopyStepFailed;
+    };
+
+    // extract source stage layers into a temporary merged directory
+    var layer_paths_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (layer_paths_list.items) |p| alloc.free(p);
+        layer_paths_list.deinit(alloc);
+    }
+
+    for (source_state.layer_digests.items) |digest| {
+        const path = layer.extractLayer(alloc, digest) catch
+            return BuildError.CopyStepFailed;
+        layer_paths_list.append(alloc, path) catch {
+            alloc.free(path);
+            return BuildError.CopyStepFailed;
+        };
+    }
+
+    if (layer_paths_list.items.len == 0) {
+        log.warn("COPY --from={s}: source stage has no layers", .{stage_ref});
+        return;
+    }
+
+    // create temp directories for the overlay mount
+    paths.ensureDataDir("tmp") catch return BuildError.CopyStepFailed;
+
+    var id_buf: [12]u8 = undefined;
+    container.generateId(&id_buf);
+
+    var upper_buf: [paths.max_path]u8 = undefined;
+    const upper_dir = paths.dataPathFmt(&upper_buf, "tmp/stage-copy-upper-{s}", .{id_buf}) catch
+        return BuildError.CopyStepFailed;
+    var work_buf: [paths.max_path]u8 = undefined;
+    const work_dir = paths.dataPathFmt(&work_buf, "tmp/stage-copy-work-{s}", .{id_buf}) catch
+        return BuildError.CopyStepFailed;
+    var merged_buf: [paths.max_path]u8 = undefined;
+    const merged_dir = paths.dataPathFmt(&merged_buf, "tmp/stage-copy-merged-{s}", .{id_buf}) catch
+        return BuildError.CopyStepFailed;
+
+    std.fs.cwd().makePath(upper_dir) catch return BuildError.CopyStepFailed;
+    std.fs.cwd().makePath(work_dir) catch return BuildError.CopyStepFailed;
+    std.fs.cwd().makePath(merged_dir) catch return BuildError.CopyStepFailed;
+
+    defer {
+        std.fs.cwd().deleteTree(upper_dir) catch {};
+        std.fs.cwd().deleteTree(work_dir) catch {};
+        // unmount before deleting
+        const merged_z = std.posix.toPosixPath(merged_dir) catch unreachable;
+        _ = linux.syscall2(.umount2, @intFromPtr(&merged_z), 0);
+        std.fs.cwd().deleteTree(merged_dir) catch {};
+    }
+
+    // mount overlay from source stage's layers (read-only)
+    filesystem.mountOverlay(.{
+        .lower_dirs = layer_paths_list.items,
+        .upper_dir = upper_dir,
+        .work_dir = work_dir,
+        .merged_dir = merged_dir,
+    }) catch return BuildError.CopyStepFailed;
+
+    // now copy the requested files from the merged dir to a new layer
+    paths.ensureDataDir("tmp") catch return BuildError.CopyStepFailed;
+    var layer_dir_buf: [paths.max_path]u8 = undefined;
+    const layer_dir = paths.dataPathFmt(&layer_dir_buf, "tmp/build-stage-copy-layer-{s}", .{id_buf}) catch
+        return BuildError.CopyStepFailed;
+
+    std.fs.cwd().deleteTree(layer_dir) catch {};
+    std.fs.cwd().makePath(layer_dir) catch return BuildError.CopyStepFailed;
+    defer std.fs.cwd().deleteTree(layer_dir) catch {};
+
+    // determine destination path (respect workdir)
+    var actual_dest_buf: [1024]u8 = undefined;
+    const actual_dest = if (dest.len > 0 and dest[0] != '/') blk: {
+        break :blk std.fmt.bufPrint(&actual_dest_buf, "{s}/{s}", .{
+            state.workdir, dest,
+        }) catch return BuildError.CopyStepFailed;
+    } else dest;
+
+    // ensure destination directory exists
+    if (actual_dest.len > 0) {
+        const dest_in_layer = if (actual_dest[0] == '/') actual_dest[1..] else actual_dest;
+        if (std.fs.path.dirname(dest_in_layer)) |parent| {
+            var full_dir = std.fs.cwd().openDir(layer_dir, .{}) catch
+                return BuildError.CopyStepFailed;
+            defer full_dir.close();
+            full_dir.makePath(parent) catch return BuildError.CopyStepFailed;
+        }
+    }
+
+    // copy from merged (source stage filesystem) to layer dir
+    context.copyFiles(merged_dir, src, layer_dir, actual_dest) catch
+        return BuildError.CopyStepFailed;
+
+    // create layer from the directory
+    const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch
+        return BuildError.LayerFailed;
+
+    if (layer_result) |lr| {
+        var digest_buf: [71]u8 = undefined;
+        const compressed_str = lr.compressed_digest.string(&digest_buf);
+        var diff_buf: [71]u8 = undefined;
+        const diff_str = lr.uncompressed_digest.string(&diff_buf);
+
+        state.addLayer(compressed_str, diff_str, lr.compressed_size) catch
+            return BuildError.LayerFailed;
+    }
+}
+
 fn processAdd(alloc: std.mem.Allocator, state: *BuildState, args: []const u8, context_dir: []const u8) BuildError!void {
     // ADD is treated as an alias for COPY. tar auto-extraction and URL
     // fetch are not yet implemented — those are niche features we can
@@ -863,12 +1142,29 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
 const CopyArgs = struct {
     src: []const u8,
     dest: []const u8,
+    /// stage name or index from --from=..., null if copying from build context
+    from_stage: ?[]const u8,
 };
 
 fn parseCopyArgs(args: []const u8) CopyArgs {
-    // simple split on last space: "src dest"
-    // TODO: handle --from=stage and --chown in the future
-    const trimmed = std.mem.trim(u8, args, " \t");
+    var trimmed = std.mem.trim(u8, args, " \t");
+    var from_stage: ?[]const u8 = null;
+
+    // check for --from=stage flag at the beginning
+    if (std.mem.startsWith(u8, trimmed, "--from=")) {
+        const rest = trimmed["--from=".len..];
+        // find the end of the --from value (next whitespace)
+        var end: usize = 0;
+        while (end < rest.len and rest[end] != ' ' and rest[end] != '\t') {
+            end += 1;
+        }
+        from_stage = rest[0..end];
+        if (end < rest.len) {
+            trimmed = std.mem.trimLeft(u8, rest[end..], " \t");
+        } else {
+            trimmed = "";
+        }
+    }
 
     // find the last space that separates src from dest
     var i: usize = trimmed.len;
@@ -878,12 +1174,13 @@ fn parseCopyArgs(args: []const u8) CopyArgs {
             return .{
                 .src = std.mem.trim(u8, trimmed[0..i], " \t"),
                 .dest = std.mem.trim(u8, trimmed[i + 1 ..], " \t"),
+                .from_stage = from_stage,
             };
         }
     }
 
     // no space found — treat as "src src" (copy to same name)
-    return .{ .src = trimmed, .dest = trimmed };
+    return .{ .src = trimmed, .dest = trimmed, .from_stage = from_stage };
 }
 
 // -- build child process --
@@ -1251,12 +1548,14 @@ test "parse copy args" {
     const result = parseCopyArgs("package.json /app/");
     try std.testing.expectEqualStrings("package.json", result.src);
     try std.testing.expectEqualStrings("/app/", result.dest);
+    try std.testing.expect(result.from_stage == null);
 }
 
 test "parse copy args — current dir" {
     const result = parseCopyArgs(". .");
     try std.testing.expectEqualStrings(".", result.src);
     try std.testing.expectEqualStrings(".", result.dest);
+    try std.testing.expect(result.from_stage == null);
 }
 
 test "config json format" {
@@ -1422,6 +1721,7 @@ test "parse copy args — single word" {
     const result = parseCopyArgs("myfile.txt");
     try std.testing.expectEqualStrings("myfile.txt", result.src);
     try std.testing.expectEqualStrings("myfile.txt", result.dest);
+    try std.testing.expect(result.from_stage == null);
 }
 
 test "first instruction not from returns error" {
@@ -1437,6 +1737,7 @@ test "parseCopyArgs with empty string" {
     const result = parseCopyArgs("");
     try std.testing.expectEqualStrings("", result.src);
     try std.testing.expectEqualStrings("", result.dest);
+    try std.testing.expect(result.from_stage == null);
 }
 
 test "cache key determinism with empty command" {
@@ -1790,4 +2091,147 @@ test "expandArgs — var with empty value uses default" {
     const result = try expandArgs(alloc, "${EMPTY:-fallback}", &args_map);
     defer alloc.free(result);
     try std.testing.expectEqualStrings("fallback", result);
+}
+
+// -- multi-stage build tests --
+
+test "parseCopyArgs — with --from flag" {
+    const result = parseCopyArgs("--from=builder /app/dist /usr/share/nginx/html");
+    try std.testing.expectEqualStrings("/app/dist", result.src);
+    try std.testing.expectEqualStrings("/usr/share/nginx/html", result.dest);
+    try std.testing.expectEqualStrings("builder", result.from_stage.?);
+}
+
+test "parseCopyArgs — --from with numeric index" {
+    const result = parseCopyArgs("--from=0 /go/bin/app /usr/local/bin/");
+    try std.testing.expectEqualStrings("/go/bin/app", result.src);
+    try std.testing.expectEqualStrings("/usr/local/bin/", result.dest);
+    try std.testing.expectEqualStrings("0", result.from_stage.?);
+}
+
+test "parseCopyArgs — no --from flag" {
+    const result = parseCopyArgs("src/app.js /app/");
+    try std.testing.expect(result.from_stage == null);
+    try std.testing.expectEqualStrings("src/app.js", result.src);
+    try std.testing.expectEqualStrings("/app/", result.dest);
+}
+
+test "parseStageName — with AS" {
+    const name = parseStageName("golang:1.21 AS builder");
+    try std.testing.expectEqualStrings("builder", name.?);
+}
+
+test "parseStageName — lowercase as" {
+    const name = parseStageName("node:20 as build-stage");
+    try std.testing.expectEqualStrings("build-stage", name.?);
+}
+
+test "parseStageName — no AS clause" {
+    const name = parseStageName("ubuntu:24.04");
+    try std.testing.expect(name == null);
+}
+
+test "splitIntoStages — single stage" {
+    const alloc = std.testing.allocator;
+    const instructions = [_]dockerfile.Instruction{
+        .{ .kind = .from, .args = "alpine:latest", .line_number = 1 },
+        .{ .kind = .run, .args = "echo hello", .line_number = 2 },
+    };
+
+    const stages = try splitIntoStages(alloc, &instructions);
+    defer alloc.free(stages);
+
+    try std.testing.expectEqual(@as(usize, 1), stages.len);
+    try std.testing.expectEqual(@as(usize, 0), stages[0].index);
+    try std.testing.expect(stages[0].name == null);
+    try std.testing.expectEqual(@as(usize, 2), stages[0].instructions.len);
+}
+
+test "splitIntoStages — two stages" {
+    const alloc = std.testing.allocator;
+    const instructions = [_]dockerfile.Instruction{
+        .{ .kind = .from, .args = "golang:1.21 AS builder", .line_number = 1 },
+        .{ .kind = .run, .args = "go build", .line_number = 2 },
+        .{ .kind = .from, .args = "alpine:latest", .line_number = 3 },
+        .{ .kind = .copy, .args = "--from=builder /app /app", .line_number = 4 },
+    };
+
+    const stages = try splitIntoStages(alloc, &instructions);
+    defer alloc.free(stages);
+
+    try std.testing.expectEqual(@as(usize, 2), stages.len);
+
+    // first stage
+    try std.testing.expectEqual(@as(usize, 0), stages[0].index);
+    try std.testing.expectEqualStrings("builder", stages[0].name.?);
+    try std.testing.expectEqual(@as(usize, 2), stages[0].instructions.len);
+
+    // second stage
+    try std.testing.expectEqual(@as(usize, 1), stages[1].index);
+    try std.testing.expect(stages[1].name == null);
+    try std.testing.expectEqual(@as(usize, 2), stages[1].instructions.len);
+}
+
+test "splitIntoStages — three stages" {
+    const alloc = std.testing.allocator;
+    const instructions = [_]dockerfile.Instruction{
+        .{ .kind = .from, .args = "node:20 AS deps", .line_number = 1 },
+        .{ .kind = .run, .args = "npm install", .line_number = 2 },
+        .{ .kind = .from, .args = "node:20 AS build", .line_number = 3 },
+        .{ .kind = .run, .args = "npm run build", .line_number = 4 },
+        .{ .kind = .from, .args = "nginx:alpine", .line_number = 5 },
+        .{ .kind = .copy, .args = "--from=build /app/dist /usr/share/nginx/html", .line_number = 6 },
+    };
+
+    const stages = try splitIntoStages(alloc, &instructions);
+    defer alloc.free(stages);
+
+    try std.testing.expectEqual(@as(usize, 3), stages.len);
+    try std.testing.expectEqualStrings("deps", stages[0].name.?);
+    try std.testing.expectEqualStrings("build", stages[1].name.?);
+    try std.testing.expect(stages[2].name == null);
+}
+
+test "findStageByRef — by name" {
+    const alloc = std.testing.allocator;
+    const stages = [_]BuildStage{
+        .{ .name = "builder", .index = 0, .instructions = &.{} },
+        .{ .name = null, .index = 1, .instructions = &.{} },
+    };
+    var states: [2]BuildState = .{ BuildState.init(alloc), BuildState.init(alloc) };
+    defer for (&states) |*s| s.deinit();
+
+    const found = findStageByRef(&stages, &states, "builder");
+    try std.testing.expect(found != null);
+}
+
+test "findStageByRef — by index" {
+    const alloc = std.testing.allocator;
+    const stages = [_]BuildStage{
+        .{ .name = "builder", .index = 0, .instructions = &.{} },
+        .{ .name = null, .index = 1, .instructions = &.{} },
+    };
+    var states: [2]BuildState = .{ BuildState.init(alloc), BuildState.init(alloc) };
+    defer for (&states) |*s| s.deinit();
+
+    const found = findStageByRef(&stages, &states, "0");
+    try std.testing.expect(found != null);
+
+    const found1 = findStageByRef(&stages, &states, "1");
+    try std.testing.expect(found1 != null);
+}
+
+test "findStageByRef — not found" {
+    const alloc = std.testing.allocator;
+    const stages = [_]BuildStage{
+        .{ .name = "builder", .index = 0, .instructions = &.{} },
+    };
+    var states: [1]BuildState = .{BuildState.init(alloc)};
+    defer for (&states) |*s| s.deinit();
+
+    const found = findStageByRef(&stages, &states, "nonexistent");
+    try std.testing.expect(found == null);
+
+    const found2 = findStageByRef(&stages, &states, "5");
+    try std.testing.expect(found2 == null);
 }
