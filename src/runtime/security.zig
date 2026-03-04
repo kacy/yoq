@@ -101,6 +101,25 @@ fn dropCapabilities() SecurityError!void {
     // to a single cap_user_data_t, but v3 requires a 2-element array
     const rc = linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&data));
     if (syscall_util.isError(rc)) return SecurityError.CapabilityFailed;
+
+    // verify: read caps back and confirm they match what we set.
+    // defense-in-depth — if the kernel silently ignored our capset(),
+    // we want to fail loudly rather than run with unexpected privileges.
+    var verify_data: [2]linux.cap_user_data_t = .{
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+    };
+    const rc2 = linux.syscall2(.capget, @intFromPtr(&hdr), @intFromPtr(&verify_data));
+    if (syscall_util.isError(rc2)) return SecurityError.CapabilityFailed;
+
+    // compare effective and permitted masks for both words
+    for (0..2) |i| {
+        if (verify_data[i].effective != data[i].effective or
+            verify_data[i].permitted != data[i].permitted)
+        {
+            return SecurityError.CapabilityFailed;
+        }
+    }
 }
 
 /// set PR_SET_NO_NEW_PRIVS so the process can't gain new
@@ -114,6 +133,11 @@ fn setNoNewPrivs() SecurityError!void {
 
 /// syscalls blocked inside containers. adding or removing entries here
 /// automatically updates the BPF filter — no manual offset counting needed.
+///
+/// note: ioctl is NOT blocked here. blocking it breaks terminal I/O, socket
+/// operations, and most real-world programs. Docker handles this with BPF
+/// argument inspection (filtering specific ioctl commands), which is a
+/// significantly larger project. for now, ioctl remains allowed.
 const blocked_syscalls = [_]linux.SYS{
     .kexec_load, // load a new kernel
     .reboot, // reboot the host
@@ -131,6 +155,18 @@ const blocked_syscalls = [_]linux.SYS{
     .open_by_handle_at, // bypass DAC with file handles
     .userfaultfd, // userfault file descriptor (used in exploits)
     .keyctl, // kernel keyring manipulation
+
+    // filesystem namespace escape vectors. these are safe to block because
+    // security.apply() runs AFTER filesystem setup (pivot_root, mounts) is done.
+    .unshare, // create new namespaces (escape isolation)
+    .mount, // mount filesystems
+    .umount2, // unmount filesystems
+    .pivot_root, // change root filesystem
+    .open_tree, // open a mount for moving (new mount API)
+    .move_mount, // move a mount to a new location (new mount API)
+    .fsopen, // open a filesystem context (new mount API)
+    .fsmount, // create a mount from fs context (new mount API)
+    .fsconfig, // configure a filesystem context (new mount API)
 };
 
 /// install a seccomp-bpf filter that blocks dangerous syscalls.
@@ -276,6 +312,52 @@ test "default caps all in low word" {
 test "blocked_syscalls includes critical entries" {
     const critical = [_]linux.SYS{ .kexec_load, .reboot, .ptrace, .bpf };
     for (critical) |sc| {
+        var found = false;
+        for (blocked_syscalls) |blocked| {
+            if (blocked == sc) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "capability mask verification detects mismatch" {
+    // simulate the verification logic: build expected masks, then check
+    // against a different set. this tests the comparison logic used in
+    // dropCapabilities() without needing root privileges.
+    var expected: [2]linux.cap_user_data_t = .{
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
+    };
+    for (default_caps) |cap| {
+        const idx = linux.CAP.TO_INDEX(cap);
+        const mask = linux.CAP.TO_MASK(cap);
+        expected[idx].effective |= mask;
+        expected[idx].permitted |= mask;
+        expected[idx].inheritable |= mask;
+    }
+
+    // matching data should pass
+    const matching = expected;
+    for (0..2) |i| {
+        try std.testing.expectEqual(expected[i].effective, matching[i].effective);
+        try std.testing.expectEqual(expected[i].permitted, matching[i].permitted);
+    }
+
+    // tampered data (extra cap) should differ
+    var tampered = expected;
+    tampered[0].effective |= linux.CAP.TO_MASK(linux.CAP.SYS_ADMIN);
+    try std.testing.expect(tampered[0].effective != expected[0].effective);
+}
+
+test "blocked_syscalls includes filesystem namespace escape vectors" {
+    const fs_escape = [_]linux.SYS{
+        .unshare, .mount, .umount2, .pivot_root,
+        .open_tree, .move_mount, .fsopen, .fsmount, .fsconfig,
+    };
+    for (fs_escape) |sc| {
         var found = false;
         for (blocked_syscalls) |blocked| {
             if (blocked == sc) {

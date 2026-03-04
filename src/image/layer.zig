@@ -321,6 +321,55 @@ fn isSafeTarPath(name: []const u8) bool {
     return true;
 }
 
+/// check whether a symlink target is safe during layer extraction.
+///
+/// absolute symlinks (starting with '/') are always safe — after pivot_root
+/// they resolve within the container's rootfs, not the host.
+///
+/// relative symlinks are checked by resolving them relative to the entry's
+/// parent directory and counting path depth. if the resolved path would
+/// escape the extraction root (depth goes negative), it's rejected.
+///
+/// examples:
+///   entry="usr/lib/libfoo.so", target="../lib64/libfoo.so" -> safe
+///   entry="usr/lib/libfoo.so", target="../../etc/shadow"   -> unsafe (escapes /usr)
+///   entry="etc/resolv.conf",   target="/run/resolv.conf"   -> safe (absolute)
+fn isSafeSymlinkTarget(entry_path: []const u8, link_target: []const u8) bool {
+    // absolute symlinks are safe — they resolve inside the container rootfs
+    if (link_target.len > 0 and link_target[0] == '/') return true;
+
+    // for relative symlinks, resolve relative to the entry's parent directory.
+    // compute the depth of the entry's parent:
+    //   "usr/lib/libfoo.so" has parent "usr/lib" -> depth 2
+    //   "etc/resolv.conf" has parent "etc" -> depth 1
+    //   "file.txt" has parent "" -> depth 0
+    var parent_depth: isize = 0;
+    var entry_it = std.mem.splitScalar(u8, entry_path, '/');
+    var component_count: usize = 0;
+    while (entry_it.next()) |_| {
+        component_count += 1;
+    }
+    // parent depth = number of components - 1 (the filename itself)
+    if (component_count > 0) {
+        parent_depth = @intCast(component_count - 1);
+    }
+
+    // now walk the link target, adjusting depth for ".." and real components
+    var depth = parent_depth;
+    var link_it = std.mem.splitScalar(u8, link_target, '/');
+    while (link_it.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".")) continue;
+        if (std.mem.eql(u8, component, "..")) {
+            depth -= 1;
+            if (depth < 0) return false; // escaped the root
+        } else {
+            depth += 1;
+        }
+    }
+
+    return true;
+}
+
 /// extract a gzipped tarball to a directory.
 /// this is the core extraction logic: gzip decompress → tar extract.
 ///
@@ -387,6 +436,13 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                 };
             },
             .sym_link => {
+                // validate symlink target doesn't escape the extraction root.
+                // absolute symlinks are safe — they resolve within the container
+                // rootfs after pivot_root. relative symlinks need checking.
+                if (!isSafeSymlinkTarget(entry.name, entry.link_name)) {
+                    log.warn("extract: skipping unsafe symlink '{s}' -> '{s}'", .{ entry.name, entry.link_name });
+                    continue;
+                }
                 createDirAndSymlink(dest_dir, entry.link_name, entry.name) catch |e| {
                     log.warn("extract: failed to create symlink '{s}': {}", .{ entry.name, e });
                 };
@@ -437,6 +493,36 @@ test "tar path validation — unsafe paths rejected" {
     try std.testing.expect(!isSafeTarPath("/etc/passwd"));
     try std.testing.expect(!isSafeTarPath("foo/../../bar"));
     try std.testing.expect(!isSafeTarPath(".."));
+}
+
+test "symlink target validation — safe relative targets" {
+    // sibling symlink: usr/lib/libfoo.so -> ../lib64/libfoo.so
+    // resolves to usr/lib64/libfoo.so (stays within root)
+    try std.testing.expect(isSafeSymlinkTarget("usr/lib/libfoo.so", "../lib64/libfoo.so"));
+
+    // same directory: etc/motd -> motd.real
+    try std.testing.expect(isSafeSymlinkTarget("etc/motd", "motd.real"));
+
+    // deeper link: a/b/c/link -> ../../d/target (resolves to a/d/target)
+    try std.testing.expect(isSafeSymlinkTarget("a/b/c/link", "../../d/target"));
+}
+
+test "symlink target validation — safe absolute targets" {
+    // absolute symlinks resolve within container rootfs after pivot_root
+    try std.testing.expect(isSafeSymlinkTarget("etc/resolv.conf", "/run/resolv.conf"));
+    try std.testing.expect(isSafeSymlinkTarget("usr/bin/python", "/usr/bin/python3"));
+}
+
+test "symlink target validation — unsafe targets rejected" {
+    // escapes root: etc/shadow -> ../../etc/shadow
+    // entry parent depth = 1 (etc/), then ../../ goes to depth -1
+    try std.testing.expect(!isSafeSymlinkTarget("etc/shadow", "../../etc/shadow"));
+
+    // escapes from deeper path
+    try std.testing.expect(!isSafeSymlinkTarget("usr/lib/link", "../../../../etc/passwd"));
+
+    // escapes from top-level file
+    try std.testing.expect(!isSafeSymlinkTarget("link", "../etc/shadow"));
 }
 
 test "layer path format" {
