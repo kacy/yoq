@@ -10,6 +10,7 @@
 const std = @import("std");
 const node_mod = @import("node.zig");
 const paths = @import("../lib/paths.zig");
+const ip_mod = @import("../network/ip.zig");
 
 pub const NodeConfig = node_mod.NodeConfig;
 pub const PeerConfig = node_mod.PeerConfig;
@@ -55,26 +56,13 @@ fn parseSinglePeer(s: []const u8) !PeerConfig {
     const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidFormat;
 
     // parse IP address (simple dotted-quad for now)
-    const addr = parseIpv4(host_str) catch return error.InvalidFormat;
+    const addr = ip_mod.parseIp(host_str) orelse return error.InvalidFormat;
 
     return .{
         .id = id,
         .addr = addr,
         .port = port,
     };
-}
-
-fn parseIpv4(s: []const u8) ![4]u8 {
-    var result: [4]u8 = undefined;
-    var iter = std.mem.splitScalar(u8, s, '.');
-    var i: usize = 0;
-    while (iter.next()) |octet_str| {
-        if (i >= 4) return error.InvalidFormat;
-        result[i] = std.fmt.parseInt(u8, octet_str, 10) catch return error.InvalidFormat;
-        i += 1;
-    }
-    if (i != 4) return error.InvalidFormat;
-    return result;
 }
 
 /// how many committed entries since the last snapshot before we
@@ -119,16 +107,6 @@ test "parsePeers empty string" {
     try std.testing.expectEqual(@as(usize, 0), peers.len);
 }
 
-test "parseIpv4 valid" {
-    const addr = try parseIpv4("192.168.1.1");
-    try std.testing.expectEqual([4]u8{ 192, 168, 1, 1 }, addr);
-}
-
-test "parseIpv4 localhost" {
-    const addr = try parseIpv4("127.0.0.1");
-    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, addr);
-}
-
 test "parsePeers rejects missing @ separator" {
     const alloc = std.testing.allocator;
     const result = parsePeers(alloc, "2_10.0.0.2:9700");
@@ -141,14 +119,3 @@ test "parsePeers rejects missing port" {
     try std.testing.expectError(ConfigError.InvalidPeerFormat, result);
 }
 
-test "parseIpv4 boundary values" {
-    const zero = try parseIpv4("0.0.0.0");
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, zero);
-
-    const max = try parseIpv4("255.255.255.255");
-    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, max);
-}
-
-test "parseIpv4 rejects too few octets" {
-    try std.testing.expectError(error.InvalidFormat, parseIpv4("10.42.0"));
-}

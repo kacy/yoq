@@ -28,6 +28,7 @@ const image_spec = @import("../image/spec.zig");
 const store = @import("../state/store.zig");
 const logs = @import("../runtime/logs.zig");
 const wireguard = @import("../network/wireguard.zig");
+const ip_mod = @import("../network/ip.zig");
 const setup = @import("../network/setup.zig");
 
 const Allocator = std.mem.Allocator;
@@ -164,7 +165,7 @@ pub const Agent = struct {
         }
 
         if (extractJsonString(resp.body, "overlay_ip")) |ip_str| {
-            if (parseOverlayIp(ip_str)) |ip| {
+            if (ip_mod.parseIp(ip_str)) |ip| {
                 self.overlay_ip = ip;
             }
         }
@@ -334,7 +335,7 @@ pub const Agent = struct {
             else
                 continue;
 
-            const overlay_ip = parseOverlayIp(overlay_str) orelse continue;
+            const overlay_ip = ip_mod.parseIp(overlay_str) orelse continue;
 
             // check if this peer is already configured
             var found = false;
@@ -697,27 +698,6 @@ pub fn detectLocalIp(target: [4]u8, buf: *[16]u8) []const u8 {
     return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] }) catch "127.0.0.1";
 }
 
-/// parse a dotted-quad overlay IP string into 4 bytes.
-fn parseOverlayIp(str: []const u8) ?[4]u8 {
-    var ip: [4]u8 = undefined;
-    var octet_idx: usize = 0;
-    var start: usize = 0;
-
-    for (str, 0..) |c, i| {
-        if (c == '.') {
-            if (octet_idx >= 3) return null;
-            ip[octet_idx] = std.fmt.parseInt(u8, str[start..i], 10) catch return null;
-            octet_idx += 1;
-            start = i + 1;
-        }
-    }
-
-    if (octet_idx != 3) return null;
-    ip[3] = std.fmt.parseInt(u8, str[start..], 10) catch return null;
-
-    return ip;
-}
-
 // -- tests --
 
 test "getSystemResources returns reasonable values" {
@@ -765,18 +745,6 @@ test "detectLocalIp returns a dotted-quad string" {
     }
     try std.testing.expectEqual(@as(usize, 3), dots);
     try std.testing.expect(ip.len >= 7); // "x.x.x.x" minimum
-}
-
-test "parseOverlayIp valid" {
-    const ip = parseOverlayIp("10.40.0.3").?;
-    try std.testing.expectEqual([4]u8{ 10, 40, 0, 3 }, ip);
-}
-
-test "parseOverlayIp invalid" {
-    try std.testing.expect(parseOverlayIp("not.an.ip") == null);
-    try std.testing.expect(parseOverlayIp("10.42.0") == null);
-    try std.testing.expect(parseOverlayIp("") == null);
-    try std.testing.expect(parseOverlayIp("999.0.0.1") == null);
 }
 
 test "Agent init peer tracking defaults to zero" {

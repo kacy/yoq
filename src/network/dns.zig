@@ -455,37 +455,12 @@ pub fn parseResolvConf(content: []const u8) ?[4]u8 {
         if (addr_clean.len == 0) continue;
 
         // parse dotted-quad IPv4 address
-        if (parseIpv4(addr_clean)) |addr| return addr;
+        if (ip_mod.parseIp(addr_clean)) |addr| return addr;
     }
 
     return null;
 }
 
-/// parse a dotted-quad IPv4 address string like "192.168.1.1" into a 4-byte array.
-fn parseIpv4(s: []const u8) ?[4]u8 {
-    var result: [4]u8 = undefined;
-    var octet_idx: usize = 0;
-    var start: usize = 0;
-
-    for (s, 0..) |c, i| {
-        if (c == '.') {
-            if (octet_idx >= 3) return null; // too many dots
-            const octet = std.fmt.parseInt(u8, s[start..i], 10) catch return null;
-            result[octet_idx] = octet;
-            octet_idx += 1;
-            start = i + 1;
-        } else if (c < '0' or c > '9') {
-            return null; // non-numeric character
-        }
-    }
-
-    // parse last octet
-    if (octet_idx != 3) return null; // not enough dots
-    const last = std.fmt.parseInt(u8, s[start..], 10) catch return null;
-    result[3] = last;
-
-    return result;
-}
 
 var resolver_thread: ?std.Thread = null;
 var resolver_socket: ?posix.socket_t = null;
@@ -1105,23 +1080,6 @@ test "detectNameConflict — unknown name is not a conflict" {
     try std.testing.expect(conflict == null);
 }
 
-// -- IPv4 parsing tests --
-
-test "parseIpv4 — valid addresses" {
-    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, parseIpv4("0.0.0.0").?);
-    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, parseIpv4("255.255.255.255").?);
-    try std.testing.expectEqual([4]u8{ 192, 168, 1, 1 }, parseIpv4("192.168.1.1").?);
-    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, parseIpv4("10.0.0.1").?);
-}
-
-test "parseIpv4 — invalid addresses" {
-    try std.testing.expect(parseIpv4("") == null);
-    try std.testing.expect(parseIpv4("1.2.3") == null);
-    try std.testing.expect(parseIpv4("1.2.3.4.5") == null);
-    try std.testing.expect(parseIpv4("256.0.0.1") == null);
-    try std.testing.expect(parseIpv4("abc.def.ghi.jkl") == null);
-    try std.testing.expect(parseIpv4("1.2.3.") == null);
-}
 
 // -- ipToU32 tests --
 
