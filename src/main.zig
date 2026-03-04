@@ -1022,4 +1022,6 @@ comptime {
     _ = @import("cluster/log.zig");
     _ = @import("cluster/raft.zig");
     _ = @import("cluster/transport.zig");
+    _ = @import("cluster/state_machine.zig");
+    _ = @import("cluster/node.zig");
 }
