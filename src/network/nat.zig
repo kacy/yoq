@@ -219,9 +219,9 @@ fn exec(args: *const ArgList) NatError!void {
     }
 
     var child = std.process.Child.init(argv[0..count], std.heap.page_allocator);
-    child.stdin_behavior = .close;
-    child.stdout_behavior = .close;
-    child.stderr_behavior = .close;
+    child.stdin_behavior = .Close;
+    child.stdout_behavior = .Close;
+    child.stderr_behavior = .Close;
 
     child.spawn() catch return NatError.ExecFailed;
     const result = child.wait() catch return NatError.ExecFailed;

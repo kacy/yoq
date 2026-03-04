@@ -311,8 +311,7 @@ pub const Raft = struct {
 
     /// return all pending actions and clear the queue.
     pub fn drainActions(self: *Raft) []Action {
-        const items = self.actions.toOwnedSlice(self.alloc) catch &.{};
-        return items;
+        return self.actions.toOwnedSlice(self.alloc) catch @constCast(&.{});
     }
 
     // -- internal --

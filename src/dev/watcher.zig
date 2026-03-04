@@ -202,7 +202,7 @@ pub const Watcher = struct {
         // set nonblocking temporarily to drain without waiting
         const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch return;
         const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-        posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch return;
+        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch return;
 
         var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
         while (true) {
@@ -210,7 +210,7 @@ pub const Watcher = struct {
         }
 
         // restore original flags
-        posix.fcntl(self.fd, posix.F.SETFL, flags) catch {};
+        _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch {};
     }
 };
 

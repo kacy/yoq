@@ -14,6 +14,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const types = @import("raft_types.zig");
+const schema = @import("../state/schema.zig");
 
 const LogEntry = types.LogEntry;
 const LogIndex = types.LogIndex;
@@ -28,10 +29,13 @@ pub const StateMachine = struct {
     last_applied: LogIndex,
 
     pub fn init(path: [:0]const u8) StateMachineError!StateMachine {
-        const db = sqlite.Db.init(.{
+        var db = sqlite.Db.init(.{
             .mode = .{ .File = path },
             .open_flags = .{ .write = true, .create = true },
         }) catch return StateMachineError.DbOpenFailed;
+
+        // create cluster tables (agents, assignments) in the replicated DB
+        schema.init(&db) catch {};
 
         return .{
             .db = db,
@@ -40,10 +44,12 @@ pub const StateMachine = struct {
     }
 
     pub fn initMemory() StateMachineError!StateMachine {
-        const db = sqlite.Db.init(.{
+        var db = sqlite.Db.init(.{
             .mode = .Memory,
             .open_flags = .{ .write = true },
         }) catch return StateMachineError.DbOpenFailed;
+
+        schema.init(&db) catch {};
 
         return .{
             .db = db,
@@ -60,7 +66,7 @@ pub const StateMachine = struct {
     pub fn apply(self: *StateMachine, entry: LogEntry) StateMachineError!void {
         if (entry.index <= self.last_applied) return;
 
-        self.db.exec(entry.data, .{}, .{}) catch return StateMachineError.ApplyFailed;
+        self.db.execDynamic(entry.data, .{}, .{}) catch return StateMachineError.ApplyFailed;
         self.last_applied = entry.index;
     }
 
