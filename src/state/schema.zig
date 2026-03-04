@@ -120,6 +120,17 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\CREATE INDEX IF NOT EXISTS idx_deployments_service
         \\    ON deployments (service_name, created_at DESC);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS secrets (
+        \\    name TEXT PRIMARY KEY,
+        \\    encrypted_value BLOB NOT NULL,
+        \\    nonce BLOB NOT NULL,
+        \\    tag BLOB NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -245,6 +256,20 @@ test "init creates deployments table" {
             " VALUES (?, ?, ?, ?, ?, ?);",
         .{},
         .{ "dep001", "web", "sha256:abc", "{}", "completed", @as(i64, 1000) },
+    ) catch unreachable;
+}
+
+test "init creates secrets table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO secrets (name, encrypted_value, nonce, tag, created_at, updated_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "db_password", "encrypted_bytes", "nonce_bytes", "tag_bytes", @as(i64, 1000), @as(i64, 1000) },
     ) catch unreachable;
 }
 
