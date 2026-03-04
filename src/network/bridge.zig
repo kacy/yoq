@@ -36,16 +36,32 @@ pub const gateway_ip = [4]u8{ 10, 42, 0, 1 };
 /// default subnet prefix length
 pub const prefix_len: u8 = 16;
 
+/// configurable bridge parameters.
+/// defaults match the existing single-node behavior so callers
+/// can construct with `.{}` and get backward-compatible behavior.
+pub const BridgeConfig = struct {
+    gateway_ip: [4]u8 = gateway_ip,
+    prefix_len: u8 = prefix_len,
+    name: []const u8 = default_bridge,
+};
+
 // -- bridge operations --
 
 /// create a bridge interface if it doesn't already exist.
 /// assigns the gateway IP and brings it up.
+/// convenience wrapper for ensureBridgeWithConfig with defaults.
 pub fn ensureBridge(name: []const u8) BridgeError!void {
+    return ensureBridgeWithConfig(.{ .name = name });
+}
+
+/// create a bridge with explicit gateway and prefix configuration.
+/// used in cluster mode where each node has a different subnet.
+pub fn ensureBridgeWithConfig(config: BridgeConfig) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.CreateFailed;
     defer posix.close(fd);
 
     // check if bridge already exists
-    const existing = nl.getIfIndex(fd, name) catch 0;
+    const existing = nl.getIfIndex(fd, config.name) catch 0;
     if (existing != 0) return; // already exists
 
     // create bridge
@@ -58,7 +74,7 @@ pub fn ensureBridge(name: []const u8) BridgeError!void {
         linux.ifinfomsg,
     ) catch return BridgeError.CreateFailed;
 
-    mb.putAttrStr(hdr, nl.IFLA.IFNAME, name) catch return BridgeError.CreateFailed;
+    mb.putAttrStr(hdr, nl.IFLA.IFNAME, config.name) catch return BridgeError.CreateFailed;
 
     // set IFLA_LINKINFO with kind = "bridge"
     const linkinfo = mb.startNested(hdr, nl.IFLA.LINKINFO) catch return BridgeError.CreateFailed;
@@ -68,10 +84,10 @@ pub fn ensureBridge(name: []const u8) BridgeError!void {
     nl.sendAndCheck(fd, mb.message()) catch return BridgeError.CreateFailed;
 
     // assign IP address to bridge
-    const bridge_idx = nl.getIfIndex(fd, name) catch return BridgeError.CreateFailed;
+    const bridge_idx = nl.getIfIndex(fd, config.name) catch return BridgeError.CreateFailed;
     if (bridge_idx == 0) return BridgeError.CreateFailed;
 
-    addAddress(fd, bridge_idx, &gateway_ip, prefix_len) catch return BridgeError.AddressFailed;
+    addAddress(fd, bridge_idx, &config.gateway_ip, config.prefix_len) catch return BridgeError.AddressFailed;
 
     // bring bridge up
     nl.setLinkUp(fd, bridge_idx) catch return BridgeError.LinkSetFailed;
@@ -219,7 +235,15 @@ pub fn deleteVeth(host_name: []const u8) BridgeError!void {
 
 /// configure networking inside a container's namespace.
 /// enters the namespace, assigns IP, sets up lo, adds default route.
+/// uses the default prefix_len (16 for single-node compatibility).
 pub fn configureContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8) BridgeError!void {
+    return configurableContainer(pid, ip, gw, prefix_len);
+}
+
+/// configure networking inside a container's namespace with
+/// an explicit prefix length. used in cluster mode where each
+/// node has a /24 instead of the default /16.
+pub fn configurableContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8, plen: u8) BridgeError!void {
     // open netns file before switching
     var ns_path_buf: [64]u8 = undefined;
     const ns_path = std.fmt.bufPrint(&ns_path_buf, "/proc/{d}/ns/net", .{pid}) catch
@@ -255,7 +279,7 @@ pub fn configureContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8) BridgeError!vo
     const eth0_idx = nl.getIfIndex(fd, "eth0") catch return BridgeError.InterfaceNotFound;
     if (eth0_idx == 0) return BridgeError.InterfaceNotFound;
 
-    addAddress(fd, eth0_idx, &ip, prefix_len) catch return BridgeError.AddressFailed;
+    addAddress(fd, eth0_idx, &ip, plen) catch return BridgeError.AddressFailed;
     nl.setLinkUp(fd, eth0_idx) catch return BridgeError.LinkSetFailed;
 
     // add default route via gateway
@@ -372,4 +396,22 @@ test "veth name with 3-char id" {
     var buf: [32]u8 = undefined;
     const name = vethName("xyz", &buf);
     try std.testing.expectEqualStrings("veth_xyz", name);
+}
+
+test "BridgeConfig defaults match existing constants" {
+    const config = BridgeConfig{};
+    try std.testing.expectEqual(gateway_ip, config.gateway_ip);
+    try std.testing.expectEqual(prefix_len, config.prefix_len);
+    try std.testing.expectEqualStrings(default_bridge, config.name);
+}
+
+test "BridgeConfig with custom values" {
+    const config = BridgeConfig{
+        .gateway_ip = .{ 10, 42, 3, 1 },
+        .prefix_len = 24,
+        .name = "yoq_node3",
+    };
+    try std.testing.expectEqual([4]u8{ 10, 42, 3, 1 }, config.gateway_ip);
+    try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
+    try std.testing.expectEqualStrings("yoq_node3", config.name);
 }

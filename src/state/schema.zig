@@ -132,6 +132,15 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
 
+    // migration: add per-node subnet and wireguard columns to agents.
+    // these support cluster networking — each agent gets a unique node_id
+    // (for its /24 subnet), a wireguard public key, and an overlay IP.
+    // ALTER TABLE ... ADD COLUMN is safe to call on existing databases;
+    // it errors if the column already exists, which we silently ignore.
+    db.exec("ALTER TABLE agents ADD COLUMN node_id INTEGER;", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN wg_public_key TEXT;", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN overlay_ip TEXT;", .{}, .{}) catch {};
+
     db.exec(
         \\CREATE TABLE IF NOT EXISTS wireguard_peers (
         \\    node_id INTEGER NOT NULL,
@@ -283,6 +292,72 @@ test "init creates secrets table" {
         .{},
         .{ "db_password", "encrypted_bytes", "nonce_bytes", "tag_bytes", @as(i64, 1000), @as(i64, 1000) },
     ) catch unreachable;
+}
+
+test "agents table has wireguard and subnet columns" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    // insert an agent with the new columns populated
+    db.exec(
+        "INSERT INTO agents (id, address, node_id, wg_public_key, overlay_ip, last_heartbeat, registered_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "agent-wg", "10.0.0.5:7701", @as(i64, 3), "base64pubkey==", "10.40.0.3", @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+
+    // read them back to verify the columns work
+    const alloc = std.testing.allocator;
+    const Row = struct { node_id: ?i64, wg_public_key: ?sqlite.Text, overlay_ip: ?sqlite.Text };
+    const row = (db.oneAlloc(
+        Row,
+        alloc,
+        "SELECT node_id, wg_public_key, overlay_ip FROM agents WHERE id = ?;",
+        .{},
+        .{"agent-wg"},
+    ) catch unreachable).?;
+    defer {
+        if (row.wg_public_key) |k| alloc.free(k.data);
+        if (row.overlay_ip) |o| alloc.free(o.data);
+    }
+
+    try std.testing.expectEqual(@as(?i64, 3), row.node_id);
+    try std.testing.expectEqualStrings("base64pubkey==", row.wg_public_key.?.data);
+    try std.testing.expectEqualStrings("10.40.0.3", row.overlay_ip.?.data);
+}
+
+test "agents table new columns default to null" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    // insert without the new columns — they should be null
+    db.exec(
+        "INSERT INTO agents (id, address, last_heartbeat, registered_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "agent-plain", "10.0.0.1:7701", @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const Row = struct { node_id: ?i64, wg_public_key: ?sqlite.Text, overlay_ip: ?sqlite.Text };
+    const row = (db.oneAlloc(
+        Row,
+        alloc,
+        "SELECT node_id, wg_public_key, overlay_ip FROM agents WHERE id = ?;",
+        .{},
+        .{"agent-plain"},
+    ) catch unreachable).?;
+    defer {
+        if (row.wg_public_key) |k| alloc.free(k.data);
+        if (row.overlay_ip) |o| alloc.free(o.data);
+    }
+
+    try std.testing.expect(row.node_id == null);
+    try std.testing.expect(row.wg_public_key == null);
+    try std.testing.expect(row.overlay_ip == null);
 }
 
 test "init is idempotent" {
