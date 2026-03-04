@@ -12,9 +12,15 @@
 //   0x02 = RequestVoteReply
 //   0x03 = AppendEntries
 //   0x04 = AppendEntriesReply
+//   0x05 = InstallSnapshot
+//   0x06 = InstallSnapshotReply
 //
 // all integers are little-endian. entries in AppendEntries are
 // serialized inline: [8B index][8B term][4B data_len][data bytes]
+//
+// InstallSnapshot payloads can be megabytes (full state machine database),
+// so encoding/decoding uses dynamic allocation instead of the fixed 8KB
+// stack buffer used for other RPCs.
 
 const std = @import("std");
 const posix = std.posix;
@@ -28,6 +34,8 @@ const RequestVoteArgs = types.RequestVoteArgs;
 const RequestVoteReply = types.RequestVoteReply;
 const AppendEntriesArgs = types.AppendEntriesArgs;
 const AppendEntriesReply = types.AppendEntriesReply;
+const InstallSnapshotArgs = types.InstallSnapshotArgs;
+const InstallSnapshotReply = types.InstallSnapshotReply;
 
 pub const TransportError = error{
     ConnectFailed,
@@ -42,6 +50,8 @@ pub const Message = union(enum) {
     request_vote_reply: RequestVoteReply,
     append_entries: AppendEntriesArgs,
     append_entries_reply: AppendEntriesReply,
+    install_snapshot: InstallSnapshotArgs,
+    install_snapshot_reply: InstallSnapshotReply,
 };
 
 pub const ReceivedMessage = struct {
@@ -59,6 +69,12 @@ const msg_request_vote: u8 = 0x01;
 const msg_request_vote_reply: u8 = 0x02;
 const msg_append_entries: u8 = 0x03;
 const msg_append_entries_reply: u8 = 0x04;
+const msg_install_snapshot: u8 = 0x05;
+const msg_install_snapshot_reply: u8 = 0x06;
+
+// max receive size: 64MB. snapshot payloads (full sqlite databases)
+// can be several megabytes. normal RPCs are a few hundred bytes.
+const max_receive_size: u32 = 64 * 1024 * 1024;
 
 pub const Transport = struct {
     alloc: std.mem.Allocator,
@@ -97,28 +113,51 @@ pub const Transport = struct {
 
     /// send a message to a peer. opens a new TCP connection each time.
     /// raft heartbeats are ~1/sec so connection overhead is negligible.
+    ///
+    /// snapshot messages use dynamic allocation since they can be megabytes.
+    /// all other RPCs use a fixed stack buffer.
     pub fn send(self: *Transport, target: NodeId, msg: Message) TransportError!void {
         const peer = self.peers.get(target) orelse return TransportError.PeerNotFound;
 
-        // encode message
+        // snapshot messages need dynamic allocation — they can be megabytes
+        if (msg == .install_snapshot) {
+            const encoded = encodeSnapshot(self.alloc, msg.install_snapshot) catch
+                return TransportError.SendFailed;
+            defer self.alloc.free(encoded);
+
+            self.sendBytes(peer, encoded) catch return TransportError.SendFailed;
+            return;
+        }
+
+        // all other RPCs fit in the 8KB stack buffer
         var buf: [8192]u8 = undefined;
         const len = encode(&buf, msg) catch return TransportError.SendFailed;
 
-        // connect with blocking socket
+        self.sendBytes(peer, buf[0..len]) catch return TransportError.SendFailed;
+    }
+
+    /// open a TCP connection to a peer and send the bytes.
+    fn sendBytes(_: *Transport, peer: PeerAddr, data: []const u8) !void {
         const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch
             return TransportError.ConnectFailed;
         defer posix.close(fd);
 
-        // set send/receive timeout (1 second)
-        const timeout = posix.timeval{ .sec = 1, .usec = 0 };
+        // set send/receive timeout (1 second for normal RPCs).
+        // snapshot sends get a longer timeout since they can be megabytes.
+        const timeout = posix.timeval{ .sec = 5, .usec = 0 };
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
         posix.connect(fd, &peer.addr.any, peer.addr.getOsSockLen()) catch
             return TransportError.ConnectFailed;
 
-        // send the encoded message
-        _ = posix.write(fd, buf[0..len]) catch return TransportError.SendFailed;
+        // write all bytes, handling partial writes
+        var total: usize = 0;
+        while (total < data.len) {
+            const n = posix.write(fd, data[total..]) catch return TransportError.SendFailed;
+            if (n == 0) return TransportError.SendFailed;
+            total += n;
+        }
     }
 
     /// accept a connection and read one message. non-blocking on accept.
@@ -135,8 +174,8 @@ pub const Transport = struct {
         };
         defer posix.close(client_fd);
 
-        // set receive timeout
-        const timeout = posix.timeval{ .sec = 1, .usec = 0 };
+        // set receive timeout — longer to accommodate snapshot transfers
+        const timeout = posix.timeval{ .sec = 5, .usec = 0 };
         posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
         // read length prefix (4 bytes)
@@ -144,7 +183,7 @@ pub const Transport = struct {
         readExact(client_fd, &len_buf) catch return TransportError.ReceiveFailed;
         const msg_len = std.mem.readInt(u32, &len_buf, .little);
 
-        if (msg_len > 65536 or msg_len < 1) return TransportError.InvalidMessage;
+        if (msg_len > max_receive_size or msg_len < 1) return TransportError.InvalidMessage;
 
         // read message body
         const body = alloc.alloc(u8, msg_len) catch return TransportError.ReceiveFailed;
@@ -229,6 +268,18 @@ fn encode(buf: []u8, msg: Message) !usize {
             writeU64(buf[offset..], reply.match_index);
             offset += 8;
         },
+        .install_snapshot => {
+            // snapshot payloads are variable-length and can be megabytes.
+            // use encodeSnapshot() instead — this case should not be reached
+            // since Transport.send() handles it separately.
+            return error.BufferTooSmall;
+        },
+        .install_snapshot_reply => |reply| {
+            buf[offset] = msg_install_snapshot_reply;
+            offset += 1;
+            writeU64(buf[offset..], reply.term);
+            offset += 8;
+        },
     }
 
     // write length prefix (excludes the 4-byte length itself)
@@ -236,6 +287,46 @@ fn encode(buf: []u8, msg: Message) !usize {
     std.mem.writeInt(u32, buf[0..4], body_len, .little);
 
     return offset;
+}
+
+/// encode an InstallSnapshot message with dynamic allocation.
+///
+/// wire format:
+///   [4B length][1B type=0x05][8B term][8B leader_id]
+///   [8B last_included_index][8B last_included_term]
+///   [4B data_len][data bytes]
+///
+/// returns an owned slice that the caller must free.
+fn encodeSnapshot(alloc: std.mem.Allocator, args: InstallSnapshotArgs) ![]u8 {
+    // header: 4B length + 1B type + 8*4 fields + 4B data_len = 41 bytes
+    const header_size = 4 + 1 + 32 + 4;
+    const total = header_size + args.data.len;
+
+    const buf = try alloc.alloc(u8, total);
+    errdefer alloc.free(buf);
+
+    var offset: usize = 4; // skip length prefix
+
+    buf[offset] = msg_install_snapshot;
+    offset += 1;
+    writeU64(buf[offset..], args.term);
+    offset += 8;
+    writeU64(buf[offset..], args.leader_id);
+    offset += 8;
+    writeU64(buf[offset..], args.last_included_index);
+    offset += 8;
+    writeU64(buf[offset..], args.last_included_term);
+    offset += 8;
+    writeU32(buf[offset..], @intCast(args.data.len));
+    offset += 4;
+    @memcpy(buf[offset..][0..args.data.len], args.data);
+    offset += args.data.len;
+
+    // write length prefix
+    const body_len: u32 = @intCast(offset - 4);
+    std.mem.writeInt(u32, buf[0..4], body_len, .little);
+
+    return buf;
 }
 
 fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
@@ -320,6 +411,35 @@ fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
                 .term = readU64(payload[0..]),
                 .success = payload[8] != 0,
                 .match_index = readU64(payload[9..]),
+            } };
+        },
+        msg_install_snapshot => {
+            // 8B term + 8B leader_id + 8B last_included_index +
+            // 8B last_included_term + 4B data_len = 36 bytes minimum
+            if (payload.len < 36) return error.InvalidMessage;
+            const term = readU64(payload[0..]);
+            const leader_id = readU64(payload[8..]);
+            const last_included_index = readU64(payload[16..]);
+            const last_included_term = readU64(payload[24..]);
+            const data_len = readU32(payload[32..]);
+
+            if (payload.len < 36 + data_len) return error.InvalidMessage;
+
+            // duplicate the snapshot data so the caller owns it
+            const data = try alloc.dupe(u8, payload[36..][0..data_len]);
+
+            return .{ .install_snapshot = .{
+                .term = term,
+                .leader_id = leader_id,
+                .last_included_index = last_included_index,
+                .last_included_term = last_included_term,
+                .data = data,
+            } };
+        },
+        msg_install_snapshot_reply => {
+            if (payload.len < 8) return error.InvalidMessage;
+            return .{ .install_snapshot_reply = .{
+                .term = readU64(payload[0..]),
             } };
         },
         else => return error.InvalidMessage,
@@ -517,4 +637,127 @@ test "encode buffer too small returns error" {
     } };
     const result = encode(&buf, msg);
     try std.testing.expectError(error.BufferTooSmall, result);
+}
+
+// -- snapshot message tests --
+
+test "encode/decode round-trip: install snapshot" {
+    const alloc = std.testing.allocator;
+    const snapshot_data = "this is a fake snapshot payload with some data in it";
+    const args = InstallSnapshotArgs{
+        .term = 7,
+        .leader_id = 1,
+        .last_included_index = 100,
+        .last_included_term = 5,
+        .data = snapshot_data,
+    };
+
+    // use encodeSnapshot since install_snapshot needs dynamic allocation
+    const encoded = try encodeSnapshot(alloc, args);
+    defer alloc.free(encoded);
+
+    // skip 4-byte length prefix
+    const decoded = try decode(alloc, encoded[4..]);
+    defer alloc.free(decoded.install_snapshot.data);
+
+    try std.testing.expectEqual(args.term, decoded.install_snapshot.term);
+    try std.testing.expectEqual(args.leader_id, decoded.install_snapshot.leader_id);
+    try std.testing.expectEqual(args.last_included_index, decoded.install_snapshot.last_included_index);
+    try std.testing.expectEqual(args.last_included_term, decoded.install_snapshot.last_included_term);
+    try std.testing.expectEqualStrings(snapshot_data, decoded.install_snapshot.data);
+}
+
+test "encode/decode round-trip: install snapshot reply" {
+    const alloc = std.testing.allocator;
+    const reply = InstallSnapshotReply{ .term = 12 };
+
+    var buf: [256]u8 = undefined;
+    const len = try encode(&buf, .{ .install_snapshot_reply = reply });
+
+    const decoded = try decode(alloc, buf[4..len]);
+    try std.testing.expectEqual(reply.term, decoded.install_snapshot_reply.term);
+}
+
+test "encode/decode round-trip: install snapshot with empty data" {
+    const alloc = std.testing.allocator;
+    const args = InstallSnapshotArgs{
+        .term = 3,
+        .leader_id = 2,
+        .last_included_index = 50,
+        .last_included_term = 2,
+        .data = "",
+    };
+
+    const encoded = try encodeSnapshot(alloc, args);
+    defer alloc.free(encoded);
+
+    const decoded = try decode(alloc, encoded[4..]);
+    defer alloc.free(decoded.install_snapshot.data);
+
+    try std.testing.expectEqual(args.term, decoded.install_snapshot.term);
+    try std.testing.expectEqual(args.last_included_index, decoded.install_snapshot.last_included_index);
+    try std.testing.expectEqual(@as(usize, 0), decoded.install_snapshot.data.len);
+}
+
+test "encode/decode round-trip: install snapshot with large payload" {
+    const alloc = std.testing.allocator;
+
+    // simulate a realistic snapshot size (64KB)
+    const data = try alloc.alloc(u8, 65536);
+    defer alloc.free(data);
+    for (data, 0..) |*b, i| b.* = @truncate(i);
+
+    const args = InstallSnapshotArgs{
+        .term = 10,
+        .leader_id = 1,
+        .last_included_index = 500,
+        .last_included_term = 8,
+        .data = data,
+    };
+
+    const encoded = try encodeSnapshot(alloc, args);
+    defer alloc.free(encoded);
+
+    const decoded = try decode(alloc, encoded[4..]);
+    defer alloc.free(decoded.install_snapshot.data);
+
+    try std.testing.expectEqual(args.term, decoded.install_snapshot.term);
+    try std.testing.expectEqual(args.last_included_index, decoded.install_snapshot.last_included_index);
+    try std.testing.expectEqual(data.len, decoded.install_snapshot.data.len);
+    try std.testing.expectEqualSlices(u8, data, decoded.install_snapshot.data);
+}
+
+test "decode rejects truncated install snapshot" {
+    const alloc = std.testing.allocator;
+    // type byte + only 20 bytes of header (need 36 minimum)
+    var buf: [21]u8 = undefined;
+    buf[0] = msg_install_snapshot;
+    @memset(buf[1..], 0);
+
+    const result = decode(alloc, &buf);
+    try std.testing.expectError(error.InvalidMessage, result);
+}
+
+test "decode rejects install snapshot with truncated data" {
+    const alloc = std.testing.allocator;
+    // header claims 1000 bytes of snapshot data but only provides 5
+    var buf: [1 + 36 + 5]u8 = undefined;
+    buf[0] = msg_install_snapshot;
+    @memset(buf[1..33], 0); // term, leader_id, last_included_index, last_included_term
+    std.mem.writeInt(u32, buf[33..37], 1000, .little); // claims 1000 bytes
+    @memset(buf[37..], 0); // but only 5 bytes available
+
+    const result = decode(alloc, &buf);
+    try std.testing.expectError(error.InvalidMessage, result);
+}
+
+test "decode rejects truncated install snapshot reply" {
+    const alloc = std.testing.allocator;
+    // type byte + only 4 bytes (need 8)
+    var buf: [5]u8 = undefined;
+    buf[0] = msg_install_snapshot_reply;
+    @memset(buf[1..], 0);
+
+    const result = decode(alloc, &buf);
+    try std.testing.expectError(error.InvalidMessage, result);
 }
