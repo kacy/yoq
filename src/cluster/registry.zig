@@ -55,7 +55,8 @@ pub fn heartbeatSql(
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
 
     return std.fmt.bufPrint(buf,
-        \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, last_heartbeat = {d}
+        \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, last_heartbeat = {d},
+        \\ status = CASE WHEN status = 'offline' THEN 'active' ELSE status END
         \\ WHERE id = '{s}';
     , .{ resources.cpu_used, resources.memory_used_mb, resources.containers, now, id_esc });
 }
@@ -102,6 +103,45 @@ pub fn removeSql(buf: []u8, id: []const u8) ![]const u8 {
 
     return std.fmt.bufPrint(buf,
         "DELETE FROM agents WHERE id = '{s}';",
+        .{id_esc},
+    );
+}
+
+/// generate SQL to orphan an agent's active assignments.
+/// resets pending/running assignments so they can be rescheduled.
+/// terminal statuses (stopped/failed) are left untouched.
+pub fn orphanAssignmentsSql(buf: []u8, agent_id: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, agent_id);
+
+    return std.fmt.bufPrint(buf,
+        "UPDATE assignments SET agent_id = '', status = 'pending' WHERE agent_id = '{s}' AND status IN ('pending', 'running');",
+        .{id_esc},
+    );
+}
+
+/// generate SQL to reassign an orphaned assignment to a new agent.
+/// the agent_id = '' guard prevents double-assignment races.
+pub fn reassignSql(buf: []u8, assignment_id: []const u8, new_agent_id: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, assignment_id);
+    var agent_esc_buf: [64]u8 = undefined;
+    const agent_esc = try sql_escape.escapeSqlString(&agent_esc_buf, new_agent_id);
+
+    return std.fmt.bufPrint(buf,
+        "UPDATE assignments SET agent_id = '{s}' WHERE id = '{s}' AND agent_id = '';",
+        .{ agent_esc, id_esc },
+    );
+}
+
+/// generate SQL to delete all assignments for an agent.
+/// used during dead agent cleanup to remove terminal assignments.
+pub fn deleteAgentAssignmentsSql(buf: []u8, agent_id: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, agent_id);
+
+    return std.fmt.bufPrint(buf,
+        "DELETE FROM assignments WHERE agent_id = '{s}';",
         .{id_esc},
     );
 }
@@ -230,6 +270,48 @@ pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![
     return results.toOwnedSlice(alloc);
 }
 
+/// get orphaned assignments (agent_id = '', status = 'pending').
+/// these are assignments that were detached from an offline agent
+/// and are waiting to be rescheduled.
+pub fn getOrphanedAssignments(alloc: Allocator, db: *sqlite.Db) ![]Assignment {
+    const Row = struct {
+        id: sqlite.Text,
+        agent_id: sqlite.Text,
+        image: sqlite.Text,
+        command: sqlite.Text,
+        status: sqlite.Text,
+        cpu_limit: i64,
+        memory_limit_mb: i64,
+    };
+
+    var stmt = db.prepare(
+        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = '' AND status = 'pending';",
+    ) catch return error.QueryFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(Row, .{}) catch return error.QueryFailed;
+
+    var results: std.ArrayListUnmanaged(Assignment) = .empty;
+    errdefer {
+        for (results.items) |a| a.deinit(alloc);
+        results.deinit(alloc);
+    }
+
+    while (iter.nextAlloc(alloc, .{}) catch null) |row| {
+        try results.append(alloc, .{
+            .id = row.id.data,
+            .agent_id = row.agent_id.data,
+            .image = row.image.data,
+            .command = row.command.data,
+            .status = row.status.data,
+            .cpu_limit = row.cpu_limit,
+            .memory_limit_mb = row.memory_limit_mb,
+        });
+    }
+
+    return results.toOwnedSlice(alloc);
+}
+
 // -- token validation --
 
 /// compare a provided token against the expected join token.
@@ -282,7 +364,7 @@ test "registerSql escapes single quotes in address" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "10.0.0.5''; DROP TABLE agents; --") != null);
 }
 
-test "heartbeatSql generates valid SQL" {
+test "heartbeatSql generates valid SQL with status recovery" {
     var buf: [512]u8 = undefined;
     const sql = try heartbeatSql(&buf, "abc123def456", .{
         .cpu_cores = 4,
@@ -294,6 +376,101 @@ test "heartbeatSql generates valid SQL" {
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "UPDATE agents SET") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
+    // should include CASE expression for status recovery
+    try std.testing.expect(std.mem.indexOf(u8, sql, "CASE WHEN status = 'offline' THEN 'active' ELSE status END") != null);
+}
+
+test "heartbeatSql restores offline agent to active" {
+    var db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    }) catch return;
+    defer db.deinit();
+
+    db.exec(
+        \\CREATE TABLE agents (
+        \\    id TEXT PRIMARY KEY,
+        \\    address TEXT NOT NULL,
+        \\    status TEXT NOT NULL DEFAULT 'active',
+        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
+        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
+        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
+        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
+        \\    containers INTEGER NOT NULL DEFAULT 0,
+        \\    last_heartbeat INTEGER NOT NULL,
+        \\    registered_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return;
+
+    // insert an offline agent
+    db.exec(
+        \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, last_heartbeat, registered_at)
+        \\ VALUES ('test12345678', '10.0.0.1:7701', 'offline', 4, 8192, 1000, 1000);
+    , .{}, .{}) catch return;
+
+    // apply heartbeat — should restore to active
+    var sql_buf: [512]u8 = undefined;
+    const sql = heartbeatSql(&sql_buf, "test12345678", .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+        .cpu_used = 1,
+        .memory_used_mb = 2048,
+        .containers = 2,
+    }, 2000) catch return;
+    db.execDynamic(sql, .{}, .{}) catch return;
+
+    const alloc = std.testing.allocator;
+    const agent = (try getAgent(alloc, &db, "test12345678")).?;
+    defer agent.deinit(alloc);
+
+    try std.testing.expectEqualStrings("active", agent.status);
+    try std.testing.expectEqual(@as(i64, 2000), agent.last_heartbeat);
+}
+
+test "heartbeatSql preserves draining status" {
+    var db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    }) catch return;
+    defer db.deinit();
+
+    db.exec(
+        \\CREATE TABLE agents (
+        \\    id TEXT PRIMARY KEY,
+        \\    address TEXT NOT NULL,
+        \\    status TEXT NOT NULL DEFAULT 'active',
+        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
+        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
+        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
+        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
+        \\    containers INTEGER NOT NULL DEFAULT 0,
+        \\    last_heartbeat INTEGER NOT NULL,
+        \\    registered_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return;
+
+    // insert a draining agent
+    db.exec(
+        \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, last_heartbeat, registered_at)
+        \\ VALUES ('test12345678', '10.0.0.1:7701', 'draining', 4, 8192, 1000, 1000);
+    , .{}, .{}) catch return;
+
+    // apply heartbeat — should NOT override draining
+    var sql_buf: [512]u8 = undefined;
+    const sql = heartbeatSql(&sql_buf, "test12345678", .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+        .cpu_used = 1,
+        .memory_used_mb = 2048,
+        .containers = 2,
+    }, 2000) catch return;
+    db.execDynamic(sql, .{}, .{}) catch return;
+
+    const alloc = std.testing.allocator;
+    const agent = (try getAgent(alloc, &db, "test12345678")).?;
+    defer agent.deinit(alloc);
+
+    try std.testing.expectEqualStrings("draining", agent.status);
 }
 
 test "drainSql generates valid SQL" {
@@ -451,4 +628,124 @@ test "getAgent returns null for missing" {
     const alloc = std.testing.allocator;
     const agent = try getAgent(alloc, &db, "nonexistent");
     try std.testing.expect(agent == null);
+}
+
+test "orphanAssignmentsSql generates valid SQL" {
+    var buf: [256]u8 = undefined;
+    const sql = try orphanAssignmentsSql(&buf, "agent1234567");
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "UPDATE assignments SET") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "agent_id = ''") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "status = 'pending'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "agent1234567") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "IN ('pending', 'running')") != null);
+}
+
+test "orphanAssignmentsSql only affects non-terminal assignments" {
+    var db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    }) catch return;
+    defer db.deinit();
+
+    db.exec(
+        \\CREATE TABLE assignments (
+        \\    id TEXT PRIMARY KEY,
+        \\    agent_id TEXT NOT NULL,
+        \\    image TEXT NOT NULL,
+        \\    command TEXT NOT NULL DEFAULT '',
+        \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    cpu_limit INTEGER NOT NULL DEFAULT 0,
+        \\    memory_limit_mb INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL DEFAULT 0
+        \\);
+    , .{}, .{}) catch return;
+
+    // insert assignments in different statuses
+    db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a1', 'agent1', 'nginx', 'pending');", .{}, .{}) catch return;
+    db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a2', 'agent1', 'redis', 'running');", .{}, .{}) catch return;
+    db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a3', 'agent1', 'postgres', 'stopped');", .{}, .{}) catch return;
+    db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a4', 'agent1', 'mysql', 'failed');", .{}, .{}) catch return;
+
+    // orphan agent1's assignments
+    var sql_buf: [256]u8 = undefined;
+    const sql = orphanAssignmentsSql(&sql_buf, "agent1") catch return;
+    db.execDynamic(sql, .{}, .{}) catch return;
+
+    // pending and running should be orphaned (agent_id = '', status = pending)
+    const alloc = std.testing.allocator;
+
+    const orphans = try getOrphanedAssignments(alloc, &db);
+    defer {
+        for (orphans) |a| a.deinit(alloc);
+        alloc.free(orphans);
+    }
+    try std.testing.expectEqual(@as(usize, 2), orphans.len);
+
+    // stopped and failed should remain on agent1
+    const remaining = try getAssignments(alloc, &db, "agent1");
+    defer {
+        for (remaining) |a| a.deinit(alloc);
+        alloc.free(remaining);
+    }
+    try std.testing.expectEqual(@as(usize, 2), remaining.len);
+}
+
+test "reassignSql generates valid SQL" {
+    var buf: [256]u8 = undefined;
+    const sql = try reassignSql(&buf, "assign123456", "newagent1234");
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "UPDATE assignments SET") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "newagent1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "assign123456") != null);
+    // guard against double-assignment
+    try std.testing.expect(std.mem.indexOf(u8, sql, "agent_id = ''") != null);
+}
+
+test "getOrphanedAssignments returns only orphaned pending" {
+    var db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    }) catch return;
+    defer db.deinit();
+
+    db.exec(
+        \\CREATE TABLE assignments (
+        \\    id TEXT PRIMARY KEY,
+        \\    agent_id TEXT NOT NULL,
+        \\    image TEXT NOT NULL,
+        \\    command TEXT NOT NULL DEFAULT '',
+        \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    cpu_limit INTEGER NOT NULL DEFAULT 0,
+        \\    memory_limit_mb INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL DEFAULT 0
+        \\);
+    , .{}, .{}) catch return;
+
+    // orphaned pending — should be returned
+    db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a1', '', 'nginx', 'pending');", .{}, .{}) catch return;
+    // normal assignment — should NOT be returned
+    db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a2', 'agent1', 'redis', 'pending');", .{}, .{}) catch return;
+    // orphaned but running status was reset to pending during orphan, so this tests
+    // a weird edge case if someone manually set it — should NOT be returned since
+    // status is running not pending
+    db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a3', '', 'pg', 'running');", .{}, .{}) catch return;
+
+    const alloc = std.testing.allocator;
+    const orphans = try getOrphanedAssignments(alloc, &db);
+    defer {
+        for (orphans) |a| a.deinit(alloc);
+        alloc.free(orphans);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), orphans.len);
+    try std.testing.expectEqualStrings("a1", orphans[0].id);
+}
+
+test "deleteAgentAssignmentsSql generates valid SQL" {
+    var buf: [256]u8 = undefined;
+    const sql = try deleteAgentAssignmentsSql(&buf, "agent1234567");
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "DELETE FROM assignments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "agent1234567") != null);
 }
