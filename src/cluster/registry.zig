@@ -71,6 +71,19 @@ pub fn drainSql(buf: []u8, id: []const u8) ![]const u8 {
     );
 }
 
+/// generate SQL to update an assignment's status.
+pub fn updateAssignmentStatusSql(buf: []u8, assignment_id: []const u8, new_status: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, assignment_id);
+    var status_esc_buf: [64]u8 = undefined;
+    const status_esc = try sql_escape.escapeSqlString(&status_esc_buf, new_status);
+
+    return std.fmt.bufPrint(buf,
+        "UPDATE assignments SET status = '{s}' WHERE id = '{s}';",
+        .{ status_esc, id_esc },
+    );
+}
+
 /// generate SQL to mark an agent as offline.
 pub fn markOfflineSql(buf: []u8, id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
@@ -289,6 +302,23 @@ test "drainSql generates valid SQL" {
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "draining") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
+}
+
+test "updateAssignmentStatusSql generates valid SQL" {
+    var buf: [256]u8 = undefined;
+    const sql = try updateAssignmentStatusSql(&buf, "assign123456", "running");
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "UPDATE assignments SET status") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "assign123456") != null);
+}
+
+test "updateAssignmentStatusSql escapes values" {
+    var buf: [512]u8 = undefined;
+    const sql = try updateAssignmentStatusSql(&buf, "id'; DROP TABLE assignments; --", "running");
+
+    // single quote should be doubled
+    try std.testing.expect(std.mem.indexOf(u8, sql, "id''; DROP TABLE assignments; --") != null);
 }
 
 test "validateToken correct" {
