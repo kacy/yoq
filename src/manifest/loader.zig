@@ -25,6 +25,7 @@ pub const LoadError = error{
     InvalidPortMapping,
     InvalidEnvVar,
     InvalidVolumeMount,
+    InvalidHealthCheck,
     UnknownDependency,
     CircularDependency,
     NoServices,
@@ -180,6 +181,9 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
         null;
     errdefer if (working_dir) |wd| alloc.free(wd);
 
+    const health_check = try parseHealthCheck(alloc, name, table.getTable("health_check"));
+    errdefer if (health_check) |hc| hc.deinit(alloc);
+
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
         .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
@@ -189,6 +193,7 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
         .depends_on = depends_on,
         .working_dir = working_dir,
         .volumes = volume_mounts,
+        .health_check = health_check,
     };
 }
 
@@ -433,6 +438,118 @@ fn parseOneVolumeMount(alloc: std.mem.Allocator, s: []const u8) LoadError!spec.V
         .target = alloc.dupe(u8, target) catch return LoadError.OutOfMemory,
         .kind = kind,
     };
+}
+
+// -- health check parsing --
+
+/// parse an optional [service.*.health_check] sub-table into a HealthCheck.
+/// returns null if the table is not present (no health check configured).
+///
+/// expected TOML format:
+///   [service.web.health_check]
+///   type = "http"       # "http", "tcp", or "exec"
+///   path = "/health"    # http only
+///   port = 8080         # http and tcp
+///   command = ["cmd"]   # exec only
+///   interval = 10       # optional, seconds
+///   timeout = 5         # optional, seconds
+///   retries = 3         # optional
+///   start_period = 0    # optional, seconds
+fn parseHealthCheck(
+    alloc: std.mem.Allocator,
+    service_name: []const u8,
+    table: ?*const toml.Table,
+) LoadError!?spec.HealthCheck {
+    const hc_table = table orelse return null;
+
+    const type_str = hc_table.getString("type") orelse {
+        log.err("manifest: service '{s}' health_check is missing required field 'type'", .{service_name});
+        return LoadError.InvalidHealthCheck;
+    };
+
+    const check_type: spec.CheckType = if (std.mem.eql(u8, type_str, "http"))
+        blk: {
+            const path = hc_table.getString("path") orelse {
+                log.err("manifest: service '{s}' http health_check is missing 'path'", .{service_name});
+                return LoadError.InvalidHealthCheck;
+            };
+            const port = hc_table.getInt("port") orelse {
+                log.err("manifest: service '{s}' http health_check is missing 'port'", .{service_name});
+                return LoadError.InvalidHealthCheck;
+            };
+            if (port < 1 or port > 65535) {
+                log.err("manifest: service '{s}' health_check port out of range", .{service_name});
+                return LoadError.InvalidHealthCheck;
+            }
+            break :blk .{ .http = .{
+                .path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory,
+                .port = @intCast(port),
+            } };
+        }
+    else if (std.mem.eql(u8, type_str, "tcp"))
+        blk: {
+            const port = hc_table.getInt("port") orelse {
+                log.err("manifest: service '{s}' tcp health_check is missing 'port'", .{service_name});
+                return LoadError.InvalidHealthCheck;
+            };
+            if (port < 1 or port > 65535) {
+                log.err("manifest: service '{s}' health_check port out of range", .{service_name});
+                return LoadError.InvalidHealthCheck;
+            }
+            break :blk .{ .tcp = .{ .port = @intCast(port) } };
+        }
+    else if (std.mem.eql(u8, type_str, "exec"))
+        blk: {
+            const cmd = try parseStringArray(alloc, hc_table.getArray("command"));
+            if (cmd.len == 0) {
+                alloc.free(cmd);
+                log.err("manifest: service '{s}' exec health_check has empty command", .{service_name});
+                return LoadError.InvalidHealthCheck;
+            }
+            break :blk .{ .exec = .{ .command = cmd } };
+        }
+    else {
+        log.err("manifest: service '{s}' health_check has unknown type '{s}'", .{ service_name, type_str });
+        return LoadError.InvalidHealthCheck;
+    };
+
+    // parse optional timing parameters (use defaults if missing)
+    var hc = spec.HealthCheck{ .check_type = check_type };
+
+    if (hc_table.getInt("interval")) |v| {
+        if (v < 1) {
+            log.err("manifest: service '{s}' health_check interval must be >= 1", .{service_name});
+            hc.deinit(alloc);
+            return LoadError.InvalidHealthCheck;
+        }
+        hc.interval = @intCast(v);
+    }
+    if (hc_table.getInt("timeout")) |v| {
+        if (v < 1) {
+            log.err("manifest: service '{s}' health_check timeout must be >= 1", .{service_name});
+            hc.deinit(alloc);
+            return LoadError.InvalidHealthCheck;
+        }
+        hc.timeout = @intCast(v);
+    }
+    if (hc_table.getInt("retries")) |v| {
+        if (v < 1) {
+            log.err("manifest: service '{s}' health_check retries must be >= 1", .{service_name});
+            hc.deinit(alloc);
+            return LoadError.InvalidHealthCheck;
+        }
+        hc.retries = @intCast(v);
+    }
+    if (hc_table.getInt("start_period")) |v| {
+        if (v < 0) {
+            log.err("manifest: service '{s}' health_check start_period must be >= 0", .{service_name});
+            hc.deinit(alloc);
+            return LoadError.InvalidHealthCheck;
+        }
+        hc.start_period = @intCast(v);
+    }
+
+    return hc;
 }
 
 // -- tests --
@@ -893,4 +1010,180 @@ test "edge case — empty arrays" {
     try std.testing.expectEqual(@as(usize, 0), manifest.services[0].env.len);
     try std.testing.expectEqual(@as(usize, 0), manifest.services[0].depends_on.len);
     try std.testing.expectEqual(@as(usize, 0), manifest.services[0].volumes.len);
+}
+
+// -- health check parsing tests --
+
+test "health check — http type" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.health_check]
+        \\type = "http"
+        \\path = "/health"
+        \\port = 8080
+        \\interval = 15
+        \\timeout = 3
+        \\retries = 5
+        \\start_period = 30
+    );
+    defer manifest.deinit();
+
+    const hc = manifest.services[0].health_check.?;
+    switch (hc.check_type) {
+        .http => |h| {
+            try std.testing.expectEqualStrings("/health", h.path);
+            try std.testing.expectEqual(@as(u16, 8080), h.port);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u32, 15), hc.interval);
+    try std.testing.expectEqual(@as(u32, 3), hc.timeout);
+    try std.testing.expectEqual(@as(u32, 5), hc.retries);
+    try std.testing.expectEqual(@as(u32, 30), hc.start_period);
+}
+
+test "health check — tcp type" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.db]
+        \\image = "postgres:15"
+        \\
+        \\[service.db.health_check]
+        \\type = "tcp"
+        \\port = 5432
+    );
+    defer manifest.deinit();
+
+    const hc = manifest.services[0].health_check.?;
+    switch (hc.check_type) {
+        .tcp => |t| {
+            try std.testing.expectEqual(@as(u16, 5432), t.port);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // defaults
+    try std.testing.expectEqual(@as(u32, 10), hc.interval);
+    try std.testing.expectEqual(@as(u32, 5), hc.timeout);
+    try std.testing.expectEqual(@as(u32, 3), hc.retries);
+    try std.testing.expectEqual(@as(u32, 0), hc.start_period);
+}
+
+test "health check — exec type" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.db]
+        \\image = "postgres:15"
+        \\
+        \\[service.db.health_check]
+        \\type = "exec"
+        \\command = ["pg_isready", "-U", "postgres"]
+        \\interval = 5
+    );
+    defer manifest.deinit();
+
+    const hc = manifest.services[0].health_check.?;
+    switch (hc.check_type) {
+        .exec => |e| {
+            try std.testing.expectEqual(@as(usize, 3), e.command.len);
+            try std.testing.expectEqualStrings("pg_isready", e.command[0]);
+            try std.testing.expectEqualStrings("-U", e.command[1]);
+            try std.testing.expectEqualStrings("postgres", e.command[2]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u32, 5), hc.interval);
+}
+
+test "health check — not specified" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expect(manifest.services[0].health_check == null);
+}
+
+test "health check — missing type returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.health_check]
+        \\port = 8080
+    );
+    try std.testing.expectError(LoadError.InvalidHealthCheck, result);
+}
+
+test "health check — unknown type returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.health_check]
+        \\type = "grpc"
+        \\port = 50051
+    );
+    try std.testing.expectError(LoadError.InvalidHealthCheck, result);
+}
+
+test "health check — http missing path returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.health_check]
+        \\type = "http"
+        \\port = 8080
+    );
+    try std.testing.expectError(LoadError.InvalidHealthCheck, result);
+}
+
+test "health check — http missing port returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.health_check]
+        \\type = "http"
+        \\path = "/health"
+    );
+    try std.testing.expectError(LoadError.InvalidHealthCheck, result);
+}
+
+test "health check — tcp missing port returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.health_check]
+        \\type = "tcp"
+    );
+    try std.testing.expectError(LoadError.InvalidHealthCheck, result);
+}
+
+test "health check — exec empty command returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.health_check]
+        \\type = "exec"
+        \\command = []
+    );
+    try std.testing.expectError(LoadError.InvalidHealthCheck, result);
 }
