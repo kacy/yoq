@@ -18,6 +18,7 @@ const orchestrator = @import("manifest/orchestrator.zig");
 const watcher_mod = @import("dev/watcher.zig");
 const manifest_spec = @import("manifest/spec.zig");
 const health = @import("manifest/health.zig");
+const update = @import("manifest/update.zig");
 const api_server = @import("api/server.zig");
 const routes = @import("api/routes.zig");
 const cluster_node = @import("cluster/node.zig");
@@ -85,6 +86,10 @@ pub fn main() !void {
         cmdNodes(&args, alloc);
     } else if (std.mem.eql(u8, command, "drain")) {
         cmdDrain(&args, alloc);
+    } else if (std.mem.eql(u8, command, "rollback")) {
+        cmdRollback(&args, alloc);
+    } else if (std.mem.eql(u8, command, "history")) {
+        cmdHistory(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -1345,6 +1350,80 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 }
 
+// -- deployment commands --
+
+fn cmdRollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const service_name = args.next() orelse {
+        writeErr("usage: yoq rollback <service>\n", .{});
+        std.process.exit(1);
+    };
+
+    // look up the previous successful deployment
+    const config = update.rollback(alloc, service_name) catch |err| {
+        switch (err) {
+            update.UpdateError.NoPreviousDeployment => {
+                writeErr("no previous deployment found for {s}\n", .{service_name});
+            },
+            update.UpdateError.StoreFailed => {
+                writeErr("failed to read deployment history\n", .{});
+            },
+            else => {
+                writeErr("rollback failed\n", .{});
+            },
+        }
+        std.process.exit(1);
+    };
+    defer alloc.free(config);
+
+    write("rollback config for {s}:\n{s}\n", .{ service_name, config });
+    write("\nto apply this rollback, redeploy with this config using 'yoq up'\n", .{});
+}
+
+fn cmdHistory(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const service_name = args.next() orelse {
+        writeErr("usage: yoq history <service>\n", .{});
+        std.process.exit(1);
+    };
+
+    var deployments = store.listDeployments(alloc, service_name) catch {
+        writeErr("failed to read deployment history\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (deployments.items) |dep| dep.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    if (deployments.items.len == 0) {
+        write("no deployments found for {s}\n", .{service_name});
+        return;
+    }
+
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{ "ID", "STATUS", "HASH", "TIMESTAMP", "MESSAGE" });
+
+    for (deployments.items) |dep| {
+        // format timestamp as a simple unix time string.
+        // full date formatting is deferred until we have a time library.
+        var ts_buf: [20]u8 = undefined;
+        const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{dep.created_at}) catch "?";
+        const msg = dep.message orelse "";
+
+        write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{
+            truncate(dep.id, 12),
+            dep.status,
+            truncate(dep.manifest_hash, 12),
+            ts_str,
+            truncate(msg, 40),
+        });
+    }
+}
+
+/// truncate a string to max_len, adding "..." if truncated
+fn truncate(s: []const u8, max_len: usize) []const u8 {
+    if (s.len <= max_len) return s;
+    return s[0..max_len];
+}
+
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -1370,6 +1449,8 @@ fn printUsage() void {
         \\  rm <id>                          remove a stopped container
         \\  pull <image>                     pull an image from a registry
         \\  images                           list pulled images
+        \\  rollback <service>               rollback to previous deployment
+        \\  history <service>                show deployment history
         \\  rmi <image>                      remove a pulled image
         \\  version                          print version
         \\  help                             show this help
@@ -1584,6 +1665,7 @@ comptime {
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
     _ = @import("manifest/health.zig");
+    _ = @import("manifest/update.zig");
     _ = @import("dev/log_mux.zig");
     _ = @import("dev/watcher.zig");
     _ = @import("api/http.zig");

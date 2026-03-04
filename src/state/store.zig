@@ -560,6 +560,162 @@ pub fn lookupServiceNames(alloc: std.mem.Allocator, name: []const u8) StoreError
     return ips;
 }
 
+// -- deployments --
+
+/// persisted deployment record. tracks each rollout of a service
+/// so we can show history and rollback to a previous config.
+pub const DeploymentRecord = struct {
+    id: []const u8,
+    service_name: []const u8,
+    manifest_hash: []const u8,
+    config_snapshot: []const u8,
+    status: []const u8,
+    message: ?[]const u8,
+    created_at: i64,
+
+    pub fn deinit(self: DeploymentRecord, alloc: std.mem.Allocator) void {
+        alloc.free(self.id);
+        alloc.free(self.service_name);
+        alloc.free(self.manifest_hash);
+        alloc.free(self.config_snapshot);
+        alloc.free(self.status);
+        if (self.message) |msg| alloc.free(msg);
+    }
+};
+
+/// sqlite row type for deployment queries
+const DeploymentRow = struct {
+    id: sqlite.Text,
+    service_name: sqlite.Text,
+    manifest_hash: sqlite.Text,
+    config_snapshot: sqlite.Text,
+    status: sqlite.Text,
+    message: ?sqlite.Text,
+    created_at: i64,
+};
+
+fn deploymentRowToRecord(row: DeploymentRow) DeploymentRecord {
+    return .{
+        .id = row.id.data,
+        .service_name = row.service_name.data,
+        .manifest_hash = row.manifest_hash.data,
+        .config_snapshot = row.config_snapshot.data,
+        .status = row.status.data,
+        .message = if (row.message) |msg| msg.data else null,
+        .created_at = row.created_at,
+    };
+}
+
+/// save a new deployment record.
+pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
+    const db = try getDb();
+    defer releaseDb();
+
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, message, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{
+            record.id,
+            record.service_name,
+            record.manifest_hash,
+            record.config_snapshot,
+            record.status,
+            record.message,
+            record.created_at,
+        },
+    ) catch return StoreError.WriteFailed;
+}
+
+/// load a deployment record by id.
+/// caller owns the returned strings.
+pub fn getDeployment(alloc: std.mem.Allocator, id: []const u8) StoreError!DeploymentRecord {
+    const db = try getDb();
+    defer releaseDb();
+
+    const row = (db.oneAlloc(
+        DeploymentRow,
+        alloc,
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE id = ?;",
+        .{},
+        .{id},
+    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+
+    return deploymentRowToRecord(row);
+}
+
+/// list deployments for a service, newest first.
+/// caller owns the returned list and records.
+pub fn listDeployments(alloc: std.mem.Allocator, service_name: []const u8) StoreError!std.ArrayList(DeploymentRecord) {
+    const db = try getDb();
+    defer releaseDb();
+
+    var deployments: std.ArrayList(DeploymentRecord) = .empty;
+
+    var stmt = db.prepare(
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE service_name = ? ORDER BY created_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(DeploymentRow, .{service_name}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        deployments.append(alloc, deploymentRowToRecord(row)) catch return StoreError.ReadFailed;
+    }
+
+    return deployments;
+}
+
+/// update a deployment's status and optional message.
+pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
+    const db = try getDb();
+    defer releaseDb();
+
+    db.exec(
+        "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
+        .{},
+        .{ status, message, id },
+    ) catch return StoreError.WriteFailed;
+}
+
+/// get the most recent deployment for a service.
+/// caller owns the returned record.
+pub fn getLatestDeployment(alloc: std.mem.Allocator, service_name: []const u8) StoreError!DeploymentRecord {
+    const db = try getDb();
+    defer releaseDb();
+
+    const row = (db.oneAlloc(
+        DeploymentRow,
+        alloc,
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE service_name = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+
+    return deploymentRowToRecord(row);
+}
+
+/// get the most recent successful deployment for a service.
+/// useful for rollback — finds the last known-good config.
+/// caller owns the returned record.
+pub fn getLastSuccessfulDeployment(alloc: std.mem.Allocator, service_name: []const u8) StoreError!DeploymentRecord {
+    const db = try getDb();
+    defer releaseDb();
+
+    const row = (db.oneAlloc(
+        DeploymentRow,
+        alloc,
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE service_name = ? AND status = 'completed' ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+
+    return deploymentRowToRecord(row);
+}
+
 // -- tests --
 
 test "container record defaults" {
@@ -1019,4 +1175,191 @@ test "find app container by hostname" {
         .{ "myapp", "cache" },
     ) catch unreachable;
     try std.testing.expect(missing == null);
+}
+
+test "deployment record round-trip via sqlite" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, message, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep001", "web", "sha256:abc", "{\"image\":\"nginx:latest\"}", "completed", "initial deploy", @as(i64, 1000) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        DeploymentRow,
+        alloc,
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE id = ?;",
+        .{},
+        .{"dep001"},
+    ) catch unreachable).?;
+    const record = deploymentRowToRecord(row);
+    defer record.deinit(alloc);
+
+    try std.testing.expectEqualStrings("dep001", record.id);
+    try std.testing.expectEqualStrings("web", record.service_name);
+    try std.testing.expectEqualStrings("sha256:abc", record.manifest_hash);
+    try std.testing.expectEqualStrings("{\"image\":\"nginx:latest\"}", record.config_snapshot);
+    try std.testing.expectEqualStrings("completed", record.status);
+    try std.testing.expectEqualStrings("initial deploy", record.message.?);
+    try std.testing.expectEqual(@as(i64, 1000), record.created_at);
+}
+
+test "deployment with null message" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep002", "api", "sha256:def", "{}", "pending", @as(i64, 2000) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        DeploymentRow,
+        alloc,
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE id = ?;",
+        .{},
+        .{"dep002"},
+    ) catch unreachable).?;
+    const record = deploymentRowToRecord(row);
+    defer record.deinit(alloc);
+
+    try std.testing.expect(record.message == null);
+}
+
+test "deployment list ordered by timestamp desc" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    // insert two deployments for the same service
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep-old", "web", "sha256:old", "{}", "completed", @as(i64, 100) },
+    ) catch unreachable;
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep-new", "web", "sha256:new", "{}", "completed", @as(i64, 200) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    var stmt = db.prepare(
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE service_name = ? ORDER BY created_at DESC;",
+    ) catch unreachable;
+    defer stmt.deinit();
+
+    var results: std.ArrayList(DeploymentRecord) = .empty;
+    defer {
+        for (results.items) |rec| rec.deinit(alloc);
+        results.deinit(alloc);
+    }
+
+    var iter = stmt.iterator(DeploymentRow, .{"web"}) catch unreachable;
+    while (iter.nextAlloc(alloc, .{}) catch unreachable) |row| {
+        results.append(alloc, deploymentRowToRecord(row)) catch unreachable;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), results.items.len);
+    try std.testing.expectEqualStrings("dep-new", results.items[0].id);
+    try std.testing.expectEqualStrings("dep-old", results.items[1].id);
+}
+
+test "deployment status update" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep-upd", "web", "sha256:abc", "{}", "pending", @as(i64, 100) },
+    ) catch unreachable;
+
+    db.exec(
+        "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
+        .{},
+        .{ "completed", "all containers healthy", "dep-upd" },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        DeploymentRow,
+        alloc,
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE id = ?;",
+        .{},
+        .{"dep-upd"},
+    ) catch unreachable).?;
+    const record = deploymentRowToRecord(row);
+    defer record.deinit(alloc);
+
+    try std.testing.expectEqualStrings("completed", record.status);
+    try std.testing.expectEqualStrings("all containers healthy", record.message.?);
+}
+
+test "deployment latest returns most recent" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep-1", "web", "sha256:first", "{}", "completed", @as(i64, 100) },
+    ) catch unreachable;
+    db.exec(
+        "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep-2", "web", "sha256:second", "{}", "in_progress", @as(i64, 200) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(
+        DeploymentRow,
+        alloc,
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE service_name = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{"web"},
+    ) catch unreachable).?;
+    const record = deploymentRowToRecord(row);
+    defer record.deinit(alloc);
+
+    try std.testing.expectEqualStrings("dep-2", record.id);
+}
+
+test "deployment not found returns null" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const alloc = std.testing.allocator;
+    const row = db.oneAlloc(
+        DeploymentRow,
+        alloc,
+        "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
+            " FROM deployments WHERE id = ?;",
+        .{},
+        .{"nonexistent"},
+    ) catch unreachable;
+
+    try std.testing.expect(row == null);
 }
