@@ -18,6 +18,7 @@ const bridge = @import("bridge.zig");
 const dns = @import("dns.zig");
 const ip = @import("ip.zig");
 const nat = @import("nat.zig");
+const wireguard = @import("wireguard.zig");
 const schema = @import("../state/schema.zig");
 const log = @import("../lib/log.zig");
 
@@ -29,6 +30,143 @@ pub const SetupError = error{
     ConfigFailed,
     DbFailed,
 };
+
+// -- cluster networking --
+//
+// these functions manage the WireGuard mesh overlay that connects
+// container networks across nodes. each node runs a "wg-yoq" interface
+// with an overlay IP (10.40.0.{node_id}). routes for remote container
+// subnets (10.42.{peer_node_id}.0/24) go through the WireGuard tunnel.
+//
+// setupClusterNetworking() is called once during agent startup.
+// addClusterPeer() / removeClusterPeer() handle dynamic membership.
+// teardownClusterNetworking() is called on agent shutdown.
+
+const wg_interface = "wg-yoq";
+
+/// configuration for setting up the cross-node WireGuard mesh.
+/// passed to setupClusterNetworking() during agent startup.
+pub const ClusterNetworkConfig = struct {
+    node_id: u8,
+    private_key: []const u8,
+    listen_port: u16,
+    overlay_ip: [4]u8,
+    peers: []const PeerInfo,
+};
+
+/// information about a remote node in the WireGuard mesh.
+/// used for both initial setup and dynamic peer add/remove.
+pub const PeerInfo = struct {
+    public_key: []const u8,
+    endpoint: []const u8,
+    overlay_ip: [4]u8,
+    /// the remote node's ID, used to derive its container subnet
+    /// (10.42.{container_subnet_node}.0/24).
+    container_subnet_node: u8,
+};
+
+/// set up the WireGuard mesh interface for cluster networking.
+///
+/// creates the "wg-yoq" interface, assigns the overlay IP, and adds
+/// all known peers with routes to their container subnets. called
+/// once during agent startup after registration returns the peer list.
+///
+/// the overlay network uses 10.40.0.0/24 — each node gets 10.40.0.{node_id}.
+/// container traffic for remote nodes (10.42.{node_id}.0/24) is routed
+/// through the WireGuard tunnel via the remote node's overlay IP.
+pub fn setupClusterNetworking(config: ClusterNetworkConfig) !void {
+    log.info("setting up cluster networking (node_id={d}, overlay={d}.{d}.{d}.{d})", .{
+        config.node_id,
+        config.overlay_ip[0], config.overlay_ip[1],
+        config.overlay_ip[2], config.overlay_ip[3],
+    });
+
+    // create the wireguard interface, set private key + listen port, bring it up
+    wireguard.createInterface(wg_interface, config.private_key, config.listen_port) catch |e| {
+        log.warn("failed to create wireguard interface: {}", .{e});
+        return error.BridgeFailed;
+    };
+    errdefer wireguard.deleteInterface(wg_interface) catch {};
+
+    // assign our overlay IP to the interface
+    wireguard.assignOverlayIp(wg_interface, config.overlay_ip) catch |e| {
+        log.warn("failed to assign overlay IP to {s}: {}", .{ wg_interface, e });
+        return error.ConfigFailed;
+    };
+
+    // add each peer and its route
+    for (config.peers) |peer| {
+        addClusterPeerInternal(peer) catch |e| {
+            // non-fatal — log and continue with remaining peers.
+            // the agent will retry via reconcilePeers on the next heartbeat.
+            log.warn("failed to add peer (node {d}): {}", .{ peer.container_subnet_node, e });
+        };
+    }
+
+    log.info("cluster networking ready ({d} peers)", .{config.peers.len});
+}
+
+/// add a single peer to the WireGuard mesh.
+///
+/// adds the peer to the "wg-yoq" interface with allowed-ips covering
+/// both the peer's overlay IP (/32) and its container subnet (/24),
+/// then adds a route for the container subnet through the peer's
+/// overlay IP.
+pub fn addClusterPeer(peer: PeerInfo) !void {
+    return addClusterPeerInternal(peer);
+}
+
+/// internal peer add — shared by setupClusterNetworking and addClusterPeer.
+fn addClusterPeerInternal(peer: PeerInfo) !void {
+    // build allowed-ips: "overlay_ip/32,container_subnet/24"
+    var allowed_buf: [64]u8 = undefined;
+    const allowed_ips = std.fmt.bufPrint(&allowed_buf, "{d}.{d}.{d}.{d}/32,10.42.{d}.0/24", .{
+        peer.overlay_ip[0], peer.overlay_ip[1],
+        peer.overlay_ip[2], peer.overlay_ip[3],
+        peer.container_subnet_node,
+    }) catch return error.ConfigFailed;
+
+    wireguard.addPeer(wg_interface, .{
+        .public_key = peer.public_key,
+        .endpoint = if (peer.endpoint.len > 0) peer.endpoint else null,
+        .allowed_ips = allowed_ips,
+    }) catch |e| {
+        log.warn("failed to add wireguard peer: {}", .{e});
+        return error.ConfigFailed;
+    };
+
+    // add route for the peer's container subnet via their overlay IP
+    const dest = [4]u8{ 10, 42, peer.container_subnet_node, 0 };
+    wireguard.addRoute(dest, 24, peer.overlay_ip) catch |e| {
+        log.warn("failed to add route for 10.42.{d}.0/24: {}", .{ peer.container_subnet_node, e });
+        // route failure is non-fatal — the peer is still added and may
+        // work if there's already a matching route from a previous run
+    };
+}
+
+/// remove a peer from the WireGuard mesh.
+///
+/// removes the WireGuard peer from "wg-yoq" and deletes the route
+/// for their container subnet. best-effort — errors are logged.
+pub fn removeClusterPeer(peer: PeerInfo) void {
+    wireguard.removePeer(wg_interface, peer.public_key) catch |e| {
+        log.warn("failed to remove wireguard peer: {}", .{e});
+    };
+
+    const dest = [4]u8{ 10, 42, peer.container_subnet_node, 0 };
+    wireguard.removeRoute(dest, 24) catch |e| {
+        log.warn("failed to remove route for 10.42.{d}.0/24: {}", .{ peer.container_subnet_node, e });
+    };
+}
+
+/// tear down cluster networking.
+/// deletes the "wg-yoq" interface — kernel removes all peers and routes.
+pub fn teardownClusterNetworking() void {
+    wireguard.deleteInterface(wg_interface) catch |e| {
+        log.warn("failed to delete wireguard interface: {}", .{e});
+    };
+    log.info("cluster networking torn down", .{});
+}
 
 /// network configuration for a container
 pub const NetworkConfig = struct {
@@ -328,4 +466,47 @@ test "NetworkConfig with node_id for cluster mode" {
     const config = NetworkConfig{ .node_id = 5 };
     try std.testing.expectEqual(@as(?u8, 5), config.node_id);
     try std.testing.expect(config.enabled);
+}
+
+// -- cluster networking tests --
+
+test "ClusterNetworkConfig struct" {
+    const config = ClusterNetworkConfig{
+        .node_id = 3,
+        .private_key = "base64privatekey==",
+        .listen_port = 51820,
+        .overlay_ip = .{ 10, 40, 0, 3 },
+        .peers = &.{},
+    };
+    try std.testing.expectEqual(@as(u8, 3), config.node_id);
+    try std.testing.expectEqual(@as(u16, 51820), config.listen_port);
+    try std.testing.expectEqual([4]u8{ 10, 40, 0, 3 }, config.overlay_ip);
+    try std.testing.expectEqual(@as(usize, 0), config.peers.len);
+}
+
+test "PeerInfo struct" {
+    const peer = PeerInfo{
+        .public_key = "peerpubkey==",
+        .endpoint = "10.0.0.5:51820",
+        .overlay_ip = .{ 10, 40, 0, 5 },
+        .container_subnet_node = 5,
+    };
+    try std.testing.expectEqualStrings("peerpubkey==", peer.public_key);
+    try std.testing.expectEqualStrings("10.0.0.5:51820", peer.endpoint);
+    try std.testing.expectEqual([4]u8{ 10, 40, 0, 5 }, peer.overlay_ip);
+    try std.testing.expectEqual(@as(u8, 5), peer.container_subnet_node);
+}
+
+test "PeerInfo with empty endpoint" {
+    const peer = PeerInfo{
+        .public_key = "key==",
+        .endpoint = "",
+        .overlay_ip = .{ 10, 40, 0, 1 },
+        .container_subnet_node = 1,
+    };
+    try std.testing.expectEqual(@as(usize, 0), peer.endpoint.len);
+}
+
+test "wg_interface constant" {
+    try std.testing.expectEqualStrings("wg-yoq", wg_interface);
 }
