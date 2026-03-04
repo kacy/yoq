@@ -61,3 +61,34 @@ test "buffer too small returns error" {
     const result = escapeSqlString(&buf, "it's");
     try std.testing.expectError(error.NoSpaceLeft, result);
 }
+
+test "consecutive single quotes are all doubled" {
+    var buf: [64]u8 = undefined;
+    const result = try escapeSqlString(&buf, "it''s");
+    try std.testing.expectEqualStrings("it''''s", result);
+}
+
+test "string of only single quotes" {
+    var buf: [64]u8 = undefined;
+    const result = try escapeSqlString(&buf, "'''");
+    try std.testing.expectEqualStrings("''''''", result);
+}
+
+test "null bytes pass through unchanged" {
+    var buf: [64]u8 = undefined;
+    const input = "ab\x00cd";
+    const result = try escapeSqlString(&buf, input);
+    try std.testing.expectEqual(@as(usize, 5), result.len);
+    try std.testing.expectEqual(@as(u8, 0), result[2]);
+}
+
+test "buffer exactly fits escaped output" {
+    // "a'" escapes to "a''" (3 bytes) — should fit in a 3-byte buffer
+    var buf3: [3]u8 = undefined;
+    const result = try escapeSqlString(&buf3, "a'");
+    try std.testing.expectEqualStrings("a''", result);
+
+    // "a'" needs 3 bytes — should fail in a 2-byte buffer
+    var buf2: [2]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, escapeSqlString(&buf2, "a'"));
+}
