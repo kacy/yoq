@@ -1188,6 +1188,13 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         routes.join_token = null;
     }
 
+    // enable cluster-wide DNS resolution. the server's DNS resolver
+    // will fall through to the replicated service_names table for
+    // names not found in the local in-memory registry. this lets
+    // containers on any node resolve service names cluster-wide.
+    dns.setClusterDb(node.stateMachineDb());
+    defer dns.setClusterDb(null);
+
     // start API server — cluster mode binds to all interfaces since
     // agents on other nodes need to reach this server.
     // set api_token so all endpoints (except health/version) require auth.
