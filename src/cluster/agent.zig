@@ -27,6 +27,7 @@ const image_layer = @import("../image/layer.zig");
 const image_spec = @import("../image/spec.zig");
 const store = @import("../state/store.zig");
 const logs = @import("../runtime/logs.zig");
+const wireguard = @import("../network/wireguard.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentResources = agent_types.AgentResources;
@@ -61,6 +62,13 @@ pub const Agent = struct {
     local_containers: std.StringHashMap(ContainerState),
     container_lock: std.Thread.Mutex,
 
+    // wireguard mesh networking fields (set during registration if the
+    // server assigns a node_id)
+    node_id: ?u8 = null,
+    wg_keypair: ?wireguard.KeyPair = null,
+    overlay_ip: ?[4]u8 = null,
+    wg_listen_port: u16 = 51820,
+
     pub fn init(alloc: Allocator, server_addr: [4]u8, server_port: u16, token: []const u8) Agent {
         return .{
             .alloc = alloc,
@@ -77,14 +85,27 @@ pub const Agent = struct {
 
     /// register this agent with the cluster server.
     /// on success, self.id is set to the server-assigned agent ID.
+    /// generates a wireguard keypair and sends the public key to the
+    /// server, which assigns a node_id and overlay IP in response.
     pub fn register(self: *Agent) AgentError!void {
         const resources = getSystemResources();
 
-        // build registration JSON
-        var body_buf: [512]u8 = undefined;
+        // generate a wireguard keypair for mesh networking
+        const kp = wireguard.generateKeyPair() catch {
+            writeErr("failed to generate wireguard keypair\n", .{});
+            return AgentError.RegisterFailed;
+        };
+        const pub_key = kp.publicKeySlice();
+
+        // detect our local IP for the wireguard endpoint
+        var local_ip_buf: [16]u8 = undefined;
+        const local_ip = detectLocalIp(self.server_addr, &local_ip_buf);
+
+        // build registration JSON with wireguard info
+        var body_buf: [1024]u8 = undefined;
         const body = std.fmt.bufPrint(&body_buf,
-            "{{\"token\":\"{s}\",\"address\":\"localhost:0\",\"cpu_cores\":{d},\"memory_mb\":{d}}}",
-            .{ self.token, resources.cpu_cores, resources.memory_mb },
+            "{{\"token\":\"{s}\",\"address\":\"{s}\",\"cpu_cores\":{d},\"memory_mb\":{d},\"wg_public_key\":\"{s}\",\"wg_listen_port\":{d}}}",
+            .{ self.token, local_ip, resources.cpu_cores, resources.memory_mb, pub_key, self.wg_listen_port },
         ) catch return AgentError.RegisterFailed;
 
         var resp = http_client.postWithAuth(
@@ -102,7 +123,7 @@ pub const Agent = struct {
             return AgentError.RegisterFailed;
         }
 
-        // parse agent ID from response: {"id":"xxxxxxxxxxxx"}
+        // parse agent ID from response: {"id":"xxxxxxxxxxxx","node_id":N,"overlay_ip":"10.40.0.N"}
         const id_str = extractJsonString(resp.body, "id") orelse {
             writeErr("invalid registration response\n", .{});
             return AgentError.InvalidResponse;
@@ -114,6 +135,28 @@ pub const Agent = struct {
         }
 
         @memcpy(&self.id, id_str);
+
+        // store wireguard state
+        self.wg_keypair = kp;
+
+        // parse optional node_id and overlay_ip from the response
+        if (extractJsonInt(resp.body, "node_id")) |nid| {
+            if (nid >= 1 and nid <= 254) {
+                self.node_id = @intCast(nid);
+            }
+        }
+
+        if (extractJsonString(resp.body, "overlay_ip")) |ip_str| {
+            if (parseOverlayIp(ip_str)) |ip| {
+                self.overlay_ip = ip;
+            }
+        }
+
+        if (self.node_id) |nid| {
+            log.info("registered as agent {s} (node_id={d})", .{ &self.id, nid });
+        } else {
+            log.info("registered as agent {s}", .{&self.id});
+        }
     }
 
     /// start the agent loop in a background thread.
@@ -460,8 +503,59 @@ pub fn getSystemResources() AgentResources {
     };
 }
 
-// use shared JSON extraction helper
+// use shared JSON extraction helpers
 const extractJsonString = json_helpers.extractJsonString;
+const extractJsonInt = json_helpers.extractJsonInt;
+
+/// detect this machine's local IP address by binding a UDP socket toward
+/// the server address and reading back the local address the kernel chose.
+/// this is the standard "get my IP toward a destination" trick — it never
+/// sends any data, just uses the kernel's routing table to determine which
+/// interface would be used.
+pub fn detectLocalIp(target: [4]u8, buf: *[16]u8) []const u8 {
+    const addr = std.net.Address.initIp4(target, 80);
+
+    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch {
+        return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
+    };
+    defer posix.close(sock);
+
+    posix.connect(sock, &addr.any, addr.getOsSockLen()) catch {
+        return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
+    };
+
+    var local_addr: posix.sockaddr.storage = undefined;
+    var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+    posix.getsockname(sock, @ptrCast(&local_addr), &addr_len) catch {
+        return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
+    };
+
+    // extract IPv4 address bytes
+    const sa_in: *const posix.sockaddr.in = @ptrCast(@alignCast(&local_addr));
+    const ip_bytes: [4]u8 = @bitCast(sa_in.addr);
+    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] }) catch "127.0.0.1";
+}
+
+/// parse a dotted-quad overlay IP string into 4 bytes.
+fn parseOverlayIp(str: []const u8) ?[4]u8 {
+    var ip: [4]u8 = undefined;
+    var octet_idx: usize = 0;
+    var start: usize = 0;
+
+    for (str, 0..) |c, i| {
+        if (c == '.') {
+            if (octet_idx >= 3) return null;
+            ip[octet_idx] = std.fmt.parseInt(u8, str[start..i], 10) catch return null;
+            octet_idx += 1;
+            start = i + 1;
+        }
+    }
+
+    if (octet_idx != 3) return null;
+    ip[3] = std.fmt.parseInt(u8, str[start..], 10) catch return null;
+
+    return ip;
+}
 
 // -- tests --
 
@@ -486,4 +580,40 @@ test "Agent init creates empty local_containers" {
 
     try std.testing.expectEqual(@as(u32, 0), agent.local_containers.count());
     try std.testing.expect(!agent.running.load(.acquire));
+}
+
+test "Agent init wireguard fields default to null" {
+    const alloc = std.testing.allocator;
+    var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
+    defer agent.local_containers.deinit();
+
+    try std.testing.expect(agent.node_id == null);
+    try std.testing.expect(agent.wg_keypair == null);
+    try std.testing.expect(agent.overlay_ip == null);
+    try std.testing.expectEqual(@as(u16, 51820), agent.wg_listen_port);
+}
+
+test "detectLocalIp returns a dotted-quad string" {
+    var buf: [16]u8 = undefined;
+    const ip = detectLocalIp(.{ 127, 0, 0, 1 }, &buf);
+
+    // should be a valid IP with at least 3 dots
+    var dots: usize = 0;
+    for (ip) |c| {
+        if (c == '.') dots += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), dots);
+    try std.testing.expect(ip.len >= 7); // "x.x.x.x" minimum
+}
+
+test "parseOverlayIp valid" {
+    const ip = parseOverlayIp("10.40.0.3").?;
+    try std.testing.expectEqual([4]u8{ 10, 40, 0, 3 }, ip);
+}
+
+test "parseOverlayIp invalid" {
+    try std.testing.expect(parseOverlayIp("not.an.ip") == null);
+    try std.testing.expect(parseOverlayIp("10.42.0") == null);
+    try std.testing.expect(parseOverlayIp("") == null);
+    try std.testing.expect(parseOverlayIp("999.0.0.1") == null);
 }
