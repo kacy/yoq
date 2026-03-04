@@ -117,6 +117,63 @@ pub fn allocate(db: *sqlite.Db, container_id: []const u8) IpError![4]u8 {
     return ip;
 }
 
+/// allocate the next available IP from a specific subnet.
+/// used in cluster mode where each node has its own /24 range.
+/// walks the range from config.range_start to config.range_end,
+/// skipping any IPs already in ip_allocations.
+pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: SubnetConfig) IpError![4]u8 {
+    var current = config.range_start;
+
+    while (true) {
+        var ip_buf: [16]u8 = undefined;
+        const ip_str = formatIp(current, &ip_buf);
+
+        const ExistsRow = struct { count: i64 };
+        const exists = (db.one(
+            ExistsRow,
+            "SELECT COUNT(*) AS count FROM ip_allocations WHERE ip_address = ?;",
+            .{},
+            .{ip_str},
+        ) catch return IpError.AllocationFailed) orelse return IpError.AllocationFailed;
+
+        if (exists.count == 0) {
+            // found a free address — insert it
+            var insert_buf: [16]u8 = undefined;
+            const insert_str = formatIp(current, &insert_buf);
+
+            db.exec(
+                "INSERT INTO ip_allocations (container_id, ip_address, allocated_at) VALUES (?, ?, ?);",
+                .{},
+                .{ container_id, insert_str, @as(i64, std.time.timestamp()) },
+            ) catch return IpError.AllocationFailed;
+
+            return current;
+        }
+
+        // move to next address, but stay within the subnet range
+        if (!incrementWithinRange(&current, config.range_end)) {
+            return IpError.SubnetExhausted;
+        }
+    }
+}
+
+/// increment IP within a bounded range.
+/// returns false if we've reached range_end (exhausted).
+fn incrementWithinRange(current: *[4]u8, range_end: [4]u8) bool {
+    // check if we're already at the end of the range
+    if (std.mem.eql(u8, current, &range_end)) return false;
+
+    // simple increment: bump last octet, roll over if needed
+    if (current[3] < 254) {
+        current[3] += 1;
+        return true;
+    }
+
+    // for /24 subnets, we don't roll over to the next /24
+    // (that would be a different node's subnet)
+    return false;
+}
+
 /// release an IP allocation for a container
 pub fn release(db: *sqlite.Db, container_id: []const u8) IpError!void {
     db.exec(
@@ -335,4 +392,73 @@ test "subnetForNode(254) returns correct /24 subnet" {
     try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
     try std.testing.expectEqual([4]u8{ 10, 42, 254, 2 }, config.range_start);
     try std.testing.expectEqual([4]u8{ 10, 42, 254, 254 }, config.range_end);
+}
+
+test "allocateWithSubnet allocates from correct range" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const config = subnetForNode(3);
+    const ip1 = try allocateWithSubnet(&db, "c1", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 3, 2 }, ip1);
+
+    const ip2 = try allocateWithSubnet(&db, "c2", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 3, 3 }, ip2);
+}
+
+test "allocateWithSubnet stays within node subnet" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    // use a tiny range for testing: only 2 addresses available
+    const config = SubnetConfig{
+        .node_id = 5,
+        .base = .{ 10, 42, 5, 0 },
+        .gateway = .{ 10, 42, 5, 1 },
+        .prefix_len = 24,
+        .range_start = .{ 10, 42, 5, 2 },
+        .range_end = .{ 10, 42, 5, 3 },
+    };
+
+    const ip1 = try allocateWithSubnet(&db, "c1", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 5, 2 }, ip1);
+
+    const ip2 = try allocateWithSubnet(&db, "c2", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 5, 3 }, ip2);
+
+    // third allocation should fail — range exhausted
+    try std.testing.expectError(IpError.SubnetExhausted, allocateWithSubnet(&db, "c3", config));
+}
+
+test "allocateWithSubnet fills gaps after release" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const config = subnetForNode(7);
+
+    _ = try allocateWithSubnet(&db, "c1", config); // .2
+    _ = try allocateWithSubnet(&db, "c2", config); // .3
+    _ = try allocateWithSubnet(&db, "c3", config); // .4
+
+    try release(&db, "c2");
+
+    // should fill the gap at .3
+    const ip4 = try allocateWithSubnet(&db, "c4", config);
+    try std.testing.expectEqual([4]u8{ 10, 42, 7, 3 }, ip4);
+}
+
+test "incrementWithinRange stops at range end" {
+    var current = [4]u8{ 10, 42, 1, 254 };
+    const range_end = [4]u8{ 10, 42, 1, 254 };
+    try std.testing.expect(!incrementWithinRange(&current, range_end));
+}
+
+test "incrementWithinRange increments within range" {
+    var current = [4]u8{ 10, 42, 1, 10 };
+    const range_end = [4]u8{ 10, 42, 1, 254 };
+    try std.testing.expect(incrementWithinRange(&current, range_end));
+    try std.testing.expectEqual([4]u8{ 10, 42, 1, 11 }, current);
 }
