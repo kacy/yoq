@@ -15,6 +15,7 @@ const logs = @import("../runtime/logs.zig");
 const container = @import("../runtime/container.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
 const log = @import("../lib/log.zig");
+const health = @import("../manifest/health.zig");
 const cluster_node = @import("../cluster/node.zig");
 const agent_registry = @import("../cluster/registry.zig");
 const scheduler = @import("../cluster/scheduler.zig");
@@ -800,7 +801,8 @@ fn badRequest(comptime message: []const u8) Response {
 
 // -- JSON serialization helpers --
 
-/// write a container record as a JSON object
+/// write a container record as a JSON object.
+/// includes health check status if the service has one configured.
 fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void {
     try writer.writeAll("{\"id\":\"");
     try writer.writeAll(record.id);
@@ -818,6 +820,20 @@ fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void {
     }
     try writer.writeAll(",\"created_at\":");
     try std.fmt.format(writer, "{d}", .{record.created_at});
+
+    // include health check status if the service is being health-checked.
+    // uses the hostname as the service name (matches manifest service names).
+    if (health.getServiceHealth(record.hostname)) |sh| {
+        const health_str = switch (sh.status) {
+            .starting => "starting",
+            .healthy => "healthy",
+            .unhealthy => "unhealthy",
+        };
+        try writer.writeAll(",\"health\":\"");
+        try writer.writeAll(health_str);
+        try writer.writeByte('"');
+    }
+
     try writer.writeByte('}');
 }
 
