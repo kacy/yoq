@@ -341,11 +341,15 @@ fn mergeServiceEnv(
             }
         }
         if (!overridden) {
-            merged.append(alloc, img_var) catch {};
+            merged.append(alloc, img_var) catch |e| {
+                log.warn("failed to merge image env var: {}", .{e});
+            };
         }
     }
     for (manifest_env) |manifest_var| {
-        merged.append(alloc, manifest_var) catch {};
+        merged.append(alloc, manifest_var) catch |e| {
+            log.warn("failed to merge manifest env var: {}", .{e});
+        };
     }
 
     return merged;
@@ -389,7 +393,9 @@ fn resolveServiceVolumes(alloc: std.mem.Allocator, volumes: []const spec.VolumeM
         result.bind_mounts.append(alloc, .{
             .source = duped,
             .target = vol.target,
-        }) catch {};
+        }) catch |e| {
+            log.warn("failed to add bind mount for {s}: {}", .{ vol.target, e });
+        };
     }
 
     return result;
@@ -433,7 +439,9 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
             .host_port = pm.host_port,
             .container_port = pm.container_port,
             .protocol = .tcp,
-        }) catch {};
+        }) catch |e| {
+            log.warn("failed to add port map: {}", .{e});
+        };
     }
 
     const net_config: ?net_setup.NetworkConfig = if (port_maps.items.len > 0)
