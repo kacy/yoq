@@ -82,6 +82,10 @@ const BuildState = struct {
     stop_signal: ?[]const u8 = null,
     healthcheck: ?[]const u8 = null,
 
+    /// build args — set by ARG instructions and --build-arg CLI flags.
+    /// keys and values are owned by the allocator.
+    build_args: std.StringHashMapUnmanaged([]const u8) = .empty,
+
     /// digest of the "current" image state — starts as base image digest,
     /// updates after each layer-producing step. used for cache key computation.
     parent_digest: []const u8 = "",
@@ -111,6 +115,12 @@ const BuildState = struct {
         if (self.shell) |s| self.alloc.free(s);
         if (self.stop_signal) |s| self.alloc.free(s);
         if (self.healthcheck) |h| self.alloc.free(h);
+        var arg_it = self.build_args.iterator();
+        while (arg_it.next()) |entry| {
+            self.alloc.free(entry.key_ptr.*);
+            self.alloc.free(entry.value_ptr.*);
+        }
+        self.build_args.deinit(self.alloc);
         if (self.parent_digest.len > 0) self.alloc.free(self.parent_digest);
     }
 
@@ -136,11 +146,13 @@ const BuildState = struct {
 /// instructions: parsed Dockerfile instructions
 /// context_dir: path to the build context (for COPY)
 /// tag: optional image tag (e.g. "myapp:latest")
+/// cli_build_args: optional key=value pairs from --build-arg flags
 pub fn build(
     alloc: std.mem.Allocator,
     instructions: []const dockerfile.Instruction,
     context_dir: []const u8,
     tag: ?[]const u8,
+    cli_build_args: ?[]const []const u8,
 ) BuildError!BuildResult {
     if (instructions.len == 0 or instructions[0].kind != .from) {
         return BuildError.NoFromInstruction;
@@ -149,26 +161,51 @@ pub fn build(
     var state = BuildState.init(alloc);
     defer state.deinit();
 
+    // seed build args from CLI --build-arg flags
+    if (cli_build_args) |args| {
+        for (args) |arg| {
+            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+                const key = alloc.dupe(u8, arg[0..eq]) catch continue;
+                const val = alloc.dupe(u8, arg[eq + 1 ..]) catch {
+                    alloc.free(key);
+                    continue;
+                };
+                state.build_args.put(alloc, key, val) catch {
+                    alloc.free(key);
+                    alloc.free(val);
+                };
+            }
+        }
+    }
+
     // process each instruction
     for (instructions) |inst| {
+        // expand build args in instruction arguments (except for ARG itself)
+        const effective_args = if (inst.kind != .arg)
+            expandArgs(alloc, inst.args, &state.build_args) catch inst.args
+        else
+            inst.args;
+        defer if (inst.kind != .arg and effective_args.ptr != inst.args.ptr)
+            alloc.free(effective_args);
+
         switch (inst.kind) {
-            .from => try processFrom(alloc, &state, inst.args),
-            .run => try processRun(alloc, &state, inst.args),
-            .copy => try processCopy(alloc, &state, inst.args, context_dir),
-            .add => try processAdd(alloc, &state, inst.args, context_dir),
-            .env => processEnv(alloc, &state, inst.args),
-            .workdir => processWorkdir(alloc, &state, inst.args),
-            .cmd => processCmd(alloc, &state, inst.args),
-            .entrypoint => processEntrypoint(alloc, &state, inst.args),
-            .expose => processExpose(alloc, &state, inst.args),
-            .user => processUser(alloc, &state, inst.args),
-            .label => processLabel(alloc, &state, inst.args),
-            .volume => processVolume(alloc, &state, inst.args),
-            .shell => processShell(alloc, &state, inst.args),
-            .healthcheck => processHealthcheck(alloc, &state, inst.args),
-            .stopsignal => processStopsignal(alloc, &state, inst.args),
-            .onbuild => processOnbuild(inst.args),
-            .arg => {}, // ARG is handled at parse time in a full implementation
+            .from => try processFrom(alloc, &state, effective_args),
+            .run => try processRun(alloc, &state, effective_args),
+            .copy => try processCopy(alloc, &state, effective_args, context_dir),
+            .add => try processAdd(alloc, &state, effective_args, context_dir),
+            .env => processEnv(alloc, &state, effective_args),
+            .workdir => processWorkdir(alloc, &state, effective_args),
+            .cmd => processCmd(alloc, &state, effective_args),
+            .entrypoint => processEntrypoint(alloc, &state, effective_args),
+            .expose => processExpose(alloc, &state, effective_args),
+            .user => processUser(alloc, &state, effective_args),
+            .label => processLabel(alloc, &state, effective_args),
+            .volume => processVolume(alloc, &state, effective_args),
+            .shell => processShell(alloc, &state, effective_args),
+            .healthcheck => processHealthcheck(alloc, &state, effective_args),
+            .stopsignal => processStopsignal(alloc, &state, effective_args),
+            .onbuild => processOnbuild(effective_args),
+            .arg => processArg(alloc, &state, inst.args),
         }
     }
 
@@ -494,6 +531,151 @@ fn processLabel(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) 
     state.labels.append(alloc, owned) catch {
         alloc.free(owned);
     };
+}
+
+fn processArg(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
+    // ARG KEY=VALUE or ARG KEY (declares without default)
+    // if the key was already set by --build-arg, the CLI value takes precedence.
+    const trimmed = std.mem.trim(u8, args, " \t");
+    if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
+        const key = trimmed[0..eq];
+        const val = trimmed[eq + 1 ..];
+
+        // only set if not already provided by CLI --build-arg
+        if (state.build_args.get(key) != null) return;
+
+        const owned_key = alloc.dupe(u8, key) catch return;
+        const owned_val = alloc.dupe(u8, val) catch {
+            alloc.free(owned_key);
+            return;
+        };
+        state.build_args.put(alloc, owned_key, owned_val) catch {
+            alloc.free(owned_key);
+            alloc.free(owned_val);
+        };
+    } else {
+        // ARG with no default — declare the key with empty value if not
+        // already set by CLI
+        if (state.build_args.get(trimmed) != null) return;
+
+        const owned_key = alloc.dupe(u8, trimmed) catch return;
+        const owned_val = alloc.dupe(u8, "") catch {
+            alloc.free(owned_key);
+            return;
+        };
+        state.build_args.put(alloc, owned_key, owned_val) catch {
+            alloc.free(owned_key);
+            alloc.free(owned_val);
+        };
+    }
+}
+
+/// expand build arg references in a string.
+/// supports three forms:
+///   $VAR        — simple variable reference
+///   ${VAR}      — braced variable reference
+///   ${VAR:-default} — variable with default value
+///
+/// returns a new string if any expansion occurred, or the original
+/// string (same pointer) if nothing was expanded.
+pub fn expandArgs(
+    alloc: std.mem.Allocator,
+    input: []const u8,
+    args_map: *const std.StringHashMapUnmanaged([]const u8),
+) ![]const u8 {
+    // quick scan: if there's no $ in the string, nothing to expand
+    if (std.mem.indexOfScalar(u8, input, '$') == null) return input;
+
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] != '$') {
+            try result.append(alloc, input[i]);
+            i += 1;
+            continue;
+        }
+
+        // found a '$' — try to parse a variable reference
+        i += 1; // skip the '$'
+        if (i >= input.len) {
+            // trailing '$' — keep it literal
+            try result.append(alloc, '$');
+            break;
+        }
+
+        if (input[i] == '{') {
+            // braced form: ${VAR} or ${VAR:-default}
+            i += 1; // skip '{'
+            const var_start = i;
+
+            // find the closing '}'
+            var default_start: ?usize = null;
+            while (i < input.len and input[i] != '}') {
+                if (i + 1 < input.len and input[i] == ':' and input[i + 1] == '-') {
+                    default_start = i + 2;
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+
+            if (i >= input.len) {
+                // unclosed brace — emit everything as literal
+                try result.append(alloc, '$');
+                try result.append(alloc, '{');
+                try result.appendSlice(alloc, input[var_start..]);
+                break;
+            }
+
+            // extract variable name and optional default
+            const var_end = if (default_start) |ds| ds - 2 else i;
+            const var_name = input[var_start..var_end];
+            const default_val = if (default_start) |ds| input[ds..i] else null;
+
+            i += 1; // skip '}'
+
+            // look up the value
+            if (args_map.get(var_name)) |val| {
+                if (val.len > 0) {
+                    try result.appendSlice(alloc, val);
+                } else if (default_val) |dv| {
+                    try result.appendSlice(alloc, dv);
+                }
+            } else if (default_val) |dv| {
+                try result.appendSlice(alloc, dv);
+            }
+        } else {
+            // simple form: $VAR — variable name must start with a letter or
+            // underscore, then can contain letters, digits, and underscores.
+            // this matches Docker's ARG variable naming rules.
+            if (!std.ascii.isAlphabetic(input[i]) and input[i] != '_') {
+                // '$' followed by non-variable char (e.g. $5) — keep literal
+                try result.append(alloc, '$');
+                continue;
+            }
+
+            const var_start = i;
+            while (i < input.len and (std.ascii.isAlphanumeric(input[i]) or input[i] == '_')) {
+                i += 1;
+            }
+
+            const var_name = input[var_start..i];
+            if (args_map.get(var_name)) |val| {
+                try result.appendSlice(alloc, val);
+            }
+            // if not found, variable is silently dropped (matches Docker behavior)
+        }
+    }
+
+    // if nothing changed, return original string to avoid allocation
+    if (result.items.len == input.len and std.mem.eql(u8, result.items, input)) {
+        result.deinit(alloc);
+        return input;
+    }
+
+    return try result.toOwnedSlice(alloc);
 }
 
 fn processAdd(alloc: std.mem.Allocator, state: *BuildState, args: []const u8, context_dir: []const u8) BuildError!void {
@@ -1125,7 +1307,7 @@ test "manifest json format" {
 
 test "no from instruction returns error" {
     const alloc = std.testing.allocator;
-    const result = build(alloc, &.{}, ".", null);
+    const result = build(alloc, &.{}, ".", null, null);
     try std.testing.expectError(BuildError.NoFromInstruction, result);
 }
 
@@ -1247,7 +1429,7 @@ test "first instruction not from returns error" {
     const instructions = [_]dockerfile.Instruction{
         .{ .kind = .run, .args = "echo hello", .line_number = 1 },
     };
-    const result = build(alloc, &instructions, ".", null);
+    const result = build(alloc, &instructions, ".", null, null);
     try std.testing.expectError(BuildError.NoFromInstruction, result);
 }
 
@@ -1427,4 +1609,185 @@ test "config json with healthcheck" {
 test "processOnbuild does not crash" {
     // just verify it doesn't panic — ONBUILD logs a warning and skips
     processOnbuild("RUN echo triggered");
+}
+
+test "processArg — key=value" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processArg(alloc, &state, "VERSION=1.0");
+    try std.testing.expectEqualStrings("1.0", state.build_args.get("VERSION").?);
+}
+
+test "processArg — key only (no default)" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processArg(alloc, &state, "MY_VAR");
+    try std.testing.expectEqualStrings("", state.build_args.get("MY_VAR").?);
+}
+
+test "processArg — cli build-arg takes precedence" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    // simulate CLI --build-arg
+    const key = try alloc.dupe(u8, "VERSION");
+    const val = try alloc.dupe(u8, "2.0");
+    try state.build_args.put(alloc, key, val);
+
+    // ARG VERSION=1.0 should not override the CLI value
+    processArg(alloc, &state, "VERSION=1.0");
+    try std.testing.expectEqualStrings("2.0", state.build_args.get("VERSION").?);
+}
+
+test "expandArgs — simple $VAR" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const key = try alloc.dupe(u8, "NAME");
+    const val = try alloc.dupe(u8, "world");
+    defer alloc.free(key);
+    defer alloc.free(val);
+    try args_map.put(alloc, key, val);
+
+    const result = try expandArgs(alloc, "hello $NAME", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("hello world", result);
+}
+
+test "expandArgs — braced ${VAR}" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const key = try alloc.dupe(u8, "VER");
+    const val = try alloc.dupe(u8, "1.0");
+    defer alloc.free(key);
+    defer alloc.free(val);
+    try args_map.put(alloc, key, val);
+
+    const result = try expandArgs(alloc, "app-${VER}-release", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("app-1.0-release", result);
+}
+
+test "expandArgs — default value ${VAR:-default}" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    // VAR is not set — should use default
+    const result = try expandArgs(alloc, "value is ${MISSING:-fallback}", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("value is fallback", result);
+}
+
+test "expandArgs — default not used when var is set" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const key = try alloc.dupe(u8, "MODE");
+    const val = try alloc.dupe(u8, "production");
+    defer alloc.free(key);
+    defer alloc.free(val);
+    try args_map.put(alloc, key, val);
+
+    const result = try expandArgs(alloc, "mode=${MODE:-development}", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("mode=production", result);
+}
+
+test "expandArgs — no vars returns same pointer" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const input = "no variables here";
+    const result = try expandArgs(alloc, input, &args_map);
+    // should return the same pointer — no allocation
+    try std.testing.expect(result.ptr == input.ptr);
+}
+
+test "expandArgs — undefined var is silently dropped" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const result = try expandArgs(alloc, "hello $MISSING world", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("hello  world", result);
+}
+
+test "expandArgs — multiple vars in one string" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const k1 = try alloc.dupe(u8, "A");
+    const v1 = try alloc.dupe(u8, "one");
+    defer alloc.free(k1);
+    defer alloc.free(v1);
+    try args_map.put(alloc, k1, v1);
+
+    const k2 = try alloc.dupe(u8, "B");
+    const v2 = try alloc.dupe(u8, "two");
+    defer alloc.free(k2);
+    defer alloc.free(v2);
+    try args_map.put(alloc, k2, v2);
+
+    const result = try expandArgs(alloc, "$A and ${B}", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("one and two", result);
+}
+
+test "expandArgs — empty default value" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const result = try expandArgs(alloc, "${MISSING:-}", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "expandArgs — trailing dollar sign" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const result = try expandArgs(alloc, "cost is $", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("cost is $", result);
+}
+
+test "expandArgs — dollar followed by non-var char" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const result = try expandArgs(alloc, "price is $5", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("price is $5", result);
+}
+
+test "expandArgs — var with empty value uses default" {
+    const alloc = std.testing.allocator;
+    var args_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer args_map.deinit(alloc);
+
+    const key = try alloc.dupe(u8, "EMPTY");
+    const val = try alloc.dupe(u8, "");
+    defer alloc.free(key);
+    defer alloc.free(val);
+    try args_map.put(alloc, key, val);
+
+    const result = try expandArgs(alloc, "${EMPTY:-fallback}", &args_map);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("fallback", result);
 }
