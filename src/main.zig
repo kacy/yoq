@@ -727,7 +727,10 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var watcher_thread: ?std.Thread = null;
 
     if (dev_mode) {
-        w = watcher_mod.Watcher.init() catch null;
+        w = watcher_mod.Watcher.init() catch |e| blk: {
+            writeErr("warning: file watcher unavailable: {}\n", .{e});
+            break :blk null;
+        };
 
         if (w != null) {
             // add watches for each service's bind-mounted volumes
@@ -748,7 +751,10 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             // spawn watcher thread
             watcher_thread = std.Thread.spawn(.{}, orchestrator.watcherThread, .{
                 &orch, &w.?,
-            }) catch null;
+            }) catch |e| blk: {
+                writeErr("warning: failed to start watcher thread: {}\n", .{e});
+                break :blk null;
+            };
         }
 
         writeErr("all services running. watching for changes...\n", .{});
