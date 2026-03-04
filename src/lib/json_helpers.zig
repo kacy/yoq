@@ -65,6 +65,68 @@ pub fn extractJsonInt(json: []const u8, key: []const u8) ?i64 {
     return std.fmt.parseInt(i64, json[pos..end], 10) catch return null;
 }
 
+// -- JSON array iteration --
+// iterate over top-level objects in a JSON array like [{...},{...}].
+// returns slices into the original buffer — no allocation needed.
+
+pub const JsonObjectIterator = struct {
+    json: []const u8,
+    pos: usize,
+
+    /// return the next top-level {...} object as a slice.
+    pub fn next(self: *JsonObjectIterator) ?[]const u8 {
+        // find the next opening brace
+        while (self.pos < self.json.len and self.json[self.pos] != '{') {
+            self.pos += 1;
+        }
+        if (self.pos >= self.json.len) return null;
+
+        const start = self.pos;
+        var depth: usize = 0;
+        var in_string = false;
+        var escape = false;
+
+        while (self.pos < self.json.len) {
+            const c = self.json[self.pos];
+
+            if (escape) {
+                escape = false;
+                self.pos += 1;
+                continue;
+            }
+
+            if (c == '\\' and in_string) {
+                escape = true;
+                self.pos += 1;
+                continue;
+            }
+
+            if (c == '"') {
+                in_string = !in_string;
+            } else if (!in_string) {
+                if (c == '{') {
+                    depth += 1;
+                } else if (c == '}') {
+                    depth -= 1;
+                    if (depth == 0) {
+                        self.pos += 1;
+                        return self.json[start..self.pos];
+                    }
+                }
+            }
+            self.pos += 1;
+        }
+
+        return null; // unterminated object
+    }
+};
+
+/// iterate over top-level JSON objects in an array string.
+/// example: `[{"a":1},{"b":2}]` yields `{"a":1}` then `{"b":2}`.
+pub fn extractJsonObjects(json: []const u8) JsonObjectIterator {
+    return .{ .json = json, .pos = 0 };
+}
+
 // -- tests --
 
 test "basic escaping" {
@@ -116,4 +178,46 @@ test "extractJsonInt basic" {
     try std.testing.expectEqual(@as(i64, 4), extractJsonInt(json, "cpu_cores").?);
     try std.testing.expectEqual(@as(i64, 8192), extractJsonInt(json, "memory_mb").?);
     try std.testing.expect(extractJsonInt(json, "missing") == null);
+}
+
+test "extractJsonObjects empty array" {
+    var iter = extractJsonObjects("[]");
+    try std.testing.expect(iter.next() == null);
+}
+
+test "extractJsonObjects single object" {
+    var iter = extractJsonObjects("[{\"id\":\"abc\"}]");
+    const obj = iter.next().?;
+    try std.testing.expectEqualStrings("{\"id\":\"abc\"}", obj);
+    try std.testing.expect(iter.next() == null);
+}
+
+test "extractJsonObjects multiple objects" {
+    var iter = extractJsonObjects("[{\"id\":\"a\"},{\"id\":\"b\"}]");
+    const first = iter.next().?;
+    try std.testing.expectEqualStrings("{\"id\":\"a\"}", first);
+    const second = iter.next().?;
+    try std.testing.expectEqualStrings("{\"id\":\"b\"}", second);
+    try std.testing.expect(iter.next() == null);
+}
+
+test "extractJsonObjects handles nested braces" {
+    var iter = extractJsonObjects("[{\"data\":{\"nested\":1}},{\"id\":\"b\"}]");
+    const first = iter.next().?;
+    try std.testing.expectEqualStrings("{\"data\":{\"nested\":1}}", first);
+    const second = iter.next().?;
+    try std.testing.expectEqualStrings("{\"id\":\"b\"}", second);
+    try std.testing.expect(iter.next() == null);
+}
+
+test "extractJsonObjects handles braces in strings" {
+    var iter = extractJsonObjects("[{\"cmd\":\"echo {hi}\"}]");
+    const obj = iter.next().?;
+    try std.testing.expectEqualStrings("{\"cmd\":\"echo {hi}\"}", obj);
+    try std.testing.expect(iter.next() == null);
+}
+
+test "extractJsonObjects empty string" {
+    var iter = extractJsonObjects("");
+    try std.testing.expect(iter.next() == null);
 }
