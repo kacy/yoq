@@ -6,7 +6,8 @@
 // without networking or disk access.
 //
 // follows the raft paper closely: leader election, log replication,
-// and commit advancement via majority agreement.
+// commit advancement via majority agreement, and InstallSnapshot RPC
+// for bringing far-behind followers up to date.
 //
 // usage:
 //   var raft = try Raft.init(alloc, 1, &.{2, 3}, &log);
@@ -26,10 +27,13 @@ const Term = types.Term;
 const LogIndex = types.LogIndex;
 const Role = types.Role;
 const LogEntry = types.LogEntry;
+const SnapshotMeta = types.SnapshotMeta;
 const RequestVoteArgs = types.RequestVoteArgs;
 const RequestVoteReply = types.RequestVoteReply;
 const AppendEntriesArgs = types.AppendEntriesArgs;
 const AppendEntriesReply = types.AppendEntriesReply;
+const InstallSnapshotArgs = types.InstallSnapshotArgs;
+const InstallSnapshotReply = types.InstallSnapshotReply;
 
 pub const Action = union(enum) {
     send_request_vote: struct { target: NodeId, args: RequestVoteArgs },
@@ -39,6 +43,12 @@ pub const Action = union(enum) {
     commit_entries: struct { up_to: LogIndex },
     become_leader: void,
     become_follower: struct { leader_id: NodeId },
+
+    // snapshot actions — the caller (node.zig) handles actual I/O
+    send_install_snapshot: struct { target: NodeId, args: InstallSnapshotArgs },
+    send_install_snapshot_reply: struct { target: NodeId, reply: InstallSnapshotReply },
+    apply_snapshot: struct { data: []const u8, meta: SnapshotMeta },
+    take_snapshot: struct { up_to_index: LogIndex, term: Term },
 };
 
 // election timeout range in ticks. randomized per election to avoid
@@ -70,6 +80,10 @@ pub const Raft = struct {
     votes_received: u32,
     heartbeat_ticks: u32,
 
+    // snapshot state — tracks the most recent snapshot so the leader
+    // knows when to send InstallSnapshot instead of AppendEntries
+    snapshot_meta: ?SnapshotMeta,
+
     // output queue
     actions: std.ArrayList(Action),
 
@@ -95,6 +109,9 @@ pub const Raft = struct {
         // seed rng with node id + timestamp for uniqueness
         const seed = @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))) ^ id;
 
+        // load snapshot metadata from persistent storage
+        const snap_meta = log.getSnapshotMeta();
+
         var raft = Raft{
             .alloc = alloc,
             .id = id,
@@ -109,6 +126,7 @@ pub const Raft = struct {
             .election_timeout = 0,
             .votes_received = 0,
             .heartbeat_ticks = 0,
+            .snapshot_meta = snap_meta,
             .actions = .{},
             .rng = std.Random.DefaultPrng.init(seed),
         };
@@ -251,6 +269,65 @@ pub const Raft = struct {
         };
     }
 
+    /// handle an InstallSnapshot RPC from the leader.
+    ///
+    /// when a follower is far behind and the leader's log has been
+    /// truncated past the follower's next_index, the leader sends
+    /// a full snapshot instead of individual entries.
+    ///
+    /// the follower:
+    /// 1. steps down if the snapshot has a higher term
+    /// 2. rejects if our term is higher
+    /// 3. queues an apply_snapshot action for the caller to process
+    /// 4. updates commit_index and snapshot_meta
+    pub fn handleInstallSnapshot(self: *Raft, args: InstallSnapshotArgs) InstallSnapshotReply {
+        const current_term = self.log.getCurrentTerm();
+
+        // reject if leader's term is behind ours
+        if (args.term < current_term) {
+            return .{ .term = current_term };
+        }
+
+        // step down if we see a higher term
+        if (args.term > current_term) {
+            self.stepDown(args.term);
+        }
+
+        self.ticks_since_event = 0;
+
+        // if the snapshot is not more recent than what we have, ignore it
+        if (args.last_included_index <= self.commit_index) {
+            return .{ .term = self.log.getCurrentTerm() };
+        }
+
+        // queue the snapshot for the caller to apply.
+        // the caller (node.zig) will:
+        //   1. restore the state machine from the snapshot data
+        //   2. update the log's snapshot metadata
+        //   3. truncate the log up to last_included_index
+        const meta = SnapshotMeta{
+            .last_included_index = args.last_included_index,
+            .last_included_term = args.last_included_term,
+            .data_len = @intCast(args.data.len),
+        };
+
+        self.actions.append(self.alloc, .{
+            .apply_snapshot = .{
+                .data = args.data,
+                .meta = meta,
+            },
+        }) catch |e| {
+            logger.warn("raft: failed to queue apply_snapshot action: {}", .{e});
+        };
+
+        // update our state
+        self.snapshot_meta = meta;
+        self.commit_index = args.last_included_index;
+        self.last_applied = args.last_included_index;
+
+        return .{ .term = self.log.getCurrentTerm() };
+    }
+
     pub fn handleRequestVoteReply(self: *Raft, from: NodeId, reply: RequestVoteReply) void {
         _ = from;
         if (self.role != .candidate) return;
@@ -292,6 +369,28 @@ pub const Raft = struct {
         }
     }
 
+    /// handle a reply to our InstallSnapshot RPC.
+    /// if the follower's term is higher, step down. otherwise,
+    /// update next_index and match_index for that peer.
+    pub fn handleInstallSnapshotReply(self: *Raft, from: NodeId, reply: InstallSnapshotReply) void {
+        if (self.role != .leader) return;
+
+        if (reply.term > self.log.getCurrentTerm()) {
+            self.stepDown(reply.term);
+            return;
+        }
+
+        const peer_idx = self.peerIndex(from) orelse return;
+
+        // the follower accepted the snapshot. update tracking to
+        // the snapshot's last_included_index so the next heartbeat
+        // sends entries from that point forward.
+        if (self.snapshot_meta) |meta| {
+            self.match_index[peer_idx] = meta.last_included_index;
+            self.next_index[peer_idx] = meta.last_included_index + 1;
+        }
+    }
+
     /// submit a new command through the leader.
     /// returns the log index where the entry will be placed.
     pub fn propose(self: *Raft, data: []const u8) !LogIndex {
@@ -317,6 +416,14 @@ pub const Raft = struct {
     /// return all pending actions and clear the queue.
     pub fn drainActions(self: *Raft) []Action {
         return self.actions.toOwnedSlice(self.alloc) catch @constCast(&.{});
+    }
+
+    /// called by the node after a successful snapshot. updates the
+    /// in-memory snapshot metadata so the leader knows it can send
+    /// snapshots to lagging followers.
+    pub fn onSnapshotComplete(self: *Raft, meta: SnapshotMeta) void {
+        self.snapshot_meta = meta;
+        self.log.setSnapshotMeta(meta);
     }
 
     // -- internal --
@@ -393,6 +500,20 @@ pub const Raft = struct {
         const next = self.next_index[peer_idx];
         const prev_index = if (next > 0) next - 1 else 0;
         const prev_term = self.log.termAt(prev_index);
+
+        // if the previous entry has been compacted away (term is 0 for an
+        // index that should exist), and we have a snapshot, send the snapshot
+        // instead of append entries. this happens when a follower is so far
+        // behind that the leader has already truncated the needed entries.
+        if (prev_index > 0 and prev_term == 0) {
+            if (self.snapshot_meta) |meta| {
+                if (prev_index <= meta.last_included_index) {
+                    self.sendInstallSnapshot(peer_idx, meta);
+                    return;
+                }
+            }
+        }
+
         const last = self.log.lastIndex();
 
         // gather entries to send (from next_index to end of log)
@@ -423,6 +544,29 @@ pub const Raft = struct {
             },
         }) catch |e| {
             logger.warn("raft: failed to queue append entries: {}", .{e});
+        };
+    }
+
+    /// queue an InstallSnapshot action for a lagging peer.
+    /// the actual snapshot data loading happens in node.zig when
+    /// it processes this action — the raft module stays I/O-free.
+    fn sendInstallSnapshot(self: *Raft, peer_idx: usize, meta: SnapshotMeta) void {
+        // we produce the action with empty data here. the caller (node.zig)
+        // is responsible for reading the snapshot file and filling in the data
+        // before sending it over the wire. this keeps the raft module pure.
+        self.actions.append(self.alloc, .{
+            .send_install_snapshot = .{
+                .target = self.peers[peer_idx],
+                .args = .{
+                    .term = self.log.getCurrentTerm(),
+                    .leader_id = self.id,
+                    .last_included_index = meta.last_included_index,
+                    .last_included_term = meta.last_included_term,
+                    .data = &.{}, // filled by node.zig
+                },
+            },
+        }) catch |e| {
+            logger.warn("raft: failed to queue install snapshot: {}", .{e});
         };
     }
 
@@ -850,4 +994,246 @@ test "propose fails when not leader" {
 
     const result = raft.propose("cmd");
     try testing.expectError(error.NotLeader, result);
+}
+
+// -- snapshot tests --
+
+test "handleInstallSnapshot updates state and queues apply" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 1, 3 };
+    var follower = try setupTestRaft(alloc, 2, peers, &log);
+    defer follower.deinit();
+
+    const reply = follower.handleInstallSnapshot(.{
+        .term = 3,
+        .leader_id = 1,
+        .last_included_index = 100,
+        .last_included_term = 2,
+        .data = "snapshot data",
+    });
+
+    // should accept (term >= ours)
+    try testing.expectEqual(@as(Term, 3), reply.term);
+
+    // commit_index and last_applied should be updated
+    try testing.expectEqual(@as(LogIndex, 100), follower.commit_index);
+    try testing.expectEqual(@as(LogIndex, 100), follower.last_applied);
+
+    // should have queued an apply_snapshot action
+    const actions = follower.drainActions();
+    defer alloc.free(actions);
+
+    var found_apply = false;
+    for (actions) |action| {
+        if (action == .apply_snapshot) {
+            try testing.expectEqual(@as(LogIndex, 100), action.apply_snapshot.meta.last_included_index);
+            try testing.expectEqualStrings("snapshot data", action.apply_snapshot.data);
+            found_apply = true;
+        }
+    }
+    try testing.expect(found_apply);
+}
+
+test "handleInstallSnapshot rejects stale term" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    // set our term higher
+    log.setCurrentTerm(5);
+
+    const peers: []const NodeId = &.{ 1, 3 };
+    var follower = try setupTestRaft(alloc, 2, peers, &log);
+    defer follower.deinit();
+
+    const reply = follower.handleInstallSnapshot(.{
+        .term = 3, // behind our term of 5
+        .leader_id = 1,
+        .last_included_index = 100,
+        .last_included_term = 2,
+        .data = "snapshot data",
+    });
+
+    try testing.expectEqual(@as(Term, 5), reply.term);
+
+    // should NOT have updated commit_index
+    try testing.expectEqual(@as(LogIndex, 0), follower.commit_index);
+
+    const actions = follower.drainActions();
+    defer alloc.free(actions);
+    // no apply_snapshot action
+    for (actions) |action| {
+        try testing.expect(action != .apply_snapshot);
+    }
+}
+
+test "handleInstallSnapshot ignores old snapshot" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 1, 3 };
+    var follower = try setupTestRaft(alloc, 2, peers, &log);
+    defer follower.deinit();
+
+    // pretend we already committed up to 100
+    follower.commit_index = 100;
+
+    const reply = follower.handleInstallSnapshot(.{
+        .term = 3,
+        .leader_id = 1,
+        .last_included_index = 50, // behind our commit_index
+        .last_included_term = 2,
+        .data = "old snapshot",
+    });
+
+    // should accept the RPC (no term issue) but not apply it
+    try testing.expectEqual(@as(Term, 3), reply.term);
+    try testing.expectEqual(@as(LogIndex, 100), follower.commit_index); // unchanged
+
+    const actions = follower.drainActions();
+    defer alloc.free(actions);
+    for (actions) |action| {
+        try testing.expect(action != .apply_snapshot);
+    }
+}
+
+test "leader sends install_snapshot when entries are truncated" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var leader = try setupTestRaft(alloc, 1, peers, &log);
+    defer leader.deinit();
+
+    // force leader
+    for (0..max_election_ticks + 1) |_| {
+        leader.tick();
+    }
+    const ea = leader.drainActions();
+    defer alloc.free(ea);
+    leader.handleRequestVoteReply(2, .{
+        .term = leader.currentTerm(),
+        .vote_granted = true,
+    });
+    const la = leader.drainActions();
+    defer {
+        for (la) |action| {
+            if (action == .send_append_entries) {
+                if (action.send_append_entries.args.entries.len > 0)
+                    alloc.free(action.send_append_entries.args.entries);
+            }
+        }
+        alloc.free(la);
+    }
+
+    // simulate: leader has a snapshot at index 50, log truncated
+    leader.snapshot_meta = .{
+        .last_included_index = 50,
+        .last_included_term = 3,
+        .data_len = 1024,
+    };
+    log.setSnapshotMeta(.{
+        .last_included_index = 50,
+        .last_included_term = 3,
+        .data_len = 1024,
+    });
+
+    // peer 2's next_index is 1 (far behind the snapshot boundary).
+    // since entries 1..50 have been truncated, the leader should
+    // send a snapshot instead of append entries.
+    leader.next_index[0] = 1; // peer 2 is at index 0 in peers array
+
+    // trigger a heartbeat
+    leader.heartbeat_ticks = heartbeat_interval;
+    leader.tick();
+
+    const actions = leader.drainActions();
+    defer alloc.free(actions);
+
+    // should have a send_install_snapshot for peer 2
+    var found_snapshot = false;
+    for (actions) |action| {
+        if (action == .send_install_snapshot) {
+            try testing.expectEqual(@as(NodeId, 2), action.send_install_snapshot.target);
+            try testing.expectEqual(@as(LogIndex, 50), action.send_install_snapshot.args.last_included_index);
+            found_snapshot = true;
+        }
+    }
+    try testing.expect(found_snapshot);
+}
+
+test "handleInstallSnapshotReply updates peer tracking" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var leader = try setupTestRaft(alloc, 1, peers, &log);
+    defer leader.deinit();
+
+    // force leader
+    for (0..max_election_ticks + 1) |_| {
+        leader.tick();
+    }
+    const ea = leader.drainActions();
+    defer alloc.free(ea);
+    leader.handleRequestVoteReply(2, .{
+        .term = leader.currentTerm(),
+        .vote_granted = true,
+    });
+    const la = leader.drainActions();
+    defer {
+        for (la) |action| {
+            if (action == .send_append_entries) {
+                if (action.send_append_entries.args.entries.len > 0)
+                    alloc.free(action.send_append_entries.args.entries);
+            }
+        }
+        alloc.free(la);
+    }
+
+    leader.snapshot_meta = .{
+        .last_included_index = 50,
+        .last_included_term = 3,
+        .data_len = 1024,
+    };
+
+    // peer 2 accepted our snapshot
+    leader.handleInstallSnapshotReply(2, .{
+        .term = leader.currentTerm(),
+    });
+
+    // next_index for peer 2 should be 51 (snapshot index + 1)
+    try testing.expectEqual(@as(LogIndex, 51), leader.next_index[0]);
+    try testing.expectEqual(@as(LogIndex, 50), leader.match_index[0]);
+}
+
+test "onSnapshotComplete updates metadata" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{};
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    try testing.expect(raft.snapshot_meta == null);
+
+    raft.onSnapshotComplete(.{
+        .last_included_index = 100,
+        .last_included_term = 5,
+        .data_len = 4096,
+    });
+
+    try testing.expect(raft.snapshot_meta != null);
+    try testing.expectEqual(@as(LogIndex, 100), raft.snapshot_meta.?.last_included_index);
+
+    // should also persist to the log's snapshot_meta table
+    const persisted = log.getSnapshotMeta().?;
+    try testing.expectEqual(@as(LogIndex, 100), persisted.last_included_index);
 }
