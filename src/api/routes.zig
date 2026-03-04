@@ -14,6 +14,7 @@ const process = @import("../runtime/process.zig");
 const logs = @import("../runtime/logs.zig");
 const container = @import("../runtime/container.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
+const log = @import("../lib/log.zig");
 const cluster_node = @import("../cluster/node.zig");
 const agent_registry = @import("../cluster/registry.zig");
 const scheduler = @import("../cluster/scheduler.zig");
@@ -217,7 +218,9 @@ fn handleStopContainer(alloc: std.mem.Allocator, id: []const u8) Response {
     const pid = record.pid orelse return badRequest("container has no pid");
 
     process.terminate(pid) catch return internalError();
-    store.updateStatus(id, "stopped", null, null) catch {};
+    store.updateStatus(id, "stopped", null, null) catch |e| {
+        log.warn("failed to update status after stopping {s}: {}", .{ id, e });
+    };
 
     return .{
         .status = .ok,
