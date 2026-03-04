@@ -21,6 +21,7 @@ pub const StatusCode = enum(u16) {
     created = 201,
     no_content = 204,
     bad_request = 400,
+    unauthorized = 401,
     not_found = 404,
     method_not_allowed = 405,
     too_many_requests = 429,
@@ -32,6 +33,7 @@ pub const StatusCode = enum(u16) {
             .created => "Created",
             .no_content => "No Content",
             .bad_request => "Bad Request",
+            .unauthorized => "Unauthorized",
             .not_found => "Not Found",
             .method_not_allowed => "Method Not Allowed",
             .too_many_requests => "Too Many Requests",
@@ -196,6 +198,41 @@ pub fn formatError(buf: []u8, status: StatusCode, message: []const u8) []const u
     return formatResponse(buf, status, body);
 }
 
+/// find a header value by name (case-insensitive) in raw headers.
+/// returns the trimmed value, or null if the header is not present.
+pub fn findHeaderValue(headers: []const u8, name: []const u8) ?[]const u8 {
+    var pos: usize = 0;
+
+    while (pos < headers.len) {
+        const line_end = std.mem.indexOfPos(u8, headers, pos, "\r\n") orelse headers.len;
+        const line = headers[pos..line_end];
+
+        // check if this line starts with "name:" (case-insensitive)
+        if (line.len > name.len and line[name.len] == ':') {
+            var match = true;
+            for (line[0..name.len], name) |a, b| {
+                if (toLower(a) != toLower(b)) {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match) {
+                // skip "name:" and leading whitespace
+                var val_start = name.len + 1;
+                while (val_start < line.len and line[val_start] == ' ') {
+                    val_start += 1;
+                }
+                return line[val_start..];
+            }
+        }
+
+        pos = if (line_end + 2 <= headers.len) line_end + 2 else headers.len;
+    }
+
+    return null;
+}
+
 // -- internal helpers --
 
 fn parseMethod(str: []const u8) ?Method {
@@ -354,4 +391,31 @@ test "PUT request" {
     const req = (try parseRequest(raw)).?;
 
     try std.testing.expectEqual(Method.PUT, req.method);
+}
+
+test "unauthorized status code phrase" {
+    try std.testing.expectEqualStrings("Unauthorized", StatusCode.unauthorized.phrase());
+}
+
+test "findHeaderValue extracts authorization" {
+    const headers = "Host: localhost\r\nAuthorization: Bearer my-token-123\r\n";
+    const value = findHeaderValue(headers, "Authorization");
+    try std.testing.expect(value != null);
+    try std.testing.expectEqualStrings("Bearer my-token-123", value.?);
+}
+
+test "findHeaderValue case insensitive" {
+    const headers = "authorization: Bearer abc\r\n";
+    const value = findHeaderValue(headers, "Authorization");
+    try std.testing.expect(value != null);
+    try std.testing.expectEqualStrings("Bearer abc", value.?);
+}
+
+test "findHeaderValue returns null for missing header" {
+    const headers = "Host: localhost\r\nContent-Type: application/json\r\n";
+    try std.testing.expect(findHeaderValue(headers, "Authorization") == null);
+}
+
+test "findHeaderValue handles empty headers" {
+    try std.testing.expect(findHeaderValue("", "Authorization") == null);
 }
