@@ -515,7 +515,7 @@ fn checkCache(alloc: std.mem.Allocator, cache_key: []const u8, state: *BuildStat
 
         log.info("  -> cached", .{});
 
-        state.addLayer(e.layer_digest, e.diff_id, e.layer_size) catch return false;
+        state.addLayer(e.layer_digest, e.diff_id, @intCast(e.layer_size)) catch return false;
         return true;
     }
     return false;
@@ -747,9 +747,9 @@ fn produceImage(alloc: std.mem.Allocator, state: *BuildState, tag: ?[]const u8) 
 }
 
 fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const u8 {
-    var buf = std.ArrayList(u8).init(alloc);
-    defer buf.deinit();
-    const writer = buf.writer();
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(alloc);
+    const writer = buf.writer(alloc);
 
     try writer.writeAll("{");
 
@@ -820,7 +820,6 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
         first = false;
     }
 
-    _ = first;
     try writer.writeAll("}");
 
     // rootfs section
@@ -835,7 +834,7 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
 
     try writer.writeAll("}");
 
-    return try buf.toOwnedSlice();
+    return try buf.toOwnedSlice(alloc);
 }
 
 fn buildManifestJson(
@@ -844,9 +843,9 @@ fn buildManifestJson(
     config_digest: blob_store.Digest,
     config_size: usize,
 ) ![]const u8 {
-    var buf = std.ArrayList(u8).init(alloc);
-    defer buf.deinit();
-    const writer = buf.writer();
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(alloc);
+    const writer = buf.writer(alloc);
 
     try writer.writeAll("{\"schemaVersion\":2");
     try writer.writeAll(",\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\"");
@@ -873,7 +872,7 @@ fn buildManifestJson(
     }
     try writer.writeAll("]}");
 
-    return try buf.toOwnedSlice();
+    return try buf.toOwnedSlice(alloc);
 }
 
 // -- tests --
@@ -991,10 +990,10 @@ test "no from instruction returns error" {
 }
 
 test "json escaping" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
+    var buf: std.ArrayList(u8) = .{};
+    defer buf.deinit(std.testing.allocator);
 
-    try json_helpers.writeJsonEscaped(buf.writer(), "hello \"world\"\nfoo\\bar");
+    try json_helpers.writeJsonEscaped(buf.writer(std.testing.allocator), "hello \"world\"\nfoo\\bar");
     try std.testing.expectEqualStrings("hello \\\"world\\\"\\nfoo\\\\bar", buf.items);
 }
 

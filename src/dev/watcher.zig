@@ -142,7 +142,7 @@ pub const Watcher = struct {
 
         // debounce: wait for the editor to finish writing, then drain
         // any events that piled up during the wait
-        std.time.sleep(debounce_ns);
+        std.Thread.sleep(debounce_ns);
         self.drainPending();
 
         return service_idx;
@@ -200,9 +200,9 @@ pub const Watcher = struct {
     /// used after debounce sleep to clear the queue.
     fn drainPending(self: *Watcher) void {
         // set nonblocking temporarily to drain without waiting
-        const flags = posix.fcntl(self.fd, .GETFL) catch return;
-        const nonblock: u32 = @bitCast(posix.O{ .NONBLOCK = true });
-        posix.fcntl(self.fd, .SETFL, flags | nonblock) catch return;
+        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch return;
+        const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
+        posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch return;
 
         var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
         while (true) {
@@ -210,7 +210,7 @@ pub const Watcher = struct {
         }
 
         // restore original flags
-        posix.fcntl(self.fd, .SETFL, flags) catch {};
+        posix.fcntl(self.fd, posix.F.SETFL, flags) catch {};
     }
 };
 
@@ -252,7 +252,7 @@ test "watch temp directory and detect file change" {
     }.run, .{ &w, &result }) catch unreachable;
 
     // give the watcher thread time to enter the blocking read
-    std.time.sleep(50 * std.time.ns_per_ms);
+    std.Thread.sleep(50 * std.time.ns_per_ms);
 
     // write a file to trigger the event
     var file = tmp.dir.createFile("test.txt", .{}) catch unreachable;

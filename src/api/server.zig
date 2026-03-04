@@ -143,10 +143,12 @@ pub const Server = struct {
     /// spawn a detached worker thread to handle a single connection.
     fn spawnWorker(self: *Server, client_fd: posix.fd_t) void {
         const alloc = self.alloc;
-        _ = std.Thread.spawn(.{ .detach = true }, handleConnection, .{ alloc, client_fd }) catch {
+        const thread = std.Thread.spawn(.{}, handleConnection, .{ alloc, client_fd }) catch {
             // if we can't spawn a thread, close the connection
             posix.close(client_fd);
+            return;
         };
+        thread.detach();
     }
 };
 

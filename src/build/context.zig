@@ -149,7 +149,7 @@ pub fn copyFiles(
         break :blk combined;
     } else dest_clean;
 
-    ctx_dir.copyFile(src, dst_dir, target_path) catch return ContextError.CopyFailed;
+    ctx_dir.copyFile(src, dst_dir, target_path, .{}) catch return ContextError.CopyFailed;
 }
 
 /// recursively copy a directory
@@ -188,7 +188,7 @@ fn copyDirectory(
                 if (std.fs.path.dirname(entry.path)) |parent| {
                     target.makePath(parent) catch return ContextError.CopyFailed;
                 }
-                source.copyFile(entry.path, target, entry.path) catch
+                source.copyFile(entry.path, target, entry.path, .{}) catch
                     return ContextError.CopyFailed;
             },
             else => continue,

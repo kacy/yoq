@@ -672,7 +672,10 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     orchestrator.installSignalHandlers();
 
     // create and run orchestrator
-    var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name);
+    var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name) catch {
+        writeErr("failed to initialize orchestrator\n", .{});
+        std.process.exit(1);
+    };
     defer orch.deinit();
     orch.dev_mode = dev_mode;
 
@@ -793,7 +796,7 @@ fn cmdDown(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 while (waited < 100) : (waited += 1) {
                     const result = process.wait(pid, true) catch break;
                     switch (result.status) {
-                        .running => std.time.sleep(100 * std.time.ns_per_ms),
+                        .running => std.Thread.sleep(100 * std.time.ns_per_ms),
                         else => break,
                     }
                 }
