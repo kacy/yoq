@@ -141,9 +141,10 @@ src/
     json_helpers.zig       JSON encoding utilities
     exec_helpers.zig       process exec helpers
     syscall.zig            low-level syscall wrappers
+    sql.zig                SQL escaping for raft proposals
 ```
 
 ## what's next
 
-- **remaining phase 6:** WireGuard mesh for cross-node networking, agent container reconciliation
+- **remaining phase 6:** WireGuard mesh for cross-node networking
 - **phase 7: production** — health checks, rolling updates, secrets, TLS, eBPF observability
