@@ -29,6 +29,7 @@ const http_client = @import("cluster/http_client.zig");
 const json_helpers = @import("lib/json_helpers.zig");
 const sqlite = @import("sqlite");
 const secrets = @import("state/secrets.zig");
+const dns = @import("network/dns.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -1258,6 +1259,20 @@ fn cmdJoin(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     writeErr("joined cluster as agent {s}\n", .{agent.id});
 
+    // set up wireguard mesh networking if the server assigned a node_id.
+    // this creates the wg-yoq interface, assigns our overlay IP, and adds
+    // any existing peers so cross-node container traffic can flow immediately.
+    if (agent.node_id != null and agent.wg_keypair != null and agent.overlay_ip != null) {
+        setupAgentWireguard(&agent, alloc);
+    }
+    defer {
+        // tear down wireguard on exit — the kernel cleans up peers and routes
+        // when the interface is deleted, so this is a single operation.
+        if (agent.node_id != null) {
+            net_setup.teardownClusterNetworking();
+        }
+    }
+
     // start heartbeat loop
     agent.start() catch {
         writeErr("failed to start agent loop\n", .{});
@@ -1271,6 +1286,110 @@ fn cmdJoin(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     agent.wait();
 
     writeErr("agent stopped\n", .{});
+}
+
+/// fetch the peer list from the server and set up the wireguard mesh.
+/// called once during cmdJoin after the agent has registered and received
+/// its node_id, overlay IP, and wireguard keypair. any failure here is
+/// non-fatal — the agent will still function, and the reconcilePeers loop
+/// in the heartbeat cycle will retry peer setup.
+fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) void {
+    const node_id = agent.node_id orelse return;
+    const kp = agent.wg_keypair orelse return;
+    const overlay_ip = agent.overlay_ip orelse return;
+
+    // fetch the current peer list from the server
+    var peers_buf: [16]net_setup.PeerInfo = undefined;
+    var peer_count: usize = 0;
+
+    var resp = http_client.getWithAuth(
+        alloc,
+        agent.server_addr,
+        agent.server_port,
+        "/wireguard/peers",
+        agent.token,
+    ) catch {
+        writeErr("warning: failed to fetch wireguard peers, will retry on heartbeat\n", .{});
+        // still set up the interface with no peers — they'll be added
+        // on the first heartbeat cycle via reconcilePeers
+        net_setup.setupClusterNetworking(.{
+            .node_id = node_id,
+            .private_key = kp.privateKeySlice(),
+            .listen_port = agent.wg_listen_port,
+            .overlay_ip = overlay_ip,
+            .peers = &.{},
+        }) catch {
+            writeErr("warning: failed to set up wireguard interface\n", .{});
+        };
+        return;
+    };
+    defer resp.deinit(alloc);
+
+    // parse peer objects from the response
+    var iter = json_helpers.extractJsonObjects(resp.body);
+    while (iter.next()) |obj| {
+        if (peer_count >= peers_buf.len) break;
+
+        const pub_key = json_helpers.extractJsonString(obj, "public_key") orelse continue;
+        const overlay_str = json_helpers.extractJsonString(obj, "overlay_ip") orelse continue;
+        const node_id_val = json_helpers.extractJsonInt(obj, "node_id") orelse continue;
+        const endpoint = json_helpers.extractJsonString(obj, "endpoint") orelse "";
+
+        // skip ourselves
+        if (node_id_val == node_id) continue;
+
+        const peer_node: u8 = if (node_id_val >= 1 and node_id_val <= 254)
+            @intCast(node_id_val)
+        else
+            continue;
+
+        peers_buf[peer_count] = .{
+            .public_key = pub_key,
+            .endpoint = endpoint,
+            .overlay_ip = .{ 10, 40, 0, peer_node },
+            .container_subnet_node = peer_node,
+        };
+
+        // also parse the actual overlay IP from the string
+        if (parseIpv4Bytes(overlay_str)) |ip_bytes| {
+            peers_buf[peer_count].overlay_ip = ip_bytes;
+        }
+
+        peer_count += 1;
+    }
+
+    net_setup.setupClusterNetworking(.{
+        .node_id = node_id,
+        .private_key = kp.privateKeySlice(),
+        .listen_port = agent.wg_listen_port,
+        .overlay_ip = overlay_ip,
+        .peers = peers_buf[0..peer_count],
+    }) catch {
+        writeErr("warning: failed to set up wireguard interface\n", .{});
+        return;
+    };
+
+    writeErr("wireguard mesh active (node_id={d}, {d} peers)\n", .{ node_id, peer_count });
+}
+
+/// parse a dotted-quad IPv4 string into 4 bytes. returns null on failure.
+fn parseIpv4Bytes(str: []const u8) ?[4]u8 {
+    var result: [4]u8 = undefined;
+    var octet_idx: usize = 0;
+    var start: usize = 0;
+
+    for (str, 0..) |c, i| {
+        if (c == '.') {
+            if (octet_idx >= 3) return null;
+            result[octet_idx] = std.fmt.parseInt(u8, str[start..i], 10) catch return null;
+            octet_idx += 1;
+            start = i + 1;
+        }
+    }
+
+    if (octet_idx != 3) return null;
+    result[3] = std.fmt.parseInt(u8, str[start..], 10) catch return null;
+    return result;
 }
 
 fn cmdCluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
