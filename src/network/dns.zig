@@ -26,6 +26,7 @@ const posix = std.posix;
 const sqlite = @import("sqlite");
 const log = @import("../lib/log.zig");
 const ip_mod = @import("ip.zig");
+const ebpf = @import("ebpf.zig");
 
 // -- service registry --
 //
@@ -115,6 +116,7 @@ pub fn registerService(name: []const u8, container_id: []const u8, container_ip:
         {
             // update IP
             entry.ip = container_ip;
+            updateBpfMap(name, container_ip);
             return;
         }
     }
@@ -143,6 +145,7 @@ pub fn registerService(name: []const u8, container_id: []const u8, container_ip:
             @memcpy(entry.container_id[0..cid_len], container_id[0..cid_len]);
             entry.ip = container_ip;
             registry_count += 1;
+            updateBpfMap(name, container_ip);
             return;
         }
     }
@@ -162,9 +165,28 @@ pub fn unregisterService(container_id: []const u8) void {
             entry.container_id_len == cid_len and
             std.mem.eql(u8, entry.container_id[0..entry.container_id_len], container_id[0..cid_len]))
         {
+            deleteBpfMap(entry.name[0..entry.name_len]);
             entry.active = false;
             registry_count -= 1;
         }
+    }
+}
+
+// -- BPF map sync --
+//
+// when a DNS interceptor is loaded, keep the BPF service_names map
+// in sync with the in-memory registry. these are best-effort —
+// if BPF isn't loaded, they're no-ops.
+
+fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
+    if (ebpf.getDnsInterceptor()) |interceptor| {
+        interceptor.updateService(name, ip_addr);
+    }
+}
+
+fn deleteBpfMap(name: []const u8) void {
+    if (ebpf.getDnsInterceptor()) |interceptor| {
+        interceptor.deleteService(name);
     }
 }
 

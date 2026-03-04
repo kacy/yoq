@@ -16,8 +16,10 @@ const sqlite = @import("sqlite");
 
 const bridge = @import("bridge.zig");
 const dns = @import("dns.zig");
+const ebpf = @import("ebpf.zig");
 const ip = @import("ip.zig");
 const nat = @import("nat.zig");
+const nl = @import("netlink.zig");
 const wireguard = @import("wireguard.zig");
 const schema = @import("../state/schema.zig");
 const log = @import("../lib/log.zig");
@@ -301,6 +303,12 @@ pub fn setupContainer(
     // skip if the service has a health check — the health checker will
     // register it only after it becomes healthy (readiness gating).
     dns.startResolver();
+
+    // load the BPF DNS interceptor on the bridge (idempotent).
+    // this gives us in-kernel DNS resolution for known services.
+    // if BPF isn't available, we fall back to the userspace resolver.
+    loadDnsInterceptorOnBridge();
+
     if (!config.skip_dns) {
         dns.registerService(hostname, container_id, container_ip);
     }
@@ -382,6 +390,29 @@ fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const 
     defer file.close();
     file.writeAll(content) catch |e| {
         log.warn("failed to write {s}: {}", .{ full_path, e });
+    };
+}
+
+// -- BPF DNS interceptor --
+//
+// loads the eBPF DNS interceptor on the yoq0 bridge. this gives us
+// in-kernel DNS resolution for known services — queries for registered
+// names are answered without leaving the kernel, while unknown names
+// fall through to the userspace resolver.
+
+/// try to load the DNS interceptor on the bridge. non-fatal.
+fn loadDnsInterceptorOnBridge() void {
+    // look up the bridge interface index
+    const sock = nl.openSocket() catch return;
+    defer posix.close(sock);
+
+    const if_index = nl.getIfIndex(sock, bridge.default_bridge) catch return;
+    if (if_index == 0) return;
+
+    ebpf.loadDnsInterceptor(if_index) catch |e| {
+        // BPF not available — fall back to userspace-only DNS.
+        // this is expected on systems without CAP_BPF or old kernels.
+        log.info("ebpf DNS interceptor not loaded (falling back to userspace): {}", .{e});
     };
 }
 
