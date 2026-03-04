@@ -39,8 +39,16 @@ pub fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
     const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
     const value_start = start_pos + needle.len;
 
-    // find closing quote (no escape handling needed for our simple values)
-    const value_end = std.mem.indexOfPos(u8, json, value_start, "\"") orelse return null;
+    // find closing quote, skipping escaped characters
+    var pos = value_start;
+    while (pos < json.len) : (pos += 1) {
+        if (json[pos] == '\\') {
+            pos += 1; // skip escaped character
+            continue;
+        }
+        if (json[pos] == '"') break;
+    } else return null;
+    const value_end = pos;
 
     return json[value_start..value_end];
 }
@@ -171,6 +179,13 @@ test "extractJsonString basic" {
     try std.testing.expectEqualStrings("my-secret", extractJsonString(json, "token").?);
     try std.testing.expectEqualStrings("10.0.0.5:7701", extractJsonString(json, "address").?);
     try std.testing.expect(extractJsonString(json, "missing") == null);
+}
+
+test "extractJsonString handles escaped quotes" {
+    const json = "{\"name\":\"hello \\\"world\\\"\",\"other\":\"val\"}";
+    const result = extractJsonString(json, "name").?;
+    try std.testing.expectEqualStrings("hello \\\"world\\\"", result);
+    try std.testing.expectEqualStrings("val", extractJsonString(json, "other").?);
 }
 
 test "extractJsonInt basic" {

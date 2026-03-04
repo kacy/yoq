@@ -270,6 +270,13 @@ fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
             const leader_commit = readU64(payload[32..]);
             const entry_count = readU32(payload[40..]);
 
+            // each entry needs at least 20 bytes (8 index + 8 term + 4 data_len).
+            // cap entry_count against remaining payload to prevent allocation spikes
+            // from malicious or corrupt messages.
+            const remaining_payload = payload.len - 44;
+            const max_possible_entries = remaining_payload / 20;
+            if (entry_count > max_possible_entries) return error.InvalidMessage;
+
             var entries = try alloc.alloc(LogEntry, entry_count);
             var offset: usize = 44;
             for (0..entry_count) |i| {
@@ -457,6 +464,21 @@ test "decode rejects invalid message type" {
 test "decode rejects truncated message" {
     const alloc = std.testing.allocator;
     const buf = [_]u8{msg_request_vote} ++ [_]u8{0} ** 10; // need 32, only 10
+    const result = decode(alloc, &buf);
+    try std.testing.expectError(error.InvalidMessage, result);
+}
+
+test "decode rejects inflated entry_count" {
+    const alloc = std.testing.allocator;
+    // build a minimal append_entries message with entry_count far exceeding
+    // what the payload could actually contain
+    var buf: [45]u8 = undefined;
+    buf[0] = msg_append_entries;
+    // term, leader_id, prev_log_index, prev_log_term, leader_commit (5 x 8 bytes)
+    @memset(buf[1..41], 0);
+    // entry_count = 1000 but remaining payload is 0 bytes
+    std.mem.writeInt(u32, buf[41..45], 1000, .little);
+
     const result = decode(alloc, &buf);
     try std.testing.expectError(error.InvalidMessage, result);
 }
