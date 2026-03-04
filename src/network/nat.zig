@@ -4,8 +4,13 @@
 // (DNAT + FORWARD rules) so containers can reach the internet and
 // the host can reach containers.
 //
-// this is a temporary solution using iptables. it will be replaced
-// by eBPF-based NAT in phase 3 weeks 10-11.
+// this is the fallback path used when eBPF is not available (no
+// CAP_BPF, old kernel). when eBPF is available, the DNS interceptor
+// and load balancer handle service discovery and traffic distribution
+// in-kernel, but iptables is still used for:
+//   - IP forwarding (sysctl)
+//   - masquerade (outbound NAT for internet access)
+//   - port mapping (host port → container DNAT)
 //
 // requires root / CAP_NET_ADMIN. all operations are non-fatal —
 // containers work without NAT (just no internet or port mapping).
