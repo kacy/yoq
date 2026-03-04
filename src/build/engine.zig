@@ -1110,3 +1110,25 @@ test "first instruction not from returns error" {
     const result = build(alloc, &instructions, ".", null);
     try std.testing.expectError(BuildError.NoFromInstruction, result);
 }
+
+test "parseCopyArgs with empty string" {
+    const result = parseCopyArgs("");
+    try std.testing.expectEqualStrings("", result.src);
+    try std.testing.expectEqualStrings("", result.dest);
+}
+
+test "cache key determinism with empty command" {
+    const alloc = std.testing.allocator;
+    var state1 = BuildState.init(alloc);
+    defer state1.deinit();
+
+    var state2 = BuildState.init(alloc);
+    defer state2.deinit();
+
+    const key1 = try computeCacheKey(alloc, "RUN", "", &state1);
+    defer alloc.free(key1);
+    const key2 = try computeCacheKey(alloc, "RUN", "", &state2);
+    defer alloc.free(key2);
+
+    try std.testing.expectEqualStrings(key1, key2);
+}

@@ -482,3 +482,39 @@ test "decode rejects inflated entry_count" {
     const result = decode(alloc, &buf);
     try std.testing.expectError(error.InvalidMessage, result);
 }
+
+test "decode empty buffer returns error" {
+    const alloc = std.testing.allocator;
+    const result = decode(alloc, &[_]u8{});
+    try std.testing.expectError(error.InvalidMessage, result);
+}
+
+test "decode truncated entry data" {
+    const alloc = std.testing.allocator;
+    // append_entries header (1 type + 40 fields + 4 entry_count = 45 bytes)
+    // then one entry header claiming data_len=100 but only 5 bytes of data
+    var buf: [45 + 20 + 5]u8 = undefined;
+    buf[0] = msg_append_entries;
+    @memset(buf[1..41], 0); // term, leader_id, etc.
+    std.mem.writeInt(u32, buf[41..45], 1, .little); // entry_count = 1
+    // entry: index=1, term=1, data_len=100
+    std.mem.writeInt(u64, buf[45..53], 1, .little);
+    std.mem.writeInt(u64, buf[53..61], 1, .little);
+    std.mem.writeInt(u32, buf[61..65], 100, .little); // claims 100 bytes
+    @memset(buf[65..70], 0); // but only 5 bytes available
+
+    const result = decode(alloc, &buf);
+    try std.testing.expectError(error.InvalidMessage, result);
+}
+
+test "encode buffer too small returns error" {
+    var buf: [4]u8 = undefined;
+    const msg = Message{ .request_vote = .{
+        .term = 1,
+        .candidate_id = 1,
+        .last_log_index = 0,
+        .last_log_term = 0,
+    } };
+    const result = encode(&buf, msg);
+    try std.testing.expectError(error.BufferTooSmall, result);
+}

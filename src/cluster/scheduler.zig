@@ -271,6 +271,29 @@ test "schedule third container exceeds tracked capacity" {
     try std.testing.expect(results[2] == null);
 }
 
+test "schedule with zero requests returns empty" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgent("agent1", "active", 4, 8192, 0, 0),
+    };
+    const requests = &[_]PlacementRequest{};
+
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+
+    try std.testing.expectEqual(@as(usize, 0), results.len);
+}
+
+test "generateAssignmentId produces 12 hex chars" {
+    var buf: [12]u8 = undefined;
+    generateAssignmentId(&buf);
+
+    for (buf) |c| {
+        const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+        try std.testing.expect(is_hex);
+    }
+}
+
 test "assignmentSql generates valid SQL" {
     var buf: [1024]u8 = undefined;
     const sql = try assignmentSql(&buf, "assign123456", "agent1", .{

@@ -702,6 +702,60 @@ test "nxdomain response" {
     try std.testing.expect(resp_len > 12);
 }
 
+test "registerService ignores empty name" {
+    resetRegistryForTest();
+
+    registerService("", "ctr_001", .{ 10, 42, 0, 50 });
+    // registry should still be empty
+    try std.testing.expect(lookupService("") == null);
+}
+
+test "registerService ignores name exceeding max length" {
+    resetRegistryForTest();
+
+    // 64 chars — exceeds max_name_len (63)
+    const long_name = "a" ** 64;
+    registerService(long_name, "ctr_001", .{ 10, 42, 0, 50 });
+
+    try std.testing.expect(lookupService(long_name) == null);
+}
+
+test "registerService updates IP for same container" {
+    resetRegistryForTest();
+
+    registerService("db", "ctr_001", .{ 10, 42, 0, 10 });
+    registerService("db", "ctr_001", .{ 10, 42, 0, 99 });
+
+    // should return updated IP, not the original
+    const result = lookupService("db").?;
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 99 }, result);
+}
+
+test "unregisterService only removes matching container" {
+    resetRegistryForTest();
+
+    registerService("api", "ctr_aaa", .{ 10, 42, 0, 10 });
+    registerService("api", "ctr_bbb", .{ 10, 42, 0, 11 });
+
+    // remove only ctr_aaa
+    unregisterService("ctr_aaa");
+
+    // ctr_bbb's entry should still be resolvable
+    const result = lookupService("api");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 11 }, result.?);
+}
+
+test "lookupService returns null after registry reset" {
+    resetRegistryForTest();
+
+    registerService("svc", "ctr_001", .{ 10, 42, 0, 5 });
+    try std.testing.expect(lookupService("svc") != null);
+
+    resetRegistryForTest();
+    try std.testing.expect(lookupService("svc") == null);
+}
+
 /// reset registry state for test isolation.
 /// only used in tests.
 fn resetRegistryForTest() void {

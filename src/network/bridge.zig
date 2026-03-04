@@ -361,3 +361,15 @@ test "gateway ip is correct" {
 test "prefix length" {
     try std.testing.expectEqual(@as(u8, 16), prefix_len);
 }
+
+test "veth name with empty container id" {
+    var buf: [32]u8 = undefined;
+    const name = vethName("", &buf);
+    try std.testing.expectEqualStrings("veth_", name);
+}
+
+test "veth name with 3-char id" {
+    var buf: [32]u8 = undefined;
+    const name = vethName("xyz", &buf);
+    try std.testing.expectEqualStrings("veth_xyz", name);
+}

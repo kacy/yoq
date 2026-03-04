@@ -325,6 +325,20 @@ test "parse image index" {
     try std.testing.expectEqualStrings("arm64", index.manifests[1].platform.?.architecture);
 }
 
+test "parse image ref — nested repository path" {
+    const ref = parseImageRef("ghcr.io/org/sub/repo:v2");
+    try std.testing.expectEqualStrings("ghcr.io", ref.host);
+    try std.testing.expectEqualStrings("org/sub/repo", ref.repository);
+    try std.testing.expectEqualStrings("v2", ref.reference);
+}
+
+test "parse image ref — explicit port with nested path" {
+    const ref = parseImageRef("myregistry:5000/org/repo:tag");
+    try std.testing.expectEqualStrings("myregistry:5000", ref.host);
+    try std.testing.expectEqualStrings("org/repo", ref.repository);
+    try std.testing.expectEqualStrings("tag", ref.reference);
+}
+
 test "media type detection" {
     try std.testing.expect(isIndexMediaType(media_type.manifest_list));
     try std.testing.expect(isIndexMediaType(media_type.oci_index));

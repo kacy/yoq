@@ -253,3 +253,18 @@ test "parsePsiAvg10" {
     const val = try parsePsiAvg10("some avg10=1.50 avg60=0.00 avg300=0.00 total=0");
     try std.testing.expectApproxEqAbs(@as(f64, 1.50), val, 0.001);
 }
+
+test "parsePsiAvg10 with zero value" {
+    const val = try parsePsiAvg10("some avg10=0.00 avg60=0.00 avg300=0.00 total=0");
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), val, 0.001);
+}
+
+test "parsePsiAvg10 with high pressure" {
+    const val = try parsePsiAvg10("full avg10=99.99 avg60=50.00 avg300=25.00 total=9999");
+    try std.testing.expectApproxEqAbs(@as(f64, 99.99), val, 0.001);
+}
+
+test "parsePsiAvg10 rejects missing avg10 field" {
+    const result = parsePsiAvg10("some total=12345");
+    try std.testing.expectError(error.ParseError, result);
+}

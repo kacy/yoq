@@ -373,6 +373,18 @@ test "isPathSafe rejects directory traversal" {
     try std.testing.expect(!isPathSafe("../../etc/shadow"));
 }
 
+test "overlay path rejects comma in path" {
+    try std.testing.expect(!isValidOverlayPath("/path,with,commas"));
+}
+
+test "overlay path rejects colon in path" {
+    try std.testing.expect(!isValidOverlayPath("/path:with:colons"));
+}
+
+test "isPathSafe accepts single dot" {
+    try std.testing.expect(isPathSafe("."));
+}
+
 test "sentinelize" {
     const path: []const u8 = "/test/path";
     const result = try sentinelize(&path);

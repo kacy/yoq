@@ -190,3 +190,44 @@ test "apply advances past bad SQL" {
 
     try std.testing.expectEqualStrings("99", row.value.data);
 }
+
+test "applyUpTo applies entries in order" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    var raft_log = try @import("log.zig").Log.initMemory();
+    defer raft_log.deinit();
+
+    const alloc = std.testing.allocator;
+
+    // insert entries into the raft log
+    try raft_log.append(.{
+        .index = 1,
+        .term = 1,
+        .data = "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);",
+    });
+    try raft_log.append(.{
+        .index = 2,
+        .term = 1,
+        .data = "INSERT INTO kv (key, value) VALUES ('a', '1');",
+    });
+    try raft_log.append(.{
+        .index = 3,
+        .term = 1,
+        .data = "INSERT INTO kv (key, value) VALUES ('b', '2');",
+    });
+
+    sm.applyUpTo(&raft_log, alloc, 3);
+
+    try std.testing.expectEqual(@as(LogIndex, 3), sm.last_applied);
+
+    // verify both inserts were applied
+    const Row = struct { value: sqlite.Text };
+    const row_a = (sm.db.oneAlloc(Row, alloc, "SELECT value FROM kv WHERE key = ?;", .{}, .{"a"}) catch unreachable).?;
+    defer alloc.free(row_a.value.data);
+    try std.testing.expectEqualStrings("1", row_a.value.data);
+
+    const row_b = (sm.db.oneAlloc(Row, alloc, "SELECT value FROM kv WHERE key = ?;", .{}, .{"b"}) catch unreachable).?;
+    defer alloc.free(row_b.value.data);
+    try std.testing.expectEqualStrings("2", row_b.value.data);
+}

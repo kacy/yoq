@@ -236,3 +236,32 @@ test "extractJsonObjects empty string" {
     var iter = extractJsonObjects("");
     try std.testing.expect(iter.next() == null);
 }
+
+test "writeJsonEscaped null byte" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    try writeJsonEscaped(writer, &[_]u8{0x00});
+    try std.testing.expectEqualStrings("\\u0000", stream.getWritten());
+}
+
+test "extractJsonInt with whitespace after colon" {
+    const json = "{\"key\": 42}";
+    try std.testing.expectEqual(@as(i64, 42), extractJsonInt(json, "key").?);
+}
+
+test "extractJsonInt returns null for non-numeric" {
+    const json = "{\"key\":\"abc\"}";
+    try std.testing.expect(extractJsonInt(json, "key") == null);
+}
+
+test "extractJsonInt returns null for missing key" {
+    const json = "{\"other\":99}";
+    try std.testing.expect(extractJsonInt(json, "missing") == null);
+}
+
+test "extractJsonString returns null for missing key" {
+    const json = "{\"name\":\"alice\"}";
+    try std.testing.expect(extractJsonString(json, "missing") == null);
+}
