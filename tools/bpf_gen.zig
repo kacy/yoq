@@ -12,71 +12,19 @@
 // usage: zig run tools/bpf_gen.zig -- <input.o> <output.zig>
 
 const std = @import("std");
+const elf = std.elf;
 
-// -- ELF constants --
-
-const ELF_MAGIC = [4]u8{ 0x7f, 'E', 'L', 'F' };
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1; // little-endian
-const ET_REL: u16 = 1; // relocatable
-const EM_BPF: u16 = 247;
-
-// section header types
-const SHT_PROGBITS: u32 = 1;
-const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
-const SHT_REL: u32 = 9;
-
-// section header flags
-const SHF_EXECINSTR: u64 = 0x4;
-
-// relocation types
-const R_BPF_64_64: u32 = 1; // ld_imm64 map fd
-
-// BPF instruction size
+// BPF-specific constants not in std.elf
+const R_BPF_64_64: u32 = 1; // ld_imm64 map fd relocation
 const BPF_INSN_SIZE: usize = 8;
 
-// -- ELF64 structures --
+// convenience aliases for std.elf types
+const Elf64_Ehdr = elf.Elf64_Ehdr;
+const Elf64_Shdr = elf.Elf64_Shdr;
+const Elf64_Sym = elf.Elf64_Sym;
 
-const Elf64_Ehdr = extern struct {
-    e_ident: [16]u8,
-    e_type: u16,
-    e_machine: u16,
-    e_version: u32,
-    e_entry: u64,
-    e_phoff: u64,
-    e_shoff: u64,
-    e_flags: u32,
-    e_ehsize: u16,
-    e_phentsize: u16,
-    e_phnum: u16,
-    e_shentsize: u16,
-    e_shnum: u16,
-    e_shstrndx: u16,
-};
-
-const Elf64_Shdr = extern struct {
-    sh_name: u32,
-    sh_type: u32,
-    sh_flags: u64,
-    sh_addr: u64,
-    sh_offset: u64,
-    sh_size: u64,
-    sh_link: u32,
-    sh_info: u32,
-    sh_addralign: u64,
-    sh_entsize: u64,
-};
-
-const Elf64_Sym = extern struct {
-    st_name: u32,
-    st_info: u8,
-    st_other: u8,
-    st_shndx: u16,
-    st_value: u64,
-    st_size: u64,
-};
-
+// std.elf doesn't have a Rel type with helper methods, so we keep
+// a thin wrapper for the sym()/typ() accessors.
 const Elf64_Rel = extern struct {
     r_offset: u64,
     r_info: u64,
@@ -192,11 +140,11 @@ fn parseElf(
     const ehdr: *const Elf64_Ehdr = @ptrCast(@alignCast(data.ptr));
 
     // validate ELF header
-    if (!std.mem.eql(u8, ehdr.e_ident[0..4], &ELF_MAGIC)) return error.InvalidElf;
-    if (ehdr.e_ident[4] != ELFCLASS64) return error.InvalidElf;
-    if (ehdr.e_ident[5] != ELFDATA2LSB) return error.InvalidElf;
-    if (ehdr.e_type != ET_REL) return error.InvalidElf;
-    if (ehdr.e_machine != EM_BPF) return error.InvalidElf;
+    if (!std.mem.eql(u8, ehdr.e_ident[0..4], "\x7fELF")) return error.InvalidElf;
+    if (ehdr.e_ident[4] != elf.ELFCLASS64) return error.InvalidElf;
+    if (ehdr.e_ident[5] != elf.ELFDATA2LSB) return error.InvalidElf;
+    if (ehdr.e_type != elf.ET.REL) return error.InvalidElf;
+    if (ehdr.e_machine != elf.EM.BPF) return error.InvalidElf;
 
     // read section headers
     const shdr_offset = ehdr.e_shoff;
@@ -218,7 +166,7 @@ fn parseElf(
 
     for (0..shdr_count) |i| {
         const shdr = getSectionHeader(data, ehdr, @intCast(i));
-        if (shdr.sh_type == SHT_SYMTAB) {
+        if (shdr.sh_type == elf.SHT_SYMTAB) {
             symtab_shdr = shdr;
             // the strtab is linked via sh_link
             if (shdr.sh_link < shdr_count) {
@@ -233,20 +181,20 @@ fn parseElf(
         const shdr = getSectionHeader(data, ehdr, @intCast(i));
         const sec_name = getSectionName(shstrtab, shdr.sh_name);
 
-        if (shdr.sh_type == SHT_PROGBITS and (shdr.sh_flags & SHF_EXECINSTR) != 0) {
+        if (shdr.sh_type == elf.SHT_PROGBITS and (shdr.sh_flags & elf.SHF_EXECINSTR) != 0) {
             // executable section = BPF program
             const sec_data = getSectionData(data, shdr);
             try programs.append(.{
                 .name = sec_name,
                 .insn_data = sec_data,
             });
-        } else if (shdr.sh_type == SHT_PROGBITS and std.mem.eql(u8, sec_name, "maps")) {
+        } else if (shdr.sh_type == elf.SHT_PROGBITS and std.mem.eql(u8, sec_name, "maps")) {
             // map definitions section
             try parseMaps(getSectionData(data, shdr), alloc, maps, symtab_shdr, strtab_data, data, ehdr, @intCast(i));
-        } else if (shdr.sh_type == SHT_REL) {
+        } else if (shdr.sh_type == elf.SHT_REL) {
             // relocation section — find which program section it applies to
             const target_shdr = getSectionHeader(data, ehdr, @intCast(shdr.sh_info));
-            if (target_shdr.sh_type == SHT_PROGBITS and (target_shdr.sh_flags & SHF_EXECINSTR) != 0) {
+            if (target_shdr.sh_type == elf.SHT_PROGBITS and (target_shdr.sh_flags & elf.SHF_EXECINSTR) != 0) {
                 try parseRelocs(getSectionData(data, shdr), alloc, relocs, symtab_shdr, strtab_data, data, ehdr);
             }
         }
