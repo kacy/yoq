@@ -90,6 +90,15 @@ const BuildState = struct {
     stop_signal: ?[]const u8 = null,
     healthcheck: ?[]const u8 = null,
 
+    /// ONBUILD triggers declared by this build — stored in the output
+    /// image config so they execute when someone FROM's this image.
+    onbuild_triggers: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    /// ONBUILD triggers inherited from the base image — pending execution.
+    /// populated during processFrom/inheritConfig, consumed after FROM
+    /// in buildStage, then cleared.
+    pending_onbuild: std.ArrayListUnmanaged([]const u8) = .empty,
+
     /// build args — set by ARG instructions and --build-arg CLI flags.
     /// keys and values are owned by the allocator.
     build_args: std.StringHashMapUnmanaged([]const u8) = .empty,
@@ -123,6 +132,10 @@ const BuildState = struct {
         if (self.shell) |s| self.alloc.free(s);
         if (self.stop_signal) |s| self.alloc.free(s);
         if (self.healthcheck) |h| self.alloc.free(h);
+        for (self.onbuild_triggers.items) |t| self.alloc.free(t);
+        self.onbuild_triggers.deinit(self.alloc);
+        for (self.pending_onbuild.items) |t| self.alloc.free(t);
+        self.pending_onbuild.deinit(self.alloc);
         var arg_it = self.build_args.iterator();
         while (arg_it.next()) |entry| {
             self.alloc.free(entry.key_ptr.*);
@@ -319,7 +332,13 @@ fn buildStage(
             alloc.free(effective_args);
 
         switch (inst.kind) {
-            .from => try processFrom(alloc, &state, effective_args),
+            .from => {
+                try processFrom(alloc, &state, effective_args);
+
+                // execute any ONBUILD triggers inherited from the base image.
+                // these run once after FROM, before the child's instructions.
+                try executePendingOnbuild(alloc, &state, context_dir, stages, completed_states);
+            },
             .run => try processRun(alloc, &state, effective_args),
             .copy => try processCopyMultiStage(alloc, &state, effective_args, context_dir, stages, completed_states),
             .add => try processAddMultiStage(alloc, &state, effective_args, context_dir, stages, completed_states),
@@ -334,7 +353,7 @@ fn buildStage(
             .shell => processShell(alloc, &state, effective_args),
             .healthcheck => processHealthcheck(alloc, &state, effective_args),
             .stopsignal => processStopsignal(alloc, &state, effective_args),
-            .onbuild => processOnbuild(effective_args),
+            .onbuild => processOnbuild(alloc, &state, effective_args),
             .arg => processArg(alloc, &state, inst.args),
         }
     }
@@ -1220,11 +1239,142 @@ fn processStopsignal(alloc: std.mem.Allocator, state: *BuildState, args: []const
     state.stop_signal = owned;
 }
 
-fn processOnbuild(args: []const u8) void {
-    // ONBUILD triggers are rarely used and complex to implement properly
-    // (they require storing instructions that run when this image is used
-    // as a base). log a warning and skip for now.
-    log.warn("ONBUILD is not yet supported, skipping: {s}", .{args});
+fn processOnbuild(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
+    // ONBUILD stores the inner instruction so it executes when someone
+    // uses this image as a base (FROM this-image). the trigger is stored
+    // as-is in the image config's OnBuild array.
+    log.info("ONBUILD {s}", .{args});
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate ONBUILD trigger", .{});
+        return;
+    };
+    state.onbuild_triggers.append(alloc, owned) catch {
+        log.warn("build: failed to store ONBUILD trigger", .{});
+        alloc.free(owned);
+    };
+}
+
+/// execute ONBUILD triggers inherited from a base image.
+/// each trigger is a Dockerfile instruction string (e.g. "RUN echo hello").
+/// after execution, the pending list is cleared.
+fn executePendingOnbuild(
+    alloc: std.mem.Allocator,
+    state: *BuildState,
+    context_dir: []const u8,
+    stages: []const BuildStage,
+    completed_states: []const BuildState,
+) BuildError!void {
+    if (state.pending_onbuild.items.len == 0) return;
+
+    log.info("executing {d} ONBUILD trigger(s) from base image", .{state.pending_onbuild.items.len});
+
+    for (state.pending_onbuild.items) |trigger| {
+        // parse the trigger string into instruction kind + args
+        const parsed = parseTrigger(trigger) orelse {
+            log.warn("ONBUILD: skipping unparseable trigger: {s}", .{trigger});
+            continue;
+        };
+
+        log.info("ONBUILD: {s} {s}", .{ @tagName(parsed.kind), parsed.args });
+
+        // dispatch just like buildStage does
+        switch (parsed.kind) {
+            .run => try processRun(alloc, state, parsed.args),
+            .copy => try processCopyMultiStage(alloc, state, parsed.args, context_dir, stages, completed_states),
+            .add => try processAddMultiStage(alloc, state, parsed.args, context_dir, stages, completed_states),
+            .env => processEnv(alloc, state, parsed.args),
+            .workdir => processWorkdir(alloc, state, parsed.args),
+            .cmd => processCmd(alloc, state, parsed.args),
+            .entrypoint => processEntrypoint(alloc, state, parsed.args),
+            .expose => processExpose(alloc, state, parsed.args),
+            .user => processUser(alloc, state, parsed.args),
+            .label => processLabel(alloc, state, parsed.args),
+            .volume => processVolume(alloc, state, parsed.args),
+            .shell => processShell(alloc, state, parsed.args),
+            .healthcheck => processHealthcheck(alloc, state, parsed.args),
+            .stopsignal => processStopsignal(alloc, state, parsed.args),
+            // FROM and ONBUILD are not valid inside ONBUILD triggers
+            .from, .onbuild => {
+                log.warn("ONBUILD: {s} is not allowed in triggers, skipping", .{@tagName(parsed.kind)});
+            },
+            .arg => processArg(alloc, state, parsed.args),
+        }
+    }
+
+    // clear pending triggers — they only execute once
+    for (state.pending_onbuild.items) |t| alloc.free(t);
+    state.pending_onbuild.clearRetainingCapacity();
+}
+
+/// parse a trigger string like "RUN echo hello" into kind + args.
+/// same as Dockerfile line parsing but without line continuation.
+fn parseTrigger(trigger: []const u8) ?struct { kind: dockerfile.InstructionKind, args: []const u8 } {
+    const trimmed = std.mem.trim(u8, trigger, " \t");
+    if (trimmed.len == 0) return null;
+
+    // split on first whitespace
+    var split_pos: ?usize = null;
+    for (trimmed, 0..) |c, i| {
+        if (c == ' ' or c == '\t') {
+            split_pos = i;
+            break;
+        }
+    }
+
+    const keyword = if (split_pos) |pos| trimmed[0..pos] else trimmed;
+    const args = if (split_pos) |pos|
+        std.mem.trimLeft(u8, trimmed[pos + 1 ..], " \t")
+    else
+        "";
+
+    if (args.len == 0) return null;
+
+    // case-insensitive keyword matching
+    var lower_buf: [16]u8 = undefined;
+    if (keyword.len > lower_buf.len) return null;
+    for (keyword, 0..) |c, i| {
+        lower_buf[i] = std.ascii.toLower(c);
+    }
+    const lower = lower_buf[0..keyword.len];
+
+    const kind: dockerfile.InstructionKind = if (std.mem.eql(u8, lower, "run"))
+        .run
+    else if (std.mem.eql(u8, lower, "copy"))
+        .copy
+    else if (std.mem.eql(u8, lower, "add"))
+        .add
+    else if (std.mem.eql(u8, lower, "env"))
+        .env
+    else if (std.mem.eql(u8, lower, "expose"))
+        .expose
+    else if (std.mem.eql(u8, lower, "entrypoint"))
+        .entrypoint
+    else if (std.mem.eql(u8, lower, "cmd"))
+        .cmd
+    else if (std.mem.eql(u8, lower, "workdir"))
+        .workdir
+    else if (std.mem.eql(u8, lower, "arg"))
+        .arg
+    else if (std.mem.eql(u8, lower, "user"))
+        .user
+    else if (std.mem.eql(u8, lower, "label"))
+        .label
+    else if (std.mem.eql(u8, lower, "volume"))
+        .volume
+    else if (std.mem.eql(u8, lower, "shell"))
+        .shell
+    else if (std.mem.eql(u8, lower, "healthcheck"))
+        .healthcheck
+    else if (std.mem.eql(u8, lower, "stopsignal"))
+        .stopsignal
+    else if (std.mem.eql(u8, lower, "from"))
+        .from
+    else if (std.mem.eql(u8, lower, "onbuild"))
+        .onbuild
+    else
+        return null;
+
+    return .{ .kind = kind, .args = args };
 }
 
 // -- cache helpers --
@@ -1356,6 +1506,21 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
                 };
                 if (state.user) |old| alloc.free(old);
                 state.user = owned;
+            }
+        }
+
+        // inherit ONBUILD triggers — these will execute in buildStage
+        // after the FROM instruction completes
+        if (cc.OnBuild) |triggers| {
+            for (triggers) |trigger| {
+                const owned = alloc.dupe(u8, trigger) catch {
+                    log.warn("build: failed to allocate inherited ONBUILD trigger", .{});
+                    continue;
+                };
+                state.pending_onbuild.append(alloc, owned) catch {
+                    log.warn("build: failed to store inherited ONBUILD trigger", .{});
+                    alloc.free(owned);
+                };
             }
         }
     }
@@ -1688,6 +1853,20 @@ fn buildConfigJson(alloc: std.mem.Allocator, state: *const BuildState) ![]const 
             hc;
         try json_helpers.writeJsonEscaped(writer, cmd_str);
         try writer.writeAll("\"]}");
+        first = false;
+    }
+
+    // OnBuild — triggers that execute when this image is used as a base
+    if (state.onbuild_triggers.items.len > 0) {
+        if (!first) try writer.writeAll(",");
+        try writer.writeAll("\"OnBuild\":[");
+        for (state.onbuild_triggers.items, 0..) |trigger, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writer.writeByte('"');
+            try json_helpers.writeJsonEscaped(writer, trigger);
+            try writer.writeByte('"');
+        }
+        try writer.writeAll("]");
         first = false;
     }
 
@@ -2159,9 +2338,54 @@ test "config json with healthcheck" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Test\":[\"CMD-SHELL\",\"curl -f http://localhost/\"]") != null);
 }
 
-test "processOnbuild does not crash" {
-    // just verify it doesn't panic — ONBUILD logs a warning and skips
-    processOnbuild("RUN echo triggered");
+test "processOnbuild stores trigger" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processOnbuild(alloc, &state, "RUN echo triggered");
+    processOnbuild(alloc, &state, "ENV FOO=bar");
+
+    try std.testing.expectEqual(@as(usize, 2), state.onbuild_triggers.items.len);
+    try std.testing.expectEqualStrings("RUN echo triggered", state.onbuild_triggers.items[0]);
+    try std.testing.expectEqualStrings("ENV FOO=bar", state.onbuild_triggers.items[1]);
+}
+
+test "parseTrigger valid instructions" {
+    const t1 = parseTrigger("RUN echo hello").?;
+    try std.testing.expectEqual(dockerfile.InstructionKind.run, t1.kind);
+    try std.testing.expectEqualStrings("echo hello", t1.args);
+
+    const t2 = parseTrigger("COPY src/ /app/").?;
+    try std.testing.expectEqual(dockerfile.InstructionKind.copy, t2.kind);
+    try std.testing.expectEqualStrings("src/ /app/", t2.args);
+
+    const t3 = parseTrigger("env NODE_ENV=production").?;
+    try std.testing.expectEqual(dockerfile.InstructionKind.env, t3.kind);
+    try std.testing.expectEqualStrings("NODE_ENV=production", t3.args);
+}
+
+test "parseTrigger rejects empty and unknown" {
+    try std.testing.expect(parseTrigger("") == null);
+    try std.testing.expect(parseTrigger("BADINSTRUCTION args") == null);
+    try std.testing.expect(parseTrigger("RUN") == null); // no args
+}
+
+test "config json includes onbuild triggers" {
+    const alloc = std.testing.allocator;
+    var state = BuildState.init(alloc);
+    defer state.deinit();
+
+    processOnbuild(alloc, &state, "RUN echo hello");
+    processOnbuild(alloc, &state, "ENV FOO=bar");
+
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+
+    // verify OnBuild array is present
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"OnBuild\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"RUN echo hello\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ENV FOO=bar\"") != null);
 }
 
 test "processArg — key=value" {
