@@ -173,6 +173,51 @@ fn patchMapFd(insn: *BPF.Insn, fd: posix.fd_t) void {
     insn.imm = @intCast(fd);
 }
 
+/// load an egress BPF program from a module with egress_insns/egress_relocs.
+fn loadEgressProgram(
+    comptime prog: type,
+    map_fds: []posix.fd_t,
+) EbpfError!posix.fd_t {
+    const insns = prog.egress_insns;
+    const relocs_arr = prog.egress_relocs;
+    const maps = prog.maps;
+
+    if (insns.len == 0) return EbpfError.ProgramLoadFailed;
+    if (insns.len > max_insns) return EbpfError.ProgramLoadFailed;
+
+    var mutable_insns: [insns.len]BPF.Insn = insns;
+
+    for (relocs_arr) |reloc| {
+        if (reloc.insn_idx >= insns.len) continue;
+        if (reloc.map_idx >= maps.len) continue;
+        patchMapFd(&mutable_insns[reloc.insn_idx], map_fds[reloc.map_idx]);
+    }
+
+    var log_buf: [4096]u8 = undefined;
+    var bpf_log = BPF.Log{
+        .level = 1,
+        .buf = &log_buf,
+    };
+
+    const prog_fd = BPF.prog_load(
+        .sched_cls,
+        &mutable_insns,
+        &bpf_log,
+        "GPL",
+        0,
+        0,
+    ) catch |e| {
+        const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
+        if (log_end > 0) {
+            log.warn("ebpf: egress verifier: {s}", .{log_buf[0..log_end]});
+        }
+        log.warn("ebpf: egress prog_load failed: {}", .{e});
+        return EbpfError.ProgramLoadFailed;
+    };
+
+    return prog_fd;
+}
+
 // -- TC attachment --
 
 /// attach a BPF program to a network interface via TC.
@@ -458,6 +503,7 @@ pub const ServiceBackends = extern struct {
 
 /// state for the loaded load balancer program.
 pub const LoadBalancer = struct {
+    egress_prog_fd: posix.fd_t,
     prog_fd: posix.fd_t,
     backends_fd: posix.fd_t,
     conntrack_fd: posix.fd_t,
@@ -534,6 +580,7 @@ pub const LoadBalancer = struct {
     pub fn deinit(self: *LoadBalancer) void {
         detachTC(self.if_index) catch {};
         posix.close(self.prog_fd);
+        if (self.egress_prog_fd >= 0) posix.close(self.egress_prog_fd);
         posix.close(self.backends_fd);
         posix.close(self.conntrack_fd);
         posix.close(self.rr_counter_fd);
@@ -582,7 +629,21 @@ pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
     // attach to bridge ingress, priority 1 (qdisc should already exist from DNS interceptor)
     try attachTC(bridge_if_index, .ingress, prog_fd, 1);
 
+    // load and attach egress program if available
+    var egress_fd: posix.fd_t = -1;
+    if (@hasDecl(lb_prog, "egress_insns")) {
+        egress_fd = loadEgressProgram(lb_prog, &map_fds) catch -1;
+        if (egress_fd >= 0) {
+            attachTC(bridge_if_index, .egress, egress_fd, 1) catch |e| {
+                log.warn("ebpf: failed to attach LB egress: {}", .{e});
+                posix.close(egress_fd);
+                egress_fd = -1;
+            };
+        }
+    }
+
     load_balancer = .{
+        .egress_prog_fd = egress_fd,
         .prog_fd = prog_fd,
         .backends_fd = backends_fd,
         .conntrack_fd = conntrack_fd,

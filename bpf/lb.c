@@ -86,7 +86,8 @@ select_backend(struct service_backends *svc)
     if (!counter)
         return svc->ips[0]; // fallback to first
 
-    __u32 idx = __sync_fetch_and_add(counter, 1) % svc->count;
+    __sync_fetch_and_add(counter, 1);
+    __u32 idx = *counter % svc->count;
     return svc->ips[idx];
 }
 

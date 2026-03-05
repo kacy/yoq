@@ -1,4 +1,4 @@
-.PHONY: build run test clean
+.PHONY: build run test clean bpf
 
 build:
 	zig build
@@ -11,3 +11,6 @@ test:
 
 clean:
 	rm -rf zig-out .zig-cache
+
+bpf:
+	zig build bpf
