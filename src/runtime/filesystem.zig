@@ -14,11 +14,17 @@ const syscall_util = @import("../lib/syscall.zig");
 const log = @import("../lib/log.zig");
 
 pub const FilesystemError = error{
+    /// a mount syscall failed (overlayfs, bind, essential fs, or remount)
     MountFailed,
+    /// pivot_root syscall failed — could not switch to new rootfs
     PivotFailed,
+    /// umount2 failed when detaching the old root after pivot
     UnmountFailed,
+    /// failed to create a required directory (e.g. mount point target)
     MkdirFailed,
+    /// a constructed path exceeded the stack buffer (4096 bytes)
     PathTooLong,
+    /// an overlay path (lower/upper/work) is a symlink, which could redirect mounts
     SymlinkNotAllowed,
 };
 

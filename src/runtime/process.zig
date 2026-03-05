@@ -10,8 +10,11 @@ const posix = std.posix;
 const syscall_util = @import("../lib/syscall.zig");
 
 pub const ProcessError = error{
+    /// wait4 syscall failed (process may not exist or is not a child)
     WaitFailed,
+    /// kill syscall failed when sending a signal to the process
     KillFailed,
+    /// generic signal delivery failure
     SignalFailed,
 };
 

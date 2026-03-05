@@ -23,8 +23,11 @@ const LogEntry = types.LogEntry;
 const SnapshotMeta = types.SnapshotMeta;
 
 pub const LogError = error{
+    /// could not open or initialize the raft log SQLite database
     DbOpenFailed,
+    /// failed to write a log entry or update raft persistent state
     WriteFailed,
+    /// failed to read a log entry or query raft persistent state
     ReadFailed,
 };
 

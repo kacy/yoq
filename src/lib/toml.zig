@@ -9,13 +9,21 @@ const std = @import("std");
 const log = @import("log.zig");
 
 pub const ParseError = error{
+    /// encountered a character that doesn't belong in the current context
     UnexpectedCharacter,
+    /// a quoted string was opened but never closed
     UnterminatedString,
+    /// an array '[' was opened but no matching ']' was found
     UnterminatedArray,
+    /// a value could not be parsed as string, integer, boolean, or array
     InvalidValue,
+    /// a key appears more than once in the same table
     DuplicateKey,
+    /// a table header is malformed (missing brackets, empty, or empty segment)
     InvalidTableHeader,
+    /// a key-value line has nothing before the '='
     EmptyKey,
+    /// the allocator could not satisfy a memory request during parsing
     OutOfMemory,
 };
 

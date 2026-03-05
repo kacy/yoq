@@ -12,9 +12,13 @@ const sqlite = @import("sqlite");
 const schema = @import("schema.zig");
 
 pub const StoreError = error{
+    /// a database write (insert/update/delete) failed
     WriteFailed,
+    /// a database read (select/query) failed
     ReadFailed,
+    /// no container record exists with the given id
     NotFound,
+    /// could not open or initialize the SQLite database file
     DbOpenFailed,
 };
 

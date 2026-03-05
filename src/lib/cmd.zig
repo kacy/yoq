@@ -9,7 +9,10 @@ const std = @import("std");
 pub const max_args = 20;
 pub const ArgList = [max_args]?[]const u8;
 
-pub const ExecError = error{ExecFailed};
+pub const ExecError = error{
+    /// command spawn or wait failed, or the command exited with a non-zero status
+    ExecFailed,
+};
 
 /// run a command with the given arguments.
 /// returns ExecFailed if spawn or wait fails, or if exit code is non-zero.

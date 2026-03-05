@@ -15,10 +15,15 @@ const paths = @import("../lib/paths.zig");
 const log_mux = @import("../dev/log_mux.zig");
 
 pub const LogError = error{
+    /// could not create the log file or log directory
     CreateFailed,
+    /// failed to read back the log file contents
     ReadFailed,
+    /// failed to write a log line to the file
     WriteFailed,
+    /// no log file exists for the given container id
     NotFound,
+    /// the constructed log file path exceeded the buffer size
     PathTooLong,
 };
 

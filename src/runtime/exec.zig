@@ -17,11 +17,17 @@ const syscall_util = @import("../lib/syscall.zig");
 const exec_helpers = @import("../lib/exec_helpers.zig");
 
 pub const ExecError = error{
+    /// the target container is not in a running state
     ContainerNotRunning,
+    /// could not open a namespace fd from /proc/<pid>/ns/ (container may be gone)
     NamespaceOpenFailed,
+    /// setns syscall failed — could not enter the container's namespace
     SetNsFailed,
+    /// clone/fork failed when creating the child process inside the container
     ForkFailed,
+    /// execve failed — command not found or not executable
     ExecFailed,
+    /// waitpid failed while waiting for the exec'd command to finish
     WaitFailed,
 };
 

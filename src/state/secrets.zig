@@ -20,15 +20,25 @@ pub const nonce_length = XChaCha20Poly1305.nonce_length; // 24
 pub const tag_length = XChaCha20Poly1305.tag_length; // 16
 
 pub const SecretsError = error{
+    /// the master key file exists but could not be read
     KeyLoadFailed,
+    /// failed to generate or write a new master key file
     KeyCreateFailed,
+    /// XChaCha20-Poly1305 encryption of a secret value failed
     EncryptionFailed,
+    /// decryption failed — wrong key, tampered ciphertext, or invalid nonce/tag size
     DecryptionFailed,
+    /// a database write (insert/update/delete) for secrets failed
     WriteFailed,
+    /// a database read (select/query) for secrets failed
     ReadFailed,
+    /// no secret exists with the given name
     NotFound,
+    /// the constructed key file path exceeded the buffer size
     PathTooLong,
+    /// could not determine the user's home directory for key storage
     HomeDirNotFound,
+    /// memory allocation failed during a secrets operation
     AllocFailed,
 };
 
