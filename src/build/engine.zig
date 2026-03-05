@@ -1014,11 +1014,135 @@ fn processCopyFromStage(
 }
 
 fn processAdd(alloc: std.mem.Allocator, state: *BuildState, args: []const u8, context_dir: []const u8) BuildError!void {
-    // ADD is treated as an alias for COPY. tar auto-extraction and URL
-    // fetch are not yet implemented — those are niche features we can
-    // add later without changing the interface.
+    const split = parseCopyArgs(args);
+    const src = split.src;
+
+    // check if the source is a tar archive by extension
+    if (isTarArchive(src)) {
+        log.info("ADD {s} (extracting archive)", .{args});
+        return processAddExtract(alloc, state, args, context_dir);
+    }
+
+    // non-archive source — same as COPY
     log.info("ADD {s} (treated as COPY)", .{args});
     return processCopy(alloc, state, args, context_dir);
+}
+
+/// detect tar archive by file extension
+fn isTarArchive(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".tar") or
+        std.mem.endsWith(u8, path, ".tar.gz") or
+        std.mem.endsWith(u8, path, ".tgz") or
+        std.mem.endsWith(u8, path, ".tar.bz2") or
+        std.mem.endsWith(u8, path, ".tar.xz");
+}
+
+/// ADD with tar extraction: extract the archive into the destination
+/// directory within the layer. uses the same cache logic as COPY.
+fn processAddExtract(alloc: std.mem.Allocator, state: *BuildState, args: []const u8, context_dir: []const u8) BuildError!void {
+    const split = parseCopyArgs(args);
+    const src = split.src;
+    const dest = split.dest;
+
+    // compute content hash of the archive for cache key
+    const file_hash = context.hashFiles(alloc, context_dir, src) catch
+        return BuildError.CopyStepFailed;
+    var file_hash_buf: [71]u8 = undefined;
+    const file_hash_str = file_hash.string(&file_hash_buf);
+
+    var cache_input_buf: [2048]u8 = undefined;
+    const cache_input = std.fmt.bufPrint(&cache_input_buf, "ADD\n{s}\n{s}\n{s}", .{
+        args, state.parent_digest, file_hash_str,
+    }) catch return BuildError.CacheFailed;
+
+    const cache_digest = blob_store.computeDigest(cache_input);
+    var cache_key_buf: [71]u8 = undefined;
+    const cache_key = cache_digest.string(&cache_key_buf);
+
+    if (checkCache(alloc, cache_key, state)) return;
+
+    // cache miss — extract the archive into a new layer
+
+    paths.ensureDataDir("tmp") catch return BuildError.CopyStepFailed;
+    var layer_dir_buf: [paths.max_path]u8 = undefined;
+    const layer_dir = paths.dataPathFmt(&layer_dir_buf, "tmp/build-add-layer", .{}) catch
+        return BuildError.CopyStepFailed;
+
+    std.fs.cwd().deleteTree(layer_dir) catch {};
+    std.fs.cwd().makePath(layer_dir) catch return BuildError.CopyStepFailed;
+    defer std.fs.cwd().deleteTree(layer_dir) catch {};
+
+    // determine extraction destination (respecting workdir)
+    var actual_dest_buf: [1024]u8 = undefined;
+    const actual_dest = if (dest.len > 0 and dest[0] != '/') blk: {
+        break :blk std.fmt.bufPrint(&actual_dest_buf, "{s}/{s}", .{
+            state.workdir, dest,
+        }) catch return BuildError.CopyStepFailed;
+    } else dest;
+
+    // build the full extraction target directory within the layer
+    const extract_rel = if (actual_dest.len > 0 and actual_dest[0] == '/')
+        actual_dest[1..]
+    else
+        actual_dest;
+
+    var extract_dir_buf: [2048]u8 = undefined;
+    const extract_dir = if (extract_rel.len > 0)
+        std.fmt.bufPrint(&extract_dir_buf, "{s}/{s}", .{
+            layer_dir, extract_rel,
+        }) catch return BuildError.CopyStepFailed
+    else
+        layer_dir;
+
+    std.fs.cwd().makePath(extract_dir) catch return BuildError.CopyStepFailed;
+
+    // build the full archive path in the build context
+    var archive_path_buf: [2048]u8 = undefined;
+    const archive_path = std.fmt.bufPrint(&archive_path_buf, "{s}/{s}", .{
+        context_dir, src,
+    }) catch return BuildError.CopyStepFailed;
+
+    // extract using tar
+    var child = std.process.Child.init(
+        &[_][]const u8{ "tar", "xf", archive_path, "-C", extract_dir },
+        alloc,
+    );
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    const term = child.spawnAndWait() catch {
+        log.err("ADD: failed to run tar for extraction", .{});
+        return BuildError.CopyStepFailed;
+    };
+
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                log.err("ADD: tar extraction failed with exit code {d}", .{code});
+                return BuildError.CopyStepFailed;
+            }
+        },
+        else => {
+            log.err("ADD: tar extraction terminated abnormally", .{});
+            return BuildError.CopyStepFailed;
+        },
+    }
+
+    // create layer from the extracted contents
+    const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch
+        return BuildError.LayerFailed;
+
+    if (layer_result) |lr| {
+        var digest_buf: [71]u8 = undefined;
+        const compressed_str = lr.compressed_digest.string(&digest_buf);
+        var diff_buf: [71]u8 = undefined;
+        const diff_str = lr.uncompressed_digest.string(&diff_buf);
+
+        state.addLayer(compressed_str, diff_str, lr.compressed_size) catch
+            return BuildError.LayerFailed;
+
+        storeCache(cache_key, compressed_str, diff_str, lr.compressed_size);
+    }
 }
 
 fn processVolume(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
@@ -2484,4 +2608,21 @@ test "cache key same when shell is same" {
     defer alloc.free(key2);
 
     try std.testing.expectEqualStrings(key1, key2);
+}
+
+test "isTarArchive detects tar extensions" {
+    try std.testing.expect(isTarArchive("archive.tar"));
+    try std.testing.expect(isTarArchive("archive.tar.gz"));
+    try std.testing.expect(isTarArchive("archive.tgz"));
+    try std.testing.expect(isTarArchive("archive.tar.bz2"));
+    try std.testing.expect(isTarArchive("archive.tar.xz"));
+    try std.testing.expect(isTarArchive("path/to/file.tar.gz"));
+}
+
+test "isTarArchive rejects non-archive files" {
+    try std.testing.expect(!isTarArchive("file.txt"));
+    try std.testing.expect(!isTarArchive("file.zip"));
+    try std.testing.expect(!isTarArchive("file.gz")); // gz alone is not a tar
+    try std.testing.expect(!isTarArchive("Makefile"));
+    try std.testing.expect(!isTarArchive(""));
 }
