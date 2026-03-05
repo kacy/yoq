@@ -299,6 +299,28 @@ pub fn findAppContainer(alloc: std.mem.Allocator, app_name: []const u8, hostname
     return rowToRecord(row);
 }
 
+/// list all container records (for status reporting).
+/// caller owns the returned list and records.
+pub fn listAll(alloc: std.mem.Allocator) StoreError!std.ArrayList(ContainerRecord) {
+    const db = try getDb();
+    defer releaseDb();
+
+    var records: std.ArrayList(ContainerRecord) = .empty;
+
+    var stmt = db.prepare(
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
+            " FROM containers ORDER BY hostname, created_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(ContainerRow, .{}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        records.append(alloc, rowToRecord(row)) catch return StoreError.ReadFailed;
+    }
+
+    return records;
+}
+
 // -- image records --
 
 /// persisted image record
