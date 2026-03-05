@@ -7,6 +7,7 @@
 const std = @import("std");
 const ip = @import("../network/ip.zig");
 const net_setup = @import("../network/setup.zig");
+const paths = @import("paths.zig");
 
 // -- output --
 
@@ -155,6 +156,53 @@ pub fn formatCount(buf: []u8, count: u64) []const u8 {
 pub fn truncate(s: []const u8, max_len: usize) []const u8 {
     if (s.len <= max_len) return s;
     return s[0..max_len];
+}
+
+// -- API token management --
+
+/// read the API auth token from ~/.local/share/yoq/api_token.
+/// returns the 64-char hex string in the provided buffer, or null on failure.
+pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
+
+    const file = std.fs.cwd().openFile(token_path, .{}) catch return null;
+    defer file.close();
+
+    const n = file.readAll(buf) catch return null;
+    if (n != 64) return null;
+
+    // validate it's all hex
+    for (buf) |c| {
+        switch (c) {
+            '0'...'9', 'a'...'f' => {},
+            else => return null,
+        }
+    }
+    return buf;
+}
+
+/// generate 32 random bytes, hex-encode to 64 chars, write to
+/// ~/.local/share/yoq/api_token with 0o600 permissions.
+/// returns the hex string in the provided buffer, or null on failure.
+pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
+    var raw: [32]u8 = undefined;
+    std.crypto.random.bytes(&raw);
+
+    const hex = std.fmt.bytesToHex(raw, .lower);
+    buf.* = hex;
+
+    // ensure data directory exists
+    paths.ensureDataDir("") catch return null;
+
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
+
+    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o600 }) catch return null;
+    defer file.close();
+
+    file.writeAll(buf) catch return null;
+    return buf;
 }
 
 // -- tests --
