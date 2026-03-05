@@ -187,11 +187,19 @@ fn splitIntoStages(alloc: std.mem.Allocator, instructions: []const dockerfile.In
 }
 
 /// extract stage name from FROM args: "image:tag AS name" -> "name"
+/// the AS keyword is case-insensitive per the Dockerfile spec.
 fn parseStageName(from_args: []const u8) ?[]const u8 {
-    // look for " AS " or " as " (case-insensitive)
-    if (std.mem.indexOf(u8, from_args, " AS ") orelse std.mem.indexOf(u8, from_args, " as ")) |idx| {
-        const name = std.mem.trim(u8, from_args[idx + 4 ..], " \t");
-        if (name.len > 0) return name;
+    // case-insensitive search for " AS " separator
+    if (from_args.len < 5) return null; // minimum: "x AS y"
+    for (0..from_args.len - 3) |i| {
+        if (from_args[i] == ' ' and
+            std.ascii.toLower(from_args[i + 1]) == 'a' and
+            std.ascii.toLower(from_args[i + 2]) == 's' and
+            from_args[i + 3] == ' ')
+        {
+            const name = std.mem.trim(u8, from_args[i + 4 ..], " \t");
+            if (name.len > 0) return name;
+        }
     }
     return null;
 }
@@ -379,13 +387,18 @@ fn processFrom(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) B
         var result = registry.pull(alloc, ref) catch return BuildError.PullFailed;
         defer result.deinit();
 
+        // compute the actual config digest from the pulled config bytes
+        const pulled_config_digest = blob_store.computeDigest(result.config_bytes);
+        var pulled_config_buf: [71]u8 = undefined;
+        const pulled_config_str = pulled_config_digest.string(&pulled_config_buf);
+
         // save the pulled image record
         state_store.saveImage(.{
             .id = result.manifest_digest,
             .repository = ref.repository,
             .tag = ref.reference,
             .manifest_digest = result.manifest_digest,
-            .config_digest = "sha256:config",
+            .config_digest = pulled_config_str,
             .total_size = @intCast(result.total_size),
             .created_at = std.time.timestamp(),
         }) catch |err| {
@@ -603,46 +616,70 @@ fn processCopy(alloc: std.mem.Allocator, state: *BuildState, args: []const u8, c
 
 fn processEnv(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
     // ENV KEY=VALUE or ENV KEY VALUE
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate ENV value", .{});
+        return;
+    };
     state.env.append(alloc, owned) catch {
+        log.warn("build: failed to store ENV value", .{});
         alloc.free(owned);
     };
 }
 
 fn processWorkdir(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate WORKDIR value", .{});
+        return;
+    };
     if (!std.mem.eql(u8, state.workdir, "/")) alloc.free(state.workdir);
     state.workdir = owned;
 }
 
 fn processCmd(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate CMD value", .{});
+        return;
+    };
     if (state.cmd) |old| alloc.free(old);
     state.cmd = owned;
 }
 
 fn processEntrypoint(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate ENTRYPOINT value", .{});
+        return;
+    };
     if (state.entrypoint) |old| alloc.free(old);
     state.entrypoint = owned;
 }
 
 fn processExpose(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate EXPOSE value", .{});
+        return;
+    };
     state.exposed_ports.append(alloc, owned) catch {
+        log.warn("build: failed to store EXPOSE value", .{});
         alloc.free(owned);
     };
 }
 
 fn processUser(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate USER value", .{});
+        return;
+    };
     if (state.user) |old| alloc.free(old);
     state.user = owned;
 }
 
 fn processLabel(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate LABEL value", .{});
+        return;
+    };
     state.labels.append(alloc, owned) catch {
+        log.warn("build: failed to store LABEL value", .{});
         alloc.free(owned);
     };
 }
@@ -658,12 +695,17 @@ fn processArg(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) vo
         // only set if not already provided by CLI --build-arg
         if (state.build_args.get(key) != null) return;
 
-        const owned_key = alloc.dupe(u8, key) catch return;
+        const owned_key = alloc.dupe(u8, key) catch {
+            log.warn("build: failed to allocate ARG key", .{});
+            return;
+        };
         const owned_val = alloc.dupe(u8, val) catch {
+            log.warn("build: failed to allocate ARG value", .{});
             alloc.free(owned_key);
             return;
         };
         state.build_args.put(alloc, owned_key, owned_val) catch {
+            log.warn("build: failed to store ARG", .{});
             alloc.free(owned_key);
             alloc.free(owned_val);
         };
@@ -672,12 +714,17 @@ fn processArg(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) vo
         // already set by CLI
         if (state.build_args.get(trimmed) != null) return;
 
-        const owned_key = alloc.dupe(u8, trimmed) catch return;
+        const owned_key = alloc.dupe(u8, trimmed) catch {
+            log.warn("build: failed to allocate ARG key", .{});
+            return;
+        };
         const owned_val = alloc.dupe(u8, "") catch {
+            log.warn("build: failed to allocate ARG value", .{});
             alloc.free(owned_key);
             return;
         };
         state.build_args.put(alloc, owned_key, owned_val) catch {
+            log.warn("build: failed to store ARG", .{});
             alloc.free(owned_key);
             alloc.free(owned_val);
         };
@@ -979,8 +1026,12 @@ fn processVolume(alloc: std.mem.Allocator, state: *BuildState, args: []const u8)
         while (iter.next()) |entry| {
             const path = std.mem.trim(u8, entry, " \t\"");
             if (path.len == 0) continue;
-            const owned = alloc.dupe(u8, path) catch continue;
+            const owned = alloc.dupe(u8, path) catch {
+                log.warn("build: failed to allocate VOLUME path", .{});
+                continue;
+            };
             state.volumes.append(alloc, owned) catch {
+                log.warn("build: failed to store VOLUME path", .{});
                 alloc.free(owned);
             };
         }
@@ -988,8 +1039,12 @@ fn processVolume(alloc: std.mem.Allocator, state: *BuildState, args: []const u8)
         // space-separated form: VOLUME /data /logs
         var iter = std.mem.tokenizeAny(u8, args, " \t");
         while (iter.next()) |path| {
-            const owned = alloc.dupe(u8, path) catch continue;
+            const owned = alloc.dupe(u8, path) catch {
+                log.warn("build: failed to allocate VOLUME path", .{});
+                continue;
+            };
             state.volumes.append(alloc, owned) catch {
+                log.warn("build: failed to store VOLUME path", .{});
                 alloc.free(owned);
             };
         }
@@ -1000,7 +1055,10 @@ fn processShell(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) 
     // SHELL sets the default shell for subsequent RUN instructions.
     // the args should be in JSON form: ["/bin/bash", "-c"]
     log.info("SHELL {s}", .{args});
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate SHELL value", .{});
+        return;
+    };
     if (state.shell) |old| alloc.free(old);
     state.shell = owned;
 }
@@ -1010,7 +1068,10 @@ fn processHealthcheck(alloc: std.mem.Allocator, state: *BuildState, args: []cons
     // runtime to use. we store the raw args string and let the runtime
     // parse the details (interval, timeout, retries, command).
     log.info("HEALTHCHECK {s}", .{args});
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate HEALTHCHECK value", .{});
+        return;
+    };
     if (state.healthcheck) |old| alloc.free(old);
     state.healthcheck = owned;
 }
@@ -1019,7 +1080,10 @@ fn processStopsignal(alloc: std.mem.Allocator, state: *BuildState, args: []const
     // STOPSIGNAL sets the signal sent to the container on stop.
     // metadata only — stored in the image config.
     log.info("STOPSIGNAL {s}", .{args});
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate STOPSIGNAL value", .{});
+        return;
+    };
     if (state.stop_signal) |old| alloc.free(old);
     state.stop_signal = owned;
 }
@@ -1094,15 +1158,22 @@ fn storeCache(cache_key: []const u8, layer_digest: []const u8, diff_id: []const 
 // -- config inheritance --
 
 fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []const u8) void {
-    var parsed = spec.parseImageConfig(alloc, config_bytes) catch return;
+    var parsed = spec.parseImageConfig(alloc, config_bytes) catch {
+        log.warn("build: failed to parse base image config", .{});
+        return;
+    };
     defer parsed.deinit();
 
     if (parsed.value.config) |cc| {
         // inherit environment variables
         if (cc.Env) |envs| {
             for (envs) |env| {
-                const owned = alloc.dupe(u8, env) catch continue;
+                const owned = alloc.dupe(u8, env) catch {
+                    log.warn("build: failed to allocate inherited ENV", .{});
+                    continue;
+                };
                 state.env.append(alloc, owned) catch {
+                    log.warn("build: failed to store inherited ENV", .{});
                     alloc.free(owned);
                 };
             }
@@ -1111,7 +1182,10 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
         // inherit working directory
         if (cc.WorkingDir) |wd| {
             if (wd.len > 0) {
-                const owned = alloc.dupe(u8, wd) catch return;
+                const owned = alloc.dupe(u8, wd) catch {
+                    log.warn("build: failed to allocate inherited WORKDIR", .{});
+                    return;
+                };
                 if (!std.mem.eql(u8, state.workdir, "/")) alloc.free(state.workdir);
                 state.workdir = owned;
             }
@@ -1120,7 +1194,10 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
         // inherit CMD
         if (cc.Cmd) |cmds| {
             if (cmds.len > 0) {
-                const owned = alloc.dupe(u8, cmds[0]) catch return;
+                const owned = alloc.dupe(u8, cmds[0]) catch {
+                    log.warn("build: failed to allocate inherited CMD", .{});
+                    return;
+                };
                 if (state.cmd) |old| alloc.free(old);
                 state.cmd = owned;
             }
@@ -1129,7 +1206,10 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
         // inherit ENTRYPOINT
         if (cc.Entrypoint) |ep| {
             if (ep.len > 0) {
-                const owned = alloc.dupe(u8, ep[0]) catch return;
+                const owned = alloc.dupe(u8, ep[0]) catch {
+                    log.warn("build: failed to allocate inherited ENTRYPOINT", .{});
+                    return;
+                };
                 if (state.entrypoint) |old| alloc.free(old);
                 state.entrypoint = owned;
             }
@@ -1138,7 +1218,10 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
         // inherit USER
         if (cc.User) |u| {
             if (u.len > 0) {
-                const owned = alloc.dupe(u8, u) catch return;
+                const owned = alloc.dupe(u8, u) catch {
+                    log.warn("build: failed to allocate inherited USER", .{});
+                    return;
+                };
                 if (state.user) |old| alloc.free(old);
                 state.user = owned;
             }
@@ -1327,12 +1410,15 @@ fn produceImage(alloc: std.mem.Allocator, state: *BuildState, tag: ?[]const u8) 
         break :blk @as([]const u8, "latest");
     } else "latest";
 
+    var config_digest_str_buf: [71]u8 = undefined;
+    const config_digest_str = config_digest.string(&config_digest_str_buf);
+
     state_store.saveImage(.{
         .id = owned_digest,
         .repository = repo,
         .tag = img_tag,
         .manifest_digest = owned_digest,
-        .config_digest = manifest_digest_str,
+        .config_digest = config_digest_str,
         .total_size = @intCast(state.total_size),
         .created_at = std.time.timestamp(),
     }) catch |err| {
@@ -2160,8 +2246,23 @@ test "parseStageName — lowercase as" {
     try std.testing.expectEqualStrings("build-stage", name.?);
 }
 
+test "parseStageName — mixed case As" {
+    const name = parseStageName("golang:1.21 As builder");
+    try std.testing.expectEqualStrings("builder", name.?);
+}
+
+test "parseStageName — mixed case aS" {
+    const name = parseStageName("golang:1.21 aS builder");
+    try std.testing.expectEqualStrings("builder", name.?);
+}
+
 test "parseStageName — no AS clause" {
     const name = parseStageName("ubuntu:24.04");
+    try std.testing.expect(name == null);
+}
+
+test "parseStageName — too short" {
+    const name = parseStageName("x");
     try std.testing.expect(name == null);
 }
 
