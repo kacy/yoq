@@ -104,6 +104,13 @@ pub fn lookupClusterService(name: []const u8) ?[4]u8 {
 pub fn registerService(name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     if (name.len == 0 or name.len > max_name_len) return;
 
+    // validate name contains only safe characters — reject control chars,
+    // whitespace, and non-printable characters that could cause issues
+    // in DNS responses or log output
+    for (name) |c| {
+        if (c < 0x21 or c > 0x7e) return;
+    }
+
     registry_mutex.lock();
     defer registry_mutex.unlock();
 
@@ -1272,4 +1279,18 @@ test "lookupService prefers local registry over cluster db" {
     const result = lookupService("web");
     try std.testing.expect(result != null);
     try std.testing.expectEqual([4]u8{ 10, 42, 1, 10 }, result.?);
+}
+
+test "registerService rejects name with control characters" {
+    resetRegistryForTest();
+
+    registerService("bad\nname", "ctr_001", .{ 10, 42, 0, 50 });
+    try std.testing.expect(lookupService("bad\nname") == null);
+}
+
+test "registerService rejects name with spaces" {
+    resetRegistryForTest();
+
+    registerService("bad name", "ctr_001", .{ 10, 42, 0, 50 });
+    try std.testing.expect(lookupService("bad name") == null);
 }
