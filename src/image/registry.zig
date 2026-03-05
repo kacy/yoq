@@ -700,27 +700,18 @@ pub fn uploadBlob(
 
     _ = alloc; // reserved for future use
 
-    const put_uri = std.Uri.parse(put_url) catch return RegistryError.UploadFailed;
-    var put_req = client.request(.PUT, put_uri, .{
-        .redirect_behavior = @enumFromInt(3),
-        .keep_alive = false,
-        .headers = .{
-            .authorization = if (auth_value2.len > 0) .{ .override = auth_value2 } else .default,
-            .content_type = .{ .override = "application/octet-stream" },
+    const put_result = client.fetch(.{
+        .location = .{ .url = put_url },
+        .method = .PUT,
+        .payload = data,
+        .extra_headers = &.{
+            .{ .name = "Content-Type", .value = "application/octet-stream" },
+            .{ .name = "Authorization", .value = auth_value2 },
         },
     }) catch return RegistryError.UploadFailed;
-    defer put_req.deinit();
-
-    put_req.send(.{ .content_length = data.len }) catch return RegistryError.UploadFailed;
-    put_req.writeAll(data) catch return RegistryError.UploadFailed;
-    put_req.finish() catch return RegistryError.UploadFailed;
-
-    var put_redirect_buf: [4096]u8 = undefined;
-    const put_response = put_req.receiveHead(&put_redirect_buf) catch
-        return RegistryError.UploadFailed;
 
     // 201 Created is the expected success status for blob upload
-    if (put_response.head.status != .created)
+    if (put_result.status != .created)
         return RegistryError.UploadFailed;
 }
 
@@ -781,33 +772,18 @@ pub fn uploadManifest(
 
     _ = alloc; // reserved for future use
 
-    const content_type_header = std.http.Header{
-        .name = "Content-Type",
-        .value = spec.media_type.oci_manifest,
-    };
-
-    var headers: [1]std.http.Header = .{content_type_header};
-
-    const uri = std.Uri.parse(url) catch return RegistryError.UploadFailed;
-    var req = client.request(.PUT, uri, .{
-        .redirect_behavior = @enumFromInt(3),
-        .keep_alive = false,
-        .headers = .{
-            .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
+    const result = client.fetch(.{
+        .location = .{ .url = url },
+        .method = .PUT,
+        .payload = manifest_bytes,
+        .extra_headers = &.{
+            .{ .name = "Content-Type", .value = spec.media_type.oci_manifest },
+            .{ .name = "Authorization", .value = auth_value },
         },
-        .extra_headers = &headers,
     }) catch return RegistryError.UploadFailed;
-    defer req.deinit();
-
-    req.send(.{ .content_length = manifest_bytes.len }) catch return RegistryError.UploadFailed;
-    req.writeAll(manifest_bytes) catch return RegistryError.UploadFailed;
-    req.finish() catch return RegistryError.UploadFailed;
-
-    var redirect_buf: [4096]u8 = undefined;
-    const response = req.receiveHead(&redirect_buf) catch return RegistryError.UploadFailed;
 
     // 201 Created is the expected success status for manifest upload
-    if (response.head.status != .created)
+    if (result.status != .created)
         return RegistryError.UploadFailed;
 }
 

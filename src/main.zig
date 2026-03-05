@@ -1335,7 +1335,7 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
         // on the first heartbeat cycle via reconcilePeers
         net_setup.setupClusterNetworking(.{
             .node_id = node_id,
-            .private_key = kp.privateKeySlice(),
+            .private_key = &kp.private_key,
             .listen_port = agent.wg_listen_port,
             .overlay_ip = overlay_ip,
             .peers = &.{},
@@ -1381,7 +1381,7 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
 
     net_setup.setupClusterNetworking(.{
         .node_id = node_id,
-        .private_key = kp.privateKeySlice(),
+        .private_key = &kp.private_key,
         .listen_port = agent.wg_listen_port,
         .overlay_ip = overlay_ip,
         .peers = peers_buf[0..peer_count],
@@ -2128,7 +2128,8 @@ fn cmdSecretSet(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         v
     else blk: {
         // read from stdin
-        const stdin_data = std.io.getStdIn().readToEndAlloc(alloc, 1024 * 1024) catch {
+        const stdin_file: std.fs.File = .{ .handle = std.posix.STDIN_FILENO };
+        const stdin_data = stdin_file.readToEndAlloc(alloc, 1024 * 1024) catch {
             writeErr("failed to read from stdin\n", .{});
             std.process.exit(1);
         };
