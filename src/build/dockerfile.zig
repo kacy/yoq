@@ -39,8 +39,11 @@ pub const Instruction = struct {
 };
 
 pub const ParseError = error{
+    /// line starts with an unrecognized keyword (not a valid Dockerfile instruction)
     UnknownInstruction,
+    /// instruction keyword found but no arguments follow it
     EmptyInstruction,
+    /// allocator ran out of memory during parsing
     OutOfMemory,
 };
 
