@@ -20,10 +20,15 @@ const sqlite = @import("sqlite");
 const schema = @import("../state/schema.zig");
 
 pub const IpError = error{
+    /// failed to allocate an IP address (db insert or transaction error)
     AllocationFailed,
+    /// failed to delete an IP allocation from the database
     ReleaseFailed,
+    /// no IP allocation exists for the given container
     NotFound,
+    /// all addresses in the subnet have been allocated
     SubnetExhausted,
+    /// failed to open or initialize the IP allocation database
     DbOpenFailed,
 };
 

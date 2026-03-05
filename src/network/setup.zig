@@ -26,11 +26,17 @@ const schema = @import("../state/schema.zig");
 const log = @import("../lib/log.zig");
 
 pub const SetupError = error{
+    /// failed to create or configure the yoq0 bridge interface
     BridgeFailed,
+    /// failed to allocate an IP address for the container
     IpAllocationFailed,
+    /// failed to create a veth pair or move it into the container namespace
     VethFailed,
+    /// failed to set up iptables NAT rules (forwarding or masquerade)
     NatFailed,
+    /// failed to configure networking inside the container namespace
     ConfigFailed,
+    /// failed to open or query the state database
     DbFailed,
 };
 

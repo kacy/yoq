@@ -25,11 +25,17 @@ const nl = @import("netlink.zig");
 const log = @import("../lib/log.zig");
 
 pub const EbpfError = error{
+    /// failed to create a BPF map via the bpf() syscall
     MapCreateFailed,
+    /// failed to insert or update a key/value pair in a BPF map
     MapUpdateFailed,
+    /// the BPF verifier rejected the program or prog_load failed
     ProgramLoadFailed,
+    /// failed to attach a BPF program to TC (qdisc or filter creation)
     AttachFailed,
+    /// failed to detach a BPF program from TC (qdisc deletion)
     DetachFailed,
+    /// BPF is not available on this system (no CAP_BPF or old kernel)
     NotSupported,
 };
 
