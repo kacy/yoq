@@ -65,6 +65,16 @@ static long (*bpf_map_update_elem)(void *map, const void *key,
 static long (*bpf_map_delete_elem)(void *map, const void *key) =
     (void *)3;
 
+// -- checksum helpers --
+//
+// used by both DNS interceptor (IP length rewrite) and load balancer
+// (DNAT address rewrite) to incrementally update L3/L4 checksums.
+
+static long (*bpf_l3_csum_replace)(void *skb, __u32 offset, __u64 from,
+                                   __u64 to, __u64 size) = (void *)10;
+static long (*bpf_l4_csum_replace)(void *skb, __u32 offset, __u64 from,
+                                   __u64 to, __u64 flags) = (void *)11;
+
 // -- TC sk_buff context --
 //
 // subset of __sk_buff fields used by our programs. the kernel maps

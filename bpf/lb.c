@@ -68,11 +68,6 @@ struct bpf_map_def SEC("maps") rr_counter = {
 
 // -- helpers --
 
-static long (*bpf_l3_csum_replace)(void *skb, __u32 offset, __u64 from,
-                                   __u64 to, __u64 size) = (void *)10;
-static long (*bpf_l4_csum_replace)(void *skb, __u32 offset, __u64 from,
-                                   __u64 to, __u64 flags) = (void *)11;
-
 // select a backend IP for a service using round-robin.
 // returns the backend IP in network byte order, or 0 on failure.
 static __attribute__((always_inline)) __u32
