@@ -23,7 +23,6 @@ const backend_mod = @import("backend.zig");
 const handshake = @import("handshake.zig");
 const record = @import("record.zig");
 const acme_mod = @import("acme.zig");
-const csr = @import("csr.zig");
 const jws = @import("jws.zig");
 
 const X25519 = std.crypto.dh.X25519;
@@ -245,11 +244,13 @@ pub const TlsProxy = struct {
         });
 
         while (self.running.load(.acquire)) {
-            // sleep in 1-second increments so we can check running flag
+            // sleep in 30-second increments so we can check the running flag
+            // without burning CPU. renewal checks are infrequent (every 12h)
+            // so 30s granularity is fine for shutdown responsiveness.
             var elapsed: u64 = 0;
             while (elapsed < config.check_interval_s and self.running.load(.acquire)) {
-                std.Thread.sleep(std.time.ns_per_s);
-                elapsed += 1;
+                std.Thread.sleep(30 * std.time.ns_per_s);
+                elapsed += 30;
             }
             if (!self.running.load(.acquire)) break;
 
@@ -346,27 +347,15 @@ pub const TlsProxy = struct {
             std.Thread.sleep(5 * std.time.ns_per_s);
         }
 
-        // finalize — generates CSR, gets signed cert
-        const result = client.finalize(order.finalize_url, domain) catch {
+        // finalize — generates CSR, gets signed cert, exports as PEM
+        var exported = client.finalizeAndExport(order.finalize_url, domain) catch {
             log.warn("  renewal: failed to finalize order", .{});
             return RenewError.AcmeFailed;
         };
-        defer {
-            self.allocator.free(result.cert_pem);
-            std.crypto.secureZero(u8, result.key_der);
-            self.allocator.free(result.key_der);
-        }
-
-        // convert key to PEM
-        const key_pem = csr.derKeyToPem(self.allocator, result.key_der) catch
-            return RenewError.AllocFailed;
-        defer {
-            std.crypto.secureZero(u8, key_pem);
-            self.allocator.free(key_pem);
-        }
+        defer exported.deinit();
 
         // store the new certificate (cert_store.install replaces existing)
-        self.certs.install(domain, result.cert_pem, key_pem, "acme") catch {
+        self.certs.install(domain, exported.cert_pem, exported.key_pem, "acme") catch {
             log.warn("  renewal: failed to store renewed certificate", .{});
             return RenewError.StoreFailed;
         };
@@ -640,6 +629,12 @@ fn extractHost(request: []const u8) ?[]const u8 {
 ///   length: 2
 ///   level: 1 (warning)
 ///   description: 0 (close_notify)
+///
+/// TODO: after the TLS handshake is complete, close_notify must be sent
+/// as an encrypted record using the application traffic key. this
+/// plaintext version is only correct before the handshake finishes.
+/// once full handshake completion is wired up, update this to encrypt
+/// the alert with record.zig's encryption layer.
 ///
 /// best-effort — we don't care if the write fails (connection may already
 /// be closed by the client).

@@ -36,8 +36,6 @@ const tls_proxy = @import("../tls/proxy.zig");
 const tls_backend = @import("../tls/backend.zig");
 const cert_store_mod = @import("../tls/cert_store.zig");
 const acme_mod = @import("../tls/acme.zig");
-const csr_mod = @import("../tls/csr.zig");
-const jws_mod = @import("../tls/jws.zig");
 const sqlite = @import("sqlite");
 
 pub const OrchestratorError = error{
@@ -533,26 +531,13 @@ fn provisionAcmeCert(
         std.Thread.sleep(5 * std.time.ns_per_s);
     }
 
-    const result = client.finalize(order.finalize_url, domain) catch {
+    var exported = client.finalizeAndExport(order.finalize_url, domain) catch {
         writeErr("    failed to finalize certificate order\n", .{});
         return;
     };
-    defer {
-        alloc.free(result.cert_pem);
-        std.crypto.secureZero(u8, result.key_der);
-        alloc.free(result.key_der);
-    }
+    defer exported.deinit();
 
-    const key_pem = csr_mod.derKeyToPem(alloc, result.key_der) catch {
-        writeErr("    failed to encode private key\n", .{});
-        return;
-    };
-    defer {
-        std.crypto.secureZero(u8, key_pem);
-        alloc.free(key_pem);
-    }
-
-    certs.install(domain, result.cert_pem, key_pem, "acme") catch {
+    certs.install(domain, exported.cert_pem, exported.key_pem, "acme") catch {
         writeErr("    failed to store certificate\n", .{});
         return;
     };
