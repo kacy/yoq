@@ -379,13 +379,18 @@ fn processFrom(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) B
         var result = registry.pull(alloc, ref) catch return BuildError.PullFailed;
         defer result.deinit();
 
+        // compute the actual config digest from the pulled config bytes
+        const pulled_config_digest = blob_store.computeDigest(result.config_bytes);
+        var pulled_config_buf: [71]u8 = undefined;
+        const pulled_config_str = pulled_config_digest.string(&pulled_config_buf);
+
         // save the pulled image record
         state_store.saveImage(.{
             .id = result.manifest_digest,
             .repository = ref.repository,
             .tag = ref.reference,
             .manifest_digest = result.manifest_digest,
-            .config_digest = "sha256:config",
+            .config_digest = pulled_config_str,
             .total_size = @intCast(result.total_size),
             .created_at = std.time.timestamp(),
         }) catch |err| {
@@ -1327,12 +1332,15 @@ fn produceImage(alloc: std.mem.Allocator, state: *BuildState, tag: ?[]const u8) 
         break :blk @as([]const u8, "latest");
     } else "latest";
 
+    var config_digest_str_buf: [71]u8 = undefined;
+    const config_digest_str = config_digest.string(&config_digest_str_buf);
+
     state_store.saveImage(.{
         .id = owned_digest,
         .repository = repo,
         .tag = img_tag,
         .manifest_digest = owned_digest,
-        .config_digest = manifest_digest_str,
+        .config_digest = config_digest_str,
         .total_size = @intCast(state.total_size),
         .created_at = std.time.timestamp(),
     }) catch |err| {
