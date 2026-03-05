@@ -59,8 +59,11 @@ pub const PeerConfig = struct {
 };
 
 pub const NodeError = error{
+    /// failed to open the raft log, state machine database, or transport listener
     InitFailed,
+    /// start() was called on a node that is already running
     AlreadyStarted,
+    /// propose() was called on a node that is not the current raft leader
     NotLeader,
 };
 
