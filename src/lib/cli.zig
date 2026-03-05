@@ -237,3 +237,40 @@ test "invalid container names" {
     try std.testing.expect(!isValidContainerName("a" ** 64));
     try std.testing.expect(!isValidContainerName("hello_world"));
 }
+
+test "generateAndSaveToken produces valid 64-char hex string" {
+    var buf: [64]u8 = undefined;
+    const token = generateAndSaveToken(&buf);
+    try std.testing.expect(token != null);
+    try std.testing.expectEqual(@as(usize, 64), token.?.len);
+    for (token.?) |c| {
+        try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
+    }
+}
+
+test "readApiToken round-trip with generateAndSaveToken" {
+    // generate a token
+    var gen_buf: [64]u8 = undefined;
+    const generated = generateAndSaveToken(&gen_buf).?;
+
+    // read it back
+    var read_buf: [64]u8 = undefined;
+    const read_back = readApiToken(&read_buf).?;
+    try std.testing.expectEqualSlices(u8, generated, read_back);
+}
+
+test "readApiToken returns null for missing file" {
+    // temporarily rename token file if it exists, test, restore
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return;
+
+    var backup_buf: [paths.max_path]u8 = undefined;
+    const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
+
+    // move existing file out of the way
+    std.fs.cwd().rename(token_path, backup_path) catch {};
+    defer std.fs.cwd().rename(backup_path, token_path) catch {};
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(readApiToken(&buf) == null);
+}
