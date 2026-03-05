@@ -420,3 +420,38 @@ test "copy to nested destination creates parents" {
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("[server]\nport = 8080", content);
 }
+
+test "copy directory skips symlinks" {
+    var src = std.testing.tmpDir(.{});
+    defer src.cleanup();
+    try src.dir.writeFile(.{ .sub_path = "real.txt", .data = "real content" });
+    // create a symlink — should be skipped during copy
+    src.dir.symLink("real.txt", "link.txt", .{}) catch {
+        // symlink creation may fail in some test environments
+        return;
+    };
+
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+
+    var src_buf: [4096]u8 = undefined;
+    var dst_buf: [4096]u8 = undefined;
+    const src_path = try src.dir.realpath(".", &src_buf);
+    const dst_path = try dst.dir.realpath(".", &dst_buf);
+
+    try copyFiles(src_path, ".", dst_path, "out");
+
+    // real file should be copied
+    const content = try dst.dir.readFileAlloc(std.testing.allocator, "out/real.txt", 1024);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("real content", content);
+
+    // symlink should NOT be copied (walker skips non-file, non-directory entries)
+    const link_result = dst.dir.access("out/link.txt", .{});
+    if (link_result) |_| {
+        // symlink was copied — this should not happen
+        try std.testing.expect(false);
+    } else |_| {
+        // expected — symlink was skipped
+    }
+}
