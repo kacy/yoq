@@ -199,7 +199,7 @@ fn appendAttributes(out: *DerBuf, domain: []const u8) !void {
 // simple fixed-size buffer for building DER structures without allocation.
 // 2KB is enough for a single-domain CSR.
 
-const DerBuf = struct {
+pub const DerBuf = struct {
     data: [2048]u8 = undefined,
     len: usize = 0,
 
@@ -239,6 +239,92 @@ const DerBuf = struct {
         }
     }
 };
+
+/// wrap a raw EC P-256 private key (32 bytes) in PEM format.
+///
+/// builds an RFC 5915 ECPrivateKey DER structure and base64-encodes
+/// it with PEM headers. caller owns the returned memory.
+///
+/// securely zeroes all intermediate buffers containing key material.
+pub fn derKeyToPem(allocator: std.mem.Allocator, raw_key: []const u8) CsrError![]u8 {
+    if (raw_key.len != 32) return CsrError.EncodingFailed;
+
+    // derive public key from the private key for the DER structure
+    const kp = EcdsaP256.KeyPair.fromSecretKey(
+        EcdsaP256.SecretKey.fromBytes(raw_key[0..32].*) catch return CsrError.SigningFailed,
+    ) catch return CsrError.SigningFailed;
+    const pub_uncompressed = kp.public_key.toUncompressedSec1(); // 65 bytes
+
+    // build the ECPrivateKey DER structure using DerBuf
+    var content: DerBuf = .{};
+    defer std.crypto.secureZero(u8, &content.data);
+
+    // version: INTEGER 1
+    content.appendSlice(&[_]u8{ 0x02, 0x01, 0x01 }) catch return CsrError.EncodingFailed;
+
+    // privateKey: OCTET STRING (32 bytes)
+    content.appendTagged(0x04, raw_key) catch return CsrError.EncodingFailed;
+
+    // parameters [0] EXPLICIT: OID prime256v1
+    content.appendTagged(0xA0, &[_]u8{
+        0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07,
+    }) catch return CsrError.EncodingFailed;
+
+    // publicKey [1] EXPLICIT: BIT STRING wrapping uncompressed point
+    var bitstring: DerBuf = .{};
+    bitstring.appendByte(0x00) catch return CsrError.EncodingFailed; // unused bits
+    bitstring.appendSlice(&pub_uncompressed) catch return CsrError.EncodingFailed;
+
+    var pubkey_wrapped: DerBuf = .{};
+    pubkey_wrapped.appendTagged(0x03, bitstring.slice()) catch return CsrError.EncodingFailed;
+    content.appendTagged(0xA1, pubkey_wrapped.slice()) catch return CsrError.EncodingFailed;
+
+    // wrap in outer SEQUENCE
+    var der: DerBuf = .{};
+    defer std.crypto.secureZero(u8, &der.data);
+    der.appendTagged(0x30, content.slice()) catch return CsrError.EncodingFailed;
+
+    const der_bytes = der.slice();
+
+    // PEM-encode: base64 with line wrapping at 64 chars
+    const encoder = std.base64.standard.Encoder;
+    const b64_len = encoder.calcSize(der_bytes.len);
+    const b64 = allocator.alloc(u8, b64_len) catch return CsrError.AllocFailed;
+    defer {
+        std.crypto.secureZero(u8, b64);
+        allocator.free(b64);
+    }
+    _ = encoder.encode(b64, der_bytes);
+
+    // PEM layout: header + base64 lines (64 chars + newline each) + footer
+    const header = "-----BEGIN EC PRIVATE KEY-----\n";
+    const footer = "-----END EC PRIVATE KEY-----\n";
+    const num_lines = (b64_len + 63) / 64;
+    const pem_len = header.len + b64_len + num_lines + footer.len;
+
+    const pem = allocator.alloc(u8, pem_len) catch return CsrError.AllocFailed;
+    var pos: usize = 0;
+
+    @memcpy(pem[pos .. pos + header.len], header);
+    pos += header.len;
+
+    // write base64 with line breaks every 64 chars
+    var b64_pos: usize = 0;
+    while (b64_pos < b64_len) {
+        const line_end = @min(b64_pos + 64, b64_len);
+        const line_len = line_end - b64_pos;
+        @memcpy(pem[pos .. pos + line_len], b64[b64_pos..line_end]);
+        pos += line_len;
+        pem[pos] = '\n';
+        pos += 1;
+        b64_pos = line_end;
+    }
+
+    @memcpy(pem[pos .. pos + footer.len], footer);
+    pos += footer.len;
+
+    return pem;
+}
 
 // -- tests --
 
@@ -333,4 +419,26 @@ test "DerBuf appendLength long form" {
     try std.testing.expectEqual(@as(u8, 0x81), buf.data[0]);
     try std.testing.expectEqual(@as(u8, 200), buf.data[1]);
     try std.testing.expectEqual(@as(usize, 2), buf.len);
+}
+
+test "derKeyToPem produces valid PEM" {
+    const alloc = std.testing.allocator;
+
+    // generate a keypair to get a valid 32-byte secret key
+    const kp = EcdsaP256.KeyPair.generate();
+    const key_bytes = kp.secret_key.toBytes();
+
+    const pem = try derKeyToPem(alloc, &key_bytes);
+    defer alloc.free(pem);
+
+    // must have correct PEM headers
+    try std.testing.expect(std.mem.startsWith(u8, pem, "-----BEGIN EC PRIVATE KEY-----\n"));
+    try std.testing.expect(std.mem.endsWith(u8, pem, "-----END EC PRIVATE KEY-----\n"));
+}
+
+test "derKeyToPem rejects wrong key length" {
+    const alloc = std.testing.allocator;
+
+    const short_key = [_]u8{0} ** 16;
+    try std.testing.expectError(CsrError.EncodingFailed, derKeyToPem(alloc, &short_key));
 }
