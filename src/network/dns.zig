@@ -27,6 +27,7 @@ const sqlite = @import("sqlite");
 const log = @import("../lib/log.zig");
 const ip_mod = @import("ip.zig");
 const ebpf = @import("ebpf.zig");
+const policy = @import("policy.zig");
 
 // -- service registry --
 //
@@ -165,6 +166,8 @@ pub fn unregisterService(container_id: []const u8) void {
             entry.container_id_len == cid_len and
             std.mem.eql(u8, entry.container_id[0..entry.container_id_len], container_id[0..cid_len]))
         {
+            // remove policy map entries before DNS/LB cleanup
+            policy.removeForContainer(entry.ip, std.heap.page_allocator);
             // remove from LB backends before removing from DNS map
             deleteBpfBackend(entry.name[0..entry.name_len], entry.ip);
             deleteBpfMap(entry.name[0..entry.name_len]);
@@ -197,6 +200,11 @@ fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
         const vip = getServiceVip(name) orelse ip_addr;
         lb.addBackend(vip, ip_addr);
     }
+
+    // apply network policy rules for this container's service + IP.
+    // uses the page allocator since we're in a mutex-protected path
+    // and allocations are small/short-lived.
+    policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
 }
 
 fn deleteBpfMap(name: []const u8) void {

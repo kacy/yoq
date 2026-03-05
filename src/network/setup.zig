@@ -20,6 +20,7 @@ const ebpf = @import("ebpf.zig");
 const ip = @import("ip.zig");
 const nat = @import("nat.zig");
 const nl = @import("netlink.zig");
+const policy = @import("policy.zig");
 const wireguard = @import("wireguard.zig");
 const schema = @import("../state/schema.zig");
 const log = @import("../lib/log.zig");
@@ -401,7 +402,7 @@ fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const 
 // fall through to the userspace resolver.
 
 /// try to load BPF programs on the bridge. non-fatal.
-/// loads the DNS interceptor and load balancer if BPF is available.
+/// loads the policy enforcer, DNS interceptor, and load balancer if BPF is available.
 fn loadDnsInterceptorOnBridge() void {
     if (ebpf.getDnsInterceptor() != null) return; // already loaded
 
@@ -411,6 +412,11 @@ fn loadDnsInterceptorOnBridge() void {
 
     const if_index = nl.getIfIndex(sock, bridge.default_bridge) catch return;
     if (if_index == 0) return;
+
+    // load policy enforcer first (priority 0 — runs before everything)
+    ebpf.loadPolicyEnforcer(if_index) catch |e| {
+        log.info("ebpf policy enforcer not loaded: {}", .{e});
+    };
 
     ebpf.loadDnsInterceptor(if_index) catch |e| {
         // BPF not available — fall back to userspace-only DNS.
@@ -422,6 +428,11 @@ fn loadDnsInterceptorOnBridge() void {
     ebpf.loadLoadBalancer(if_index) catch |e| {
         log.info("ebpf load balancer not loaded: {}", .{e});
     };
+
+    // sync existing network policies into BPF maps
+    if (ebpf.getPolicyEnforcer() != null) {
+        policy.syncPolicies(std.heap.page_allocator);
+    }
 }
 
 // -- tests --

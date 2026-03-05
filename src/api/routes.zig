@@ -24,6 +24,7 @@ const secrets = @import("../state/secrets.zig");
 const monitor = @import("../runtime/monitor.zig");
 const ebpf = @import("../network/ebpf.zig");
 const ip_mod = @import("../network/ip.zig");
+const net_policy = @import("../network/policy.zig");
 
 /// cluster node reference (set by server when running in cluster mode)
 pub var cluster: ?*cluster_node.Node = null;
@@ -155,6 +156,25 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
             if (request.method == .GET) return handleGetSecret(alloc, name);
             if (request.method == .DELETE) return handleDeleteSecret(alloc, name);
             return methodNotAllowed();
+        }
+    }
+
+    // /v1/policies routes
+    if (std.mem.eql(u8, path, "/v1/policies")) {
+        if (request.method == .GET) return handleListPolicies(alloc);
+        if (request.method == .POST) return handleAddPolicy(alloc, request);
+        return methodNotAllowed();
+    }
+    if (path.len > "/v1/policies/".len and std.mem.startsWith(u8, path, "/v1/policies/")) {
+        const rest = path["/v1/policies/".len..];
+        // expect source/target path segments
+        if (std.mem.indexOf(u8, rest, "/")) |slash| {
+            const source = rest[0..slash];
+            const target = rest[slash + 1 ..];
+            if (source.len > 0 and target.len > 0 and std.mem.indexOf(u8, target, "/") == null) {
+                if (request.method == .DELETE) return handleDeletePolicy(alloc, source, target);
+                return methodNotAllowed();
+            }
         }
     }
 
@@ -1180,6 +1200,79 @@ fn handleDeleteSecret(alloc: std.mem.Allocator, name: []const u8) Response {
         if (err == secrets.SecretsError.NotFound) return notFound();
         return internalError();
     };
+
+    return .{
+        .status = .ok,
+        .body = "{\"status\":\"removed\"}",
+        .allocated = false,
+    };
+}
+
+// -- network policy handlers --
+
+fn handleListPolicies(alloc: std.mem.Allocator) Response {
+    var policies = store.listNetworkPolicies(alloc) catch return internalError();
+    defer {
+        for (policies.items) |p| p.deinit(alloc);
+        policies.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return internalError();
+    for (policies.items, 0..) |pol, i| {
+        if (i > 0) writer.writeByte(',') catch return internalError();
+        writer.writeAll("{\"source\":\"") catch return internalError();
+        json_helpers.writeJsonEscaped(writer, pol.source_service) catch return internalError();
+        writer.writeAll("\",\"target\":\"") catch return internalError();
+        json_helpers.writeJsonEscaped(writer, pol.target_service) catch return internalError();
+        writer.writeAll("\",\"action\":\"") catch return internalError();
+        json_helpers.writeJsonEscaped(writer, pol.action) catch return internalError();
+        writer.writeAll("\"}") catch return internalError();
+    }
+    writer.writeByte(']') catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleAddPolicy(alloc: std.mem.Allocator, request: http.Request) Response {
+    if (request.body.len == 0) return badRequest("missing request body");
+
+    const source = extractJsonString(request.body, "source") orelse
+        return badRequest("missing source field");
+    const target = extractJsonString(request.body, "target") orelse
+        return badRequest("missing target field");
+    const action = extractJsonString(request.body, "action") orelse
+        return badRequest("missing action field");
+
+    if (source.len == 0) return badRequest("source cannot be empty");
+    if (target.len == 0) return badRequest("target cannot be empty");
+
+    // validate action
+    if (!std.mem.eql(u8, action, "deny") and !std.mem.eql(u8, action, "allow")) {
+        return badRequest("action must be 'deny' or 'allow'");
+    }
+
+    store.addNetworkPolicy(source, target, action) catch return internalError();
+
+    // sync BPF maps
+    net_policy.syncPolicies(alloc);
+
+    return .{
+        .status = .ok,
+        .body = "{\"status\":\"ok\"}",
+        .allocated = false,
+    };
+}
+
+fn handleDeletePolicy(alloc: std.mem.Allocator, source: []const u8, target: []const u8) Response {
+    store.removeNetworkPolicy(source, target) catch return internalError();
+
+    // sync BPF maps
+    net_policy.syncPolicies(alloc);
 
     return .{
         .status = .ok,

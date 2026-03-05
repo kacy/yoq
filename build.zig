@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
         "test_prog",
         "dns_intercept",
         "lb",
+        "policy",
     };
 
     for (bpf_programs) |prog| {

@@ -583,6 +583,107 @@ pub fn lookupServiceNames(alloc: std.mem.Allocator, name: []const u8) StoreError
     return ips;
 }
 
+// -- network policies --
+
+/// persisted network policy record.
+pub const NetworkPolicyRecord = struct {
+    source_service: []const u8,
+    target_service: []const u8,
+    action: []const u8,
+    created_at: i64,
+
+    pub fn deinit(self: NetworkPolicyRecord, alloc: std.mem.Allocator) void {
+        alloc.free(self.source_service);
+        alloc.free(self.target_service);
+        alloc.free(self.action);
+    }
+};
+
+/// sqlite row type for network policy queries
+const NetworkPolicyRow = struct {
+    source_service: sqlite.Text,
+    target_service: sqlite.Text,
+    action: sqlite.Text,
+    created_at: i64,
+};
+
+/// add or update a network policy rule.
+/// uses INSERT OR REPLACE to handle the unique (source, target) constraint.
+pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const u8) StoreError!void {
+    const db = try getDb();
+    defer releaseDb();
+
+    db.exec(
+        "INSERT OR REPLACE INTO network_policies (source_service, target_service, action, created_at)" ++
+            " VALUES (?, ?, ?, ?);",
+        .{},
+        .{ source, target, action, @as(i64, std.time.timestamp()) },
+    ) catch return StoreError.WriteFailed;
+}
+
+/// remove a network policy rule.
+pub fn removeNetworkPolicy(source: []const u8, target: []const u8) StoreError!void {
+    const db = try getDb();
+    defer releaseDb();
+
+    db.exec(
+        "DELETE FROM network_policies WHERE source_service = ? AND target_service = ?;",
+        .{},
+        .{ source, target },
+    ) catch return StoreError.WriteFailed;
+}
+
+/// list all network policy rules.
+pub fn listNetworkPolicies(alloc: std.mem.Allocator) StoreError!std.ArrayList(NetworkPolicyRecord) {
+    const db = try getDb();
+    defer releaseDb();
+
+    var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
+
+    var stmt = db.prepare(
+        "SELECT source_service, target_service, action, created_at FROM network_policies ORDER BY created_at;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(NetworkPolicyRow, .{}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        policies.append(alloc, .{
+            .source_service = row.source_service.data,
+            .target_service = row.target_service.data,
+            .action = row.action.data,
+            .created_at = row.created_at,
+        }) catch return StoreError.ReadFailed;
+    }
+
+    return policies;
+}
+
+/// get all policies for a specific source service.
+pub fn getServicePolicies(alloc: std.mem.Allocator, source: []const u8) StoreError!std.ArrayList(NetworkPolicyRecord) {
+    const db = try getDb();
+    defer releaseDb();
+
+    var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
+
+    var stmt = db.prepare(
+        "SELECT source_service, target_service, action, created_at FROM network_policies" ++
+            " WHERE source_service = ? ORDER BY created_at;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(NetworkPolicyRow, .{source}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        policies.append(alloc, .{
+            .source_service = row.source_service.data,
+            .target_service = row.target_service.data,
+            .action = row.action.data,
+            .created_at = row.created_at,
+        }) catch return StoreError.ReadFailed;
+    }
+
+    return policies;
+}
+
 // -- deployments --
 
 /// persisted deployment record. tracks each rollout of a service

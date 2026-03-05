@@ -142,6 +142,21 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     db.exec("ALTER TABLE agents ADD COLUMN overlay_ip TEXT;", .{}, .{}) catch {};
 
     db.exec(
+        \\CREATE TABLE IF NOT EXISTS network_policies (
+        \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
+        \\    source_service TEXT NOT NULL,
+        \\    target_service TEXT NOT NULL,
+        \\    action TEXT NOT NULL,
+        \\    created_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE UNIQUE INDEX IF NOT EXISTS idx_network_policies_pair
+        \\    ON network_policies (source_service, target_service);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
         \\CREATE TABLE IF NOT EXISTS wireguard_peers (
         \\    node_id INTEGER NOT NULL,
         \\    agent_id TEXT NOT NULL,
@@ -398,6 +413,28 @@ test "default columns" {
     try std.testing.expectEqualStrings("created", row.status.data);
     try std.testing.expect(row.pid == null);
     try std.testing.expect(row.exit_code == null);
+}
+
+test "init creates network_policies table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO network_policies (source_service, target_service, action, created_at)" ++
+            " VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "web", "db", "deny", @as(i64, 1000) },
+    ) catch unreachable;
+
+    // verify unique index — same pair should replace
+    db.exec(
+        "INSERT OR REPLACE INTO network_policies (source_service, target_service, action, created_at)" ++
+            " VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "web", "db", "allow", @as(i64, 2000) },
+    ) catch unreachable;
 }
 
 test "init creates wireguard_peers table" {
