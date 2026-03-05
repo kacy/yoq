@@ -198,6 +198,52 @@ pub const SecretsStore = struct {
         return names;
     }
 
+    /// rotate the master encryption key. decrypts all secrets with the
+    /// current key, then re-encrypts them with the new key. updates
+    /// the in-memory key to the new one.
+    ///
+    /// WARNING: callers should ensure the new key is persisted to disk
+    /// before calling this, and the old key is securely erased after
+    /// a successful rotation.
+    pub fn rotateKey(self: *SecretsStore, new_key: [key_length]u8) SecretsError!void {
+        // list all secret names
+        var names = try self.list();
+        defer {
+            for (names.items) |n| self.allocator.free(n);
+            names.deinit(self.allocator);
+        }
+
+        // decrypt all secrets with the current key, re-encrypt with new key.
+        // we collect all plaintext first so a failure mid-rotation doesn't
+        // leave secrets in a mixed-key state.
+        var plaintexts: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (plaintexts.items) |pt| {
+                secureZero(pt);
+                self.allocator.free(pt);
+            }
+            plaintexts.deinit(self.allocator);
+        }
+
+        for (names.items) |name| {
+            const pt = try self.get(name);
+            plaintexts.append(self.allocator, pt) catch {
+                secureZero(pt);
+                self.allocator.free(pt);
+                return SecretsError.AllocFailed;
+            };
+        }
+
+        // switch to the new key
+        secureZero(&self.key);
+        self.key = new_key;
+
+        // re-encrypt all secrets with the new key
+        for (names.items, 0..) |name, i| {
+            try self.set(name, plaintexts.items[i]);
+        }
+    }
+
     /// re-encrypt a secret with the current key. useful after key rotation:
     /// load the old key, decrypt, load the new key, re-encrypt.
     /// in the simple case (same key), this just generates a fresh nonce.
@@ -633,4 +679,47 @@ test "encrypt and decrypt large value" {
     defer alloc.free(decrypted);
 
     try std.testing.expectEqualSlices(u8, plaintext, decrypted);
+}
+
+test "store rotateKey re-encrypts all secrets with new key" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    const alloc = std.testing.allocator;
+    const old_key = [_]u8{0xAA} ** key_length;
+    const new_key = [_]u8{0xBB} ** key_length;
+    var store_obj = try SecretsStore.initWithKey(&db, alloc, old_key);
+
+    // store some secrets with the old key
+    try store_obj.set("secret_a", "value_a");
+    try store_obj.set("secret_b", "value_b");
+
+    // rotate to new key
+    try store_obj.rotateKey(new_key);
+
+    // verify secrets are still readable with the new key
+    const val_a = try store_obj.get("secret_a");
+    defer alloc.free(val_a);
+    try std.testing.expectEqualStrings("value_a", val_a);
+
+    const val_b = try store_obj.get("secret_b");
+    defer alloc.free(val_b);
+    try std.testing.expectEqualStrings("value_b", val_b);
+
+    // verify the store's key is now the new key
+    try std.testing.expectEqualSlices(u8, &new_key, &store_obj.key);
+}
+
+test "store rotateKey with no secrets succeeds" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    const alloc = std.testing.allocator;
+    const old_key = [_]u8{0xAA} ** key_length;
+    const new_key = [_]u8{0xBB} ** key_length;
+    var store_obj = try SecretsStore.initWithKey(&db, alloc, old_key);
+
+    // should succeed even with no secrets
+    try store_obj.rotateKey(new_key);
+    try std.testing.expectEqualSlices(u8, &new_key, &store_obj.key);
 }
