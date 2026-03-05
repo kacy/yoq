@@ -64,6 +64,7 @@ pub const ContainerConfig = struct {
     Shell: ?[]const []const u8 = null,
     StopSignal: ?[]const u8 = null,
     Healthcheck: ?Healthcheck = null,
+    OnBuild: ?[]const []const u8 = null,
 };
 
 /// healthcheck configuration from the image config.
