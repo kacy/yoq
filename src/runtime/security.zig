@@ -51,22 +51,25 @@ const SECCOMP_DATA_NR = 0; // syscall number
 const SECCOMP_DATA_ARCH = 4; // architecture
 
 /// default set of capabilities to keep for containers.
-/// mirrors Docker's default capability set.
+/// matches Docker's default set minus CAP_SETFCAP.
+///
+/// CAP_SETFCAP is excluded because it allows setting file capabilities
+/// on binaries, which combined with CAP_CHOWN + CAP_DAC_OVERRIDE can
+/// enable privilege escalation within the container.
 pub const default_caps = [_]u8{
-    linux.CAP.CHOWN,
-    linux.CAP.DAC_OVERRIDE,
-    linux.CAP.FSETID,
-    linux.CAP.FOWNER,
-    linux.CAP.MKNOD,
-    linux.CAP.NET_RAW,
-    linux.CAP.SETGID,
-    linux.CAP.SETUID,
-    linux.CAP.SETFCAP,
-    linux.CAP.SETPCAP,
-    linux.CAP.NET_BIND_SERVICE,
-    linux.CAP.SYS_CHROOT,
-    linux.CAP.KILL,
-    linux.CAP.AUDIT_WRITE,
+    linux.CAP.CHOWN, // change file ownership
+    linux.CAP.DAC_OVERRIDE, // bypass file read/write/execute checks
+    linux.CAP.FSETID, // don't clear setuid/setgid on file modification
+    linux.CAP.FOWNER, // bypass permission checks on operations requiring file owner
+    linux.CAP.MKNOD, // create device special files
+    linux.CAP.NET_RAW, // use raw and packet sockets
+    linux.CAP.SETGID, // set process GID
+    linux.CAP.SETUID, // set process UID
+    linux.CAP.SETPCAP, // modify process capabilities
+    linux.CAP.NET_BIND_SERVICE, // bind to ports below 1024
+    linux.CAP.SYS_CHROOT, // use chroot()
+    linux.CAP.KILL, // send signals to any process
+    linux.CAP.AUDIT_WRITE, // write to the kernel audit log
 };
 
 /// apply container security restrictions.
@@ -370,5 +373,14 @@ test "blocked_syscalls includes filesystem namespace escape vectors" {
             }
         }
         try std.testing.expect(found);
+    }
+}
+
+test "CAP_SETFCAP not in default set" {
+    // CAP_SETFCAP enables file capability modification which can lead
+    // to privilege escalation when combined with CAP_CHOWN + CAP_DAC_OVERRIDE.
+    // Docker includes it by default, but we intentionally exclude it.
+    for (default_caps) |cap| {
+        try std.testing.expect(cap != linux.CAP.SETFCAP);
     }
 }
