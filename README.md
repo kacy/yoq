@@ -8,7 +8,7 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 ## status
 
-~42k lines of Zig, ~900 tests. phases 1-6 are substantially implemented with some gaps noted below. phase 7 production features are roughly half done.
+**~85% complete.** ~43k lines of Zig, ~920 tests. phases 1-6 are substantially complete. phase 7 production features are roughly half done.
 
 **container runtime (phase 1) — ~98%:** containers run in isolated namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. process supervision, log capture, and exec into running containers all work. rootless containers via user namespace uid/gid mappings are implemented.
 
@@ -16,13 +16,13 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 **networking (phase 3) — ~85%:** each container gets its own IP on a bridge network (10.42.0.0/16), with iptables NAT for outbound traffic and port mapping for inbound. eBPF programs handle DNS interception for service discovery, round-robin load balancing across replicas, per-IP and per-service-pair metrics collection, and network policy enforcement (allow/deny between services). WireGuard mesh for cross-node networking with automatic key exchange on node join. gap: XDP port mapping program not implemented.
 
-**build engine (phase 4) — ~70%:** Dockerfile parser (FROM, RUN, COPY, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR) produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order. `--build-arg` substitution is supported. gaps: missing Dockerfile directives (ADD, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD), no multi-stage builds, TOML-based declarative build manifest not implemented.
+**build engine (phase 4) — ~90%:** Dockerfile parser supports all major directives (FROM, RUN, COPY, ADD, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD) and produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order. `--build-arg` substitution and multi-stage builds (`COPY --from`) are supported. gap: TOML-based declarative build manifest not implemented.
 
 **manifest + dev mode (phase 5) — ~80%:** TOML manifest format defines multi-service applications with dependency ordering, health checks, readiness probes, rolling update strategies, and secret references. `yoq up` starts all services, `yoq down` stops them in reverse order. dev mode (`--dev`) watches source directories with inotify and hot-restarts containers on file changes. colored log multiplexing prefixes output with service names. rolling updates with automatic rollback on health check failure. gaps: workers and crons not implemented in manifest spec, `up <service>` (start individual service) not implemented.
 
-**clustering (phase 6) — ~85%:** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. WireGuard mesh with automatic key exchange on join encrypts cross-node traffic. cross-node service discovery works via cluster DNS. the API server exposes endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`. gap: raft snapshots not implemented (log grows unbounded).
+**clustering (phase 6) — ~95%:** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. raft snapshots keep the log bounded and bring lagging followers up to date via InstallSnapshot RPC. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. WireGuard mesh with automatic key exchange on join encrypts cross-node traffic. cross-node service discovery works via cluster DNS. the API server exposes endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`.
 
-**production features (phase 7) — ~50%:** health checks (HTTP, TCP, exec) with configurable intervals and readiness probes. rolling updates with automatic rollback on failure. encrypted secrets store with rotation (mounted as files or env vars). TLS termination with ACME auto-provisioning, TLS 1.3 handshake, bidirectional proxy with SNI routing, and auto-renewal on startup. certificate management CLI. eBPF observability with per-IP and per-service-pair metrics. eBPF network policies (allow/deny between services). remaining: PSI-based resource monitoring with auto-tuning.
+**production features (phase 7) — ~55%:** health checks (HTTP, TCP, exec) with configurable intervals and readiness probes. rolling updates with automatic rollback on failure. encrypted secrets store with rotation (mounted as files or env vars). TLS termination with ACME auto-provisioning, TLS 1.3 handshake, bidirectional proxy with SNI routing, and auto-renewal on startup. certificate management CLI. eBPF observability with per-IP and per-service-pair metrics. eBPF network policies (allow/deny between services). PSI metrics reading from cgroups v2. remaining: PSI-based auto-tuning suggestions.
 
 ## what works
 
@@ -201,17 +201,14 @@ src/
 
 ### high priority (unblocks production use)
 
-- raft snapshots (log grows unbounded without them)
-- PSI-based resource monitoring with auto-tuning
+- PSI-based auto-tuning suggestions from resource monitoring
 
 ### medium priority (completes phase promises)
 
 - TOML declarative build manifest
 - workers and crons in manifest spec
-- multi-stage Dockerfile builds
 
 ### lower priority (polish)
 
-- missing Dockerfile directives (ADD, VOLUME, SHELL, etc.)
 - XDP port mapping program
 - `up <service>` (start individual service from manifest)
