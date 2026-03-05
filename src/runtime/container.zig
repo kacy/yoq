@@ -55,6 +55,33 @@ pub const BindMount = struct {
     target: []const u8,
     /// mount read-only
     read_only: bool = false,
+
+    /// check that the source path doesn't point into sensitive system directories.
+    /// a manifest could otherwise mount /etc/shadow or /root/.ssh into a container.
+    pub fn isSourceAllowed(self: BindMount) bool {
+        const blocked = [_][]const u8{
+            "/etc",
+            "/root",
+            "/var/lib",
+            "/home",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/boot",
+            "/usr/sbin",
+            "/sbin",
+        };
+        for (blocked) |prefix| {
+            if (std.mem.startsWith(u8, self.source, prefix)) {
+                // allow exact prefix only if followed by '/' or end of string
+                // (so "/devtools" doesn't match "/dev")
+                if (self.source.len == prefix.len or self.source[prefix.len] == '/') {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
 };
 
 /// configuration for creating a container
@@ -355,6 +382,7 @@ fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
 
         // 1.5 apply bind mounts into the merged overlay
         for (ctx.mounts) |m| {
+            if (!m.isSourceAllowed()) return 1;
             filesystem.bindMount(ctx.fs_config.merged_dir, m.source, m.target, m.read_only) catch return 1;
         }
 
@@ -362,6 +390,7 @@ fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     } else {
         // bind mounts with a local rootfs — mount into rootfs before pivot
         for (ctx.mounts) |m| {
+            if (!m.isSourceAllowed()) return 1;
             filesystem.bindMount(ctx.rootfs, m.source, m.target, m.read_only) catch return 1;
         }
 
@@ -550,6 +579,44 @@ test "generate id produces 12 hex chars" {
             }
         }
         try std.testing.expect(found);
+    }
+}
+
+test "bind mount rejects sensitive source paths" {
+    const cases = [_][]const u8{
+        "/etc/shadow",
+        "/etc/passwd",
+        "/root/.ssh",
+        "/home/user/.bashrc",
+        "/proc/1/environ",
+        "/sys/kernel",
+        "/dev/sda",
+        "/boot/vmlinuz",
+        "/var/lib/docker",
+        "/sbin/init",
+        "/usr/sbin/sshd",
+    };
+
+    for (cases) |source| {
+        const m = BindMount{ .source = source, .target = "/mnt" };
+        try std.testing.expect(!m.isSourceAllowed());
+    }
+}
+
+test "bind mount allows safe source paths" {
+    const cases = [_][]const u8{
+        "/tmp/myproject",
+        "/opt/data",
+        "/srv/app",
+        "/usr/local/share",
+        "/devtools", // shouldn't match /dev prefix
+        "/homework", // shouldn't match /home prefix
+        "/etcetera", // shouldn't match /etc prefix
+    };
+
+    for (cases) |source| {
+        const m = BindMount{ .source = source, .target = "/mnt" };
+        try std.testing.expect(m.isSourceAllowed());
     }
 }
 

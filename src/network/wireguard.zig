@@ -33,6 +33,12 @@ const encoded_key_len = 44;
 pub const KeyPair = struct {
     private_key: [encoded_key_len]u8,
     public_key: [encoded_key_len]u8,
+
+    /// zero the private key material. call this after the key has been
+    /// passed to createInterface() and is no longer needed.
+    pub fn secureZero(self: *KeyPair) void {
+        std.crypto.secureZero(u8, &self.private_key);
+    }
 };
 
 /// configuration for a WireGuard peer (remote node).
@@ -159,17 +165,18 @@ fn exec(args: *const ArgList) WireguardError!void {
 ///
 /// equivalent to:
 ///   ip link add <name> type wireguard
-///   wg set <name> private-key /tmp/yoq-wg-<random> listen-port <port>
+///   wg set <name> private-key /dev/shm/yoq-wg-<random> listen-port <port>
 ///   ip link set <name> up
 pub fn createInterface(name: []const u8, private_key: []const u8, listen_port: u16) WireguardError!void {
     // step 1: create the wireguard interface
     const create_args = buildCreateArgs(name);
     exec(&create_args) catch return WireguardError.DeviceCreateFailed;
 
-    // step 2: write private key to a temp file
-    // wg set requires reading the key from a file path
+    // step 2: write private key to a temp file on tmpfs (RAM-only, never hits disk).
+    // wg set requires reading the key from a file path.
+    // /dev/shm is a standard Linux tmpfs — the key only exists in memory.
     var tmp_path_buf: [64]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/yoq-wg-{d}", .{std.crypto.random.int(u32)}) catch
+    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/dev/shm/yoq-wg-{d}", .{std.crypto.random.int(u32)}) catch
         return WireguardError.DeviceCreateFailed;
 
     // write the key, configure wg, then delete the file
@@ -329,7 +336,8 @@ pub fn removeRoute(dest: [4]u8, prefix_len: u8) WireguardError!void {
 /// uses zig's std.crypto — no external tools needed.
 pub fn generateKeyPair() WireguardError!KeyPair {
     const X25519 = std.crypto.dh.X25519;
-    const raw_kp = X25519.KeyPair.generate();
+    var raw_kp = X25519.KeyPair.generate();
+    defer std.crypto.secureZero(u8, &raw_kp.secret_key);
 
     var kp: KeyPair = undefined;
     const encoder = std.base64.standard.Encoder;

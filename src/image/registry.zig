@@ -88,7 +88,11 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     // step 1: authenticate
     const token = authenticate(alloc, &client, image_ref.host, repository, "pull") catch
         return RegistryError.AuthFailed;
-    defer alloc.free(token.value);
+    defer {
+        // zero the token before freeing to prevent it lingering in freed memory
+        std.crypto.secureZero(u8, @constCast(token.value));
+        alloc.free(token.value);
+    }
 
     // step 2: fetch manifest (resolving image index if multi-arch)
     const manifest_result = fetchManifest(alloc, &client, image_ref.host, repository, image_ref.reference, token) catch |e| {
@@ -195,7 +199,10 @@ pub fn push(
     // authenticate with push,pull scope
     const token = authenticate(alloc, &client, image_ref.host, repository, "push,pull") catch
         return RegistryError.AuthFailed;
-    defer alloc.free(token.value);
+    defer {
+        std.crypto.secureZero(u8, @constCast(token.value));
+        alloc.free(token.value);
+    }
 
     var layers_uploaded: usize = 0;
     var layers_skipped: usize = 0;

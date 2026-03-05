@@ -24,6 +24,12 @@ pub const LogError = error{
 
 const logs_subdir = "logs";
 
+/// maximum log file size before truncation (50 MB).
+/// a container spamming stdout can fill the disk without this limit.
+/// when exceeded, the file is truncated and old logs are lost.
+/// the read path already caps at 10 MB (readLogs).
+const max_log_size: u64 = 50 * 1024 * 1024;
+
 /// resolve the log file path for a container.
 /// returns the formatted path within the provided buffer.
 fn logPath(buf: *[paths.max_path]u8, container_id: []const u8) LogError![]const u8 {
@@ -131,6 +137,15 @@ pub fn writeLogLine(log_file: std.fs.File, stream: []const u8, line: []const u8)
         pos += 1;
     }
 
+    // truncate if the log file has exceeded the size limit.
+    // check before writing so we don't grow unboundedly.
+    if (log_file.getEndPos()) |end_pos| {
+        if (end_pos > max_log_size) {
+            log_file.seekTo(0) catch {};
+            posix.ftruncate(log_file.handle, 0) catch {};
+        }
+    } else |_| {}
+
     // single atomic write
     log_file.writeAll(buf[0..pos]) catch return;
 }
@@ -226,6 +241,23 @@ test "write and read log line" {
 
     try std.testing.expect(std.mem.indexOf(u8, content, "stdout | hello world\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "stderr | something broke\n") != null);
+}
+
+test "log file truncated when exceeding max size" {
+    const tmp_dir = std.testing.tmpDir(.{});
+    const file = tmp_dir.dir.createFile("test_trunc.log", .{ .read = true }) catch unreachable;
+    defer file.close();
+
+    // simulate a file already at the size limit by seeking past it
+    file.seekTo(max_log_size + 1) catch unreachable;
+    file.writeAll("x") catch unreachable;
+
+    // next writeLogLine should truncate
+    writeLogLine(file, "stdout", "after truncation");
+
+    // file should now be small (just the new line)
+    const end = file.getEndPos() catch unreachable;
+    try std.testing.expect(end < 1024);
 }
 
 test "write log line adds newline" {

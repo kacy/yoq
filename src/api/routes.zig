@@ -60,9 +60,15 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
             const provided = extractBearerToken(&request) orelse {
                 return unauthorized();
             };
-            if (!std.mem.eql(u8, provided, expected_token)) {
-                return unauthorized();
+
+            // constant-time comparison to prevent timing attacks.
+            // same pattern as cluster token validation in registry.zig.
+            if (provided.len != expected_token.len) return unauthorized();
+            var diff: u8 = 0;
+            for (provided, expected_token) |a, b| {
+                diff |= a ^ b;
             }
+            if (diff != 0) return unauthorized();
         }
     }
 

@@ -180,9 +180,13 @@ pub fn pivotRoot(new_root: []const u8) FilesystemError!void {
 /// rather than the threadlocal sentinelize (we need source and target
 /// simultaneously).
 pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8, read_only: bool) FilesystemError!void {
-    // reject targets with ".." components to prevent escaping the container rootfs.
-    // in cluster mode a remote deploy request could specify arbitrary mount targets,
+    // reject paths with ".." components to prevent directory traversal.
+    // in cluster mode a remote deploy request could specify arbitrary paths,
     // so we validate at the filesystem layer as defense-in-depth.
+    if (!isPathSafe(source)) {
+        log.warn("bind mount source contains directory traversal: {s}", .{source});
+        return FilesystemError.MountFailed;
+    }
     if (!isPathSafe(target)) {
         log.warn("bind mount target contains directory traversal: {s}", .{target});
         return FilesystemError.MountFailed;
