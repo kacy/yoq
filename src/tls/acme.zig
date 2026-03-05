@@ -196,9 +196,9 @@ pub const AcmeClient = struct {
         // the account URL comes from the Location header in the response.
         // for now, extract from the response body if available.
         // a full implementation would parse the Location header.
-        self.account_url = extractJsonString(self.allocator, response, "id") catch {
+        self.account_url = extractJsonString(self.allocator, response, "id") catch blk: {
             // use the new_account URL as fallback
-            self.allocator.dupe(u8, dir.new_account) catch
+            break :blk self.allocator.dupe(u8, dir.new_account) catch
                 return AcmeError.AllocFailed;
         };
     }
@@ -237,8 +237,7 @@ pub const AcmeClient = struct {
             return AcmeError.OrderCreationFailed;
 
         // parse authorization URLs from the JSON array
-        var auth_urls = std.ArrayList([]const u8).init(self.allocator);
-        defer auth_urls.deinit();
+        var auth_urls: std.ArrayList([]const u8) = .empty;
 
         if (extractJsonArray(response, "authorizations")) |urls_str| {
             var iter = std.mem.splitScalar(u8, urls_str, '"');
@@ -246,7 +245,7 @@ pub const AcmeClient = struct {
                 if (std.mem.startsWith(u8, part, "http")) {
                     const url = self.allocator.dupe(u8, part) catch
                         return AcmeError.AllocFailed;
-                    auth_urls.append(url) catch {
+                    auth_urls.append(self.allocator, url) catch {
                         self.allocator.free(url);
                         return AcmeError.AllocFailed;
                     };
@@ -256,7 +255,7 @@ pub const AcmeClient = struct {
 
         return .{
             .finalize_url = finalize_url,
-            .authorization_urls = auth_urls.toOwnedSlice() catch
+            .authorization_urls = auth_urls.toOwnedSlice(self.allocator) catch
                 return AcmeError.AllocFailed,
             .allocator = self.allocator,
         };
@@ -392,24 +391,25 @@ pub const AcmeClient = struct {
     // -- HTTP helpers --
 
     fn httpGet(self: *AcmeClient, url: []const u8) ![]u8 {
-        var body: std.ArrayListUnmanaged(u8) = .empty;
-        defer body.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
 
         const result = try self.http_client.fetch(.{
             .location = .{ .url = url },
-            .response_writer = body.writer(self.allocator).any(),
+            .response_writer = &aw.writer,
         });
 
         if (result.status != .ok and result.status != .created) {
             return error.HttpError;
         }
 
-        return body.toOwnedSlice(self.allocator);
+        return self.allocator.dupe(u8, aw.writer.buffer[0..aw.writer.end]) catch
+            return error.HttpError;
     }
 
     fn httpPost(self: *AcmeClient, url: []const u8, body: []const u8) ![]u8 {
-        var response_body: std.ArrayListUnmanaged(u8) = .empty;
-        defer response_body.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
 
         const result = try self.http_client.fetch(.{
             .location = .{ .url = url },
@@ -418,14 +418,15 @@ pub const AcmeClient = struct {
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "application/jose+json" },
             },
-            .response_writer = response_body.writer(self.allocator).any(),
+            .response_writer = &aw.writer,
         });
 
         if (result.status != .ok and result.status != .created) {
             return error.HttpError;
         }
 
-        return response_body.toOwnedSlice(self.allocator);
+        return self.allocator.dupe(u8, aw.writer.buffer[0..aw.writer.end]) catch
+            return error.HttpError;
     }
 };
 
