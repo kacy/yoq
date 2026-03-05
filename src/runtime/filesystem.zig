@@ -295,6 +295,70 @@ pub fn mountEssential() FilesystemError!void {
         @intFromPtr(@as([*:0]const u8, "newinstance,ptmxmode=0666,mode=0620")),
     );
     if (syscall_util.isError(rc5)) return FilesystemError.MountFailed;
+
+    // create standard device nodes and symlinks in /dev.
+    // many programs expect /dev/null, /dev/zero, etc. to exist.
+    createDeviceNodes();
+}
+
+/// create essential device nodes (/dev/null, /dev/zero, etc.) and symlinks.
+/// uses mknod syscall — may fail in user namespaces without CAP_MKNOD,
+/// which is fine (log and continue). most container workloads need these
+/// but the container can still function without them.
+fn createDeviceNodes() void {
+    const DeviceNode = struct {
+        path: [*:0]const u8,
+        major: u32,
+        minor: u32,
+        mode: u32,
+    };
+
+    // character devices: mode includes S_IFCHR (0o020000) + permissions
+    const devices = [_]DeviceNode{
+        .{ .path = "/dev/null", .major = 1, .minor = 3, .mode = 0o020666 },
+        .{ .path = "/dev/zero", .major = 1, .minor = 5, .mode = 0o020666 },
+        .{ .path = "/dev/random", .major = 1, .minor = 8, .mode = 0o020666 },
+        .{ .path = "/dev/urandom", .major = 1, .minor = 9, .mode = 0o020666 },
+    };
+
+    for (devices) |dev| {
+        // dev_t = makedev(major, minor) = (major << 8) | minor for Linux
+        const device_num: u32 = (dev.major << 8) | dev.minor;
+        const rc = linux.syscall3(
+            .mknod,
+            @intFromPtr(dev.path),
+            dev.mode,
+            device_num,
+        );
+        if (syscall_util.isError(rc)) {
+            // expected in user namespaces without CAP_MKNOD — not fatal
+            log.info("device node creation skipped (no CAP_MKNOD?): {s}", .{std.mem.span(dev.path)});
+        }
+    }
+
+    // symlinks for /proc/self/fd convenience
+    const Symlink = struct {
+        target: [*:0]const u8,
+        path: [*:0]const u8,
+    };
+
+    const symlinks = [_]Symlink{
+        .{ .target = "/proc/self/fd", .path = "/dev/fd" },
+        .{ .target = "/proc/self/fd/0", .path = "/dev/stdin" },
+        .{ .target = "/proc/self/fd/1", .path = "/dev/stdout" },
+        .{ .target = "/proc/self/fd/2", .path = "/dev/stderr" },
+    };
+
+    for (symlinks) |link| {
+        const rc = linux.syscall2(
+            .symlink,
+            @intFromPtr(link.target),
+            @intFromPtr(link.path),
+        );
+        if (syscall_util.isError(rc)) {
+            log.info("symlink creation failed: {s}", .{std.mem.span(link.path)});
+        }
+    }
 }
 
 /// create a directory if it doesn't exist

@@ -87,6 +87,10 @@ fn reapLoop(target_pid: i32) u8 {
 
         // only care about the workload process exit
         if (exited_pid == target_pid) {
+            // clear workload_pid so the signal handler doesn't forward
+            // to a stale PID that the kernel may have recycled
+            workload_pid.store(0, .release);
+
             // WIFEXITED: (status & 0x7f) == 0
             if (status & 0x7f == 0) {
                 return @intCast((status >> 8) & 0xff);

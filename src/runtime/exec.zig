@@ -12,6 +12,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 
 const process = @import("process.zig");
+const security = @import("security.zig");
 const syscall_util = @import("../lib/syscall.zig");
 const exec_helpers = @import("../lib/exec_helpers.zig");
 
@@ -82,6 +83,12 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
         // chdir to working directory (fall back to / if it doesn't exist)
         posix.chdir(config.working_dir) catch {
             posix.chdir("/") catch {};
+        };
+
+        // apply seccomp + capability restrictions so exec'd commands
+        // are subject to the same security policy as the container
+        security.apply() catch {
+            linux.exit_group(1);
         };
 
         // exec the command — does not return on success
