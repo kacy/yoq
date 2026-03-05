@@ -161,7 +161,10 @@ fn patchMapFd(insn: *BPF.Insn, fd: posix.fd_t) void {
 /// 1. creates a clsact qdisc on the interface (idempotent — ignores
 ///    EEXIST so it's safe to call multiple times)
 /// 2. adds the BPF program as a TC filter on the specified direction
-pub fn attachTC(if_index: u32, direction: Direction, prog_fd: posix.fd_t) EbpfError!void {
+///
+/// priority controls execution order — lower values run first.
+/// DNS interceptor and load balancer use priority 1, metrics uses 2.
+pub fn attachTC(if_index: u32, direction: Direction, prog_fd: posix.fd_t, priority: u32) EbpfError!void {
     const fd = nl.openSocket() catch return EbpfError.AttachFailed;
     defer posix.close(fd);
 
@@ -172,7 +175,7 @@ pub fn attachTC(if_index: u32, direction: Direction, prog_fd: posix.fd_t) EbpfEr
     };
 
     // step 2: add BPF filter
-    addBpfFilter(fd, if_index, direction, prog_fd) catch |e| {
+    addBpfFilter(fd, if_index, direction, prog_fd, priority) catch |e| {
         log.warn("ebpf: failed to add BPF filter on ifindex {d}: {}", .{ if_index, e });
         return EbpfError.AttachFailed;
     };
@@ -251,6 +254,7 @@ fn addBpfFilter(
     if_index: u32,
     direction: Direction,
     prog_fd: posix.fd_t,
+    priority: u32,
 ) nl.NetlinkError!void {
     var buf: [nl.buf_size]u8 align(4) = undefined;
     var mb = nl.MessageBuilder.init(&buf);
@@ -261,9 +265,8 @@ fn addBpfFilter(
     };
 
     // info encodes priority (upper 16 bits) and protocol (lower 16, network byte order).
-    // ETH_P_ALL = 0x0003, priority = 1.
+    // ETH_P_ALL = 0x0003.
     const eth_p_all: u16 = 0x0003;
-    const priority: u32 = 1;
     const info: u32 = (priority << 16) | @as(u32, std.mem.nativeToBig(u16, eth_p_all));
 
     const hdr = try mb.putHeader(
@@ -371,8 +374,8 @@ pub fn loadDnsInterceptor(bridge_if_index: u32) EbpfError!void {
     const prog_fd = try loadProgram(dns_intercept, &map_fds);
     errdefer posix.close(prog_fd);
 
-    // attach to bridge ingress
-    try attachTC(bridge_if_index, .ingress, prog_fd);
+    // attach to bridge ingress (priority 1 — runs first)
+    try attachTC(bridge_if_index, .ingress, prog_fd, 1);
 
     dns_interceptor = .{
         .prog_fd = prog_fd,
@@ -539,8 +542,8 @@ pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
     const prog_fd = try loadProgram(lb_prog, &map_fds);
     errdefer posix.close(prog_fd);
 
-    // attach to bridge ingress (the qdisc should already exist from DNS interceptor)
-    try attachTC(bridge_if_index, .ingress, prog_fd);
+    // attach to bridge ingress, priority 1 (qdisc should already exist from DNS interceptor)
+    try attachTC(bridge_if_index, .ingress, prog_fd, 1);
 
     load_balancer = .{
         .prog_fd = prog_fd,
