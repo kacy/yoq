@@ -228,7 +228,9 @@ pub fn performRollingUpdate(
                     start_failures += 1;
                     continue;
                 };
-                new_container_ids.append(new_id) catch {};
+                new_container_ids.append(new_id) catch {
+                    log.warn("update: failed to track new container ID for rollback (possible orphan on failure)", .{});
+                };
             } else {
                 start_failures += 1;
             }
