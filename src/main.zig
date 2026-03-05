@@ -32,6 +32,7 @@ const secrets = @import("state/secrets.zig");
 const dns = @import("network/dns.zig");
 const monitor = @import("runtime/monitor.zig");
 const cgroups = @import("runtime/cgroups.zig");
+const ebpf = @import("network/ebpf.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -102,6 +103,8 @@ pub fn main() !void {
         cmdSecret(&args, alloc);
     } else if (std.mem.eql(u8, command, "status")) {
         cmdStatus(&args, alloc);
+    } else if (std.mem.eql(u8, command, "metrics")) {
+        cmdMetrics(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -1795,6 +1798,196 @@ fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8
     return .{ .some_avg10 = some, .full_avg10 = full };
 }
 
+// -- metrics command --
+
+fn cmdMetrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var service_filter: ?[]const u8 = null;
+    var server_addr: ?[4]u8 = null;
+    var server_port: u16 = 7700;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--server")) {
+            const addr_str = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                std.process.exit(1);
+            };
+            var addr: [4]u8 = .{ 127, 0, 0, 1 };
+            if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
+                addr = ip.parseIp(addr_str[0..colon]) orelse {
+                    writeErr("invalid server address: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+                server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
+                    writeErr("invalid port: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+            } else {
+                addr = ip.parseIp(addr_str) orelse {
+                    writeErr("invalid server address: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+            }
+            server_addr = addr;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            service_filter = arg;
+        }
+    }
+
+    if (server_addr) |addr| {
+        cmdMetricsRemote(alloc, addr, server_port, service_filter);
+        return;
+    }
+
+    cmdMetricsLocal(alloc, service_filter);
+}
+
+fn cmdMetricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) void {
+    var records = store.listAll(alloc) catch {
+        writeErr("failed to list containers\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (records.items) |rec| rec.deinit(alloc);
+        records.deinit(alloc);
+    }
+
+    if (records.items.len == 0) {
+        write("no services running\n", .{});
+        return;
+    }
+
+    const mc = ebpf.getMetricsCollector();
+
+    write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
+        "SERVICE", "CONTAINER", "IP", "PACKETS", "BYTES",
+    });
+
+    var found = false;
+    for (records.items) |rec| {
+        if (!std.mem.eql(u8, rec.status, "running")) continue;
+
+        if (service_filter) |svc| {
+            if (!std.mem.eql(u8, rec.hostname, svc)) continue;
+        }
+
+        const ip_str = rec.ip_address orelse continue;
+        const short_id = if (rec.id.len >= 6) rec.id[0..6] else rec.id;
+
+        var packets: u64 = 0;
+        var bytes: u64 = 0;
+        if (mc) |collector| {
+            if (ip.parseIp(ip_str)) |addr| {
+                const ip_net = ebpf.ipToNetworkOrder(addr);
+                if (collector.readMetrics(ip_net)) |m| {
+                    packets = m.packets;
+                    bytes = m.bytes;
+                }
+            }
+        }
+
+        var bytes_buf: [16]u8 = undefined;
+        const bytes_str = monitor.formatBytes(&bytes_buf, bytes);
+
+        var pkt_buf: [16]u8 = undefined;
+        const pkt_str = formatCount(&pkt_buf, packets);
+
+        write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
+            rec.hostname, short_id, ip_str, pkt_str, bytes_str,
+        });
+        found = true;
+    }
+
+    if (!found) {
+        if (service_filter) |svc| {
+            write("no running containers for service '{s}'\n", .{svc});
+        } else {
+            write("no running containers with network\n", .{});
+        }
+    }
+}
+
+fn cmdMetricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filter: ?[]const u8) void {
+    // build path with optional query param
+    var path_buf: [128]u8 = undefined;
+    const path = if (service_filter) |svc|
+        std.fmt.bufPrint(&path_buf, "/v1/metrics?service={s}", .{svc}) catch "/v1/metrics"
+    else
+        @as([]const u8, "/v1/metrics");
+
+    var resp = http_client.get(alloc, addr, port, path) catch {
+        writeErr("failed to connect to server\n", .{});
+        std.process.exit(1);
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("server returned status {d}\n", .{resp.status_code});
+        std.process.exit(1);
+    }
+
+    write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
+        "SERVICE", "CONTAINER", "IP", "PACKETS", "BYTES",
+    });
+
+    var found = false;
+    var iter = json_helpers.extractJsonObjects(resp.body);
+    while (iter.next()) |obj| {
+        const service = extractJsonString(obj, "service") orelse "?";
+        const container_id = extractJsonString(obj, "container") orelse "?";
+        const ip_str = extractJsonString(obj, "ip") orelse "?";
+        const packets: u64 = @intCast(extractJsonInt(obj, "packets") orelse 0);
+        const bytes: u64 = @intCast(extractJsonInt(obj, "bytes") orelse 0);
+
+        var bytes_buf: [16]u8 = undefined;
+        const bytes_str = monitor.formatBytes(&bytes_buf, bytes);
+
+        var pkt_buf: [16]u8 = undefined;
+        const pkt_str = formatCount(&pkt_buf, packets);
+
+        write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
+            service, container_id, ip_str, pkt_str, bytes_str,
+        });
+        found = true;
+    }
+
+    if (!found) {
+        write("no metrics available\n", .{});
+    }
+}
+
+/// format a large count with comma separators for readability.
+/// e.g. 12450 → "12,450", 1234567 → "1,234,567"
+fn formatCount(buf: []u8, count: u64) []const u8 {
+    if (count == 0) return "0";
+
+    // format the number first without commas
+    var num_buf: [24]u8 = undefined;
+    const digits = std.fmt.bufPrint(&num_buf, "{d}", .{count}) catch return "-";
+
+    // insert commas
+    var i: usize = 0;
+    var d: usize = 0;
+    const leading = digits.len % 3;
+    if (leading > 0) {
+        if (i + leading > buf.len) return digits;
+        @memcpy(buf[i..][0..leading], digits[d..][0..leading]);
+        i += leading;
+        d += leading;
+    }
+    while (d < digits.len) {
+        if (i > 0 and i < buf.len) {
+            buf[i] = ',';
+            i += 1;
+        }
+        if (i + 3 > buf.len) return digits;
+        @memcpy(buf[i..][0..3], digits[d..][0..3]);
+        i += 3;
+        d += 3;
+    }
+
+    return buf[0..i];
+}
+
 // -- deployment commands --
 
 fn cmdRollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -2086,6 +2279,7 @@ fn printUsage() void {
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  status [--verbose] [--server h:p]  show service status and resources
+        \\  metrics [service] [--server h:p]  show per-service network metrics
         \\  ps                               list containers
         \\  logs <id>                        show container output
         \\  stop <id>                        stop a running container
