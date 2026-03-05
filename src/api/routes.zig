@@ -21,6 +21,7 @@ const agent_registry = @import("../cluster/registry.zig");
 const scheduler = @import("../cluster/scheduler.zig");
 const sqlite = @import("sqlite");
 const secrets = @import("../state/secrets.zig");
+const monitor = @import("../runtime/monitor.zig");
 
 /// cluster node reference (set by server when running in cluster mode)
 pub var cluster: ?*cluster_node.Node = null;
@@ -71,6 +72,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
         if (std.mem.eql(u8, path, "/cluster/status")) return handleClusterStatus(alloc);
         if (std.mem.eql(u8, path, "/agents")) return handleListAgents(alloc);
         if (std.mem.eql(u8, path, "/wireguard/peers")) return handleWireguardPeers(alloc);
+        if (std.mem.eql(u8, path, "/v1/status")) return handleStatus(alloc);
     }
 
     if (request.method == .POST) {
@@ -915,6 +917,82 @@ fn openSecretsStore(alloc: std.mem.Allocator) ?secrets.SecretsStore {
         return null;
     };
 }
+
+// -- status handler --
+
+fn handleStatus(alloc: std.mem.Allocator) Response {
+    var records = store.listAll(alloc) catch return internalError();
+
+    var snapshots = monitor.collectSnapshots(alloc, &records) catch {
+        for (records.items) |rec| rec.deinit(alloc);
+        records.deinit(alloc);
+        return internalError();
+    };
+    defer {
+        for (records.items) |rec| rec.deinit(alloc);
+        records.deinit(alloc);
+        snapshots.deinit(alloc);
+    }
+
+    // build JSON array
+    var json_buf: std.ArrayList(u8) = .empty;
+    var writer = json_buf.writer(alloc);
+    writer.writeByte('[') catch return internalError();
+
+    for (snapshots.items, 0..) |snap, idx| {
+        if (idx > 0) writer.writeByte(',') catch return internalError();
+        writeSnapshotJson(writer, snap) catch return internalError();
+    }
+
+    writer.writeByte(']') catch return internalError();
+
+    return .{
+        .status = .ok,
+        .body = json_buf.items,
+        .allocated = true,
+    };
+}
+
+fn writeSnapshotJson(writer: anytype, snap: monitor.ServiceSnapshot) !void {
+    try writer.print(
+        "{{\"name\":\"{s}\",\"status\":\"{s}\",",
+        .{ snap.name, monitor.formatStatus(snap.status) },
+    );
+
+    // health is nullable
+    if (snap.health_status) |hs| {
+        try writer.print("\"health\":\"{s}\",", .{monitor.formatHealth(hs)});
+    } else {
+        try writer.writeAll("\"health\":null,");
+    }
+
+    try writer.print(
+        "\"cpu_pct\":{d:.1},\"memory_bytes\":{d},\"running\":{d},\"desired\":{d},\"uptime_secs\":{d}",
+        .{
+            snap.cpu_pct,
+            snap.memory_bytes,
+            snap.running_count,
+            snap.desired_count,
+            snap.uptime_secs,
+        },
+    );
+
+    // include PSI if available
+    if (snap.psi_cpu) |psi| {
+        try writer.print(",\"psi_cpu_some\":{d:.2},\"psi_cpu_full\":{d:.2}", .{
+            psi.some_avg10, psi.full_avg10,
+        });
+    }
+    if (snap.psi_memory) |psi| {
+        try writer.print(",\"psi_mem_some\":{d:.2},\"psi_mem_full\":{d:.2}", .{
+            psi.some_avg10, psi.full_avg10,
+        });
+    }
+
+    try writer.writeByte('}');
+}
+
+// -- secrets handlers --
 
 /// clean up a secrets store opened with openSecretsStore.
 fn closeSecretsStore(alloc: std.mem.Allocator, sec: *secrets.SecretsStore) void {

@@ -30,6 +30,7 @@ const json_helpers = @import("lib/json_helpers.zig");
 const sqlite = @import("sqlite");
 const secrets = @import("state/secrets.zig");
 const dns = @import("network/dns.zig");
+const monitor = @import("runtime/monitor.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -98,6 +99,8 @@ pub fn main() !void {
         cmdHistory(&args, alloc);
     } else if (std.mem.eql(u8, command, "secret")) {
         cmdSecret(&args, alloc);
+    } else if (std.mem.eql(u8, command, "status")) {
+        cmdStatus(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -1588,6 +1591,221 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 }
 
+// -- status command --
+
+fn cmdStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var verbose = false;
+    var server_addr: ?[4]u8 = null;
+    var server_port: u16 = 7700;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            const addr_str = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                std.process.exit(1);
+            };
+            var addr: [4]u8 = .{ 127, 0, 0, 1 };
+            if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
+                addr = ip.parseIp(addr_str[0..colon]) orelse {
+                    writeErr("invalid server address: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+                server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
+                    writeErr("invalid port: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+            } else {
+                addr = ip.parseIp(addr_str) orelse {
+                    writeErr("invalid server address: {s}\n", .{addr_str});
+                    std.process.exit(1);
+                };
+            }
+            server_addr = addr;
+        }
+    }
+
+    // cluster mode: query API endpoint
+    if (server_addr) |addr| {
+        cmdStatusRemote(alloc, addr, server_port, verbose);
+        return;
+    }
+
+    // local mode: read directly from store and cgroups
+    cmdStatusLocal(alloc, verbose);
+}
+
+fn cmdStatusLocal(alloc: std.mem.Allocator, verbose: bool) void {
+    var records = store.listAll(alloc) catch {
+        writeErr("failed to list containers\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (records.items) |rec| rec.deinit(alloc);
+        records.deinit(alloc);
+    }
+
+    if (records.items.len == 0) {
+        write("no services running\n", .{});
+        return;
+    }
+
+    var snapshots = monitor.collectSnapshots(alloc, &records) catch {
+        writeErr("failed to collect service snapshots\n", .{});
+        std.process.exit(1);
+    };
+    defer snapshots.deinit(alloc);
+
+    printStatusTable(snapshots.items, verbose);
+}
+
+fn cmdStatusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) void {
+    var resp = http_client.get(alloc, addr, port, "/v1/status") catch {
+        writeErr("failed to connect to server\n", .{});
+        std.process.exit(1);
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("server returned status {d}\n", .{resp.status_code});
+        std.process.exit(1);
+    }
+
+    // parse JSON response into snapshots for display
+    var snapshots: std.ArrayList(monitor.ServiceSnapshot) = .empty;
+    defer snapshots.deinit(alloc);
+
+    var pos: usize = 0;
+    while (pos < resp.body.len) {
+        const obj_start = std.mem.indexOfPos(u8, resp.body, pos, "{\"name\":\"") orelse break;
+        const obj_end = std.mem.indexOfPos(u8, resp.body, obj_start + 1, "}") orelse break;
+        const obj = resp.body[obj_start .. obj_end + 1];
+
+        const name = extractJsonString(obj, "name") orelse "?";
+        const status_str = extractJsonString(obj, "status") orelse "unknown";
+        const health_str = extractJsonString(obj, "health");
+
+        const status: monitor.ServiceStatus = if (std.mem.eql(u8, status_str, "running"))
+            .running
+        else if (std.mem.eql(u8, status_str, "stopped"))
+            .stopped
+        else
+            .mixed;
+
+        const health_status: ?health.HealthStatus = if (health_str) |h| blk: {
+            if (std.mem.eql(u8, h, "healthy")) break :blk .healthy;
+            if (std.mem.eql(u8, h, "unhealthy")) break :blk .unhealthy;
+            if (std.mem.eql(u8, h, "starting")) break :blk .starting;
+            break :blk null;
+        } else null;
+
+        snapshots.append(alloc, .{
+            .name = name,
+            .status = status,
+            .health_status = health_status,
+            .cpu_pct = extractJsonFloat(obj, "cpu_pct") orelse 0.0,
+            .memory_bytes = @intCast(extractJsonInt(obj, "memory_bytes") orelse 0),
+            .psi_cpu = null,
+            .psi_memory = null,
+            .running_count = @intCast(extractJsonInt(obj, "running") orelse 0),
+            .desired_count = @intCast(extractJsonInt(obj, "desired") orelse 0),
+            .uptime_secs = extractJsonInt(obj, "uptime_secs") orelse 0,
+        }) catch {
+            writeErr("failed to parse status response\n", .{});
+            std.process.exit(1);
+        };
+
+        pos = obj_end + 1;
+    }
+
+    if (snapshots.items.len == 0) {
+        write("no services running\n", .{});
+        return;
+    }
+
+    printStatusTable(snapshots.items, verbose);
+}
+
+fn printStatusTable(snapshots: []const monitor.ServiceSnapshot, verbose: bool) void {
+    write("{s:<12} {s:<10} {s:<11} {s:<10} {s:<11} {s:<13} {s}\n", .{
+        "SERVICE", "STATUS", "HEALTH", "CPU", "MEMORY", "CONTAINERS", "UPTIME",
+    });
+
+    for (snapshots) |snap| {
+        var cpu_buf: [16]u8 = undefined;
+        const cpu_str = if (snap.cpu_pct > 0.0)
+            std.fmt.bufPrint(&cpu_buf, "{d:.1}%", .{snap.cpu_pct}) catch "-"
+        else
+            @as([]const u8, "-");
+
+        var mem_buf: [16]u8 = undefined;
+        const mem_str = monitor.formatBytes(&mem_buf, snap.memory_bytes);
+
+        var uptime_buf: [16]u8 = undefined;
+        const uptime_str = monitor.formatUptime(&uptime_buf, snap.uptime_secs);
+
+        var count_buf: [12]u8 = undefined;
+        const count_str = std.fmt.bufPrint(&count_buf, "{d}/{d}", .{
+            snap.running_count, snap.desired_count,
+        }) catch "-";
+
+        write("{s:<12} {s:<10} {s:<11} {s:<10} {s:<11} {s:<13} {s}\n", .{
+            snap.name,
+            monitor.formatStatus(snap.status),
+            monitor.formatHealth(snap.health_status),
+            cpu_str,
+            mem_str,
+            count_str,
+            uptime_str,
+        });
+
+        if (verbose) {
+            printVerboseDetails(snap);
+        }
+    }
+}
+
+fn printVerboseDetails(snap: monitor.ServiceSnapshot) void {
+    // PSI pressure metrics
+    if (snap.psi_cpu) |psi| {
+        write("  cpu pressure:    some={d:.1}%  full={d:.1}%\n", .{ psi.some_avg10, psi.full_avg10 });
+    }
+    if (snap.psi_memory) |psi| {
+        write("  memory pressure: some={d:.1}%  full={d:.1}%\n", .{ psi.some_avg10, psi.full_avg10 });
+    }
+
+    // auto-tuning suggestions based on PSI
+    if (snap.psi_memory) |psi| {
+        if (psi.some_avg10 > 25.0) {
+            write("  \xe2\x9a\xa0 memory pressure high \xe2\x80\x94 consider increasing memory limit\n", .{});
+        }
+    }
+    if (snap.psi_cpu) |psi| {
+        if (psi.some_avg10 > 50.0) {
+            write("  \xe2\x9a\xa0 cpu pressure high \xe2\x80\x94 consider increasing cpu allocation\n", .{});
+        }
+    }
+}
+
+/// extract a float value from a JSON key like "cpu_pct":12.3
+fn extractJsonFloat(json: []const u8, key: []const u8) ?f64 {
+    // look for "key":
+    var search_buf: [64]u8 = undefined;
+    const search = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
+
+    const key_pos = std.mem.indexOf(u8, json, search) orelse return null;
+    const val_start = key_pos + search.len;
+
+    // find end of number (next , or })
+    var val_end = val_start;
+    while (val_end < json.len) : (val_end += 1) {
+        if (json[val_end] == ',' or json[val_end] == '}') break;
+    }
+
+    return std.fmt.parseFloat(f64, json[val_start..val_end]) catch null;
+}
+
 // -- deployment commands --
 
 fn cmdRollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -1878,6 +2096,7 @@ fn printUsage() void {
         \\  secret rotate <name>            re-encrypt with current key
         \\  build [opts] <path>              build an image from a Dockerfile
         \\  exec <id> <cmd> [args...]         run a command in a running container
+        \\  status [--verbose] [--server h:p]  show service status and resources
         \\  ps                               list containers
         \\  logs <id>                        show container output
         \\  stop <id>                        stop a running container
