@@ -112,10 +112,11 @@ fn dropCapabilities() SecurityError!void {
     const rc2 = linux.syscall2(.capget, @intFromPtr(&hdr), @intFromPtr(&verify_data));
     if (syscall_util.isError(rc2)) return SecurityError.CapabilityFailed;
 
-    // compare effective and permitted masks for both words
+    // compare effective, permitted, and inheritable masks for both words
     for (0..2) |i| {
         if (verify_data[i].effective != data[i].effective or
-            verify_data[i].permitted != data[i].permitted)
+            verify_data[i].permitted != data[i].permitted or
+            verify_data[i].inheritable != data[i].inheritable)
         {
             return SecurityError.CapabilityFailed;
         }

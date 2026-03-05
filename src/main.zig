@@ -308,8 +308,6 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    write("{s}\n", .{id});
-
     // build network config
     const net_config: ?net_setup.NetworkConfig = if (flags.networking_enabled)
         .{ .port_maps = flags.port_maps.items }
@@ -335,9 +333,15 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     };
 
     c.start() catch {
+        // clean up the DB record and dirs so yoq ps doesn't show a ghost
+        store.remove(id) catch {};
+        container.cleanupContainerDirs(id);
         writeErr("failed to start container\n", .{});
         std.process.exit(1);
     };
+
+    // only print the ID after successful start
+    write("{s}\n", .{id});
 
     // exit with the container's exit code
     std.process.exit(c.exit_code orelse 0);

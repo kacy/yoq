@@ -8,7 +8,7 @@ const std = @import("std");
 
 pub const PathError = error{ HomeDirNotFound, PathTooLong };
 
-pub const max_path = 512;
+pub const max_path = 4096;
 
 /// build a path: ~/.local/share/yoq/<subpath>
 pub fn dataPath(buf: *[max_path]u8, subpath: []const u8) PathError![]const u8 {

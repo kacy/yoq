@@ -468,11 +468,11 @@ const containers_subdir = "containers";
 
 /// paths to the overlay directories for a container
 pub const OverlayDirs = struct {
-    upper: [512]u8,
+    upper: [paths.max_path]u8,
     upper_len: usize,
-    work: [512]u8,
+    work: [paths.max_path]u8,
     work_len: usize,
-    merged: [512]u8,
+    merged: [paths.max_path]u8,
     merged_len: usize,
 
     pub fn upperPath(self: *const OverlayDirs) []const u8 {
