@@ -20,6 +20,11 @@ const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
 const exec_helpers = @import("../lib/exec_helpers.zig");
 
+/// PID of the currently running container process.
+/// set after spawn, cleared on exit. used by the signal handler
+/// in main.zig to forward SIGINT/SIGTERM to the container.
+pub var active_pid: std.atomic.Value(i32) = std.atomic.Value(i32).init(0);
+
 pub const ContainerError = error{
     CreateFailed,
     StartFailed,
@@ -224,6 +229,7 @@ pub const Container = struct {
 
         self.pid = spawn_result.pid;
         self.status = .running;
+        active_pid.store(spawn_result.pid, .release);
 
         // add child to cgroup and set resource limits
         if (cgroup) |*cg| {
@@ -318,6 +324,7 @@ pub const Container = struct {
         self.status = .stopped;
         self.exit_code = exit_code;
         self.pid = null;
+        active_pid.store(0, .release);
 
         // join log capture threads and close log file
         if (stdout_thread) |t| t.join();
