@@ -242,7 +242,7 @@ pub fn removePeer(name: []const u8, public_key: []const u8) WireguardError!void 
 
 /// assign an overlay IP address to a WireGuard interface.
 /// uses netlink RTM_NEWADDR (same pattern as bridge.zig's addAddress).
-pub fn assignOverlayIp(name: []const u8, overlay_ip: [4]u8) WireguardError!void {
+pub fn assignOverlayIp(name: []const u8, overlay_ip: [4]u8, prefix_len: u8) WireguardError!void {
     const fd = nl.openSocket() catch return WireguardError.AddressFailed;
     defer posix.close(fd);
 
@@ -260,7 +260,7 @@ pub fn assignOverlayIp(name: []const u8, overlay_ip: [4]u8) WireguardError!void 
 
     const addr_msg = mb.getPayload(hdr, nl.IfAddrMsg);
     addr_msg.family = nl.AF.INET;
-    addr_msg.prefixlen = 24;
+    addr_msg.prefixlen = prefix_len;
     addr_msg.scope = nl.RT_SCOPE.UNIVERSE;
     addr_msg.index = if_index;
 

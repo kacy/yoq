@@ -92,7 +92,7 @@ pub fn setupClusterNetworking(config: ClusterNetworkConfig) !void {
     errdefer wireguard.deleteInterface(wg_interface) catch {};
 
     // assign our overlay IP to the interface
-    wireguard.assignOverlayIp(wg_interface, config.overlay_ip) catch |e| {
+    wireguard.assignOverlayIp(wg_interface, config.overlay_ip, 24) catch |e| {
         log.warn("failed to assign overlay IP to {s}: {}", .{ wg_interface, e });
         return error.ConfigFailed;
     };
