@@ -78,7 +78,7 @@ fn rowToRecord(row: ContainerRow) ContainerRecord {
         .hostname = row.hostname.data,
         .status = row.status.data,
         .pid = if (row.pid) |p| @intCast(p) else null,
-        .exit_code = if (row.exit_code) |e| @intCast(e) else null,
+        .exit_code = if (row.exit_code) |e| if (e >= 0 and e <= 255) @as(?u8, @intCast(e)) else null else null,
         .ip_address = if (row.ip_address) |ip_val| ip_val.data else null,
         .veth_host = if (row.veth_host) |veth| veth.data else null,
         .app_name = if (row.app_name) |app| app.data else null,
