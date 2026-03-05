@@ -575,7 +575,7 @@ pub fn getLoadBalancer() ?*const LoadBalancer {
 
 /// convert a 4-byte IP to a u32 in network byte order.
 /// the bytes are already in network order — this is just a type pun.
-fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
+pub fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
     return @bitCast(ip_bytes);
 }
 

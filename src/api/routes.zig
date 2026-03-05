@@ -22,6 +22,8 @@ const scheduler = @import("../cluster/scheduler.zig");
 const sqlite = @import("sqlite");
 const secrets = @import("../state/secrets.zig");
 const monitor = @import("../runtime/monitor.zig");
+const ebpf = @import("../network/ebpf.zig");
+const ip_mod = @import("../network/ip.zig");
 
 /// cluster node reference (set by server when running in cluster mode)
 pub var cluster: ?*cluster_node.Node = null;
@@ -73,6 +75,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
         if (std.mem.eql(u8, path, "/agents")) return handleListAgents(alloc);
         if (std.mem.eql(u8, path, "/wireguard/peers")) return handleWireguardPeers(alloc);
         if (std.mem.eql(u8, path, "/v1/status")) return handleStatus(alloc);
+        if (std.mem.startsWith(u8, path, "/v1/metrics")) return handleMetrics(alloc, request);
     }
 
     if (request.method == .POST) {
@@ -992,6 +995,97 @@ fn writeSnapshotJson(writer: anytype, snap: monitor.ServiceSnapshot) !void {
     }
 
     try writer.writeByte('}');
+}
+
+// -- metrics handlers --
+
+fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
+    // parse optional ?service=<name> query param
+    const service_filter = extractQueryParam(request.path, "service");
+
+    var records = store.listAll(alloc) catch return internalError();
+    defer {
+        for (records.items) |rec| rec.deinit(alloc);
+        records.deinit(alloc);
+    }
+
+    const mc = ebpf.getMetricsCollector();
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    var writer = json_buf.writer(alloc);
+    writer.writeByte('[') catch return internalError();
+
+    var first = true;
+    for (records.items) |rec| {
+        if (!std.mem.eql(u8, rec.status, "running")) continue;
+
+        // filter by service name if specified
+        if (service_filter) |svc| {
+            if (!std.mem.eql(u8, rec.hostname, svc)) continue;
+        }
+
+        const ip_str = rec.ip_address orelse continue;
+
+        // look up eBPF metrics for this container's IP
+        var packets: u64 = 0;
+        var bytes: u64 = 0;
+        if (mc) |collector| {
+            if (ip_mod.parseIp(ip_str)) |addr| {
+                const ip_net = ebpf.ipToNetworkOrder(addr);
+                if (collector.readMetrics(ip_net)) |m| {
+                    packets = m.packets;
+                    bytes = m.bytes;
+                }
+            }
+        }
+
+        if (!first) writer.writeByte(',') catch return internalError();
+        first = false;
+
+        // short container ID (first 6 chars)
+        const short_id = if (rec.id.len >= 6) rec.id[0..6] else rec.id;
+
+        writer.print(
+            "{{\"service\":\"{s}\",\"container\":\"{s}\",\"ip\":\"{s}\",\"packets\":{d},\"bytes\":{d}}}",
+            .{ rec.hostname, short_id, ip_str, packets, bytes },
+        ) catch return internalError();
+    }
+
+    writer.writeByte(']') catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{
+        .status = .ok,
+        .body = body,
+        .allocated = true,
+    };
+}
+
+/// extract a query parameter value from a URL path.
+/// e.g. extractQueryParam("/v1/metrics?service=api", "service") → "api"
+fn extractQueryParam(path: []const u8, param: []const u8) ?[]const u8 {
+    const query_start = std.mem.indexOf(u8, path, "?") orelse return null;
+    var rest = path[query_start + 1 ..];
+
+    while (rest.len > 0) {
+        // find end of this param
+        const amp = std.mem.indexOf(u8, rest, "&") orelse rest.len;
+        const pair = rest[0..amp];
+
+        // split on =
+        if (std.mem.indexOf(u8, pair, "=")) |eq| {
+            const key = pair[0..eq];
+            const value = pair[eq + 1 ..];
+            if (std.mem.eql(u8, key, param) and value.len > 0) {
+                return value;
+            }
+        }
+
+        rest = if (amp < rest.len) rest[amp + 1 ..] else &.{};
+    }
+
+    return null;
 }
 
 // -- secrets handlers --
