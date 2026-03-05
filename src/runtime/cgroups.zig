@@ -240,7 +240,7 @@ pub const Cgroup = struct {
                         metrics.cpu_usec = std.fmt.parseInt(u64, line["usage_usec ".len..], 10) catch null;
                         break;
                     }
-                };
+                }
             }
         }
 
