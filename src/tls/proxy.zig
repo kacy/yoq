@@ -22,6 +22,9 @@ const cert_store = @import("cert_store.zig");
 const backend_mod = @import("backend.zig");
 const handshake = @import("handshake.zig");
 const record = @import("record.zig");
+const acme_mod = @import("acme.zig");
+const csr = @import("csr.zig");
+const jws = @import("jws.zig");
 
 const X25519 = std.crypto.dh.X25519;
 
@@ -89,6 +92,18 @@ pub const ChallengeStore = struct {
     }
 };
 
+/// configuration for automatic certificate renewal.
+/// if set, the proxy will periodically check for expiring certs and renew
+/// them via ACME. the check runs every 12 hours by default.
+pub const RenewalConfig = struct {
+    email: []const u8,
+    directory_url: []const u8,
+    /// number of days before expiry to trigger renewal
+    renewal_days: i64 = 30,
+    /// interval between renewal checks in seconds (default: 12 hours)
+    check_interval_s: u64 = 12 * 3600,
+};
+
 pub const TlsProxy = struct {
     allocator: std.mem.Allocator,
     backends: *backend_mod.BackendRegistry,
@@ -99,6 +114,7 @@ pub const TlsProxy = struct {
     tls_port: u16,
     http_port: u16,
     running: std.atomic.Value(bool),
+    renewal_config: ?RenewalConfig,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -123,7 +139,14 @@ pub const TlsProxy = struct {
             .tls_port = tls_port,
             .http_port = http_port,
             .running = std.atomic.Value(bool).init(false),
+            .renewal_config = null,
         };
+    }
+
+    /// set ACME renewal configuration. when set, the proxy will
+    /// automatically renew certificates before they expire.
+    pub fn setRenewalConfig(self: *TlsProxy, config: RenewalConfig) void {
+        self.renewal_config = config;
     }
 
     pub fn deinit(self: *TlsProxy) void {
@@ -153,6 +176,15 @@ pub const TlsProxy = struct {
             return;
         };
         http_thread.detach();
+
+        // renewal checker (only if configured)
+        if (self.renewal_config != null) {
+            const renewal_thread = std.Thread.spawn(.{}, renewalLoop, .{self}) catch {
+                log.err("failed to start renewal checker", .{});
+                return;
+            };
+            renewal_thread.detach();
+        }
     }
 
     /// stop accepting new connections.
@@ -202,11 +234,154 @@ pub const TlsProxy = struct {
         }
     }
 
+    // -- renewal --
+
+    fn renewalLoop(self: *TlsProxy) void {
+        const config = self.renewal_config orelse return;
+
+        log.info("renewal checker started (every {d}h, renew within {d} days)", .{
+            config.check_interval_s / 3600,
+            config.renewal_days,
+        });
+
+        while (self.running.load(.acquire)) {
+            // sleep in 1-second increments so we can check running flag
+            var elapsed: u64 = 0;
+            while (elapsed < config.check_interval_s and self.running.load(.acquire)) {
+                std.Thread.sleep(std.time.ns_per_s);
+                elapsed += 1;
+            }
+            if (!self.running.load(.acquire)) break;
+
+            self.checkAndRenew(config);
+        }
+
+        log.info("renewal checker stopped", .{});
+    }
+
+    fn checkAndRenew(self: *TlsProxy, config: RenewalConfig) void {
+        var expiring = self.certs.listExpiringSoon(config.renewal_days) catch {
+            log.warn("failed to list expiring certificates", .{});
+            return;
+        };
+        defer {
+            for (expiring.items) |d| self.allocator.free(d);
+            expiring.deinit(self.allocator);
+        }
+
+        if (expiring.items.len == 0) {
+            log.info("renewal check: no certificates need renewal", .{});
+            return;
+        }
+
+        log.info("renewal check: {d} certificate(s) need renewal", .{expiring.items.len});
+
+        for (expiring.items) |domain| {
+            if (!self.running.load(.acquire)) break;
+            self.renewCertificate(domain, config) catch |err| {
+                log.warn("failed to renew certificate for {s}: {}", .{ domain, err });
+            };
+        }
+    }
+
+    const RenewError = error{
+        AcmeFailed,
+        StoreFailed,
+        AllocFailed,
+    };
+
+    fn renewCertificate(self: *TlsProxy, domain: []const u8, config: RenewalConfig) RenewError!void {
+        log.info("renewing certificate for {s}", .{domain});
+
+        var client = acme_mod.AcmeClient.init(self.allocator, config.directory_url);
+        defer client.deinit();
+
+        client.fetchDirectory() catch {
+            log.warn("  renewal: failed to fetch ACME directory", .{});
+            return RenewError.AcmeFailed;
+        };
+
+        client.createAccount(config.email) catch {
+            log.warn("  renewal: failed to create/find ACME account", .{});
+            return RenewError.AcmeFailed;
+        };
+
+        var order = client.createOrder(domain) catch {
+            log.warn("  renewal: failed to create order for {s}", .{domain});
+            return RenewError.AcmeFailed;
+        };
+        defer order.deinit();
+
+        // handle HTTP-01 challenge — register token with our challenge store
+        if (order.authorization_urls.len > 0) {
+            var challenge = client.getHttpChallenge(order.authorization_urls[0]) catch {
+                log.warn("  renewal: failed to get HTTP-01 challenge", .{});
+                return RenewError.AcmeFailed;
+            };
+            defer challenge.deinit();
+
+            // compute key authorization: token + "." + jwk_thumbprint
+            const account_key = client.account_key orelse return RenewError.AcmeFailed;
+            const thumbprint = jws.jwkThumbprint(self.allocator, account_key.public_key) catch
+                return RenewError.AllocFailed;
+            defer self.allocator.free(thumbprint);
+
+            const key_auth = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{
+                challenge.token, thumbprint,
+            }) catch return RenewError.AllocFailed;
+            defer self.allocator.free(key_auth);
+
+            // register the challenge token so port 80 handler can serve it
+            self.challenges.set(challenge.token, key_auth) catch
+                return RenewError.AllocFailed;
+            defer self.challenges.remove(challenge.token);
+
+            // tell the CA we're ready
+            client.respondToChallenge(challenge.url) catch {
+                log.warn("  renewal: failed to respond to challenge", .{});
+                return RenewError.AcmeFailed;
+            };
+
+            // brief wait for CA to validate (the CA will hit our port 80)
+            std.Thread.sleep(5 * std.time.ns_per_s);
+        }
+
+        // finalize — generates CSR, gets signed cert
+        const result = client.finalize(order.finalize_url, domain) catch {
+            log.warn("  renewal: failed to finalize order", .{});
+            return RenewError.AcmeFailed;
+        };
+        defer {
+            self.allocator.free(result.cert_pem);
+            std.crypto.secureZero(u8, result.key_der);
+            self.allocator.free(result.key_der);
+        }
+
+        // convert key to PEM
+        const key_pem = csr.derKeyToPem(self.allocator, result.key_der) catch
+            return RenewError.AllocFailed;
+        defer {
+            std.crypto.secureZero(u8, key_pem);
+            self.allocator.free(key_pem);
+        }
+
+        // store the new certificate (cert_store.install replaces existing)
+        self.certs.install(domain, result.cert_pem, key_pem, "acme") catch {
+            log.warn("  renewal: failed to store renewed certificate", .{});
+            return RenewError.StoreFailed;
+        };
+
+        // no in-memory cache to swap — cert_store.get() is called per-connection,
+        // so the new cert will be used automatically on the next TLS handshake.
+        log.info("  renewed certificate for {s}", .{domain});
+    }
+
     // -- connection handlers --
 
     fn tlsConnectionHandler(self: *TlsProxy, client_fd: posix.fd_t) void {
         defer {
             _ = active_connections.fetchSub(1, .acq_rel);
+            sendCloseNotify(client_fd);
             posix.close(client_fd);
         }
 
@@ -455,6 +630,28 @@ fn extractHost(request: []const u8) ?[]const u8 {
     const end = std.mem.indexOfPos(u8, request, start, "\r") orelse request.len;
     const host = request[start..end];
     return if (host.len > 0) host else null;
+}
+
+/// send a TLS close_notify alert to gracefully shut down the connection.
+///
+/// TLS 1.3 close_notify is an alert record:
+///   content_type: 21 (alert)
+///   version: 0x0303 (TLS 1.2 — used on the wire even for TLS 1.3)
+///   length: 2
+///   level: 1 (warning)
+///   description: 0 (close_notify)
+///
+/// best-effort — we don't care if the write fails (connection may already
+/// be closed by the client).
+fn sendCloseNotify(fd: posix.fd_t) void {
+    const close_notify = [_]u8{
+        0x15, // content type: alert
+        0x03, 0x03, // protocol version: TLS 1.2 (wire format)
+        0x00, 0x02, // length: 2
+        0x01, // level: warning
+        0x00, // description: close_notify
+    };
+    _ = posix.write(fd, &close_notify) catch {};
 }
 
 fn sendHttpResponse(fd: posix.fd_t, status: []const u8, body: []const u8) void {

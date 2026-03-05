@@ -35,6 +35,9 @@ const health = @import("health.zig");
 const tls_proxy = @import("../tls/proxy.zig");
 const tls_backend = @import("../tls/backend.zig");
 const cert_store_mod = @import("../tls/cert_store.zig");
+const acme_mod = @import("../tls/acme.zig");
+const csr_mod = @import("../tls/csr.zig");
+const jws_mod = @import("../tls/jws.zig");
 const sqlite = @import("sqlite");
 
 pub const OrchestratorError = error{
@@ -292,6 +295,30 @@ pub const Orchestrator = struct {
             return;
         };
 
+        // auto-provision ACME certificates for services that need them.
+        // runs before starting the proxy so certs are ready when traffic arrives.
+        var acme_email: ?[]const u8 = null;
+        for (self.manifest.services) |svc| {
+            const tls = svc.tls orelse continue;
+            if (!tls.acme) continue;
+
+            // save the email for renewal config
+            if (acme_email == null) acme_email = tls.email;
+
+            // skip if a valid cert already exists
+            const needs = certs.needsRenewal(tls.domain, 30) catch |err| blk: {
+                if (err == cert_store_mod.CertError.NotFound) break :blk true;
+                break :blk false;
+            };
+            if (!needs) {
+                writeErr("  tls: {s} has valid certificate\n", .{tls.domain});
+                continue;
+            }
+
+            writeErr("  tls: provisioning certificate for {s}...\n", .{tls.domain});
+            provisionAcmeCert(self.alloc, certs, tls.domain, tls.email orelse "admin@localhost");
+        }
+
         // create and start proxy
         const proxy = self.alloc.create(tls_proxy.TlsProxy) catch {
             std.crypto.secureZero(u8, &certs.key);
@@ -310,6 +337,14 @@ pub const Orchestrator = struct {
             writeErr("failed to bind TLS proxy ports (443/80)\n", .{});
             return;
         };
+
+        // configure auto-renewal if any service uses ACME
+        if (acme_email) |email| {
+            proxy.setRenewalConfig(.{
+                .email = email,
+                .directory_url = acme_mod.letsencrypt_production,
+            });
+        }
 
         self.tls_db = db_ptr;
         self.tls_certs = certs;
@@ -441,6 +476,89 @@ pub const Orchestrator = struct {
         }
     }
 };
+
+// -- ACME provisioning --
+
+/// attempt to provision a certificate via ACME for the given domain.
+/// logs progress and errors but does not fail the startup — the service
+/// can still work without TLS if provisioning fails (e.g., DNS not ready).
+fn provisionAcmeCert(
+    alloc: std.mem.Allocator,
+    certs: *cert_store_mod.CertStore,
+    domain: []const u8,
+    email: []const u8,
+) void {
+    var client = acme_mod.AcmeClient.init(alloc, acme_mod.letsencrypt_production);
+    defer client.deinit();
+
+    client.fetchDirectory() catch {
+        writeErr("    failed to fetch ACME directory\n", .{});
+        return;
+    };
+
+    client.createAccount(email) catch {
+        writeErr("    failed to create ACME account\n", .{});
+        return;
+    };
+
+    var order = client.createOrder(domain) catch {
+        writeErr("    failed to create certificate order\n", .{});
+        return;
+    };
+    defer order.deinit();
+
+    // handle HTTP-01 challenge
+    // note: the proxy isn't running yet at this point, so we can't serve
+    // challenges on port 80 during startup provisioning. the user needs
+    // to either:
+    //   1. pre-provision with 'yoq cert provision' (which runs the ACME
+    //      flow with manual challenge handling), or
+    //   2. have DNS already configured so the CA can reach us.
+    //
+    // during auto-renewal (after startup), the proxy IS running and
+    // challenge tokens are served automatically.
+    if (order.authorization_urls.len > 0) {
+        var challenge = client.getHttpChallenge(order.authorization_urls[0]) catch {
+            writeErr("    failed to get HTTP-01 challenge (is DNS configured?)\n", .{});
+            return;
+        };
+        defer challenge.deinit();
+
+        client.respondToChallenge(challenge.url) catch {
+            writeErr("    failed to respond to challenge\n", .{});
+            return;
+        };
+
+        // wait for validation
+        std.Thread.sleep(5 * std.time.ns_per_s);
+    }
+
+    const result = client.finalize(order.finalize_url, domain) catch {
+        writeErr("    failed to finalize certificate order\n", .{});
+        return;
+    };
+    defer {
+        alloc.free(result.cert_pem);
+        std.crypto.secureZero(u8, result.key_der);
+        alloc.free(result.key_der);
+    }
+
+    const key_pem = csr_mod.derKeyToPem(alloc, result.key_der) catch {
+        writeErr("    failed to encode private key\n", .{});
+        return;
+    };
+    defer {
+        std.crypto.secureZero(u8, key_pem);
+        alloc.free(key_pem);
+    }
+
+    certs.install(domain, result.cert_pem, key_pem, "acme") catch {
+        writeErr("    failed to store certificate\n", .{});
+        return;
+    };
+
+    writeErr("    provisioned certificate for {s}\n", .{domain});
+}
 
 // -- service thread helpers --
 //

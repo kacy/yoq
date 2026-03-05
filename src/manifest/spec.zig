@@ -130,9 +130,11 @@ pub const HealthCheck = struct {
 pub const TlsConfig = struct {
     domain: []const u8,
     acme: bool = false, // automatic certificate provisioning via Let's Encrypt
+    email: ?[]const u8 = null, // contact email for ACME account (required if acme = true)
 
     pub fn deinit(self: TlsConfig, alloc: std.mem.Allocator) void {
         alloc.free(self.domain);
+        if (self.email) |e| alloc.free(e);
     }
 };
 
