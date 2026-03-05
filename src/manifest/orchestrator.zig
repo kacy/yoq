@@ -32,6 +32,10 @@ const ip_mod = @import("../network/ip.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const logs = @import("../runtime/logs.zig");
 const health = @import("health.zig");
+const tls_proxy = @import("../tls/proxy.zig");
+const tls_backend = @import("../tls/backend.zig");
+const cert_store_mod = @import("../tls/cert_store.zig");
+const sqlite = @import("sqlite");
 
 pub const OrchestratorError = error{
     PullFailed,
@@ -65,6 +69,10 @@ pub const Orchestrator = struct {
     states: []ServiceState,
     dev_mode: bool = false,
     restart_requested: []std.atomic.Value(bool),
+    backend_registry: ?*tls_backend.BackendRegistry = null,
+    proxy: ?*tls_proxy.TlsProxy = null,
+    tls_certs: ?*cert_store_mod.CertStore = null,
+    tls_db: ?*sqlite.Db = null,
 
     pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) !Orchestrator {
         const states = try alloc.alloc(ServiceState, manifest.services.len);
@@ -91,6 +99,24 @@ pub const Orchestrator = struct {
     }
 
     pub fn deinit(self: *Orchestrator) void {
+        // clean up TLS resources in reverse init order
+        if (self.proxy) |p| {
+            p.deinit();
+            self.alloc.destroy(p);
+        }
+        if (self.tls_certs) |c| {
+            // zero the master key before freeing
+            std.crypto.secureZero(u8, &c.key);
+            self.alloc.destroy(c);
+        }
+        if (self.tls_db) |db| {
+            db.deinit();
+            self.alloc.destroy(db);
+        }
+        if (self.backend_registry) |r| {
+            r.deinit();
+            self.alloc.destroy(r);
+        }
         if (self.states.len > 0) {
             self.alloc.free(self.states);
         }
@@ -160,6 +186,10 @@ pub const Orchestrator = struct {
         // the service thread sets status=running then enters c.start()
         // which does network setup synchronously before blocking.
         self.registerHealthChecks();
+
+        // phase 4: start TLS proxy if any services have TLS configs.
+        // this runs after all services are up so backends are resolvable.
+        self.startTlsProxy();
     }
 
     /// register services for health checking and start the checker thread.
@@ -189,9 +219,113 @@ pub const Orchestrator = struct {
         }
     }
 
+    /// start the TLS reverse proxy if any services have TLS configs.
+    /// registers backends for each TLS-enabled service and starts the proxy.
+    fn startTlsProxy(self: *Orchestrator) void {
+        // check if any services have TLS configs
+        var has_tls = false;
+        for (self.manifest.services) |svc| {
+            if (svc.tls != null) {
+                has_tls = true;
+                break;
+            }
+        }
+        if (!has_tls) return;
+
+        // create backend registry
+        const reg = self.alloc.create(tls_backend.BackendRegistry) catch {
+            writeErr("failed to allocate backend registry\n", .{});
+            return;
+        };
+        reg.* = tls_backend.BackendRegistry.init(self.alloc);
+        self.backend_registry = reg;
+
+        // register backends for TLS-enabled services
+        for (self.manifest.services, 0..) |svc, i| {
+            const tls = svc.tls orelse continue;
+
+            // look up the container's IP from the store
+            const id = self.states[i].container_id;
+            const record = store.load(self.alloc, id[0..]) catch {
+                log.warn("could not find container for {s}, skipping TLS backend", .{svc.name});
+                continue;
+            };
+            defer record.deinit(self.alloc);
+
+            const ip = record.ip_address orelse {
+                log.warn("no IP for {s}, skipping TLS backend", .{svc.name});
+                continue;
+            };
+
+            // use the first port mapping's container port, or default to 80
+            const port: u16 = if (svc.ports.len > 0) svc.ports[0].container_port else 80;
+
+            reg.register(tls.domain, ip, port) catch {
+                log.warn("failed to register backend for {s}", .{tls.domain});
+                continue;
+            };
+            writeErr("  tls: {s} -> {s}:{d}\n", .{ tls.domain, ip, port });
+        }
+
+        // open database and cert store
+        const db_ptr = self.alloc.create(sqlite.Db) catch {
+            writeErr("failed to allocate database for cert store\n", .{});
+            return;
+        };
+        db_ptr.* = store.openDb() catch {
+            self.alloc.destroy(db_ptr);
+            writeErr("failed to open database for cert store\n", .{});
+            return;
+        };
+
+        const certs = self.alloc.create(cert_store_mod.CertStore) catch {
+            db_ptr.deinit();
+            self.alloc.destroy(db_ptr);
+            writeErr("failed to allocate cert store\n", .{});
+            return;
+        };
+        certs.* = cert_store_mod.CertStore.init(db_ptr, self.alloc) catch {
+            db_ptr.deinit();
+            self.alloc.destroy(db_ptr);
+            self.alloc.destroy(certs);
+            writeErr("failed to init cert store (is the master key set?)\n", .{});
+            return;
+        };
+
+        // create and start proxy
+        const proxy = self.alloc.create(tls_proxy.TlsProxy) catch {
+            std.crypto.secureZero(u8, &certs.key);
+            db_ptr.deinit();
+            self.alloc.destroy(db_ptr);
+            self.alloc.destroy(certs);
+            writeErr("failed to allocate TLS proxy\n", .{});
+            return;
+        };
+        proxy.* = tls_proxy.TlsProxy.init(self.alloc, reg, certs, 443, 80) catch {
+            std.crypto.secureZero(u8, &certs.key);
+            db_ptr.deinit();
+            self.alloc.destroy(db_ptr);
+            self.alloc.destroy(certs);
+            self.alloc.destroy(proxy);
+            writeErr("failed to bind TLS proxy ports (443/80)\n", .{});
+            return;
+        };
+
+        self.tls_db = db_ptr;
+        self.tls_certs = certs;
+        self.proxy = proxy;
+        proxy.start();
+    }
+
     /// stop all running services in reverse dependency order.
     pub fn stopAll(self: *Orchestrator) void {
-        // stop health checker first so it doesn't see partially-stopped services
+        // stop TLS proxy before stopping services so it stops routing traffic
+        if (self.proxy) |p| {
+            p.stop();
+            writeErr("stopped tls proxy\n", .{});
+        }
+
+        // stop health checker so it doesn't see partially-stopped services
         health.stopChecker();
 
         const services = self.manifest.services;

@@ -28,6 +28,7 @@ pub const LoadError = error{
     InvalidVolumeMount,
     InvalidHealthCheck,
     InvalidRestartPolicy,
+    InvalidTlsConfig,
     UnknownDependency,
     CircularDependency,
     NoServices,
@@ -272,6 +273,9 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
 
     const restart = try parseRestartPolicy(name, table.getString("restart"));
 
+    const tls_config = try parseTlsConfig(alloc, name, table.getTable("tls"));
+    errdefer if (tls_config) |tc| tc.deinit(alloc);
+
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
         .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
@@ -283,6 +287,7 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
         .volumes = volume_mounts,
         .health_check = health_check,
         .restart = restart,
+        .tls = tls_config,
     };
 }
 
@@ -543,6 +548,40 @@ fn parseRestartPolicy(service_name: []const u8, raw: ?[]const u8) LoadError!spec
 
     log.err("manifest: service '{s}' has invalid restart policy '{s}' (expected none, always, or on_failure)", .{ service_name, value });
     return LoadError.InvalidRestartPolicy;
+}
+
+// -- TLS config parsing --
+
+/// parse an optional [service.*.tls] sub-table into a TlsConfig.
+/// returns null if the table is not present.
+///
+/// expected TOML format:
+///   [service.web.tls]
+///   domain = "example.com"   # required
+///   acme = true              # optional, default false
+fn parseTlsConfig(
+    alloc: std.mem.Allocator,
+    service_name: []const u8,
+    table: ?*const toml.Table,
+) LoadError!?spec.TlsConfig {
+    const tls_table = table orelse return null;
+
+    const domain = tls_table.getString("domain") orelse {
+        log.err("manifest: service '{s}' tls is missing required field 'domain'", .{service_name});
+        return LoadError.InvalidTlsConfig;
+    };
+
+    if (domain.len == 0) {
+        log.err("manifest: service '{s}' tls domain cannot be empty", .{service_name});
+        return LoadError.InvalidTlsConfig;
+    }
+
+    const acme = tls_table.getBool("acme") orelse false;
+
+    return .{
+        .domain = alloc.dupe(u8, domain) catch return LoadError.OutOfMemory,
+        .acme = acme,
+    };
 }
 
 // -- health check parsing --
@@ -1537,4 +1576,63 @@ test "variable substitution in manifest — working_dir" {
     defer manifest.deinit();
 
     try std.testing.expectEqualStrings("/app", manifest.services[0].working_dir.?);
+}
+
+test "tls config — domain and acme" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.tls]
+        \\domain = "example.com"
+        \\acme = true
+    );
+    defer manifest.deinit();
+
+    const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqualStrings("example.com", tls.domain);
+    try std.testing.expect(tls.acme);
+}
+
+test "tls config — domain only, acme defaults to false" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.tls]
+        \\domain = "test.org"
+    );
+    defer manifest.deinit();
+
+    const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqualStrings("test.org", tls.domain);
+    try std.testing.expect(!tls.acme);
+}
+
+test "tls config — not specified" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expect(manifest.services[0].tls == null);
+}
+
+test "tls config — missing domain returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidTlsConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.tls]
+        \\acme = true
+    ));
 }

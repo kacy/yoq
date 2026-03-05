@@ -58,6 +58,7 @@ pub const Service = struct {
     volumes: []const VolumeMount,
     health_check: ?HealthCheck = null,
     restart: RestartPolicy = .none,
+    tls: ?TlsConfig = null,
 
     pub fn deinit(self: Service, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
@@ -80,6 +81,7 @@ pub const Service = struct {
         alloc.free(self.volumes);
 
         if (self.health_check) |hc| hc.deinit(alloc);
+        if (self.tls) |tc| tc.deinit(alloc);
     }
 };
 
@@ -119,6 +121,18 @@ pub const HealthCheck = struct {
             },
             .tcp => {},
         }
+    }
+};
+
+/// TLS configuration for a service.
+/// enables TLS termination via the reverse proxy. traffic between the
+/// proxy and the container is plaintext — TLS is terminated at the edge.
+pub const TlsConfig = struct {
+    domain: []const u8,
+    acme: bool = false, // automatic certificate provisioning via Let's Encrypt
+
+    pub fn deinit(self: TlsConfig, alloc: std.mem.Allocator) void {
+        alloc.free(self.domain);
     }
 };
 
