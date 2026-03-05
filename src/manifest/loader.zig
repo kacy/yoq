@@ -19,19 +19,33 @@ const toml = @import("../lib/toml.zig");
 const log = @import("../lib/log.zig");
 
 pub const LoadError = error{
+    /// the manifest file does not exist at the given path
     FileNotFound,
+    /// the manifest file exists but could not be read (permissions, I/O error)
     ReadFailed,
+    /// the file content is not valid TOML
     ParseFailed,
+    /// a service declaration is missing the required `image` field
     MissingImage,
+    /// a port mapping string is malformed (expected "host:container" or "container")
     InvalidPortMapping,
+    /// an environment variable string is malformed (expected "KEY=VALUE")
     InvalidEnvVar,
+    /// a volume mount string is malformed (expected "source:target" or "source:target:ro")
     InvalidVolumeMount,
+    /// a health check configuration has invalid or missing fields
     InvalidHealthCheck,
+    /// an unrecognized restart policy was specified
     InvalidRestartPolicy,
+    /// a TLS configuration has invalid or missing fields
     InvalidTlsConfig,
+    /// a service declares a dependency on a service name that doesn't exist in the manifest
     UnknownDependency,
+    /// the service dependency graph contains a cycle
     CircularDependency,
+    /// the manifest contains no service definitions
     NoServices,
+    /// memory allocation failed during parsing
     OutOfMemory,
 };
 

@@ -40,8 +40,11 @@ const acme_mod = @import("../tls/acme.zig");
 const sqlite = @import("sqlite");
 
 pub const OrchestratorError = error{
+    /// one or more container images could not be pulled from the registry
     PullFailed,
+    /// a service container failed to reach running state during startup
     StartFailed,
+    /// the manifest contains no service definitions
     ManifestEmpty,
 };
 

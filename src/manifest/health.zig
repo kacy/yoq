@@ -24,8 +24,11 @@ const log = @import("../lib/log.zig");
 // -- public types --
 
 pub const HealthStatus = enum {
+    /// service registered but hasn't passed its first health check yet
     starting,
+    /// service is passing health checks consistently
     healthy,
+    /// service has failed enough consecutive health checks to be marked down
     unhealthy,
 };
 
