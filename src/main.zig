@@ -36,7 +36,6 @@ const ebpf = @import("network/ebpf.zig");
 const net_policy = @import("network/policy.zig");
 const cert_store = @import("tls/cert_store.zig");
 const acme = @import("tls/acme.zig");
-const csr = @import("tls/csr.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -2607,32 +2606,17 @@ fn cmdCertProvision(args: *std.process.ArgIterator, alloc: std.mem.Allocator) vo
         };
     }
 
-    // step 5: finalize and download
-    const result = client.finalize(order.finalize_url, dom) catch {
+    // step 5: finalize, export as PEM, and store
+    var exported = client.finalizeAndExport(order.finalize_url, dom) catch {
         writeErr("failed to finalize certificate order\n", .{});
         std.process.exit(1);
     };
-    defer {
-        alloc.free(result.cert_pem);
-        std.crypto.secureZero(u8, result.key_der);
-        alloc.free(result.key_der);
-    }
-
-    // step 6: store in cert store
-    // the ACME client returns raw key bytes — wrap in PEM for storage
-    const key_pem = csr.derKeyToPem(alloc, result.key_der) catch {
-        writeErr("failed to encode private key\n", .{});
-        std.process.exit(1);
-    };
-    defer {
-        std.crypto.secureZero(u8, key_pem);
-        alloc.free(key_pem);
-    }
+    defer exported.deinit();
 
     var cs = openCertStore(alloc);
     defer closeCertStore(alloc, &cs);
 
-    cs.install(dom, result.cert_pem, key_pem, "acme") catch {
+    cs.install(dom, exported.cert_pem, exported.key_pem, "acme") catch {
         writeErr("failed to store certificate\n", .{});
         std.process.exit(1);
     };

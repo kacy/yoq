@@ -91,6 +91,35 @@ pub const Challenge = struct {
     }
 };
 
+/// result of finalizing an ACME order.
+/// cert_pem is the PEM certificate chain, key_der is the raw private key.
+/// caller is responsible for securely zeroing key_der before freeing.
+pub const FinalizeResult = struct {
+    cert_pem: []u8,
+    key_der: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *FinalizeResult) void {
+        self.allocator.free(self.cert_pem);
+        std.crypto.secureZero(u8, self.key_der);
+        self.allocator.free(self.key_der);
+    }
+};
+
+/// result of finalizing and exporting an ACME order as PEM.
+/// both cert and key are PEM-encoded strings ready for storage.
+pub const ExportResult = struct {
+    cert_pem: []u8,
+    key_pem: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *ExportResult) void {
+        self.allocator.free(self.cert_pem);
+        std.crypto.secureZero(u8, self.key_pem);
+        self.allocator.free(self.key_pem);
+    }
+};
+
 pub const AcmeClient = struct {
     allocator: std.mem.Allocator,
     directory_url: []const u8,
@@ -332,7 +361,7 @@ pub const AcmeClient = struct {
         self: *AcmeClient,
         finalize_url: []const u8,
         domain: []const u8,
-    ) AcmeError!struct { cert_pem: []u8, key_der: []u8 } {
+    ) AcmeError!FinalizeResult {
         // generate CSR
         const csr_result = csr_mod.generateCsr(self.allocator, domain) catch
             return AcmeError.CsrGenerationFailed;
@@ -385,6 +414,35 @@ pub const AcmeClient = struct {
         return .{
             .cert_pem = cert_pem,
             .key_der = key_der,
+            .allocator = self.allocator,
+        };
+    }
+
+    /// finalize the order and export as PEM-encoded cert + key.
+    /// combines finalize() + derKeyToPem into one call. this is the
+    /// common path used by CLI provisioning, orchestrator startup,
+    /// and auto-renewal — all need PEM output for the cert store.
+    pub fn finalizeAndExport(
+        self: *AcmeClient,
+        finalize_url: []const u8,
+        domain: []const u8,
+    ) AcmeError!ExportResult {
+        var result = try self.finalize(finalize_url, domain);
+
+        const key_pem = csr_mod.derKeyToPem(self.allocator, result.key_der) catch {
+            // clean up everything on failure
+            result.deinit();
+            return AcmeError.CsrGenerationFailed;
+        };
+
+        // key_der no longer needed — zero and free, keep cert_pem
+        std.crypto.secureZero(u8, result.key_der);
+        self.allocator.free(result.key_der);
+
+        return .{
+            .cert_pem = result.cert_pem,
+            .key_pem = key_pem,
+            .allocator = self.allocator,
         };
     }
 
