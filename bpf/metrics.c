@@ -101,7 +101,7 @@ int metrics_count(struct __sk_buff *skb)
     if (iph->protocol != IPPROTO_TCP)
         return TC_ACT_OK;
 
-    struct tcphdr *tcp = (void *)iph + (iph->ihl * 4);
+    struct tcphdr *tcp = (void *)((char *)iph + ((iph->ihl_version & 0x0F) * 4));
     if ((void *)(tcp + 1) > data_end)
         return TC_ACT_OK;
 
@@ -140,3 +140,5 @@ int metrics_count(struct __sk_buff *skb)
 
     return TC_ACT_OK;
 }
+
+char _license[] SEC("license") = "GPL";
