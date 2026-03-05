@@ -671,6 +671,135 @@ pub fn getMetricsCollector() ?*const MetricsCollector {
     return null;
 }
 
+// -- policy enforcer --
+//
+// per-IP-pair allow/deny enforcement. attached to the bridge ingress
+// at priority 0 (before DNS, LB, and metrics). drops packets matching
+// deny rules or packets from isolated sources without an allow entry.
+
+const policy_prog = @import("bpf/policy.zig");
+
+/// key for the policy_map: source + destination IP pair.
+/// matches struct policy_key in bpf/policy.c.
+pub const PolicyKey = extern struct {
+    src_ip: u32,
+    dst_ip: u32,
+};
+
+/// state for the loaded policy enforcer program.
+pub const PolicyEnforcer = struct {
+    prog_fd: posix.fd_t,
+    policy_fd: posix.fd_t,
+    isolation_fd: posix.fd_t,
+    if_index: u32,
+
+    /// add a deny rule: drop packets from src_ip to dst_ip.
+    pub fn addDeny(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
+        var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
+        var action: u8 = 0; // deny
+        mapUpdate(self.policy_fd, std.mem.asBytes(&key), std.mem.asBytes(&action)) catch {};
+    }
+
+    /// remove a deny rule.
+    pub fn removeDeny(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
+        var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
+        mapDelete(self.policy_fd, std.mem.asBytes(&key));
+    }
+
+    /// add an allow rule: permit packets from src_ip to dst_ip.
+    pub fn addAllow(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
+        var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
+        var action: u8 = 1; // allow
+        mapUpdate(self.policy_fd, std.mem.asBytes(&key), std.mem.asBytes(&action)) catch {};
+    }
+
+    /// remove an allow rule.
+    pub fn removeAllow(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
+        var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
+        mapDelete(self.policy_fd, std.mem.asBytes(&key));
+    }
+
+    /// mark a source IP as isolated (allow-only mode).
+    /// when isolated, only destinations with explicit allow entries are reachable.
+    pub fn isolate(self: *const PolicyEnforcer, src_ip: u32) void {
+        var key = src_ip;
+        var flag: u8 = 1;
+        mapUpdate(self.isolation_fd, std.mem.asBytes(&key), std.mem.asBytes(&flag)) catch {};
+    }
+
+    /// remove isolation for a source IP (return to default-allow).
+    pub fn unisolate(self: *const PolicyEnforcer, src_ip: u32) void {
+        var key = src_ip;
+        mapDelete(self.isolation_fd, std.mem.asBytes(&key));
+    }
+
+    pub fn deinit(self: *PolicyEnforcer) void {
+        detachTC(self.if_index) catch {};
+        posix.close(self.prog_fd);
+        posix.close(self.policy_fd);
+        posix.close(self.isolation_fd);
+    }
+};
+
+/// global policy enforcer instance.
+var policy_enforcer: ?PolicyEnforcer = null;
+
+/// load and attach the policy enforcer BPF program to the bridge.
+/// attaches at priority 0 (runs before DNS/LB at 1 and metrics at 2).
+pub fn loadPolicyEnforcer(bridge_if_index: u32) EbpfError!void {
+    if (policy_enforcer != null) return;
+
+    // create maps
+    const policy_fd = try createMap(
+        @enumFromInt(policy_prog.maps[0].map_type),
+        policy_prog.maps[0].key_size,
+        policy_prog.maps[0].value_size,
+        policy_prog.maps[0].max_entries,
+    );
+    errdefer posix.close(policy_fd);
+
+    const isolation_fd = try createMap(
+        @enumFromInt(policy_prog.maps[1].map_type),
+        policy_prog.maps[1].key_size,
+        policy_prog.maps[1].value_size,
+        policy_prog.maps[1].max_entries,
+    );
+    errdefer posix.close(isolation_fd);
+
+    var map_fds = [_]posix.fd_t{ policy_fd, isolation_fd };
+    const prog_fd = try loadProgram(policy_prog, &map_fds);
+    errdefer posix.close(prog_fd);
+
+    // attach at priority 0 — runs before everything else
+    try attachTC(bridge_if_index, .ingress, prog_fd, 0);
+
+    policy_enforcer = .{
+        .prog_fd = prog_fd,
+        .policy_fd = policy_fd,
+        .isolation_fd = isolation_fd,
+        .if_index = bridge_if_index,
+    };
+
+    log.info("ebpf: policy enforcer loaded on ifindex {d}", .{bridge_if_index});
+}
+
+/// unload the policy enforcer.
+pub fn unloadPolicyEnforcer() void {
+    if (policy_enforcer) |*pe| {
+        pe.deinit();
+        policy_enforcer = null;
+        log.info("ebpf: policy enforcer unloaded", .{});
+    }
+}
+
+/// get the active policy enforcer, if loaded.
+pub fn getPolicyEnforcer() ?*const PolicyEnforcer {
+    if (policy_enforcer) |*pe| {
+        return pe;
+    }
+    return null;
+}
+
 // -- capability check --
 
 /// check if BPF is supported on this system.
@@ -790,6 +919,26 @@ test "metrics_prog bytecode has expected structure" {
     try std.testing.expectEqual(@as(u32, 9), metrics_prog.maps[0].map_type);
     try std.testing.expectEqual(@as(u32, 4), metrics_prog.maps[0].key_size);
     try std.testing.expect(metrics_prog.insns.len >= 2);
+}
+
+test "PolicyKey struct size matches BPF map key" {
+    // must match policy.c: struct policy_key
+    // src_ip (4) + dst_ip (4) = 8 bytes
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(PolicyKey));
+    try std.testing.expectEqual(@as(u32, 8), policy_prog.maps[0].key_size);
+}
+
+test "policy_prog bytecode has expected maps" {
+    try std.testing.expectEqual(@as(usize, 2), policy_prog.maps.len);
+    try std.testing.expectEqualStrings("policy_map", policy_prog.maps[0].name);
+    try std.testing.expectEqualStrings("isolation_map", policy_prog.maps[1].name);
+    // HASH = 1
+    try std.testing.expectEqual(@as(u32, 1), policy_prog.maps[0].map_type);
+    try std.testing.expectEqual(@as(u32, 1), policy_prog.maps[1].map_type);
+    // isolation_map: key=4 (u32 IP), value=1 (u8 flag)
+    try std.testing.expectEqual(@as(u32, 4), policy_prog.maps[1].key_size);
+    try std.testing.expectEqual(@as(u32, 1), policy_prog.maps[1].value_size);
+    try std.testing.expect(policy_prog.insns.len >= 2);
 }
 
 test "createMap returns fd or error" {
