@@ -309,7 +309,10 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     defer img.deinit();
 
     // resolve effective command per OCI spec
-    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, flags.user_argv.items);
+    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, flags.user_argv.items) catch {
+        writeErr("failed to resolve command: out of memory\n", .{});
+        std.process.exit(1);
+    };
     defer resolved.args.deinit(alloc);
 
     // generate container id

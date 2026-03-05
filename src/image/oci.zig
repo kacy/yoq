@@ -23,7 +23,7 @@ pub fn resolveCommand(
     entrypoint: []const []const u8,
     default_cmd: []const []const u8,
     user_args: []const []const u8,
-) ResolvedCommand {
+) error{OutOfMemory}!ResolvedCommand {
     // effective_argv = user_override or default_cmd
     const effective_args: []const []const u8 = if (user_args.len > 0)
         user_args
@@ -41,17 +41,18 @@ pub fn resolveCommand(
     // build the full args list: entrypoint[1..] ++ effective_args
     // (or effective_args[1..] if no entrypoint)
     var full_args: std.ArrayList([]const u8) = .empty;
+    errdefer full_args.deinit(alloc);
 
     if (entrypoint.len > 1) {
-        full_args.appendSlice(alloc, entrypoint[1..]) catch {};
+        try full_args.appendSlice(alloc, entrypoint[1..]);
     }
 
     if (entrypoint.len > 0) {
         // entrypoint is set — append all of effective_args
-        full_args.appendSlice(alloc, effective_args) catch {};
+        try full_args.appendSlice(alloc, effective_args);
     } else if (effective_args.len > 1) {
         // no entrypoint — effective_args[0] is the command, rest are args
-        full_args.appendSlice(alloc, effective_args[1..]) catch {};
+        try full_args.appendSlice(alloc, effective_args[1..]);
     }
 
     return .{
@@ -93,7 +94,7 @@ test "entrypoint with default cmd" {
     const alloc = std.testing.allocator;
     const ep: []const []const u8 = &.{"/usr/bin/python"};
     const cmd: []const []const u8 = &.{"app.py"};
-    var result = resolveCommand(alloc, ep, cmd, &.{});
+    var result = try resolveCommand(alloc, ep, cmd, &.{});
     defer result.args.deinit(alloc);
 
     try std.testing.expectEqualStrings("/usr/bin/python", result.command);
@@ -106,7 +107,7 @@ test "entrypoint with user override" {
     const ep: []const []const u8 = &.{"/usr/bin/python"};
     const cmd: []const []const u8 = &.{"app.py"};
     const user: []const []const u8 = &.{"test.py"};
-    var result = resolveCommand(alloc, ep, cmd, user);
+    var result = try resolveCommand(alloc, ep, cmd, user);
     defer result.args.deinit(alloc);
 
     try std.testing.expectEqualStrings("/usr/bin/python", result.command);
@@ -117,7 +118,7 @@ test "entrypoint with user override" {
 test "cmd only no entrypoint" {
     const alloc = std.testing.allocator;
     const cmd: []const []const u8 = &.{ "/bin/echo", "hello" };
-    var result = resolveCommand(alloc, &.{}, cmd, &.{});
+    var result = try resolveCommand(alloc, &.{}, cmd, &.{});
     defer result.args.deinit(alloc);
 
     try std.testing.expectEqualStrings("/bin/echo", result.command);
@@ -128,7 +129,7 @@ test "cmd only no entrypoint" {
 test "user args only" {
     const alloc = std.testing.allocator;
     const user: []const []const u8 = &.{ "/bin/ls", "-la" };
-    var result = resolveCommand(alloc, &.{}, &.{}, user);
+    var result = try resolveCommand(alloc, &.{}, &.{}, user);
     defer result.args.deinit(alloc);
 
     try std.testing.expectEqualStrings("/bin/ls", result.command);
@@ -141,7 +142,7 @@ test "user args completely replace default cmd" {
     const ep: []const []const u8 = &.{"/entrypoint.sh"};
     const cmd: []const []const u8 = &.{ "default", "args" };
     const user: []const []const u8 = &.{ "custom", "override" };
-    var result = resolveCommand(alloc, ep, cmd, user);
+    var result = try resolveCommand(alloc, ep, cmd, user);
     defer result.args.deinit(alloc);
 
     // entrypoint is still the command binary
@@ -154,7 +155,7 @@ test "user args completely replace default cmd" {
 
 test "empty falls back to /bin/sh" {
     const alloc = std.testing.allocator;
-    var result = resolveCommand(alloc, &.{}, &.{}, &.{});
+    var result = try resolveCommand(alloc, &.{}, &.{}, &.{});
     defer result.args.deinit(alloc);
 
     try std.testing.expectEqualStrings("/bin/sh", result.command);
