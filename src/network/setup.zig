@@ -373,9 +373,28 @@ pub fn teardownContainer(
     ip.release(db, container_id) catch {};
 }
 
+/// validate a hostname per RFC 1123: printable ASCII (0x21-0x7e),
+/// no control characters, whitespace, or newlines, max 253 characters.
+/// rejects hostnames that could inject content into /etc/hosts.
+fn isValidHostname(name: []const u8) bool {
+    if (name.len == 0 or name.len > 253) return false;
+    for (name) |c| {
+        if (c < 0x21 or c > 0x7e) return false;
+    }
+    return true;
+}
+
 /// write /etc/resolv.conf and /etc/hosts into a container's rootfs.
 /// called with the merged overlay path before the container starts.
 pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, hostname: []const u8) void {
+    // validate hostname to prevent injection into /etc/hosts.
+    // hostnames with newlines, control characters, or whitespace could
+    // inject arbitrary entries into /etc/hosts.
+    const valid_hostname = isValidHostname(hostname);
+    if (!valid_hostname) {
+        log.warn("invalid hostname, using container ID prefix instead", .{});
+    }
+
     // write /etc/resolv.conf — use the bridge gateway DNS resolver
     // for service discovery, with 8.8.8.8 as fallback
     writeFileInRootfs(rootfs_path, "etc/resolv.conf",
@@ -385,16 +404,20 @@ pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, hostname:
     );
 
     // write /etc/hosts
-    var hosts_buf: [256]u8 = undefined;
-    var ip_buf: [16]u8 = undefined;
-    const ip_str = ip.formatIp(container_ip, &ip_buf);
-    const hosts = std.fmt.bufPrint(
-        &hosts_buf,
-        "127.0.0.1\tlocalhost\n{s}\t{s}\n",
-        .{ ip_str, hostname },
-    ) catch return;
+    if (valid_hostname) {
+        var hosts_buf: [256]u8 = undefined;
+        var ip_buf: [16]u8 = undefined;
+        const ip_str = ip.formatIp(container_ip, &ip_buf);
+        const hosts = std.fmt.bufPrint(
+            &hosts_buf,
+            "127.0.0.1\tlocalhost\n{s}\t{s}\n",
+            .{ ip_str, hostname },
+        ) catch return;
 
-    writeFileInRootfs(rootfs_path, "etc/hosts", hosts);
+        writeFileInRootfs(rootfs_path, "etc/hosts", hosts);
+    } else {
+        writeFileInRootfs(rootfs_path, "etc/hosts", "127.0.0.1\tlocalhost\n");
+    }
 }
 
 fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const u8) void {
@@ -593,4 +616,26 @@ test "PeerInfo with empty endpoint" {
 
 test "wg_interface constant" {
     try std.testing.expectEqualStrings("wg-yoq", wg_interface);
+}
+
+test "hostname validation — valid hostnames" {
+    try std.testing.expect(isValidHostname("myhost"));
+    try std.testing.expect(isValidHostname("web-server"));
+    try std.testing.expect(isValidHostname("db.internal"));
+    try std.testing.expect(isValidHostname("a")); // single char
+}
+
+test "hostname validation — rejects invalid hostnames" {
+    try std.testing.expect(!isValidHostname("")); // empty
+    try std.testing.expect(!isValidHostname("host\nname")); // newline
+    try std.testing.expect(!isValidHostname("host\rname")); // carriage return
+    try std.testing.expect(!isValidHostname("host\tname")); // tab
+    try std.testing.expect(!isValidHostname("host name")); // space
+    try std.testing.expect(!isValidHostname("a" ** 254)); // too long
+}
+
+test "hostname validation — rejects control characters" {
+    try std.testing.expect(!isValidHostname(&[_]u8{ 'a', 0x00, 'b' })); // null byte
+    try std.testing.expect(!isValidHostname(&[_]u8{ 0x01, 'a' })); // SOH
+    try std.testing.expect(!isValidHostname(&[_]u8{ 'a', 0x7f })); // DEL
 }
