@@ -729,3 +729,31 @@ test "listExtractedLayersOnDisk returns empty for fresh install" {
     // may or may not be empty depending on prior test runs, just verify no crash
     try std.testing.expect(layers.items.len >= 0);
 }
+
+test "symlink target validation — trailing slash on .." {
+    // "../" should still count as escape attempt
+    try std.testing.expect(!isSafeSymlinkTarget("link", "../"));
+    // "../../" from depth 1 should escape
+    try std.testing.expect(!isSafeSymlinkTarget("etc/link", "../../"));
+}
+
+test "symlink target validation — empty components" {
+    // double slashes produce empty components which should be skipped
+    try std.testing.expect(isSafeSymlinkTarget("usr/lib/link", "foo//bar"));
+    // trailing slash with valid path
+    try std.testing.expect(isSafeSymlinkTarget("usr/lib/link", "../lib64/"));
+}
+
+test "symlink target validation — dot components" {
+    // "." should be treated as no-op (current directory)
+    try std.testing.expect(isSafeSymlinkTarget("usr/lib/link", "./foo"));
+    try std.testing.expect(isSafeSymlinkTarget("usr/lib/link", "././foo"));
+}
+
+test "symlink target validation — deep escape attempt" {
+    // many levels of ".." that exactly match parent depth is still safe
+    // entry "a/b/c/d/link" has parent depth 4
+    try std.testing.expect(isSafeSymlinkTarget("a/b/c/d/link", "../../../../root_file"));
+    // one more ".." would escape
+    try std.testing.expect(!isSafeSymlinkTarget("a/b/c/d/link", "../../../../../escape"));
+}
