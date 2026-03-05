@@ -14,6 +14,7 @@ const ip = @import("network/ip.zig");
 const exec = @import("runtime/exec.zig");
 const dockerfile = @import("build/dockerfile.zig");
 const build_engine = @import("build/engine.zig");
+const build_manifest = @import("build/manifest.zig");
 const manifest_loader = @import("manifest/loader.zig");
 const orchestrator = @import("manifest/orchestrator.zig");
 const watcher_mod = @import("dev/watcher.zig");
@@ -682,6 +683,7 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var tag: ?[]const u8 = null;
     var dockerfile_path: []const u8 = "Dockerfile";
     var context_path: ?[]const u8 = null;
+    var format: enum { dockerfile, toml } = .dockerfile;
     var build_args_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer build_args_list.deinit(alloc);
 
@@ -696,6 +698,19 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 writeErr("-f requires a Dockerfile path\n", .{});
                 std.process.exit(1);
             };
+        } else if (std.mem.eql(u8, arg, "--format")) {
+            const fmt = args.next() orelse {
+                writeErr("--format requires 'dockerfile' or 'toml'\n", .{});
+                std.process.exit(1);
+            };
+            if (std.mem.eql(u8, fmt, "toml")) {
+                format = .toml;
+            } else if (std.mem.eql(u8, fmt, "dockerfile")) {
+                format = .dockerfile;
+            } else {
+                writeErr("unknown format '{s}', expected 'dockerfile' or 'toml'\n", .{fmt});
+                std.process.exit(1);
+            }
         } else if (std.mem.eql(u8, arg, "--build-arg")) {
             const ba = args.next() orelse {
                 writeErr("--build-arg requires KEY=VALUE\n", .{});
@@ -712,36 +727,73 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     const ctx_dir = context_path orelse ".";
 
-    // resolve Dockerfile path relative to context directory
+    // determine the build file path and default filename based on format
+    const default_filename: []const u8 = switch (format) {
+        .dockerfile => "Dockerfile",
+        .toml => "build.toml",
+    };
+    const using_default = std.mem.eql(u8, dockerfile_path, "Dockerfile");
+
     var df_path_buf: [4096]u8 = undefined;
-    const effective_df_path = if (std.mem.eql(u8, dockerfile_path, "Dockerfile"))
-        std.fmt.bufPrint(&df_path_buf, "{s}/Dockerfile", .{ctx_dir}) catch {
+    const effective_path = if (using_default)
+        std.fmt.bufPrint(&df_path_buf, "{s}/{s}", .{ ctx_dir, default_filename }) catch {
             writeErr("path too long\n", .{});
             std.process.exit(1);
         }
     else
         dockerfile_path;
 
-    // read the Dockerfile
-    const content = std.fs.cwd().readFileAlloc(alloc, effective_df_path, 1024 * 1024) catch {
-        writeErr("cannot read {s}\n", .{effective_df_path});
-        std.process.exit(1);
-    };
-    defer alloc.free(content);
+    // parse instructions — both formats produce []Instruction
+    var instructions: []const dockerfile.Instruction = undefined;
 
-    // parse
-    var parsed = dockerfile.parse(alloc, content) catch |err| {
-        switch (err) {
-            dockerfile.ParseError.UnknownInstruction => writeErr("unknown instruction in Dockerfile\n", .{}),
-            dockerfile.ParseError.EmptyInstruction => writeErr("empty instruction in Dockerfile\n", .{}),
-            dockerfile.ParseError.OutOfMemory => writeErr("out of memory\n", .{}),
-        }
-        std.process.exit(1);
-    };
-    defer parsed.deinit();
+    // we need to track which deinit to call
+    var df_parsed: ?dockerfile.ParseResult = null;
+    var toml_parsed: ?build_manifest.LoadResult = null;
+
+    switch (format) {
+        .dockerfile => {
+            const content = std.fs.cwd().readFileAlloc(alloc, effective_path, 1024 * 1024) catch {
+                writeErr("cannot read {s}\n", .{effective_path});
+                std.process.exit(1);
+            };
+            defer alloc.free(content);
+
+            const parsed = dockerfile.parse(alloc, content) catch |err| {
+                switch (err) {
+                    dockerfile.ParseError.UnknownInstruction => writeErr("unknown instruction in Dockerfile\n", .{}),
+                    dockerfile.ParseError.EmptyInstruction => writeErr("empty instruction in Dockerfile\n", .{}),
+                    dockerfile.ParseError.OutOfMemory => writeErr("out of memory\n", .{}),
+                }
+                std.process.exit(1);
+            };
+            df_parsed = parsed;
+            instructions = parsed.instructions;
+        },
+        .toml => {
+            const parsed = build_manifest.load(alloc, effective_path) catch |err| {
+                switch (err) {
+                    build_manifest.LoadError.FileNotFound => writeErr("cannot find {s}\n", .{effective_path}),
+                    build_manifest.LoadError.ReadFailed => writeErr("cannot read {s}\n", .{effective_path}),
+                    build_manifest.LoadError.ParseFailed => writeErr("invalid TOML in {s}\n", .{effective_path}),
+                    build_manifest.LoadError.MissingFrom => writeErr("stage missing required 'from' field\n", .{}),
+                    build_manifest.LoadError.InvalidStep => writeErr("invalid step in build manifest\n", .{}),
+                    build_manifest.LoadError.EmptyManifest => writeErr("no stages found in build manifest\n", .{}),
+                    build_manifest.LoadError.CyclicDependency => writeErr("circular dependency between stages\n", .{}),
+                    build_manifest.LoadError.OutOfMemory => writeErr("out of memory\n", .{}),
+                }
+                std.process.exit(1);
+            };
+            toml_parsed = parsed;
+            instructions = parsed.instructions;
+        },
+    }
+    defer {
+        if (df_parsed) |*p| p.deinit();
+        if (toml_parsed) |*p| p.deinit();
+    }
 
     writeErr("building from {s} ({d} instructions)...\n", .{
-        effective_df_path, parsed.instructions.len,
+        effective_path, instructions.len,
     });
 
     // resolve context directory to absolute path
@@ -756,15 +808,15 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         build_args_list.items
     else
         null;
-    var result = build_engine.build(alloc, parsed.instructions, abs_ctx, tag, cli_args) catch |err| {
+    var result = build_engine.build(alloc, instructions, abs_ctx, tag, cli_args) catch |err| {
         switch (err) {
-            build_engine.BuildError.NoFromInstruction => writeErr("Dockerfile must start with FROM\n", .{}),
+            build_engine.BuildError.NoFromInstruction => writeErr("build must start with FROM\n", .{}),
             build_engine.BuildError.PullFailed => writeErr("failed to pull base image\n", .{}),
             build_engine.BuildError.RunStepFailed => writeErr("RUN step failed\n", .{}),
             build_engine.BuildError.CopyStepFailed => writeErr("COPY step failed\n", .{}),
             build_engine.BuildError.LayerFailed => writeErr("failed to create layer\n", .{}),
             build_engine.BuildError.ImageStoreFailed => writeErr("failed to store image\n", .{}),
-            build_engine.BuildError.ParseFailed => writeErr("failed to parse Dockerfile\n", .{}),
+            build_engine.BuildError.ParseFailed => writeErr("failed to parse build instructions\n", .{}),
             build_engine.BuildError.CacheFailed => writeErr("cache error\n", .{}),
         }
         std.process.exit(1);
@@ -1972,6 +2024,7 @@ comptime {
     _ = @import("build/dockerfile.zig");
     _ = @import("build/context.zig");
     _ = @import("build/engine.zig");
+    _ = @import("build/manifest.zig");
     _ = @import("manifest/spec.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
