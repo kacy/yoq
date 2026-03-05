@@ -1811,6 +1811,7 @@ fn cmdMetrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var service_filter: ?[]const u8 = null;
     var server_addr: ?[4]u8 = null;
     var server_port: u16 = 7700;
+    var pairs_mode = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--server")) {
@@ -1835,9 +1836,20 @@ fn cmdMetrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 };
             }
             server_addr = addr;
+        } else if (std.mem.eql(u8, arg, "--pairs")) {
+            pairs_mode = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             service_filter = arg;
         }
+    }
+
+    if (pairs_mode) {
+        if (server_addr) |addr| {
+            cmdMetricsPairsRemote(alloc, addr, server_port);
+        } else {
+            cmdMetricsPairs(alloc);
+        }
+        return;
     }
 
     if (server_addr) |addr| {
@@ -1960,6 +1972,113 @@ fn cmdMetricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_fi
     if (!found) {
         write("no metrics available\n", .{});
     }
+}
+
+fn cmdMetricsPairs(alloc: std.mem.Allocator) void {
+    const mc = ebpf.getMetricsCollector() orelse {
+        write("metrics collector not loaded (requires root)\n", .{});
+        return;
+    };
+
+    var records = store.listAll(alloc) catch {
+        writeErr("failed to list containers\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (records.items) |rec| rec.deinit(alloc);
+        records.deinit(alloc);
+    }
+
+    var entries: [1024]ebpf.PairEntry = undefined;
+    const count = mc.readPairMetrics(&entries);
+
+    if (count == 0) {
+        write("no pair metrics available\n", .{});
+        return;
+    }
+
+    write("{s:<14} {s:<14} {s:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
+        "FROM", "TO", "PORT", "CONNECTIONS", "PACKETS", "BYTES", "ERRORS",
+    });
+
+    for (entries[0..count]) |entry| {
+        const src_name = resolveIpName(entry.key.src_ip, records.items);
+        const dst_name = resolveIpName(entry.key.dst_ip, records.items);
+        const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
+
+        var conn_buf: [16]u8 = undefined;
+        const conn_str = formatCount(&conn_buf, entry.value.connections);
+        var pkt_buf: [16]u8 = undefined;
+        const pkt_str = formatCount(&pkt_buf, entry.value.packets);
+        var bytes_buf: [16]u8 = undefined;
+        const bytes_str = monitor.formatBytes(&bytes_buf, entry.value.bytes);
+        var err_buf: [16]u8 = undefined;
+        const err_str = formatCount(&err_buf, entry.value.errors);
+
+        write("{s:<14} {s:<14} {d:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
+            src_name, dst_name, port, conn_str, pkt_str, bytes_str, err_str,
+        });
+    }
+}
+
+fn cmdMetricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) void {
+    var resp = http_client.get(alloc, addr, port, "/v1/metrics?mode=pairs") catch {
+        writeErr("failed to connect to server\n", .{});
+        std.process.exit(1);
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("server returned status {d}\n", .{resp.status_code});
+        std.process.exit(1);
+    }
+
+    write("{s:<14} {s:<14} {s:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
+        "FROM", "TO", "PORT", "CONNECTIONS", "PACKETS", "BYTES", "ERRORS",
+    });
+
+    var found = false;
+    var iter = json_helpers.extractJsonObjects(resp.body);
+    while (iter.next()) |obj| {
+        const from = extractJsonString(obj, "from") orelse "?";
+        const to = extractJsonString(obj, "to") orelse "?";
+        const obj_port: u64 = @intCast(extractJsonInt(obj, "port") orelse 0);
+        const connections: u64 = @intCast(extractJsonInt(obj, "connections") orelse 0);
+        const packets: u64 = @intCast(extractJsonInt(obj, "packets") orelse 0);
+        const bytes: u64 = @intCast(extractJsonInt(obj, "bytes") orelse 0);
+        const errors: u64 = @intCast(extractJsonInt(obj, "errors") orelse 0);
+
+        var conn_buf: [16]u8 = undefined;
+        const conn_str = formatCount(&conn_buf, connections);
+        var pkt_buf: [16]u8 = undefined;
+        const pkt_str = formatCount(&pkt_buf, packets);
+        var bytes_buf: [16]u8 = undefined;
+        const bytes_str = monitor.formatBytes(&bytes_buf, bytes);
+        var err_buf: [16]u8 = undefined;
+        const err_str = formatCount(&err_buf, errors);
+
+        write("{s:<14} {s:<14} {d:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
+            from, to, obj_port, conn_str, pkt_str, bytes_str, err_str,
+        });
+        found = true;
+    }
+
+    if (!found) {
+        write("no pair metrics available\n", .{});
+    }
+}
+
+/// resolve a network-order IP (u32) to a service hostname.
+fn resolveIpName(ip_net: u32, records: []const store.ContainerRecord) []const u8 {
+    const ip_bytes = std.mem.asBytes(&ip_net);
+    for (records) |rec| {
+        if (!std.mem.eql(u8, rec.status, "running")) continue;
+        const rec_ip_str = rec.ip_address orelse continue;
+        if (ip.parseIp(rec_ip_str)) |addr| {
+            if (std.mem.eql(u8, &addr, ip_bytes[0..4])) return rec.hostname;
+        }
+    }
+    return "unknown";
 }
 
 /// format a large count with comma separators for readability.
@@ -2727,6 +2846,7 @@ fn printUsage() void {
         \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  status [--verbose] [--server h:p]  show service status and resources
         \\  metrics [service] [--server h:p]  show per-service network metrics
+        \\  metrics --pairs [--server h:p]    show service-to-service pair metrics
         \\  cert install <domain> --cert <p> --key <p>  store a TLS certificate
         \\  cert list                        list certificates with expiry
         \\  cert rm <domain>                 remove a certificate

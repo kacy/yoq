@@ -1040,6 +1040,12 @@ fn writeSnapshotJson(writer: anytype, snap: monitor.ServiceSnapshot) !void {
 // -- metrics handlers --
 
 fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
+    // check for ?mode=pairs query param
+    const mode = extractQueryParam(request.path, "mode");
+    if (mode) |m| {
+        if (std.mem.eql(u8, m, "pairs")) return handleMetricsPairs(alloc);
+    }
+
     // parse optional ?service=<name> query param
     const service_filter = extractQueryParam(request.path, "service");
 
@@ -1098,6 +1104,84 @@ fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
     return .{
         .status = .ok,
         .body = body,
+        .allocated = true,
+    };
+}
+
+fn handleMetricsPairs(alloc: std.mem.Allocator) Response {
+    const mc = ebpf.getMetricsCollector() orelse {
+        return jsonResponse(alloc, "[]");
+    };
+
+    // read all pair entries from the BPF map
+    var entries: [1024]ebpf.PairEntry = undefined;
+    const count = mc.readPairMetrics(&entries);
+
+    // resolve IPs to hostnames using container records
+    var records = store.listAll(alloc) catch return internalError();
+    defer {
+        for (records.items) |rec| rec.deinit(alloc);
+        records.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    var writer = json_buf.writer(alloc);
+    writer.writeByte('[') catch return internalError();
+
+    var first = true;
+    for (entries[0..count]) |entry| {
+        if (!first) writer.writeByte(',') catch return internalError();
+        first = false;
+
+        // resolve src and dst IPs to service names
+        const src_name = resolveIpToService(entry.key.src_ip, records.items);
+        const dst_name = resolveIpToService(entry.key.dst_ip, records.items);
+        const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
+
+        writer.print(
+            "{{\"from\":\"{s}\",\"to\":\"{s}\",\"port\":{d},\"connections\":{d},\"packets\":{d},\"bytes\":{d},\"errors\":{d}}}",
+            .{
+                src_name,
+                dst_name,
+                port,
+                entry.value.connections,
+                entry.value.packets,
+                entry.value.bytes,
+                entry.value.errors,
+            },
+        ) catch return internalError();
+    }
+
+    writer.writeByte(']') catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{
+        .status = .ok,
+        .body = body,
+        .allocated = true,
+    };
+}
+
+/// resolve a network-order IP (u32) to a service hostname.
+/// falls back to dotted-quad string if no container matches.
+fn resolveIpToService(ip_net: u32, records: []const store.ContainerRecord) []const u8 {
+    const ip_bytes = std.mem.asBytes(&ip_net);
+    for (records) |rec| {
+        if (!std.mem.eql(u8, rec.status, "running")) continue;
+        const rec_ip_str = rec.ip_address orelse continue;
+        if (ip_mod.parseIp(rec_ip_str)) |addr| {
+            if (std.mem.eql(u8, &addr, ip_bytes[0..4])) return rec.hostname;
+        }
+    }
+    return "unknown";
+}
+
+fn jsonResponse(alloc: std.mem.Allocator, body: []const u8) Response {
+    const owned = alloc.dupe(u8, body) catch return internalError();
+    return .{
+        .status = .ok,
+        .body = owned,
         .allocated = true,
     };
 }

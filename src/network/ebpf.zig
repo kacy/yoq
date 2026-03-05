@@ -67,8 +67,8 @@ pub fn mapLookup(map_fd: posix.fd_t, key: []const u8, value: []u8) bool {
 /// get the next key in a BPF map (for iteration).
 /// returns true if a next key was found.
 pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
-    BPF.map_get_next_key(map_fd, key, next_key) catch return false;
-    return true;
+    const found = BPF.map_get_next_key(map_fd, key, next_key) catch return false;
+    return found;
 }
 
 /// insert or update a key/value pair in a BPF map.
