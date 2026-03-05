@@ -452,12 +452,14 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
 }
 
 /// create parent directories as needed and open a file for writing.
+/// uses exclusive=false because legitimate OCI layers can have duplicate
+/// tar entries where later entries override earlier ones.
 fn createDirAndFile(dir: std.fs.Dir, name: []const u8, mode: std.fs.File.Mode) !std.fs.File {
-    return dir.createFile(name, .{ .exclusive = true, .mode = mode }) catch |err| {
+    return dir.createFile(name, .{ .mode = mode }) catch |err| {
         if (err == error.FileNotFound) {
             if (std.fs.path.dirname(name)) |dir_name| {
                 try dir.makePath(dir_name);
-                return try dir.createFile(name, .{ .exclusive = true, .mode = mode });
+                return try dir.createFile(name, .{ .mode = mode });
             }
         }
         return err;
