@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const paths = @import("../lib/paths.zig");
+const log = @import("../lib/log.zig");
 
 pub const BlobError = error{
     WriteFailed,
@@ -181,12 +182,17 @@ pub fn verifyBlob(digest: Digest) bool {
 }
 
 /// remove a blob file from the store without error.
-/// intended for cleaning up corrupted cache entries — silently ignores
-/// any errors (missing file, permission issues, etc.)
+/// intended for cleaning up corrupted cache entries — file-not-found
+/// is expected and silent, but other errors (permission denied, etc.)
+/// are logged as warnings.
 pub fn removeBlob(digest: Digest) void {
     var path_buf: [max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return;
-    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path) catch |err| {
+        if (err != error.FileNotFound) {
+            log.warn("failed to remove blob {s}: {}", .{ path, err });
+        }
+    };
 }
 
 /// get the filesystem path for a blob
