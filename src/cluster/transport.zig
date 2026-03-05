@@ -135,6 +135,19 @@ pub const Transport = struct {
         });
     }
 
+    /// log a warning if shared_key is null. cluster mode should always
+    /// authenticate raft messages to prevent unauthorized nodes from
+    /// joining or injecting entries. single-node mode (no peers) is
+    /// the only case where unauthenticated transport is acceptable.
+    pub fn requireAuth(self: *const Transport) void {
+        if (self.shared_key == null and self.peers.count() > 0) {
+            @import("../lib/log.zig").warn(
+                "transport: cluster has {d} peers but no shared_key — raft messages are unauthenticated",
+                .{self.peers.count()},
+            );
+        }
+    }
+
     /// send a message to a peer. opens a new TCP connection each time.
     /// raft heartbeats are ~1/sec so connection overhead is negligible.
     ///

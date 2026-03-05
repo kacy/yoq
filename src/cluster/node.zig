@@ -127,6 +127,9 @@ pub const Node = struct {
             transport.addPeer(p.id, p.addr, p.port) catch return NodeError.InitFailed;
         }
 
+        // warn if cluster mode is running without authentication
+        transport.requireAuth();
+
         // initialize raft
         var raft = Raft.init(alloc, config.id, peer_ids, &log) catch return NodeError.InitFailed;
         errdefer raft.deinit();
