@@ -578,9 +578,22 @@ fn parseTlsConfig(
 
     const acme = tls_table.getBool("acme") orelse false;
 
+    // email is required when acme is enabled
+    const email_raw = tls_table.getString("email");
+    if (acme and email_raw == null) {
+        log.err("manifest: service '{s}' tls has acme = true but no email", .{service_name});
+        return LoadError.InvalidTlsConfig;
+    }
+
+    const email: ?[]const u8 = if (email_raw) |e|
+        alloc.dupe(u8, e) catch return LoadError.OutOfMemory
+    else
+        null;
+
     return .{
         .domain = alloc.dupe(u8, domain) catch return LoadError.OutOfMemory,
         .acme = acme,
+        .email = email,
     };
 }
 
