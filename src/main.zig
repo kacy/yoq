@@ -1620,6 +1620,17 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
     };
     defer alloc.free(peers);
 
+    // derive a shared key from the join token for raft transport authentication.
+    // uses HMAC-SHA256 as a simple KDF: HMAC(key=token, data="yoq-raft-transport-key").
+    // this ensures cluster comms are always authenticated when a token is set.
+    var shared_key: ?[32]u8 = null;
+    if (token) |t| {
+        const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+        var derived: [32]u8 = undefined;
+        HmacSha256.create(&derived, "yoq-raft-transport-key", t);
+        shared_key = derived;
+    }
+
     writeErr("starting server node {d} on :{d} (api :{d}) with {d} peers\n", .{
         node_id, raft_port, api_port, peers.len,
     });
@@ -1635,6 +1646,11 @@ fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         std.process.exit(1);
     };
     defer node.deinit();
+
+    // set transport authentication key derived from join token
+    if (shared_key) |key| {
+        node.transport.shared_key = key;
+    }
 
     node.start() catch {
         writeErr("failed to start raft node\n", .{});
