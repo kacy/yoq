@@ -92,7 +92,7 @@ pub fn setupClusterNetworking(config: ClusterNetworkConfig) !void {
     errdefer wireguard.deleteInterface(wg_interface) catch {};
 
     // assign our overlay IP to the interface
-    wireguard.assignOverlayIp(wg_interface, config.overlay_ip) catch |e| {
+    wireguard.assignOverlayIp(wg_interface, config.overlay_ip, 24) catch |e| {
         log.warn("failed to assign overlay IP to {s}: {}", .{ wg_interface, e });
         return error.ConfigFailed;
     };
@@ -376,6 +376,12 @@ pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, hostname:
 }
 
 fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const u8) void {
+    // defense-in-depth: reject paths that could escape the rootfs.
+    // currently only called with hardcoded "etc/resolv.conf" and "etc/hosts",
+    // but guard against future misuse.
+    if (std.mem.indexOf(u8, rel_path, "..") != null) return;
+    if (rel_path.len > 0 and rel_path[0] == '/') return;
+
     var path_buf: [512]u8 = undefined;
     const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ rootfs, rel_path }) catch return;
 

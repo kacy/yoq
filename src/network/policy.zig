@@ -37,13 +37,19 @@ pub fn syncPolicies(alloc: std.mem.Allocator) void {
 
     // for each policy, resolve both service names to IPs and populate maps
     for (policies.items) |pol| {
-        var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch continue;
+        var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch {
+            log.warn("policy: failed to resolve source service '{s}' during sync", .{pol.source_service});
+            continue;
+        };
         defer {
             for (src_ips.items) |s| alloc.free(s);
             src_ips.deinit(alloc);
         }
 
-        var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch continue;
+        var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch {
+            log.warn("policy: failed to resolve target service '{s}' during sync", .{pol.target_service});
+            continue;
+        };
         defer {
             for (dst_ips.items) |d| alloc.free(d);
             dst_ips.deinit(alloc);
@@ -83,7 +89,10 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
     const enforcer = ebpf.getPolicyEnforcer() orelse return;
     const new_ip_net = ebpf.ipToNetworkOrder(container_ip);
 
-    var policies = store.listNetworkPolicies(alloc) catch return;
+    var policies = store.listNetworkPolicies(alloc) catch {
+        log.warn("policy: failed to list policies for container '{s}'", .{service_name});
+        return;
+    };
     defer {
         for (policies.items) |p| p.deinit(alloc);
         policies.deinit(alloc);
@@ -102,7 +111,10 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
                 enforcer.isolate(new_ip_net);
             }
 
-            var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch continue;
+            var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch {
+                log.warn("policy: failed to resolve target service '{s}' for container apply", .{pol.target_service});
+                continue;
+            };
             defer {
                 for (dst_ips.items) |d| alloc.free(d);
                 dst_ips.deinit(alloc);
@@ -122,7 +134,10 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
 
         if (is_target) {
             // this container is the target — resolve source IPs
-            var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch continue;
+            var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch {
+                log.warn("policy: failed to resolve source service '{s}' for container apply", .{pol.source_service});
+                continue;
+            };
             defer {
                 for (src_ips.items) |s| alloc.free(s);
                 src_ips.deinit(alloc);
@@ -154,7 +169,10 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
     enforcer.unisolate(old_ip_net);
 
     // remove all policy_map entries that reference this IP
-    var policies = store.listNetworkPolicies(alloc) catch return;
+    var policies = store.listNetworkPolicies(alloc) catch {
+        log.warn("policy: failed to list policies for container removal", .{});
+        return;
+    };
     defer {
         for (policies.items) |p| p.deinit(alloc);
         policies.deinit(alloc);
@@ -164,7 +182,10 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
         const is_allow = std.mem.eql(u8, pol.action, "allow");
 
         // check if this IP was a source
-        var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch continue;
+        var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch {
+            log.warn("policy: failed to resolve source service '{s}' for container removal", .{pol.source_service});
+            continue;
+        };
         defer {
             for (src_ips.items) |s| alloc.free(s);
             src_ips.deinit(alloc);
@@ -174,7 +195,10 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
             const src_addr = ip_mod.parseIp(src_str) orelse continue;
             if (ebpf.ipToNetworkOrder(src_addr) == old_ip_net) {
                 // this IP was a source — remove all its entries for this policy's targets
-                var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch continue;
+                var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch {
+                    log.warn("policy: failed to resolve target service '{s}' during removal", .{pol.target_service});
+                    continue;
+                };
                 defer {
                     for (dst_ips.items) |d| alloc.free(d);
                     dst_ips.deinit(alloc);
@@ -192,7 +216,10 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
         }
 
         // check if this IP was a target
-        var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch continue;
+        var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch {
+            log.warn("policy: failed to resolve target service '{s}' during removal", .{pol.target_service});
+            continue;
+        };
         defer {
             for (dst_ips.items) |d| alloc.free(d);
             dst_ips.deinit(alloc);

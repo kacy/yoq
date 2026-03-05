@@ -117,8 +117,14 @@ pub fn loadProgram(
 
     // patch relocations: set map fd in ld_imm64 instructions
     for (relocs) |reloc| {
-        if (reloc.insn_idx >= insns.len) continue;
-        if (reloc.map_idx >= maps.len) continue;
+        if (reloc.insn_idx >= insns.len) {
+            log.warn("ebpf: skipping relocation with out-of-bounds insn_idx={d} (max={d})", .{ reloc.insn_idx, insns.len });
+            continue;
+        }
+        if (reloc.map_idx >= maps.len) {
+            log.warn("ebpf: skipping relocation with out-of-bounds map_idx={d} (max={d})", .{ reloc.map_idx, maps.len });
+            continue;
+        }
 
         const fd = map_fds[reloc.map_idx];
         patchMapFd(&mutable_insns[reloc.insn_idx], fd);
@@ -355,6 +361,12 @@ fn makeKey(name: []const u8) ?[64]u8 {
     return key;
 }
 
+/// guards access to all global BPF state (dns_interceptor, load_balancer,
+/// metrics_collector, policy_enforcer). currently safe because container
+/// startup is sequential, but this protects against future parallel
+/// startup (e.g. `yoq up` with multiple services).
+var global_mutex: std.Thread.Mutex = .{};
+
 /// global DNS interceptor instance. set after loadDnsInterceptor() succeeds.
 var dns_interceptor: ?DnsInterceptor = null;
 
@@ -364,6 +376,9 @@ var dns_interceptor: ?DnsInterceptor = null;
 /// as a TC ingress filter on the given bridge interface. idempotent —
 /// returns immediately if already loaded.
 pub fn loadDnsInterceptor(bridge_if_index: u32) EbpfError!void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (dns_interceptor != null) return; // already loaded
 
     // create the service_names map
@@ -395,6 +410,9 @@ pub fn loadDnsInterceptor(bridge_if_index: u32) EbpfError!void {
 
 /// unload the DNS interceptor. detaches from TC and closes fds.
 pub fn unloadDnsInterceptor() void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (dns_interceptor) |*interceptor| {
         interceptor.deinit();
         dns_interceptor = null;
@@ -404,6 +422,9 @@ pub fn unloadDnsInterceptor() void {
 
 /// get the active DNS interceptor, if loaded.
 pub fn getDnsInterceptor() ?*const DnsInterceptor {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (dns_interceptor) |*interceptor| {
         return interceptor;
     }
@@ -518,6 +539,9 @@ var load_balancer: ?LoadBalancer = null;
 
 /// load and attach the load balancer BPF program.
 pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (load_balancer != null) return;
 
     // create maps
@@ -565,6 +589,9 @@ pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
 
 /// unload the load balancer.
 pub fn unloadLoadBalancer() void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (load_balancer) |*lb| {
         lb.deinit();
         load_balancer = null;
@@ -574,6 +601,9 @@ pub fn unloadLoadBalancer() void {
 
 /// get the active load balancer, if loaded.
 pub fn getLoadBalancer() ?*const LoadBalancer {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (load_balancer) |*lb| {
         return lb;
     }
@@ -692,6 +722,9 @@ var metrics_collector: ?MetricsCollector = null;
 
 /// load and attach the metrics BPF program to the bridge.
 pub fn loadMetricsCollector(bridge_if_index: u32) EbpfError!void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (metrics_collector != null) return;
 
     // create the metrics_map (LRU hash, per-IP)
@@ -733,6 +766,9 @@ pub fn loadMetricsCollector(bridge_if_index: u32) EbpfError!void {
 
 /// unload the metrics collector.
 pub fn unloadMetricsCollector() void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (metrics_collector) |*mc| {
         mc.deinit();
         metrics_collector = null;
@@ -742,6 +778,9 @@ pub fn unloadMetricsCollector() void {
 
 /// get the active metrics collector, if loaded.
 pub fn getMetricsCollector() ?*const MetricsCollector {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (metrics_collector) |*mc| {
         return mc;
     }
@@ -824,6 +863,9 @@ var policy_enforcer: ?PolicyEnforcer = null;
 /// load and attach the policy enforcer BPF program to the bridge.
 /// attaches at priority 0 (runs before DNS/LB at 1 and metrics at 2).
 pub fn loadPolicyEnforcer(bridge_if_index: u32) EbpfError!void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (policy_enforcer != null) return;
 
     // create maps
@@ -862,6 +904,9 @@ pub fn loadPolicyEnforcer(bridge_if_index: u32) EbpfError!void {
 
 /// unload the policy enforcer.
 pub fn unloadPolicyEnforcer() void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (policy_enforcer) |*pe| {
         pe.deinit();
         policy_enforcer = null;
@@ -871,6 +916,9 @@ pub fn unloadPolicyEnforcer() void {
 
 /// get the active policy enforcer, if loaded.
 pub fn getPolicyEnforcer() ?*const PolicyEnforcer {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
     if (policy_enforcer) |*pe| {
         return pe;
     }
