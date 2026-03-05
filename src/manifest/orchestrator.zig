@@ -204,7 +204,10 @@ pub const Orchestrator = struct {
 
             // look up the container's IP from the store
             const id = self.states[i].container_id;
-            const record = store.load(self.alloc, id[0..]) catch continue;
+            const record = store.load(self.alloc, id[0..]) catch {
+                log.warn("orchestrator: failed to load container for health check registration: {s}", .{svc.name});
+                continue;
+            };
             defer record.deinit(self.alloc);
 
             const container_ip = if (record.ip_address) |ip_str|
@@ -381,7 +384,10 @@ pub const Orchestrator = struct {
             writeErr("stopping {s}...\n", .{services[i].name});
 
             // find the container's PID and send SIGTERM
-            const record = store.load(self.alloc, id[0..]) catch continue;
+            const record = store.load(self.alloc, id[0..]) catch {
+                log.warn("orchestrator: failed to load container for shutdown: {s}", .{services[i].name});
+                continue;
+            };
             defer record.deinit(self.alloc);
 
             if (record.pid) |pid| {
@@ -676,7 +682,10 @@ fn resolveServiceVolumes(alloc: std.mem.Allocator, volumes: []const spec.VolumeM
             continue;
         };
 
-        const duped = alloc.dupe(u8, abs_source) catch continue;
+        const duped = alloc.dupe(u8, abs_source) catch {
+            log.warn("orchestrator: failed to allocate bind mount source: {s}", .{vol.source});
+            continue;
+        };
         result.resolved_sources.append(alloc, duped) catch {
             alloc.free(duped);
             continue;
