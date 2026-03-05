@@ -268,6 +268,30 @@ fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageResolu
     return result;
 }
 
+/// signal handler that forwards SIGINT/SIGTERM to the active container process.
+/// only async-signal-safe operations: atomic load + kill syscall.
+fn forwardSignal(sig: c_int) callconv(.c) void {
+    const pid = container.active_pid.load(.acquire);
+    if (pid > 0) {
+        _ = std.os.linux.syscall2(
+            .kill,
+            @as(usize, @bitCast(@as(isize, pid))),
+            @intCast(sig),
+        );
+    }
+}
+
+/// install SIGINT and SIGTERM handlers that forward to the container.
+fn installSignalHandlers() void {
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = forwardSignal },
+        .mask = std.posix.empty_sigset,
+        .flags = @bitCast(@as(u32, 0x10000000)), // SA_RESTART
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+}
+
 fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var flags = parseRunFlags(args, alloc);
     defer flags.port_maps.deinit(alloc);
@@ -332,6 +356,9 @@ fn cmdRun(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         .created_at = std.time.timestamp(),
     };
 
+    // forward SIGINT/SIGTERM to the container so Ctrl+C stops it
+    installSignalHandlers();
+
     c.start() catch {
         // clean up the DB record and dirs so yoq ps doesn't show a ghost
         store.remove(id) catch {};
@@ -370,8 +397,20 @@ fn cmdPs(alloc: std.mem.Allocator) void {
         };
         defer record.deinit(alloc);
 
+        // check liveness: if DB says "running" but process is gone, update to "stopped"
+        var status = record.status;
+        if (std.mem.eql(u8, status, "running")) {
+            if (record.pid) |pid| {
+                process.sendSignal(pid, 0) catch {
+                    // process is dead — update DB
+                    store.updateStatus(id, "stopped", null, null) catch {};
+                    status = "stopped";
+                };
+            }
+        }
+
         const ip_display: []const u8 = record.ip_address orelse "-";
-        write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, record.status, ip_display, record.command });
+        write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, status, ip_display, record.command });
     }
 }
 
@@ -393,6 +432,14 @@ fn cmdStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const pid = record.pid orelse {
         writeErr("container {s} has no pid\n", .{id});
         std.process.exit(1);
+    };
+
+    // check if the process is actually still alive before sending SIGTERM
+    process.sendSignal(pid, 0) catch {
+        // already dead — just update the record
+        store.updateStatus(id, "stopped", null, null) catch {};
+        write("{s} (already stopped)\n", .{id});
+        return;
     };
 
     process.terminate(pid) catch {

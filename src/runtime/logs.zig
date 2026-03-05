@@ -143,6 +143,7 @@ pub fn writeLogLine(log_file: std.fs.File, stream: []const u8, line: []const u8)
         if (end_pos > max_log_size) {
             log_file.seekTo(0) catch {};
             posix.ftruncate(log_file.handle, 0) catch {};
+            log_file.writeAll("--- log truncated (exceeded 50 MB) ---\n") catch {};
         }
     } else |_| {}
 
@@ -255,9 +256,16 @@ test "log file truncated when exceeding max size" {
     // next writeLogLine should truncate
     writeLogLine(file, "stdout", "after truncation");
 
-    // file should now be small (just the new line)
+    // file should now be small (truncation marker + new line)
     const end = file.getEndPos() catch unreachable;
     try std.testing.expect(end < 1024);
+
+    // verify truncation marker is at the start
+    file.seekTo(0) catch unreachable;
+    var buf: [512]u8 = undefined;
+    const n = file.readAll(&buf) catch unreachable;
+    const content = buf[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, content, "--- log truncated"));
 }
 
 test "write log line adds newline" {

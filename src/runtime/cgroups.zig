@@ -206,9 +206,92 @@ pub const Cgroup = struct {
         return self.readPsi("cpu.pressure");
     }
 
-    /// remove this cgroup. the cgroup must have no processes.
+    /// all metrics collected in one pass
+    pub const CgroupMetrics = struct {
+        memory_bytes: ?u64 = null,
+        cpu_usec: ?u64 = null,
+        psi_cpu: ?PsiMetrics = null,
+        psi_memory: ?PsiMetrics = null,
+    };
+
+    /// read all metrics in a single pass by opening the cgroup directory once.
+    /// avoids N separate open/close cycles per container.
+    pub fn readAllMetrics(self: *const Cgroup) CgroupMetrics {
+        var metrics: CgroupMetrics = .{};
+
+        const dir = std.fs.cwd().openDir(self.path(), .{}) catch return metrics;
+        defer dir.close();
+
+        // memory.current
+        {
+            var buf: [64]u8 = undefined;
+            if (readFromDir(dir, "memory.current", &buf)) |content| {
+                metrics.memory_bytes = std.fmt.parseInt(u64, content, 10) catch null;
+            }
+        }
+
+        // cpu.stat — parse usage_usec
+        {
+            var buf: [512]u8 = undefined;
+            if (readFromDir(dir, "cpu.stat", &buf)) |content| {
+                var lines = std.mem.splitScalar(u8, content, '\n');
+                while (lines.next()) |line| {
+                    if (std.mem.startsWith(u8, line, "usage_usec ")) {
+                        metrics.cpu_usec = std.fmt.parseInt(u64, line["usage_usec ".len..], 10) catch null;
+                        break;
+                    }
+                };
+            }
+        }
+
+        // PSI metrics
+        {
+            var buf: [512]u8 = undefined;
+            if (readFromDir(dir, "cpu.pressure", &buf)) |content| {
+                metrics.psi_cpu = parsePsiFromContent(content);
+            }
+        }
+        {
+            var buf: [512]u8 = undefined;
+            if (readFromDir(dir, "memory.pressure", &buf)) |content| {
+                metrics.psi_memory = parsePsiFromContent(content);
+            }
+        }
+
+        return metrics;
+    }
+
+    /// remove this cgroup. kills remaining processes first to avoid EBUSY.
     pub fn destroy(self: *const Cgroup) CgroupError!void {
+        // try cgroup.kill (kernel 5.14+) — cleanest approach
+        self.writeFile("cgroup.kill", "1") catch {
+            // fallback: read cgroup.procs and SIGKILL each PID
+            self.killRemainingProcesses();
+        };
+
+        // brief sleep to let the kernel reap killed processes
+        std.time.sleep(10 * std.time.ns_per_ms);
+
         std.fs.cwd().deleteDir(self.path()) catch return CgroupError.DeleteFailed;
+    }
+
+    /// send SIGKILL to all processes in the cgroup.
+    /// used as a fallback when cgroup.kill is not available.
+    fn killRemainingProcesses(self: *const Cgroup) void {
+        var buf: [4096]u8 = undefined;
+        const content = self.readFile("cgroup.procs", &buf) catch return;
+        if (content.len == 0) return;
+
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            const pid = std.fmt.parseInt(std.posix.pid_t, line, 10) catch continue;
+            _ = std.os.linux.syscall2(
+                .kill,
+                @as(usize, @bitCast(@as(isize, pid))),
+                9, // SIGKILL
+            );
+        }
     }
 
     /// get the cgroup path as a string
@@ -263,6 +346,29 @@ pub const Cgroup = struct {
         return metrics;
     }
 };
+
+/// read a file from an already-opened directory handle.
+/// avoids the overhead of constructing full paths and opening the cgroup dir again.
+fn readFromDir(dir: std.fs.Dir, filename: []const u8, buf: []u8) ?[]const u8 {
+    const file = dir.openFile(filename, .{}) catch return null;
+    defer file.close();
+    const n = file.readAll(buf) catch return null;
+    return std.mem.trimRight(u8, buf[0..n], "\n ");
+}
+
+/// parse PSI metrics from already-read content (for batch reads)
+fn parsePsiFromContent(content: []const u8) ?PsiMetrics {
+    var metrics: PsiMetrics = .{ .some_avg10 = 0.0, .full_avg10 = 0.0 };
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "some ")) {
+            metrics.some_avg10 = parsePsiAvg10(line) catch return null;
+        } else if (std.mem.startsWith(u8, line, "full ")) {
+            metrics.full_avg10 = parsePsiAvg10(line) catch return null;
+        }
+    }
+    return metrics;
+}
 
 /// parse the avg10 value from a PSI line like "some avg10=0.00 avg60=0.00 avg300=0.00 total=0"
 fn parsePsiAvg10(line: []const u8) !f64 {

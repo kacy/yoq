@@ -91,21 +91,20 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
                 earliest_start = rec.created_at;
             }
 
-            // open existing cgroup to read metrics (no directory creation)
+            // open existing cgroup and read all metrics in one pass
             const cg = cgroups.Cgroup.open(rec.id) catch continue;
-            if (cg.memoryUsage()) |mem| {
-                total_memory += mem;
-            } else |_| {}
+            const m = cg.readAllMetrics();
 
-            if (cg.cpuUsage()) |cpu_usec| {
+            if (m.memory_bytes) |mem| total_memory += mem;
+            if (m.cpu_usec) |cpu_usec| {
                 total_cpu_usec += cpu_usec;
                 has_cpu = true;
-            } else |_| {}
+            }
 
-            // read PSI from the first running container (representative)
+            // use PSI from the first running container (representative)
             if (psi_cpu == null) {
-                psi_cpu = cg.cpuPressure() catch null;
-                psi_memory = cg.memoryPressure() catch null;
+                psi_cpu = m.psi_cpu;
+                psi_memory = m.psi_memory;
             }
         }
     }
