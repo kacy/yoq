@@ -37,6 +37,7 @@ const cgroups = @import("runtime/cgroups.zig");
 const ebpf = @import("network/ebpf.zig");
 const net_policy = @import("network/policy.zig");
 const net_cmds = @import("network/commands.zig");
+const runtime_cmds = @import("runtime/commands.zig");
 const cert_store = @import("tls/cert_store.zig");
 const acme = @import("tls/acme.zig");
 
@@ -118,9 +119,9 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "secret")) {
         state_cmds.secret(&args, alloc);
     } else if (std.mem.eql(u8, command, "status")) {
-        cmdStatus(&args, alloc);
+        runtime_cmds.status(&args, alloc);
     } else if (std.mem.eql(u8, command, "metrics")) {
-        cmdMetrics(&args, alloc);
+        runtime_cmds.metrics(&args, alloc);
     } else if (std.mem.eql(u8, command, "policy")) {
         net_cmds.policy(&args, alloc);
     } else if (std.mem.eql(u8, command, "cert")) {
@@ -1445,7 +1446,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
 
     // POST to /deploy with auth token if available
     var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
+    const token = cli.readApiToken(&token_buf);
 
     var resp = http_client.postWithAuth(alloc, server_ip, server_port, "/deploy", json_buf.items, token) catch {
         writeErr("failed to connect to cluster server\n", .{});
@@ -1567,7 +1568,7 @@ fn cmdServe(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // even in single-node mode (localhost-only), require auth so that
     // any process on the machine can't silently manage containers.
     var token_buf: [64]u8 = undefined;
-    const token: ?[]const u8 = readApiToken(&token_buf) orelse generateAndSaveToken(&token_buf);
+    const token: ?[]const u8 = cli.readApiToken(&token_buf) orelse cli.generateAndSaveToken(&token_buf);
 
     if (token) |t| {
         routes.api_token = t;
@@ -1593,49 +1594,6 @@ fn cmdServe(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 /// read the API token from ~/.local/share/yoq/api_token.
 /// returns a 64-char hex string in the provided buffer, or null if the file
 /// doesn't exist or can't be read.
-fn readApiToken(buf: *[64]u8) ?[]const u8 {
-    var path_buf: [paths.max_path]u8 = undefined;
-    const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
-
-    const file = std.fs.cwd().openFile(token_path, .{}) catch return null;
-    defer file.close();
-
-    const n = file.readAll(buf) catch return null;
-    if (n != 64) return null;
-
-    // validate it's all hex
-    for (buf) |c| {
-        switch (c) {
-            '0'...'9', 'a'...'f' => {},
-            else => return null,
-        }
-    }
-    return buf;
-}
-
-/// generate 32 random bytes, hex-encode to 64 chars, write to
-/// ~/.local/share/yoq/api_token with 0o600 permissions.
-/// returns the hex string in the provided buffer, or null on failure.
-fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
-    var raw: [32]u8 = undefined;
-    std.crypto.random.bytes(&raw);
-
-    const hex = std.fmt.bytesToHex(raw, .lower);
-    buf.* = hex;
-
-    // ensure data directory exists
-    paths.ensureDataDir("") catch return null;
-
-    var path_buf: [paths.max_path]u8 = undefined;
-    const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
-
-    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o600 }) catch return null;
-    defer file.close();
-
-    file.writeAll(buf) catch return null;
-    return buf;
-}
-
 fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var node_id: u64 = 1;
     var raft_port: u16 = 9700;
@@ -2027,7 +1985,7 @@ fn cmdNodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const server_port = server.port;
 
     var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
+    const token = cli.readApiToken(&token_buf);
 
     var resp = http_client.getWithAuth(alloc, server_addr, server_port, "/agents", token) catch {
         writeErr("failed to connect to server\n", .{});
@@ -2107,7 +2065,7 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     };
 
     var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
+    const token = cli.readApiToken(&token_buf);
 
     var resp = http_client.postWithAuth(alloc, server_addr, server_port, path, "", token) catch {
         writeErr("failed to connect to server\n", .{});
@@ -2121,460 +2079,6 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         writeErr("drain failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
         std.process.exit(1);
     }
-}
-
-// -- status command --
-
-fn cmdStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    var verbose = false;
-    var server: ?cli.ServerAddr = null;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
-            verbose = true;
-        } else if (std.mem.eql(u8, arg, "--server")) {
-            const addr_str = args.next() orelse {
-                writeErr("--server requires a host:port address\n", .{});
-                std.process.exit(1);
-            };
-            server = cli.parseServerAddr(addr_str);
-        }
-    }
-
-    // cluster mode: query API endpoint
-    if (server) |s| {
-        cmdStatusRemote(alloc, s.ip, s.port, verbose);
-        return;
-    }
-
-    // local mode: read directly from store and cgroups
-    cmdStatusLocal(alloc, verbose);
-}
-
-fn cmdStatusLocal(alloc: std.mem.Allocator, verbose: bool) void {
-    var records = store.listAll(alloc) catch {
-        writeErr("failed to list containers\n", .{});
-        std.process.exit(1);
-    };
-    defer {
-        for (records.items) |rec| rec.deinit(alloc);
-        records.deinit(alloc);
-    }
-
-    if (records.items.len == 0) {
-        write("no services running\n", .{});
-        return;
-    }
-
-    var snapshots = monitor.collectSnapshots(alloc, &records) catch {
-        writeErr("failed to collect service snapshots\n", .{});
-        std.process.exit(1);
-    };
-    defer snapshots.deinit(alloc);
-
-    printStatusTable(snapshots.items, verbose);
-}
-
-fn cmdStatusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) void {
-    var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
-
-    var resp = http_client.getWithAuth(alloc, addr, port, "/v1/status", token) catch {
-        writeErr("failed to connect to server\n", .{});
-        std.process.exit(1);
-    };
-    defer resp.deinit(alloc);
-
-    if (resp.status_code != 200) {
-        writeErr("server returned status {d}\n", .{resp.status_code});
-        std.process.exit(1);
-    }
-
-    // parse JSON response into snapshots for display
-    var snapshots: std.ArrayList(monitor.ServiceSnapshot) = .empty;
-    defer snapshots.deinit(alloc);
-
-    var iter = json_helpers.extractJsonObjects(resp.body);
-    while (iter.next()) |obj| {
-        const name = extractJsonString(obj, "name") orelse "?";
-        const status_str = extractJsonString(obj, "status") orelse "unknown";
-        const health_str = extractJsonString(obj, "health");
-
-        const status: monitor.ServiceStatus = if (std.mem.eql(u8, status_str, "running"))
-            .running
-        else if (std.mem.eql(u8, status_str, "stopped"))
-            .stopped
-        else
-            .mixed;
-
-        const health_status: ?health.HealthStatus = if (health_str) |h| blk: {
-            if (std.mem.eql(u8, h, "healthy")) break :blk .healthy;
-            if (std.mem.eql(u8, h, "unhealthy")) break :blk .unhealthy;
-            if (std.mem.eql(u8, h, "starting")) break :blk .starting;
-            break :blk null;
-        } else null;
-
-        // parse PSI metrics if present in the response
-        const psi_cpu = parsePsiFromJson(obj, "psi_cpu_some", "psi_cpu_full");
-        const psi_mem = parsePsiFromJson(obj, "psi_mem_some", "psi_mem_full");
-
-        snapshots.append(alloc, .{
-            .name = name,
-            .status = status,
-            .health_status = health_status,
-            .cpu_pct = extractJsonFloat(obj, "cpu_pct") orelse 0.0,
-            .memory_bytes = @intCast(extractJsonInt(obj, "memory_bytes") orelse 0),
-            .psi_cpu = psi_cpu,
-            .psi_memory = psi_mem,
-            .running_count = @intCast(extractJsonInt(obj, "running") orelse 0),
-            .desired_count = @intCast(extractJsonInt(obj, "desired") orelse 0),
-            .uptime_secs = extractJsonInt(obj, "uptime_secs") orelse 0,
-        }) catch {
-            writeErr("failed to parse status response\n", .{});
-            std.process.exit(1);
-        };
-    }
-
-    if (snapshots.items.len == 0) {
-        write("no services running\n", .{});
-        return;
-    }
-
-    printStatusTable(snapshots.items, verbose);
-}
-
-fn printStatusTable(snapshots: []const monitor.ServiceSnapshot, verbose: bool) void {
-    write("{s:<12} {s:<10} {s:<11} {s:<10} {s:<11} {s:<13} {s}\n", .{
-        "SERVICE", "STATUS", "HEALTH", "CPU", "MEMORY", "CONTAINERS", "UPTIME",
-    });
-
-    for (snapshots) |snap| {
-        var cpu_buf: [16]u8 = undefined;
-        const cpu_str = if (snap.cpu_pct > 0.0)
-            std.fmt.bufPrint(&cpu_buf, "{d:.1}%", .{snap.cpu_pct}) catch "-"
-        else
-            @as([]const u8, "-");
-
-        var mem_buf: [16]u8 = undefined;
-        const mem_str = monitor.formatBytes(&mem_buf, snap.memory_bytes);
-
-        var uptime_buf: [16]u8 = undefined;
-        const uptime_str = monitor.formatUptime(&uptime_buf, snap.uptime_secs);
-
-        var count_buf: [12]u8 = undefined;
-        const count_str = std.fmt.bufPrint(&count_buf, "{d}/{d}", .{
-            snap.running_count, snap.desired_count,
-        }) catch "-";
-
-        write("{s:<12} {s:<10} {s:<11} {s:<10} {s:<11} {s:<13} {s}\n", .{
-            snap.name,
-            monitor.formatStatus(snap.status),
-            monitor.formatHealth(snap.health_status),
-            cpu_str,
-            mem_str,
-            count_str,
-            uptime_str,
-        });
-
-        if (verbose) {
-            printVerboseDetails(snap);
-        }
-    }
-}
-
-fn printVerboseDetails(snap: monitor.ServiceSnapshot) void {
-    // PSI pressure metrics
-    if (snap.psi_cpu) |psi| {
-        write("  cpu pressure:    some={d:.1}%  full={d:.1}%\n", .{ psi.some_avg10, psi.full_avg10 });
-    }
-    if (snap.psi_memory) |psi| {
-        write("  memory pressure: some={d:.1}%  full={d:.1}%\n", .{ psi.some_avg10, psi.full_avg10 });
-    }
-
-    // auto-tuning suggestions based on PSI
-    if (snap.psi_memory) |psi| {
-        if (psi.some_avg10 > 25.0) {
-            write("  \xe2\x9a\xa0 memory pressure high \xe2\x80\x94 consider increasing memory limit\n", .{});
-        }
-    }
-    if (snap.psi_cpu) |psi| {
-        if (psi.some_avg10 > 50.0) {
-            write("  \xe2\x9a\xa0 cpu pressure high \xe2\x80\x94 consider increasing cpu allocation\n", .{});
-        }
-    }
-}
-
-/// parse PSI metrics from a JSON object's some/full fields.
-/// returns null if neither field is present.
-fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8) ?cgroups.PsiMetrics {
-    const some = extractJsonFloat(json, some_key) orelse return null;
-    const full = extractJsonFloat(json, full_key) orelse return null;
-    return .{ .some_avg10 = some, .full_avg10 = full };
-}
-
-// -- metrics command --
-
-fn cmdMetrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    var service_filter: ?[]const u8 = null;
-    var server: ?cli.ServerAddr = null;
-    var pairs_mode = false;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--server")) {
-            const addr_str = args.next() orelse {
-                writeErr("--server requires a host:port address\n", .{});
-                std.process.exit(1);
-            };
-            server = cli.parseServerAddr(addr_str);
-        } else if (std.mem.eql(u8, arg, "--pairs")) {
-            pairs_mode = true;
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            service_filter = arg;
-        }
-    }
-
-    if (pairs_mode) {
-        if (server) |s| {
-            cmdMetricsPairsRemote(alloc, s.ip, s.port);
-        } else {
-            cmdMetricsPairs(alloc);
-        }
-        return;
-    }
-
-    if (server) |s| {
-        cmdMetricsRemote(alloc, s.ip, s.port, service_filter);
-        return;
-    }
-
-    cmdMetricsLocal(alloc, service_filter);
-}
-
-fn cmdMetricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) void {
-    var records = store.listAll(alloc) catch {
-        writeErr("failed to list containers\n", .{});
-        std.process.exit(1);
-    };
-    defer {
-        for (records.items) |rec| rec.deinit(alloc);
-        records.deinit(alloc);
-    }
-
-    if (records.items.len == 0) {
-        write("no services running\n", .{});
-        return;
-    }
-
-    const mc = ebpf.getMetricsCollector();
-
-    write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
-        "SERVICE", "CONTAINER", "IP", "PACKETS", "BYTES",
-    });
-
-    var found = false;
-    for (records.items) |rec| {
-        if (!std.mem.eql(u8, rec.status, "running")) continue;
-
-        if (service_filter) |svc| {
-            if (!std.mem.eql(u8, rec.hostname, svc)) continue;
-        }
-
-        const ip_str = rec.ip_address orelse continue;
-        const short_id = if (rec.id.len >= 6) rec.id[0..6] else rec.id;
-
-        var packets: u64 = 0;
-        var bytes: u64 = 0;
-        if (mc) |collector| {
-            if (ip.parseIp(ip_str)) |addr| {
-                const ip_net = ebpf.ipToNetworkOrder(addr);
-                if (collector.readMetrics(ip_net)) |m| {
-                    packets = m.packets;
-                    bytes = m.bytes;
-                }
-            }
-        }
-
-        var bytes_buf: [16]u8 = undefined;
-        const bytes_str = monitor.formatBytes(&bytes_buf, bytes);
-
-        var pkt_buf: [16]u8 = undefined;
-        const pkt_str = formatCount(&pkt_buf, packets);
-
-        write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
-            rec.hostname, short_id, ip_str, pkt_str, bytes_str,
-        });
-        found = true;
-    }
-
-    if (!found) {
-        if (service_filter) |svc| {
-            write("no running containers for service '{s}'\n", .{svc});
-        } else {
-            write("no running containers with network\n", .{});
-        }
-    }
-}
-
-fn cmdMetricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filter: ?[]const u8) void {
-    // build path with optional query param
-    var path_buf: [128]u8 = undefined;
-    const path = if (service_filter) |svc|
-        std.fmt.bufPrint(&path_buf, "/v1/metrics?service={s}", .{svc}) catch "/v1/metrics"
-    else
-        @as([]const u8, "/v1/metrics");
-
-    var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
-
-    var resp = http_client.getWithAuth(alloc, addr, port, path, token) catch {
-        writeErr("failed to connect to server\n", .{});
-        std.process.exit(1);
-    };
-    defer resp.deinit(alloc);
-
-    if (resp.status_code != 200) {
-        writeErr("server returned status {d}\n", .{resp.status_code});
-        std.process.exit(1);
-    }
-
-    write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
-        "SERVICE", "CONTAINER", "IP", "PACKETS", "BYTES",
-    });
-
-    var found = false;
-    var iter = json_helpers.extractJsonObjects(resp.body);
-    while (iter.next()) |obj| {
-        const service = extractJsonString(obj, "service") orelse "?";
-        const container_id = extractJsonString(obj, "container") orelse "?";
-        const ip_str = extractJsonString(obj, "ip") orelse "?";
-        const packets: u64 = @intCast(extractJsonInt(obj, "packets") orelse 0);
-        const bytes: u64 = @intCast(extractJsonInt(obj, "bytes") orelse 0);
-
-        var bytes_buf: [16]u8 = undefined;
-        const bytes_str = monitor.formatBytes(&bytes_buf, bytes);
-
-        var pkt_buf: [16]u8 = undefined;
-        const pkt_str = formatCount(&pkt_buf, packets);
-
-        write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
-            service, container_id, ip_str, pkt_str, bytes_str,
-        });
-        found = true;
-    }
-
-    if (!found) {
-        write("no metrics available\n", .{});
-    }
-}
-
-fn cmdMetricsPairs(alloc: std.mem.Allocator) void {
-    const mc = ebpf.getMetricsCollector() orelse {
-        write("metrics collector not loaded (requires root)\n", .{});
-        return;
-    };
-
-    var records = store.listAll(alloc) catch {
-        writeErr("failed to list containers\n", .{});
-        std.process.exit(1);
-    };
-    defer {
-        for (records.items) |rec| rec.deinit(alloc);
-        records.deinit(alloc);
-    }
-
-    var entries: [1024]ebpf.PairEntry = undefined;
-    const count = mc.readPairMetrics(&entries);
-
-    if (count == 0) {
-        write("no pair metrics available\n", .{});
-        return;
-    }
-
-    write("{s:<14} {s:<14} {s:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
-        "FROM", "TO", "PORT", "CONNECTIONS", "PACKETS", "BYTES", "ERRORS",
-    });
-
-    for (entries[0..count]) |entry| {
-        const src_name = resolveIpName(entry.key.src_ip, records.items);
-        const dst_name = resolveIpName(entry.key.dst_ip, records.items);
-        const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
-
-        var conn_buf: [16]u8 = undefined;
-        const conn_str = formatCount(&conn_buf, entry.value.connections);
-        var pkt_buf: [16]u8 = undefined;
-        const pkt_str = formatCount(&pkt_buf, entry.value.packets);
-        var bytes_buf: [16]u8 = undefined;
-        const bytes_str = monitor.formatBytes(&bytes_buf, entry.value.bytes);
-        var err_buf: [16]u8 = undefined;
-        const err_str = formatCount(&err_buf, entry.value.errors);
-
-        write("{s:<14} {s:<14} {d:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
-            src_name, dst_name, port, conn_str, pkt_str, bytes_str, err_str,
-        });
-    }
-}
-
-fn cmdMetricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) void {
-    var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
-
-    var resp = http_client.getWithAuth(alloc, addr, port, "/v1/metrics?mode=pairs", token) catch {
-        writeErr("failed to connect to server\n", .{});
-        std.process.exit(1);
-    };
-    defer resp.deinit(alloc);
-
-    if (resp.status_code != 200) {
-        writeErr("server returned status {d}\n", .{resp.status_code});
-        std.process.exit(1);
-    }
-
-    write("{s:<14} {s:<14} {s:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
-        "FROM", "TO", "PORT", "CONNECTIONS", "PACKETS", "BYTES", "ERRORS",
-    });
-
-    var found = false;
-    var iter = json_helpers.extractJsonObjects(resp.body);
-    while (iter.next()) |obj| {
-        const from = extractJsonString(obj, "from") orelse "?";
-        const to = extractJsonString(obj, "to") orelse "?";
-        const obj_port: u64 = @intCast(extractJsonInt(obj, "port") orelse 0);
-        const connections: u64 = @intCast(extractJsonInt(obj, "connections") orelse 0);
-        const packets: u64 = @intCast(extractJsonInt(obj, "packets") orelse 0);
-        const bytes: u64 = @intCast(extractJsonInt(obj, "bytes") orelse 0);
-        const errors: u64 = @intCast(extractJsonInt(obj, "errors") orelse 0);
-
-        var conn_buf: [16]u8 = undefined;
-        const conn_str = formatCount(&conn_buf, connections);
-        var pkt_buf: [16]u8 = undefined;
-        const pkt_str = formatCount(&pkt_buf, packets);
-        var bytes_buf: [16]u8 = undefined;
-        const bytes_str = monitor.formatBytes(&bytes_buf, bytes);
-        var err_buf: [16]u8 = undefined;
-        const err_str = formatCount(&err_buf, errors);
-
-        write("{s:<14} {s:<14} {d:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
-            from, to, obj_port, conn_str, pkt_str, bytes_str, err_str,
-        });
-        found = true;
-    }
-
-    if (!found) {
-        write("no pair metrics available\n", .{});
-    }
-}
-
-/// resolve a network-order IP (u32) to a service hostname.
-fn resolveIpName(ip_net: u32, records: []const store.ContainerRecord) []const u8 {
-    const ip_bytes = std.mem.asBytes(&ip_net);
-    for (records) |rec| {
-        if (!std.mem.eql(u8, rec.status, "running")) continue;
-        const rec_ip_str = rec.ip_address orelse continue;
-        if (ip.parseIp(rec_ip_str)) |addr| {
-            if (std.mem.eql(u8, &addr, ip_bytes[0..4])) return rec.hostname;
-        }
-    }
-    return "unknown";
 }
 
 // -- deployment commands --
@@ -3065,7 +2569,7 @@ test "smoke test" {
 
 test "generateAndSaveToken produces valid 64-char hex string" {
     var buf: [64]u8 = undefined;
-    const token = generateAndSaveToken(&buf);
+    const token = cli.generateAndSaveToken(&buf);
     try std.testing.expect(token != null);
     try std.testing.expectEqual(@as(usize, 64), token.?.len);
     for (token.?) |c| {
@@ -3076,11 +2580,11 @@ test "generateAndSaveToken produces valid 64-char hex string" {
 test "readApiToken round-trip with generateAndSaveToken" {
     // generate a token
     var gen_buf: [64]u8 = undefined;
-    const generated = generateAndSaveToken(&gen_buf).?;
+    const generated = cli.generateAndSaveToken(&gen_buf).?;
 
     // read it back
     var read_buf: [64]u8 = undefined;
-    const read_back = readApiToken(&read_buf).?;
+    const read_back = cli.readApiToken(&read_buf).?;
     try std.testing.expectEqualSlices(u8, generated, read_back);
 }
 
@@ -3097,7 +2601,7 @@ test "readApiToken returns null for missing file" {
     defer std.fs.cwd().rename(backup_path, token_path) catch {};
 
     var buf: [64]u8 = undefined;
-    try std.testing.expect(readApiToken(&buf) == null);
+    try std.testing.expect(cli.readApiToken(&buf) == null);
 }
 // pull in tests from all modules
 comptime {
@@ -3109,6 +2613,7 @@ comptime {
     _ = @import("runtime/process.zig");
     _ = @import("runtime/exec.zig");
     _ = @import("runtime/logs.zig");
+    _ = @import("runtime/commands.zig");
     _ = @import("state/store.zig");
     _ = @import("state/schema.zig");
     _ = @import("state/commands.zig");
