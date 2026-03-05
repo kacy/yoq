@@ -442,11 +442,12 @@ pub const Node = struct {
     }
 
     fn handleMessage(self: *Node, received: transport_mod.ReceivedMessage) void {
+        const from_id = self.resolveNodeId(received.from_addr);
+
         switch (received.message) {
             .request_vote => |args| {
                 const reply = self.raft.handleRequestVote(args);
-                // send reply back (we don't know the sender's NodeId from the
-                // address alone, so we use the candidate_id from the request)
+                // send reply back using the candidate_id from the request
                 self.transport.send(args.candidate_id, .{
                     .request_vote_reply = reply,
                 }) catch |e| {
@@ -454,9 +455,8 @@ pub const Node = struct {
                 };
             },
             .request_vote_reply => |reply| {
-                // we don't have a direct sender ID, but replies only matter
-                // if we're a candidate, and the vote count is what matters
-                self.raft.handleRequestVoteReply(0, reply);
+                // vote replies only matter for counting — raft ignores from_id
+                self.raft.handleRequestVoteReply(from_id orelse 0, reply);
             },
             .append_entries => |args| {
                 const reply = self.raft.handleAppendEntries(args);
@@ -470,10 +470,11 @@ pub const Node = struct {
                 self.alloc.free(args.entries);
             },
             .append_entries_reply => |reply| {
-                // similar issue — we need the sender's NodeId.
-                // for now we process it with id=0; the node integration
-                // will need enhancement later for proper peer tracking
-                self.raft.handleAppendEntriesReply(0, reply);
+                if (from_id) |id| {
+                    self.raft.handleAppendEntriesReply(id, reply);
+                } else {
+                    logger.warn("append_entries_reply from unknown address, dropping", .{});
+                }
             },
             .install_snapshot => |args| {
                 const commit_before = self.raft.commit_index;
@@ -493,9 +494,28 @@ pub const Node = struct {
                 }
             },
             .install_snapshot_reply => |reply| {
-                self.raft.handleInstallSnapshotReply(0, reply);
+                if (from_id) |id| {
+                    self.raft.handleInstallSnapshotReply(id, reply);
+                } else {
+                    logger.warn("install_snapshot_reply from unknown address, dropping", .{});
+                }
             },
         }
+    }
+
+    /// resolve a network address to a peer's NodeId by matching against
+    /// the configured peer list. returns null if the address doesn't
+    /// match any known peer (e.g. a stale connection from a removed node).
+    fn resolveNodeId(self: *const Node, addr: std.net.Address) ?NodeId {
+        const from_ip: [4]u8 = @bitCast(addr.in.sa.addr);
+        const from_port = std.mem.bigToNative(u16, addr.in.sa.port);
+
+        for (self.config.peers) |peer| {
+            if (std.mem.eql(u8, &peer.addr, &from_ip) and peer.port == from_port) {
+                return peer.id;
+            }
+        }
+        return null;
     }
 
     fn processActions(self: *Node) void {
@@ -627,6 +647,46 @@ pub const Node = struct {
 };
 
 // -- tests --
+
+test "resolveNodeId matches configured peer" {
+    const alloc = std.testing.allocator;
+
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+        .{ .id = 3, .addr = .{ 10, 0, 0, 3 }, .port = 9700 },
+    };
+
+    // create temp directory for data
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    // build an address matching peer 2 (10.0.0.2:9700)
+    const addr2 = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700);
+    try std.testing.expectEqual(@as(?NodeId, 2), node.resolveNodeId(addr2));
+
+    // build an address matching peer 3
+    const addr3 = std.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700);
+    try std.testing.expectEqual(@as(?NodeId, 3), node.resolveNodeId(addr3));
+
+    // unknown address should return null
+    const unknown = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 9700);
+    try std.testing.expect(node.resolveNodeId(unknown) == null);
+
+    // right IP, wrong port should return null
+    const wrong_port = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 8080);
+    try std.testing.expect(node.resolveNodeId(wrong_port) == null);
+}
 
 test "node init and deinit" {
     // just verify the struct can be created without crashing.
