@@ -616,46 +616,70 @@ fn processCopy(alloc: std.mem.Allocator, state: *BuildState, args: []const u8, c
 
 fn processEnv(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
     // ENV KEY=VALUE or ENV KEY VALUE
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate ENV value", .{});
+        return;
+    };
     state.env.append(alloc, owned) catch {
+        log.warn("build: failed to store ENV value", .{});
         alloc.free(owned);
     };
 }
 
 fn processWorkdir(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate WORKDIR value", .{});
+        return;
+    };
     if (!std.mem.eql(u8, state.workdir, "/")) alloc.free(state.workdir);
     state.workdir = owned;
 }
 
 fn processCmd(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate CMD value", .{});
+        return;
+    };
     if (state.cmd) |old| alloc.free(old);
     state.cmd = owned;
 }
 
 fn processEntrypoint(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate ENTRYPOINT value", .{});
+        return;
+    };
     if (state.entrypoint) |old| alloc.free(old);
     state.entrypoint = owned;
 }
 
 fn processExpose(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate EXPOSE value", .{});
+        return;
+    };
     state.exposed_ports.append(alloc, owned) catch {
+        log.warn("build: failed to store EXPOSE value", .{});
         alloc.free(owned);
     };
 }
 
 fn processUser(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate USER value", .{});
+        return;
+    };
     if (state.user) |old| alloc.free(old);
     state.user = owned;
 }
 
 fn processLabel(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate LABEL value", .{});
+        return;
+    };
     state.labels.append(alloc, owned) catch {
+        log.warn("build: failed to store LABEL value", .{});
         alloc.free(owned);
     };
 }
@@ -671,12 +695,17 @@ fn processArg(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) vo
         // only set if not already provided by CLI --build-arg
         if (state.build_args.get(key) != null) return;
 
-        const owned_key = alloc.dupe(u8, key) catch return;
+        const owned_key = alloc.dupe(u8, key) catch {
+            log.warn("build: failed to allocate ARG key", .{});
+            return;
+        };
         const owned_val = alloc.dupe(u8, val) catch {
+            log.warn("build: failed to allocate ARG value", .{});
             alloc.free(owned_key);
             return;
         };
         state.build_args.put(alloc, owned_key, owned_val) catch {
+            log.warn("build: failed to store ARG", .{});
             alloc.free(owned_key);
             alloc.free(owned_val);
         };
@@ -685,12 +714,17 @@ fn processArg(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) vo
         // already set by CLI
         if (state.build_args.get(trimmed) != null) return;
 
-        const owned_key = alloc.dupe(u8, trimmed) catch return;
+        const owned_key = alloc.dupe(u8, trimmed) catch {
+            log.warn("build: failed to allocate ARG key", .{});
+            return;
+        };
         const owned_val = alloc.dupe(u8, "") catch {
+            log.warn("build: failed to allocate ARG value", .{});
             alloc.free(owned_key);
             return;
         };
         state.build_args.put(alloc, owned_key, owned_val) catch {
+            log.warn("build: failed to store ARG", .{});
             alloc.free(owned_key);
             alloc.free(owned_val);
         };
@@ -992,8 +1026,12 @@ fn processVolume(alloc: std.mem.Allocator, state: *BuildState, args: []const u8)
         while (iter.next()) |entry| {
             const path = std.mem.trim(u8, entry, " \t\"");
             if (path.len == 0) continue;
-            const owned = alloc.dupe(u8, path) catch continue;
+            const owned = alloc.dupe(u8, path) catch {
+                log.warn("build: failed to allocate VOLUME path", .{});
+                continue;
+            };
             state.volumes.append(alloc, owned) catch {
+                log.warn("build: failed to store VOLUME path", .{});
                 alloc.free(owned);
             };
         }
@@ -1001,8 +1039,12 @@ fn processVolume(alloc: std.mem.Allocator, state: *BuildState, args: []const u8)
         // space-separated form: VOLUME /data /logs
         var iter = std.mem.tokenizeAny(u8, args, " \t");
         while (iter.next()) |path| {
-            const owned = alloc.dupe(u8, path) catch continue;
+            const owned = alloc.dupe(u8, path) catch {
+                log.warn("build: failed to allocate VOLUME path", .{});
+                continue;
+            };
             state.volumes.append(alloc, owned) catch {
+                log.warn("build: failed to store VOLUME path", .{});
                 alloc.free(owned);
             };
         }
@@ -1013,7 +1055,10 @@ fn processShell(alloc: std.mem.Allocator, state: *BuildState, args: []const u8) 
     // SHELL sets the default shell for subsequent RUN instructions.
     // the args should be in JSON form: ["/bin/bash", "-c"]
     log.info("SHELL {s}", .{args});
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate SHELL value", .{});
+        return;
+    };
     if (state.shell) |old| alloc.free(old);
     state.shell = owned;
 }
@@ -1023,7 +1068,10 @@ fn processHealthcheck(alloc: std.mem.Allocator, state: *BuildState, args: []cons
     // runtime to use. we store the raw args string and let the runtime
     // parse the details (interval, timeout, retries, command).
     log.info("HEALTHCHECK {s}", .{args});
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate HEALTHCHECK value", .{});
+        return;
+    };
     if (state.healthcheck) |old| alloc.free(old);
     state.healthcheck = owned;
 }
@@ -1032,7 +1080,10 @@ fn processStopsignal(alloc: std.mem.Allocator, state: *BuildState, args: []const
     // STOPSIGNAL sets the signal sent to the container on stop.
     // metadata only — stored in the image config.
     log.info("STOPSIGNAL {s}", .{args});
-    const owned = alloc.dupe(u8, args) catch return;
+    const owned = alloc.dupe(u8, args) catch {
+        log.warn("build: failed to allocate STOPSIGNAL value", .{});
+        return;
+    };
     if (state.stop_signal) |old| alloc.free(old);
     state.stop_signal = owned;
 }
