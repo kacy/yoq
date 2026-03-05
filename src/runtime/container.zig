@@ -268,8 +268,8 @@ pub const Container = struct {
                             config.hostname,
                         );
                     }
-                } else |_| {
-                    // networking failed, but container can still run
+                } else |e| {
+                    log.warn("container: network setup failed, continuing without network: {}", .{e});
                 }
             }
         }

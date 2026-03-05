@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+const log = @import("../lib/log.zig");
 
 pub const CgroupError = error{
     CreateFailed,
@@ -279,7 +280,10 @@ pub const Cgroup = struct {
     /// used as a fallback when cgroup.kill is not available.
     fn killRemainingProcesses(self: *const Cgroup) void {
         var buf: [4096]u8 = undefined;
-        const content = self.readFile("cgroup.procs", &buf) catch return;
+        const content = self.readFile("cgroup.procs", &buf) catch {
+            log.warn("cgroup: failed to read procs for cleanup: {s}", .{self.path()});
+            return;
+        };
         if (content.len == 0) return;
 
         var lines = std.mem.splitScalar(u8, content, '\n');
