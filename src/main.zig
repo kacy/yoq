@@ -79,6 +79,8 @@ pub fn main() !void {
         cmdImages(alloc);
     } else if (std.mem.eql(u8, command, "rmi")) {
         cmdRmi(&args, alloc);
+    } else if (std.mem.eql(u8, command, "inspect")) {
+        cmdInspect(&args, alloc);
     } else if (std.mem.eql(u8, command, "exec")) {
         cmdExec(&args, alloc);
     } else if (std.mem.eql(u8, command, "build")) {
@@ -754,6 +756,209 @@ fn cmdRmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // rmi removes the tag, prune cleans up storage.
 
     write("untagged: {s}:{s}\n", .{ image.repository, image.tag });
+}
+
+
+fn cmdInspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const image_str = requireArg(args, "usage: yoq inspect <image>\n");
+
+    // find the image (same pattern as cmdRmi)
+    const ref = spec.parseImageRef(image_str);
+    const image = store.findImage(alloc, ref.repository, ref.reference) catch {
+        writeErr("image not found: {s}\n", .{image_str});
+        std.process.exit(1);
+    };
+    defer image.deinit(alloc);
+
+    // read manifest blob
+    const manifest_digest = blob_store.Digest.parse(image.manifest_digest) orelse {
+        writeErr("invalid manifest digest\n", .{});
+        std.process.exit(1);
+    };
+    const manifest_bytes = blob_store.getBlob(alloc, manifest_digest) catch {
+        writeErr("failed to read manifest blob\n", .{});
+        std.process.exit(1);
+    };
+    defer alloc.free(manifest_bytes);
+
+    var parsed_manifest = spec.parseManifest(alloc, manifest_bytes) catch {
+        writeErr("failed to parse manifest\n", .{});
+        std.process.exit(1);
+    };
+    defer parsed_manifest.deinit();
+
+    // read config blob
+    const config_digest = blob_store.Digest.parse(image.config_digest) orelse {
+        writeErr("invalid config digest\n", .{});
+        std.process.exit(1);
+    };
+    const config_bytes = blob_store.getBlob(alloc, config_digest) catch {
+        writeErr("failed to read config blob\n", .{});
+        std.process.exit(1);
+    };
+    defer alloc.free(config_bytes);
+
+    var parsed_config = spec.parseImageConfig(alloc, config_bytes) catch {
+        writeErr("failed to parse config\n", .{});
+        std.process.exit(1);
+    };
+    defer parsed_config.deinit();
+
+    const config = parsed_config.value;
+    const manifest = parsed_manifest.value;
+
+    // -- display --
+    write("{s}:{s}\n\n", .{ image.repository, image.tag });
+
+    // digest (truncated for readability)
+    const short_digest = if (image.manifest_digest.len > 19) image.manifest_digest[0..19] else image.manifest_digest;
+    write("  digest:       {s}...\n", .{short_digest});
+
+    // platform
+    if (config.architecture) |arch| {
+        if (config.os) |os_name| {
+            write("  platform:     {s}/{s}\n", .{ os_name, arch });
+        }
+    }
+
+    // created
+    if (config.created) |created| {
+        write("  created:      {s}\n", .{created});
+    }
+
+    // size
+    const size_mb = @divTrunc(image.total_size, 1024 * 1024);
+    write("  size:         {d} MB\n", .{size_mb});
+
+    // layers
+    write("  layers:       {d}\n", .{manifest.layers.len});
+    for (manifest.layers, 0..) |l, i| {
+        const layer_mb = l.size / (1024 * 1024);
+        const layer_short = if (l.digest.len > 19) l.digest[7..19] else l.digest;
+        write("    [{d}] {s}  {d} MB\n", .{ i, layer_short, layer_mb });
+    }
+
+    // container config
+    if (config.config) |cc| {
+        write("\n", .{});
+
+        if (cc.Entrypoint) |ep| {
+            write("  entrypoint:   ", .{});
+            for (ep, 0..) |arg, i| {
+                if (i > 0) write(" ", .{});
+                write("{s}", .{arg});
+            }
+            write("\n", .{});
+        }
+
+        if (cc.Cmd) |cmd| {
+            write("  cmd:          ", .{});
+            for (cmd, 0..) |arg, i| {
+                if (i > 0) write(" ", .{});
+                write("{s}", .{arg});
+            }
+            write("\n", .{});
+        }
+
+        if (cc.Env) |env| {
+            write("  env:\n", .{});
+            for (env) |e| {
+                write("    {s}\n", .{e});
+            }
+        }
+
+        if (cc.ExposedPorts) |ports| {
+            if (ports == .object) {
+                write("  ports:        ", .{});
+                var first = true;
+                var port_iter = ports.object.iterator();
+                while (port_iter.next()) |entry| {
+                    if (!first) write(", ", .{});
+                    write("{s}", .{entry.key_ptr.*});
+                    first = false;
+                }
+                write("\n", .{});
+            }
+        }
+
+        if (cc.Volumes) |volumes| {
+            if (volumes == .object) {
+                write("  volumes:      ", .{});
+                var first = true;
+                var vol_iter = volumes.object.iterator();
+                while (vol_iter.next()) |entry| {
+                    if (!first) write(", ", .{});
+                    write("{s}", .{entry.key_ptr.*});
+                    first = false;
+                }
+                write("\n", .{});
+            }
+        }
+
+        if (cc.WorkingDir) |wd| {
+            write("  workdir:      {s}\n", .{wd});
+        }
+
+        if (cc.User) |user| {
+            write("  user:         {s}\n", .{user});
+        }
+
+        if (cc.Shell) |shell| {
+            write("  shell:        ", .{});
+            for (shell, 0..) |arg, i| {
+                if (i > 0) write(" ", .{});
+                write("{s}", .{arg});
+            }
+            write("\n", .{});
+        }
+
+        if (cc.StopSignal) |sig| {
+            write("  stopsignal:   {s}\n", .{sig});
+        }
+
+        if (cc.Healthcheck) |hc| {
+            write("  healthcheck:\n", .{});
+            if (hc.Test) |test_cmd| {
+                write("    test:     ", .{});
+                for (test_cmd, 0..) |arg, i| {
+                    if (i > 0) write(" ", .{});
+                    write("{s}", .{arg});
+                }
+                write("\n", .{});
+            }
+            if (hc.Interval) |iv| {
+                write("    interval: {d}ns\n", .{iv});
+            }
+            if (hc.Timeout) |to| {
+                write("    timeout:  {d}ns\n", .{to});
+            }
+            if (hc.Retries) |r| {
+                write("    retries:  {d}\n", .{r});
+            }
+        }
+
+        if (cc.OnBuild) |onbuild| {
+            if (onbuild.len > 0) {
+                write("  onbuild:\n", .{});
+                for (onbuild) |trigger| {
+                    write("    {s}\n", .{trigger});
+                }
+            }
+        }
+
+        if (cc.Labels) |labels| {
+            if (labels == .object) {
+                write("  labels:\n", .{});
+                var label_iter = labels.object.iterator();
+                while (label_iter.next()) |entry| {
+                    const val = entry.value_ptr.*;
+                    if (val == .string) {
+                        write("    {s}: {s}\n", .{ entry.key_ptr.*, val.string });
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -2980,6 +3185,7 @@ fn printUsage() void {
         \\  rollback <service>               rollback to previous deployment
         \\  history <service>                show deployment history
         \\  rmi <image>                      remove a pulled image
+        \\  inspect <image>                  show image details
         \\  version                          print version
         \\  help                             show this help
         \\
