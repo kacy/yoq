@@ -71,44 +71,46 @@ pub fn subnetForNode(node_id: u8) SubnetConfig {
 ///
 /// uses BEGIN IMMEDIATE to acquire a write lock before reading,
 /// preventing concurrent allocations from seeing the same free IP.
+///
+/// fetches all allocated IPs in a single query and finds the first
+/// gap using a bitset, rather than issuing one query per address.
 pub fn allocate(db: *sqlite.Db, container_id: []const u8) IpError![4]u8 {
     // acquire exclusive write lock before reading to prevent race conditions.
     // without this, two concurrent allocations could see the same IP as free.
     db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return IpError.AllocationFailed;
     errdefer db.exec("ROLLBACK;", .{}, .{}) catch {};
 
-    // get all currently allocated IPs, sorted
-    const CountRow = struct { count: i64 };
-    const count_result = (db.one(
-        CountRow,
-        "SELECT COUNT(*) AS count FROM ip_allocations;",
-        .{},
-        .{},
-    ) catch return IpError.AllocationFailed) orelse return IpError.AllocationFailed;
+    // fetch all allocated IPs in one query and mark them in a bitset.
+    // bitset maps the offset within 10.42.0.0/16: offset = ip[2]*256 + ip[3].
+    // 65536 bits = 8KB on the stack — trivial.
+    var allocated = std.StaticBitSet(65536).initEmpty();
+    var count: usize = 0;
 
-    if (count_result.count >= 65533) return IpError.SubnetExhausted; // 10.42.0.2 to 10.42.255.254
+    const IpRow = struct { ip_address: sqlite.Text };
+    var stmt = db.prepare("SELECT ip_address FROM ip_allocations;") catch
+        return IpError.AllocationFailed;
+    defer stmt.deinit();
 
-    // find the lowest unused IP by trying sequentially.
-    // start at 10.42.0.2 and check each address.
+    var iter = stmt.iterator(IpRow, .{}) catch return IpError.AllocationFailed;
+    while (iter.nextAlloc(std.heap.page_allocator, .{}) catch return IpError.AllocationFailed) |row| {
+        defer std.heap.page_allocator.free(row.ip_address.data);
+        if (parseIp(row.ip_address.data)) |addr| {
+            if (addr[0] == 10 and addr[1] == 42) {
+                const offset = @as(usize, addr[2]) * 256 + addr[3];
+                allocated.set(offset);
+            }
+        }
+        count += 1;
+    }
+
+    if (count >= 65533) return IpError.SubnetExhausted;
+
+    // find the first gap starting at 10.42.0.2, following the same
+    // increment logic as before: .2-.254, then .1-.254 per /24 block.
     var ip = [4]u8{ 10, 42, 0, 2 };
-
-    // we iterate through the address space checking for gaps.
-    // with <65k addresses this is fine.
     while (true) {
-        var ip_buf: [16]u8 = undefined;
-        const ip_str = formatIp(ip, &ip_buf);
-
-        const ExistsRow = struct { count: i64 };
-        const exists = (db.one(
-            ExistsRow,
-            "SELECT COUNT(*) AS count FROM ip_allocations WHERE ip_address = ?;",
-            .{},
-            .{ip_str},
-        ) catch return IpError.AllocationFailed) orelse return IpError.AllocationFailed;
-
-        if (exists.count == 0) break; // found a free one
-
-        // increment IP
+        const offset = @as(usize, ip[2]) * 256 + ip[3];
+        if (!allocated.isSet(offset)) break; // found a free one
         if (!incrementIp(&ip)) return IpError.SubnetExhausted;
     }
 
@@ -133,33 +135,47 @@ pub fn allocate(db: *sqlite.Db, container_id: []const u8) IpError![4]u8 {
 /// skipping any IPs already in ip_allocations.
 ///
 /// uses BEGIN IMMEDIATE for atomicity (same as allocate()).
+///
+/// fetches all IPs in the subnet with a single query (filtered by
+/// the /24 prefix) and finds the first gap using a bitset.
 pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: SubnetConfig) IpError![4]u8 {
     db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return IpError.AllocationFailed;
     errdefer db.exec("ROLLBACK;", .{}, .{}) catch {};
 
+    // build a LIKE prefix to filter only IPs in this /24.
+    // e.g. node_id=3 → "10.42.3.%"
+    var prefix_buf: [16]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "10.42.{d}.%", .{config.node_id}) catch
+        return IpError.AllocationFailed;
+
+    // bitset for a /24: 256 bits = 32 bytes. offset = last octet.
+    var allocated = std.StaticBitSet(256).initEmpty();
+
+    const IpRow = struct { ip_address: sqlite.Text };
+    var stmt = db.prepare("SELECT ip_address FROM ip_allocations WHERE ip_address LIKE ?;") catch
+        return IpError.AllocationFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(IpRow, .{prefix}) catch return IpError.AllocationFailed;
+    while (iter.nextAlloc(std.heap.page_allocator, .{}) catch return IpError.AllocationFailed) |row| {
+        defer std.heap.page_allocator.free(row.ip_address.data);
+        if (parseIp(row.ip_address.data)) |addr| {
+            allocated.set(addr[3]);
+        }
+    }
+
+    // find first gap in the range
     var current = config.range_start;
-
     while (true) {
-        var ip_buf: [16]u8 = undefined;
-        const ip_str = formatIp(current, &ip_buf);
-
-        const ExistsRow = struct { count: i64 };
-        const exists = (db.one(
-            ExistsRow,
-            "SELECT COUNT(*) AS count FROM ip_allocations WHERE ip_address = ?;",
-            .{},
-            .{ip_str},
-        ) catch return IpError.AllocationFailed) orelse return IpError.AllocationFailed;
-
-        if (exists.count == 0) {
+        if (!allocated.isSet(current[3])) {
             // found a free address — insert it
-            var insert_buf: [16]u8 = undefined;
-            const insert_str = formatIp(current, &insert_buf);
+            var ip_buf: [16]u8 = undefined;
+            const ip_str = formatIp(current, &ip_buf);
 
             db.exec(
                 "INSERT INTO ip_allocations (container_id, ip_address, allocated_at) VALUES (?, ?, ?);",
                 .{},
-                .{ container_id, insert_str, @as(i64, std.time.timestamp()) },
+                .{ container_id, ip_str, @as(i64, std.time.timestamp()) },
             ) catch return IpError.AllocationFailed;
 
             db.exec("COMMIT;", .{}, .{}) catch return IpError.AllocationFailed;
@@ -167,7 +183,6 @@ pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: Subn
             return current;
         }
 
-        // move to next address, but stay within the subnet range
         if (!incrementWithinRange(&current, config.range_end)) {
             return IpError.SubnetExhausted;
         }
