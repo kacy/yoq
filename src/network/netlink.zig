@@ -91,8 +91,21 @@ pub const IFLA = struct {
     pub const MASTER: u16 = 10;
     pub const LINKINFO: u16 = 18;
     pub const NET_NS_PID: u16 = 19;
+    pub const XDP: u16 = 43;
     pub const INFO_KIND: u16 = 1;
     pub const INFO_DATA: u16 = 2;
+};
+
+/// XDP attribute types (IFLA_XDP_*)
+pub const IFLA_XDP = struct {
+    pub const FD: u16 = 1;
+    pub const ATTACHED: u16 = 2;
+    pub const FLAGS: u16 = 3;
+};
+
+/// XDP attachment flags
+pub const XDP_FLAGS = struct {
+    pub const SKB_MODE: u32 = 1 << 1;
 };
 
 /// veth-specific attribute
