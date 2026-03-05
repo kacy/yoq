@@ -64,6 +64,11 @@ pub fn run(workload_fn: WorkloadFn, ctx: ?*anyopaque) u8 {
 /// wait for children in a loop. reaps zombies from any process in the
 /// PID namespace. exits when the workload (identified by its PID) exits.
 fn reapLoop(target_pid: i32) u8 {
+    // track consecutive unexpected errors to avoid infinite busy loops.
+    // if wait4 returns an errno we don't handle (not EINTR, not ECHILD),
+    // we'd spin at 100% CPU. bail after 10 consecutive failures.
+    var unexpected_errors: u32 = 0;
+
     while (true) {
         var status: u32 = 0;
 
@@ -78,10 +83,15 @@ fn reapLoop(target_pid: i32) u8 {
 
         if (syscall_util.isError(rc)) {
             const errno = syscall_util.getErrno(rc);
-            if (errno == 4) continue; // EINTR — signal interrupted, retry
-            if (errno == 10) return 0; // ECHILD — no more children
+            if (errno == @intFromEnum(linux.E.INTR)) continue;
+            if (errno == @intFromEnum(linux.E.CHILD)) return 0; // no more children
+            unexpected_errors += 1;
+            if (unexpected_errors >= 10) return 1;
             continue;
         }
+
+        // successful wait — reset error counter
+        unexpected_errors = 0;
 
         const exited_pid: i32 = @intCast(@as(isize, @bitCast(rc)));
 

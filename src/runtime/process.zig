@@ -51,7 +51,7 @@ pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
 
         if (syscall_util.isError(rc)) {
             // EINTR: a signal interrupted the wait — just retry
-            if (syscall_util.getErrno(rc) == 4) continue;
+            if (syscall_util.getErrno(rc) == @intFromEnum(linux.E.INTR)) continue;
             return ProcessError.WaitFailed;
         }
 

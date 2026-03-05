@@ -143,11 +143,13 @@ pub const Container = struct {
                 self.status = .stopped;
                 self.exit_code = code;
                 self.pid = null;
+                active_pid.store(0, .release);
             },
             .signaled => {
                 self.status = .stopped;
                 self.exit_code = 128; // convention for signal death
                 self.pid = null;
+                active_pid.store(0, .release);
             },
             .running => {},
         }
