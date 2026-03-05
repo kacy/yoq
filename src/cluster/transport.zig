@@ -48,11 +48,17 @@ const InstallSnapshotReply = types.InstallSnapshotReply;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
 pub const TransportError = error{
+    /// TCP connection to a peer could not be established
     ConnectFailed,
+    /// failed to write the full message to the peer socket
     SendFailed,
+    /// failed to read a complete message from an incoming connection
     ReceiveFailed,
+    /// received data could not be decoded as a valid raft message
     InvalidMessage,
+    /// HMAC verification failed — shared key mismatch or tampered message
     AuthenticationFailed,
+    /// the target NodeId has no known address in the peer table
     PeerNotFound,
 };
 

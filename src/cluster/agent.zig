@@ -38,7 +38,9 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 
 pub const AgentError = error{
+    /// POST /agents/register returned a non-200 status or connection failed
     RegisterFailed,
+    /// the registration response could not be parsed (missing or malformed agent ID)
     InvalidResponse,
 };
 

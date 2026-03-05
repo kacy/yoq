@@ -177,7 +177,9 @@ pub fn deleteAgentAssignmentsSql(buf: []u8, agent_id: []const u8) ![]const u8 {
 // -- node_id assignment --
 
 pub const NodeIdError = error{
+    /// all 254 node IDs (1-254) are already assigned to existing agents
     NoAvailableNodeId,
+    /// failed to query the agents table for existing node_id values
     QueryFailed,
 };
 

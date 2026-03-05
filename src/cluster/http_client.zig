@@ -12,10 +12,15 @@ const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
 pub const HttpClientError = error{
+    /// TCP connection to the server could not be established
     ConnectFailed,
+    /// failed to write the HTTP request to the socket
     SendFailed,
+    /// failed to read any response bytes from the server
     ReceiveFailed,
+    /// response body exceeds the 64KB read buffer
     ResponseTooLarge,
+    /// response does not start with a valid HTTP status line
     InvalidResponse,
 };
 

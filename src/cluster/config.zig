@@ -16,8 +16,11 @@ pub const NodeConfig = node_mod.NodeConfig;
 pub const PeerConfig = node_mod.PeerConfig;
 
 pub const ConfigError = error{
+    /// peer string does not match the expected id@host:port format
     InvalidPeerFormat,
+    /// port number is out of the valid u16 range
     InvalidPort,
+    /// could not create or access the cluster data directory
     DataDirFailed,
 };
 

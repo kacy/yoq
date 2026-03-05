@@ -29,13 +29,18 @@ const LogIndex = types.LogIndex;
 const SnapshotMeta = types.SnapshotMeta;
 
 pub const StateMachineError = error{
+    /// could not open or initialize the replicated state machine database
     DbOpenFailed,
 };
 
 pub const SnapshotError = error{
+    /// the SQLite Online Backup API (sqlite3_backup_init/step/finish) failed
     BackupFailed,
+    /// could not read or write the snapshot file on disk
     IoError,
+    /// snapshot data is too short to contain the required header
     InvalidSnapshot,
+    /// snapshot header claims more sqlite data than the file contains
     CorruptSnapshot,
 };
 
