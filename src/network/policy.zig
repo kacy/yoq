@@ -3,6 +3,12 @@
 // bridges the gap between service-level policy rules (stored in SQLite
 // as service name pairs) and the IP-level BPF maps that enforce them.
 //
+// default behavior: all traffic between containers is ALLOWED.
+// network policies are opt-in — calling isolate() on a source IP
+// switches it to allow-only mode, where only explicitly permitted
+// destinations are reachable. containers without any policy rules
+// can communicate freely with all other containers.
+//
 // service names are resolved to IPs via store.lookupServiceNames().
 // BPF maps are updated when:
 //   - policies are added/removed (full sync from SQLite)
