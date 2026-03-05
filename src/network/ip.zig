@@ -68,7 +68,15 @@ pub fn subnetForNode(node_id: u8) SubnetConfig {
 
 /// allocate the next available IP for a container.
 /// finds the lowest unused address in 10.42.0.2 — 10.42.255.254.
+///
+/// uses BEGIN IMMEDIATE to acquire a write lock before reading,
+/// preventing concurrent allocations from seeing the same free IP.
 pub fn allocate(db: *sqlite.Db, container_id: []const u8) IpError![4]u8 {
+    // acquire exclusive write lock before reading to prevent race conditions.
+    // without this, two concurrent allocations could see the same IP as free.
+    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return IpError.AllocationFailed;
+    errdefer db.exec("ROLLBACK;", .{}, .{}) catch {};
+
     // get all currently allocated IPs, sorted
     const CountRow = struct { count: i64 };
     const count_result = (db.one(
@@ -114,6 +122,8 @@ pub fn allocate(db: *sqlite.Db, container_id: []const u8) IpError![4]u8 {
         .{ container_id, ip_str, @as(i64, std.time.timestamp()) },
     ) catch return IpError.AllocationFailed;
 
+    db.exec("COMMIT;", .{}, .{}) catch return IpError.AllocationFailed;
+
     return ip;
 }
 
@@ -121,7 +131,12 @@ pub fn allocate(db: *sqlite.Db, container_id: []const u8) IpError![4]u8 {
 /// used in cluster mode where each node has its own /24 range.
 /// walks the range from config.range_start to config.range_end,
 /// skipping any IPs already in ip_allocations.
+///
+/// uses BEGIN IMMEDIATE for atomicity (same as allocate()).
 pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: SubnetConfig) IpError![4]u8 {
+    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return IpError.AllocationFailed;
+    errdefer db.exec("ROLLBACK;", .{}, .{}) catch {};
+
     var current = config.range_start;
 
     while (true) {
@@ -146,6 +161,8 @@ pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: Subn
                 .{},
                 .{ container_id, insert_str, @as(i64, std.time.timestamp()) },
             ) catch return IpError.AllocationFailed;
+
+            db.exec("COMMIT;", .{}, .{}) catch return IpError.AllocationFailed;
 
             return current;
         }
