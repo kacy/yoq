@@ -78,8 +78,8 @@ fn reapLoop(target_pid: i32) u8 {
 
         if (syscall_util.isError(rc)) {
             const errno = syscall_util.getErrno(rc);
-            if (errno == 4) continue; // EINTR — signal interrupted, retry
-            if (errno == 10) return 0; // ECHILD — no more children
+            if (errno == @intFromEnum(linux.E.INTR)) continue;
+            if (errno == @intFromEnum(linux.E.CHILD)) return 0; // no more children
             continue;
         }
 
