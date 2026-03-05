@@ -64,6 +64,13 @@ pub fn mapLookup(map_fd: posix.fd_t, key: []const u8, value: []u8) bool {
     return true;
 }
 
+/// get the next key in a BPF map (for iteration).
+/// returns true if a next key was found.
+pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
+    const found = BPF.map_get_next_key(map_fd, key, next_key) catch return false;
+    return found;
+}
+
 /// insert or update a key/value pair in a BPF map.
 pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) EbpfError!void {
     BPF.map_update_elem(map_fd, key, value, BPF.ANY) catch |e| {
@@ -597,10 +604,29 @@ pub const IpMetrics = extern struct {
     bytes: u64,
 };
 
+/// per-service-pair key as stored in the BPF map.
+/// matches struct pair_key in bpf/metrics.c.
+pub const PairKey = extern struct {
+    src_ip: u32,
+    dst_ip: u32,
+    dst_port: u16,
+    pad: u16 = 0,
+};
+
+/// per-service-pair metrics as stored in the BPF map.
+/// matches struct pair_metrics in bpf/metrics.c.
+pub const PairMetrics = extern struct {
+    packets: u64,
+    bytes: u64,
+    connections: u64,
+    errors: u64,
+};
+
 /// state for the loaded metrics collector program.
 pub const MetricsCollector = struct {
     prog_fd: posix.fd_t,
     metrics_fd: posix.fd_t,
+    pair_metrics_fd: posix.fd_t,
     if_index: u32,
 
     /// read packet/byte counters for a single IP.
@@ -614,11 +640,51 @@ pub const MetricsCollector = struct {
         return null;
     }
 
+    /// iterate all entries in the pair_metrics_map.
+    /// calls the callback for each (key, value) pair. stops early if callback
+    /// returns false. returns the number of entries visited.
+    pub fn readPairMetrics(
+        self: *const MetricsCollector,
+        buf: []PairEntry,
+    ) usize {
+        var count: usize = 0;
+        var key: PairKey = std.mem.zeroes(PairKey);
+        var next_key: PairKey = undefined;
+        var first = true;
+
+        while (count < buf.len) {
+            const found = if (first)
+                mapGetNextKey(self.pair_metrics_fd, std.mem.asBytes(&key), std.mem.asBytes(&next_key))
+            else
+                mapGetNextKey(self.pair_metrics_fd, std.mem.asBytes(&key), std.mem.asBytes(&next_key));
+
+            if (!found) break;
+            first = false;
+
+            var value: PairMetrics = undefined;
+            if (mapLookup(self.pair_metrics_fd, std.mem.asBytes(&next_key), std.mem.asBytes(&value))) {
+                buf[count] = .{ .key = next_key, .value = value };
+                count += 1;
+            }
+
+            key = next_key;
+        }
+
+        return count;
+    }
+
     pub fn deinit(self: *MetricsCollector) void {
         detachTC(self.if_index) catch {};
         posix.close(self.prog_fd);
         posix.close(self.metrics_fd);
+        posix.close(self.pair_metrics_fd);
     }
+};
+
+/// a single pair metrics entry (key + value).
+pub const PairEntry = struct {
+    key: PairKey,
+    value: PairMetrics,
 };
 
 /// global metrics collector instance.
@@ -628,17 +694,27 @@ var metrics_collector: ?MetricsCollector = null;
 pub fn loadMetricsCollector(bridge_if_index: u32) EbpfError!void {
     if (metrics_collector != null) return;
 
-    // create the metrics_map (LRU hash)
-    const map_def = metrics_prog.maps[0];
+    // create the metrics_map (LRU hash, per-IP)
+    const map0_def = metrics_prog.maps[0];
     const map_fd = try createMap(
-        @enumFromInt(map_def.map_type),
-        map_def.key_size,
-        map_def.value_size,
-        map_def.max_entries,
+        @enumFromInt(map0_def.map_type),
+        map0_def.key_size,
+        map0_def.value_size,
+        map0_def.max_entries,
     );
     errdefer posix.close(map_fd);
 
-    var map_fds = [_]posix.fd_t{map_fd};
+    // create the pair_metrics_map (LRU hash, per-pair)
+    const map1_def = metrics_prog.maps[1];
+    const pair_fd = try createMap(
+        @enumFromInt(map1_def.map_type),
+        map1_def.key_size,
+        map1_def.value_size,
+        map1_def.max_entries,
+    );
+    errdefer posix.close(pair_fd);
+
+    var map_fds = [_]posix.fd_t{ map_fd, pair_fd };
     const prog_fd = try loadProgram(metrics_prog, &map_fds);
     errdefer posix.close(prog_fd);
 
@@ -648,6 +724,7 @@ pub fn loadMetricsCollector(bridge_if_index: u32) EbpfError!void {
     metrics_collector = .{
         .prog_fd = prog_fd,
         .metrics_fd = map_fd,
+        .pair_metrics_fd = pair_fd,
         .if_index = bridge_if_index,
     };
 
@@ -912,11 +989,27 @@ test "IpMetrics struct size matches BPF map value" {
     try std.testing.expectEqual(@as(u32, 16), metrics_prog.maps[0].value_size);
 }
 
+test "PairKey struct size matches BPF map key" {
+    // must match metrics.c: struct pair_key
+    // src_ip (4) + dst_ip (4) + dst_port (2) + pad (2) = 12 bytes
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(PairKey));
+    try std.testing.expectEqual(@as(u32, 12), metrics_prog.maps[1].key_size);
+}
+
+test "PairMetrics struct size matches BPF map value" {
+    // must match metrics.c: struct pair_metrics
+    // packets (8) + bytes (8) + connections (8) + errors (8) = 32 bytes
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PairMetrics));
+    try std.testing.expectEqual(@as(u32, 32), metrics_prog.maps[1].value_size);
+}
+
 test "metrics_prog bytecode has expected structure" {
-    try std.testing.expectEqual(@as(usize, 1), metrics_prog.maps.len);
+    try std.testing.expectEqual(@as(usize, 2), metrics_prog.maps.len);
     try std.testing.expectEqualStrings("metrics_map", metrics_prog.maps[0].name);
+    try std.testing.expectEqualStrings("pair_metrics_map", metrics_prog.maps[1].name);
     // LRU_HASH = 9
     try std.testing.expectEqual(@as(u32, 9), metrics_prog.maps[0].map_type);
+    try std.testing.expectEqual(@as(u32, 9), metrics_prog.maps[1].map_type);
     try std.testing.expectEqual(@as(u32, 4), metrics_prog.maps[0].key_size);
     try std.testing.expect(metrics_prog.insns.len >= 2);
 }
