@@ -301,6 +301,15 @@ pub fn setupContainer(
     const ip_str = ip.formatIp(container_ip, &ip_str_buf);
 
     for (config.port_maps) |pm| {
+        // try XDP port mapping first (faster path)
+        if (ebpf.getPortMapper()) |mapper| {
+            const proto: u8 = switch (pm.protocol) {
+                .tcp => 6, // IPPROTO_TCP
+                .udp => 17, // IPPROTO_UDP
+            };
+            mapper.addMapping(pm.host_port, proto, container_ip, pm.container_port);
+        }
+        // always set up iptables as fallback / for return traffic SNAT
         nat.addPortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat()) catch |e| {
             log.warn("failed to add port map {}:{} for {s}: {}", .{ pm.host_port, pm.container_port, container_id, e });
         };
@@ -347,6 +356,13 @@ pub fn teardownContainer(
     const ip_str = ip.formatIp(net_info.ip, &ip_str_buf);
 
     for (config.port_maps) |pm| {
+        if (ebpf.getPortMapper()) |mapper| {
+            const proto: u8 = switch (pm.protocol) {
+                .tcp => 6,
+                .udp => 17,
+            };
+            mapper.removeMapping(pm.host_port, proto);
+        }
         nat.removePortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat());
     }
 
@@ -439,6 +455,12 @@ fn loadDnsInterceptorOnBridge() void {
 
     ebpf.loadLoadBalancer(if_index) catch |e| {
         log.info("ebpf load balancer not loaded: {}", .{e});
+    };
+
+    // try loading XDP port mapper for fast port forwarding.
+    // falls back to iptables-only if XDP isn't available.
+    ebpf.loadPortMapper(if_index) catch |e| {
+        log.info("ebpf port mapper not loaded (using iptables): {}", .{e});
     };
 
     // sync existing network policies into BPF maps

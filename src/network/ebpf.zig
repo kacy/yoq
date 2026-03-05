@@ -163,6 +163,55 @@ pub fn loadProgram(
     return prog_fd;
 }
 
+/// load a BPF program with a specific program type.
+///
+/// like loadProgram but allows specifying the BPF program type
+/// (e.g. .xdp instead of the default .sched_cls).
+pub fn loadProgramWithType(
+    comptime prog: type,
+    map_fds: []posix.fd_t,
+    prog_type: BPF.ProgType,
+) EbpfError!posix.fd_t {
+    const insns = prog.insns;
+    const relocs = prog.relocs;
+    const maps = prog.maps;
+
+    if (insns.len == 0) return EbpfError.ProgramLoadFailed;
+    if (insns.len > max_insns) return EbpfError.ProgramLoadFailed;
+
+    var mutable_insns: [insns.len]BPF.Insn = insns;
+
+    for (relocs) |reloc| {
+        if (reloc.insn_idx >= insns.len) continue;
+        if (reloc.map_idx >= maps.len) continue;
+        patchMapFd(&mutable_insns[reloc.insn_idx], map_fds[reloc.map_idx]);
+    }
+
+    var log_buf: [4096]u8 = undefined;
+    var bpf_log = BPF.Log{
+        .level = 1,
+        .buf = &log_buf,
+    };
+
+    const prog_fd = BPF.prog_load(
+        prog_type,
+        &mutable_insns,
+        &bpf_log,
+        "GPL",
+        0,
+        0,
+    ) catch |e| {
+        const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
+        if (log_end > 0) {
+            log.warn("ebpf: verifier output: {s}", .{log_buf[0..log_end]});
+        }
+        log.warn("ebpf: prog_load failed: {}", .{e});
+        return EbpfError.ProgramLoadFailed;
+    };
+
+    return prog_fd;
+}
+
 /// patch a ld_imm64 instruction to reference a map fd.
 ///
 /// ld_imm64 is a two-instruction wide load. the map fd goes in the
@@ -1003,6 +1052,188 @@ pub fn getPolicyEnforcer() ?*const PolicyEnforcer {
     return null;
 }
 
+// -- XDP port mapper --
+//
+// XDP-based port mapping for fast container port forwarding.
+// rewrites destination IP and port for inbound traffic, replacing
+// iptables DNAT rules. uses SKB mode for compatibility with
+// virtual interfaces (bridges, veths).
+//
+// falls back to iptables if XDP isn't available (old kernel,
+// no CAP_BPF, or interface doesn't support XDP).
+
+const port_map_prog = @import("bpf/port_map.zig");
+
+/// port mapping key — matches struct port_key in bpf/port_map.c.
+pub const PortKey = extern struct {
+    port: u16, // network byte order
+    protocol: u8, // IPPROTO_TCP (6) or IPPROTO_UDP (17)
+    _pad: u8 = 0,
+};
+
+/// port mapping target — matches struct port_target in bpf/port_map.c.
+pub const PortTarget = extern struct {
+    dst_ip: u32, // network byte order
+    dst_port: u16, // network byte order
+    _pad: u16 = 0,
+};
+
+/// state for the loaded XDP port mapping program.
+pub const PortMapper = struct {
+    prog_fd: posix.fd_t,
+    map_fd: posix.fd_t,
+    if_index: u32,
+
+    /// add a port mapping: host_port -> container_ip:container_port.
+    pub fn addMapping(self: *const PortMapper, host_port: u16, protocol: u8, container_ip: [4]u8, container_port: u16) void {
+        var key = PortKey{
+            .port = std.mem.nativeToBig(u16, host_port),
+            .protocol = protocol,
+        };
+        var target = PortTarget{
+            .dst_ip = ipToNetworkOrder(container_ip),
+            .dst_port = std.mem.nativeToBig(u16, container_port),
+        };
+        mapUpdate(self.map_fd, std.mem.asBytes(&key), std.mem.asBytes(&target)) catch {};
+    }
+
+    /// remove a port mapping.
+    pub fn removeMapping(self: *const PortMapper, host_port: u16, protocol: u8) void {
+        var key = PortKey{
+            .port = std.mem.nativeToBig(u16, host_port),
+            .protocol = protocol,
+        };
+        mapDelete(self.map_fd, std.mem.asBytes(&key));
+    }
+
+    pub fn deinit(self: *PortMapper) void {
+        detachXdp(self.if_index) catch {};
+        posix.close(self.prog_fd);
+        posix.close(self.map_fd);
+    }
+};
+
+var port_mapper: ?PortMapper = null;
+
+/// load and attach the XDP port mapping program to an interface.
+pub fn loadPortMapper(if_index: u32) EbpfError!void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
+    if (port_mapper != null) return;
+
+    const map_fd = try createMap(
+        @enumFromInt(port_map_prog.maps[0].map_type),
+        port_map_prog.maps[0].key_size,
+        port_map_prog.maps[0].value_size,
+        port_map_prog.maps[0].max_entries,
+    );
+    errdefer posix.close(map_fd);
+
+    var map_fds = [_]posix.fd_t{map_fd};
+    const prog_fd = try loadProgramWithType(port_map_prog, &map_fds, .xdp);
+    errdefer posix.close(prog_fd);
+
+    attachXdp(if_index, prog_fd) catch |e| {
+        log.warn("ebpf: failed to attach XDP on ifindex {d}: {}", .{ if_index, e });
+        return EbpfError.AttachFailed;
+    };
+
+    port_mapper = .{
+        .prog_fd = prog_fd,
+        .map_fd = map_fd,
+        .if_index = if_index,
+    };
+
+    log.info("ebpf: port mapper loaded on ifindex {d}", .{if_index});
+}
+
+pub fn unloadPortMapper() void {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
+    if (port_mapper) |*pm| {
+        pm.deinit();
+        port_mapper = null;
+        log.info("ebpf: port mapper unloaded", .{});
+    }
+}
+
+pub fn getPortMapper() ?*const PortMapper {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+
+    if (port_mapper) |*pm| {
+        return pm;
+    }
+    return null;
+}
+
+// -- XDP attach/detach --
+
+/// attach an XDP program to an interface using SKB mode.
+/// SKB mode (generic XDP) works on all interface types including
+/// virtual ones like bridges and veths.
+pub fn attachXdp(if_index: u32, prog_fd: posix.fd_t) EbpfError!void {
+    const fd = nl.openSocket() catch return EbpfError.AttachFailed;
+    defer posix.close(fd);
+
+    var buf: [nl.buf_size]u8 align(4) = undefined;
+    var mb = nl.MessageBuilder.init(&buf);
+
+    const hdr = mb.putHeader(
+        .RTM_NEWLINK,
+        nl.NLM_F.REQUEST | nl.NLM_F.ACK,
+        linux.ifinfomsg,
+    ) catch return EbpfError.AttachFailed;
+
+    const info = mb.getPayload(hdr, linux.ifinfomsg);
+    info.family = 0;
+    info.index = @bitCast(if_index);
+
+    // nested IFLA_XDP attribute
+    const xdp_attr = mb.startNested(hdr, nl.IFLA.XDP) catch return EbpfError.AttachFailed;
+    mb.putAttrU32(hdr, nl.IFLA_XDP.FD, @intCast(prog_fd)) catch return EbpfError.AttachFailed;
+    mb.putAttrU32(hdr, nl.IFLA_XDP.FLAGS, nl.XDP_FLAGS.SKB_MODE) catch return EbpfError.AttachFailed;
+    mb.endNested(xdp_attr);
+
+    nl.sendAndCheck(fd, mb.message()) catch |e| {
+        log.warn("ebpf: XDP attach failed on ifindex {d}: {}", .{ if_index, e });
+        return EbpfError.AttachFailed;
+    };
+}
+
+/// detach XDP program from an interface.
+pub fn detachXdp(if_index: u32) EbpfError!void {
+    const fd = nl.openSocket() catch return EbpfError.DetachFailed;
+    defer posix.close(fd);
+
+    var buf: [nl.buf_size]u8 align(4) = undefined;
+    var mb = nl.MessageBuilder.init(&buf);
+
+    const hdr = mb.putHeader(
+        .RTM_NEWLINK,
+        nl.NLM_F.REQUEST | nl.NLM_F.ACK,
+        linux.ifinfomsg,
+    ) catch return EbpfError.DetachFailed;
+
+    const info = mb.getPayload(hdr, linux.ifinfomsg);
+    info.family = 0;
+    info.index = @bitCast(if_index);
+
+    // set fd to -1 to detach
+    const xdp_attr = mb.startNested(hdr, nl.IFLA.XDP) catch return EbpfError.DetachFailed;
+    const neg_one: u32 = @bitCast(@as(i32, -1));
+    mb.putAttrU32(hdr, nl.IFLA_XDP.FD, neg_one) catch return EbpfError.DetachFailed;
+    mb.putAttrU32(hdr, nl.IFLA_XDP.FLAGS, nl.XDP_FLAGS.SKB_MODE) catch return EbpfError.DetachFailed;
+    mb.endNested(xdp_attr);
+
+    nl.sendAndCheck(fd, mb.message()) catch |e| {
+        log.warn("ebpf: XDP detach failed on ifindex {d}: {}", .{ if_index, e });
+        return EbpfError.DetachFailed;
+    };
+}
+
 // -- capability check --
 
 /// check if BPF is supported on this system.
@@ -1170,4 +1401,21 @@ test "createMap returns fd or error" {
     } else |_| {
         // expected in unprivileged environments
     }
+}
+
+test "PortKey struct size matches BPF map key" {
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(PortKey));
+    try std.testing.expectEqual(@as(u32, 4), port_map_prog.maps[0].key_size);
+}
+
+test "PortTarget struct size matches BPF map value" {
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(PortTarget));
+    try std.testing.expectEqual(@as(u32, 8), port_map_prog.maps[0].value_size);
+}
+
+test "port_map_prog bytecode has expected structure" {
+    try std.testing.expectEqual(@as(usize, 1), port_map_prog.maps.len);
+    try std.testing.expectEqualStrings("port_map", port_map_prog.maps[0].name);
+    try std.testing.expectEqual(@as(u32, 1), port_map_prog.maps[0].map_type); // HASH
+    try std.testing.expect(port_map_prog.insns.len >= 2);
 }

@@ -78,6 +78,7 @@ pub fn build(b: *std.Build) void {
         "lb",
         "policy",
         "metrics",
+        "port_map",
     };
 
     for (bpf_programs) |prog| {
