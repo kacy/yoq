@@ -8,7 +8,7 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 ## status
 
-**~85% complete.** ~43k lines of Zig, ~920 tests. phases 1-6 are substantially complete. phase 7 production features are roughly half done.
+**~88% complete.** ~44k lines of Zig, ~941 tests. phases 1-4 and 6 are complete or nearly so. phase 5 and 7 have remaining work.
 
 **container runtime (phase 1) — ~98%:** containers run in isolated namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. process supervision, log capture, and exec into running containers all work. rootless containers via user namespace uid/gid mappings are implemented.
 
@@ -16,7 +16,7 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 **networking (phase 3) — ~85%:** each container gets its own IP on a bridge network (10.42.0.0/16), with iptables NAT for outbound traffic and port mapping for inbound. eBPF programs handle DNS interception for service discovery, round-robin load balancing across replicas, per-IP and per-service-pair metrics collection, and network policy enforcement (allow/deny between services). WireGuard mesh for cross-node networking with automatic key exchange on node join. gap: XDP port mapping program not implemented.
 
-**build engine (phase 4) — ~90%:** Dockerfile parser supports all major directives (FROM, RUN, COPY, ADD, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD) and produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order. `--build-arg` substitution and multi-stage builds (`COPY --from`) are supported. gap: TOML-based declarative build manifest not implemented.
+**build engine (phase 4) — complete:** Dockerfile parser supports all major directives (FROM, RUN, COPY, ADD, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD) and produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order. `--build-arg` substitution and multi-stage builds (`COPY --from`) are supported. ADD auto-extracts tar archives (gzip, bzip2, xz, zstd, plain tar) with URL source support. ONBUILD triggers are stored in image config and executed when used as a base image. TOML declarative build manifest (`--format toml`) provides an alternative to Dockerfiles with automatic stage dependency resolution.
 
 **manifest + dev mode (phase 5) — ~80%:** TOML manifest format defines multi-service applications with dependency ordering, health checks, readiness probes, rolling update strategies, and secret references. `yoq up` starts all services, `yoq down` stops them in reverse order. dev mode (`--dev`) watches source directories with inotify and hot-restarts containers on file changes. colored log multiplexing prefixes output with service names. rolling updates with automatic rollback on health check failure. gaps: workers and crons not implemented in manifest spec, `up <service>` (start individual service) not implemented.
 
@@ -45,6 +45,7 @@ yoq rmi <image>                      remove a pulled image
 
 # build
 yoq build [-t tag] [-f Dockerfile] . build an image from a Dockerfile
+                  [--format toml]   build from a TOML manifest
 
 # manifest
 yoq up [-f manifest.toml]            start services from manifest
@@ -144,6 +145,7 @@ src/
     dockerfile.zig         Dockerfile parser (FROM, RUN, COPY, ENV, etc.)
     engine.zig             build engine with content-hash caching
     context.zig            build context file hashing and copying
+    manifest.zig           TOML declarative build manifest
   manifest/
     spec.zig               manifest type definitions (services, volumes, ports)
     loader.zig             TOML manifest parser with dependency ordering
@@ -205,7 +207,6 @@ src/
 
 ### medium priority (completes phase promises)
 
-- TOML declarative build manifest
 - workers and crons in manifest spec
 
 ### lower priority (polish)
