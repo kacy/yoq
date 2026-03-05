@@ -164,7 +164,7 @@ pub const TlsProxy = struct {
 
     fn tlsAcceptLoop(self: *TlsProxy) void {
         while (self.running.load(.acquire)) {
-            const client_fd = posix.accept(self.tls_fd, null, null, .{}) catch |err| {
+            const client_fd = posix.accept(self.tls_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
                 if (!self.running.load(.acquire)) break;
                 log.warn("tls accept error: {}", .{err});
                 continue;
@@ -188,7 +188,7 @@ pub const TlsProxy = struct {
 
     fn httpAcceptLoop(self: *TlsProxy) void {
         while (self.running.load(.acquire)) {
-            const client_fd = posix.accept(self.http_fd, null, null, .{}) catch |err| {
+            const client_fd = posix.accept(self.http_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
                 if (!self.running.load(.acquire)) break;
                 log.warn("http accept error: {}", .{err});
                 continue;
@@ -241,16 +241,16 @@ pub const TlsProxy = struct {
         };
 
         // perform TLS handshake and proxy traffic
-        self.handleTlsSession(client_fd, client_hello, cert_result, backend) catch |err| {
+        self.handleTlsSession(client_hello, cert_result.cert_pem, cert_result.key_pem, backend) catch |err| {
             log.warn("TLS session error for {s}: {}", .{ server_name, err });
         };
     }
 
     fn handleTlsSession(
         self: *TlsProxy,
-        _: posix.fd_t, // client_fd — used once full handshake is wired
         client_hello: []const u8,
-        cert_result: struct { cert_pem: []u8, key_pem: []u8 },
+        cert_pem: []u8,
+        key_pem: []u8,
         backend_info: backend_mod.Backend,
     ) !void {
         _ = self;
@@ -283,7 +283,8 @@ pub const TlsProxy = struct {
         const traffic = handshake.deriveHandshakeTrafficSecrets(hs_secret, hello_hash);
 
         // the cert and keys are available for CertificateVerify signing
-        _ = cert_result;
+        _ = cert_pem;
+        _ = key_pem;
         _ = traffic;
 
         // connect to backend for proxying
