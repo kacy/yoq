@@ -31,6 +31,7 @@
 const std = @import("std");
 const record = @import("record.zig");
 
+const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const X25519 = std.crypto.dh.X25519;
 const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
 const HkdfSha384 = std.crypto.kdf.hkdf.Hkdf(HmacSha384);
@@ -288,6 +289,63 @@ pub fn buildCertificate(buf: []u8, cert_der: []const u8) HandshakeError!usize {
     // certificate extensions (none)
     writeU16(buf[pos..], 0);
     pos += 2;
+
+    return pos;
+}
+
+/// build a CertificateVerify message (RFC 8446 §4.4.3).
+///
+/// signs the transcript hash with the server's private key.
+/// signature algorithm: ecdsa_secp256r1_sha256 (0x0403).
+///
+/// signed content = 64 × 0x20 + "TLS 1.3, server CertificateVerify" + 0x00 + transcript_hash
+pub fn buildCertificateVerify(
+    buf: []u8,
+    transcript_hash: [hash_len]u8,
+    private_key: EcdsaP256.SecretKey,
+) HandshakeError!usize {
+    // build the content to sign (RFC 8446 §4.4.3)
+    var signed_content: [64 + 33 + 1 + hash_len]u8 = undefined;
+    defer std.crypto.secureZero(u8, &signed_content);
+
+    @memset(signed_content[0..64], 0x20); // 64 spaces
+    const context = "TLS 1.3, server CertificateVerify";
+    @memcpy(signed_content[64 .. 64 + context.len], context);
+    signed_content[64 + context.len] = 0x00; // separator
+    @memcpy(signed_content[64 + context.len + 1 ..], &transcript_hash);
+
+    // sign with ECDSA P-256
+    const kp = EcdsaP256.KeyPair.fromSecretKey(private_key) catch
+        return HandshakeError.KeyExchangeFailed;
+    const sig = kp.sign(&signed_content, null) catch
+        return HandshakeError.KeyExchangeFailed;
+
+    // DER-encode the signature
+    var der_sig_buf: [EcdsaP256.Signature.der_encoded_length_max]u8 = undefined;
+    const der_sig = sig.toDer(&der_sig_buf);
+
+    // message format: type(1) + length(3) + algorithm(2) + sig_len(2) + sig(N)
+    const body_len = 2 + 2 + der_sig.len;
+    const total = 4 + body_len;
+    if (buf.len < total) return HandshakeError.BufferTooSmall;
+
+    var pos: usize = 0;
+
+    // handshake header
+    buf[pos] = 0x0F; // CertificateVerify
+    pos += 1;
+    writeU24(buf[pos..], @intCast(body_len));
+    pos += 3;
+
+    // signature algorithm: ecdsa_secp256r1_sha256 (0x0403)
+    writeU16(buf[pos..], 0x0403);
+    pos += 2;
+
+    // signature length + data
+    writeU16(buf[pos..], @intCast(der_sig.len));
+    pos += 2;
+    @memcpy(buf[pos .. pos + der_sig.len], der_sig);
+    pos += der_sig.len;
 
     return pos;
 }
@@ -692,6 +750,51 @@ test "parseClientHelloFields with X25519 and TLS 1.3" {
 
     const expected_random = [_]u8{0xAA} ** 32;
     try std.testing.expectEqualSlices(u8, &expected_random, &info.client_random);
+}
+
+test "buildCertificateVerify produces valid structure" {
+    var buf: [512]u8 = undefined;
+    var transcript: [hash_len]u8 = undefined;
+    std.crypto.random.bytes(&transcript);
+
+    const kp = EcdsaP256.KeyPair.generate();
+    const len = try buildCertificateVerify(&buf, transcript, kp.secret_key);
+
+    // type byte: CertificateVerify (0x0F)
+    try std.testing.expectEqual(@as(u8, 0x0F), buf[0]);
+    // algorithm: ecdsa_secp256r1_sha256 (0x0403)
+    try std.testing.expectEqual(@as(u8, 0x04), buf[4]);
+    try std.testing.expectEqual(@as(u8, 0x03), buf[5]);
+    // length should be reasonable
+    try std.testing.expect(len > 10 and len < 200);
+}
+
+test "buildCertificateVerify different transcripts produce different output" {
+    var buf1: [512]u8 = undefined;
+    var buf2: [512]u8 = undefined;
+    var t1: [hash_len]u8 = undefined;
+    std.crypto.random.bytes(&t1);
+    var t2: [hash_len]u8 = undefined;
+    std.crypto.random.bytes(&t2);
+
+    const kp = EcdsaP256.KeyPair.generate();
+    const len1 = try buildCertificateVerify(&buf1, t1, kp.secret_key);
+    const len2 = try buildCertificateVerify(&buf2, t2, kp.secret_key);
+
+    // signatures should differ (different transcripts)
+    try std.testing.expect(!std.mem.eql(u8, buf1[0..len1], buf2[0..len2]));
+}
+
+test "buildCertificateVerify buffer too small" {
+    var buf: [4]u8 = undefined;
+    var transcript: [hash_len]u8 = undefined;
+    @memset(&transcript, 0);
+
+    const kp = EcdsaP256.KeyPair.generate();
+    try std.testing.expectError(
+        HandshakeError.BufferTooSmall,
+        buildCertificateVerify(&buf, transcript, kp.secret_key),
+    );
 }
 
 test "X25519 key exchange produces shared secret" {
