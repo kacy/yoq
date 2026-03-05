@@ -66,6 +66,18 @@ struct bpf_map_def SEC("maps") rr_counter = {
     .map_flags = 0,
 };
 
+// reverse conntrack: maps return-traffic tuples → original VIP.
+// populated on ingress alongside the forward conntrack entry.
+// key: reversed 5-tuple (backend=src, client=dst) matching return traffic.
+// value: original service VIP (u32, network byte order).
+struct bpf_map_def SEC("maps") rev_conntrack_map = {
+    .type = BPF_MAP_TYPE_LRU_HASH,
+    .key_size = sizeof(struct conn_key),
+    .value_size = 4,
+    .max_entries = 65536,
+    .map_flags = 0,
+};
+
 // -- helpers --
 
 // select a backend IP for a service using round-robin.
@@ -192,6 +204,19 @@ int lb_ingress(struct __sk_buff *skb)
         udp->check = 0;
     }
 
+    // populate reverse conntrack for egress SNAT.
+    // the reverse key matches what return traffic from the backend
+    // will look like: src=backend, dst=client.
+    struct conn_key rev_key = {
+        .src_ip = backend_ip,     // return traffic src = backend
+        .dst_ip = ip->saddr,      // return traffic dst = client (unchanged)
+        .src_port = dst_port,     // return traffic src_port = service port
+        .dst_port = src_port,     // return traffic dst_port = client port
+        .protocol = ip->protocol,
+    };
+    __u32 vip = old_daddr;        // the original VIP before DNAT
+    bpf_map_update_elem(&rev_conntrack_map, &rev_key, &vip, 0);
+
     return TC_ACT_OK;
 }
 
@@ -236,40 +261,46 @@ int lb_egress(struct __sk_buff *skb)
     }
 
     // -- reverse conntrack lookup --
-    // for return traffic, the roles are reversed:
-    // the backend is now the source, the client is the destination.
-    // we look up (dst_ip, src_ip, dst_port, src_port) to find the
-    // original service VIP.
+    // look up the reverse conntrack map to find the original VIP.
+    // the key matches the return traffic tuple exactly as populated
+    // by lb_ingress after DNAT.
     struct conn_key rev_key = {
-        .src_ip = ip->daddr,   // original client (now dst)
-        .dst_ip = ip->saddr,   // this should match backend_ip
-        .src_port = dst_port,  // original client port
-        .dst_port = src_port,  // original service port
+        .src_ip = ip->saddr,      // backend IP (source in return traffic)
+        .dst_ip = ip->daddr,      // client IP (destination in return traffic)
+        .src_port = src_port,     // service port
+        .dst_port = dst_port,     // client port
         .protocol = ip->protocol,
     };
 
-    // we need to find the original VIP for this backend.
-    // check if the source IP is a backend by seeing if any conntrack
-    // entry exists with this source as the backend value.
-    // instead, we do a simpler approach: look up by reversed tuple.
-    __u32 *vip = bpf_map_lookup_elem(&conntrack_map, &rev_key);
+    __u32 *vip = bpf_map_lookup_elem(&rev_conntrack_map, &rev_key);
     if (!vip)
         return TC_ACT_OK; // not a tracked connection
 
-    // the conntrack value is the backend IP. we need to SNAT
-    // src_ip from backend back to the VIP that the client expects.
-    // but the conntrack stores backend_ip as value and dst_ip (VIP) as key.
-    // so actually the reverse lookup gives us... the backend IP, not the VIP.
-    //
-    // for proper reverse NAT, we'd need a separate reverse map.
-    // for now, return traffic works because the client connects to
-    // a specific container IP (from DNS), and if only DNAT was done
-    // on ingress, the return traffic comes from the backend IP which
-    // the client kernel's conntrack can handle.
-    //
-    // TODO: add a reverse conntrack map for full SNAT support.
-    // for most container-to-container traffic within the bridge,
-    // this works without SNAT because both ends are on the same L2.
+    // SNAT: rewrite source IP from backend back to VIP
+    if (*vip == ip->saddr)
+        return TC_ACT_OK; // already correct, nothing to do
+
+    __u32 old_saddr = ip->saddr;
+    ip->saddr = *vip;
+
+    // update IP checksum (incremental)
+    bpf_l3_csum_replace(skb, (char *)&ip->check - (char *)data,
+                        old_saddr, *vip, 4);
+
+    // update L4 checksum
+    if (ip->protocol == IPPROTO_TCP) {
+        struct tcphdr *tcp = (void *)((char *)ip + ihl);
+        if ((void *)(tcp + 1) > data_end)
+            return TC_ACT_OK;
+        bpf_l4_csum_replace(skb, (char *)&tcp->check - (char *)data,
+                            old_saddr, *vip, 4 | 0x10);
+    } else {
+        struct udphdr *udp = (void *)((char *)ip + ihl);
+        if ((void *)(udp + 1) > data_end)
+            return TC_ACT_OK;
+        // UDP checksum is optional for IPv4 — zero it
+        udp->check = 0;
+    }
 
     return TC_ACT_OK;
 }

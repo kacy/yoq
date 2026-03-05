@@ -508,6 +508,7 @@ pub const LoadBalancer = struct {
     backends_fd: posix.fd_t,
     conntrack_fd: posix.fd_t,
     rr_counter_fd: posix.fd_t,
+    rev_conntrack_fd: posix.fd_t,
     if_index: u32,
 
     /// add a backend IP for a service VIP.
@@ -584,6 +585,7 @@ pub const LoadBalancer = struct {
         posix.close(self.backends_fd);
         posix.close(self.conntrack_fd);
         posix.close(self.rr_counter_fd);
+        posix.close(self.rev_conntrack_fd);
     }
 };
 
@@ -622,7 +624,15 @@ pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
     );
     errdefer posix.close(rr_counter_fd);
 
-    var map_fds = [_]posix.fd_t{ backends_fd, conntrack_fd, rr_counter_fd };
+    const rev_conntrack_fd = try createMap(
+        @enumFromInt(lb_prog.maps[3].map_type),
+        lb_prog.maps[3].key_size,
+        lb_prog.maps[3].value_size,
+        lb_prog.maps[3].max_entries,
+    );
+    errdefer posix.close(rev_conntrack_fd);
+
+    var map_fds = [_]posix.fd_t{ backends_fd, conntrack_fd, rr_counter_fd, rev_conntrack_fd };
     const prog_fd = try loadProgram(lb_prog, &map_fds);
     errdefer posix.close(prog_fd);
 
@@ -648,6 +658,7 @@ pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
         .backends_fd = backends_fd,
         .conntrack_fd = conntrack_fd,
         .rr_counter_fd = rr_counter_fd,
+        .rev_conntrack_fd = rev_conntrack_fd,
         .if_index = bridge_if_index,
     };
 
@@ -1091,10 +1102,11 @@ test "ServiceBackends struct size matches BPF map value" {
 }
 
 test "lb_prog bytecode has expected maps" {
-    try std.testing.expectEqual(@as(usize, 3), lb_prog.maps.len);
+    try std.testing.expectEqual(@as(usize, 4), lb_prog.maps.len);
     try std.testing.expectEqualStrings("backends_map", lb_prog.maps[0].name);
     try std.testing.expectEqualStrings("conntrack_map", lb_prog.maps[1].name);
     try std.testing.expectEqualStrings("rr_counter", lb_prog.maps[2].name);
+    try std.testing.expectEqualStrings("rev_conntrack_map", lb_prog.maps[3].name);
 }
 
 test "IpMetrics struct size matches BPF map value" {
