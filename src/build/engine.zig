@@ -187,11 +187,19 @@ fn splitIntoStages(alloc: std.mem.Allocator, instructions: []const dockerfile.In
 }
 
 /// extract stage name from FROM args: "image:tag AS name" -> "name"
+/// the AS keyword is case-insensitive per the Dockerfile spec.
 fn parseStageName(from_args: []const u8) ?[]const u8 {
-    // look for " AS " or " as " (case-insensitive)
-    if (std.mem.indexOf(u8, from_args, " AS ") orelse std.mem.indexOf(u8, from_args, " as ")) |idx| {
-        const name = std.mem.trim(u8, from_args[idx + 4 ..], " \t");
-        if (name.len > 0) return name;
+    // case-insensitive search for " AS " separator
+    if (from_args.len < 5) return null; // minimum: "x AS y"
+    for (0..from_args.len - 3) |i| {
+        if (from_args[i] == ' ' and
+            std.ascii.toLower(from_args[i + 1]) == 'a' and
+            std.ascii.toLower(from_args[i + 2]) == 's' and
+            from_args[i + 3] == ' ')
+        {
+            const name = std.mem.trim(u8, from_args[i + 4 ..], " \t");
+            if (name.len > 0) return name;
+        }
     }
     return null;
 }
@@ -2168,8 +2176,23 @@ test "parseStageName — lowercase as" {
     try std.testing.expectEqualStrings("build-stage", name.?);
 }
 
+test "parseStageName — mixed case As" {
+    const name = parseStageName("golang:1.21 As builder");
+    try std.testing.expectEqualStrings("builder", name.?);
+}
+
+test "parseStageName — mixed case aS" {
+    const name = parseStageName("golang:1.21 aS builder");
+    try std.testing.expectEqualStrings("builder", name.?);
+}
+
 test "parseStageName — no AS clause" {
     const name = parseStageName("ubuntu:24.04");
+    try std.testing.expect(name == null);
+}
+
+test "parseStageName — too short" {
+    const name = parseStageName("x");
     try std.testing.expect(name == null);
 }
 
