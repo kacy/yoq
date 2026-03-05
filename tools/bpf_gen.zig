@@ -88,12 +88,12 @@ pub fn main() !void {
     };
     defer alloc.free(data);
 
-    var maps = std.ArrayList(MapInfo).init(alloc);
-    defer maps.deinit();
-    var programs = std.ArrayList(ProgramInfo).init(alloc);
-    defer programs.deinit();
-    var relocs = std.ArrayList(RelocInfo).init(alloc);
-    defer relocs.deinit();
+    var maps: std.ArrayList(MapInfo) = .empty;
+    defer maps.deinit(alloc);
+    var programs: std.ArrayList(ProgramInfo) = .empty;
+    defer programs.deinit(alloc);
+    var relocs: std.ArrayList(RelocInfo) = .empty;
+    defer relocs.deinit(alloc);
 
     try parseElf(data, alloc, &maps, &programs, &relocs);
 
@@ -108,7 +108,10 @@ pub fn main() !void {
     };
     defer output_file.close();
 
-    try generateZig(output_file.writer(), input_path, maps.items, programs.items, relocs.items);
+    var write_buf: [4096]u8 = undefined;
+    var file_writer = output_file.writer(&write_buf);
+    try generateZig(&file_writer.interface, input_path, maps.items, programs.items, relocs.items);
+    try file_writer.interface.flush();
 
     std.debug.print("generated {s} ({d} program(s), {d} map(s), {d} relocation(s))\n", .{
         output_path, programs.items.len, maps.items.len, relocs.items.len,
@@ -145,8 +148,10 @@ fn parseElf(data: []const u8, alloc: std.mem.Allocator, maps: *std.ArrayList(Map
     for (0..shdr_count) |i| {
         const shdr = getSectionHeader(data, ehdr, @intCast(i));
         const sec_name = getSectionName(shstrtab, shdr.sh_name);
-        if (shdr.sh_type == elf.SHT_PROGBITS and (shdr.sh_flags & elf.SHF_EXECINSTR) != 0) {
-            try programs.append(.{ .name = sec_name, .insn_data = getSectionData(data, shdr), .section_idx = @intCast(i) });
+        if (shdr.sh_type == elf.SHT_PROGBITS and (shdr.sh_flags & elf.SHF_EXECINSTR) != 0 and !std.mem.eql(u8, sec_name, ".text")) {
+            // skip .text — it contains static helper functions that get
+            // inlined into the real program sections by the compiler.
+            try programs.append(alloc, .{ .name = sec_name, .insn_data = getSectionData(data, shdr), .section_idx = @intCast(i) });
         } else if (shdr.sh_type == elf.SHT_PROGBITS and std.mem.eql(u8, sec_name, "maps")) {
             try parseMaps(getSectionData(data, shdr), alloc, maps, symtab_shdr, strtab_data, data, ehdr, @intCast(i));
         } else if (shdr.sh_type == elf.SHT_REL) {
@@ -178,14 +183,14 @@ fn getSectionName(strtab: []const u8, offset: u32) []const u8 {
     return start[0..end];
 }
 
-fn parseMaps(section_data: []const u8, _: std.mem.Allocator, maps: *std.ArrayList(MapInfo), symtab_shdr: ?*const Elf64_Shdr, strtab_data: ?[]const u8, elf_data: []const u8, ehdr: *const Elf64_Ehdr, maps_section_idx: u16) !void {
+fn parseMaps(section_data: []const u8, alloc: std.mem.Allocator, maps: *std.ArrayList(MapInfo), symtab_shdr: ?*const Elf64_Shdr, strtab_data: ?[]const u8, elf_data: []const u8, ehdr: *const Elf64_Ehdr, maps_section_idx: u16) !void {
     const map_def_size = @sizeOf(BpfMapDef);
     var offset: usize = 0;
     var map_idx: usize = 0;
     while (offset + map_def_size <= section_data.len) : ({ offset += map_def_size; map_idx += 1; }) {
         const def: *const BpfMapDef = @ptrCast(@alignCast(&section_data[offset]));
         const name = findSymbolName(symtab_shdr, strtab_data, elf_data, ehdr, maps_section_idx, offset) orelse "unknown";
-        try maps.append(.{ .name = name, .map_type = def.type, .key_size = def.key_size, .value_size = def.value_size, .max_entries = def.max_entries });
+        try maps.append(alloc, .{ .name = name, .map_type = def.type, .key_size = def.key_size, .value_size = def.value_size, .max_entries = def.max_entries });
     }
 }
 
@@ -201,7 +206,7 @@ fn findSymbolName(symtab_shdr: ?*const Elf64_Shdr, strtab_data: ?[]const u8, elf
     return null;
 }
 
-fn parseRelocs(section_data: []const u8, _: std.mem.Allocator, relocs: *std.ArrayList(RelocInfo), symtab_shdr: ?*const Elf64_Shdr, strtab_data: ?[]const u8, elf_data: []const u8, _: *const Elf64_Ehdr, target_section_idx: u16) !void {
+fn parseRelocs(section_data: []const u8, alloc: std.mem.Allocator, relocs: *std.ArrayList(RelocInfo), symtab_shdr: ?*const Elf64_Shdr, strtab_data: ?[]const u8, elf_data: []const u8, _: *const Elf64_Ehdr, target_section_idx: u16) !void {
     const rel_size = @sizeOf(Elf64_Rel);
     const shdr = symtab_shdr orelse return;
     const strtab = strtab_data orelse return;
@@ -213,7 +218,7 @@ fn parseRelocs(section_data: []const u8, _: std.mem.Allocator, relocs: *std.Arra
         const sym_idx = rel.sym();
         if (@as(usize, sym_idx) * sym_entry_size >= sym_data.len) continue;
         const sym: *const Elf64_Sym = @ptrCast(@alignCast(&sym_data[sym_idx * sym_entry_size]));
-        try relocs.append(.{ .insn_idx = @intCast(rel.r_offset / BPF_INSN_SIZE), .map_name = getSectionName(strtab, sym.st_name), .target_section_idx = target_section_idx });
+        try relocs.append(alloc, .{ .insn_idx = @intCast(rel.r_offset / BPF_INSN_SIZE), .map_name = getSectionName(strtab, sym.st_name), .target_section_idx = target_section_idx });
     }
 }
 
