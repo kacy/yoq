@@ -299,7 +299,8 @@ pub fn findAppContainer(alloc: std.mem.Allocator, app_name: []const u8, hostname
     return rowToRecord(row);
 }
 
-/// list all container records (for status reporting).
+/// list active container records (for status reporting).
+/// excludes stopped containers — they are no longer part of the active service state.
 /// caller owns the returned list and records.
 pub fn listAll(alloc: std.mem.Allocator) StoreError!std.ArrayList(ContainerRecord) {
     const db = try getDb();
@@ -309,7 +310,7 @@ pub fn listAll(alloc: std.mem.Allocator) StoreError!std.ArrayList(ContainerRecor
 
     var stmt = db.prepare(
         "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
-            " FROM containers ORDER BY hostname, created_at DESC;",
+            " FROM containers WHERE status != 'stopped' ORDER BY hostname, created_at DESC;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
 

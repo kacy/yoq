@@ -89,14 +89,22 @@ pub const Cgroup = struct {
     path_buf: [256]u8,
     path_len: usize,
 
-    /// create a new cgroup for the given container id.
-    /// creates the directory under /sys/fs/cgroup/yoq/<id>/
-    pub fn create(container_id: []const u8) CgroupError!Cgroup {
+    /// open a handle to an existing cgroup for reading metrics.
+    /// does not create any directories — use create() for new cgroups.
+    pub fn open(container_id: []const u8) CgroupError!Cgroup {
         var cg: Cgroup = .{ .path_buf = undefined, .path_len = 0 };
 
         const formatted = std.fmt.bufPrint(&cg.path_buf, cgroup_root ++ "/" ++ yoq_prefix ++ "/{s}", .{container_id}) catch
             return CgroupError.CreateFailed;
         cg.path_len = formatted.len;
+
+        return cg;
+    }
+
+    /// create a new cgroup for the given container id.
+    /// creates the directory under /sys/fs/cgroup/yoq/<id>/
+    pub fn create(container_id: []const u8) CgroupError!Cgroup {
+        var cg = open(container_id) catch return CgroupError.CreateFailed;
 
         // create yoq parent dir if needed
         std.fs.cwd().makeDir(cgroup_root ++ "/" ++ yoq_prefix) catch |e| switch (e) {
@@ -105,7 +113,7 @@ pub const Cgroup = struct {
         };
 
         // create container cgroup dir
-        std.fs.cwd().makeDir(formatted) catch |e| switch (e) {
+        std.fs.cwd().makeDir(cg.path()) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return CgroupError.CreateFailed,
         };
