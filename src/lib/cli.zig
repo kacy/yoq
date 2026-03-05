@@ -7,6 +7,7 @@
 const std = @import("std");
 const ip = @import("../network/ip.zig");
 const net_setup = @import("../network/setup.zig");
+const paths = @import("paths.zig");
 
 // -- output --
 
@@ -157,6 +158,54 @@ pub fn truncate(s: []const u8, max_len: usize) []const u8 {
     return s[0..max_len];
 }
 
+// -- API token helpers --
+
+/// read the API token from ~/.local/share/yoq/api_token.
+/// returns a 64-char hex string in the provided buffer, or null if the file
+/// doesn't exist or can't be read.
+pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
+
+    const file = std.fs.cwd().openFile(token_path, .{}) catch return null;
+    defer file.close();
+
+    const n = file.readAll(buf) catch return null;
+    if (n != 64) return null;
+
+    // validate it's all hex
+    for (buf) |c| {
+        switch (c) {
+            '0'...'9', 'a'...'f' => {},
+            else => return null,
+        }
+    }
+    return buf;
+}
+
+/// generate 32 random bytes, hex-encode to 64 chars, write to
+/// ~/.local/share/yoq/api_token with 0o600 permissions.
+/// returns the hex string in the provided buffer, or null on failure.
+pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
+    var raw: [32]u8 = undefined;
+    std.crypto.random.bytes(&raw);
+
+    const hex = std.fmt.bytesToHex(raw, .lower);
+    buf.* = hex;
+
+    // ensure data directory exists
+    paths.ensureDataDir("") catch return null;
+
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
+
+    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o600 }) catch return null;
+    defer file.close();
+
+    file.writeAll(buf) catch return null;
+    return buf;
+}
+
 // -- tests --
 
 test "parse port map" {
@@ -188,4 +237,41 @@ test "invalid container names" {
     try std.testing.expect(!isValidContainerName("../../etc/passwd"));
     try std.testing.expect(!isValidContainerName("a" ** 64));
     try std.testing.expect(!isValidContainerName("hello_world"));
+}
+
+test "generateAndSaveToken produces valid 64-char hex string" {
+    var buf: [64]u8 = undefined;
+    const token = generateAndSaveToken(&buf);
+    try std.testing.expect(token != null);
+    try std.testing.expectEqual(@as(usize, 64), token.?.len);
+    for (token.?) |c| {
+        try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
+    }
+}
+
+test "readApiToken round-trip with generateAndSaveToken" {
+    // generate a token
+    var gen_buf: [64]u8 = undefined;
+    const generated = generateAndSaveToken(&gen_buf).?;
+
+    // read it back
+    var read_buf: [64]u8 = undefined;
+    const read_back = readApiToken(&read_buf).?;
+    try std.testing.expectEqualSlices(u8, generated, read_back);
+}
+
+test "readApiToken returns null for missing file" {
+    // temporarily rename token file if it exists, test, restore
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return;
+
+    var backup_buf: [paths.max_path]u8 = undefined;
+    const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
+
+    // move existing file out of the way
+    std.fs.cwd().rename(token_path, backup_path) catch {};
+    defer std.fs.cwd().rename(backup_path, token_path) catch {};
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(readApiToken(&buf) == null);
 }
