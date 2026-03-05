@@ -19,8 +19,10 @@ pub const MapDef = struct {
 };
 
 /// map 0: metrics_map — source IP (u32) → ip_metrics { packets, bytes }
+/// map 1: pair_metrics_map — pair_key { src_ip, dst_ip, dst_port, pad } → pair_metrics { packets, bytes, connections, errors }
 pub const maps = [_]MapDef{
     .{ .name = "metrics_map", .map_type = 9, .key_size = 4, .value_size = 16, .max_entries = 1024 },
+    .{ .name = "pair_metrics_map", .map_type = 9, .key_size = 12, .value_size = 32, .max_entries = 4096 },
 };
 
 pub const Reloc = struct {
@@ -29,18 +31,20 @@ pub const Reloc = struct {
 };
 
 // placeholder relocations — the real bytecode will have ld_imm64
-// instructions referencing the metrics_map at specific offsets.
+// instructions referencing both maps at specific offsets.
 pub const relocs = [_]Reloc{
     .{ .insn_idx = 30, .map_idx = 0 }, // metrics_map lookup
     .{ .insn_idx = 45, .map_idx = 0 }, // metrics_map update
+    .{ .insn_idx = 70, .map_idx = 1 }, // pair_metrics_map lookup
+    .{ .insn_idx = 90, .map_idx = 1 }, // pair_metrics_map update
 };
 
 /// BPF program section: "tc_ingress"
 pub const prog_name = "tc_ingress";
 
 // placeholder instructions: passes all packets through.
-// the real bytecode from clang will be ~60-80 instructions with
-// ethernet/IP parsing and atomic counter updates.
+// the real bytecode from clang will be ~100-120 instructions with
+// ethernet/IP/TCP parsing and atomic counter updates.
 pub const insns = [_]BPF.Insn{
     .{ .code = 0xb7, .dst = 0, .src = 0, .off = 0, .imm = 0 }, // mov r0, 0 (TC_ACT_OK)
     .{ .code = 0x95, .dst = 0, .src = 0, .off = 0, .imm = 0 }, // exit
