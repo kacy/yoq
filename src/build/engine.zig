@@ -32,13 +32,21 @@ const exec_helpers = @import("../lib/exec_helpers.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
 
 pub const BuildError = error{
+    /// Dockerfile parsing failed (syntax error or unknown instruction)
     ParseFailed,
+    /// failed to pull a base image from a registry
     PullFailed,
+    /// a RUN step failed (container spawn, execution, or exit code)
     RunStepFailed,
+    /// a COPY step failed (source not found, permission error, or copy I/O)
     CopyStepFailed,
+    /// layer creation or compression failed after a build step
     LayerFailed,
+    /// failed to store the final image (blob write or image record save)
     ImageStoreFailed,
+    /// Dockerfile has no FROM instruction — every build must start with one
     NoFromInstruction,
+    /// build cache lookup or storage failed
     CacheFailed,
 };
 
