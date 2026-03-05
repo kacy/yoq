@@ -1158,15 +1158,22 @@ fn storeCache(cache_key: []const u8, layer_digest: []const u8, diff_id: []const 
 // -- config inheritance --
 
 fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []const u8) void {
-    var parsed = spec.parseImageConfig(alloc, config_bytes) catch return;
+    var parsed = spec.parseImageConfig(alloc, config_bytes) catch {
+        log.warn("build: failed to parse base image config", .{});
+        return;
+    };
     defer parsed.deinit();
 
     if (parsed.value.config) |cc| {
         // inherit environment variables
         if (cc.Env) |envs| {
             for (envs) |env| {
-                const owned = alloc.dupe(u8, env) catch continue;
+                const owned = alloc.dupe(u8, env) catch {
+                    log.warn("build: failed to allocate inherited ENV", .{});
+                    continue;
+                };
                 state.env.append(alloc, owned) catch {
+                    log.warn("build: failed to store inherited ENV", .{});
                     alloc.free(owned);
                 };
             }
@@ -1175,7 +1182,10 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
         // inherit working directory
         if (cc.WorkingDir) |wd| {
             if (wd.len > 0) {
-                const owned = alloc.dupe(u8, wd) catch return;
+                const owned = alloc.dupe(u8, wd) catch {
+                    log.warn("build: failed to allocate inherited WORKDIR", .{});
+                    return;
+                };
                 if (!std.mem.eql(u8, state.workdir, "/")) alloc.free(state.workdir);
                 state.workdir = owned;
             }
@@ -1184,7 +1194,10 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
         // inherit CMD
         if (cc.Cmd) |cmds| {
             if (cmds.len > 0) {
-                const owned = alloc.dupe(u8, cmds[0]) catch return;
+                const owned = alloc.dupe(u8, cmds[0]) catch {
+                    log.warn("build: failed to allocate inherited CMD", .{});
+                    return;
+                };
                 if (state.cmd) |old| alloc.free(old);
                 state.cmd = owned;
             }
@@ -1193,7 +1206,10 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
         // inherit ENTRYPOINT
         if (cc.Entrypoint) |ep| {
             if (ep.len > 0) {
-                const owned = alloc.dupe(u8, ep[0]) catch return;
+                const owned = alloc.dupe(u8, ep[0]) catch {
+                    log.warn("build: failed to allocate inherited ENTRYPOINT", .{});
+                    return;
+                };
                 if (state.entrypoint) |old| alloc.free(old);
                 state.entrypoint = owned;
             }
@@ -1202,7 +1218,10 @@ fn inheritConfig(alloc: std.mem.Allocator, state: *BuildState, config_bytes: []c
         // inherit USER
         if (cc.User) |u| {
             if (u.len > 0) {
-                const owned = alloc.dupe(u8, u) catch return;
+                const owned = alloc.dupe(u8, u) catch {
+                    log.warn("build: failed to allocate inherited USER", .{});
+                    return;
+                };
                 if (state.user) |old| alloc.free(old);
                 state.user = owned;
             }
