@@ -1089,6 +1089,18 @@ fn addDigestHex(set: *std.StringHashMap(void), digest_str: []const u8) void {
     }
 }
 
+/// validate an image tag per OCI distribution spec constraints.
+/// tags must be alphanumeric with '.', '-', '_' separators, max 128 chars.
+fn isValidTag(tag: []const u8) bool {
+    if (tag.len == 0 or tag.len > 128) return false;
+    for (tag) |c| {
+        if (std.ascii.isAlphanumeric(c)) continue;
+        if (c == '.' or c == '-' or c == '_') continue;
+        return false;
+    }
+    return true;
+}
+
 fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var tag: ?[]const u8 = null;
     var dockerfile_path: []const u8 = "Dockerfile";
@@ -1136,6 +1148,15 @@ fn cmdBuild(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 
     const ctx_dir = context_path orelse ".";
+
+    // validate tag format
+    if (tag) |t| {
+        const ref = spec.parseImageRef(t);
+        if (!isValidTag(ref.reference)) {
+            writeErr("invalid tag: must be alphanumeric with '.', '-', '_' (max 128 chars)\n", .{});
+            std.process.exit(1);
+        }
+    }
 
     // determine the build file path and default filename based on format
     const default_filename: []const u8 = switch (format) {
