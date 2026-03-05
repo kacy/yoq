@@ -881,11 +881,11 @@ fn downloadLayerBlob(
 
     // verify downloaded data matches expected digest
     const computed = blob_store.computeDigest(data);
-    if (blob_store.Digest.parse(digest)) |expected| {
-        if (!computed.eql(expected)) return error.DigestMismatch;
-    }
+    const expected = blob_store.Digest.parse(digest) orelse return error.DigestMismatch;
+    if (!computed.eql(expected)) return error.DigestMismatch;
 
-    _ = blob_store.putBlob(data) catch return error.BlobNotFound;
+    // use putBlobDirect since we already verified the digest
+    blob_store.putBlobDirect(data, expected) catch return error.BlobNotFound;
 }
 
 // -- tests --

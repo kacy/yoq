@@ -133,6 +133,39 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
     };
 }
 
+/// write a blob with a pre-verified digest, skipping the hash computation.
+/// use this when the caller has already verified the data matches the digest
+/// (e.g. after downloading and checking against the registry's expected digest).
+pub fn putBlobDirect(data: []const u8, digest: Digest) BlobError!void {
+    if (hasBlob(digest)) return;
+
+    var dir_buf: [max_path]u8 = undefined;
+    const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
+    std.fs.cwd().makePath(dir_path) catch {};
+
+    // write to a temp file, then rename for atomicity
+    var tmp_buf: [max_path]u8 = undefined;
+    const tmp_path = paths.dataPathFmt(&tmp_buf, "{s}/.tmp.{s}", .{ blob_subdir, digest.hex() }) catch
+        return BlobError.PathTooLong;
+
+    const file = std.fs.cwd().createFile(tmp_path, .{}) catch
+        return BlobError.WriteFailed;
+
+    file.writeAll(data) catch {
+        file.close();
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return BlobError.WriteFailed;
+    };
+    file.close();
+
+    var path_buf: [max_path]u8 = undefined;
+    const final_path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
+    std.fs.cwd().rename(tmp_path, final_path) catch {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return BlobError.WriteFailed;
+    };
+}
+
 /// read a blob's contents by digest.
 /// caller owns the returned slice.
 pub fn getBlob(alloc: std.mem.Allocator, digest: Digest) BlobError![]u8 {
