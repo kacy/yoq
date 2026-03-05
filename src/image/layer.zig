@@ -416,10 +416,10 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                 }
             },
             .file => {
-                const mode: std.fs.File.Mode = if (entry.mode & 0o100 != 0)
-                    0o755
-                else
-                    0o644;
+                // preserve rwx bits for user/group/other, but strip
+                // setuid/setgid/sticky (security: never grant elevated
+                // privileges from extracted layers)
+                const mode: std.fs.File.Mode = entry.mode & 0o777;
                 const fs_file = createDirAndFile(dest_dir, entry.name, mode) catch |e| {
                     log.warn("extract: failed to create file '{s}': {}", .{ entry.name, e });
                     continue;
