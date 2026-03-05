@@ -35,6 +35,8 @@ const cgroups = @import("runtime/cgroups.zig");
 const ebpf = @import("network/ebpf.zig");
 const net_policy = @import("network/policy.zig");
 const cert_store = @import("tls/cert_store.zig");
+const acme = @import("tls/acme.zig");
+const csr = @import("tls/csr.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -2392,9 +2394,11 @@ fn cmdCert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             \\usage: yoq cert <command> [options]
             \\
             \\commands:
-            \\  install <domain> --cert <path> --key <path>  store a certificate
-            \\  list                                         list certificates
-            \\  rm <domain>                                  remove a certificate
+            \\  install <domain> --cert <path> --key <path>   store a certificate
+            \\  provision <domain> --email <email> [--staging] obtain via ACME
+            \\  renew <domain>                                 renew via ACME
+            \\  list                                           list certificates
+            \\  rm <domain>                                    remove a certificate
             \\
         , .{});
         std.process.exit(1);
@@ -2402,6 +2406,10 @@ fn cmdCert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     if (std.mem.eql(u8, subcmd, "install")) {
         cmdCertInstall(args, alloc);
+    } else if (std.mem.eql(u8, subcmd, "provision")) {
+        cmdCertProvision(args, alloc);
+    } else if (std.mem.eql(u8, subcmd, "renew")) {
+        cmdCertRenew(args, alloc);
     } else if (std.mem.eql(u8, subcmd, "list")) {
         cmdCertList(alloc);
     } else if (std.mem.eql(u8, subcmd, "rm")) {
@@ -2521,6 +2529,144 @@ fn cmdCertRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s}\n", .{domain});
 }
 
+fn cmdCertProvision(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var domain: ?[]const u8 = null;
+    var email: ?[]const u8 = null;
+    var use_staging = false;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--email")) {
+            email = args.next() orelse {
+                writeErr("--email requires an address\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--staging")) {
+            use_staging = true;
+        } else if (arg[0] != '-') {
+            domain = arg;
+        } else {
+            writeErr("unknown option: {s}\n", .{arg});
+            std.process.exit(1);
+        }
+    }
+
+    const dom = domain orelse {
+        writeErr("usage: yoq cert provision <domain> --email <email> [--staging]\n", .{});
+        std.process.exit(1);
+    };
+    const em = email orelse {
+        writeErr("--email is required for ACME provisioning\n", .{});
+        std.process.exit(1);
+    };
+
+    const directory_url = if (use_staging)
+        acme.letsencrypt_staging
+    else
+        acme.letsencrypt_production;
+
+    writeErr("provisioning certificate for {s}...\n", .{dom});
+    if (use_staging) writeErr("  using staging environment\n", .{});
+
+    var client = acme.AcmeClient.init(alloc, directory_url);
+    defer client.deinit();
+
+    // step 1: discover endpoints
+    client.fetchDirectory() catch {
+        writeErr("failed to fetch ACME directory\n", .{});
+        std.process.exit(1);
+    };
+
+    // step 2: create account
+    client.createAccount(em) catch {
+        writeErr("failed to create ACME account\n", .{});
+        std.process.exit(1);
+    };
+    writeErr("  account registered\n", .{});
+
+    // step 3: create order
+    var order = client.createOrder(dom) catch {
+        writeErr("failed to create certificate order\n", .{});
+        std.process.exit(1);
+    };
+    defer order.deinit();
+
+    // step 4: handle HTTP-01 challenge
+    if (order.authorization_urls.len > 0) {
+        var challenge = client.getHttpChallenge(order.authorization_urls[0]) catch {
+            writeErr("failed to get HTTP-01 challenge\n", .{});
+            std.process.exit(1);
+        };
+        defer challenge.deinit();
+
+        writeErr("  challenge token: {s}\n", .{challenge.token});
+        writeErr("  place at: /.well-known/acme-challenge/{s}\n", .{challenge.token});
+
+        client.respondToChallenge(challenge.url) catch {
+            writeErr("failed to respond to challenge\n", .{});
+            std.process.exit(1);
+        };
+    }
+
+    // step 5: finalize and download
+    const result = client.finalize(order.finalize_url, dom) catch {
+        writeErr("failed to finalize certificate order\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        alloc.free(result.cert_pem);
+        std.crypto.secureZero(u8, result.key_der);
+        alloc.free(result.key_der);
+    }
+
+    // step 6: store in cert store
+    // the ACME client returns raw key bytes — wrap in PEM for storage
+    const key_pem = csr.derKeyToPem(alloc, result.key_der) catch {
+        writeErr("failed to encode private key\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        std.crypto.secureZero(u8, key_pem);
+        alloc.free(key_pem);
+    }
+
+    var cs = openCertStore(alloc);
+    defer closeCertStore(alloc, &cs);
+
+    cs.install(dom, result.cert_pem, key_pem, "acme") catch {
+        writeErr("failed to store certificate\n", .{});
+        std.process.exit(1);
+    };
+
+    writeErr("certificate provisioned for {s}\n", .{dom});
+}
+
+fn cmdCertRenew(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const domain = requireArg(args, "usage: yoq cert renew <domain>\n");
+
+    // check if cert exists and get its source
+    var cs = openCertStore(alloc);
+    defer closeCertStore(alloc, &cs);
+
+    // verify the domain has an existing certificate
+    const needs = cs.needsRenewal(domain, 90) catch |err| {
+        if (err == cert_store.CertError.NotFound) {
+            writeErr("no certificate found for {s}\n", .{domain});
+        } else {
+            writeErr("failed to check certificate for {s}\n", .{domain});
+        }
+        std.process.exit(1);
+    };
+
+    if (!needs) {
+        writeErr("certificate for {s} does not need renewal yet\n", .{domain});
+        return;
+    }
+
+    writeErr("certificate for {s} needs renewal\n", .{domain});
+    writeErr("run: yoq cert provision {s} --email <email>\n", .{domain});
+    writeErr("automatic renewal via the orchestrator is available in the next release\n", .{});
+}
+
 /// open a CertStore with a heap-allocated database connection.
 /// exits on failure — used by CLI commands.
 /// caller must call closeCertStore() when done.
@@ -2599,6 +2745,8 @@ fn printUsage() void {
         \\  cert install <domain> --cert <p> --key <p>  store a TLS certificate
         \\  cert list                        list certificates with expiry
         \\  cert rm <domain>                 remove a certificate
+        \\  cert provision <domain> --email <e>  provision via ACME (Let's Encrypt)
+        \\  cert renew <domain>              check/trigger certificate renewal
         \\  policy deny <src> <tgt>          block traffic from source to target
         \\  policy allow <src> <tgt>         allow only this destination for source
         \\  policy rm <src> <tgt>            remove a policy rule
