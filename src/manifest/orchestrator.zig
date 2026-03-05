@@ -713,7 +713,11 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
     defer img.deinit(alloc);
 
     // resolve command
-    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, svc.command);
+    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, svc.command) catch {
+        log.err("failed to resolve command for {s}: out of memory", .{svc.name});
+        orch.states[idx].status = .failed;
+        return;
+    };
     defer resolved.args.deinit(alloc);
 
     // merge env

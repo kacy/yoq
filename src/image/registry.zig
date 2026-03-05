@@ -39,6 +39,11 @@ const max_manifest_size: usize = 10 * 1024 * 1024;
 /// max auth/token response size: 64 KB. token JSON is typically < 4 KB.
 const max_auth_response_size: usize = 64 * 1024;
 
+/// max blob size: 512 MB. individual layers rarely exceed ~200 MB.
+/// this prevents a malicious registry from exhausting memory with an
+/// unbounded response. (streaming download is deferred — see PR 3.)
+const max_blob_size: usize = 512 * 1024 * 1024;
+
 /// bearer token from the registry's auth service
 const Token = struct {
     value: []const u8,
@@ -787,7 +792,9 @@ pub fn uploadManifest(
         return RegistryError.UploadFailed;
 }
 
-/// fetch a blob (config or layer) from the registry
+/// fetch a blob (config or layer) from the registry.
+/// uses the low-level request API so we can check Content-Length before
+/// reading the body and enforce max_blob_size to prevent memory exhaustion.
 fn fetchBlob(
     alloc: std.mem.Allocator,
     client: *std.http.Client,
@@ -806,21 +813,44 @@ fn fetchBlob(
     var auth_buf: [8192]u8 = undefined;
     const auth_value = authHeaderValue(token, &auth_buf);
 
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    defer aw.deinit();
+    const uri = std.Uri.parse(url) catch return error.BlobNotFound;
 
-    const result = client.fetch(.{
-        .location = .{ .url = url },
+    var req = client.request(.GET, uri, .{
+        .redirect_behavior = @enumFromInt(3),
+        .keep_alive = false,
         .headers = .{
             .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
         },
-        .response_writer = &aw.writer,
     }) catch return error.NetworkError;
+    defer req.deinit();
 
-    if (result.status != .ok) return error.BlobNotFound;
+    req.sendBodiless() catch return error.NetworkError;
 
-    const body_data = aw.writer.buffer[0..aw.writer.end];
-    return alloc.dupe(u8, body_data) catch return error.NetworkError;
+    var redirect_buf: [8192]u8 = undefined;
+    var response = req.receiveHead(&redirect_buf) catch return error.NetworkError;
+
+    if (response.head.status != .ok) return error.BlobNotFound;
+
+    // reject oversized blobs before reading the body
+    if (response.head.content_length) |cl| {
+        if (cl > max_blob_size) return error.ResponseTooLarge;
+    }
+
+    // read body with size tracking
+    var transfer_buf: [8192]u8 = undefined;
+    const body_reader = response.reader(&transfer_buf);
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+
+    _ = body_reader.streamRemaining(&aw.writer) catch return error.NetworkError;
+
+    const raw_body = aw.writer.buffer[0..aw.writer.end];
+
+    // enforce size limit on actual body (servers can lie about Content-Length)
+    if (raw_body.len > max_blob_size) return error.ResponseTooLarge;
+
+    return alloc.dupe(u8, raw_body) catch return error.NetworkError;
 }
 
 /// download a layer blob and store it in the content-addressable blob store.
@@ -851,11 +881,11 @@ fn downloadLayerBlob(
 
     // verify downloaded data matches expected digest
     const computed = blob_store.computeDigest(data);
-    if (blob_store.Digest.parse(digest)) |expected| {
-        if (!computed.eql(expected)) return error.DigestMismatch;
-    }
+    const expected = blob_store.Digest.parse(digest) orelse return error.DigestMismatch;
+    if (!computed.eql(expected)) return error.DigestMismatch;
 
-    _ = blob_store.putBlob(data) catch return error.BlobNotFound;
+    // use putBlobDirect since we already verified the digest
+    blob_store.putBlobDirect(data, expected) catch return error.BlobNotFound;
 }
 
 // -- tests --

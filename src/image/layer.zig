@@ -416,10 +416,10 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                 }
             },
             .file => {
-                const mode: std.fs.File.Mode = if (entry.mode & 0o100 != 0)
-                    0o755
-                else
-                    0o644;
+                // preserve rwx bits for user/group/other, but strip
+                // setuid/setgid/sticky (security: never grant elevated
+                // privileges from extracted layers)
+                const mode: std.fs.File.Mode = entry.mode & 0o777;
                 const fs_file = createDirAndFile(dest_dir, entry.name, mode) catch |e| {
                     log.warn("extract: failed to create file '{s}': {}", .{ entry.name, e });
                     continue;
@@ -452,12 +452,14 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
 }
 
 /// create parent directories as needed and open a file for writing.
+/// uses exclusive=false because legitimate OCI layers can have duplicate
+/// tar entries where later entries override earlier ones.
 fn createDirAndFile(dir: std.fs.Dir, name: []const u8, mode: std.fs.File.Mode) !std.fs.File {
-    return dir.createFile(name, .{ .exclusive = true, .mode = mode }) catch |err| {
+    return dir.createFile(name, .{ .mode = mode }) catch |err| {
         if (err == error.FileNotFound) {
             if (std.fs.path.dirname(name)) |dir_name| {
                 try dir.makePath(dir_name);
-                return try dir.createFile(name, .{ .exclusive = true, .mode = mode });
+                return try dir.createFile(name, .{ .mode = mode });
             }
         }
         return err;
