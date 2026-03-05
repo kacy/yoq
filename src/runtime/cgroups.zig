@@ -12,12 +12,19 @@ const linux = std.os.linux;
 const log = @import("../lib/log.zig");
 
 pub const CgroupError = error{
+    /// failed to create the cgroup directory under /sys/fs/cgroup/yoq/
     CreateFailed,
+    /// failed to write a cgroup control file (cpu.weight, memory.max, etc.)
     WriteFailed,
+    /// failed to read a cgroup control file (cpu.stat, memory.current, etc.)
     ReadFailed,
+    /// failed to remove the cgroup directory during cleanup
     DeleteFailed,
+    /// cgroups v2 is not available on this system
     NotSupported,
+    /// a resource limit value is outside its valid range (e.g. cpu_weight 0 or >10000)
     InvalidLimit,
+    /// a resource limit is below the safe minimum (memory < 4 MB or pids < 1)
     LimitBelowMinimum,
 };
 

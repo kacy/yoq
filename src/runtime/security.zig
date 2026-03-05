@@ -13,8 +13,11 @@ const posix = std.posix;
 const syscall_util = @import("../lib/syscall.zig");
 
 pub const SecurityError = error{
+    /// seccomp filter installation failed (seccomp syscall returned error)
     SeccompFailed,
+    /// capability set/get failed (capset/capget syscall or verification mismatch)
     CapabilityFailed,
+    /// prctl failed when setting PR_SET_NO_NEW_PRIVS
     PrctlFailed,
 };
 
