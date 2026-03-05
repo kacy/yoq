@@ -51,6 +51,10 @@ pub const SnapshotError = error{
 //   [N bytes] raw sqlite database
 const snapshot_header_size = 24;
 
+// maximum snapshot size — matches transport's max_receive_size (64MB).
+// cluster metadata databases are small, so this is generous.
+const max_snapshot_size: u64 = 64 * 1024 * 1024;
+
 pub const StateMachine = struct {
     db: sqlite.Db,
     last_applied: LogIndex,
@@ -234,9 +238,12 @@ pub const StateMachine = struct {
         const last_included_term = std.mem.readInt(u64, data[8..16], .little);
         const sqlite_data_len = std.mem.readInt(u64, data[16..24], .little);
 
-        if (data.len < snapshot_header_size + sqlite_data_len) {
-            return SnapshotError.CorruptSnapshot;
-        }
+        // validate snapshot size before allocating or processing
+        if (sqlite_data_len > max_snapshot_size) return SnapshotError.InvalidSnapshot;
+
+        // exact match — the snapshot should contain exactly the header + sqlite data.
+        // a `<` check would accept trailing garbage which could mask corruption.
+        if (data.len != snapshot_header_size + sqlite_data_len) return SnapshotError.CorruptSnapshot;
 
         const sqlite_data = data[snapshot_header_size .. snapshot_header_size + sqlite_data_len];
 
@@ -649,6 +656,35 @@ test "restoreFromBytes rejects truncated snapshot" {
     std.mem.writeInt(u64, data[0..8], 10, .little); // index
     std.mem.writeInt(u64, data[8..16], 2, .little); // term
     std.mem.writeInt(u64, data[16..24], 1000, .little); // claims 1000 bytes
+    @memset(data[snapshot_header_size..], 0);
+
+    const result = sm.restoreFromBytes(&data);
+    try std.testing.expectError(SnapshotError.CorruptSnapshot, result);
+}
+
+test "restoreFromBytes rejects oversized snapshot" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    // header claims more than max_snapshot_size
+    var data: [snapshot_header_size]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], 10, .little); // index
+    std.mem.writeInt(u64, data[8..16], 2, .little); // term
+    std.mem.writeInt(u64, data[16..24], max_snapshot_size + 1, .little); // too large
+
+    const result = sm.restoreFromBytes(&data);
+    try std.testing.expectError(SnapshotError.InvalidSnapshot, result);
+}
+
+test "restoreFromBytes rejects snapshot with trailing data" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    // header claims 5 bytes but we provide 10 (trailing garbage)
+    var data: [snapshot_header_size + 10]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], 10, .little); // index
+    std.mem.writeInt(u64, data[8..16], 2, .little); // term
+    std.mem.writeInt(u64, data[16..24], 5, .little); // claims 5 bytes
     @memset(data[snapshot_header_size..], 0);
 
     const result = sm.restoreFromBytes(&data);
