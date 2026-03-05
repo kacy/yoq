@@ -575,8 +575,100 @@ pub fn getLoadBalancer() ?*const LoadBalancer {
 
 /// convert a 4-byte IP to a u32 in network byte order.
 /// the bytes are already in network order — this is just a type pun.
-fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
+pub fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
     return @bitCast(ip_bytes);
+}
+
+// -- metrics collector --
+//
+// per-IP packet and byte counting via an LRU hash map. attached to the
+// bridge ingress at priority 2 (after DNS and LB). purely passive —
+// never drops packets.
+//
+// userspace reads the map to report per-container network traffic
+// via `yoq metrics`.
+
+const metrics_prog = @import("bpf/metrics.zig");
+
+/// per-IP metrics as stored in the BPF map.
+/// matches struct ip_metrics in bpf/metrics.c.
+pub const IpMetrics = extern struct {
+    packets: u64,
+    bytes: u64,
+};
+
+/// state for the loaded metrics collector program.
+pub const MetricsCollector = struct {
+    prog_fd: posix.fd_t,
+    metrics_fd: posix.fd_t,
+    if_index: u32,
+
+    /// read packet/byte counters for a single IP.
+    /// the IP should be in network byte order (as stored by the BPF program).
+    pub fn readMetrics(self: *const MetricsCollector, ip_net: u32) ?IpMetrics {
+        var value: IpMetrics = undefined;
+        const key = std.mem.asBytes(&ip_net);
+        if (mapLookup(self.metrics_fd, key, std.mem.asBytes(&value))) {
+            return value;
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *MetricsCollector) void {
+        detachTC(self.if_index) catch {};
+        posix.close(self.prog_fd);
+        posix.close(self.metrics_fd);
+    }
+};
+
+/// global metrics collector instance.
+var metrics_collector: ?MetricsCollector = null;
+
+/// load and attach the metrics BPF program to the bridge.
+pub fn loadMetricsCollector(bridge_if_index: u32) EbpfError!void {
+    if (metrics_collector != null) return;
+
+    // create the metrics_map (LRU hash)
+    const map_def = metrics_prog.maps[0];
+    const map_fd = try createMap(
+        @enumFromInt(map_def.map_type),
+        map_def.key_size,
+        map_def.value_size,
+        map_def.max_entries,
+    );
+    errdefer posix.close(map_fd);
+
+    var map_fds = [_]posix.fd_t{map_fd};
+    const prog_fd = try loadProgram(metrics_prog, &map_fds);
+    errdefer posix.close(prog_fd);
+
+    // attach at priority 2 (after DNS/LB at priority 1)
+    try attachTC(bridge_if_index, .ingress, prog_fd, 2);
+
+    metrics_collector = .{
+        .prog_fd = prog_fd,
+        .metrics_fd = map_fd,
+        .if_index = bridge_if_index,
+    };
+
+    log.info("ebpf: metrics collector loaded on ifindex {d}", .{bridge_if_index});
+}
+
+/// unload the metrics collector.
+pub fn unloadMetricsCollector() void {
+    if (metrics_collector) |*mc| {
+        mc.deinit();
+        metrics_collector = null;
+        log.info("ebpf: metrics collector unloaded", .{});
+    }
+}
+
+/// get the active metrics collector, if loaded.
+pub fn getMetricsCollector() ?*const MetricsCollector {
+    if (metrics_collector) |*mc| {
+        return mc;
+    }
+    return null;
 }
 
 // -- capability check --
@@ -682,6 +774,22 @@ test "lb_prog bytecode has expected maps" {
     try std.testing.expectEqualStrings("backends_map", lb_prog.maps[0].name);
     try std.testing.expectEqualStrings("conntrack_map", lb_prog.maps[1].name);
     try std.testing.expectEqualStrings("rr_counter", lb_prog.maps[2].name);
+}
+
+test "IpMetrics struct size matches BPF map value" {
+    // must match metrics.c: struct ip_metrics
+    // packets (8) + bytes (8) = 16 bytes
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(IpMetrics));
+    try std.testing.expectEqual(@as(u32, 16), metrics_prog.maps[0].value_size);
+}
+
+test "metrics_prog bytecode has expected structure" {
+    try std.testing.expectEqual(@as(usize, 1), metrics_prog.maps.len);
+    try std.testing.expectEqualStrings("metrics_map", metrics_prog.maps[0].name);
+    // LRU_HASH = 9
+    try std.testing.expectEqual(@as(u32, 9), metrics_prog.maps[0].map_type);
+    try std.testing.expectEqual(@as(u32, 4), metrics_prog.maps[0].key_size);
+    try std.testing.expect(metrics_prog.insns.len >= 2);
 }
 
 test "createMap returns fd or error" {
