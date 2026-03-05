@@ -25,6 +25,7 @@ const monitor = @import("../runtime/monitor.zig");
 const ebpf = @import("../network/ebpf.zig");
 const ip_mod = @import("../network/ip.zig");
 const net_policy = @import("../network/policy.zig");
+const cert_store = @import("../tls/cert_store.zig");
 
 /// cluster node reference (set by server when running in cluster mode)
 pub var cluster: ?*cluster_node.Node = null;
@@ -181,6 +182,19 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
                 if (request.method == .DELETE) return handleDeletePolicy(alloc, source, target);
                 return methodNotAllowed();
             }
+        }
+    }
+
+    // /v1/certificates routes
+    if (std.mem.eql(u8, path, "/v1/certificates")) {
+        if (request.method == .GET) return handleListCertificates(alloc);
+        return methodNotAllowed();
+    }
+    if (path.len > "/v1/certificates/".len and std.mem.startsWith(u8, path, "/v1/certificates/")) {
+        const domain = path["/v1/certificates/".len..];
+        if (std.mem.indexOf(u8, domain, "/") == null and domain.len > 0) {
+            if (request.method == .DELETE) return handleDeleteCertificate(alloc, domain);
+            return methodNotAllowed();
         }
     }
 
@@ -1204,6 +1218,73 @@ fn handleDeleteSecret(alloc: std.mem.Allocator, name: []const u8) Response {
 
     sec.remove(name) catch |err| {
         if (err == secrets.SecretsError.NotFound) return notFound();
+        return internalError();
+    };
+
+    return .{
+        .status = .ok,
+        .body = "{\"status\":\"removed\"}",
+        .allocated = false,
+    };
+}
+
+// -- certificate handlers --
+
+fn openCertStore(alloc: std.mem.Allocator) ?cert_store.CertStore {
+    const db_ptr = alloc.create(sqlite.Db) catch return null;
+    db_ptr.* = store.openDb() catch {
+        alloc.destroy(db_ptr);
+        return null;
+    };
+    return cert_store.CertStore.init(db_ptr, alloc) catch {
+        db_ptr.deinit();
+        alloc.destroy(db_ptr);
+        return null;
+    };
+}
+
+fn closeCertStore(alloc: std.mem.Allocator, cs: *cert_store.CertStore) void {
+    cs.db.deinit();
+    alloc.destroy(cs.db);
+}
+
+fn handleListCertificates(alloc: std.mem.Allocator) Response {
+    var cs = openCertStore(alloc) orelse return internalError();
+    defer closeCertStore(alloc, &cs);
+
+    var certs = cs.list() catch return internalError();
+    defer {
+        for (certs.items) |c| c.deinit(alloc);
+        certs.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return internalError();
+    for (certs.items, 0..) |cert, i| {
+        if (i > 0) writer.writeByte(',') catch return internalError();
+        writer.writeAll("{\"domain\":\"") catch return internalError();
+        json_helpers.writeJsonEscaped(writer, cert.domain) catch return internalError();
+        writer.writeAll("\",\"not_after\":") catch return internalError();
+        std.fmt.format(writer, "{d}", .{cert.not_after}) catch return internalError();
+        writer.writeAll(",\"source\":\"") catch return internalError();
+        json_helpers.writeJsonEscaped(writer, cert.source) catch return internalError();
+        writer.writeAll("\"}") catch return internalError();
+    }
+    writer.writeByte(']') catch return internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleDeleteCertificate(alloc: std.mem.Allocator, domain: []const u8) Response {
+    var cs = openCertStore(alloc) orelse return internalError();
+    defer closeCertStore(alloc, &cs);
+
+    cs.remove(domain) catch |err| {
+        if (err == cert_store.CertError.NotFound) return notFound();
         return internalError();
     };
 

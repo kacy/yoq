@@ -167,6 +167,20 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    PRIMARY KEY (node_id)
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS certificates (
+        \\    domain TEXT PRIMARY KEY,
+        \\    cert_pem BLOB NOT NULL,
+        \\    encrypted_key BLOB NOT NULL,
+        \\    key_nonce BLOB NOT NULL,
+        \\    key_tag BLOB NOT NULL,
+        \\    not_after INTEGER NOT NULL,
+        \\    source TEXT NOT NULL DEFAULT 'manual',
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -448,5 +462,19 @@ test "init creates wireguard_peers table" {
             " VALUES (?, ?, ?, ?, ?, ?);",
         .{},
         .{ @as(i64, 1), "agent-001", "dGVzdHB1YmtleQ==", "10.0.0.2:51820", "10.40.0.2", "10.42.1.0/24" },
+    ) catch unreachable;
+}
+
+test "init creates certificates table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO certificates (domain, cert_pem, encrypted_key, key_nonce, key_tag, not_after, source, created_at, updated_at)" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "example.com", "cert-data", "enc-key", "nonce", "tag", @as(i64, 1735689600), "manual", @as(i64, 1000), @as(i64, 1000) },
     ) catch unreachable;
 }

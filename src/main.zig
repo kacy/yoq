@@ -34,6 +34,7 @@ const monitor = @import("runtime/monitor.zig");
 const cgroups = @import("runtime/cgroups.zig");
 const ebpf = @import("network/ebpf.zig");
 const net_policy = @import("network/policy.zig");
+const cert_store = @import("tls/cert_store.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -108,6 +109,8 @@ pub fn main() !void {
         cmdMetrics(&args, alloc);
     } else if (std.mem.eql(u8, command, "policy")) {
         cmdPolicy(&args, alloc);
+    } else if (std.mem.eql(u8, command, "cert")) {
+        cmdCert(&args, alloc);
     } else {
         writeErr("unknown command: {s}\n", .{command});
         printUsage();
@@ -2381,6 +2384,175 @@ fn cmdPolicyList(alloc: std.mem.Allocator) void {
     }
 }
 
+// -- certificate commands --
+
+fn cmdCert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const subcmd = args.next() orelse {
+        writeErr(
+            \\usage: yoq cert <command> [options]
+            \\
+            \\commands:
+            \\  install <domain> --cert <path> --key <path>  store a certificate
+            \\  list                                         list certificates
+            \\  rm <domain>                                  remove a certificate
+            \\
+        , .{});
+        std.process.exit(1);
+    };
+
+    if (std.mem.eql(u8, subcmd, "install")) {
+        cmdCertInstall(args, alloc);
+    } else if (std.mem.eql(u8, subcmd, "list")) {
+        cmdCertList(alloc);
+    } else if (std.mem.eql(u8, subcmd, "rm")) {
+        cmdCertRm(args, alloc);
+    } else {
+        writeErr("unknown cert command: {s}\n", .{subcmd});
+        std.process.exit(1);
+    }
+}
+
+fn cmdCertInstall(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var domain: ?[]const u8 = null;
+    var cert_path: ?[]const u8 = null;
+    var key_path: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--cert")) {
+            cert_path = args.next() orelse {
+                writeErr("--cert requires a file path\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--key")) {
+            key_path = args.next() orelse {
+                writeErr("--key requires a file path\n", .{});
+                std.process.exit(1);
+            };
+        } else if (domain == null) {
+            domain = arg;
+        }
+    }
+
+    const dom = domain orelse {
+        writeErr("usage: yoq cert install <domain> --cert <path> --key <path>\n", .{});
+        std.process.exit(1);
+    };
+    const cp = cert_path orelse {
+        writeErr("--cert is required\n", .{});
+        std.process.exit(1);
+    };
+    const kp = key_path orelse {
+        writeErr("--key is required\n", .{});
+        std.process.exit(1);
+    };
+
+    // read cert file
+    const cert_pem = std.fs.cwd().readFileAlloc(alloc, cp, 1024 * 1024) catch {
+        writeErr("failed to read certificate file: {s}\n", .{cp});
+        std.process.exit(1);
+    };
+    defer alloc.free(cert_pem);
+
+    // read key file
+    const key_pem = std.fs.cwd().readFileAlloc(alloc, kp, 1024 * 1024) catch {
+        writeErr("failed to read key file: {s}\n", .{kp});
+        std.process.exit(1);
+    };
+    defer {
+        std.crypto.secureZero(u8, key_pem);
+        alloc.free(key_pem);
+    }
+
+    var cs = openCertStore(alloc);
+    defer closeCertStore(alloc, &cs);
+
+    cs.install(dom, cert_pem, key_pem, "manual") catch |err| {
+        if (err == cert_store.CertError.InvalidCert) {
+            writeErr("failed to parse certificate (invalid PEM or X.509)\n", .{});
+        } else {
+            writeErr("failed to store certificate\n", .{});
+        }
+        std.process.exit(1);
+    };
+
+    write("{s}\n", .{dom});
+}
+
+fn cmdCertList(alloc: std.mem.Allocator) void {
+    var cs = openCertStore(alloc);
+    defer closeCertStore(alloc, &cs);
+
+    var certs = cs.list() catch {
+        writeErr("failed to list certificates\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (certs.items) |c| c.deinit(alloc);
+        certs.deinit(alloc);
+    }
+
+    if (certs.items.len == 0) {
+        write("no certificates\n", .{});
+        return;
+    }
+
+    for (certs.items) |cert| {
+        var ts_buf: [20]u8 = undefined;
+        const expires = formatTimestamp(&ts_buf, cert.not_after);
+        write("{s}  expires={s}  source={s}\n", .{ cert.domain, expires, cert.source });
+    }
+}
+
+fn cmdCertRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    const domain = requireArg(args, "usage: yoq cert rm <domain>\n");
+
+    var cs = openCertStore(alloc);
+    defer closeCertStore(alloc, &cs);
+
+    cs.remove(domain) catch |err| {
+        if (err == cert_store.CertError.NotFound) {
+            writeErr("certificate not found: {s}\n", .{domain});
+        } else {
+            writeErr("failed to remove certificate\n", .{});
+        }
+        std.process.exit(1);
+    };
+
+    write("{s}\n", .{domain});
+}
+
+/// open a CertStore with a heap-allocated database connection.
+/// exits on failure — used by CLI commands.
+/// caller must call closeCertStore() when done.
+fn openCertStore(alloc: std.mem.Allocator) cert_store.CertStore {
+    const db_ptr = alloc.create(sqlite.Db) catch {
+        writeErr("failed to allocate database\n", .{});
+        std.process.exit(1);
+    };
+    db_ptr.* = store.openDb() catch {
+        alloc.destroy(db_ptr);
+        writeErr("failed to open database\n", .{});
+        std.process.exit(1);
+    };
+
+    return cert_store.CertStore.init(db_ptr, alloc) catch |err| {
+        db_ptr.deinit();
+        alloc.destroy(db_ptr);
+        if (err == cert_store.CertError.HomeDirNotFound) {
+            writeErr("HOME directory not found\n", .{});
+        } else {
+            writeErr("failed to initialize certificate store\n", .{});
+        }
+        std.process.exit(1);
+    };
+}
+
+/// close a cert store opened with openCertStore.
+fn closeCertStore(alloc: std.mem.Allocator, cs: *cert_store.CertStore) void {
+    cs.db.deinit();
+    alloc.destroy(cs.db);
+}
+
 /// format a unix timestamp as "YYYY-MM-DD HH:MM"
 fn formatTimestamp(buf: []u8, timestamp: i64) []const u8 {
     const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, timestamp)) };
@@ -2424,6 +2596,9 @@ fn printUsage() void {
         \\  exec <id> <cmd> [args...]         run a command in a running container
         \\  status [--verbose] [--server h:p]  show service status and resources
         \\  metrics [service] [--server h:p]  show per-service network metrics
+        \\  cert install <domain> --cert <p> --key <p>  store a TLS certificate
+        \\  cert list                        list certificates with expiry
+        \\  cert rm <domain>                 remove a certificate
         \\  policy deny <src> <tgt>          block traffic from source to target
         \\  policy allow <src> <tgt>         allow only this destination for source
         \\  policy rm <src> <tgt>            remove a policy rule
