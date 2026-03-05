@@ -16,11 +16,17 @@ const linux = std.os.linux;
 const posix = std.posix;
 
 pub const NetlinkError = error{
+    /// failed to open an AF_NETLINK socket
     SocketFailed,
+    /// failed to send a netlink message to the kernel
     SendFailed,
+    /// failed to receive a response from the kernel
     RecvFailed,
+    /// the kernel returned a non-zero error code in the ACK
     KernelError,
+    /// the message buffer is too small for the header or attributes
     BufferFull,
+    /// the kernel response was too short or had an unexpected type
     InvalidResponse,
 };
 

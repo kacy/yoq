@@ -19,7 +19,9 @@ const std = @import("std");
 const cmd = @import("../lib/cmd.zig");
 
 pub const NatError = error{
+    /// an iptables command failed to execute or returned a non-zero exit code
     ExecFailed,
+    /// failed to write to /proc/sys/net/ipv4/ip_forward
     ForwardingFailed,
 };
 

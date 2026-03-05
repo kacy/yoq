@@ -14,13 +14,21 @@ const nl = @import("netlink.zig");
 const cmd = @import("../lib/cmd.zig");
 
 pub const WireguardError = error{
+    /// failed to generate an X25519 keypair for WireGuard
     KeyGenFailed,
+    /// failed to create the WireGuard interface or configure its private key
     DeviceCreateFailed,
+    /// failed to delete a WireGuard interface
     DeviceDeleteFailed,
+    /// failed to add a peer to the WireGuard interface
     PeerAddFailed,
+    /// failed to remove a peer from the WireGuard interface
     PeerRemoveFailed,
+    /// failed to assign an overlay IP address to the WireGuard interface
     AddressFailed,
+    /// failed to add or remove a route through the WireGuard tunnel
     RouteFailed,
+    /// a subprocess (ip or wg) failed to execute
     ExecFailed,
 };
 

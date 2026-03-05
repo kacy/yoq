@@ -242,3 +242,21 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
         }
     }
 }
+
+// -- tests --
+
+test "syncPolicies — no-op without enforcer" {
+    // when no policy enforcer is loaded, syncPolicies returns immediately.
+    // this exercises the `orelse return` guard at the top.
+    syncPolicies(std.testing.allocator);
+}
+
+test "applyForContainer — no-op without enforcer" {
+    // when no policy enforcer is loaded, applyForContainer returns immediately.
+    applyForContainer("myservice", .{ 10, 42, 0, 5 }, std.testing.allocator);
+}
+
+test "removeForContainer — no-op without enforcer" {
+    // when no policy enforcer is loaded, removeForContainer returns immediately.
+    removeForContainer(.{ 10, 42, 0, 5 }, std.testing.allocator);
+}

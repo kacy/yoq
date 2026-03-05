@@ -16,14 +16,23 @@ const nl = @import("netlink.zig");
 const log = @import("../lib/log.zig");
 
 pub const BridgeError = error{
+    /// failed to create the bridge interface or assign its gateway IP
     CreateFailed,
+    /// failed to delete an existing bridge interface
     DeleteFailed,
+    /// failed to create a veth pair or attach it to the bridge
     VethCreateFailed,
+    /// failed to delete a veth pair from the host
     VethDeleteFailed,
+    /// the named network interface does not exist or has index 0
     InterfaceNotFound,
+    /// failed to assign an IPv4 address to an interface
     AddressFailed,
+    /// failed to add a default route via the gateway
     RouteFailed,
+    /// failed to bring a network interface up
     LinkSetFailed,
+    /// failed to enter or restore a network namespace via setns
     NamespaceFailed,
 };
 
