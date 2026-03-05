@@ -22,10 +22,13 @@ const cert_store = @import("cert_store.zig");
 const backend_mod = @import("backend.zig");
 const handshake = @import("handshake.zig");
 const record = @import("record.zig");
+const pem = @import("pem.zig");
 const acme_mod = @import("acme.zig");
 const jws = @import("jws.zig");
 
 const X25519 = std.crypto.dh.X25519;
+const Sha384 = std.crypto.hash.sha2.Sha384;
+const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
 const max_connections: u32 = 256;
 var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
@@ -368,9 +371,10 @@ pub const TlsProxy = struct {
     // -- connection handlers --
 
     fn tlsConnectionHandler(self: *TlsProxy, client_fd: posix.fd_t) void {
+        var handshake_complete = false;
         defer {
             _ = active_connections.fetchSub(1, .acq_rel);
-            sendCloseNotify(client_fd);
+            if (!handshake_complete) sendCloseNotify(client_fd);
             posix.close(client_fd);
         }
 
@@ -405,22 +409,33 @@ pub const TlsProxy = struct {
         };
 
         // perform TLS handshake and proxy traffic
-        self.handleTlsSession(client_hello, cert_result.cert_pem, cert_result.key_pem, backend) catch |err| {
+        self.handleTlsSession(
+            client_fd,
+            client_hello,
+            cert_result.cert_pem,
+            cert_result.key_pem,
+            backend,
+            &handshake_complete,
+        ) catch |err| {
             log.warn("TLS session error for {s}: {}", .{ server_name, err });
         };
     }
 
+    const hash_len = Sha384.digest_length; // 48
+
     fn handleTlsSession(
         self: *TlsProxy,
+        client_fd: posix.fd_t,
         client_hello: []const u8,
         cert_pem: []u8,
         key_pem: []u8,
         backend_info: backend_mod.Backend,
+        handshake_complete: *bool,
     ) !void {
         _ = self;
 
-        // parse ClientHello fields (already have the raw bytes from SNI extraction)
-        // skip past TLS record header (5) and handshake header (4)
+        // -- phase 1-2: parse ClientHello, X25519 key exchange --
+
         if (client_hello.len < 9) return error.InvalidClientHello;
         const rec_len = (@as(usize, client_hello[3]) << 8) | @as(usize, client_hello[4]);
         if (client_hello.len < 5 + rec_len) return error.InvalidClientHello;
@@ -432,36 +447,239 @@ pub const TlsProxy = struct {
         if (!hello_info.supported_versions_has_tls13) return error.UnsupportedVersion;
         const client_x25519_key = hello_info.x25519_key_share orelse return error.MissingKeyShare;
 
-        // generate server X25519 keypair and compute shared secret
         const server_kp = X25519.KeyPair.generate();
         const shared_secret = X25519.scalarmult(server_kp.secret_key, client_x25519_key) catch
             return error.KeyExchangeFailed;
 
-        // derive handshake secrets — these will be used for the encrypted
-        // portion of the handshake once full TLS session is wired up
-        var hello_hash: [48]u8 = undefined;
-        std.crypto.hash.sha2.Sha384.hash(client_hello, &hello_hash, .{});
+        // -- phase 3: transcript hash --
+
+        // hash the ClientHello handshake message body (after record header)
+        var transcript = Sha384.init(.{});
+        transcript.update(client_hello[5 .. 5 + rec_len]);
+
+        // -- phase 4: build + send ServerHello as plaintext --
+
+        var server_random: [32]u8 = undefined;
+        std.crypto.random.bytes(&server_random);
+
+        var sh_buf: [512]u8 = undefined;
+        const sh_len = handshake.buildServerHello(
+            &sh_buf,
+            hello_info.client_random,
+            server_random,
+            hello_info.session_id,
+            server_kp.public_key,
+        ) catch return error.HandshakeFailed;
+
+        // send as plaintext record
+        var sh_record: [5 + 512]u8 = undefined;
+        record.writeHeader(&sh_record, .handshake, @intCast(sh_len)) catch return error.HandshakeFailed;
+        @memcpy(sh_record[5 .. 5 + sh_len], sh_buf[0..sh_len]);
+        _ = posix.write(client_fd, sh_record[0 .. 5 + sh_len]) catch return error.WriteFailed;
+
+        // add ServerHello to transcript
+        transcript.update(sh_buf[0..sh_len]);
+
+        // TLS 1.3 compatibility: send ChangeCipherSpec (ignored by TLS 1.3 peers
+        // but needed for middlebox compatibility per RFC 8446 §5.1)
+        const ccs = [_]u8{
+            0x14, 0x03, 0x03, 0x00, 0x01, 0x01,
+        };
+        _ = posix.write(client_fd, &ccs) catch return error.WriteFailed;
+
+        // -- phase 5: derive handshake traffic keys --
+
+        var transcript_hash: [hash_len]u8 = undefined;
+        transcript_hash = transcript.peek();
 
         const early = handshake.deriveEarlySecret();
         const hs_secret = handshake.deriveHandshakeSecret(early, shared_secret);
-        const traffic = handshake.deriveHandshakeTrafficSecrets(hs_secret, hello_hash);
+        const hs_keys = handshake.deriveHandshakeTrafficSecrets(hs_secret, transcript_hash);
 
-        // the cert and keys are available for CertificateVerify signing
-        _ = cert_pem;
-        _ = key_pem;
-        _ = traffic;
+        const server_hs_traffic = handshake.deriveTrafficKeys(hs_keys.server_handshake_traffic_secret);
+        const client_hs_traffic = handshake.deriveTrafficKeys(hs_keys.client_handshake_traffic_secret);
 
-        // connect to backend for proxying
+        // -- phase 6: send encrypted handshake messages --
+
+        var server_seq: u64 = 0;
+
+        // 6a. EncryptedExtensions
+        var ee_buf: [64]u8 = undefined;
+        const ee_len = handshake.buildEncryptedExtensions(&ee_buf) catch return error.HandshakeFailed;
+        transcript.update(ee_buf[0..ee_len]);
+        try sendEncryptedHandshake(client_fd, ee_buf[0..ee_len], server_hs_traffic, &server_seq);
+
+        // 6b. Certificate — parse PEM cert to DER
+        const cert_der = pem.parseCertDer(std.heap.page_allocator, cert_pem) catch return error.CertParseFailed;
+        defer std.heap.page_allocator.free(cert_der);
+
+        var cert_buf: [8192]u8 = undefined;
+        const cert_len = handshake.buildCertificate(&cert_buf, cert_der) catch return error.HandshakeFailed;
+        transcript.update(cert_buf[0..cert_len]);
+        try sendEncryptedHandshake(client_fd, cert_buf[0..cert_len], server_hs_traffic, &server_seq);
+
+        // 6c. CertificateVerify — sign transcript with private key
+        const private_key = pem.parseEcPrivateKey(key_pem) catch return error.KeyParseFailed;
+
+        const cv_transcript_hash = transcript.peek();
+
+        var cv_buf: [512]u8 = undefined;
+        const cv_len = handshake.buildCertificateVerify(&cv_buf, cv_transcript_hash, private_key) catch
+            return error.HandshakeFailed;
+        transcript.update(cv_buf[0..cv_len]);
+        try sendEncryptedHandshake(client_fd, cv_buf[0..cv_len], server_hs_traffic, &server_seq);
+
+        // 6d. Finished
+        const fin_transcript_hash = transcript.peek();
+
+        const verify_data = handshake.computeFinished(hs_keys.server_handshake_traffic_secret, fin_transcript_hash);
+
+        var fin_buf: [128]u8 = undefined;
+        const fin_len = handshake.buildFinished(&fin_buf, verify_data) catch return error.HandshakeFailed;
+        transcript.update(fin_buf[0..fin_len]);
+        try sendEncryptedHandshake(client_fd, fin_buf[0..fin_len], server_hs_traffic, &server_seq);
+
+        // -- phase 7: read + decrypt client Finished --
+
+        var client_seq: u64 = 0;
+        var client_finished_buf: [512]u8 = undefined;
+        const client_rec_n = readWithTimeout(client_fd, &client_finished_buf, 10000) catch
+            return error.ReadFailed;
+        if (client_rec_n < record.record_header_size + record.aead_tag_size + 1)
+            return error.InvalidClientFinished;
+
+        // client may send CCS before Finished — skip it
+        var client_data = client_finished_buf[0..client_rec_n];
+        if (client_data[0] == 0x14) {
+            // ChangeCipherSpec record — skip
+            if (client_data.len < 6) return error.InvalidClientFinished;
+            const ccs_len: usize = 5 + @as(usize, (@as(u16, client_data[3]) << 8) | @as(u16, client_data[4]));
+            if (ccs_len > client_data.len) return error.InvalidClientFinished;
+            client_data = client_data[ccs_len..];
+            if (client_data.len < record.record_header_size + record.aead_tag_size + 1)
+                return error.InvalidClientFinished;
+        }
+
+        // parse the encrypted record
+        const client_rec_header = client_data[0..5].*;
+        const client_ciphertext_len = (@as(usize, client_data[3]) << 8) | @as(usize, client_data[4]);
+        if (5 + client_ciphertext_len > client_data.len) return error.InvalidClientFinished;
+        const client_ciphertext = client_data[5 .. 5 + client_ciphertext_len];
+
+        const client_decrypted = record.decryptRecord(
+            client_hs_traffic.key,
+            client_hs_traffic.iv,
+            client_seq,
+            client_ciphertext,
+            client_rec_header,
+        ) catch return error.InvalidClientFinished;
+        client_seq += 1;
+
+        if (client_decrypted.content_type != .handshake) return error.InvalidClientFinished;
+        if (client_decrypted.plaintext.len < 4 + hash_len) return error.InvalidClientFinished;
+        if (client_decrypted.plaintext[0] != 0x14) return error.InvalidClientFinished; // Finished type
+
+        // verify the client's Finished
+        const client_fin_transcript_hash = transcript.peek();
+
+        const expected_verify = handshake.computeFinished(
+            hs_keys.client_handshake_traffic_secret,
+            client_fin_transcript_hash,
+        );
+
+        if (!std.mem.eql(u8, client_decrypted.plaintext[4 .. 4 + hash_len], &expected_verify))
+            return error.FinishedVerifyFailed;
+
+        // add client Finished to transcript
+        transcript.update(client_decrypted.plaintext);
+
+        // -- phase 8: derive application keys --
+
+        var app_transcript_hash: [hash_len]u8 = undefined;
+        transcript.final(&app_transcript_hash);
+
+        const master = handshake.deriveMasterSecret(hs_keys.handshake_secret);
+        const app_keys = handshake.deriveApplicationSecrets(master, app_transcript_hash);
+
+        handshake_complete.* = true;
+
+        // -- phase 9: bidirectional proxy --
+
         const backend_fd = connectToBackend(backend_info) catch return error.BackendConnectFailed;
-        posix.close(backend_fd);
+        defer posix.close(backend_fd);
 
-        // full handshake completion deferred — the building blocks
-        // (handshake.zig, record.zig) are in place. wiring them together
-        // with CertificateVerify signing requires private key parsing,
-        // which comes in a follow-up PR.
-        //
-        // proxy structure, connection lifecycle, SNI routing, and backend
-        // connectivity are all functional.
+        var client_app_seq: u64 = 0;
+        var server_app_seq: u64 = 0;
+
+        var poll_fds = [_]posix.pollfd{
+            .{ .fd = client_fd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = backend_fd, .events = posix.POLL.IN, .revents = 0 },
+        };
+
+        while (true) {
+            const poll_result = posix.poll(&poll_fds, 30000) catch break;
+            if (poll_result == 0) break; // timeout
+
+            // check for errors/hangup
+            if (poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) break;
+            if (poll_fds[1].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) break;
+
+            // client → backend: decrypt TLS, forward plaintext
+            if (poll_fds[0].revents & posix.POLL.IN != 0) {
+                var enc_buf: [record.max_ciphertext_size + record.record_header_size]u8 = undefined;
+                const enc_n = posix.read(client_fd, &enc_buf) catch break;
+                if (enc_n == 0) break;
+
+                if (enc_n < record.record_header_size) break;
+                const app_rec_header = enc_buf[0..5].*;
+                const app_ct_len = (@as(usize, enc_buf[3]) << 8) | @as(usize, enc_buf[4]);
+                if (5 + app_ct_len > enc_n) break;
+
+                const app_ct = enc_buf[5 .. 5 + app_ct_len];
+                const decrypted = record.decryptRecord(
+                    app_keys.client.key,
+                    app_keys.client.iv,
+                    client_app_seq,
+                    app_ct,
+                    app_rec_header,
+                ) catch break;
+                client_app_seq += 1;
+
+                // close_notify from client
+                if (decrypted.content_type == .alert) break;
+
+                if (decrypted.plaintext.len > 0) {
+                    _ = posix.write(backend_fd, decrypted.plaintext) catch break;
+                }
+            }
+
+            // backend → client: read plaintext, encrypt, send TLS
+            if (poll_fds[1].revents & posix.POLL.IN != 0) {
+                var plain_buf: [record.max_record_size]u8 = undefined;
+                const plain_n = posix.read(backend_fd, &plain_buf) catch break;
+                if (plain_n == 0) break;
+
+                var ct_out: [record.max_ciphertext_size]u8 = undefined;
+                const ct_len = record.encryptRecord(
+                    app_keys.server.key,
+                    app_keys.server.iv,
+                    server_app_seq,
+                    plain_buf[0..plain_n],
+                    .application_data,
+                    &ct_out,
+                ) catch break;
+                server_app_seq += 1;
+
+                // send TLS record: header + ciphertext
+                var out_rec: [5 + record.max_ciphertext_size]u8 = undefined;
+                record.writeHeader(&out_rec, .application_data, @intCast(ct_len)) catch break;
+                @memcpy(out_rec[5 .. 5 + ct_len], ct_out[0..ct_len]);
+                _ = posix.write(client_fd, out_rec[0 .. 5 + ct_len]) catch break;
+            }
+        }
+
+        // send encrypted close_notify before exiting
+        sendEncryptedCloseNotify(client_fd, app_keys.server, &server_app_seq);
     }
 
     fn httpConnectionHandler(self: *TlsProxy, client_fd: posix.fd_t) void {
@@ -523,6 +741,52 @@ pub const TlsProxy = struct {
         _ = posix.write(client_fd, response) catch {};
     }
 };
+
+// -- TLS helpers --
+
+/// encrypt a handshake message and send as a TLS record.
+fn sendEncryptedHandshake(
+    fd: posix.fd_t,
+    msg: []const u8,
+    keys: handshake.TrafficKeys,
+    seq: *u64,
+) !void {
+    var ct_buf: [record.max_ciphertext_size]u8 = undefined;
+    const ct_len = record.encryptRecord(
+        keys.key,
+        keys.iv,
+        seq.*,
+        msg,
+        .handshake,
+        &ct_buf,
+    ) catch return error.EncryptFailed;
+
+    var out: [5 + record.max_ciphertext_size]u8 = undefined;
+    record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return error.EncryptFailed;
+    @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
+    _ = posix.write(fd, out[0 .. 5 + ct_len]) catch return error.WriteFailed;
+    seq.* += 1;
+}
+
+/// send an encrypted close_notify alert.
+fn sendEncryptedCloseNotify(fd: posix.fd_t, keys: handshake.TrafficKeys, seq: *u64) void {
+    const alert = [_]u8{ 0x01, 0x00 }; // warning, close_notify
+    var ct_buf: [64]u8 = undefined;
+    const ct_len = record.encryptRecord(
+        keys.key,
+        keys.iv,
+        seq.*,
+        &alert,
+        .alert,
+        &ct_buf,
+    ) catch return;
+
+    var out: [5 + 64]u8 = undefined;
+    record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return;
+    @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
+    _ = posix.write(fd, out[0 .. 5 + ct_len]) catch {};
+    seq.* += 1;
+}
 
 // -- helpers --
 
@@ -621,20 +885,11 @@ fn extractHost(request: []const u8) ?[]const u8 {
     return if (host.len > 0) host else null;
 }
 
-/// send a TLS close_notify alert to gracefully shut down the connection.
+/// send a plaintext TLS close_notify alert.
 ///
-/// TLS 1.3 close_notify is an alert record:
-///   content_type: 21 (alert)
-///   version: 0x0303 (TLS 1.2 — used on the wire even for TLS 1.3)
-///   length: 2
-///   level: 1 (warning)
-///   description: 0 (close_notify)
-///
-/// TODO: after the TLS handshake is complete, close_notify must be sent
-/// as an encrypted record using the application traffic key. this
-/// plaintext version is only correct before the handshake finishes.
-/// once full handshake completion is wired up, update this to encrypt
-/// the alert with record.zig's encryption layer.
+/// used only before the handshake completes. after handshake completion,
+/// tlsConnectionHandler skips this and handleTlsSession sends an
+/// encrypted close_notify via sendEncryptedCloseNotify instead.
 ///
 /// best-effort — we don't care if the write fails (connection may already
 /// be closed by the client).
