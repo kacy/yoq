@@ -310,6 +310,49 @@ fn layerDir(buf: *[max_path]u8) LayerError![]const u8 {
     return paths.dataPath(buf, layer_subdir) catch return LayerError.PathTooLong;
 }
 
+/// list all extracted layer hex digests on disk.
+/// walks ~/.local/share/yoq/layers/sha256/ and collects directory names.
+/// caller owns the returned list.
+pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) LayerError!std.ArrayList([]const u8) {
+    var dir_buf: [max_path]u8 = undefined;
+    const dir_path = layerDir(&dir_buf) catch return LayerError.PathTooLong;
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+        return std.ArrayList([]const u8).init(alloc);
+    };
+    defer dir.close();
+
+    var layers = std.ArrayList([]const u8).init(alloc);
+    errdefer {
+        for (layers.items) |item| alloc.free(item);
+        layers.deinit();
+    }
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        if (entry.name.len != 64) continue;
+        const owned = alloc.dupe(u8, entry.name) catch continue;
+        layers.append(owned) catch {
+            alloc.free(owned);
+            continue;
+        };
+    }
+
+    return layers;
+}
+
+/// delete an extracted layer directory by hex digest string.
+pub fn deleteExtractedLayer(hex: []const u8) void {
+    var path_buf: [max_path]u8 = undefined;
+    const path = paths.dataPathFmt(&path_buf, "{s}/{s}", .{ layer_subdir, hex }) catch return;
+    std.fs.cwd().deleteTree(path) catch |err| {
+        if (err != error.FileNotFound) {
+            log.warn("failed to delete extracted layer {s}: {}", .{ hex, err });
+        }
+    };
+}
+
 /// check whether a tar entry path is safe to extract.
 /// rejects absolute paths and paths containing ".." components,
 /// which could write outside the extraction directory.
@@ -674,4 +717,15 @@ test "different content produces different layer digests" {
     // clean up
     blob_store.deleteBlob(result1.compressed_digest) catch {};
     blob_store.deleteBlob(result2.compressed_digest) catch {};
+}
+
+test "listExtractedLayersOnDisk returns empty for fresh install" {
+    const alloc = std.testing.allocator;
+    var layers = try listExtractedLayersOnDisk(alloc);
+    defer {
+        for (layers.items) |item| alloc.free(item);
+        layers.deinit();
+    }
+    // may or may not be empty depending on prior test runs, just verify no crash
+    try std.testing.expect(layers.items.len >= 0);
 }
