@@ -2978,19 +2978,21 @@ fn requireArg(args: *std.process.ArgIterator, comptime usage: []const u8) []cons
     };
 }
 
-/// full cleanup for a stopped container: network, store record, logs, dirs.
-/// used by cmdRm and the per-service cleanup loop in cmdDown.
+/// full cleanup for a stopped container: network, logs, dirs, then DB record.
+/// DB record is removed last so we can still find orphaned resources if
+/// an earlier cleanup step fails.
 fn cleanupStoppedContainer(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) void {
     cleanupNetwork(id, ip_address, veth_host);
+    logs.deleteLogFile(id);
+    container.cleanupContainerDirs(id);
     store.remove(id) catch |e| {
         writeErr("warning: failed to remove container record {s}: {}\n", .{ id, e });
     };
-    logs.deleteLogFile(id);
-    container.cleanupContainerDirs(id);
 }
 
 /// clean up network resources for a container (veth pair + IP allocation).
-/// called from cmdStop and cmdRm. non-fatal — ignores errors.
+/// called from cmdStop and cmdRm. non-fatal — logs warnings on failure
+/// to help debug network resource leaks.
 fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) void {
     const bridge = @import("network/bridge.zig");
 
@@ -2999,14 +3001,18 @@ fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_host: 
         var name_buf: [32]u8 = undefined;
         const len = @min(veth.len, name_buf.len);
         @memcpy(name_buf[0..len], veth[0..len]);
-        bridge.deleteVeth(name_buf[0..len]) catch {};
+        bridge.deleteVeth(name_buf[0..len]) catch |e| {
+            writeErr("warning: failed to delete veth {s} for {s}: {}\n", .{ veth, container_id, e });
+        };
     }
 
     // release IP allocation
     if (ip_address != null) {
         var db = store.openDb() catch return;
         defer db.deinit();
-        ip.release(&db, container_id) catch {};
+        ip.release(&db, container_id) catch |e| {
+            writeErr("warning: failed to release IP for {s}: {}\n", .{ container_id, e });
+        };
     }
 }
 
