@@ -14,6 +14,7 @@ const filesystem = @import("filesystem.zig");
 const security = @import("security.zig");
 const process = @import("process.zig");
 const logs = @import("logs.zig");
+const init = @import("init.zig");
 const store = @import("../state/store.zig");
 const paths = @import("../lib/paths.zig");
 const net_setup = @import("../network/setup.zig");
@@ -376,7 +377,8 @@ const ChildExecContext = struct {
 };
 
 /// child process entry point (called after namespace creation).
-/// sets up filesystem, security, and execs the container command.
+/// sets up filesystem, security, then runs init.run() which forks
+/// a workload process, reaps zombies, and forwards signals.
 /// returns 127 if exec fails (convention for "command not found").
 fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
@@ -423,7 +425,15 @@ fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     // must be after filesystem setup since mounting requires caps
     security.apply() catch return 1;
 
-    // 7. exec the container command
+    // 7. run container init: forks the workload, reaps zombies, forwards signals.
+    //    init.run() becomes PID 1 and forks execCommandWrapper as PID 2.
+    return init.run(execCommandWrapper, @ptrCast(@constCast(ctx)));
+}
+
+/// C-callable wrapper around execCommand for use with init.run().
+/// init.run() forks and calls this in the child (workload) process.
+fn execCommandWrapper(arg: ?*anyopaque) callconv(.c) u8 {
+    const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
     return execCommand(ctx.command, ctx.args, ctx.env);
 }
 
