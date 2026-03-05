@@ -12,6 +12,13 @@ pub fn isError(rc: usize) bool {
     return signed < 0;
 }
 
+/// extract the errno value from a failed syscall return.
+/// only meaningful when isError(rc) is true.
+pub fn getErrno(rc: usize) usize {
+    const signed: isize = @bitCast(rc);
+    return @bitCast(-signed);
+}
+
 /// convert a raw syscall return to a usable value or error.
 /// returns the value on success, error.SyscallFailed on failure.
 pub fn unwrap(rc: usize) !usize {
@@ -42,4 +49,14 @@ test "unwrap: success" {
 test "unwrap: failure" {
     const neg: usize = @bitCast(@as(isize, -1));
     try std.testing.expectError(error.SyscallFailed, unwrap(neg));
+}
+
+test "getErrno: EINTR" {
+    const eintr: usize = @bitCast(@as(isize, -4)); // EINTR = 4
+    try std.testing.expectEqual(@as(usize, 4), getErrno(eintr));
+}
+
+test "getErrno: EPERM" {
+    const eperm: usize = @bitCast(@as(isize, -1)); // EPERM = 1
+    try std.testing.expectEqual(@as(usize, 1), getErrno(eperm));
 }

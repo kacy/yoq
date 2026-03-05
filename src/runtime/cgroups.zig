@@ -101,9 +101,20 @@ pub const Cgroup = struct {
         return cg;
     }
 
+    /// check if cgroups v2 is available on this system.
+    /// looks for the cgroup.controllers file which only exists
+    /// when cgroups v2 is mounted at /sys/fs/cgroup.
+    pub fn isV2Available() bool {
+        std.fs.cwd().access(cgroup_root ++ "/cgroup.controllers", .{}) catch return false;
+        return true;
+    }
+
     /// create a new cgroup for the given container id.
     /// creates the directory under /sys/fs/cgroup/yoq/<id>/
+    /// returns NotSupported if cgroups v2 is not available.
     pub fn create(container_id: []const u8) CgroupError!Cgroup {
+        if (!isV2Available()) return CgroupError.NotSupported;
+
         var cg = open(container_id) catch return CgroupError.CreateFailed;
 
         // create yoq parent dir if needed

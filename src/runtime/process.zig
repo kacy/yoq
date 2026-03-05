@@ -34,31 +34,39 @@ pub const ExitStatus = union(enum) {
 /// wait for a specific process to change state.
 /// returns immediately if the process has already exited.
 /// if `no_hang` is true, returns `.running` if still alive.
+/// retries automatically on EINTR (signal interrupted the wait).
 pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
     var status: u32 = 0;
     var flags: u32 = 0;
     if (no_hang) flags |= linux.W.NOHANG;
 
-    const rc = linux.syscall4(
-        .wait4,
-        @as(usize, @bitCast(@as(isize, pid))),
-        @intFromPtr(&status),
-        flags,
-        0, // rusage
-    );
+    while (true) {
+        const rc = linux.syscall4(
+            .wait4,
+            @as(usize, @bitCast(@as(isize, pid))),
+            @intFromPtr(&status),
+            flags,
+            0, // rusage
+        );
 
-    if (syscall_util.isError(rc)) return ProcessError.WaitFailed;
-    const result_pid: isize = @bitCast(rc);
+        if (syscall_util.isError(rc)) {
+            // EINTR: a signal interrupted the wait — just retry
+            if (syscall_util.getErrno(rc) == 4) continue;
+            return ProcessError.WaitFailed;
+        }
 
-    // WNOHANG and process hasn't changed state
-    if (result_pid == 0) {
-        return .{ .pid = pid, .status = .running };
+        const result_pid: isize = @bitCast(rc);
+
+        // WNOHANG and process hasn't changed state
+        if (result_pid == 0) {
+            return .{ .pid = pid, .status = .running };
+        }
+
+        return .{
+            .pid = @intCast(result_pid),
+            .status = parseStatus(status),
+        };
     }
-
-    return .{
-        .pid = @intCast(result_pid),
-        .status = parseStatus(status),
-    };
 }
 
 /// send a signal to a process.
