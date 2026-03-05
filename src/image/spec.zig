@@ -4,6 +4,11 @@
 // follows the OCI image spec v1.1:
 // https://github.com/opencontainers/image-spec/blob/main/manifest.md
 //
+// type hierarchy:
+//   ImageIndex → [Descriptor] → Manifest → { config: Descriptor, layers: [Descriptor] }
+//   Descriptor points to a blob by digest. Manifest.config references an ImageConfig
+//   blob, which contains ContainerConfig (runtime defaults like Cmd, Env, etc.).
+//
 // struct field names match the JSON keys exactly so std.json can
 // parse them without any field name mapping. this means some fields
 // use camelCase (mediaType, schemaVersion) — intentional tradeoff
@@ -120,11 +125,11 @@ pub fn ParseResult(comptime T: type) type {
     };
 }
 
-/// check that JSON nesting depth doesn't exceed our limit.
+/// validate that JSON nesting depth doesn't exceed our limit.
 /// scans the raw bytes counting `[` and `{` as depth increases,
 /// `]` and `}` as decreases. skips characters inside strings.
 /// returns error if depth exceeds max_json_depth.
-fn checkJsonDepth(json_bytes: []const u8) !void {
+fn validateJsonDepth(json_bytes: []const u8) !void {
     var depth: usize = 0;
     var in_string = false;
     var escaped = false;
@@ -158,7 +163,7 @@ fn checkJsonDepth(json_bytes: []const u8) !void {
 /// enforces a depth limit to prevent stack exhaustion from crafted input.
 /// caller must call .deinit() on the result when done.
 pub fn parseJson(comptime T: type, alloc: std.mem.Allocator, json_bytes: []const u8) !ParseResult(T) {
-    try checkJsonDepth(json_bytes);
+    try validateJsonDepth(json_bytes);
     const parsed = try std.json.parseFromSlice(T, alloc, json_bytes, .{
         .ignore_unknown_fields = true,
     });
@@ -506,7 +511,7 @@ test "json depth limit — normal manifest passes" {
     ;
 
     // should not error — depth is only ~3
-    try checkJsonDepth(json);
+    try validateJsonDepth(json);
 }
 
 test "json depth limit — excessive nesting rejected" {
@@ -516,7 +521,7 @@ test "json depth limit — excessive nesting rejected" {
     for (0..65) |i| {
         buf[i] = '[';
     }
-    const result = checkJsonDepth(buf[0..65]);
+    const result = validateJsonDepth(buf[0..65]);
     try std.testing.expectError(error.JsonDepthExceeded, result);
 }
 
@@ -525,5 +530,5 @@ test "json depth limit — strings with braces don't count" {
     const json =
         \\{"key": "value with { and [ characters }]"}
     ;
-    try checkJsonDepth(json);
+    try validateJsonDepth(json);
 }

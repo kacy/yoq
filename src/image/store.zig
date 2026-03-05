@@ -14,11 +14,17 @@ const paths = @import("../lib/paths.zig");
 const log = @import("../lib/log.zig");
 
 pub const BlobError = error{
+    /// failed to write blob data or rename temp file into place
     WriteFailed,
+    /// failed to read source file during putBlobFromFile
     ReadFailed,
+    /// blob with the requested digest does not exist in the store
     NotFound,
+    /// blob contents don't match the expected sha256 digest
     HashMismatch,
+    /// constructed blob path exceeds max_path buffer
     PathTooLong,
+    /// HOME environment variable not set, can't locate data directory
     HomeDirNotFound,
 };
 
@@ -184,7 +190,9 @@ pub fn hasBlob(digest: Digest) bool {
     return true;
 }
 
-/// delete a blob by digest
+/// delete a blob by digest. returns BlobError.NotFound if the blob
+/// doesn't exist — use removeBlob() instead for best-effort cleanup
+/// where missing blobs are expected.
 pub fn deleteBlob(digest: Digest) BlobError!void {
     var path_buf: [max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;

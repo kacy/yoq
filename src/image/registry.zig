@@ -15,16 +15,27 @@ const blob_store = @import("store.zig");
 const log = @import("../lib/log.zig");
 
 pub const RegistryError = error{
+    /// bearer token authentication failed (bad credentials or challenge)
     AuthFailed,
+    /// manifest not found for the given reference (tag or digest)
     ManifestNotFound,
+    /// blob (config or layer) not found in the registry
     BlobNotFound,
+    /// HTTP request failed (connection, timeout, DNS, etc.)
     NetworkError,
+    /// manifest or config JSON could not be parsed
     ParseError,
+    /// registry returned a media type we don't handle
     UnsupportedMediaType,
+    /// no manifest found for the target platform (linux/amd64)
     PlatformNotFound,
+    /// downloaded content's sha256 doesn't match the expected digest
     DigestMismatch,
+    /// response body exceeds the configured size limit
     ResponseTooLarge,
+    /// blob or manifest PUT to the registry failed
     UploadFailed,
+    /// POST to initiate a blob upload returned non-202
     UploadInitFailed,
 };
 
@@ -979,6 +990,10 @@ test "response size limits — constants are reasonable" {
     // sanity check that our limits are set correctly
     try std.testing.expectEqual(@as(usize, 10 * 1024 * 1024), max_manifest_size);
     try std.testing.expectEqual(@as(usize, 64 * 1024), max_auth_response_size);
+    try std.testing.expectEqual(@as(usize, 512 * 1024 * 1024), max_blob_size);
+
+    // blob limit should be larger than manifest limit (layers >> manifests)
+    try std.testing.expect(max_blob_size > max_manifest_size);
 
     // a normal manifest is well under the limit
     const small_manifest = "{\"schemaVersion\":2,\"config\":{},\"layers\":[]}";

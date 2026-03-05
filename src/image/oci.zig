@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const image_spec = @import("spec.zig");
-const store = @import("../state/store.zig");
+const state_store = @import("../state/store.zig");
 const blob_store = @import("store.zig");
 
 pub const ResolvedCommand = struct {
@@ -71,13 +71,13 @@ pub fn saveImageFromPull(
     config_bytes: []const u8,
     config_digest: []const u8,
     total_size: usize,
-) store.StoreError!void {
+) state_store.StoreError!void {
     // persist manifest and config blobs so they can be read back for push.
     // putBlob is idempotent — if the blob already exists, it's a no-op.
-    _ = blob_store.putBlob(manifest_bytes) catch return store.StoreError.WriteFailed;
-    _ = blob_store.putBlob(config_bytes) catch return store.StoreError.WriteFailed;
+    _ = blob_store.putBlob(manifest_bytes) catch return state_store.StoreError.WriteFailed;
+    _ = blob_store.putBlob(config_bytes) catch return state_store.StoreError.WriteFailed;
 
-    return store.saveImage(.{
+    return state_store.saveImage(.{
         .id = manifest_digest,
         .repository = ref.repository,
         .tag = ref.reference,
