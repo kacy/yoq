@@ -41,6 +41,12 @@ const acme = @import("tls/acme.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
+const parsePortMap = cli.parsePortMap;
+const isValidContainerName = cli.isValidContainerName;
+const requireArg = cli.requireArg;
+const formatTimestamp = cli.formatTimestamp;
+const formatCount = cli.formatCount;
+const truncate = cli.truncate;
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -1388,25 +1394,9 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
 /// deploy manifest services to a cluster server via POST /deploy.
 fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *const manifest_spec.Manifest) void {
-    // parse host:port
-    var server_ip: [4]u8 = .{ 127, 0, 0, 1 };
-    var server_port: u16 = 7700;
-
-    if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
-        server_ip = ip.parseIp(addr_str[0..colon]) orelse {
-            writeErr("invalid server address: {s}\n", .{addr_str});
-            std.process.exit(1);
-        };
-        server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
-            writeErr("invalid port in server address: {s}\n", .{addr_str});
-            std.process.exit(1);
-        };
-    } else {
-        server_ip = ip.parseIp(addr_str) orelse {
-            writeErr("invalid server address: {s}\n", .{addr_str});
-            std.process.exit(1);
-        };
-    }
+    const server = cli.parseServerAddr(addr_str);
+    const server_ip = server.ip;
+    const server_port = server.port;
 
     // build JSON body: {"services":[{"image":"...","command":"...","cpu_limit":N,"memory_limit_mb":N},...]}
     var json_buf: std.ArrayList(u8) = .empty;
@@ -2021,8 +2011,7 @@ fn cmdClusterStatus(alloc: std.mem.Allocator) void {
 }
 
 fn cmdNodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    var server_addr: [4]u8 = .{ 127, 0, 0, 1 };
-    var server_port: u16 = 7700;
+    var server: cli.ServerAddr = .{};
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--server")) {
@@ -2030,23 +2019,11 @@ fn cmdNodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 writeErr("--server requires a host:port address\n", .{});
                 std.process.exit(1);
             };
-            if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
-                server_addr = ip.parseIp(addr_str[0..colon]) orelse {
-                    writeErr("invalid server address: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-                server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
-                    writeErr("invalid port: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-            } else {
-                server_addr = ip.parseIp(addr_str) orelse {
-                    writeErr("invalid server address: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-            }
+            server = cli.parseServerAddr(addr_str);
         }
     }
+    const server_addr = server.ip;
+    const server_port = server.port;
 
     var token_buf: [64]u8 = undefined;
     const token = readApiToken(&token_buf);
@@ -2100,8 +2077,7 @@ fn cmdNodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
 fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var node_id: ?[]const u8 = null;
-    var server_addr: [4]u8 = .{ 127, 0, 0, 1 };
-    var server_port: u16 = 7700;
+    var server: cli.ServerAddr = .{};
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--server")) {
@@ -2109,25 +2085,13 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 writeErr("--server requires a host:port address\n", .{});
                 std.process.exit(1);
             };
-            if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
-                server_addr = ip.parseIp(addr_str[0..colon]) orelse {
-                    writeErr("invalid server address: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-                server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
-                    writeErr("invalid port: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-            } else {
-                server_addr = ip.parseIp(addr_str) orelse {
-                    writeErr("invalid server address: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-            }
+            server = cli.parseServerAddr(addr_str);
         } else {
             node_id = arg;
         }
     }
+    const server_addr = server.ip;
+    const server_port = server.port;
 
     const id = node_id orelse {
         writeErr("usage: yoq drain <node-id> [--server host:port]\n", .{});
@@ -2162,8 +2126,7 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
 fn cmdStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var verbose = false;
-    var server_addr: ?[4]u8 = null;
-    var server_port: u16 = 7700;
+    var server: ?cli.ServerAddr = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
@@ -2173,29 +2136,13 @@ fn cmdStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 writeErr("--server requires a host:port address\n", .{});
                 std.process.exit(1);
             };
-            var addr: [4]u8 = .{ 127, 0, 0, 1 };
-            if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
-                addr = ip.parseIp(addr_str[0..colon]) orelse {
-                    writeErr("invalid server address: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-                server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
-                    writeErr("invalid port: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-            } else {
-                addr = ip.parseIp(addr_str) orelse {
-                    writeErr("invalid server address: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-            }
-            server_addr = addr;
+            server = cli.parseServerAddr(addr_str);
         }
     }
 
     // cluster mode: query API endpoint
-    if (server_addr) |addr| {
-        cmdStatusRemote(alloc, addr, server_port, verbose);
+    if (server) |s| {
+        cmdStatusRemote(alloc, s.ip, s.port, verbose);
         return;
     }
 
@@ -2368,8 +2315,7 @@ fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8
 
 fn cmdMetrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var service_filter: ?[]const u8 = null;
-    var server_addr: ?[4]u8 = null;
-    var server_port: u16 = 7700;
+    var server: ?cli.ServerAddr = null;
     var pairs_mode = false;
 
     while (args.next()) |arg| {
@@ -2378,23 +2324,7 @@ fn cmdMetrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 writeErr("--server requires a host:port address\n", .{});
                 std.process.exit(1);
             };
-            var addr: [4]u8 = .{ 127, 0, 0, 1 };
-            if (std.mem.indexOf(u8, addr_str, ":")) |colon| {
-                addr = ip.parseIp(addr_str[0..colon]) orelse {
-                    writeErr("invalid server address: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-                server_port = std.fmt.parseInt(u16, addr_str[colon + 1 ..], 10) catch {
-                    writeErr("invalid port: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-            } else {
-                addr = ip.parseIp(addr_str) orelse {
-                    writeErr("invalid server address: {s}\n", .{addr_str});
-                    std.process.exit(1);
-                };
-            }
-            server_addr = addr;
+            server = cli.parseServerAddr(addr_str);
         } else if (std.mem.eql(u8, arg, "--pairs")) {
             pairs_mode = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
@@ -2403,16 +2333,16 @@ fn cmdMetrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 
     if (pairs_mode) {
-        if (server_addr) |addr| {
-            cmdMetricsPairsRemote(alloc, addr, server_port);
+        if (server) |s| {
+            cmdMetricsPairsRemote(alloc, s.ip, s.port);
         } else {
             cmdMetricsPairs(alloc);
         }
         return;
     }
 
-    if (server_addr) |addr| {
-        cmdMetricsRemote(alloc, addr, server_port, service_filter);
+    if (server) |s| {
+        cmdMetricsRemote(alloc, s.ip, s.port, service_filter);
         return;
     }
 
@@ -2646,39 +2576,6 @@ fn resolveIpName(ip_net: u32, records: []const store.ContainerRecord) []const u8
     return "unknown";
 }
 
-/// format a large count with comma separators for readability.
-/// e.g. 12450 → "12,450", 1234567 → "1,234,567"
-fn formatCount(buf: []u8, count: u64) []const u8 {
-    if (count == 0) return "0";
-
-    // format the number first without commas
-    var num_buf: [24]u8 = undefined;
-    const digits = std.fmt.bufPrint(&num_buf, "{d}", .{count}) catch return "-";
-
-    // insert commas
-    var i: usize = 0;
-    var d: usize = 0;
-    const leading = digits.len % 3;
-    if (leading > 0) {
-        if (i + leading > buf.len) return digits;
-        @memcpy(buf[i..][0..leading], digits[d..][0..leading]);
-        i += leading;
-        d += leading;
-    }
-    while (d < digits.len) {
-        if (i > 0 and i < buf.len) {
-            buf[i] = ',';
-            i += 1;
-        }
-        if (i + 3 > buf.len) return digits;
-        @memcpy(buf[i..][0..3], digits[d..][0..3]);
-        i += 3;
-        d += 3;
-    }
-
-    return buf[0..i];
-}
-
 // -- deployment commands --
 
 fn cmdRollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -2745,12 +2642,6 @@ fn cmdHistory(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             truncate(msg, 40),
         });
     }
-}
-
-/// truncate a string to max_len, adding "..." if truncated
-fn truncate(s: []const u8, max_len: usize) []const u8 {
-    if (s.len <= max_len) return s;
-    return s[0..max_len];
 }
 
 // -- secret commands --
@@ -3368,23 +3259,6 @@ fn closeCertStore(alloc: std.mem.Allocator, cs: *cert_store.CertStore) void {
     alloc.destroy(cs.db);
 }
 
-/// format a unix timestamp as "YYYY-MM-DD HH:MM"
-fn formatTimestamp(buf: []u8, timestamp: i64) []const u8 {
-    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, timestamp)) };
-    const day = epoch.getEpochDay();
-    const year_day = day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day_seconds = epoch.getDaySeconds();
-
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
-        year_day.year,
-        month_day.month.numeric(),
-        month_day.day_index + 1,
-        day_seconds.getHoursIntoDay(),
-        day_seconds.getMinutesIntoHour(),
-    }) catch "?";
-}
-
 fn printUsage() void {
     write(
         \\yoq — container runtime and orchestrator
@@ -3458,42 +3332,6 @@ fn printUsage() void {
     , .{});
 }
 
-/// validate a container name as an RFC 1123 DNS label.
-/// must be 1-63 chars, alphanumeric or hyphens, no leading/trailing hyphen.
-fn isValidContainerName(name: []const u8) bool {
-    if (name.len == 0 or name.len > 63) return false;
-    if (name[0] == '-' or name[name.len - 1] == '-') return false;
-    for (name) |c| {
-        const ok = (c >= 'a' and c <= 'z') or
-            (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or
-            c == '-';
-        if (!ok) return false;
-    }
-    return true;
-}
-
-/// parse a port mapping string "host_port:container_port" into a PortMap
-fn parsePortMap(str: []const u8) ?net_setup.PortMap {
-    // find the colon separator
-    const colon_pos = std.mem.indexOf(u8, str, ":") orelse return null;
-    if (colon_pos == 0 or colon_pos >= str.len - 1) return null;
-
-    const host_port = std.fmt.parseInt(u16, str[0..colon_pos], 10) catch return null;
-    const container_port = std.fmt.parseInt(u16, str[colon_pos + 1 ..], 10) catch return null;
-
-    return .{ .host_port = host_port, .container_port = container_port };
-}
-
-/// require the next CLI argument, or print usage and exit.
-/// used by commands that take a single required positional argument.
-fn requireArg(args: *std.process.ArgIterator, comptime usage: []const u8) []const u8 {
-    return args.next() orelse {
-        writeErr(usage, .{});
-        std.process.exit(1);
-    };
-}
-
 /// full cleanup for a stopped container: network, logs, dirs, then DB record.
 /// DB record is removed last so we can still find orphaned resources if
 /// an earlier cleanup step fails.
@@ -3541,37 +3379,6 @@ test "smoke test" {
     try std.testing.expect(true);
 }
 
-test "parse port map" {
-    const pm = parsePortMap("8080:80").?;
-    try std.testing.expectEqual(@as(u16, 8080), pm.host_port);
-    try std.testing.expectEqual(@as(u16, 80), pm.container_port);
-}
-
-test "parse port map invalid" {
-    try std.testing.expect(parsePortMap("invalid") == null);
-    try std.testing.expect(parsePortMap(":80") == null);
-    try std.testing.expect(parsePortMap("8080:") == null);
-    try std.testing.expect(parsePortMap("99999:80") == null);
-}
-
-test "valid container names" {
-    try std.testing.expect(isValidContainerName("db"));
-    try std.testing.expect(isValidContainerName("web-api"));
-    try std.testing.expect(isValidContainerName("my-service-1"));
-    try std.testing.expect(isValidContainerName("A"));
-    try std.testing.expect(isValidContainerName("abc123"));
-}
-
-test "invalid container names" {
-    try std.testing.expect(!isValidContainerName(""));
-    try std.testing.expect(!isValidContainerName("-db"));
-    try std.testing.expect(!isValidContainerName("db-"));
-    try std.testing.expect(!isValidContainerName("my db"));
-    try std.testing.expect(!isValidContainerName("../../etc/passwd"));
-    try std.testing.expect(!isValidContainerName("a" ** 64));
-    try std.testing.expect(!isValidContainerName("hello_world"));
-}
-
 test "generateAndSaveToken produces valid 64-char hex string" {
     var buf: [64]u8 = undefined;
     const token = generateAndSaveToken(&buf);
@@ -3608,7 +3415,6 @@ test "readApiToken returns null for missing file" {
     var buf: [64]u8 = undefined;
     try std.testing.expect(readApiToken(&buf) == null);
 }
-
 // pull in tests from all modules
 comptime {
     _ = @import("runtime/container.zig");
