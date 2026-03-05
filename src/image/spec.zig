@@ -65,6 +65,7 @@ pub const ContainerConfig = struct {
     StopSignal: ?[]const u8 = null,
     Healthcheck: ?Healthcheck = null,
     OnBuild: ?[]const []const u8 = null,
+    Labels: ?std.json.Value = null,
 };
 
 /// healthcheck configuration from the image config.
@@ -91,6 +92,7 @@ pub const ImageConfig = struct {
     os: ?[]const u8 = null,
     config: ?ContainerConfig = null,
     rootfs: ?RootFs = null,
+    created: ?[]const u8 = null,
 };
 
 // -- media types --
@@ -532,4 +534,42 @@ test "json depth limit — strings with braces don't count" {
         \\{"key": "value with { and [ characters }]"}
     ;
     try validateJsonDepth(json);
+}
+
+test "parse image config with created timestamp" {
+    const json =
+        \\{
+        \\  "architecture": "amd64",
+        \\  "os": "linux",
+        \\  "created": "2024-01-15T10:30:00Z",
+        \\  "config": {
+        \\    "Cmd": ["/bin/sh"]
+        \\  }
+        \\}
+    ;
+
+    const alloc = std.testing.allocator;
+    var result = try parseImageConfig(alloc, json);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("2024-01-15T10:30:00Z", result.value.created.?);
+}
+
+test "parse image config with labels" {
+    const json =
+        \\{
+        \\  "architecture": "amd64",
+        \\  "os": "linux",
+        \\  "config": {
+        \\    "Cmd": ["/bin/sh"],
+        \\    "Labels": {"maintainer": "user@example.com", "version": "1.0"}
+        \\  }
+        \\}
+    ;
+
+    const alloc = std.testing.allocator;
+    var result = try parseImageConfig(alloc, json);
+    defer result.deinit();
+
+    try std.testing.expect(result.value.config.?.Labels != null);
 }
