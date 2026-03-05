@@ -129,10 +129,6 @@ pub const RT_TABLE = struct {
 pub const TCA = struct {
     pub const KIND: u16 = 1;
     pub const OPTIONS: u16 = 2;
-    pub const BPF_FD: u16 = 1;
-    pub const BPF_NAME: u16 = 2;
-    pub const BPF_FLAGS: u16 = 3;
-    pub const BPF_FLAGS_GEN: u16 = 4;
 };
 
 /// TC handle/parent constants
@@ -143,9 +139,15 @@ pub const TC_H = struct {
     pub const MIN_EGRESS: u32 = 0xFFF3;
 };
 
-/// TC BPF flags
+/// TCA_BPF attributes — nested inside TCA_OPTIONS when kind="bpf".
+/// these share numeric values with top-level TCA attrs (e.g. FD=1,
+/// KIND=1) because they live at different nesting levels.
 pub const TCA_BPF = struct {
     pub const FLAG_ACT_DIRECT: u32 = 1;
+    pub const FD: u16 = 1;
+    pub const NAME: u16 = 2;
+    pub const FLAGS: u16 = 3;
+    pub const FLAGS_GEN: u16 = 4;
 };
 
 /// from linux/pkt_sched.h — used for TC qdisc/filter operations

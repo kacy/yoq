@@ -285,9 +285,9 @@ fn addBpfFilter(
     // nested TCA_OPTIONS containing the BPF fd and flags
     const options = try mb.startNested(hdr, nl.TCA.OPTIONS);
 
-    try mb.putAttrU32(hdr, nl.TCA.BPF_FD, @intCast(prog_fd));
-    try mb.putAttrStr(hdr, nl.TCA.BPF_NAME, "yoq");
-    try mb.putAttrU32(hdr, nl.TCA.BPF_FLAGS, nl.TCA_BPF.FLAG_ACT_DIRECT);
+    try mb.putAttrU32(hdr, nl.TCA_BPF.FD, @intCast(prog_fd));
+    try mb.putAttrStr(hdr, nl.TCA_BPF.NAME, "yoq");
+    try mb.putAttrU32(hdr, nl.TCA_BPF.FLAGS, nl.TCA_BPF.FLAG_ACT_DIRECT);
 
     mb.endNested(options);
 
@@ -312,10 +312,7 @@ pub const DnsInterceptor = struct {
     /// update the service_names map with a new name → IP mapping.
     /// the name is padded to 64 bytes (matching the BPF map key size).
     pub fn updateService(self: *const DnsInterceptor, name: []const u8, ip_addr: [4]u8) void {
-        if (name.len == 0 or name.len > 63) return;
-
-        var key: [64]u8 = [_]u8{0} ** 64;
-        @memcpy(key[0..name.len], name);
+        var key = makeKey(name) orelse return;
 
         mapUpdate(self.map_fd, &key, &ip_addr) catch |e| {
             log.warn("ebpf: dns map update failed for '{s}': {}", .{ name, e });
@@ -324,10 +321,7 @@ pub const DnsInterceptor = struct {
 
     /// remove a service name from the BPF map.
     pub fn deleteService(self: *const DnsInterceptor, name: []const u8) void {
-        if (name.len == 0 or name.len > 63) return;
-
-        var key: [64]u8 = [_]u8{0} ** 64;
-        @memcpy(key[0..name.len], name);
+        var key = makeKey(name) orelse return;
 
         mapDelete(self.map_fd, &key);
     }
@@ -341,6 +335,15 @@ pub const DnsInterceptor = struct {
         self.map_fd = -1;
     }
 };
+
+/// build a 64-byte zero-padded key from a service name.
+/// returns null if the name is empty or too long for the BPF map key.
+fn makeKey(name: []const u8) ?[64]u8 {
+    if (name.len == 0 or name.len > 63) return null;
+    var key: [64]u8 = [_]u8{0} ** 64;
+    @memcpy(key[0..name.len], name);
+    return key;
+}
 
 /// global DNS interceptor instance. set after loadDnsInterceptor() succeeds.
 var dns_interceptor: ?DnsInterceptor = null;
@@ -365,10 +368,7 @@ pub fn loadDnsInterceptor(bridge_if_index: u32) EbpfError!void {
 
     // load the program with the map fd
     var map_fds = [_]posix.fd_t{map_fd};
-    const prog_fd = loadProgram(dns_intercept, &map_fds) catch |e| {
-        posix.close(map_fd);
-        return e;
-    };
+    const prog_fd = try loadProgram(dns_intercept, &map_fds);
     errdefer posix.close(prog_fd);
 
     // attach to bridge ingress
@@ -536,9 +536,7 @@ pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
     errdefer posix.close(rr_counter_fd);
 
     var map_fds = [_]posix.fd_t{ backends_fd, conntrack_fd, rr_counter_fd };
-    const prog_fd = loadProgram(lb_prog, &map_fds) catch |e| {
-        return e;
-    };
+    const prog_fd = try loadProgram(lb_prog, &map_fds);
     errdefer posix.close(prog_fd);
 
     // attach to bridge ingress (the qdisc should already exist from DNS interceptor)
@@ -573,11 +571,9 @@ pub fn getLoadBalancer() ?*const LoadBalancer {
 }
 
 /// convert a 4-byte IP to a u32 in network byte order.
+/// the bytes are already in network order — this is just a type pun.
 fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
-    return @as(u32, ip_bytes[0]) |
-        (@as(u32, ip_bytes[1]) << 8) |
-        (@as(u32, ip_bytes[2]) << 16) |
-        (@as(u32, ip_bytes[3]) << 24);
+    return @bitCast(ip_bytes);
 }
 
 // -- capability check --

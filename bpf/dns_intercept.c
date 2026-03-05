@@ -42,11 +42,6 @@ static long (*bpf_skb_change_tail)(void *skb, __u32 new_len,
 static long (*bpf_redirect)(int ifindex, __u64 flags) = (void *)23;
 static int (*bpf_csum_diff)(__u32 *from, __u32 from_size, __u32 *to,
                             __u32 to_size, int seed) = (void *)28;
-static long (*bpf_l3_csum_replace)(void *skb, __u32 offset, __u64 from,
-                                   __u64 to, __u64 size) = (void *)10;
-static long (*bpf_l4_csum_replace)(void *skb, __u32 offset, __u64 from,
-                                   __u64 to, __u64 flags) = (void *)11;
-
 // DNS constants
 #define DNS_PORT 53
 #define DNS_HEADER_SIZE 12

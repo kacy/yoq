@@ -403,6 +403,8 @@ fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const 
 /// try to load BPF programs on the bridge. non-fatal.
 /// loads the DNS interceptor and load balancer if BPF is available.
 fn loadDnsInterceptorOnBridge() void {
+    if (ebpf.getDnsInterceptor() != null) return; // already loaded
+
     // look up the bridge interface index
     const sock = nl.openSocket() catch return;
     defer posix.close(sock);
