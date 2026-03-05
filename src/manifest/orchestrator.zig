@@ -26,6 +26,7 @@ const oci = @import("../image/oci.zig");
 const container = @import("../runtime/container.zig");
 const process = @import("../runtime/process.zig");
 const store = @import("../state/store.zig");
+const blob_store = @import("../image/store.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
 const ip_mod = @import("../network/ip.zig");
@@ -443,8 +444,18 @@ pub const Orchestrator = struct {
             self.alloc.free(layer_paths);
         }
 
-        // save image record
-        oci.saveImageFromPull(ref, result.manifest_digest, result.total_size) catch return false;
+        // save image record — compute config digest from raw bytes
+        const cfg_computed = blob_store.computeDigest(result.config_bytes);
+        var cfg_digest_buf: [71]u8 = undefined;
+        const cfg_digest_str = cfg_computed.string(&cfg_digest_buf);
+        oci.saveImageFromPull(
+            ref,
+            result.manifest_digest,
+            result.manifest_bytes,
+            result.config_bytes,
+            cfg_digest_str,
+            result.total_size,
+        ) catch return false;
 
         return true;
     }
@@ -860,7 +871,7 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
             while (slept_ms < backoff_ms) {
                 if (shutdown_requested.load(.acquire)) break;
                 const remaining = backoff_ms - slept_ms;
-                const sleep_chunk = @min(remaining, 200);
+                const sleep_chunk: u64 = @min(remaining, 200);
                 std.Thread.sleep(sleep_chunk * std.time.ns_per_ms);
                 slept_ms += sleep_chunk;
             }

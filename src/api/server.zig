@@ -79,7 +79,7 @@ pub const RateLimiter = struct {
         defer self.mutex.unlock();
 
         // look for existing entry or empty slot
-        const start_idx = @as(usize, @truncate(ip *% 2654435761)); // knuth multiplicative hash
+        const start_idx = @as(usize, ip *% 2654435761); // knuth multiplicative hash
         var probe: usize = 0;
         var first_empty: ?usize = null;
 

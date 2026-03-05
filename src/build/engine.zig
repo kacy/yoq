@@ -258,7 +258,7 @@ pub fn build(
 
     // produce image from the final stage only
     if (completed_states.items.len == 0) return BuildError.NoFromInstruction;
-    var final_state = &completed_states.items[completed_states.items.len - 1];
+    const final_state = &completed_states.items[completed_states.items.len - 1];
     return produceImage(alloc, final_state, tag);
 }
 
