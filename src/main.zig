@@ -200,8 +200,15 @@ const ImageResolution = struct {
     layer_paths: []const []const u8 = &.{},
     pull_result: ?registry.PullResult = null,
     config_parsed: ?spec.ParseResult(spec.ImageConfig) = null,
+    /// set when layer_paths was allocated and needs freeing.
+    /// null for local rootfs paths (not heap-allocated).
+    alloc: ?std.mem.Allocator = null,
 
     fn deinit(self: *ImageResolution) void {
+        if (self.alloc) |a| {
+            for (self.layer_paths) |p| a.free(p);
+            a.free(self.layer_paths);
+        }
         if (self.pull_result) |*r| r.deinit();
         if (self.config_parsed) |*c| c.deinit();
     }
@@ -241,6 +248,7 @@ fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageResolu
         writeErr("failed to extract image layers\n", .{});
         std.process.exit(1);
     };
+    result.alloc = alloc;
 
     if (result.layer_paths.len > 0) {
         result.rootfs = result.layer_paths[result.layer_paths.len - 1];

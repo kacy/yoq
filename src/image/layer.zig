@@ -127,7 +127,7 @@ pub fn createLayerFromDir(alloc: std.mem.Allocator, dir_path: []const u8) LayerE
     paths.ensureDataDir("tmp") catch return LayerError.CreateFailed;
 
     // write tar file and compute uncompressed digest
-    const uncompressed_digest = writeTarFromDir(dir_path, tar_path) catch
+    const uncompressed_digest = writeTarFromDir(alloc, dir_path, tar_path) catch
         return LayerError.CreateFailed;
 
     defer std.fs.cwd().deleteFile(tar_path) catch {};
@@ -214,9 +214,7 @@ fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []cons
 }
 
 /// write a tar archive from a directory, returning the sha256 of the tar.
-/// uses a page allocator internally for the directory walker since this
-/// runs as part of image builds (not in the child container).
-fn writeTarFromDir(dir_path: []const u8, tar_path: []const u8) !blob_store.Digest {
+fn writeTarFromDir(alloc: std.mem.Allocator, dir_path: []const u8, tar_path: []const u8) !blob_store.Digest {
     var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
     defer dir.close();
 
@@ -228,7 +226,7 @@ fn writeTarFromDir(dir_path: []const u8, tar_path: []const u8) !blob_store.Diges
     var tar_writer: std.tar.Writer = .{ .underlying_writer = &file_writer.interface };
 
     // walk the directory tree recursively
-    var walker = try dir.walk(std.heap.page_allocator);
+    var walker = try dir.walk(alloc);
     defer walker.deinit();
 
     while (try walker.next()) |entry| {
