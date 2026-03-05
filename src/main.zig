@@ -28,6 +28,7 @@ const cluster_config = @import("cluster/config.zig");
 const cluster_agent = @import("cluster/agent.zig");
 const http_client = @import("cluster/http_client.zig");
 const json_helpers = @import("lib/json_helpers.zig");
+const paths = @import("lib/paths.zig");
 const sqlite = @import("sqlite");
 const secrets = @import("state/secrets.zig");
 const dns = @import("network/dns.zig");
@@ -1451,8 +1452,11 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
 
     writeErr("deploying {d} services to cluster {s}...\n", .{ manifest.services.len, addr_str });
 
-    // POST to /deploy
-    var resp = http_client.post(alloc, server_ip, server_port, "/deploy", json_buf.items) catch {
+    // POST to /deploy with auth token if available
+    var token_buf: [64]u8 = undefined;
+    const token = readApiToken(&token_buf);
+
+    var resp = http_client.postWithAuth(alloc, server_ip, server_port, "/deploy", json_buf.items, token) catch {
         writeErr("failed to connect to cluster server\n", .{});
         std.process.exit(1);
     };
@@ -1568,7 +1572,23 @@ fn cmdServe(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         }
     }
 
-    // single-node mode: bind to localhost only — no auth needed
+    // generate or load API token for authentication.
+    // even in single-node mode (localhost-only), require auth so that
+    // any process on the machine can't silently manage containers.
+    var token_buf: [64]u8 = undefined;
+    const token: ?[]const u8 = readApiToken(&token_buf) orelse generateAndSaveToken(&token_buf);
+
+    if (token) |t| {
+        routes.api_token = t;
+
+        var path_buf: [paths.max_path]u8 = undefined;
+        const token_path = paths.dataPath(&path_buf, "api_token") catch "~/.local/share/yoq/api_token";
+        writeErr("API token: {s}\n", .{token_path});
+    } else {
+        writeErr("warning: failed to set up API token, running without auth\n", .{});
+    }
+    defer routes.api_token = null;
+
     var server = api_server.Server.init(alloc, port, .{ 127, 0, 0, 1 }) catch {
         writeErr("failed to start server on port {d}\n", .{port});
         std.process.exit(1);
@@ -1577,6 +1597,52 @@ fn cmdServe(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     orchestrator.installSignalHandlers();
     server.run();
+}
+
+/// read the API token from ~/.local/share/yoq/api_token.
+/// returns a 64-char hex string in the provided buffer, or null if the file
+/// doesn't exist or can't be read.
+fn readApiToken(buf: *[64]u8) ?[]const u8 {
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
+
+    const file = std.fs.cwd().openFile(token_path, .{}) catch return null;
+    defer file.close();
+
+    const n = file.readAll(buf) catch return null;
+    if (n != 64) return null;
+
+    // validate it's all hex
+    for (buf) |c| {
+        switch (c) {
+            '0'...'9', 'a'...'f' => {},
+            else => return null,
+        }
+    }
+    return buf;
+}
+
+/// generate 32 random bytes, hex-encode to 64 chars, write to
+/// ~/.local/share/yoq/api_token with 0o600 permissions.
+/// returns the hex string in the provided buffer, or null on failure.
+fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
+    var raw: [32]u8 = undefined;
+    std.crypto.random.bytes(&raw);
+
+    const hex = std.fmt.bytesToHex(raw, .lower);
+    buf.* = hex;
+
+    // ensure data directory exists
+    paths.ensureDataDir("") catch return null;
+
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
+
+    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o600 }) catch return null;
+    defer file.close();
+
+    file.writeAll(buf) catch return null;
+    return buf;
 }
 
 fn cmdInitServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -1982,7 +2048,10 @@ fn cmdNodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         }
     }
 
-    var resp = http_client.get(alloc, server_addr, server_port, "/agents") catch {
+    var token_buf: [64]u8 = undefined;
+    const token = readApiToken(&token_buf);
+
+    var resp = http_client.getWithAuth(alloc, server_addr, server_port, "/agents", token) catch {
         writeErr("failed to connect to server\n", .{});
         std.process.exit(1);
     };
@@ -2072,7 +2141,10 @@ fn cmdDrain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    var resp = http_client.post(alloc, server_addr, server_port, path, "") catch {
+    var token_buf: [64]u8 = undefined;
+    const token = readApiToken(&token_buf);
+
+    var resp = http_client.postWithAuth(alloc, server_addr, server_port, path, "", token) catch {
         writeErr("failed to connect to server\n", .{});
         std.process.exit(1);
     };
@@ -2156,7 +2228,10 @@ fn cmdStatusLocal(alloc: std.mem.Allocator, verbose: bool) void {
 }
 
 fn cmdStatusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) void {
-    var resp = http_client.get(alloc, addr, port, "/v1/status") catch {
+    var token_buf: [64]u8 = undefined;
+    const token = readApiToken(&token_buf);
+
+    var resp = http_client.getWithAuth(alloc, addr, port, "/v1/status", token) catch {
         writeErr("failed to connect to server\n", .{});
         std.process.exit(1);
     };
@@ -2417,7 +2492,10 @@ fn cmdMetricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_fi
     else
         @as([]const u8, "/v1/metrics");
 
-    var resp = http_client.get(alloc, addr, port, path) catch {
+    var token_buf: [64]u8 = undefined;
+    const token = readApiToken(&token_buf);
+
+    var resp = http_client.getWithAuth(alloc, addr, port, path, token) catch {
         writeErr("failed to connect to server\n", .{});
         std.process.exit(1);
     };
@@ -2506,7 +2584,10 @@ fn cmdMetricsPairs(alloc: std.mem.Allocator) void {
 }
 
 fn cmdMetricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) void {
-    var resp = http_client.get(alloc, addr, port, "/v1/metrics?mode=pairs") catch {
+    var token_buf: [64]u8 = undefined;
+    const token = readApiToken(&token_buf);
+
+    var resp = http_client.getWithAuth(alloc, addr, port, "/v1/metrics?mode=pairs", token) catch {
         writeErr("failed to connect to server\n", .{});
         std.process.exit(1);
     };
@@ -3489,6 +3570,43 @@ test "invalid container names" {
     try std.testing.expect(!isValidContainerName("../../etc/passwd"));
     try std.testing.expect(!isValidContainerName("a" ** 64));
     try std.testing.expect(!isValidContainerName("hello_world"));
+}
+
+test "generateAndSaveToken produces valid 64-char hex string" {
+    var buf: [64]u8 = undefined;
+    const token = generateAndSaveToken(&buf);
+    try std.testing.expect(token != null);
+    try std.testing.expectEqual(@as(usize, 64), token.?.len);
+    for (token.?) |c| {
+        try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
+    }
+}
+
+test "readApiToken round-trip with generateAndSaveToken" {
+    // generate a token
+    var gen_buf: [64]u8 = undefined;
+    const generated = generateAndSaveToken(&gen_buf).?;
+
+    // read it back
+    var read_buf: [64]u8 = undefined;
+    const read_back = readApiToken(&read_buf).?;
+    try std.testing.expectEqualSlices(u8, generated, read_back);
+}
+
+test "readApiToken returns null for missing file" {
+    // temporarily rename token file if it exists, test, restore
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return;
+
+    var backup_buf: [paths.max_path]u8 = undefined;
+    const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
+
+    // move existing file out of the way
+    std.fs.cwd().rename(token_path, backup_path) catch {};
+    defer std.fs.cwd().rename(backup_path, token_path) catch {};
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(readApiToken(&buf) == null);
 }
 
 // pull in tests from all modules
