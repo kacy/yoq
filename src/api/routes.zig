@@ -936,6 +936,7 @@ fn handleStatus(alloc: std.mem.Allocator) Response {
 
     // build JSON array
     var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
     var writer = json_buf.writer(alloc);
     writer.writeByte('[') catch return internalError();
 
@@ -946,9 +947,10 @@ fn handleStatus(alloc: std.mem.Allocator) Response {
 
     writer.writeByte(']') catch return internalError();
 
+    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
     return .{
         .status = .ok,
-        .body = json_buf.items,
+        .body = body,
         .allocated = true,
     };
 }

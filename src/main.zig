@@ -31,6 +31,7 @@ const sqlite = @import("sqlite");
 const secrets = @import("state/secrets.zig");
 const dns = @import("network/dns.zig");
 const monitor = @import("runtime/monitor.zig");
+const cgroups = @import("runtime/cgroups.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -1676,12 +1677,8 @@ fn cmdStatusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bo
     var snapshots: std.ArrayList(monitor.ServiceSnapshot) = .empty;
     defer snapshots.deinit(alloc);
 
-    var pos: usize = 0;
-    while (pos < resp.body.len) {
-        const obj_start = std.mem.indexOfPos(u8, resp.body, pos, "{\"name\":\"") orelse break;
-        const obj_end = std.mem.indexOfPos(u8, resp.body, obj_start + 1, "}") orelse break;
-        const obj = resp.body[obj_start .. obj_end + 1];
-
+    var iter = json_helpers.extractJsonObjects(resp.body);
+    while (iter.next()) |obj| {
         const name = extractJsonString(obj, "name") orelse "?";
         const status_str = extractJsonString(obj, "status") orelse "unknown";
         const health_str = extractJsonString(obj, "health");
@@ -1700,14 +1697,18 @@ fn cmdStatusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bo
             break :blk null;
         } else null;
 
+        // parse PSI metrics if present in the response
+        const psi_cpu = parsePsiFromJson(obj, "psi_cpu_some", "psi_cpu_full");
+        const psi_mem = parsePsiFromJson(obj, "psi_mem_some", "psi_mem_full");
+
         snapshots.append(alloc, .{
             .name = name,
             .status = status,
             .health_status = health_status,
             .cpu_pct = extractJsonFloat(obj, "cpu_pct") orelse 0.0,
             .memory_bytes = @intCast(extractJsonInt(obj, "memory_bytes") orelse 0),
-            .psi_cpu = null,
-            .psi_memory = null,
+            .psi_cpu = psi_cpu,
+            .psi_memory = psi_mem,
             .running_count = @intCast(extractJsonInt(obj, "running") orelse 0),
             .desired_count = @intCast(extractJsonInt(obj, "desired") orelse 0),
             .uptime_secs = extractJsonInt(obj, "uptime_secs") orelse 0,
@@ -1715,8 +1716,6 @@ fn cmdStatusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bo
             writeErr("failed to parse status response\n", .{});
             std.process.exit(1);
         };
-
-        pos = obj_end + 1;
     }
 
     if (snapshots.items.len == 0) {
@@ -1788,22 +1787,12 @@ fn printVerboseDetails(snap: monitor.ServiceSnapshot) void {
     }
 }
 
-/// extract a float value from a JSON key like "cpu_pct":12.3
-fn extractJsonFloat(json: []const u8, key: []const u8) ?f64 {
-    // look for "key":
-    var search_buf: [64]u8 = undefined;
-    const search = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
-
-    const key_pos = std.mem.indexOf(u8, json, search) orelse return null;
-    const val_start = key_pos + search.len;
-
-    // find end of number (next , or })
-    var val_end = val_start;
-    while (val_end < json.len) : (val_end += 1) {
-        if (json[val_end] == ',' or json[val_end] == '}') break;
-    }
-
-    return std.fmt.parseFloat(f64, json[val_start..val_end]) catch null;
+/// parse PSI metrics from a JSON object's some/full fields.
+/// returns null if neither field is present.
+fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8) ?cgroups.PsiMetrics {
+    const some = extractJsonFloat(json, some_key) orelse return null;
+    const full = extractJsonFloat(json, full_key) orelse return null;
+    return .{ .some_avg10 = some, .full_avg10 = full };
 }
 
 // -- deployment commands --
@@ -2203,6 +2192,7 @@ fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_host: 
 // use shared JSON extraction helpers
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
+const extractJsonFloat = json_helpers.extractJsonFloat;
 
 test "smoke test" {
     try std.testing.expect(true);

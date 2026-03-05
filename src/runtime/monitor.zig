@@ -91,8 +91,8 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
                 earliest_start = rec.created_at;
             }
 
-            // try to read cgroup metrics for this container
-            var cg = cgroups.Cgroup.create(rec.id) catch continue;
+            // open existing cgroup to read metrics (no directory creation)
+            const cg = cgroups.Cgroup.open(rec.id) catch continue;
             if (cg.memoryUsage()) |mem| {
                 total_memory += mem;
             } else |_| {}
@@ -110,10 +110,11 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
         }
     }
 
+    const now = std.time.timestamp();
+
     // compute CPU percentage from total usage since container start.
     // usage_usec / elapsed_usec * 100 gives approximate CPU%.
     const cpu_pct = if (has_cpu) blk: {
-        const now = std.time.timestamp();
         const elapsed_secs = now - earliest_start;
         if (elapsed_secs <= 0) break :blk @as(f64, 0.0);
         const elapsed_usec: f64 = @floatFromInt(elapsed_secs * std.time.us_per_s);
@@ -129,7 +130,6 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
         .mixed;
 
     // uptime is seconds since earliest running container started
-    const now = std.time.timestamp();
     const uptime: i64 = if (running > 0) now - earliest_start else 0;
 
     return .{

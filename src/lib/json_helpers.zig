@@ -73,6 +73,28 @@ pub fn extractJsonInt(json: []const u8, key: []const u8) ?i64 {
     return std.fmt.parseInt(i64, json[pos..end], 10) catch return null;
 }
 
+/// extract a float value from a JSON object: {"key":12.3}
+pub fn extractJsonFloat(json: []const u8, key: []const u8) ?f64 {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
+
+    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    const value_start = start_pos + needle.len;
+
+    // skip whitespace
+    var pos = value_start;
+    while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
+
+    // find end of number (next , or })
+    var end = pos;
+    while (end < json.len) : (end += 1) {
+        if (json[end] == ',' or json[end] == '}') break;
+    }
+
+    if (end == pos) return null;
+    return std.fmt.parseFloat(f64, json[pos..end]) catch null;
+}
+
 // -- JSON array iteration --
 // iterate over top-level objects in a JSON array like [{...},{...}].
 // returns slices into the original buffer — no allocation needed.
@@ -264,4 +286,15 @@ test "extractJsonInt returns null for missing key" {
 test "extractJsonString returns null for missing key" {
     const json = "{\"name\":\"alice\"}";
     try std.testing.expect(extractJsonString(json, "missing") == null);
+}
+
+test "extractJsonFloat basic" {
+    const json = "{\"cpu_pct\":12.3,\"other\":99}";
+    try std.testing.expectApproxEqAbs(@as(f64, 12.3), extractJsonFloat(json, "cpu_pct").?, 0.001);
+    try std.testing.expect(extractJsonFloat(json, "missing") == null);
+}
+
+test "extractJsonFloat zero" {
+    const json = "{\"value\":0.0}";
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), extractJsonFloat(json, "value").?, 0.001);
 }
