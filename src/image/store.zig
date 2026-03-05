@@ -291,6 +291,51 @@ pub fn computeDigest(data: []const u8) Digest {
     return Digest{ .hash = hasher.finalResult() };
 }
 
+/// list all blob hex digests present on disk in the blob store directory.
+/// walks ~/.local/share/yoq/blobs/sha256/ and collects filenames.
+/// caller owns the returned list.
+pub fn listBlobsOnDisk(alloc: std.mem.Allocator) BlobError!std.ArrayList([]const u8) {
+    var dir_buf: [max_path]u8 = undefined;
+    const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+        // directory doesn't exist yet â no blobs
+        return std.ArrayList([]const u8).init(alloc);
+    };
+    defer dir.close();
+
+    var blobs = std.ArrayList([]const u8).init(alloc);
+    errdefer {
+        for (blobs.items) |item| alloc.free(item);
+        blobs.deinit();
+    }
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        // blob filenames are 64-char hex strings
+        if (entry.name.len != 64) continue;
+        const owned = alloc.dupe(u8, entry.name) catch continue;
+        blobs.append(owned) catch {
+            alloc.free(owned);
+            continue;
+        };
+    }
+
+    return blobs;
+}
+
+/// get the size in bytes of a blob on disk.
+/// returns null if the blob doesn't exist or can't be stat'd.
+pub fn getBlobSize(digest: Digest) ?u64 {
+    var path_buf: [max_path]u8 = undefined;
+    const path = blobPath(digest, &path_buf) catch return null;
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+    const stat = file.stat() catch return null;
+    return stat.size;
+}
+
 // -- tests --
 
 test "compute digest" {
@@ -398,4 +443,51 @@ test "remove blob — silently handles missing blob" {
     const digest = computeDigest("never stored blob for remove test");
     // should not crash or return an error
     removeBlob(digest);
+}
+
+test "listBlobsOnDisk returns stored blobs" {
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+    const alloc = std.testing.allocator;
+
+    const d1 = try putBlob("blob one for list test");
+    defer deleteBlob(d1) catch {};
+
+    var blobs = try listBlobsOnDisk(alloc);
+    defer {
+        for (blobs.items) |item| alloc.free(item);
+        blobs.deinit();
+    }
+
+    // should contain at least the blob we just stored
+    try std.testing.expect(blobs.items.len >= 1);
+
+    // verify our blob's hex is in the list
+    const our_hex = d1.hex();
+    var found = false;
+    for (blobs.items) |item| {
+        if (std.mem.eql(u8, item, &our_hex)) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "getBlobSize returns correct size" {
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+
+    const data = "blob size test content";
+    const digest = try putBlob(data);
+    defer deleteBlob(digest) catch {};
+
+    const size = getBlobSize(digest);
+    try std.testing.expect(size != null);
+    try std.testing.expectEqual(@as(u64, data.len), size.?);
+}
+
+test "getBlobSize returns null for missing blob" {
+    const digest = computeDigest("never stored blob for size test");
+    try std.testing.expect(getBlobSize(digest) == null);
 }

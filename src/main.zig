@@ -79,6 +79,8 @@ pub fn main() !void {
         cmdImages(alloc);
     } else if (std.mem.eql(u8, command, "rmi")) {
         cmdRmi(&args, alloc);
+    } else if (std.mem.eql(u8, command, "prune")) {
+        cmdPrune(alloc);
     } else if (std.mem.eql(u8, command, "inspect")) {
         cmdInspect(&args, alloc);
     } else if (std.mem.eql(u8, command, "exec")) {
@@ -957,6 +959,132 @@ fn cmdInspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                     }
                 }
             }
+        }
+    }
+}
+
+fn cmdPrune(alloc: std.mem.Allocator) void {
+    // step 1: collect all referenced digests from image records
+    var referenced = std.StringHashMap(void).init(alloc);
+    defer referenced.deinit();
+
+    var images = store.listImages(alloc) catch {
+        writeErr("failed to list images\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (images.items) |img| img.deinit(alloc);
+        images.deinit(alloc);
+    }
+
+    for (images.items) |img| {
+        // manifest and config digests are referenced
+        addDigestHex(&referenced, img.manifest_digest);
+        addDigestHex(&referenced, img.config_digest);
+
+        // parse the manifest to find layer digests
+        const manifest_digest = blob_store.Digest.parse(img.manifest_digest) orelse continue;
+        const manifest_bytes = blob_store.getBlob(alloc, manifest_digest) catch continue;
+        defer alloc.free(manifest_bytes);
+
+        var parsed = spec.parseManifest(alloc, manifest_bytes) catch continue;
+        defer parsed.deinit();
+
+        for (parsed.value.layers) |l| {
+            addDigestHex(&referenced, l.digest);
+        }
+
+        // also parse config to get diff_ids (referenced as extracted layers)
+        const config_digest = blob_store.Digest.parse(img.config_digest) orelse continue;
+        const config_bytes = blob_store.getBlob(alloc, config_digest) catch continue;
+        defer alloc.free(config_bytes);
+
+        var parsed_config = spec.parseImageConfig(alloc, config_bytes) catch continue;
+        defer parsed_config.deinit();
+
+        if (parsed_config.value.rootfs) |rootfs| {
+            for (rootfs.diff_ids) |diff_id| {
+                addDigestHex(&referenced, diff_id);
+            }
+        }
+    }
+
+    // add build cache digests
+    var cache_digests = store.listBuildCacheDigests(alloc) catch std.ArrayList([]const u8).init(alloc);
+    defer {
+        for (cache_digests.items) |d| alloc.free(d);
+        cache_digests.deinit();
+    }
+    for (cache_digests.items) |d| {
+        addDigestHex(&referenced, d);
+    }
+
+    // step 2: walk blobs on disk and delete unreferenced ones
+    var blobs = blob_store.listBlobsOnDisk(alloc) catch {
+        writeErr("failed to list blobs\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (blobs.items) |item| alloc.free(item);
+        blobs.deinit();
+    }
+
+    var blobs_removed: usize = 0;
+    var bytes_reclaimed: u64 = 0;
+
+    for (blobs.items) |hex| {
+        if (referenced.contains(hex)) continue;
+
+        // unreferenced blob â delete it
+        const digest_str_buf = std.fmt.allocPrint(alloc, "sha256:{s}", .{hex}) catch continue;
+        defer alloc.free(digest_str_buf);
+
+        if (blob_store.Digest.parse(digest_str_buf)) |digest| {
+            const size = blob_store.getBlobSize(digest) orelse 0;
+            blob_store.removeBlob(digest);
+            blobs_removed += 1;
+            bytes_reclaimed += size;
+        }
+    }
+
+    // step 3: walk extracted layers and delete unreferenced ones
+    var layers = layer.listExtractedLayersOnDisk(alloc) catch {
+        writeErr("failed to list layers\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        for (layers.items) |item| alloc.free(item);
+        layers.deinit();
+    }
+
+    var layers_removed: usize = 0;
+    for (layers.items) |hex| {
+        if (referenced.contains(hex)) continue;
+        layer.deleteExtractedLayer(hex);
+        layers_removed += 1;
+    }
+
+    // report
+    if (blobs_removed == 0 and layers_removed == 0) {
+        write("nothing to prune\n", .{});
+    } else {
+        const mb = @divTrunc(bytes_reclaimed, 1024 * 1024);
+        write("pruned {d} blob(s), {d} layer(s), reclaimed {d} MB\n", .{
+            blobs_removed,
+            layers_removed,
+            mb,
+        });
+    }
+}
+
+/// extract the hex portion from a "sha256:<hex>" digest string and
+/// add it to the referenced set. silently ignores malformed digests.
+fn addDigestHex(set: *std.StringHashMap(void), digest_str: []const u8) void {
+    const prefix = "sha256:";
+    if (std.mem.startsWith(u8, digest_str, prefix)) {
+        const hex = digest_str[prefix.len..];
+        if (hex.len == 64) {
+            set.put(hex, {}) catch {};
         }
     }
 }
@@ -3185,6 +3313,7 @@ fn printUsage() void {
         \\  rollback <service>               rollback to previous deployment
         \\  history <service>                show deployment history
         \\  rmi <image>                      remove a pulled image
+        \\  prune                            remove unused blobs and layers
         \\  inspect <image>                  show image details
         \\  version                          print version
         \\  help                             show this help
