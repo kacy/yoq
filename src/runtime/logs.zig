@@ -63,19 +63,77 @@ pub fn readLogs(alloc: std.mem.Allocator, container_id: []const u8) LogError![]c
 }
 
 /// read the last N lines of a container's log file. caller owns the returned slice.
+///
+/// optimization: reads only the last 64KB of the file instead of the entire
+/// thing. for `yoq logs --tail 10` on a multi-MB log, this avoids reading
+/// and allocating the full file. falls back to full read if the tail chunk
+/// doesn't contain enough lines.
 pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
+    if (n == 0) return readLogs(alloc, container_id);
+
+    var path_buf: [paths.max_path]u8 = undefined;
+    const file_path = try logPath(&path_buf, container_id);
+
+    const file = std.fs.cwd().openFile(file_path, .{}) catch
+        return LogError.NotFound;
+    defer file.close();
+
+    const file_size = file.getEndPos() catch return LogError.ReadFailed;
+    if (file_size == 0) {
+        return alloc.dupe(u8, "") catch return LogError.ReadFailed;
+    }
+
+    // try reading just the last 64KB — covers the common case
+    const tail_chunk_size: u64 = 64 * 1024;
+    const read_size = @min(file_size, tail_chunk_size);
+    const seek_pos = file_size - read_size;
+
+    file.seekTo(seek_pos) catch return LogError.ReadFailed;
+
+    const buf = alloc.alloc(u8, @intCast(read_size)) catch return LogError.ReadFailed;
+    const bytes_read = file.readAll(buf) catch {
+        alloc.free(buf);
+        return LogError.ReadFailed;
+    };
+    const chunk = buf[0..bytes_read];
+
+    // count newlines from the end to find the start of the last N lines
+    var count: usize = 0;
+    var pos: usize = chunk.len;
+    while (pos > 0) {
+        pos -= 1;
+        if (chunk[pos] == '\n') {
+            count += 1;
+            if (count == n + 1) {
+                const result = alloc.dupe(u8, chunk[pos + 1 ..]) catch {
+                    alloc.free(buf);
+                    return LogError.ReadFailed;
+                };
+                alloc.free(buf);
+                return result;
+            }
+        }
+    }
+
+    // chunk didn't have enough lines — if we read the whole file, return it
+    if (seek_pos == 0) return buf;
+
+    // otherwise fall back to reading the full file
+    alloc.free(buf);
+    return readTailFull(alloc, container_id, n);
+}
+
+/// fallback: read the entire log file and extract the last N lines.
+/// used when the 64KB tail chunk doesn't contain enough lines.
+fn readTailFull(alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
     const full = try readLogs(alloc, container_id);
 
-    if (n == 0) return full;
-
-    // walk backwards counting newlines
     var count: usize = 0;
     var pos: usize = full.len;
     while (pos > 0) {
         pos -= 1;
         if (full[pos] == '\n') {
             count += 1;
-            // +1 because the last line might not end with \n
             if (count == n + 1) {
                 const result = alloc.dupe(u8, full[pos + 1 ..]) catch {
                     alloc.free(full);
@@ -87,7 +145,6 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
         }
     }
 
-    // fewer than n lines — return everything
     return full;
 }
 
