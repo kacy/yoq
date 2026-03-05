@@ -158,11 +158,10 @@ pub fn truncate(s: []const u8, max_len: usize) []const u8 {
     return s[0..max_len];
 }
 
-// -- API token helpers --
+// -- API token management --
 
-/// read the API token from ~/.local/share/yoq/api_token.
-/// returns a 64-char hex string in the provided buffer, or null if the file
-/// doesn't exist or can't be read.
+/// read the API auth token from ~/.local/share/yoq/api_token.
+/// returns the 64-char hex string in the provided buffer, or null on failure.
 pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
