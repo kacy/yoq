@@ -8,13 +8,13 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 ## status
 
-**~88% complete.** ~44k lines of Zig, ~941 tests. phases 1-4 and 6 are complete or nearly so. phase 5 and 7 have remaining work.
+**~90% complete.** ~46k lines of Zig, ~951 tests. phases 1-4 and 6 are complete. phase 5 and 7 have remaining work.
 
-**container runtime (phase 1) — ~98%:** containers run in isolated namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. process supervision, log capture, and exec into running containers all work. rootless containers via user namespace uid/gid mappings are implemented.
+**container runtime (phase 1) — complete:** containers run in isolated namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. process supervision, log capture, and exec into running containers all work. rootless containers via user namespace uid/gid mappings are implemented.
 
-**OCI images (phase 2) — ~95%:** images are pulled from and pushed to any OCI registry (Docker Hub, GHCR, etc.) with token auth, extracted, and cached locally with layer deduplication. content-addressable blob store.
+**OCI images (phase 2) — complete:** images are pulled from and pushed to any OCI registry (Docker Hub, GHCR, etc.) with token auth, extracted, and cached locally with layer deduplication. content-addressable blob store. `yoq inspect` shows image metadata (layers, entrypoint, env, ports, labels). `yoq prune` garbage-collects unreferenced blobs and extracted layers.
 
-**networking (phase 3) — ~85%:** each container gets its own IP on a bridge network (10.42.0.0/16), with iptables NAT for outbound traffic and port mapping for inbound. eBPF programs handle DNS interception for service discovery, round-robin load balancing across replicas, per-IP and per-service-pair metrics collection, and network policy enforcement (allow/deny between services). WireGuard mesh for cross-node networking with automatic key exchange on node join. gap: XDP port mapping program not implemented.
+**networking (phase 3) — complete:** each container gets its own IP on a bridge network (10.42.0.0/16), with iptables NAT for outbound traffic and XDP port mapping for inbound (iptables DNAT fallback). eBPF programs handle DNS interception for service discovery, round-robin load balancing with reverse SNAT conntrack across replicas, per-IP and per-service-pair metrics collection, and network policy enforcement (allow/deny between services). WireGuard mesh for cross-node networking with automatic key exchange on node join. all BPF programs compile from C source to real bytecode.
 
 **build engine (phase 4) — complete:** Dockerfile parser supports all major directives (FROM, RUN, COPY, ADD, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD) and produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order. `--build-arg` substitution and multi-stage builds (`COPY --from`) are supported. ADD auto-extracts tar archives (gzip, bzip2, xz, zstd, plain tar) with URL source support. ONBUILD triggers are stored in image config and executed when used as a base image. TOML declarative build manifest (`--format toml`) provides an alternative to Dockerfiles with automatic stage dependency resolution.
 
@@ -41,7 +41,9 @@ yoq exec <id> <cmd> [args...]        run a command in a running container
 yoq pull <image>                     pull an image from a registry
 yoq push <source> [target]           push an image to a registry
 yoq images                           list pulled images
+yoq inspect <image>                  show image metadata and layers
 yoq rmi <image>                      remove a pulled image
+yoq prune                            remove unreferenced blobs and layers
 
 # build
 yoq build [-t tag] [-f Dockerfile] . build an image from a Dockerfile
@@ -138,9 +140,10 @@ src/
     policy.zig             eBPF-based network policy enforcement
     bpf/
       dns_intercept.zig    eBPF: DNS service discovery
-      lb.zig               eBPF: round-robin load balancing
+      lb.zig               eBPF: round-robin load balancing + reverse SNAT
       metrics.zig          eBPF: per-IP and per-pair packet counting
       policy.zig           eBPF: network policy enforcement
+      port_map.zig         eBPF: XDP port mapping
   build/
     dockerfile.zig         Dockerfile parser (FROM, RUN, COPY, ENV, etc.)
     engine.zig             build engine with content-hash caching
@@ -211,5 +214,4 @@ src/
 
 ### lower priority (polish)
 
-- XDP port mapping program
 - `up <service>` (start individual service from manifest)
