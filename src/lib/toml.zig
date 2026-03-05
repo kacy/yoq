@@ -27,6 +27,10 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+/// maximum nesting depth for TOML table paths. protects against
+/// stack overflow from deeply nested input like "[a.b.c.d.e.f.g...]".
+const max_table_depth = 64;
+
 pub const Value = union(enum) {
     string: []const u8,
     integer: i64,
@@ -401,6 +405,14 @@ fn resolveTablePath(root: *Table, alloc: std.mem.Allocator, line: []const u8, li
     const path = std.mem.trim(u8, line[1 .. line.len - 1], " \t");
     if (path.len == 0) {
         log.err("toml: line {d}: empty table header", .{line_num});
+        return ParseError.InvalidTableHeader;
+    }
+
+    // check nesting depth to prevent stack-like resource exhaustion
+    // from maliciously deep table paths
+    const depth = std.mem.count(u8, path, ".") + 1;
+    if (depth > max_table_depth) {
+        log.err("toml: line {d}: table nesting too deep ({d} levels, max {d})", .{ line_num, depth, max_table_depth });
         return ParseError.InvalidTableHeader;
     }
 
@@ -809,4 +821,52 @@ test "full manifest format" {
     // verify volume
     const data = volume.getTable("data").?;
     try std.testing.expectEqualStrings("local", data.getString("driver").?);
+}
+
+test "deeply nested table path rejected" {
+    const alloc = std.testing.allocator;
+    // build a table path with 65 levels of nesting (exceeds max_table_depth=64)
+    var path_buf: [65 * 2 + 2]u8 = undefined;
+    path_buf[0] = '[';
+    var pos: usize = 1;
+    for (0..65) |i| {
+        if (i > 0) {
+            path_buf[pos] = '.';
+            pos += 1;
+        }
+        path_buf[pos] = 'a';
+        pos += 1;
+    }
+    path_buf[pos] = ']';
+    pos += 1;
+
+    const input = path_buf[0..pos];
+    const result = parse(alloc, input);
+    try std.testing.expectError(ParseError.InvalidTableHeader, result);
+}
+
+test "table nesting at max depth succeeds" {
+    const alloc = std.testing.allocator;
+    // build a table path with exactly 64 levels (at the limit)
+    var path_buf: [64 * 2 + 2]u8 = undefined;
+    path_buf[0] = '[';
+    var pos: usize = 1;
+    for (0..64) |i| {
+        if (i > 0) {
+            path_buf[pos] = '.';
+            pos += 1;
+        }
+        path_buf[pos] = 'a';
+        pos += 1;
+    }
+    path_buf[pos] = ']';
+    pos += 1;
+
+    const input = path_buf[0..pos];
+    var result = parse(alloc, input) catch |e| {
+        // should not fail with InvalidTableHeader
+        try std.testing.expect(e != ParseError.InvalidTableHeader);
+        return;
+    };
+    result.deinit();
 }
