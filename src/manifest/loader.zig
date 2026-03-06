@@ -197,6 +197,25 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         return LoadError.NoServices;
     }
 
+    // parse workers from [worker.*] subtables
+    var workers: std.ArrayListUnmanaged(spec.Worker) = .empty;
+    defer {
+        for (workers.items) |w| w.deinit(alloc);
+        workers.deinit(alloc);
+    }
+
+    if (root.getTable("worker")) |worker_table| {
+        for (worker_table.entries.keys(), worker_table.entries.values()) |name, val| {
+            switch (val) {
+                .table => |tbl| {
+                    const w = try parseWorker(alloc, name, tbl);
+                    workers.append(alloc, w) catch return LoadError.OutOfMemory;
+                },
+                else => {},
+            }
+        }
+    }
+
     // parse volumes from [volume.*] subtables
     var volumes: std.ArrayListUnmanaged(spec.Volume) = .empty;
     defer {
@@ -216,8 +235,8 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
-    // validate that all depends_on entries reference real services
-    try validateDependencies(services.items);
+    // validate that all depends_on entries reference real services or workers
+    try validateDependencies(services.items, workers.items);
 
     // topological sort — returns services in dependency order
     const sorted = try sortByDependency(alloc, services.items);
@@ -227,6 +246,12 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
     // so the defer doesn't double-free
     services.items.len = 0;
 
+    const owned_workers = workers.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+    errdefer {
+        for (owned_workers) |w| w.deinit(alloc);
+        alloc.free(owned_workers);
+    }
+
     const owned_volumes = volumes.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
     errdefer {
         for (owned_volumes) |vol| vol.deinit(alloc);
@@ -235,6 +260,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
 
     return spec.Manifest{
         .services = sorted,
+        .workers = owned_workers,
         .volumes = owned_volumes,
         .alloc = alloc,
     };
@@ -315,12 +341,68 @@ fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
     };
 }
 
+/// parse a worker definition from its TOML subtable.
+/// workers are like services but without ports, health checks, restart, or TLS.
+fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Worker {
+    const image_raw = table.getString("image") orelse {
+        log.err("manifest: worker '{s}' is missing required field 'image'", .{name});
+        return LoadError.MissingImage;
+    };
+
+    const command = try parseStringArray(alloc, table.getArray("command"));
+    errdefer {
+        for (command) |cmd| alloc.free(cmd);
+        alloc.free(command);
+    }
+
+    const env = try parseEnvVars(alloc, table.getArray("env"));
+    errdefer {
+        for (env) |e| alloc.free(e);
+        alloc.free(env);
+    }
+
+    const depends_on = try parseStringArray(alloc, table.getArray("depends_on"));
+    errdefer {
+        for (depends_on) |dep| alloc.free(dep);
+        alloc.free(depends_on);
+    }
+
+    const volume_mounts = try parseVolumeMounts(alloc, table.getArray("volumes"));
+    errdefer {
+        for (volume_mounts) |vm| vm.deinit(alloc);
+        alloc.free(volume_mounts);
+    }
+
+    const working_dir: ?[]const u8 = if (table.getString("working_dir")) |wd|
+        alloc.dupe(u8, wd) catch return LoadError.OutOfMemory
+    else
+        null;
+    errdefer if (working_dir) |wd| alloc.free(wd);
+
+    return .{
+        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
+        .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
+        .command = command,
+        .env = env,
+        .depends_on = depends_on,
+        .working_dir = working_dir,
+        .volumes = volume_mounts,
+    };
+}
+
 // -- dependency validation and ordering --
 
-/// check that all depends_on entries reference services that exist
-fn validateDependencies(services: []const spec.Service) LoadError!void {
+/// check that all depends_on entries reference existing services or workers
+fn validateDependencies(services: []const spec.Service, workers: []const spec.Worker) LoadError!void {
     for (services) |svc| {
         for (svc.depends_on) |dep| {
+            // self-dependency check
+            if (std.mem.eql(u8, svc.name, dep)) {
+                log.err("manifest: service '{s}' depends on itself", .{svc.name});
+                return LoadError.CircularDependency;
+            }
+
+            // look in services and workers
             var found = false;
             for (services) |other| {
                 if (std.mem.eql(u8, other.name, dep)) {
@@ -329,13 +411,16 @@ fn validateDependencies(services: []const spec.Service) LoadError!void {
                 }
             }
             if (!found) {
-                log.err("manifest: service '{s}' depends on unknown service '{s}'", .{ svc.name, dep });
-                return LoadError.UnknownDependency;
+                for (workers) |w| {
+                    if (std.mem.eql(u8, w.name, dep)) {
+                        found = true;
+                        break;
+                    }
+                }
             }
-            // also check for self-dependency
-            if (std.mem.eql(u8, svc.name, dep)) {
-                log.err("manifest: service '{s}' depends on itself", .{svc.name});
-                return LoadError.CircularDependency;
+            if (!found) {
+                log.err("manifest: service '{s}' depends on unknown service or worker '{s}'", .{ svc.name, dep });
+                return LoadError.UnknownDependency;
             }
         }
     }
@@ -1661,5 +1746,59 @@ test "tls config — missing domain returns error" {
         \\
         \\[service.web.tls]
         \\acme = true
+    ));
+}
+
+// -- worker tests --
+
+test "worker parsing — basic worker" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\ports = ["8000:8000"]
+        \\
+        \\[worker.migrate]
+        \\image = "myapp:latest"
+        \\command = ["python", "manage.py", "migrate"]
+        \\env = ["DATABASE_URL=postgres://localhost/app"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.workers.len);
+    const w = manifest.workers[0];
+    try std.testing.expectEqualStrings("migrate", w.name);
+    try std.testing.expectEqualStrings("myapp:latest", w.image);
+    try std.testing.expectEqual(@as(usize, 2), w.command.len);
+    try std.testing.expectEqualStrings("python", w.command[0]);
+    try std.testing.expectEqual(@as(usize, 1), w.env.len);
+}
+
+test "worker as dependency — service depends on worker" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[worker.migrate]
+        \\image = "myapp:latest"
+        \\command = ["python", "manage.py", "migrate"]
+        \\
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\depends_on = ["migrate"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.services.len);
+    try std.testing.expectEqual(@as(usize, 1), manifest.workers.len);
+    try std.testing.expectEqualStrings("migrate", manifest.services[0].depends_on[0]);
+}
+
+test "worker — missing image returns error" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(LoadError.MissingImage, loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\
+        \\[worker.migrate]
+        \\command = ["python", "manage.py", "migrate"]
     ));
 }

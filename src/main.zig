@@ -76,6 +76,8 @@ pub fn main() !void {
         cluster_cmds.nodes(&args, alloc);
     } else if (std.mem.eql(u8, command, "drain")) {
         cluster_cmds.drain(&args, alloc);
+    } else if (std.mem.eql(u8, command, "run-worker")) {
+        manifest_cmds.runWorker(&args, alloc);
     } else if (std.mem.eql(u8, command, "rollback")) {
         manifest_cmds.rollback(&args, alloc);
     } else if (std.mem.eql(u8, command, "history")) {
@@ -109,6 +111,7 @@ fn printUsage() void {
         \\     [--server host:port]           deploy to cluster instead of locally
         \\     [service...]                   start only named services + deps
         \\  down [-f manifest.toml]          stop all services from manifest
+        \\  run-worker [-f manifest.toml] <name>  run a one-shot worker task
         \\  serve [--port PORT]             start the API server (default: 7700)
         \\  init-server [opts]              start a cluster server node
         \\  join <host> --token <token>     join a cluster as an agent node
