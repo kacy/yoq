@@ -17,6 +17,7 @@ const std = @import("std");
 pub const Manifest = struct {
     services: []const Service,
     workers: []const Worker,
+    crons: []const Cron,
     volumes: []const Volume,
     alloc: std.mem.Allocator,
 
@@ -26,6 +27,9 @@ pub const Manifest = struct {
 
         for (self.workers) |w| w.deinit(self.alloc);
         self.alloc.free(self.workers);
+
+        for (self.crons) |c| c.deinit(self.alloc);
+        self.alloc.free(self.crons);
 
         for (self.volumes) |vol| vol.deinit(self.alloc);
         self.alloc.free(self.volumes);
@@ -130,6 +134,35 @@ pub const Worker = struct {
     }
 };
 
+/// a scheduled recurring task. crons run on a fixed interval — e.g.,
+/// database backups every 24 hours. the cron scheduler spawns a
+/// container for each execution and cleans up after completion.
+pub const Cron = struct {
+    name: []const u8,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    working_dir: ?[]const u8,
+    volumes: []const VolumeMount,
+    every: u64, // interval in seconds
+
+    pub fn deinit(self: Cron, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.image);
+
+        for (self.command) |cmd| alloc.free(cmd);
+        alloc.free(self.command);
+
+        for (self.env) |e| alloc.free(e);
+        alloc.free(self.env);
+
+        if (self.working_dir) |wd| alloc.free(wd);
+
+        for (self.volumes) |vol| vol.deinit(alloc);
+        alloc.free(self.volumes);
+    }
+};
+
 /// the type of health check to perform.
 /// http: connect and send a GET request, check for 2xx response.
 /// tcp: connect to a port, success if connection is accepted.
@@ -225,6 +258,7 @@ test "serviceByName finds existing service" {
     var manifest = Manifest{
         .services = services,
         .workers = &.{},
+        .crons = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };
@@ -246,6 +280,7 @@ test "serviceByName returns null for missing service" {
     var manifest = Manifest{
         .services = services,
         .workers = &.{},
+        .crons = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };
@@ -308,6 +343,7 @@ test "deinit frees all memory" {
     var manifest = Manifest{
         .services = services,
         .workers = &.{},
+        .crons = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };

@@ -37,6 +37,7 @@ const tls_proxy = @import("../tls/proxy.zig");
 const tls_backend = @import("../tls/backend.zig");
 const cert_store_mod = @import("../tls/cert_store.zig");
 const acme_mod = @import("../tls/acme.zig");
+const cron_scheduler = @import("cron_scheduler.zig");
 const sqlite = @import("sqlite");
 
 pub const OrchestratorError = error{
@@ -78,6 +79,7 @@ pub const Orchestrator = struct {
     proxy: ?*tls_proxy.TlsProxy = null,
     tls_certs: ?*cert_store_mod.CertStore = null,
     tls_db: ?*sqlite.Db = null,
+    cron_sched: ?*cron_scheduler.CronScheduler = null,
     /// when set, only start these services (+ transitive deps).
     /// null means start everything.
     service_filter: ?[]const []const u8 = null,
@@ -127,6 +129,10 @@ pub const Orchestrator = struct {
         if (self.backend_registry) |r| {
             r.deinit();
             self.alloc.destroy(r);
+        }
+        if (self.cron_sched) |cs| {
+            cs.deinit();
+            self.alloc.destroy(cs);
         }
         if (self.start_set) |*set| {
             set.deinit(self.alloc);
@@ -277,6 +283,23 @@ pub const Orchestrator = struct {
         // phase 4: start TLS proxy if any services have TLS configs.
         // this runs after all services are up so backends are resolvable.
         self.startTlsProxy();
+
+        // phase 5: start cron scheduler if there are crons and no service filter.
+        // crons run independently of services — they don't make sense with a filter.
+        if (self.service_filter == null and self.manifest.crons.len > 0) {
+            const cs = self.alloc.create(cron_scheduler.CronScheduler) catch {
+                writeErr("failed to allocate cron scheduler\n", .{});
+                return;
+            };
+            cs.* = cron_scheduler.CronScheduler.init(self.alloc, self.manifest.crons) catch {
+                self.alloc.destroy(cs);
+                writeErr("failed to init cron scheduler\n", .{});
+                return;
+            };
+            self.cron_sched = cs;
+            cs.start();
+            writeErr("{d} cron(s) scheduled\n", .{self.manifest.crons.len});
+        }
     }
 
     /// register services for health checking and start the checker thread.
@@ -444,6 +467,12 @@ pub const Orchestrator = struct {
 
     /// stop all running services in reverse dependency order.
     pub fn stopAll(self: *Orchestrator) void {
+        // stop cron scheduler first — prevent new cron containers from starting
+        if (self.cron_sched) |cs| {
+            cs.stop();
+            writeErr("stopped cron scheduler\n", .{});
+        }
+
         // stop TLS proxy before stopping services so it stops routing traffic
         if (self.proxy) |p| {
             p.stop();
@@ -1306,6 +1335,7 @@ test "computeStartSet: single target with no deps" {
     var manifest = spec.Manifest{
         .services = &services,
         .workers = &.{},
+        .crons = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };
@@ -1353,6 +1383,7 @@ test "computeStartSet: transitive dependencies" {
     var manifest = spec.Manifest{
         .services = &services,
         .workers = &.{},
+        .crons = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };
@@ -1397,6 +1428,7 @@ test "computeStartSet: no filter starts everything" {
     var manifest = spec.Manifest{
         .services = &services,
         .workers = &.{},
+        .crons = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };
