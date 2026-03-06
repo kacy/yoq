@@ -27,26 +27,26 @@ pub fn run(alloc: std.mem.Allocator, args: []const []const u8) !RunResult {
 
     try child.spawn();
 
-    var stdout_buf = std.ArrayList(u8).init(alloc);
-    var stderr_buf = std.ArrayList(u8).init(alloc);
-    errdefer stdout_buf.deinit();
-    errdefer stderr_buf.deinit();
+    var stdout_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var stderr_buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer stdout_buf.deinit(alloc);
+    errdefer stderr_buf.deinit(alloc);
 
-    child.collectOutput(&stdout_buf, &stderr_buf, 1024 * 1024) catch |err| {
+    child.collectOutput(alloc, &stdout_buf, &stderr_buf, 1024 * 1024) catch |err| {
         if (err != error.BrokenPipe) return err;
     };
 
     const term = try child.wait();
 
     const exit_code: u8 = switch (term) {
-        .exited => |code| code,
-        .signal => 128,
+        .Exited => |code| code,
+        .Signal => 128,
         else => 255,
     };
 
     return .{
-        .stdout = try stdout_buf.toOwnedSlice(),
-        .stderr = try stderr_buf.toOwnedSlice(),
+        .stdout = try stdout_buf.toOwnedSlice(alloc),
+        .stderr = try stderr_buf.toOwnedSlice(alloc),
         .exit_code = exit_code,
         .alloc = alloc,
     };
@@ -55,11 +55,11 @@ pub fn run(alloc: std.mem.Allocator, args: []const []const u8) !RunResult {
 /// run the yoq binary with the given arguments.
 /// assumes the binary is at zig-out/bin/yoq.
 pub fn runYoq(alloc: std.mem.Allocator, args: []const []const u8) !RunResult {
-    var full_args = std.ArrayList([]const u8).init(alloc);
-    defer full_args.deinit();
+    var full_args: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer full_args.deinit(alloc);
 
-    try full_args.append("zig-out/bin/yoq");
-    try full_args.appendSlice(args);
+    try full_args.append(alloc, "zig-out/bin/yoq");
+    try full_args.appendSlice(alloc, args);
 
     return run(alloc, full_args.items);
 }
