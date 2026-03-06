@@ -600,3 +600,4 @@ pub const insns = [_]BPF.Insn{
     .{ .code = 0x85, .dst = 0, .src = 0, .off = 0, .imm = 23 },
     .{ .code = 0x95, .dst = 0, .src = 0, .off = 0, .imm = 0 },
 };
+

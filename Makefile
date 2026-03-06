@@ -4,16 +4,16 @@ build:
 	zig build -Doptimize=ReleaseSafe
 
 run:
-	zig build run
+	zig build run -Doptimize=ReleaseSafe
 
 test:
-	zig build test
+	zig build test -Doptimize=ReleaseSafe
 
 test-integration:
-	zig build test-integration
+	zig build test-integration -Doptimize=ReleaseSafe
 
 test-privileged: build
-	sudo zig build test-privileged
+	sudo zig build test-privileged -Doptimize=ReleaseSafe
 
 clean:
 	rm -rf zig-out .zig-cache
