@@ -80,6 +80,42 @@ pub fn build(b: *std.Build) void {
     });
     integration_test_step.dependOn(&b.addRunArtifact(helper_tests).step);
 
+    // -- privileged integration tests (require root + linux 6.1+) --
+    //
+    // these tests run the yoq binary as a subprocess and exercise the full
+    // container lifecycle: run, ps, logs, stop, rm, networking, port mapping,
+    // and service discovery. they require root for namespace and cgroup ops.
+    //
+    // usage:
+    //   sudo zig build test-privileged    — run privileged tests
+    //   sudo make test-privileged         — same via Makefile
+    //
+    // prerequisites:
+    //   zig build                         — build the yoq binary first
+
+    const privileged_test_step = b.step("test-privileged", "Run privileged integration tests (requires root)");
+
+    const priv_tests = [_][]const u8{
+        "tests/privileged/test_container.zig",
+        "tests/privileged/test_networking.zig",
+    };
+
+    for (priv_tests) |test_file| {
+        const priv_mod = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(test_file),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        priv_mod.root_module.addImport("helpers", b.createModule(.{
+            .root_source_file = b.path("tests/helpers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }));
+        privileged_test_step.dependOn(&b.addRunArtifact(priv_mod).step);
+    }
+
     // -- BPF compilation (optional) --
     //
     // compiles BPF C programs in bpf/ and generates Zig bytecode arrays
