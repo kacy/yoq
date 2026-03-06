@@ -22,9 +22,11 @@ pub const StatusCode = enum(u16) {
     no_content = 204,
     bad_request = 400,
     unauthorized = 401,
+    content_too_large = 413,
     not_found = 404,
     method_not_allowed = 405,
     too_many_requests = 429,
+    request_header_fields_too_large = 431,
     internal_server_error = 500,
 
     pub fn phrase(self: StatusCode) []const u8 {
@@ -34,9 +36,11 @@ pub const StatusCode = enum(u16) {
             .no_content => "No Content",
             .bad_request => "Bad Request",
             .unauthorized => "Unauthorized",
+            .content_too_large => "Content Too Large",
             .not_found => "Not Found",
             .method_not_allowed => "Method Not Allowed",
             .too_many_requests => "Too Many Requests",
+            .request_header_fields_too_large => "Request Header Fields Too Large",
             .internal_server_error => "Internal Server Error",
         };
     }
@@ -47,7 +51,12 @@ pub const HttpError = error{
     BadRequest,
     UriTooLong,
     HeadersTooLarge,
+    BodyTooLarge,
 };
+
+pub const max_uri_bytes: usize = 2048;
+pub const max_header_bytes: usize = 16 * 1024;
+pub const max_body_bytes: usize = 32 * 1024;
 
 /// a parsed HTTP request. all slices reference the original input buffer —
 /// no allocations, no copies. the caller must keep the input alive.
@@ -74,6 +83,7 @@ pub const Request = struct {
 /// on success, all slices in the returned Request point into `buf`.
 pub fn parseRequest(buf: []const u8) HttpError!?Request {
     const header_end = findHeaderEnd(buf) orelse return null;
+    if (header_end > max_header_bytes) return HttpError.HeadersTooLarge;
     const body_start = header_end + 4; // include the \r\n\r\n
 
     const line = try parseRequestLine(buf);
@@ -81,8 +91,9 @@ pub fn parseRequest(buf: []const u8) HttpError!?Request {
 
     const headers_raw = buf[line.headers_start..header_end];
     const content_length = findContentLength(headers_raw);
+    if (content_length > max_body_bytes) return HttpError.BodyTooLarge;
+    if (body_start + content_length > buf.len) return null;
 
-    if (buf.len < body_start + content_length) return null;
     const body = buf[body_start .. body_start + content_length];
 
     return Request{
@@ -241,6 +252,7 @@ fn parseRequestLine(buf: []const u8) HttpError!ParsedRequestLine {
     const uri_end = std.mem.indexOf(u8, after_method, " ") orelse return HttpError.BadRequest;
     const uri = after_method[0..uri_end];
     if (uri.len == 0) return HttpError.BadRequest;
+    if (uri.len > max_uri_bytes) return HttpError.UriTooLong;
 
     return .{
         .method = method,
@@ -411,6 +423,14 @@ test "unauthorized status code phrase" {
     try std.testing.expectEqualStrings("Unauthorized", StatusCode.unauthorized.phrase());
 }
 
+test "payload too large status code phrase" {
+    try std.testing.expectEqualStrings("Content Too Large", StatusCode.content_too_large.phrase());
+}
+
+test "header too large status code phrase" {
+    try std.testing.expectEqualStrings("Request Header Fields Too Large", StatusCode.request_header_fields_too_large.phrase());
+}
+
 test "findHeaderValue extracts authorization" {
     const headers = "Host: localhost\r\nAuthorization: Bearer my-token-123\r\n";
     const value = findHeaderValue(headers, "Authorization");
@@ -432,4 +452,20 @@ test "findHeaderValue returns null for missing header" {
 
 test "findHeaderValue handles empty headers" {
     try std.testing.expect(findHeaderValue("", "Authorization") == null);
+}
+
+test "parse request rejects long URI" {
+    var uri_buf: [max_uri_bytes + 32]u8 = undefined;
+    const long_uri = std.fmt.bufPrint(&uri_buf, "/{s}", .{"a" ** max_uri_bytes}) catch unreachable;
+    var raw_buf: [max_uri_bytes + 64]u8 = undefined;
+    const raw = std.fmt.bufPrint(&raw_buf, "GET {s} HTTP/1.1\r\nHost: localhost\r\n\r\n", .{long_uri}) catch unreachable;
+    try std.testing.expectError(HttpError.UriTooLong, parseRequest(raw));
+}
+
+test "parse request rejects large body" {
+    var body_buf: [16]u8 = undefined;
+    const raw = std.fmt.bufPrint(&body_buf, "{d}", .{max_body_bytes + 1}) catch unreachable;
+    var req_buf: [128]u8 = undefined;
+    const req = std.fmt.bufPrint(&req_buf, "POST /data HTTP/1.1\r\nContent-Length: {s}\r\n\r\n", .{raw}) catch unreachable;
+    try std.testing.expectError(HttpError.BodyTooLarge, parseRequest(req));
 }

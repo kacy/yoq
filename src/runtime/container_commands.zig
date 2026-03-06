@@ -281,10 +281,16 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
             std.process.exit(1);
         }
 
-        const source = if (std.mem.startsWith(u8, spec.source, "/"))
+        const source_input = if (std.mem.startsWith(u8, spec.source, "/"))
             alloc.dupe(u8, spec.source) catch unreachable
         else
             std.fs.path.resolve(alloc, &.{ cwd, spec.source }) catch unreachable;
+        defer alloc.free(source_input);
+
+        const source = std.fs.cwd().realpathAlloc(alloc, source_input) catch {
+            writeErr("volume source must exist and be canonicalizable: {s}\n", .{spec.source});
+            std.process.exit(1);
+        };
 
         mounts[i] = .{
             .source = source,

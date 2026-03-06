@@ -28,6 +28,8 @@ pub const LayerError = error{
     AssemblyFailed,
     /// failed to create a new layer from a directory
     CreateFailed,
+    /// tar archive contained an unsupported entry type
+    UnsupportedEntry,
 };
 
 /// cache directory for extracted layers
@@ -128,7 +130,7 @@ pub fn createLayerFromDir(alloc: std.mem.Allocator, dir_path: []const u8) LayerE
 
     // create temp file for the uncompressed tar
     var tar_path_buf: [max_path]u8 = undefined;
-    const tar_path = paths.dataPathFmt(&tar_path_buf, "tmp/build-layer.tar", .{}) catch
+    const tar_path = paths.uniqueDataTempPath(&tar_path_buf, "tmp", "build-layer", ".tar") catch
         return LayerError.PathTooLong;
     paths.ensureDataDir("tmp") catch return LayerError.CreateFailed;
 
@@ -140,7 +142,7 @@ pub fn createLayerFromDir(alloc: std.mem.Allocator, dir_path: []const u8) LayerE
 
     // gzip compress the tar and compute compressed digest
     var gz_path_buf: [max_path]u8 = undefined;
-    const gz_path = paths.dataPathFmt(&gz_path_buf, "tmp/build-layer.tar.gz", .{}) catch
+    const gz_path = paths.uniqueDataTempPath(&gz_path_buf, "tmp", "build-layer", ".tar.gz") catch
         return LayerError.PathTooLong;
 
     const compress_result = gzipCompress(alloc, tar_path, gz_path) catch
@@ -436,7 +438,7 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     // the buffer fills, avoiding the unreachableRebase panic that
     // occurs in indirect mode.
     var tmp_path_buf: [max_path]u8 = undefined;
-    const tmp_path = paths.dataPathFmt(&tmp_path_buf, "tmp/layer-extract.tar", .{}) catch
+    const tmp_path = paths.uniqueDataTempPath(&tmp_path_buf, "tmp", "layer-extract", ".tar") catch
         return error.PathTooLong;
     paths.ensureDataDir("tmp") catch return error.FileNotFound;
 
@@ -463,8 +465,9 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
         var write_buf: [std.compress.flate.max_window_len]u8 = undefined;
         var tmp_writer = tmp_file.writer(&write_buf);
 
-        _ = decompress.reader.streamRemaining(&tmp_writer.interface) catch {};
+        _ = try decompress.reader.streamRemaining(&tmp_writer.interface);
         tmp_writer.interface.flush() catch return error.FileNotFound;
+        tmp_file.sync() catch {};
     }
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
@@ -493,9 +496,7 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
         switch (entry.kind) {
             .directory => {
                 if (entry.name.len > 0) {
-                    dest_dir.makePath(entry.name) catch |e| {
-                        log.warn("extract: failed to create dir '{s}': {}", .{ entry.name, e });
-                    };
+                    try dest_dir.makePath(entry.name);
                 }
             },
             .file => {
@@ -503,15 +504,9 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                 // setuid/setgid/sticky (security: never grant elevated
                 // privileges from extracted layers)
                 const mode: std.fs.File.Mode = @intCast(entry.mode & 0o777);
-                const fs_file = createDirAndFile(dest_dir, entry.name, mode) catch |e| {
-                    log.warn("extract: failed to create file '{s}': {}", .{ entry.name, e });
-                    continue;
-                };
+                const fs_file = try createDirAndFile(dest_dir, entry.name, mode);
                 defer fs_file.close();
-                copyTarEntryToFile(&it, entry, fs_file) catch |e| {
-                    log.warn("extract: failed to write file '{s}': {}", .{ entry.name, e });
-                    continue;
-                };
+                try copyTarEntryToFile(&it, entry, fs_file);
             },
             .sym_link => {
                 // validate symlink target doesn't escape the extraction root.
@@ -521,9 +516,7 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                     log.warn("extract: skipping unsafe symlink '{s}' -> '{s}'", .{ entry.name, entry.link_name });
                     continue;
                 }
-                createDirAndSymlink(dest_dir, entry.link_name, entry.name) catch |e| {
-                    log.warn("extract: failed to create symlink '{s}': {}", .{ entry.name, e });
-                };
+                try createDirAndSymlink(dest_dir, entry.link_name, entry.name);
             },
         }
     }

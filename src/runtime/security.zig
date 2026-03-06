@@ -51,25 +51,17 @@ const SECCOMP_DATA_NR = 0; // syscall number
 const SECCOMP_DATA_ARCH = 4; // architecture
 
 /// default set of capabilities to keep for containers.
-/// matches Docker's default set minus CAP_SETFCAP.
-///
-/// CAP_SETFCAP is excluded because it allows setting file capabilities
-/// on binaries, which combined with CAP_CHOWN + CAP_DAC_OVERRIDE can
-/// enable privilege escalation within the container.
+/// this is intentionally narrower than Docker's default profile:
+/// enough for common service workloads, but no raw sockets or broad
+/// DAC bypass by default.
 pub const default_caps = [_]u8{
     linux.CAP.CHOWN, // change file ownership
-    linux.CAP.DAC_OVERRIDE, // bypass file read/write/execute checks
     linux.CAP.FSETID, // don't clear setuid/setgid on file modification
     linux.CAP.FOWNER, // bypass permission checks on operations requiring file owner
-    linux.CAP.MKNOD, // create device special files
-    linux.CAP.NET_RAW, // use raw and packet sockets
     linux.CAP.SETGID, // set process GID
     linux.CAP.SETUID, // set process UID
-    linux.CAP.SETPCAP, // modify process capabilities
     linux.CAP.NET_BIND_SERVICE, // bind to ports below 1024
     linux.CAP.SYS_CHROOT, // use chroot()
-    linux.CAP.KILL, // send signals to any process
-    linux.CAP.AUDIT_WRITE, // write to the kernel audit log
 };
 
 /// apply container security restrictions.
@@ -281,6 +273,23 @@ test "default capabilities set" {
     try std.testing.expect(found_net_bind);
 }
 
+test "default capabilities exclude high-risk defaults" {
+    const denied = [_]u8{
+        linux.CAP.DAC_OVERRIDE,
+        linux.CAP.NET_RAW,
+        linux.CAP.SETPCAP,
+        linux.CAP.KILL,
+        linux.CAP.AUDIT_WRITE,
+        linux.CAP.MKNOD,
+    };
+
+    for (denied) |forbidden| {
+        for (default_caps) |cap| {
+            try std.testing.expect(cap != forbidden);
+        }
+    }
+}
+
 test "bpf instruction construction" {
     const stmt = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ALLOW);
     try std.testing.expectEqual(@as(u16, BPF_RET | BPF_K), stmt.code);
@@ -361,8 +370,9 @@ test "capability mask verification detects mismatch" {
 
 test "blocked_syscalls includes filesystem namespace escape vectors" {
     const fs_escape = [_]linux.SYS{
-        .unshare, .mount, .umount2, .pivot_root,
-        .open_tree, .move_mount, .fsopen, .fsmount, .fsconfig,
+        .unshare,   .mount,      .umount2, .pivot_root,
+        .open_tree, .move_mount, .fsopen,  .fsmount,
+        .fsconfig,
     };
     for (fs_escape) |sc| {
         var found = false;

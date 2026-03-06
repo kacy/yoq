@@ -20,6 +20,7 @@ comptime {
     _ = @import("state/store.zig");
     _ = @import("state/schema.zig");
     _ = @import("state/commands.zig");
+    _ = @import("state/secrets.zig");
     _ = @import("lib/cli.zig");
     _ = @import("lib/cmd.zig");
     _ = @import("lib/command_registry.zig");

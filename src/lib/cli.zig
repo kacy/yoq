@@ -113,7 +113,7 @@ pub fn parsePortMap(str: []const u8) ?net_setup.PortMap {
 pub const VolumeMountSpec = struct {
     source: []const u8,
     target: []const u8,
-    read_only: bool = false,
+    read_only: bool = true,
 };
 
 /// parse an env var in KEY=VALUE form.
@@ -131,10 +131,15 @@ pub fn parseVolumeMount(str: []const u8) ?VolumeMountSpec {
     const mode = parts.next();
     if (source.len == 0 or target.len == 0 or parts.next() != null) return null;
 
-    var read_only = false;
+    var read_only = true;
     if (mode) |m| {
-        if (!std.mem.eql(u8, m, "ro")) return null;
-        read_only = true;
+        if (std.mem.eql(u8, m, "ro")) {
+            read_only = true;
+        } else if (std.mem.eql(u8, m, "rw")) {
+            read_only = false;
+        } else {
+            return null;
+        }
     }
 
     return .{ .source = source, .target = target, .read_only = read_only };
@@ -228,6 +233,8 @@ pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
     const file = std.fs.cwd().openFile(token_path, .{}) catch return null;
     defer file.close();
 
+    if (!hasOwnerOnlyPermissions(file)) return null;
+
     const n = file.readAll(buf) catch return null;
     if (n != 64) return null;
 
@@ -257,11 +264,36 @@ pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
 
+    if (tokenFileExistsWithWeakPermissions(token_path)) return null;
+
     const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o600 }) catch return null;
     defer file.close();
 
     file.writeAll(buf) catch return null;
+    std.crypto.secureZero(u8, &raw);
     return buf;
+}
+
+pub fn isValidApiToken(token: []const u8) bool {
+    if (token.len != 64) return false;
+    for (token) |c| {
+        switch (c) {
+            '0'...'9', 'a'...'f' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn hasOwnerOnlyPermissions(file: std.fs.File) bool {
+    const stat = file.stat() catch return false;
+    return (stat.mode & 0o077) == 0;
+}
+
+fn tokenFileExistsWithWeakPermissions(path: []const u8) bool {
+    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    defer file.close();
+    return !hasOwnerOnlyPermissions(file);
 }
 
 // -- tests --
@@ -286,17 +318,24 @@ test "parse env var" {
 }
 
 test "parse volume mount" {
-    const mount = parseVolumeMount("./src:/app:ro").?;
+    const mount = parseVolumeMount("./src:/app").?;
     try std.testing.expectEqualStrings("./src", mount.source);
     try std.testing.expectEqualStrings("/app", mount.target);
     try std.testing.expect(mount.read_only);
 }
 
+test "parse volume mount rw" {
+    const mount = parseVolumeMount("./src:/app:rw").?;
+    try std.testing.expectEqualStrings("./src", mount.source);
+    try std.testing.expectEqualStrings("/app", mount.target);
+    try std.testing.expect(!mount.read_only);
+}
+
 test "parse volume mount invalid" {
     try std.testing.expect(parseVolumeMount(":/app") == null);
     try std.testing.expect(parseVolumeMount("./src") == null);
-    try std.testing.expect(parseVolumeMount("./src:/app:rw") == null);
     try std.testing.expect(parseVolumeMount("./src:/app:ro:extra") == null);
+    try std.testing.expect(parseVolumeMount("./src:/app:bad") == null);
 }
 
 test "parse memory size" {
@@ -360,4 +399,31 @@ test "readApiToken returns null for missing file" {
 
     var buf: [64]u8 = undefined;
     try std.testing.expect(readApiToken(&buf) == null);
+}
+
+test "readApiToken rejects weak file permissions" {
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return;
+
+    var backup_buf: [paths.max_path]u8 = undefined;
+    const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
+
+    std.fs.cwd().rename(token_path, backup_path) catch {};
+    defer std.fs.cwd().rename(backup_path, token_path) catch {};
+
+    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o644 }) catch return;
+    defer {
+        file.close();
+        std.fs.cwd().deleteFile(token_path) catch {};
+    }
+    file.writeAll("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") catch return;
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(readApiToken(&buf) == null);
+}
+
+test "isValidApiToken validates hex token" {
+    try std.testing.expect(isValidApiToken("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    try std.testing.expect(!isValidApiToken("short"));
+    try std.testing.expect(!isValidApiToken("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
 }

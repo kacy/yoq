@@ -51,7 +51,7 @@ pub fn putBlob(data: []const u8) BlobError!Digest {
 
     // write to a temp file, then rename for atomicity
     var tmp_buf: [max_path]u8 = undefined;
-    const tmp_path = paths.dataPathFmt(&tmp_buf, "{s}/.tmp.{s}", .{ blob_subdir, digest.hex() }) catch
+    const tmp_path = paths.uniqueDataTempPath(&tmp_buf, blob_subdir, "blob", ".tmp") catch
         return BlobError.PathTooLong;
 
     const file = std.fs.cwd().createFile(tmp_path, .{}) catch
@@ -62,12 +62,17 @@ pub fn putBlob(data: []const u8) BlobError!Digest {
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return BlobError.WriteFailed;
     };
+    file.sync() catch {};
     file.close();
 
     // atomic rename to final path
     var path_buf: [max_path]u8 = undefined;
     const final_path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
     std.fs.cwd().rename(tmp_path, final_path) catch {
+        if (hasBlob(digest)) {
+            std.fs.cwd().deleteFile(tmp_path) catch {};
+            return digest;
+        }
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return BlobError.WriteFailed;
     };
@@ -90,7 +95,7 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
 
     // write to a temp file, then rename for atomicity
     var tmp_buf: [max_path]u8 = undefined;
-    const tmp_path = paths.dataPathFmt(&tmp_buf, "{s}/.tmp.{s}", .{ blob_subdir, expected_digest.hex() }) catch
+    const tmp_path = paths.uniqueDataTempPath(&tmp_buf, blob_subdir, "blob", ".tmp") catch
         return BlobError.PathTooLong;
 
     const src_file = std.fs.cwd().openFile(source_path, .{}) catch
@@ -116,6 +121,7 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
             break;
         };
     }
+    dest_file.sync() catch {};
     dest_file.close();
 
     if (!write_ok) {
@@ -134,6 +140,10 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
     var path_buf: [max_path]u8 = undefined;
     const final_path = blobPath(expected_digest, &path_buf) catch return BlobError.PathTooLong;
     std.fs.cwd().rename(tmp_path, final_path) catch {
+        if (hasBlob(expected_digest)) {
+            std.fs.cwd().deleteFile(tmp_path) catch {};
+            return;
+        }
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return BlobError.WriteFailed;
     };
@@ -151,7 +161,7 @@ pub fn putBlobDirect(data: []const u8, digest: Digest) BlobError!void {
 
     // write to a temp file, then rename for atomicity
     var tmp_buf: [max_path]u8 = undefined;
-    const tmp_path = paths.dataPathFmt(&tmp_buf, "{s}/.tmp.{s}", .{ blob_subdir, digest.hex() }) catch
+    const tmp_path = paths.uniqueDataTempPath(&tmp_buf, blob_subdir, "blob", ".tmp") catch
         return BlobError.PathTooLong;
 
     const file = std.fs.cwd().createFile(tmp_path, .{}) catch
@@ -162,11 +172,16 @@ pub fn putBlobDirect(data: []const u8, digest: Digest) BlobError!void {
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return BlobError.WriteFailed;
     };
+    file.sync() catch {};
     file.close();
 
     var path_buf: [max_path]u8 = undefined;
     const final_path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
     std.fs.cwd().rename(tmp_path, final_path) catch {
+        if (hasBlob(digest)) {
+            std.fs.cwd().deleteFile(tmp_path) catch {};
+            return;
+        }
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return BlobError.WriteFailed;
     };

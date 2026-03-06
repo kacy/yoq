@@ -36,8 +36,8 @@ var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 // rate, which is normal for legitimate clients making a few rapid calls.
 //
 // uses a small fixed-size table with linear probing. if the table fills
-// up, new IPs are allowed through (fail-open) — better to serve a
-// request than to reject legitimate traffic due to table pressure.
+// up, new IPs are rejected until entries age out. this is intentionally
+// fail-closed for a management API.
 
 const rate_limit_per_sec: u32 = 10;
 const rate_limit_burst: u32 = 50;
@@ -121,10 +121,8 @@ pub const RateLimiter = struct {
             return true;
         }
 
-        // table full — fail open (allow the request).
-        // this shouldn't happen often with 64 slots and 1-second windows,
-        // but we don't want to reject legitimate traffic.
-        return true;
+        // table full — fail closed rather than disabling rate limiting.
+        return false;
     }
 
     /// reset all entries. used for testing.
@@ -332,6 +330,18 @@ fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
             sendError(client_fd, .bad_request, "malformed request");
             return;
         },
+        error.UriTooLong => {
+            sendError(client_fd, .bad_request, "request uri too long");
+            return;
+        },
+        error.HeadersTooLarge => {
+            sendError(client_fd, .request_header_fields_too_large, "headers too large");
+            return;
+        },
+        error.BodyTooLarge => {
+            sendError(client_fd, .content_too_large, "request body too large");
+            return;
+        },
         error.ReadIncomplete => {
             sendError(client_fd, .bad_request, "request too large or timed out");
             return;
@@ -348,6 +358,9 @@ fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
 
 const ReadRequestError = error{
     MalformedRequest,
+    UriTooLong,
+    HeadersTooLarge,
+    BodyTooLarge,
     ReadIncomplete,
 };
 
@@ -358,11 +371,24 @@ fn readRequest(fd: posix.fd_t, buf: []u8) ReadRequestError!http.Request {
         if (n == 0) break;
         total += n;
 
-        const parsed = http.parseRequest(buf[0..total]) catch return error.MalformedRequest;
+        if (findHeaderEnd(buf[0..total]) == null and total > http.max_header_bytes) {
+            return error.HeadersTooLarge;
+        }
+
+        const parsed = http.parseRequest(buf[0..total]) catch |err| return switch (err) {
+            error.UriTooLong => error.UriTooLong,
+            error.HeadersTooLarge => error.HeadersTooLarge,
+            error.BodyTooLarge => error.BodyTooLarge,
+            else => error.MalformedRequest,
+        };
         if (parsed) |req| return req;
     }
 
     return error.ReadIncomplete;
+}
+
+fn findHeaderEnd(buf: []const u8) ?usize {
+    return std.mem.indexOf(u8, buf, "\r\n\r\n");
 }
 
 fn setReadTimeout(fd: posix.fd_t, seconds: i64) void {
@@ -484,6 +510,6 @@ test "rate limiter handles table collision gracefully" {
         try std.testing.expect(limiter.checkRateAt(ip, now));
     }
 
-    // a new IP when table is full should still be allowed (fail-open)
-    try std.testing.expect(limiter.checkRateAt(0xFFFFFFFF, now));
+    // a new IP when table is full should be rejected (fail-closed)
+    try std.testing.expect(!limiter.checkRateAt(0xFFFFFFFF, now));
 }

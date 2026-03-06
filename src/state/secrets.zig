@@ -343,9 +343,14 @@ fn loadOrCreateKey() KeyError![key_length]u8 {
     // ensure the data directory exists
     paths.ensureDataDir("") catch return KeyError.HomeDirNotFound;
 
-    // try to read existing key
-    if (readKeyFile(key_path)) |key| {
-        return key;
+    // refuse existing weak-permission key files rather than silently
+    // replacing them. callers should fix permissions explicitly.
+    if (keyFileExists(key_path)) {
+        if (!keyFileHasOwnerOnlyPermissions(key_path)) return KeyError.KeyLoadFailed;
+        if (readKeyFile(key_path)) |key| {
+            return key;
+        }
+        return KeyError.KeyLoadFailed;
     }
 
     // key doesn't exist — generate and save
@@ -362,11 +367,27 @@ fn readKeyFile(path: []const u8) ?[key_length]u8 {
     const file = std.fs.cwd().openFile(path, .{}) catch return null;
     defer file.close();
 
+    const stat = file.stat() catch return null;
+    if ((stat.mode & 0o077) != 0) return null;
+
     var key: [key_length]u8 = undefined;
     const n = file.readAll(&key) catch return null;
     if (n != key_length) return null;
 
     return key;
+}
+
+fn keyFileExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+fn keyFileHasOwnerOnlyPermissions(path: []const u8) bool {
+    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    defer file.close();
+
+    const stat = file.stat() catch return false;
+    return (stat.mode & 0o077) == 0;
 }
 
 /// write a key to a file with restrictive permissions (owner read/write only).
@@ -376,6 +397,7 @@ fn saveKeyFile(path: []const u8, key: *const [key_length]u8) !void {
     defer file.close();
 
     file.writeAll(key) catch return error.KeyCreateFailed;
+    file.sync() catch return error.KeyCreateFailed;
 }
 
 // -- utility --
@@ -517,6 +539,19 @@ test "store remove" {
 
     const result = store.get("temp_secret");
     try std.testing.expectError(SecretsError.NotFound, result);
+}
+
+test "readKeyFile rejects weak permissions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("secrets.key", .{ .mode = 0o644 });
+    defer file.close();
+    try file.writeAll(&([_]u8{0x11} ** key_length));
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("secrets.key", &path_buf);
+    try std.testing.expect(readKeyFile(path) == null);
 }
 
 test "store remove nonexistent returns not found" {
