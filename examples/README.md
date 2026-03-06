@@ -30,6 +30,23 @@ a postgres database with an hourly backup cron. the cron runs `pg_dump` every ho
 yoq up -f examples/cron/manifest.toml
 ```
 
+## cluster
+
+a multi-node deployment with postgres, API server, and nginx with automatic TLS. demonstrates service discovery across nodes, environment variable expansion, and a database backup cron.
+
+```bash
+# start the server node
+yoq serve --port 7700
+
+# join worker nodes
+yoq join <server-ip>:7700 --token <api-token>
+
+# deploy
+yoq up -f examples/cluster/manifest.toml
+```
+
+see [examples/cluster/README.md](cluster/README.md) for full setup instructions.
+
 ## writing your own manifest
 
-a manifest is a TOML file with `[service.*]`, `[worker.*]`, `[cron.*]`, and `[volume.*]` sections. see the [manifest spec](../src/manifest/spec.zig) for the full type definitions and the [loader](../src/manifest/loader.zig) for parsing details.
+a manifest is a TOML file with `[service.*]`, `[worker.*]`, `[cron.*]`, and `[volume.*]` sections. see the [manifest spec](../docs/manifest-spec.md) for the full reference.
