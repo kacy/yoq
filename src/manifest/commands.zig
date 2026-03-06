@@ -7,6 +7,7 @@ const std = @import("std");
 const cli = @import("../lib/cli.zig");
 const init_mod = @import("init.zig");
 const manifest_loader = @import("loader.zig");
+const validator = @import("validate.zig");
 const orchestrator = @import("orchestrator.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const manifest_spec = @import("spec.zig");
@@ -47,6 +48,77 @@ pub fn init(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             std.process.exit(1);
         },
     };
+}
+
+pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var manifest_path: []const u8 = manifest_loader.default_filename;
+    var quiet = false;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f")) {
+            manifest_path = args.next() orelse {
+                writeErr("-f requires a manifest path\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else {
+            writeErr("unknown option: {s}\n", .{arg});
+            std.process.exit(1);
+        }
+    }
+
+    // load and parse the manifest (catches syntax errors, missing fields, cycles, etc.)
+    var manifest = manifest_loader.load(alloc, manifest_path) catch {
+        if (!quiet) writeErr("failed to load manifest: {s}\n", .{manifest_path});
+        std.process.exit(1);
+    };
+    defer manifest.deinit();
+
+    // run semantic checks on the parsed manifest
+    var result = validator.check(alloc, &manifest) catch {
+        if (!quiet) writeErr("validation failed: out of memory\n", .{});
+        std.process.exit(1);
+    };
+    defer result.deinit();
+
+    // print diagnostics
+    if (!quiet) {
+        for (result.diagnostics) |d| {
+            switch (d.severity) {
+                .@"error" => writeErr("error: {s}\n", .{d.message}),
+                .warning => writeErr("warning: {s}\n", .{d.message}),
+            }
+        }
+    }
+
+    if (result.hasErrors()) {
+        if (!quiet) writeErr("validation failed\n", .{});
+        std.process.exit(1);
+    }
+
+    if (!quiet) {
+        // build summary: "path is valid (N services, M workers, K crons)"
+        write("{s} is valid", .{manifest_path});
+
+        var has_count = false;
+        if (manifest.services.len > 0) {
+            write(" ({d} service{s}", .{ manifest.services.len, if (manifest.services.len != 1) "s" else "" });
+            has_count = true;
+        }
+        if (manifest.workers.len > 0) {
+            if (has_count) write(",", .{}) else write(" (", .{});
+            write(" {d} worker{s}", .{ manifest.workers.len, if (manifest.workers.len != 1) "s" else "" });
+            has_count = true;
+        }
+        if (manifest.crons.len > 0) {
+            if (has_count) write(",", .{}) else write(" (", .{});
+            write(" {d} cron{s}", .{ manifest.crons.len, if (manifest.crons.len != 1) "s" else "" });
+            has_count = true;
+        }
+        if (has_count) write(")", .{});
+        write("\n", .{});
+    }
 }
 
 pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {

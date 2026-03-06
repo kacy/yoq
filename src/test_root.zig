@@ -55,6 +55,7 @@ comptime {
     _ = @import("manifest/update.zig");
     _ = @import("manifest/commands.zig");
     _ = @import("manifest/init.zig");
+    _ = @import("manifest/validate.zig");
     _ = @import("manifest/cron_scheduler.zig");
     _ = @import("dev/log_mux.zig");
     _ = @import("dev/watcher.zig");
