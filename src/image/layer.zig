@@ -469,14 +469,9 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                     continue;
                 };
                 defer fs_file.close();
-                var write_buf: [4096]u8 = undefined;
-                var file_writer = fs_file.writer(&write_buf);
-                it.streamRemaining(entry, &file_writer.interface) catch |e| {
+                copyTarEntryToFile(&it, entry, fs_file) catch |e| {
                     log.warn("extract: failed to write file '{s}': {}", .{ entry.name, e });
                     continue;
-                };
-                file_writer.interface.flush() catch |e| {
-                    log.warn("extract: failed to flush '{s}': {}", .{ entry.name, e });
                 };
             },
             .sym_link => {
@@ -493,6 +488,20 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
             },
         }
     }
+}
+
+fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: std.fs.File) !void {
+    var remaining = entry.size;
+    var buf: [8192]u8 = undefined;
+
+    while (remaining > 0) {
+        const chunk_len: usize = @intCast(@min(remaining, buf.len));
+        try it.reader.readSliceAll(buf[0..chunk_len]);
+        try fs_file.writeAll(buf[0..chunk_len]);
+        remaining -= chunk_len;
+    }
+
+    it.unread_file_bytes = 0;
 }
 
 /// create parent directories as needed and open a file for writing.

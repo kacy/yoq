@@ -4,6 +4,7 @@
 // readability — no logic changes.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cli = @import("../lib/cli.zig");
 const store = @import("../state/store.zig");
 const container = @import("container.zig");
@@ -162,6 +163,11 @@ pub fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_ho
 // -- commands --
 
 pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    if (builtin.os.tag != .linux) {
+        writeErr("yoq run is only supported on linux (kernel 6.1+)\n", .{});
+        std.process.exit(1);
+    }
+
     var flags = parseRunFlags(args, alloc);
     defer flags.port_maps.deinit(alloc);
     defer flags.user_argv.deinit(alloc);

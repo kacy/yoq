@@ -39,6 +39,14 @@ pub const RegistryError = error{
     UploadInitFailed,
 };
 
+const AuthError = error{
+    AuthFailed,
+    NetworkError,
+    ParseError,
+    ResponseTooLarge,
+    OutOfMemory,
+};
+
 // -- response size limits --
 // these prevent a malicious or buggy registry from sending unbounded data
 // and exhausting memory.
@@ -102,8 +110,14 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     const repository = resolveRepository(image_ref, &repo_buf);
 
     // step 1: authenticate
-    const token = authenticate(alloc, &client, image_ref.host, repository, "pull") catch
-        return RegistryError.AuthFailed;
+    const token = authenticate(alloc, &client, image_ref.host, repository, "pull") catch |e|
+        return switch (e) {
+            error.AuthFailed => RegistryError.AuthFailed,
+            error.NetworkError => RegistryError.NetworkError,
+            error.ParseError => RegistryError.ParseError,
+            error.ResponseTooLarge => RegistryError.ResponseTooLarge,
+            error.OutOfMemory => RegistryError.NetworkError,
+        };
     defer {
         // zero the token before freeing to prevent it lingering in freed memory
         std.crypto.secureZero(u8, @constCast(token.value));
@@ -113,9 +127,14 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     // step 2: fetch manifest (resolving image index if multi-arch)
     const manifest_result = fetchManifest(alloc, &client, image_ref.host, repository, image_ref.reference, token) catch |e| {
         return switch (e) {
+            error.ManifestNotFound => RegistryError.ManifestNotFound,
+            error.NetworkError => RegistryError.NetworkError,
+            error.AuthFailed => RegistryError.AuthFailed,
+            error.ParseError => RegistryError.ParseError,
+            error.PlatformNotFound => RegistryError.PlatformNotFound,
             error.DigestMismatch => RegistryError.DigestMismatch,
             error.ResponseTooLarge => RegistryError.ResponseTooLarge,
-            else => RegistryError.ManifestNotFound,
+            error.OutOfMemory => RegistryError.NetworkError,
         };
     };
     const manifest_bytes = manifest_result.body;
@@ -130,8 +149,12 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     const manifest = parsed.value;
 
     // step 4: download the config blob
-    const config_bytes = fetchBlob(alloc, &client, image_ref.host, repository, manifest.config.digest, token) catch
-        return RegistryError.BlobNotFound;
+    const config_bytes = fetchBlob(alloc, &client, image_ref.host, repository, manifest.config.digest, token) catch |e|
+        return switch (e) {
+            error.BlobNotFound => RegistryError.BlobNotFound,
+            error.NetworkError => RegistryError.NetworkError,
+            error.ResponseTooLarge => RegistryError.ResponseTooLarge,
+        };
     errdefer alloc.free(config_bytes);
 
     // verify config blob integrity against manifest digest
@@ -151,8 +174,13 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     var total_size: u64 = 0;
 
     for (manifest.layers) |l| {
-        downloadLayerBlob(alloc, &client, image_ref.host, repository, l.digest, token) catch
-            return RegistryError.BlobNotFound;
+        downloadLayerBlob(alloc, &client, image_ref.host, repository, l.digest, token) catch |e|
+            return switch (e) {
+                error.BlobNotFound => RegistryError.BlobNotFound,
+                error.NetworkError => RegistryError.NetworkError,
+                error.ResponseTooLarge => RegistryError.ResponseTooLarge,
+                error.DigestMismatch => RegistryError.DigestMismatch,
+            };
 
         const digest_copy = alloc.dupe(u8, l.digest) catch
             return RegistryError.NetworkError;
@@ -213,8 +241,14 @@ pub fn push(
     const repository = resolveRepository(image_ref, &repo_buf);
 
     // authenticate with push,pull scope
-    const token = authenticate(alloc, &client, image_ref.host, repository, "push,pull") catch
-        return RegistryError.AuthFailed;
+    const token = authenticate(alloc, &client, image_ref.host, repository, "push,pull") catch |e|
+        return switch (e) {
+            error.AuthFailed => RegistryError.AuthFailed,
+            error.NetworkError => RegistryError.NetworkError,
+            error.ParseError => RegistryError.ParseError,
+            error.ResponseTooLarge => RegistryError.ResponseTooLarge,
+            error.OutOfMemory => RegistryError.NetworkError,
+        };
     defer {
         std.crypto.secureZero(u8, @constCast(token.value));
         alloc.free(token.value);
@@ -300,28 +334,28 @@ fn authenticate(
     host: []const u8,
     repository: []const u8,
     scope: []const u8,
-) !Token {
+) AuthError!Token {
     // step 1: ping /v2/ to get the auth challenge
     var ping_url_buf: [512]u8 = undefined;
     const ping_url = std.fmt.bufPrint(&ping_url_buf, "https://{s}/v2/", .{host}) catch
-        return error.AuthFailed;
+        return error.OutOfMemory;
 
     // we need the lower-level request API to read the Www-Authenticate header
     const uri = std.Uri.parse(ping_url) catch return error.AuthFailed;
     var req = client.request(.GET, uri, .{
         .redirect_behavior = .not_allowed,
         .keep_alive = false,
-    }) catch return error.AuthFailed;
+    }) catch return error.NetworkError;
     defer req.deinit();
 
-    req.sendBodiless() catch return error.AuthFailed;
+    req.sendBodiless() catch return error.NetworkError;
 
     var redirect_buf: [4096]u8 = undefined;
-    const response = req.receiveHead(&redirect_buf) catch return error.AuthFailed;
+    const response = req.receiveHead(&redirect_buf) catch return error.NetworkError;
 
     // if 200, no auth needed (rare but possible for local registries)
     if (response.head.status == .ok) {
-        return Token{ .value = try alloc.dupe(u8, "") };
+        return Token{ .value = alloc.dupe(u8, "") catch return error.OutOfMemory };
     }
 
     // parse the Www-Authenticate header from the raw response
@@ -335,7 +369,7 @@ fn authenticate(
         &token_url_buf,
         "{s}?service={s}&scope=repository:{s}:{s}",
         .{ challenge.realm, challenge.service, repository, scope },
-    ) catch return error.AuthFailed;
+    ) catch return error.OutOfMemory;
 
     // use fetch for the token request — it's simple and we just need the body
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -344,7 +378,7 @@ fn authenticate(
     const result = client.fetch(.{
         .location = .{ .url = token_url },
         .response_writer = &aw.writer,
-    }) catch return error.AuthFailed;
+    }) catch return error.NetworkError;
 
     if (result.status != .ok) return error.AuthFailed;
 
@@ -352,20 +386,20 @@ fn authenticate(
     const body_data = aw.writer.buffer[0..aw.writer.end];
 
     // reject oversized auth responses — token JSON should be well under 64 KB
-    if (body_data.len > max_auth_response_size) return error.AuthFailed;
+    if (body_data.len > max_auth_response_size) return error.ResponseTooLarge;
 
     // parse the token from the JSON response
     const token_json = std.json.parseFromSlice(struct {
         token: ?[]const u8 = null,
         access_token: ?[]const u8 = null,
-    }, alloc, body_data, .{ .ignore_unknown_fields = true }) catch return error.AuthFailed;
+    }, alloc, body_data, .{ .ignore_unknown_fields = true }) catch return error.ParseError;
     defer token_json.deinit();
 
     const token_str = token_json.value.token orelse
         token_json.value.access_token orelse
         return error.AuthFailed;
 
-    return Token{ .value = try alloc.dupe(u8, token_str) };
+    return Token{ .value = alloc.dupe(u8, token_str) catch return error.OutOfMemory };
 }
 
 /// parse a Www-Authenticate: Bearer realm="...",service="..." header
@@ -376,8 +410,10 @@ fn parseAuthChallenge(head: std.http.Client.Response.Head) ?AuthChallenge {
 
         // format: Bearer realm="https://auth.docker.io/token",service="registry.docker.io"
         const value = header.value;
-        if (!std.mem.startsWith(u8, value, "Bearer ")) continue;
-        const params = value["Bearer ".len..];
+        const space_idx = std.mem.indexOfScalar(u8, value, ' ') orelse continue;
+        const scheme = value[0..space_idx];
+        if (!std.ascii.eqlIgnoreCase(scheme, "Bearer")) continue;
+        const params = value[space_idx + 1 ..];
 
         var realm: ?[]const u8 = null;
         var service: ?[]const u8 = null;
@@ -416,6 +452,30 @@ fn parseAuthChallenge(head: std.http.Client.Response.Head) ?AuthChallenge {
         }
     }
     return null;
+}
+
+fn contentTypeBase(value: []const u8) []const u8 {
+    const semi_idx = std.mem.indexOfScalar(u8, value, ';') orelse return std.mem.trim(u8, value, " \t\r\n");
+    return std.mem.trim(u8, value[0..semi_idx], " \t\r\n");
+}
+
+fn isRedirectStatus(status: std.http.Status) bool {
+    const code = @intFromEnum(status);
+    return code >= 300 and code < 400;
+}
+
+fn summarizeUrl(url: []const u8, buf: *[256]u8) []const u8 {
+    const q_idx = std.mem.indexOfScalar(u8, url, '?') orelse url.len;
+    const trimmed = url[0..q_idx];
+    if (trimmed.len <= buf.len) {
+        @memcpy(buf[0..trimmed.len], trimmed);
+        return buf[0..trimmed.len];
+    }
+
+    const keep = buf.len - 3;
+    @memcpy(buf[0..keep], trimmed[0..keep]);
+    @memcpy(buf[keep..buf.len], "...");
+    return buf[0..buf.len];
 }
 
 /// result from fetching a manifest
@@ -494,7 +554,7 @@ fn fetchManifest(
     }
 
     // read the content type to determine what we got
-    const content_type = response.head.content_type orelse "";
+    const content_type = contentTypeBase(response.head.content_type orelse "");
 
     // capture Docker-Content-Digest before reading the body: std.http.Response.reader()
     // invalidates header strings in response.head.
@@ -538,9 +598,39 @@ fn fetchManifest(
 
     // if we got an image index, resolve to the platform-specific manifest
     if (spec.isIndexMediaType(content_type)) {
-        const platform_result = resolveImageIndex(alloc, client, host, repository, raw_body, token) catch
-            return error.PlatformNotFound;
+        const platform_result = resolveImageIndex(alloc, client, host, repository, raw_body, token) catch |e|
+            return switch (e) {
+                error.PlatformNotFound => error.PlatformNotFound,
+                error.ManifestNotFound => error.ManifestNotFound,
+                error.NetworkError => error.NetworkError,
+                error.AuthFailed => error.AuthFailed,
+                error.ParseError => error.ParseError,
+                error.DigestMismatch => error.DigestMismatch,
+                error.ResponseTooLarge => error.ResponseTooLarge,
+                error.OutOfMemory => error.OutOfMemory,
+            };
         return platform_result;
+    }
+
+    // Some registries return a generic or parameterized content type for multi-arch
+    // images. Fall back to body inspection so common Docker Hub images still resolve.
+    var parsed_index = spec.parseImageIndex(alloc, raw_body) catch null;
+    if (parsed_index) |*idx| {
+        defer idx.deinit();
+        if (idx.value.manifests.len > 0) {
+            const platform_result = resolveImageIndex(alloc, client, host, repository, raw_body, token) catch |e|
+                return switch (e) {
+                    error.PlatformNotFound => error.PlatformNotFound,
+                    error.ManifestNotFound => error.ManifestNotFound,
+                    error.NetworkError => error.NetworkError,
+                    error.AuthFailed => error.AuthFailed,
+                    error.ParseError => error.ParseError,
+                    error.DigestMismatch => error.DigestMismatch,
+                    error.ResponseTooLarge => error.ResponseTooLarge,
+                    error.OutOfMemory => error.OutOfMemory,
+                };
+            return platform_result;
+        }
     }
 
     // it's a direct manifest — return it
@@ -761,7 +851,7 @@ fn parseLocationHeader(host: []const u8, head: std.http.Client.Response.Head) ?[
         // we handle it with a thread-local buffer since this is always called
         // from a single upload flow.
         const static = struct {
-            threadlocal var buf: [2048]u8 = undefined;
+            threadlocal var buf: [8192]u8 = undefined;
         };
         const full_url = std.fmt.bufPrint(&static.buf, "https://{s}{s}", .{ host, value }) catch
             return null;
@@ -827,46 +917,93 @@ fn fetchBlob(
         .{ host, repository, digest },
     ) catch return error.BlobNotFound;
 
-    var auth_buf: [8192]u8 = undefined;
-    const auth_value = authHeaderValue(token, &auth_buf);
+    return fetchBlobFromUrl(alloc, client, host, url, token, true, 0);
+}
 
-    const uri = std.Uri.parse(url) catch return error.BlobNotFound;
+fn fetchBlobFromUrl(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    url: []const u8,
+    token: Token,
+    send_auth: bool,
+    redirect_count: u8,
+) ![]u8 {
+    if (redirect_count > 5) return error.NetworkError;
+
+    var url_summary_buf: [256]u8 = undefined;
+    const url_summary = summarizeUrl(url, &url_summary_buf);
+    var auth_buf: [8192]u8 = undefined;
+    const auth_value = if (send_auth) authHeaderValue(token, &auth_buf) else "";
+    const uri = std.Uri.parse(url) catch {
+        log.warn("blob fetch: failed to parse url {s}", .{url_summary});
+        return error.BlobNotFound;
+    };
 
     var req = client.request(.GET, uri, .{
-        .redirect_behavior = @enumFromInt(3),
+        .redirect_behavior = .unhandled,
         .keep_alive = false,
         .headers = .{
             .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
         },
-    }) catch return error.NetworkError;
+    }) catch |err| {
+        log.warn("blob fetch: request setup failed for {s}: {}", .{ url_summary, err });
+        return error.NetworkError;
+    };
     defer req.deinit();
 
-    req.sendBodiless() catch return error.NetworkError;
+    req.sendBodiless() catch |err| {
+        log.warn("blob fetch: send failed for {s}: {}", .{ url_summary, err });
+        return error.NetworkError;
+    };
 
-    var redirect_buf: [8192]u8 = undefined;
-    var response = req.receiveHead(&redirect_buf) catch return error.NetworkError;
+    var redirect_buf: [262144]u8 = undefined;
+    var response = req.receiveHead(&redirect_buf) catch |err| {
+        log.warn("blob fetch: receive head failed for {s}: {}", .{ url_summary, err });
+        return error.NetworkError;
+    };
 
-    if (response.head.status != .ok) return error.BlobNotFound;
+    if (isRedirectStatus(response.head.status)) {
+        const location = parseLocationHeader(host, response.head) orelse {
+            log.warn("blob fetch: redirect missing location for {s}", .{url_summary});
+            return error.NetworkError;
+        };
+        const location_copy = alloc.dupe(u8, location) catch return error.NetworkError;
+        defer alloc.free(location_copy);
 
-    // reject oversized blobs before reading the body
+        var location_summary_buf: [256]u8 = undefined;
+        const location_summary = summarizeUrl(location_copy, &location_summary_buf);
+        log.warn("blob fetch: redirect {d} from {s} to {s} (auth={})", .{
+            @intFromEnum(response.head.status),
+            url_summary,
+            location_summary,
+            send_auth,
+        });
+
+        return fetchBlobFromUrl(alloc, client, host, location_copy, token, false, redirect_count + 1);
+    }
+
+    if (response.head.status != .ok) {
+        log.warn("blob fetch: unexpected status {d} for {s}", .{ @intFromEnum(response.head.status), url_summary });
+        return error.BlobNotFound;
+    }
+
     if (response.head.content_length) |cl| {
         if (cl > max_blob_size) return error.ResponseTooLarge;
     }
 
-    // read body with size tracking
     var transfer_buf: [8192]u8 = undefined;
     const body_reader = response.reader(&transfer_buf);
-
     var aw: std.Io.Writer.Allocating = .init(alloc);
     defer aw.deinit();
 
-    _ = body_reader.streamRemaining(&aw.writer) catch return error.NetworkError;
+    _ = body_reader.streamRemaining(&aw.writer) catch |err| {
+        log.warn("blob fetch: body read failed for {s}: {}", .{ url_summary, err });
+        return error.NetworkError;
+    };
 
     const raw_body = aw.writer.buffer[0..aw.writer.end];
-
-    // enforce size limit on actual body (servers can lie about Content-Length)
     if (raw_body.len > max_blob_size) return error.ResponseTooLarge;
-
     return alloc.dupe(u8, raw_body) catch return error.NetworkError;
 }
 
@@ -953,12 +1090,37 @@ test "parse auth challenge" {
     try std.testing.expectEqualStrings("registry.docker.io", challenge.service);
 }
 
+test "parse auth challenge — lowercase bearer scheme" {
+    const response_bytes = "HTTP/1.1 401 Unauthorized\r\n" ++
+        "www-authenticate: bearer realm=\"https://auth.docker.io/token\",service=\"registry.docker.io\"\r\n" ++
+        "Content-Length: 0\r\n\r\n";
+
+    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
+    const challenge = parseAuthChallenge(head).?;
+
+    try std.testing.expectEqualStrings("https://auth.docker.io/token", challenge.realm);
+    try std.testing.expectEqualStrings("registry.docker.io", challenge.service);
+}
+
 test "parse auth challenge — missing header returns null" {
     const response_bytes = "HTTP/1.1 401 Unauthorized\r\n" ++
         "Content-Length: 0\r\n\r\n";
 
     const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
     try std.testing.expect(parseAuthChallenge(head) == null);
+}
+
+test "contentTypeBase strips parameters and whitespace" {
+    try std.testing.expectEqualStrings(
+        "application/vnd.oci.image.index.v1+json",
+        contentTypeBase(" application/vnd.oci.image.index.v1+json; charset=utf-8 "),
+    );
+}
+
+test "isRedirectStatus detects redirect responses" {
+    try std.testing.expect(isRedirectStatus(.temporary_redirect));
+    try std.testing.expect(isRedirectStatus(.found));
+    try std.testing.expect(!isRedirectStatus(.ok));
 }
 
 test "manifest digest is always computed from body" {

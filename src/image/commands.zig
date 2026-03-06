@@ -11,6 +11,22 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const requireArg = cli.requireArg;
 
+fn writePullError(target: []const u8, err: anyerror) void {
+    writeErr("failed to pull image: {s} ({})\n", .{ target, err });
+
+    switch (err) {
+        error.AuthFailed => writeErr("registry authentication failed\n", .{}),
+        error.ManifestNotFound => writeErr("manifest not found for the requested image reference\n", .{}),
+        error.BlobNotFound => writeErr("a required config or layer blob could not be downloaded\n", .{}),
+        error.NetworkError => writeErr("network request to the registry failed\n", .{}),
+        error.PlatformNotFound => writeErr("no linux/amd64 image was found in the manifest list\n", .{}),
+        error.DigestMismatch => writeErr("the registry returned content with a mismatched digest\n", .{}),
+        error.ResponseTooLarge => writeErr("the registry response exceeded the configured safety limit\n", .{}),
+        error.ParseError => writeErr("the registry returned invalid manifest or config data\n", .{}),
+        else => {},
+    }
+}
+
 pub const ImageResolution = struct {
     rootfs: []const u8,
     entrypoint: []const []const u8 = &.{},
@@ -43,8 +59,8 @@ pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageRe
 
     var result = ImageResolution{ .rootfs = target };
 
-    result.pull_result = registry.pull(alloc, ref) catch {
-        writeErr("failed to pull image: {s}\n", .{target});
+    result.pull_result = registry.pull(alloc, ref) catch |err| {
+        writePullError(target, err);
         std.process.exit(1);
     };
 
@@ -103,8 +119,8 @@ pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     writeErr("pulling {s}...\n", .{image_str});
 
-    var result = registry.pull(alloc, ref) catch {
-        writeErr("failed to pull image: {s}\n", .{image_str});
+    var result = registry.pull(alloc, ref) catch |err| {
+        writePullError(image_str, err);
         std.process.exit(1);
     };
     defer result.deinit();
