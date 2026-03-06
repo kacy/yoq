@@ -270,10 +270,6 @@ yoq up -f examples/redis/manifest.toml
 
 ## what's next
 
-### remaining work
-
-- PSI-based auto-tuning suggestions from resource monitoring
-
 ### future directions
 
 - `yoq init` — scaffold a manifest.toml interactively
