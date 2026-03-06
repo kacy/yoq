@@ -1,143 +1,140 @@
 # yoq
 
-a single binary that replaces Docker + Kubernetes + Istio + Helm for 90% of teams.
+yoq is a single Linux binary for building, running, networking, and deploying containers without stitching together Docker, Compose, Kubernetes, Istio, Helm, and a pile of glue.
 
-## what
+Most teams do not need a platform made of separate control planes, YAML layers, sidecars, and operators just to run a few services reliably. They need containers, service discovery, rollouts, secrets, TLS, metrics, and a sane deployment model that one engineer can actually understand end to end.
 
-yoq combines container runtime, orchestration, networking, and service mesh into one static binary. built on modern Linux primitives (cgroups v2, io_uring, eBPF) instead of the 2013-era stack everything else is built on. networking uses eBPF programs for DNS interception, load balancing, per-service metrics, and network policy enforcement, with iptables NAT as the outbound path. WireGuard mesh handles cross-node encryption.
+That is the point of yoq. It collapses the usual stack into one operational model, one CLI, one state store, and one binary you can ship to a Linux host. Instead of outsourcing core behavior to half a dozen daemons, it builds directly on Linux primitives like namespaces, cgroups v2, io_uring, eBPF, and WireGuard.
 
-## status
+Linux kernel 6.1+ is required.
 
-**~95% complete.** ~51k lines of Zig, ~1019 tests. all seven phases are implemented.
+## why this exists
 
-**container runtime (phase 1) — complete:** containers run in isolated namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. process supervision, log capture, and exec into running containers all work. rootless containers via user namespace uid/gid mappings are implemented.
+The standard container stack grew by accretion:
 
-**OCI images (phase 2) — complete:** images are pulled from and pushed to any OCI registry (Docker Hub, GHCR, etc.) with token auth, extracted, and cached locally with layer deduplication. content-addressable blob store. `yoq inspect` shows image metadata (layers, entrypoint, env, ports, labels). `yoq prune` garbage-collects unreferenced blobs and extracted layers.
+- one tool to build images
+- one tool to run containers
+- one file format for local development
+- another system for production scheduling
+- extra layers for ingress, service discovery, mesh, secrets, TLS, and observability
 
-**networking (phase 3) — complete:** each container gets its own IP on a bridge network (10.42.0.0/16), with iptables NAT for outbound traffic and XDP port mapping for inbound (iptables DNAT fallback). eBPF programs handle DNS interception for service discovery, round-robin load balancing with reverse SNAT conntrack across replicas, per-IP and per-service-pair metrics collection, and network policy enforcement (allow/deny between services). WireGuard mesh for cross-node networking with automatic key exchange on node join. all BPF programs compile from C source to real bytecode.
+That stack can be the right answer for very large organizations. For most teams, it creates more moving parts than the application actually needs. The operational burden becomes the platform.
 
-**build engine (phase 4) — complete:** Dockerfile parser supports all major directives (FROM, RUN, COPY, ADD, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD) and produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order. `--build-arg` substitution and multi-stage builds (`COPY --from`) are supported. ADD auto-extracts tar archives (gzip, bzip2, xz, zstd, plain tar) with URL source support. ONBUILD triggers are stored in image config and executed when used as a base image. TOML declarative build manifest (`--format toml`) provides an alternative to Dockerfiles with automatic stage dependency resolution.
+yoq takes the opposite approach: keep the system integrated, keep the surface area small, and ship the production features people usually bolt on later.
 
-**manifest + dev mode (phase 5) — complete:** TOML manifest format defines multi-service applications with dependency ordering, health checks, readiness probes, rolling update strategies, and secret references. `yoq up` starts all services, `yoq down` stops them in reverse order. `yoq up <service>` starts individual services with their dependencies. workers provide one-shot tasks (e.g., database migrations) that run to completion. crons run on a fixed interval (e.g., `every = "1h"`) and are automatically scheduled when `yoq up` starts. dev mode (`--dev`) watches source directories with inotify and hot-restarts containers on file changes. colored log multiplexing prefixes output with service names. rolling updates with automatic rollback on health check failure.
+## why yoq is better for most teams
 
-**clustering (phase 6) — complete:** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. raft snapshots keep the log bounded and bring lagging followers up to date via InstallSnapshot RPC. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. WireGuard mesh with automatic key exchange on join encrypts cross-node traffic. cross-node service discovery works via cluster DNS. the API server exposes endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`.
+- Fewer moving parts: one binary instead of a runtime, orchestrator, ingress layer, mesh, and templating stack.
+- One mental model: local containers, multi-service apps, and clustered deployments all use the same CLI and same resource model.
+- Less operational glue: service discovery, TLS, rollouts, secrets, metrics, and network policy are built in.
+- Less translation work: you do not need to move from Dockerfiles to Compose to Helm charts to controller-specific CRDs just to keep shipping.
+- Easier debugging: there is one codebase, one state store, and one place to reason about failures.
 
-**production features (phase 7) — complete:** health checks (HTTP, TCP, exec) with configurable intervals and readiness probes. rolling updates with automatic rollback on failure. encrypted secrets store with rotation (mounted as files or env vars). TLS termination with ACME auto-provisioning, TLS 1.3 handshake, bidirectional proxy with SNI routing, and auto-renewal on startup. certificate management CLI. eBPF observability with per-IP and per-service-pair metrics. eBPF network policies (allow/deny between services). PSI metrics reading from cgroups v2 with auto-tuning suggestions.
+This is not a claim that yoq is the right answer for every environment. It is a claim that the usual stack is often overbuilt for what small and mid-sized teams actually need.
 
-## what works
+## why not the usual stack
 
-Linux kernel 6.1+ required. commands grouped by function:
+For many teams, the default path looks like this:
 
-```
-# containers
-yoq run <image|rootfs> [command]     pull and run a container
-yoq ps [--json]                      list containers
-yoq stop <id|name>                   stop a running container
-yoq rm <id|name>                     remove a stopped container
-yoq logs <id|name> [--tail N]        view container output
-yoq restart <id|name>                restart a container
-yoq exec <id|name> <cmd> [args...]   run a command in a running container
+- Docker for images and local containers
+- Compose for local multi-service development
+- Kubernetes for scheduling
+- Helm for packaging
+- ingress controllers and cert tooling for edge traffic
+- service mesh or extra controllers for traffic policy and observability
 
-# images
-yoq pull <image>                     pull an image from a registry
-yoq push <source> [target]           push an image to a registry
-yoq images [--json]                  list pulled images
-yoq inspect <image>                  show image metadata and layers
-yoq rmi <image>                      remove a pulled image
-yoq prune [--json]                   remove unreferenced blobs and layers
+yoq keeps those responsibilities in one system:
 
-# build
-yoq build [-t tag] [-f Dockerfile] . build an image from a Dockerfile
-                  [--format toml]   build from a TOML manifest
+- OCI image build and registry operations
+- container runtime and process supervision
+- service orchestration from a manifest
+- built-in service discovery and networking
+- TLS, secrets, health checks, rollouts, and metrics
+- optional multi-node clustering
 
-# manifest
-yoq up [-f manifest.toml]            start services from manifest
-yoq up [service...]                  start only named services + deps
-yoq up --dev                         dev mode: watch + hot restart
-yoq up --server host:port            deploy to cluster
-yoq down [-f manifest.toml]          stop all services
-yoq run-worker <name>                run a one-shot worker task
-yoq init [-f path]                   scaffold a manifest.toml interactively
-yoq validate [-f manifest.toml] [-q] validate a manifest file
+The result is a smaller stack to install, upgrade, debug, and teach.
 
-# deployment
-yoq rollback <service>               rollback to previous version
-yoq history <service>                show deployment history
+## best fit
 
-# secrets
-yoq secret set <name> <value>        store an encrypted secret
-yoq secret get <name>                retrieve a secret
-yoq secret rm <name>                 delete a secret
-yoq secret list                      list all secrets
-yoq secret rotate <name>             rotate a secret
+yoq is a strong fit for:
 
-# status
-yoq status [--verbose]               show service status and resources
+- small-to-medium teams that want production features without building a platform team first
+- multi-service applications that outgrew Compose but do not need the ecosystem breadth of Kubernetes
+- operators who prefer direct, inspectable systems over layered abstractions
+- Linux environments where shipping one binary is operationally attractive
 
-# metrics
-yoq metrics [service]                show per-service network stats
-yoq metrics --pairs                  show service-to-service metrics
+yoq is probably not the right fit if you already depend on the full Kubernetes ecosystem surface, deep CRD-driven workflows, or broad vendor tooling built specifically around Kubernetes APIs.
 
-# network policies
-yoq policy deny <src> <tgt>          block traffic between services
-yoq policy allow <src> <tgt>         allow traffic between services
-yoq policy rm <src> <tgt>            remove a policy rule
-yoq policy list                      list all policy rules
+## what you get
 
-# certificates
-yoq cert provision <domain>          provision TLS certificate via ACME
-yoq cert renew <domain>              renew an existing certificate
-yoq cert install <domain> --cert <path> --key <path>
-yoq cert list                        list managed certificates
-yoq cert rm <domain>                 remove a certificate
+### runtime
 
-# server
-yoq serve [--port PORT]              start the API server
+- isolated containers with PID, NET, MNT, UTS, IPC, USER, and CGROUP namespaces
+- cgroups v2 resource limits, overlayfs root filesystems, seccomp filters, and capability dropping
+- process supervision, log capture, restart handling, and `exec` into running containers
 
-# cluster
-yoq init-server [--id N] [--port P]  start a cluster server node
-    [--api-port P] [--peers ...]
-    [--token TOKEN]
-yoq join <host> --token <token>      join cluster as agent node
-yoq cluster status                   show cluster node status
-yoq nodes [--server host:port]       list cluster agent nodes
-yoq drain <id> [--server host:port]  drain an agent node
+### build
 
-# meta
-yoq version [--json]                 print version
-yoq help                             show help
-yoq completion <bash|zsh|fish>       output shell completion script
-```
+- Dockerfile support for the major directives, including multi-stage builds and build args
+- content-hash caching so unchanged build steps are not re-executed
+- optional TOML build manifest format
 
-crons defined in the manifest run automatically when `yoq up` starts — no separate command needed.
+### service orchestration
 
-deployment, metrics, and certificate commands accept `--server host:port` for remote cluster operation.
+- declarative multi-service manifests
+- dependency ordering, workers, cron jobs, and dev mode with hot restart
+- health checks, readiness probes, rollout history, rollback, and automatic rollback on failed updates
 
-`--json` is currently available on `ps`, `images`, `prune`, and `version`.
+### networking and discovery
 
-## requirements
+- per-container IPs on a bridge network
+- built-in DNS-based service discovery
+- port mapping, outbound NAT, and eBPF-based load balancing and policy enforcement where available
+- WireGuard-based cluster networking for multi-node deployments
 
-- Linux kernel 6.1+ (user namespace support)
-- Zig 0.15.2
+### production features
 
-## build
+- encrypted secrets store with rotation
+- TLS termination with ACME provisioning and renewal
+- service and pairwise network metrics
+- policy controls between services
+- status and resource reporting
 
-```
-make build
-```
+### clustering
+
+- raft-based server nodes with SQLite-backed state replication
+- agent registration, heartbeats, placement, drain, and cluster status
+- remote operations via `--server host:port`
 
 ## quickstart
 
+### requirements
+
+- Linux kernel 6.1+ (sorry no Mac support)
+- Zig 0.15.2
+
+### build
+
 ```bash
-# run a container
+make build
+```
+
+### one-liner
+```bash
+curl -fsSL https://yoq.dev/install | bash
+```
+
+### run one container
+
+```bash
 yoq run alpine:latest echo "hello from yoq"
+yoq ps
+yoq logs <id-or-name>
+```
 
-# pull and inspect an image
-yoq pull redis:7
-yoq inspect redis:7
+### run a small app
 
-# multi-service app from a manifest
-cat > manifest.toml << 'EOF'
+```toml
 [service.redis]
 image = "redis:7"
 ports = ["6379:6379"]
@@ -146,131 +143,145 @@ ports = ["6379:6379"]
 image = "nginx:latest"
 ports = ["8080:80"]
 depends_on = ["redis"]
-EOF
+```
+
+```bash
 yoq up -f manifest.toml
-
-# run a one-shot worker
-yoq run-worker -f manifest.toml migrate
-
-# check status
-yoq ps
 yoq status
+yoq down -f manifest.toml
 ```
 
-## architecture
+## command overview
 
+### containers
+
+```text
+yoq run <image|rootfs> [command]     run a container
+yoq ps [--json]                      list containers
+yoq stop <id|name>                   stop a container
+yoq rm <id|name>                     remove a stopped container
+yoq logs <id|name> [--tail N]        show container output
+yoq restart <id|name>                restart a container
+yoq exec <id|name> <cmd> [args...]   run a command in a container
 ```
-src/
-  main.zig                CLI entry point, argument parsing
-  runtime/
-    container.zig          container lifecycle (create/start/stop/rm)
-    namespaces.zig         clone3, user/pid/net/mnt namespace setup
-    cgroups.zig            cgroups v2 (cpu, memory, pids limits)
-    filesystem.zig         overlayfs, pivot_root, bind mounts
-    security.zig           seccomp filters, capability dropping
-    process.zig            process supervision, signal handling
-    logs.zig               stdout/stderr capture to files
-    exec.zig               execute commands in running containers
-    monitor.zig            resource monitoring
-    commands.zig           status/metrics CLI handlers
-    container_commands.zig container lifecycle CLI handlers
-  image/
-    registry.zig           OCI registry client (token auth, manifests, blobs, push)
-    store.zig              content-addressable blob storage
-    layer.zig              layer extraction and deduplication
-    spec.zig               OCI image/manifest spec types
-    oci.zig                OCI image config resolution
-    commands.zig           image CLI handlers
-  network/
-    setup.zig              network orchestrator (bridge + veth + NAT)
-    bridge.zig             bridge and veth pair management via netlink
-    netlink.zig            raw netlink socket interface
-    ip.zig                 IP allocation from sqlite pool
-    nat.zig                iptables NAT, forwarding, port mapping
-    dns.zig                userspace DNS resolver for service discovery
-    wireguard.zig          WireGuard mesh setup and key exchange
-    ebpf.zig               eBPF program loading, map management
-    policy.zig             eBPF-based network policy enforcement
-    commands.zig           network policy CLI handlers
-    bpf/
-      dns_intercept.zig    eBPF: DNS service discovery
-      lb.zig               eBPF: round-robin load balancing + reverse SNAT
-      metrics.zig          eBPF: per-IP and per-pair packet counting
-      policy.zig           eBPF: network policy enforcement
-      port_map.zig         eBPF: XDP port mapping
-  build/
-    dockerfile.zig         Dockerfile parser (FROM, RUN, COPY, ENV, etc.)
-    engine.zig             build engine with content-hash caching
-    context.zig            build context file hashing and copying
-    manifest.zig           TOML declarative build manifest
-    commands.zig           build CLI handlers
-  manifest/
-    spec.zig               manifest type definitions (services, volumes, ports)
-    loader.zig             TOML manifest parser with dependency ordering
-    orchestrator.zig       service lifecycle and dependency management
-    health.zig             health checks and readiness probes
-    update.zig             rolling updates and rollback
-    cron_scheduler.zig     cron scheduling thread
-    commands.zig           manifest CLI handlers (up/down/run-worker)
-  dev/
-    watcher.zig            inotify file watcher for dev mode
-    log_mux.zig            colored log multiplexing by service name
-  tls/
-    proxy.zig              TLS reverse proxy with SNI routing
-    sni.zig                TLS ClientHello SNI extraction
-    handshake.zig          TLS 1.3 handshake message construction
-    record.zig             TLS record encryption/decryption (AES-256-GCM)
-    pem.zig                PEM/DER parsing for keys and certificates
-    csr.zig                certificate signing request generation
-    jws.zig                JSON Web Signature for ACME protocol
-    acme.zig               ACME client (Let's Encrypt)
-    cert_store.zig         certificate storage and management
-    backend.zig            backend registry for domain routing
-    commands.zig           certificate CLI handlers
-  cluster/
-    raft.zig               raft consensus (leader election, log replication)
-    raft_types.zig         raft protocol types and constants
-    log.zig                persistent raft log (SQLite-backed)
-    transport.zig          TCP transport for node-to-node communication
-    state_machine.zig      applies committed entries to replicated SQLite DB
-    node.zig               server node management (raft + state machine)
-    config.zig             cluster configuration and peer parsing
-    registry.zig           server-side agent registry
-    agent_types.zig        shared agent/assignment types
-    agent.zig              worker node agent (heartbeat, resource reporting)
-    http_client.zig        HTTP client for agent-server communication
-    scheduler.zig          bin-packing container placement
-    commands.zig           cluster CLI handlers
-  api/
-    http.zig               HTTP request/response parsing
-    routes.zig             API route dispatch and handlers
-    server.zig             HTTP server (io_uring + blocking fallback)
-  state/
-    store.zig              sqlite container/image metadata
-    schema.zig             database schema and migrations
-    secrets.zig            encrypted secret storage
-    commands.zig           secret CLI handlers
-  lib/
-    log.zig                structured logging
-    paths.zig              XDG data directory helpers
-    toml.zig               TOML parser for manifest files
-    cli.zig                CLI output helpers
-    json_helpers.zig       JSON encoding utilities
-    exec_helpers.zig       process exec helpers
-    syscall.zig            low-level syscall wrappers
-    sql.zig                SQL escaping for raft proposals
-    cmd.zig                shared command execution helpers
-    completion.zig         shell completion generators (bash/zsh/fish)
+
+### images
+
+```text
+yoq pull <image>                     pull from a registry
+yoq push <source> [target]           push to a registry
+yoq images [--json]                  list local images
+yoq inspect <image>                  show image metadata
+yoq rmi <image>                      remove an image
+yoq prune [--json]                   delete unreferenced blobs and layers
 ```
+
+### build and manifests
+
+```text
+yoq build [-t tag] [-f Dockerfile] . build an image
+                  [--format toml]   build from a TOML manifest
+yoq up [-f manifest.toml]            start services from a manifest
+yoq up [service...]                  start named services and dependencies
+yoq up --dev                         watch and hot-restart on changes
+yoq up --server host:port            deploy to a cluster
+yoq down [-f manifest.toml]          stop services from a manifest
+yoq run-worker <name>                run a one-shot worker
+yoq init [-f path]                   scaffold a manifest
+yoq validate [-f manifest.toml] [-q] validate a manifest
+```
+
+### deployment and operations
+
+```text
+yoq rollback <service>               roll back a deployment
+yoq history <service>                show deployment history
+yoq status [--verbose]               show service status and resources
+yoq metrics [service]                show service metrics
+yoq metrics --pairs                  show service-to-service metrics
+yoq policy deny <src> <tgt>          block traffic between services
+yoq policy allow <src> <tgt>         allow traffic between services
+yoq policy rm <src> <tgt>            remove a policy rule
+yoq policy list                      list policy rules
+```
+
+### secrets and certificates
+
+```text
+yoq secret set <name> <value>        store a secret
+yoq secret get <name>                read a secret
+yoq secret rm <name>                 delete a secret
+yoq secret list                      list secrets
+yoq secret rotate <name>             rotate a secret
+yoq cert provision <domain>          provision a TLS certificate
+yoq cert renew <domain>              renew a certificate
+yoq cert install <domain> --cert <path> --key <path>
+yoq cert list                        list certificates
+yoq cert rm <domain>                 remove a certificate
+```
+
+### server and cluster
+
+```text
+yoq serve [--port PORT]              start the API server
+yoq init-server [--id N] [--port P]  start a cluster server node
+    [--api-port P] [--peers ...]
+    [--token TOKEN]
+yoq join <host> --token <token>      join as an agent node
+yoq cluster status                   show cluster health
+yoq nodes [--server host:port]       list agent nodes
+yoq drain <id> [--server host:port]  drain an agent node
+```
+
+### meta
+
+```text
+yoq version [--json]                 print version
+yoq help                             show help
+yoq completion <bash|zsh|fish>       output shell completion
+```
+
+Notes:
+
+- `--json` is currently available on `ps`, `images`, `prune`, and `version`.
+- crons defined in the manifest start automatically with `yoq up`.
+- deployment, metrics, and certificate commands also support `--server host:port`.
+
+## current status
+
+yoq is substantially implemented today: roughly 51k lines of Zig, around 1019 tests, and coverage across runtime, images, networking, build, manifests, clustering, secrets, TLS, and metrics.
+
+Implemented areas include:
+
+- container runtime with namespaces, cgroups v2, overlayfs, seccomp, supervision, logs, and exec
+- OCI image pull, push, inspect, extraction, caching, and pruning
+- networking with bridge setup, DNS discovery, port mapping, eBPF hooks, and WireGuard mesh support
+- build engine with Dockerfile parsing, multi-stage builds, caching, and TOML manifests
+- manifest-driven service orchestration, health checks, workers, cron scheduling, dev mode, rollouts, and rollback
+- raft-backed clustering with agent management and scheduling
+- secrets, TLS termination, ACME, network policy, and observability features
+
+## architecture snapshot
+
+yoq is organized as a small set of integrated subsystems:
+
+- `runtime/` handles container lifecycle, namespaces, cgroups, filesystem setup, security, logs, and exec
+- `image/` handles OCI registry interactions, blob storage, layer extraction, and image metadata
+- `network/` handles bridge networking, DNS, NAT, WireGuard, eBPF integration, and policy enforcement
+- `build/` and `manifest/` handle image builds, application manifests, orchestration, health, updates, and dev workflows
+- `cluster/`, `api/`, and `state/` handle replication, scheduling, remote control, and persistent state
+- `tls/` and `lib/` provide certificate management, proxying, shared utilities, CLI helpers, and logging
+
+The design goal is straightforward: keep the control plane close to the runtime, avoid unnecessary layers, and rely on Linux kernel primitives directly when they provide a simpler and more coherent implementation.
 
 ## examples
 
-the [`examples/`](examples/) directory has ready-to-use manifests:
+The [`examples/`](examples/) directory has ready-to-use manifests:
 
-- **[redis](examples/redis/)** — single service, simplest possible manifest
-- **[web-app](examples/web-app/)** — multi-service app with postgres, redis, workers, and health checks
-- **[cron](examples/cron/)** — scheduled database backups with `every = "1h"`
-- **[cluster](examples/cluster/)** — minimal multi-node cluster setup and agent join flow
+- [`examples/redis/`](examples/redis/) for the simplest possible single-service setup
+- [`examples/web-app/`](examples/web-app/) for a multi-service app with postgres, redis, workers, and health checks
+- [`examples/cron/`](examples/cron/) for scheduled jobs with `every = "1h"`
+- [`examples/cluster/`](examples/cluster/) for a minimal multi-node cluster flow
 
 ```bash
 yoq up -f examples/redis/manifest.toml
@@ -278,11 +289,9 @@ yoq up -f examples/redis/manifest.toml
 
 ## what's next
 
-### future directions
-
-- web UI (explicitly deferred — CLI only for now)
+- web UI remains intentionally deferred; the CLI is the primary interface
 - GPU scheduling
 - multi-region federation
-- advanced L7 routing (path-based HTTP routing)
+- advanced L7 routing
 - plugin system
-- image signing (use cosign externally for now)
+- image signing is not built in today; use cosign externally
