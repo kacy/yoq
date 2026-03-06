@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
+const init_mod = @import("init.zig");
 const manifest_loader = @import("loader.zig");
 const orchestrator = @import("orchestrator.zig");
 const watcher_mod = @import("../dev/watcher.zig");
@@ -19,6 +20,34 @@ const container_cmds = @import("../runtime/container_commands.zig");
 const write = cli.write;
 const writeErr = cli.writeErr;
 const truncate = cli.truncate;
+
+pub fn init(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var opts: init_mod.Options = .{};
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f")) {
+            opts.output_path = args.next() orelse {
+                writeErr("-f requires an output path\n", .{});
+                std.process.exit(1);
+            };
+        } else {
+            writeErr("unknown option: {s}\n", .{arg});
+            std.process.exit(1);
+        }
+    }
+
+    init_mod.run(alloc, opts) catch |err| switch (err) {
+        init_mod.InitError.FileExists => std.process.exit(1),
+        init_mod.InitError.WriteFailed => {
+            writeErr("failed to write manifest file\n", .{});
+            std.process.exit(1);
+        },
+        init_mod.InitError.CwdFailed => {
+            writeErr("failed to resolve working directory\n", .{});
+            std.process.exit(1);
+        },
+    };
+}
 
 pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
