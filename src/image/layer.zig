@@ -417,24 +417,63 @@ fn isSafeSymlinkTarget(entry_path: []const u8, link_target: []const u8) bool {
 /// extract a gzipped tarball to a directory.
 /// this is the core extraction logic: gzip decompress → tar extract.
 ///
+/// decompresses to a temp file first, then extracts the tar. this
+/// two-step approach works around a zig 0.15.2 stdlib bug where the
+/// flate decompressor's indirect streaming mode panics with
+/// unreachableRebase when a deflate back-reference exceeds the
+/// remaining buffer space in the window.
+///
 /// uses manual tar iteration instead of pipeToFileSystem so we can
 /// validate each entry's path before writing. entries with ".." path
 /// components or absolute paths are skipped — a malicious layer tarball
 /// cannot write outside the extraction directory.
 fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
-    const file = try std.fs.cwd().openFile(gz_path, .{});
-    defer file.close();
+    // step 1: decompress gzip to a temp file.
+    //
+    // uses flate direct mode (no internal window buffer) and streams
+    // decompressed output to a file Writer whose buffer serves as the
+    // deflate history window. the file Writer can drain to disk when
+    // the buffer fills, avoiding the unreachableRebase panic that
+    // occurs in indirect mode.
+    var tmp_path_buf: [max_path]u8 = undefined;
+    const tmp_path = paths.dataPathFmt(&tmp_path_buf, "tmp/layer-extract.tar", .{}) catch
+        return error.PathTooLong;
+    paths.ensureDataDir("tmp") catch return error.FileNotFound;
 
-    // set up gzip decompression
-    var read_buf: [4096]u8 = undefined;
-    var file_reader = file.reader(&read_buf);
+    {
+        const gz_file = try std.fs.cwd().openFile(gz_path, .{});
+        defer gz_file.close();
 
-    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompress = std.compress.flate.Decompress.init(
-        &file_reader.interface,
-        .gzip,
-        &decompress_buf,
-    );
+        const tmp_file = try std.fs.cwd().createFile(tmp_path, .{});
+        defer tmp_file.close();
+
+        var read_buf: [4096]u8 = undefined;
+        var gz_reader = gz_file.reader(&read_buf);
+
+        // direct mode: empty buffer means the decompressor uses the
+        // caller's Writer directly instead of its own internal window
+        var decompress = std.compress.flate.Decompress.init(
+            &gz_reader.interface,
+            .gzip,
+            &.{},
+        );
+
+        // the file Writer's buffer serves as the deflate history window;
+        // must be >= history_len + max_match_length (32768 + 258)
+        var write_buf: [std.compress.flate.max_window_len]u8 = undefined;
+        var tmp_writer = tmp_file.writer(&write_buf);
+
+        _ = decompress.reader.streamRemaining(&tmp_writer.interface) catch {};
+        tmp_writer.interface.flush() catch return error.FileNotFound;
+    }
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    // step 2: extract the uncompressed tar
+    const tar_file = try std.fs.cwd().openFile(tmp_path, .{});
+    defer tar_file.close();
+
+    var tar_read_buf: [4096]u8 = undefined;
+    var tar_reader = tar_file.reader(&tar_read_buf);
 
     // open the destination directory
     var dest_dir = try std.fs.cwd().openDir(dest_path, .{});
@@ -443,7 +482,7 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     // iterate tar entries manually so we can validate paths
     var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    var it: std.tar.Iterator = .init(&decompress.reader, .{
+    var it: std.tar.Iterator = .init(&tar_reader.interface, .{
         .file_name_buffer = &file_name_buffer,
         .link_name_buffer = &link_name_buffer,
     });
