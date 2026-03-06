@@ -1,332 +1,53 @@
-// routes — API route dispatch and handler implementations
-//
-// maps method + path to handler functions. handlers call into store.zig
-// for data and return JSON responses. no framework — just string matching
-// on paths. ~10 endpoints don't need a router.
-//
-// each handler returns a Response struct. the caller (server.zig) is
-// responsible for formatting it into an HTTP response.
+// routes — API dispatch/auth shell with concern-specific route modules
 
 const std = @import("std");
 const http = @import("http.zig");
-const store = @import("../state/store.zig");
-const process = @import("../runtime/process.zig");
-const logs = @import("../runtime/logs.zig");
-const container = @import("../runtime/container.zig");
-const json_helpers = @import("../lib/json_helpers.zig");
-const log = @import("../lib/log.zig");
-const health = @import("../manifest/health.zig");
 const cluster_node = @import("../cluster/node.zig");
-const agent_registry = @import("../cluster/registry.zig");
-const scheduler = @import("../cluster/scheduler.zig");
-const sqlite = @import("sqlite");
-const secrets = @import("../state/secrets.zig");
-const monitor = @import("../runtime/monitor.zig");
-const ebpf = @import("../network/ebpf.zig");
-const ip_mod = @import("../network/ip.zig");
-const net_policy = @import("../network/policy.zig");
-const cert_store = @import("../tls/cert_store.zig");
+const json_helpers = @import("../lib/json_helpers.zig");
+const common = @import("routes/common.zig");
+const containers_images = @import("routes/containers_images.zig");
+const cluster_agents = @import("routes/cluster_agents.zig");
+const status_metrics = @import("routes/status_metrics.zig");
+const security = @import("routes/security.zig");
 
-/// cluster node reference (set by server when running in cluster mode)
 pub var cluster: ?*cluster_node.Node = null;
-
-/// join token for agent registration (set by cmdInitServer)
 pub var join_token: ?[]const u8 = null;
-
-/// API bearer token for authentication (set when running in cluster mode).
-/// when null, all endpoints are accessible without auth (single-node mode,
-/// API listens on localhost only). when set, all endpoints except /health
-/// and /version require a valid Authorization: Bearer <token> header.
 pub var api_token: ?[]const u8 = null;
 
-pub const Response = struct {
-    status: http.StatusCode,
-    body: []const u8,
-    /// if true, the caller must free body with the allocator passed to dispatch
-    allocated: bool,
-};
+pub const Response = common.Response;
+const AssignmentIds = common.AssignmentIds;
 
-/// route an incoming request to the appropriate handler.
-/// the caller must free response.body if response.allocated is true.
 pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
-    const path = request.path_only;
-
-    // bearer token authentication — when api_token is set, require auth
-    // on all endpoints except /health and /version (used for probes).
     if (api_token) |expected_token| {
-        const is_public = std.mem.eql(u8, path, "/health") or
-            std.mem.eql(u8, path, "/version");
+        const is_public = std.mem.eql(u8, request.path_only, "/health") or
+            std.mem.eql(u8, request.path_only, "/version");
 
-        if (!is_public) {
-            const provided = extractBearerToken(&request) orelse {
-                return unauthorized();
-            };
-
-            // constant-time comparison to prevent timing attacks.
-            // same pattern as cluster token validation in registry.zig.
-            if (provided.len != expected_token.len) return unauthorized();
-            var diff: u8 = 0;
-            for (provided, expected_token) |a, b| {
-                diff |= a ^ b;
-            }
-            if (diff != 0) return unauthorized();
+        if (!is_public and !common.hasValidBearerToken(&request, expected_token)) {
+            return common.unauthorized();
         }
     }
 
-    // static routes (no allocation needed)
     if (request.method == .GET) {
-        if (std.mem.eql(u8, path, "/health")) return handleHealth();
-        if (std.mem.eql(u8, path, "/version")) return handleVersion();
-        if (std.mem.eql(u8, path, "/containers")) return handleListContainers(alloc);
-        if (std.mem.eql(u8, path, "/images")) return handleListImages(alloc);
-        if (std.mem.eql(u8, path, "/cluster/status")) return handleClusterStatus(alloc);
-        if (std.mem.eql(u8, path, "/agents")) return handleListAgents(alloc);
-        if (std.mem.eql(u8, path, "/wireguard/peers")) return handleWireguardPeers(alloc);
-        if (std.mem.eql(u8, path, "/v1/status")) return handleStatus(alloc);
-        if (std.mem.startsWith(u8, path, "/v1/metrics")) return handleMetrics(alloc, request);
-    }
-
-    if (request.method == .POST) {
-        if (std.mem.eql(u8, path, "/cluster/propose")) return handleClusterPropose(alloc, request);
-        if (std.mem.eql(u8, path, "/agents/register")) return handleAgentRegister(alloc, request);
-        if (std.mem.eql(u8, path, "/deploy")) return handleDeploy(alloc, request);
-    }
-
-    // /agents/{id} routes
-    if (path.len > "/agents/".len and std.mem.startsWith(u8, path, "/agents/")) {
-        const rest = path["/agents/".len..];
-
-        // validate the ID portion of the path (everything before the first /)
-        const agent_id_end = std.mem.indexOf(u8, rest, "/") orelse rest.len;
-        if (!validateContainerId(rest[0..agent_id_end])) return badRequest("invalid agent id");
-
-        if (matchSubpath(rest, "/heartbeat")) |id| {
-            if (request.method != .POST) return methodNotAllowed();
-            return handleAgentHeartbeat(alloc, request, id);
+        if (std.mem.eql(u8, request.path_only, "/health")) {
+            return .{ .status = .ok, .body = "{\"status\":\"ok\"}", .allocated = false };
         }
-
-        if (matchSubpath(rest, "/assignments")) |id| {
-            if (request.method != .GET) return methodNotAllowed();
-            return handleAgentAssignments(alloc, id);
-        }
-
-        if (matchSubpath(rest, "/drain")) |id| {
-            if (request.method != .POST) return methodNotAllowed();
-            return handleAgentDrain(alloc, id);
-        }
-
-        // /agents/{id}/assignments/{assignment_id}/status
-        if (matchAssignmentStatusPath(rest)) |ids| {
-            if (request.method != .POST) return methodNotAllowed();
-            return handleAssignmentStatusUpdate(alloc, request, ids.agent_id, ids.assignment_id);
+        if (std.mem.eql(u8, request.path_only, "/version")) {
+            return .{ .status = .ok, .body = "{\"version\":\"0.0.1\"}", .allocated = false };
         }
     }
 
-    // /containers/{id} routes
-    if (path.len > "/containers/".len and std.mem.startsWith(u8, path, "/containers/")) {
-        const rest = path["/containers/".len..];
+    if (containers_images.route(request, alloc)) |resp| return resp;
 
-        // validate the ID portion of the path
-        const container_id_end = std.mem.indexOf(u8, rest, "/") orelse rest.len;
-        if (!validateContainerId(rest[0..container_id_end])) return badRequest("invalid container id");
-
-        // /containers/{id}/logs
-        if (matchSubpath(rest, "/logs")) |id| {
-            if (request.method != .GET) return methodNotAllowed();
-            return handleGetLogs(alloc, id);
-        }
-
-        // /containers/{id}/stop
-        if (matchSubpath(rest, "/stop")) |id| {
-            if (request.method != .POST) return methodNotAllowed();
-            return handleStopContainer(alloc, id);
-        }
-
-        // /containers/{id} (no suffix)
-        if (std.mem.indexOf(u8, rest, "/") == null) {
-            const id = rest;
-            if (request.method == .GET) return handleGetContainer(alloc, id);
-            if (request.method == .DELETE) return handleRemoveContainer(alloc, id);
-            return methodNotAllowed();
-        }
-    }
-
-    // /v1/secrets routes
-    if (std.mem.eql(u8, path, "/v1/secrets")) {
-        if (request.method == .GET) return handleListSecrets(alloc);
-        if (request.method == .POST) return handleSetSecret(alloc, request);
-        return methodNotAllowed();
-    }
-    if (path.len > "/v1/secrets/".len and std.mem.startsWith(u8, path, "/v1/secrets/")) {
-        const name = path["/v1/secrets/".len..];
-        if (std.mem.indexOf(u8, name, "/") == null and name.len > 0) {
-            if (request.method == .GET) return handleGetSecret(alloc, name);
-            if (request.method == .DELETE) return handleDeleteSecret(alloc, name);
-            return methodNotAllowed();
-        }
-    }
-
-    // /v1/policies routes
-    if (std.mem.eql(u8, path, "/v1/policies")) {
-        if (request.method == .GET) return handleListPolicies(alloc);
-        if (request.method == .POST) return handleAddPolicy(alloc, request);
-        return methodNotAllowed();
-    }
-    if (path.len > "/v1/policies/".len and std.mem.startsWith(u8, path, "/v1/policies/")) {
-        const rest = path["/v1/policies/".len..];
-        // expect source/target path segments
-        if (std.mem.indexOf(u8, rest, "/")) |slash| {
-            const source = rest[0..slash];
-            const target = rest[slash + 1 ..];
-            if (source.len > 0 and target.len > 0 and std.mem.indexOf(u8, target, "/") == null) {
-                if (request.method == .DELETE) return handleDeletePolicy(alloc, source, target);
-                return methodNotAllowed();
-            }
-        }
-    }
-
-    // /v1/certificates routes
-    if (std.mem.eql(u8, path, "/v1/certificates")) {
-        if (request.method == .GET) return handleListCertificates(alloc);
-        return methodNotAllowed();
-    }
-    if (path.len > "/v1/certificates/".len and std.mem.startsWith(u8, path, "/v1/certificates/")) {
-        const domain = path["/v1/certificates/".len..];
-        if (std.mem.indexOf(u8, domain, "/") == null and domain.len > 0) {
-            if (request.method == .DELETE) return handleDeleteCertificate(alloc, domain);
-            return methodNotAllowed();
-        }
-    }
-
-    // /images/{id} routes
-    if (path.len > "/images/".len and std.mem.startsWith(u8, path, "/images/")) {
-        const id = path["/images/".len..];
-        if (std.mem.indexOf(u8, id, "/") == null) {
-            if (request.method == .DELETE) return handleRemoveImage(id);
-            return methodNotAllowed();
-        }
-    }
-
-    return notFound();
-}
-
-// -- handlers --
-
-fn handleHealth() Response {
-    return .{
-        .status = .ok,
-        .body = "{\"status\":\"ok\"}",
-        .allocated = false,
-    };
-}
-
-fn handleVersion() Response {
-    return .{
-        .status = .ok,
-        .body = "{\"version\":\"0.0.1\"}",
-        .allocated = false,
-    };
-}
-
-fn handleListContainers(alloc: std.mem.Allocator) Response {
-    var ids = store.listIds(alloc) catch return internalError();
-    defer {
-        for (ids.items) |id| alloc.free(id);
-        ids.deinit(alloc);
-    }
-
-    // build JSON array of container objects
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeByte('[') catch return internalError();
-
-    var first = true;
-    for (ids.items) |id| {
-        const record = store.load(alloc, id) catch continue;
-        defer record.deinit(alloc);
-
-        if (!first) writer.writeByte(',') catch return internalError();
-        first = false;
-
-        writeContainerJson(writer, record) catch return internalError();
-    }
-
-    writer.writeByte(']') catch return internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
-}
-
-fn handleGetContainer(alloc: std.mem.Allocator, id: []const u8) Response {
-    const record = store.load(alloc, id) catch |err| {
-        if (err == store.StoreError.NotFound) return notFound();
-        return internalError();
-    };
-    defer record.deinit(alloc);
-
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writeContainerJson(writer, record) catch return internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
-}
-
-fn handleGetLogs(alloc: std.mem.Allocator, id: []const u8) Response {
-    // verify container exists
-    const record = store.load(alloc, id) catch |err| {
-        if (err == store.StoreError.NotFound) return notFound();
-        return internalError();
-    };
-    record.deinit(alloc);
-
-    const log_data = logs.readLogs(alloc, id) catch {
-        // no log file is fine — return empty
-        const empty = alloc.dupe(u8, "{\"logs\":\"\"}") catch return internalError();
-        return .{ .status = .ok, .body = empty, .allocated = true };
-    };
-    defer alloc.free(log_data);
-
-    // escape the log content for JSON and build response
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeAll("{\"logs\":\"") catch return internalError();
-    json_helpers.writeJsonEscaped(writer, log_data) catch return internalError();
-    writer.writeAll("\"}") catch return internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
-}
-
-fn handleStopContainer(alloc: std.mem.Allocator, id: []const u8) Response {
-    const record = store.load(alloc, id) catch |err| {
-        if (err == store.StoreError.NotFound) return notFound();
-        return internalError();
-    };
-    defer record.deinit(alloc);
-
-    if (!std.mem.eql(u8, record.status, "running")) {
-        return badRequest("container is not running");
-    }
-
-    const pid = record.pid orelse return badRequest("container has no pid");
-
-    process.terminate(pid) catch return internalError();
-    store.updateStatus(id, "stopped", null, null) catch |e| {
-        log.warn("failed to update status after stopping {s}: {}", .{ id, e });
+    const ctx: common.RouteContext = .{
+        .cluster = cluster,
+        .join_token = join_token,
     };
 
-    return .{
-        .status = .ok,
-        .body = "{\"status\":\"stopped\"}",
-        .allocated = false,
-    };
+    if (cluster_agents.route(request, alloc, ctx)) |resp| return resp;
+    if (status_metrics.route(request, alloc)) |resp| return resp;
+    if (security.route(request, alloc)) |resp| return resp;
+
+    return common.notFound();
 }
 
 fn handleRemoveContainer(alloc: std.mem.Allocator, id: []const u8) Response {
@@ -1566,137 +1287,44 @@ fn validateContainerId(id: []const u8) bool {
 // -- response helpers --
 
 fn notFound() Response {
-    return .{ .status = .not_found, .body = "{\"error\":\"not found\"}", .allocated = false };
+    return common.notFound();
 }
 
 fn unauthorized() Response {
-    return .{ .status = .unauthorized, .body = "{\"error\":\"unauthorized\"}", .allocated = false };
+    return common.unauthorized();
 }
 
 fn methodNotAllowed() Response {
-    return .{ .status = .method_not_allowed, .body = "{\"error\":\"method not allowed\"}", .allocated = false };
+    return common.methodNotAllowed();
 }
 
 fn internalError() Response {
-    return .{ .status = .internal_server_error, .body = "{\"error\":\"internal error\"}", .allocated = false };
+    return common.internalError();
 }
 
 fn badRequest(comptime message: []const u8) Response {
-    // message is comptime-known, so we can build the JSON at comptime
-    return .{
-        .status = .bad_request,
-        .body = "{\"error\":\"" ++ message ++ "\"}",
-        .allocated = false,
-    };
+    return common.badRequest(message);
 }
 
-/// extract the bearer token from an Authorization header.
-/// expects format: "Authorization: Bearer <token>"
-/// returns the token string, or null if the header is missing or malformed.
 pub fn extractBearerToken(request: *const http.Request) ?[]const u8 {
-    const auth_value = http.findHeaderValue(request.headers_raw, "Authorization") orelse return null;
-
-    const prefix = "Bearer ";
-    if (auth_value.len <= prefix.len) return null;
-    if (!std.mem.startsWith(u8, auth_value, prefix)) return null;
-
-    return auth_value[prefix.len..];
+    return common.extractBearerToken(request);
 }
 
-// -- JSON serialization helpers --
-
-/// write a container record as a JSON object.
-/// includes health check status if the service has one configured.
-fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void {
-    try writer.writeAll("{\"id\":\"");
-    try writer.writeAll(record.id);
-    try writer.writeAll("\",\"command\":\"");
-    try json_helpers.writeJsonEscaped(writer, record.command);
-    try writer.writeAll("\",\"status\":\"");
-    try writer.writeAll(record.status);
-    try writer.writeAll("\",\"hostname\":\"");
-    try json_helpers.writeJsonEscaped(writer, record.hostname);
-    try writer.writeAll("\",\"pid\":");
-    if (record.pid) |pid| {
-        try std.fmt.format(writer, "{d}", .{pid});
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.writeAll(",\"created_at\":");
-    try std.fmt.format(writer, "{d}", .{record.created_at});
-
-    // include health check status if the service is being health-checked.
-    // uses the hostname as the service name (matches manifest service names).
-    if (health.getServiceHealth(record.hostname)) |sh| {
-        const health_str = switch (sh.status) {
-            .starting => "starting",
-            .healthy => "healthy",
-            .unhealthy => "unhealthy",
-        };
-        try writer.writeAll(",\"health\":\"");
-        try writer.writeAll(health_str);
-        try writer.writeByte('"');
-    }
-
-    try writer.writeByte('}');
+fn validateClusterInput(value: []const u8) bool {
+    return common.validateClusterInput(value);
 }
 
-/// write an image record as a JSON object
-fn writeImageJson(writer: anytype, img: store.ImageRecord) !void {
-    try writer.writeAll("{\"id\":\"");
-    try json_helpers.writeJsonEscaped(writer, img.id);
-    try writer.writeAll("\",\"repository\":\"");
-    try json_helpers.writeJsonEscaped(writer, img.repository);
-    try writer.writeAll("\",\"tag\":\"");
-    try json_helpers.writeJsonEscaped(writer, img.tag);
-    try writer.writeAll("\",\"size\":");
-    try std.fmt.format(writer, "{d}", .{img.total_size});
-    try writer.writeAll(",\"created_at\":");
-    try std.fmt.format(writer, "{d}", .{img.created_at});
-    try writer.writeByte('}');
+fn validateContainerId(id: []const u8) bool {
+    return common.validateContainerId(id);
 }
 
-const AssignmentIds = struct {
-    agent_id: []const u8,
-    assignment_id: []const u8,
-};
-
-/// extract agent and assignment IDs from a path like
-/// "{agent_id}/assignments/{assignment_id}/status".
 fn matchAssignmentStatusPath(rest: []const u8) ?AssignmentIds {
-    const slash = std.mem.indexOf(u8, rest, "/") orelse return null;
-    const agent_id = rest[0..slash];
-    if (agent_id.len == 0) return null;
-
-    const after = rest[slash..];
-    const prefix = "/assignments/";
-    if (!std.mem.startsWith(u8, after, prefix)) return null;
-
-    const remaining = after[prefix.len..];
-    // find the next slash before "/status"
-    const slash2 = std.mem.indexOf(u8, remaining, "/") orelse return null;
-    const assignment_id = remaining[0..slash2];
-    if (assignment_id.len == 0) return null;
-
-    const suffix = remaining[slash2..];
-    if (!std.mem.eql(u8, suffix, "/status")) return null;
-
-    return .{ .agent_id = agent_id, .assignment_id = assignment_id };
+    return common.matchAssignmentStatusPath(rest);
 }
 
-/// extract an ID from a path like "{id}/suffix".
-/// returns the id portion if the suffix matches, null otherwise.
 fn matchSubpath(rest: []const u8, suffix: []const u8) ?[]const u8 {
-    const slash = std.mem.indexOf(u8, rest, "/") orelse return null;
-    const id = rest[0..slash];
-    const after = rest[slash..];
-
-    if (id.len == 0) return null;
-    if (std.mem.eql(u8, after, suffix)) return id;
-    return null;
+    return common.matchSubpath(rest, suffix);
 }
-
-// -- tests --
 
 test "dispatch health" {
     const req = (try http.parseRequest("GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")).?;
