@@ -1034,6 +1034,14 @@ fn writeSnapshotJson(writer: anytype, snap: monitor.ServiceSnapshot) !void {
         });
     }
 
+    // resource limits for auto-tuning
+    if (snap.memory_limit) |limit| {
+        try writer.print(",\"memory_limit\":{d}", .{limit});
+    }
+    if (snap.cpu_quota_pct) |quota| {
+        try writer.print(",\"cpu_quota_pct\":{d:.2}", .{quota});
+    }
+
     try writer.writeByte('}');
 }
 
