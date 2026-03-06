@@ -22,6 +22,7 @@ comptime {
     _ = @import("lib/cli.zig");
     _ = @import("lib/cmd.zig");
     _ = @import("lib/command_registry.zig");
+    _ = @import("lib/completion.zig");
     _ = @import("lib/exec_helpers.zig");
     _ = @import("lib/log.zig");
     _ = @import("lib/paths.zig");

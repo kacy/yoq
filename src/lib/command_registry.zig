@@ -9,6 +9,7 @@ const tls_cmds = @import("../tls/commands.zig");
 const container_cmds = @import("../runtime/container_commands.zig");
 const build_cmds = @import("../build/commands.zig");
 const manifest_cmds = @import("../manifest/commands.zig");
+const completion = @import("completion.zig");
 
 const write = cli.write;
 
@@ -70,6 +71,7 @@ pub const command_specs = [_]CommandSpec{
 
     .{ .name = "version", .group = .misc, .usage = "version", .description = "print version", .handler = versionHandler },
     .{ .name = "help", .group = .misc, .usage = "help", .description = "show this help", .handler = helpHandler },
+    .{ .name = "completion", .group = .misc, .usage = "completion <bash|zsh|fish>", .description = "output shell completion script", .handler = completion.handler },
 };
 
 const group_order = [_]struct {
