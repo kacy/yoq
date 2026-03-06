@@ -148,9 +148,20 @@ fn printGroup(group: CommandGroup, title: []const u8) void {
 }
 
 fn versionHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    _ = args;
     _ = alloc;
-    write("yoq 0.0.1\n", .{});
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
+    }
+    if (cli.output_mode == .json) {
+        const json_out = @import("json_output.zig");
+        var w = json_out.JsonWriter{};
+        w.beginObject();
+        w.stringField("version", "0.0.1");
+        w.endObject();
+        w.flush();
+    } else {
+        write("yoq 0.0.1\n", .{});
+    }
 }
 
 fn helpHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {

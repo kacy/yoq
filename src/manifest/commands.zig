@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
+const json_out = @import("../lib/json_output.zig");
 const init_mod = @import("init.zig");
 const manifest_loader = @import("loader.zig");
 const validator = @import("validate.zig");
@@ -455,12 +456,22 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 }
 
 pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const service_name = args.next() orelse {
-        writeErr("usage: yoq history <service>\n", .{});
+    var service_name: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else {
+            service_name = arg;
+        }
+    }
+
+    const svc = service_name orelse {
+        writeErr("usage: yoq history <service> [--json]\n", .{});
         std.process.exit(1);
     };
 
-    var deployments = store.listDeployments(alloc, service_name) catch |err| {
+    var deployments = store.listDeployments(alloc, svc) catch |err| {
         writeErr("failed to read deployment history: {}\n", .{err});
         std.process.exit(1);
     };
@@ -469,16 +480,36 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         deployments.deinit(alloc);
     }
 
+    if (cli.output_mode == .json) {
+        var w = json_out.JsonWriter{};
+        w.beginArray();
+        for (deployments.items) |dep| {
+            w.beginObject();
+            w.stringField("id", dep.id);
+            w.stringField("service", dep.service_name);
+            w.stringField("status", dep.status);
+            w.stringField("manifest_hash", dep.manifest_hash);
+            w.intField("created_at", dep.created_at);
+            if (dep.message) |msg| {
+                w.stringField("message", msg);
+            } else {
+                w.nullField("message");
+            }
+            w.endObject();
+        }
+        w.endArray();
+        w.flush();
+        return;
+    }
+
     if (deployments.items.len == 0) {
-        write("no deployments found for {s}\n", .{service_name});
+        write("no deployments found for {s}\n", .{svc});
         return;
     }
 
     write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{ "ID", "STATUS", "HASH", "TIMESTAMP", "MESSAGE" });
 
     for (deployments.items) |dep| {
-        // format timestamp as a simple unix time string.
-        // full date formatting is deferred until we have a time library.
         var ts_buf: [20]u8 = undefined;
         const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{dep.created_at}) catch "?";
         const msg = dep.message orelse "";

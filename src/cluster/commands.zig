@@ -389,15 +389,25 @@ fn parseIpv4Bytes(str: []const u8) ?[4]u8 {
 }
 
 pub fn cluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const subcommand = args.next() orelse {
+    var subcommand: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else {
+            subcommand = arg;
+        }
+    }
+
+    const subcmd = subcommand orelse {
         writeErr("usage: yoq cluster <status>\n", .{});
         std.process.exit(1);
     };
 
-    if (std.mem.eql(u8, subcommand, "status")) {
+    if (std.mem.eql(u8, subcmd, "status")) {
         clusterStatus(alloc);
     } else {
-        writeErr("unknown cluster subcommand: {s}\n", .{subcommand});
+        writeErr("unknown cluster subcommand: {s}\n", .{subcmd});
         std.process.exit(1);
     }
 }
@@ -450,7 +460,9 @@ pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var server: cli.ServerAddr = .{};
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--server")) {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else if (std.mem.eql(u8, arg, "--server")) {
             const addr_str = args.next() orelse {
                 writeErr("--server requires a host:port address\n", .{});
                 std.process.exit(1);
@@ -474,6 +486,12 @@ pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     if (resp.status_code != 200) {
         writeErr("server returned status {d}\n", .{resp.status_code});
         std.process.exit(1);
+    }
+
+    // API already returns JSON — pass through directly
+    if (cli.output_mode == .json) {
+        write("{s}\n", .{resp.body});
+        return;
     }
 
     // parse and display agent list as a table

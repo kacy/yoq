@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const cli = @import("../lib/cli.zig");
+const json_out = @import("../lib/json_output.zig");
 const store = @import("../state/store.zig");
 const monitor = @import("monitor.zig");
 const cgroups = @import("cgroups.zig");
@@ -67,7 +68,9 @@ pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var server: ?cli.ServerAddr = null;
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "--server")) {
             const addr_str = args.next() orelse {
@@ -196,6 +199,11 @@ fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool)
 }
 
 fn printStatusTable(snapshots: []const monitor.ServiceSnapshot, verbose: bool) void {
+    if (cli.output_mode == .json) {
+        statusJson(snapshots);
+        return;
+    }
+
     write("{s:<12} {s:<10} {s:<11} {s:<10} {s:<11} {s:<13} {s}\n", .{
         "SERVICE", "STATUS", "HEALTH", "CPU", "MEMORY", "CONTAINERS", "UPTIME",
     });
@@ -265,6 +273,35 @@ fn printVerboseDetails(snap: monitor.ServiceSnapshot) void {
     }
 }
 
+fn statusJson(snapshots: []const monitor.ServiceSnapshot) void {
+    var w = json_out.JsonWriter{};
+    w.beginArray();
+    for (snapshots) |snap| {
+        w.beginObject();
+        w.stringField("name", snap.name);
+        w.stringField("status", monitor.formatStatus(snap.status));
+        w.stringField("health", monitor.formatHealth(snap.health_status));
+        w.floatField("cpu_pct", snap.cpu_pct);
+        w.uintField("memory_bytes", snap.memory_bytes);
+        w.uintField("running", snap.running_count);
+        w.uintField("desired", snap.desired_count);
+        w.intField("uptime_secs", snap.uptime_secs);
+        if (snap.memory_limit) |limit| {
+            w.uintField("memory_limit", limit);
+        } else {
+            w.nullField("memory_limit");
+        }
+        if (snap.cpu_quota_pct) |quota| {
+            w.floatField("cpu_quota_pct", quota);
+        } else {
+            w.nullField("cpu_quota_pct");
+        }
+        w.endObject();
+    }
+    w.endArray();
+    w.flush();
+}
+
 /// parse PSI metrics from a JSON object's some/full fields.
 /// returns null if neither field is present.
 fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8) ?cgroups.PsiMetrics {
@@ -281,7 +318,9 @@ pub fn metrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var pairs_mode = false;
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--server")) {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else if (std.mem.eql(u8, arg, "--server")) {
             const addr_str = args.next() orelse {
                 writeErr("--server requires a host:port address\n", .{});
                 std.process.exit(1);
@@ -322,11 +361,23 @@ fn metricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) void {
     }
 
     if (records.items.len == 0) {
-        write("no services running\n", .{});
+        if (cli.output_mode == .json) {
+            var w = json_out.JsonWriter{};
+            w.beginArray();
+            w.endArray();
+            w.flush();
+        } else {
+            write("no services running\n", .{});
+        }
         return;
     }
 
     const mc = ebpf.getMetricsCollector();
+
+    if (cli.output_mode == .json) {
+        metricsLocalJson(records.items, mc, service_filter);
+        return;
+    }
 
     write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
         "SERVICE", "CONTAINER", "IP", "PACKETS", "BYTES",
@@ -398,6 +449,12 @@ fn metricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filte
         std.process.exit(1);
     }
 
+    // API already returns JSON — pass through directly
+    if (cli.output_mode == .json) {
+        write("{s}\n", .{resp.body});
+        return;
+    }
+
     write("{s:<12} {s:<10} {s:<16} {s:<12} {s}\n", .{
         "SERVICE", "CONTAINER", "IP", "PACKETS", "BYTES",
     });
@@ -441,6 +498,11 @@ fn metricsPairs(alloc: std.mem.Allocator) void {
     defer {
         for (records.items) |rec| rec.deinit(alloc);
         records.deinit(alloc);
+    }
+
+    if (cli.output_mode == .json) {
+        metricsPairsJson(records.items, mc);
+        return;
     }
 
     var entries: [1024]ebpf.PairEntry = undefined;
@@ -490,6 +552,11 @@ fn metricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) void {
         std.process.exit(1);
     }
 
+    if (cli.output_mode == .json) {
+        write("{s}\n", .{resp.body});
+        return;
+    }
+
     write("{s:<14} {s:<14} {s:<8} {s:<12} {s:<12} {s:<10} {s}\n", .{
         "FROM", "TO", "PORT", "CONNECTIONS", "PACKETS", "BYTES", "ERRORS",
     });
@@ -523,6 +590,66 @@ fn metricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) void {
     if (!found) {
         write("no pair metrics available\n", .{});
     }
+}
+
+fn metricsLocalJson(records: []const store.ContainerRecord, mc: ?*ebpf.MetricsCollector, service_filter: ?[]const u8) void {
+    var w = json_out.JsonWriter{};
+    w.beginArray();
+    for (records) |rec| {
+        if (!std.mem.eql(u8, rec.status, "running")) continue;
+        if (service_filter) |svc| {
+            if (!std.mem.eql(u8, rec.hostname, svc)) continue;
+        }
+        const ip_str = rec.ip_address orelse continue;
+        const short_id = if (rec.id.len >= 6) rec.id[0..6] else rec.id;
+
+        var packets: u64 = 0;
+        var bytes: u64 = 0;
+        if (mc) |collector| {
+            if (ip.parseIp(ip_str)) |addr| {
+                const ip_net = ebpf.ipToNetworkOrder(addr);
+                if (collector.readMetrics(ip_net)) |m| {
+                    packets = m.packets;
+                    bytes = m.bytes;
+                }
+            }
+        }
+
+        w.beginObject();
+        w.stringField("service", rec.hostname);
+        w.stringField("container", short_id);
+        w.stringField("ip", ip_str);
+        w.uintField("packets", packets);
+        w.uintField("bytes", bytes);
+        w.endObject();
+    }
+    w.endArray();
+    w.flush();
+}
+
+fn metricsPairsJson(records: []const store.ContainerRecord, mc: *ebpf.MetricsCollector) void {
+    var entries: [1024]ebpf.PairEntry = undefined;
+    const count = mc.readPairMetrics(&entries);
+
+    var w = json_out.JsonWriter{};
+    w.beginArray();
+    for (entries[0..count]) |entry| {
+        const src_name = resolveIpName(entry.key.src_ip, records);
+        const dst_name = resolveIpName(entry.key.dst_ip, records);
+        const port_val = std.mem.nativeTo(u16, entry.key.dst_port, .big);
+
+        w.beginObject();
+        w.stringField("from", src_name);
+        w.stringField("to", dst_name);
+        w.uintField("port", port_val);
+        w.uintField("connections", entry.value.connections);
+        w.uintField("packets", entry.value.packets);
+        w.uintField("bytes", entry.value.bytes);
+        w.uintField("errors", entry.value.errors);
+        w.endObject();
+    }
+    w.endArray();
+    w.flush();
 }
 
 /// resolve a network-order IP (u32) to a service hostname.
