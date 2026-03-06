@@ -1258,32 +1258,6 @@ fn writeWireguardPeerJson(writer: anytype, peer: agent_registry.WireguardPeer) !
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 
-// -- input validation --
-
-/// reject values containing SQL metacharacters or control characters.
-/// defense-in-depth: SQL generation also escapes, but rejecting at the
-/// API boundary is the first line of defense.
-fn validateClusterInput(value: []const u8) bool {
-    if (value.len == 0 or value.len > 256) return false;
-    for (value) |c| {
-        if (c == '\'' or c == '"' or c == ';' or c == '\\') return false;
-        if (c < 0x20) return false; // control characters
-    }
-    return true;
-}
-
-/// validate that a container or agent ID from a URL path is safe.
-/// IDs are always 12 hex chars from generateId(), but the API accepts
-/// arbitrary strings from HTTP requests. defense-in-depth: reject
-/// anything that isn't lowercase hex.
-fn validateContainerId(id: []const u8) bool {
-    if (id.len == 0 or id.len > 64) return false;
-    for (id) |c| {
-        if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'))) return false;
-    }
-    return true;
-}
-
 // -- response helpers --
 
 fn notFound() Response {
