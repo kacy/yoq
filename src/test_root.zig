@@ -28,6 +28,7 @@ comptime {
     _ = @import("lib/paths.zig");
     _ = @import("lib/toml.zig");
     _ = @import("lib/json_helpers.zig");
+    _ = @import("lib/json_output.zig");
     _ = @import("lib/sql.zig");
     _ = @import("image/spec.zig");
     _ = @import("image/store.zig");

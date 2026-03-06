@@ -9,6 +9,16 @@ const ip = @import("../network/ip.zig");
 const net_setup = @import("../network/setup.zig");
 const paths = @import("paths.zig");
 
+// -- output mode --
+
+/// controls whether commands emit human-readable or machine-readable output.
+/// commands that support --json check this before printing.
+pub const OutputMode = enum { human, json };
+
+/// current output mode for the CLI session. defaults to human-readable.
+/// set to .json when --json is passed on the command line.
+pub var output_mode: OutputMode = .human;
+
 // -- output --
 
 /// write formatted output to stdout. errors are silently ignored
