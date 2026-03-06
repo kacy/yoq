@@ -105,6 +105,7 @@ yoq drain <id> [--server host:port]  drain an agent node
 # meta
 yoq version                          print version
 yoq help                             show help
+yoq completion <bash|zsh|fish>       output shell completion script
 ```
 
 crons defined in the manifest run automatically when `yoq up` starts — no separate command needed.
@@ -256,6 +257,7 @@ src/
     syscall.zig            low-level syscall wrappers
     sql.zig                SQL escaping for raft proposals
     cmd.zig                shared command execution helpers
+    completion.zig         shell completion generators (bash/zsh/fish)
 ```
 
 ## examples
@@ -274,7 +276,6 @@ yoq up -f examples/redis/manifest.toml
 
 ### future directions
 
-- shell completions (bash/zsh/fish)
 - `--json` output flag for scripting
 - web UI (explicitly deferred — CLI only for now)
 - GPU scheduling
