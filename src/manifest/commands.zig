@@ -385,3 +385,52 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         });
     }
 }
+
+/// run a worker defined in the manifest by name.
+/// loads the manifest, finds the worker, pulls the image, runs it to completion.
+pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+    var manifest_path: []const u8 = manifest_loader.default_filename;
+    var worker_name: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f")) {
+            manifest_path = args.next() orelse {
+                writeErr("-f requires a manifest path\n", .{});
+                std.process.exit(1);
+            };
+        } else {
+            worker_name = arg;
+        }
+    }
+
+    const name = worker_name orelse {
+        writeErr("usage: yoq run-worker [-f manifest.toml] <name>\n", .{});
+        std.process.exit(1);
+    };
+
+    var manifest = manifest_loader.load(alloc, manifest_path) catch {
+        writeErr("failed to load manifest: {s}\n", .{manifest_path});
+        std.process.exit(1);
+    };
+    defer manifest.deinit();
+
+    const worker = manifest.workerByName(name) orelse {
+        writeErr("unknown worker: {s}\n", .{name});
+        std.process.exit(1);
+    };
+
+    // pull image first
+    writeErr("pulling {s}...\n", .{worker.image});
+    if (!orchestrator.ensureImageAvailable(alloc, worker.image)) {
+        writeErr("failed to pull image: {s}\n", .{worker.image});
+        std.process.exit(1);
+    }
+
+    writeErr("running worker {s}...\n", .{name});
+    if (orchestrator.runOneShot(alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, name)) {
+        writeErr("worker {s} completed successfully\n", .{name});
+    } else {
+        writeErr("worker {s} failed\n", .{name});
+        std.process.exit(1);
+    }
+}

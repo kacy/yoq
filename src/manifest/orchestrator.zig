@@ -151,13 +151,23 @@ pub const Orchestrator = struct {
             set.put(self.alloc, name, {}) catch return OrchestratorError.StartFailed;
         }
 
-        // fixed-point iteration: keep adding deps until nothing changes
+        // fixed-point iteration: keep adding deps until nothing changes.
+        // walks both service and worker depends_on chains.
         var changed = true;
         while (changed) {
             changed = false;
             for (self.manifest.services) |svc| {
                 if (!set.contains(svc.name)) continue;
                 for (svc.depends_on) |dep| {
+                    if (!set.contains(dep)) {
+                        set.put(self.alloc, dep, {}) catch return OrchestratorError.StartFailed;
+                        changed = true;
+                    }
+                }
+            }
+            for (self.manifest.workers) |w| {
+                if (!set.contains(w.name)) continue;
+                for (w.depends_on) |dep| {
                     if (!set.contains(dep)) {
                         set.put(self.alloc, dep, {}) catch return OrchestratorError.StartFailed;
                         changed = true;
@@ -200,16 +210,36 @@ pub const Orchestrator = struct {
             writeErr("  {s} ready\n", .{svc.image});
         }
 
-        // phase 2: start services in dependency order (already sorted)
+        // phase 2: start services in dependency order (already sorted).
+        // if a dependency is a worker, run it to completion first.
+        var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
+        defer completed_workers.deinit(self.alloc);
+
         for (services, 0..) |svc, i| {
             if (!self.shouldStart(svc.name)) continue;
-            // wait for dependencies to be running
+
+            // wait for dependencies — services wait for running, workers run to completion
             for (svc.depends_on) |dep_name| {
-                const dep_idx = self.serviceIndex(dep_name) orelse continue;
-                if (!self.waitForRunning(dep_idx)) {
-                    writeErr("dependency '{s}' failed to start\n", .{dep_name});
-                    self.stopAll();
-                    return OrchestratorError.StartFailed;
+                if (self.manifest.workerByName(dep_name)) |worker| {
+                    // worker dependency — run it once if not already done
+                    if (!completed_workers.contains(dep_name)) {
+                        writeErr("running worker {s}...\n", .{dep_name});
+                        if (!runOneShot(self.alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, dep_name)) {
+                            writeErr("worker '{s}' failed\n", .{dep_name});
+                            self.stopAll();
+                            return OrchestratorError.StartFailed;
+                        }
+                        completed_workers.put(self.alloc, dep_name, {}) catch {};
+                        writeErr("  worker {s} completed\n", .{dep_name});
+                    }
+                } else {
+                    // service dependency — wait for it to reach running
+                    const dep_idx = self.serviceIndex(dep_name) orelse continue;
+                    if (!self.waitForRunning(dep_idx)) {
+                        writeErr("dependency '{s}' failed to start\n", .{dep_name});
+                        self.stopAll();
+                        return OrchestratorError.StartFailed;
+                    }
                 }
             }
 
@@ -486,42 +516,9 @@ pub const Orchestrator = struct {
 
     // -- internal --
 
-    /// check if image exists locally, pull if not
+    /// check if image exists locally, pull if not (instance method)
     fn ensureImage(self: *Orchestrator, image: []const u8) bool {
-        const ref = image_spec.parseImageRef(image);
-
-        // check if already pulled
-        const existing = store.findImage(self.alloc, ref.repository, ref.reference);
-        if (existing) |img| {
-            img.deinit(self.alloc);
-            return true;
-        } else |_| {}
-
-        // pull from registry
-        var result = registry.pull(self.alloc, ref) catch return false;
-        defer result.deinit();
-
-        // extract layers
-        const layer_paths = layer.assembleRootfs(self.alloc, result.layer_digests) catch return false;
-        defer {
-            for (layer_paths) |p| self.alloc.free(p);
-            self.alloc.free(layer_paths);
-        }
-
-        // save image record — compute config digest from raw bytes
-        const cfg_computed = blob_store.computeDigest(result.config_bytes);
-        var cfg_digest_buf: [71]u8 = undefined;
-        const cfg_digest_str = cfg_computed.string(&cfg_digest_buf);
-        oci.saveImageFromPull(
-            ref,
-            result.manifest_digest,
-            result.manifest_bytes,
-            result.config_bytes,
-            cfg_digest_str,
-            result.total_size,
-        ) catch return false;
-
-        return true;
+        return ensureImageAvailable(self.alloc, image);
     }
 
     /// find the index of a service by name
@@ -549,6 +546,47 @@ pub const Orchestrator = struct {
         }
     }
 };
+
+// -- standalone image helpers --
+
+/// check if image exists locally, pull if not.
+/// usable outside the Orchestrator (e.g., for run-worker command).
+pub fn ensureImageAvailable(alloc: std.mem.Allocator, image: []const u8) bool {
+    const ref = image_spec.parseImageRef(image);
+
+    // check if already pulled
+    const existing = store.findImage(alloc, ref.repository, ref.reference);
+    if (existing) |img| {
+        img.deinit(alloc);
+        return true;
+    } else |_| {}
+
+    // pull from registry
+    var result = registry.pull(alloc, ref) catch return false;
+    defer result.deinit();
+
+    // extract layers
+    const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch return false;
+    defer {
+        for (layer_paths) |p| alloc.free(p);
+        alloc.free(layer_paths);
+    }
+
+    // save image record — compute config digest from raw bytes
+    const cfg_computed = blob_store.computeDigest(result.config_bytes);
+    var cfg_digest_buf: [71]u8 = undefined;
+    const cfg_digest_str = cfg_computed.string(&cfg_digest_buf);
+    oci.saveImageFromPull(
+        ref,
+        result.manifest_digest,
+        result.manifest_bytes,
+        result.config_bytes,
+        cfg_digest_str,
+        result.total_size,
+    ) catch return false;
+
+    return true;
+}
 
 // -- ACME provisioning --
 
@@ -758,6 +796,98 @@ fn resolveServiceVolumes(alloc: std.mem.Allocator, volumes: []const spec.VolumeM
     }
 
     return result;
+}
+
+/// run a container to completion and return whether it succeeded (exit code 0).
+/// used for workers — one-shot tasks like database migrations.
+/// resolves the image, creates a container, runs it, and cleans up.
+pub fn runOneShot(
+    alloc: std.mem.Allocator,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    volumes: []const spec.VolumeMount,
+    working_dir: ?[]const u8,
+    hostname: []const u8,
+) bool {
+    // resolve image
+    var img = resolveServiceImage(alloc, image) orelse {
+        writeErr("failed to resolve image for worker {s}\n", .{hostname});
+        return false;
+    };
+    defer img.deinit(alloc);
+
+    // resolve command
+    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, command) catch {
+        writeErr("failed to resolve command for worker {s}\n", .{hostname});
+        return false;
+    };
+    defer resolved.args.deinit(alloc);
+
+    // merge env
+    var merged_env = mergeServiceEnv(alloc, img.image_env, env);
+    defer merged_env.deinit(alloc);
+
+    // working dir
+    var wd = img.working_dir;
+    if (working_dir) |w| wd = w;
+
+    // resolve volumes
+    var vols = resolveServiceVolumes(alloc, volumes);
+    defer vols.deinit(alloc);
+
+    // generate container id
+    var id_buf: [12]u8 = undefined;
+    container.generateId(&id_buf);
+    const id = id_buf[0..];
+
+    // save record
+    store.save(.{
+        .id = id,
+        .rootfs = img.rootfs,
+        .command = resolved.command,
+        .hostname = hostname,
+        .status = "created",
+        .pid = null,
+        .exit_code = null,
+        .app_name = null,
+        .created_at = std.time.timestamp(),
+    }) catch return false;
+
+    // create and run container
+    var c = container.Container{
+        .config = .{
+            .id = id,
+            .rootfs = img.rootfs,
+            .command = resolved.command,
+            .args = resolved.args.items,
+            .env = merged_env.items,
+            .working_dir = wd,
+            .lower_dirs = img.layer_paths,
+            .hostname = hostname,
+            .mounts = vols.bind_mounts.items,
+        },
+        .status = .created,
+        .pid = null,
+        .exit_code = null,
+        .created_at = std.time.timestamp(),
+    };
+
+    c.start() catch {
+        logs.deleteLogFile(id);
+        container.cleanupContainerDirs(id);
+        store.remove(id) catch {};
+        return false;
+    };
+
+    const exit_code = c.exit_code orelse 255;
+
+    // clean up
+    logs.deleteLogFile(id);
+    container.cleanupContainerDirs(id);
+    store.remove(id) catch {};
+
+    return exit_code == 0;
 }
 
 /// runs a single service in its own thread.
@@ -1175,6 +1305,7 @@ test "computeStartSet: single target with no deps" {
     };
     var manifest = spec.Manifest{
         .services = &services,
+        .workers = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };
@@ -1221,6 +1352,7 @@ test "computeStartSet: transitive dependencies" {
     };
     var manifest = spec.Manifest{
         .services = &services,
+        .workers = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };
@@ -1264,6 +1396,7 @@ test "computeStartSet: no filter starts everything" {
     };
     var manifest = spec.Manifest{
         .services = &services,
+        .workers = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };

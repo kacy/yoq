@@ -16,12 +16,16 @@ const std = @import("std");
 
 pub const Manifest = struct {
     services: []const Service,
+    workers: []const Worker,
     volumes: []const Volume,
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *Manifest) void {
         for (self.services) |svc| svc.deinit(self.alloc);
         self.alloc.free(self.services);
+
+        for (self.workers) |w| w.deinit(self.alloc);
+        self.alloc.free(self.workers);
 
         for (self.volumes) |vol| vol.deinit(self.alloc);
         self.alloc.free(self.volumes);
@@ -31,6 +35,14 @@ pub const Manifest = struct {
     pub fn serviceByName(self: *const Manifest, name: []const u8) ?*const Service {
         for (self.services) |*svc| {
             if (std.mem.eql(u8, svc.name, name)) return svc;
+        }
+        return null;
+    }
+
+    /// find a worker by name. returns null if not found.
+    pub fn workerByName(self: *const Manifest, name: []const u8) ?*const Worker {
+        for (self.workers) |*w| {
+            if (std.mem.eql(u8, w.name, name)) return w;
         }
         return null;
     }
@@ -82,6 +94,39 @@ pub const Service = struct {
 
         if (self.health_check) |hc| hc.deinit(alloc);
         if (self.tls) |tc| tc.deinit(alloc);
+    }
+};
+
+/// a one-shot task defined in the manifest. workers run to completion
+/// and exit — they're used for things like database migrations.
+/// workers can be dependencies of services (runs before the service starts)
+/// or invoked manually with `yoq run-worker <name>`.
+pub const Worker = struct {
+    name: []const u8,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    depends_on: []const []const u8,
+    working_dir: ?[]const u8,
+    volumes: []const VolumeMount,
+
+    pub fn deinit(self: Worker, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.image);
+
+        for (self.command) |cmd| alloc.free(cmd);
+        alloc.free(self.command);
+
+        for (self.env) |e| alloc.free(e);
+        alloc.free(self.env);
+
+        for (self.depends_on) |dep| alloc.free(dep);
+        alloc.free(self.depends_on);
+
+        if (self.working_dir) |wd| alloc.free(wd);
+
+        for (self.volumes) |vol| vol.deinit(alloc);
+        alloc.free(self.volumes);
     }
 };
 
@@ -179,6 +224,7 @@ test "serviceByName finds existing service" {
 
     var manifest = Manifest{
         .services = services,
+        .workers = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };
@@ -199,6 +245,7 @@ test "serviceByName returns null for missing service" {
 
     var manifest = Manifest{
         .services = services,
+        .workers = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };
@@ -260,6 +307,7 @@ test "deinit frees all memory" {
 
     var manifest = Manifest{
         .services = services,
+        .workers = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };
