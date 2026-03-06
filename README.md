@@ -22,7 +22,7 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 **clustering (phase 6) — complete:** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. raft snapshots keep the log bounded and bring lagging followers up to date via InstallSnapshot RPC. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. WireGuard mesh with automatic key exchange on join encrypts cross-node traffic. cross-node service discovery works via cluster DNS. the API server exposes endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`.
 
-**production features (phase 7) — complete:** health checks (HTTP, TCP, exec) with configurable intervals and readiness probes. rolling updates with automatic rollback on failure. encrypted secrets store with rotation (mounted as files or env vars). TLS termination with ACME auto-provisioning, TLS 1.3 handshake, bidirectional proxy with SNI routing, and auto-renewal on startup. certificate management CLI. eBPF observability with per-IP and per-service-pair metrics. eBPF network policies (allow/deny between services). PSI metrics reading from cgroups v2. remaining: PSI-based auto-tuning suggestions.
+**production features (phase 7) — complete:** health checks (HTTP, TCP, exec) with configurable intervals and readiness probes. rolling updates with automatic rollback on failure. encrypted secrets store with rotation (mounted as files or env vars). TLS termination with ACME auto-provisioning, TLS 1.3 handshake, bidirectional proxy with SNI routing, and auto-renewal on startup. certificate management CLI. eBPF observability with per-IP and per-service-pair metrics. eBPF network policies (allow/deny between services). PSI metrics reading from cgroups v2 with auto-tuning suggestions.
 
 ## what works
 
@@ -56,6 +56,8 @@ yoq up --dev                         dev mode: watch + hot restart
 yoq up --server host:port            deploy to cluster
 yoq down [-f manifest.toml]          stop all services
 yoq run-worker <name>                run a one-shot worker task
+yoq init [-f path]                   scaffold a manifest.toml interactively
+yoq validate [-f manifest.toml] [-q] validate a manifest file
 
 # deployment
 yoq rollback <service>               rollback to previous version
@@ -272,8 +274,6 @@ yoq up -f examples/redis/manifest.toml
 
 ### future directions
 
-- `yoq init` — scaffold a manifest.toml interactively
-- `yoq validate` — validate a manifest without starting services
 - shell completions (bash/zsh/fish)
 - `--json` output flag for scripting
 - web UI (explicitly deferred — CLI only for now)

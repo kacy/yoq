@@ -50,6 +50,7 @@ pub const command_specs = [_]CommandSpec{
 
     .{ .name = "build", .group = .build_manifest, .usage = "build [opts] <path>", .description = "build an image from a Dockerfile", .handler = build_cmds.build_cmd },
     .{ .name = "init", .group = .build_manifest, .usage = "init [-f path]", .description = "create a manifest.toml interactively", .handler = manifest_cmds.init },
+    .{ .name = "validate", .group = .build_manifest, .usage = "validate [-f manifest.toml] [-q]", .description = "validate a manifest file", .handler = manifest_cmds.validate },
     .{ .name = "up", .group = .build_manifest, .usage = "up [-f manifest.toml] [--dev] [--server host:port] [service...]", .description = "start services from a manifest", .handler = manifest_cmds.up },
     .{ .name = "down", .group = .build_manifest, .usage = "down [-f manifest.toml]", .description = "stop all services from manifest", .handler = manifest_cmds.down },
     .{ .name = "run-worker", .group = .build_manifest, .usage = "run-worker [-f manifest.toml] <name>", .description = "run a one-shot worker task", .handler = manifest_cmds.runWorker },
