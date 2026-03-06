@@ -1,0 +1,86 @@
+name: quality
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 13 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-test:
+    name: full-test
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: full-test
+      command: zig build test
+      timeout-minutes: 45
+      failure-artifact-name: quality-full-test-log
+
+  release-build-smoke:
+    name: release-build-smoke
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: release-build-smoke
+      command: zig build -Doptimize=ReleaseSafe
+      timeout-minutes: 30
+      failure-artifact-name: release-build-smoke-log
+      upload-path: zig-out/bin/yoq
+      upload-artifact-name: yoq-release-smoke-linux-amd64
+
+  dependency-drift:
+    name: dependency-drift
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-drift
+
+      - name: rebuild from a clean workspace cache
+        shell: bash
+        run: |
+          rm -rf .zig-cache zig-out
+          zig build
+          rm -rf .zig-cache zig-out
+          zig build -Doptimize=ReleaseSafe
+
+  docs-packaging-smoke:
+    name: docs-packaging-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+
+      - name: build yoq
+        shell: bash
+        run: zig build
+
+      - name: verify documented cli entry points
+        shell: bash
+        run: |
+          ./zig-out/bin/yoq version
+          ./zig-out/bin/yoq help > /dev/null
+          for manifest in examples/*/manifest.toml; do
+            ./zig-out/bin/yoq validate -f "$manifest" -q
+          done
+
+      - name: verify Docker packaging
+        shell: bash
+        run: docker build --tag yoq-quality:${{ github.sha }} .

@@ -1,0 +1,98 @@
+name: _build-test
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        description: shell command to execute
+        required: true
+        type: string
+      job-name:
+        description: display name for the job
+        required: true
+        type: string
+      timeout-minutes:
+        description: job timeout in minutes
+        required: false
+        default: 20
+        type: number
+      install-clang:
+        description: install clang and llvm before running the command
+        required: false
+        default: false
+        type: boolean
+      failure-artifact-name:
+        description: artifact name used when the command fails
+        required: false
+        default: ""
+        type: string
+      upload-path:
+        description: path to upload when the command succeeds
+        required: false
+        default: ""
+        type: string
+      upload-artifact-name:
+        description: artifact name used for successful uploads
+        required: false
+        default: ""
+        type: string
+      artifact-retention-days:
+        description: retention days for uploaded artifacts
+        required: false
+        default: 7
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: ${{ inputs.job-name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+
+      - name: install clang
+        if: inputs.install-clang
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang llvm
+
+      - name: run command
+        id: run-command
+        shell: bash
+        continue-on-error: true
+        env:
+          RUN_COMMAND: ${{ inputs.command }}
+          RUN_LOG: ${{ runner.temp }}/build-test.log
+        run: |
+          set -o pipefail
+          bash -lc "$RUN_COMMAND" 2>&1 | tee "$RUN_LOG"
+
+      - name: upload failure log
+        if: steps.run-command.outcome == 'failure' && inputs.failure-artifact-name != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.failure-artifact-name }}
+          path: ${{ runner.temp }}/build-test.log
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: upload success artifact
+        if: steps.run-command.outcome == 'success' && inputs.upload-path != '' && inputs.upload-artifact-name != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.upload-artifact-name }}
+          path: ${{ inputs.upload-path }}
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: fail job if command failed
+        if: steps.run-command.outcome == 'failure'
+        shell: bash
+        run: exit 1

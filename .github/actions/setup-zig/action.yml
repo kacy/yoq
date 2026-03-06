@@ -1,0 +1,35 @@
+name: setup-zig
+description: install zig and restore the local zig caches
+
+inputs:
+  zig-version:
+    description: zig version to install
+    required: false
+    default: "0.15.2"
+  cache-prefix:
+    description: prefix for zig cache keys
+    required: false
+    default: "zig"
+
+runs:
+  using: composite
+  steps:
+    - name: install zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ inputs.zig-version }}
+
+    - name: restore zig cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+        key: ${{ runner.os }}-${{ inputs.cache-prefix }}-${{ inputs.zig-version }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.cache-prefix }}-${{ inputs.zig-version }}-
+          ${{ runner.os }}-${{ inputs.cache-prefix }}-
+
+    - name: print zig version
+      shell: bash
+      run: zig version
