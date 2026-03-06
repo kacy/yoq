@@ -40,6 +40,8 @@ const ebpf = if (builtin.os.tag == .linux) @import("../network/ebpf.zig") else s
         }
     };
 
+    pub const MetricsCollector = Collector;
+
     pub fn getMetricsCollector() ?*Collector {
         return null;
     }

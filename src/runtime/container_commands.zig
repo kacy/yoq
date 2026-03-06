@@ -277,7 +277,7 @@ pub fn ps(alloc: std.mem.Allocator) void {
     write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ "CONTAINER ID", "STATUS", "IP", "COMMAND" });
     for (ids.items) |id| {
         const record = store.load(alloc, id) catch |err| {
-            write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, @tagName(err), "-", "-" });
+            write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, @errorName(err), "-", "-" });
             continue;
         };
         defer record.deinit(alloc);

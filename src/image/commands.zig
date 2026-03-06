@@ -282,7 +282,7 @@ fn imagesJson(imgs: []const store.ImageRecord) void {
         w.stringField("id", img.id);
         w.stringField("manifest_digest", img.manifest_digest);
         w.stringField("config_digest", img.config_digest);
-        w.uintField("size_bytes", img.total_size);
+        w.uintField("size_bytes", @intCast(img.total_size));
         w.intField("created_at", img.created_at);
         w.endObject();
     }
@@ -296,7 +296,7 @@ fn inspectJson(image: *const store.ImageRecord, config: *const spec.ImageConfig,
     w.stringField("repository", image.repository);
     w.stringField("tag", image.tag);
     w.stringField("manifest_digest", image.manifest_digest);
-    w.uintField("size_bytes", image.total_size);
+    w.uintField("size_bytes", @intCast(image.total_size));
     w.intField("created_at", image.created_at);
 
     if (config.architecture) |arch| w.stringField("architecture", arch);
