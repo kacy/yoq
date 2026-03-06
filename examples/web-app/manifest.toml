@@ -1,0 +1,50 @@
+# multi-service web app: frontend + API + database + cache
+#
+# start everything:  yoq up -f examples/web-app/manifest.toml
+# run migrations:    yoq run-worker -f examples/web-app/manifest.toml migrate
+
+[service.postgres]
+image = "postgres:15"
+env = ["POSTGRES_PASSWORD=secret", "POSTGRES_DB=app"]
+volumes = ["pgdata:/var/lib/postgresql/data"]
+restart = "always"
+
+[service.postgres.health_check]
+type = "tcp"
+port = 5432
+interval = 5
+
+[service.redis]
+image = "redis:7"
+restart = "always"
+
+[service.redis.health_check]
+type = "tcp"
+port = 6379
+
+[worker.migrate]
+image = "myapp:latest"
+command = ["python", "manage.py", "migrate"]
+depends_on = ["postgres"]
+env = ["DATABASE_URL=postgres://postgres:secret@postgres:5432/app"]
+
+[service.api]
+image = "myapp:latest"
+ports = ["8000:8000"]
+depends_on = ["postgres", "redis"]
+env = ["DATABASE_URL=postgres://postgres:secret@postgres:5432/app", "REDIS_URL=redis://redis:6379"]
+working_dir = "/app"
+restart = "on_failure"
+
+[service.api.health_check]
+type = "http"
+path = "/health"
+port = 8000
+interval = 10
+
+[service.web]
+image = "nginx:latest"
+ports = ["80:80"]
+depends_on = ["api"]
+
+[volume.pgdata]
