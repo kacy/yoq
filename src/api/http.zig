@@ -73,47 +73,23 @@ pub const Request = struct {
 /// returns an error if the request is malformed.
 /// on success, all slices in the returned Request point into `buf`.
 pub fn parseRequest(buf: []const u8) HttpError!?Request {
-    // find end of headers: \r\n\r\n
     const header_end = findHeaderEnd(buf) orelse return null;
-    const headers_len = header_end + 4; // include the \r\n\r\n
+    const body_start = header_end + 4; // include the \r\n\r\n
 
-    // parse the request line (first line up to \r\n)
-    const first_line_end = std.mem.indexOf(u8, buf, "\r\n") orelse return HttpError.BadRequest;
-    const request_line = buf[0..first_line_end];
+    const line = try parseRequestLine(buf);
+    const uri_parts = splitUri(line.uri);
 
-    // method
-    const method_end = std.mem.indexOf(u8, request_line, " ") orelse return HttpError.BadRequest;
-    const method_str = request_line[0..method_end];
-    const method = parseMethod(method_str) orelse return HttpError.BadMethod;
-
-    // URI
-    const after_method = request_line[method_end + 1 ..];
-    const uri_end = std.mem.indexOf(u8, after_method, " ") orelse return HttpError.BadRequest;
-    const uri = after_method[0..uri_end];
-
-    if (uri.len == 0) return HttpError.BadRequest;
-
-    // split path and query
-    const query_start = std.mem.indexOf(u8, uri, "?");
-    const path_only = if (query_start) |qs| uri[0..qs] else uri;
-    const query = if (query_start) |qs| uri[qs + 1 ..] else "";
-
-    // headers block (between request line and the blank line)
-    const headers_raw = buf[first_line_end + 2 .. header_end];
-
-    // check Content-Length to know if we have the full body
+    const headers_raw = buf[line.headers_start..header_end];
     const content_length = findContentLength(headers_raw);
 
-    // do we have enough data for the body?
-    if (buf.len < headers_len + content_length) return null;
-
-    const body = buf[headers_len .. headers_len + content_length];
+    if (buf.len < body_start + content_length) return null;
+    const body = buf[body_start .. body_start + content_length];
 
     return Request{
-        .method = method,
-        .path = uri,
-        .path_only = path_only,
-        .query = query,
+        .method = line.method,
+        .path = line.uri,
+        .path_only = uri_parts.path_only,
+        .query = uri_parts.query,
         .headers_raw = headers_raw,
         .body = body,
         .content_length = content_length,
@@ -168,8 +144,7 @@ pub fn formatResponseWithType(buf: []u8, status: StatusCode, content_type: []con
     const code: u16 = @intFromEnum(status);
     const phrase = status.phrase();
 
-    const result = std.fmt.bufPrint(buf,
-        "HTTP/1.1 {d} {s}\r\n" ++
+    const result = std.fmt.bufPrint(buf, "HTTP/1.1 {d} {s}\r\n" ++
         "Content-Type: {s}\r\n" ++
         "Content-Length: {d}\r\n" ++
         "Connection: close\r\n" ++
@@ -241,6 +216,45 @@ fn parseMethod(str: []const u8) ?Method {
     if (std.mem.eql(u8, str, "PUT")) return .PUT;
     if (std.mem.eql(u8, str, "DELETE")) return .DELETE;
     return null;
+}
+
+const ParsedRequestLine = struct {
+    method: Method,
+    uri: []const u8,
+    headers_start: usize,
+};
+
+const UriParts = struct {
+    path_only: []const u8,
+    query: []const u8,
+};
+
+fn parseRequestLine(buf: []const u8) HttpError!ParsedRequestLine {
+    const line_end = std.mem.indexOf(u8, buf, "\r\n") orelse return HttpError.BadRequest;
+    const line = buf[0..line_end];
+
+    const method_end = std.mem.indexOf(u8, line, " ") orelse return HttpError.BadRequest;
+    const method_str = line[0..method_end];
+    const method = parseMethod(method_str) orelse return HttpError.BadMethod;
+
+    const after_method = line[method_end + 1 ..];
+    const uri_end = std.mem.indexOf(u8, after_method, " ") orelse return HttpError.BadRequest;
+    const uri = after_method[0..uri_end];
+    if (uri.len == 0) return HttpError.BadRequest;
+
+    return .{
+        .method = method,
+        .uri = uri,
+        .headers_start = line_end + 2,
+    };
+}
+
+fn splitUri(uri: []const u8) UriParts {
+    const query_start = std.mem.indexOf(u8, uri, "?");
+    return .{
+        .path_only = if (query_start) |qs| uri[0..qs] else uri,
+        .query = if (query_start) |qs| uri[qs + 1 ..] else "",
+    };
 }
 
 fn findHeaderEnd(buf: []const u8) ?usize {
