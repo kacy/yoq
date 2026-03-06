@@ -111,19 +111,7 @@ pub const SecretsStore = struct {
         const existing = self.getTimestamp(name);
         const created_at = existing orelse now;
 
-        self.db.exec(
-            "INSERT OR REPLACE INTO secrets (name, encrypted_value, nonce, tag, created_at, updated_at)" ++
-                " VALUES (?, ?, ?, ?, ?, ?);",
-            .{},
-            .{
-                name,
-                @as(sqlite.Blob, .{ .data = encrypted.ciphertext }),
-                @as(sqlite.Blob, .{ .data = &encrypted.nonce }),
-                @as(sqlite.Blob, .{ .data = &encrypted.tag }),
-                created_at,
-                now,
-            },
-        ) catch return SecretsError.WriteFailed;
+        try self.writeEncryptedValue(name, encrypted, created_at, now);
     }
 
     /// retrieve and decrypt a secret by name.
@@ -206,6 +194,14 @@ pub const SecretsStore = struct {
     /// before calling this, and the old key is securely erased after
     /// a successful rotation.
     pub fn rotateKey(self: *SecretsStore, new_key: [key_length]u8) SecretsError!void {
+        try self.rotateKeyWithWriter(new_key, writeEncryptedValueForRotation);
+    }
+
+    fn rotateKeyWithWriter(
+        self: *SecretsStore,
+        new_key: [key_length]u8,
+        write_fn: *const fn (*SecretsStore, []const u8, EncryptResult, i64, i64) SecretsError!void,
+    ) SecretsError!void {
         // list all secret names
         var names = try self.list();
         defer {
@@ -234,14 +230,26 @@ pub const SecretsStore = struct {
             };
         }
 
-        // switch to the new key
-        secureZero(&self.key);
-        self.key = new_key;
+        self.db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return SecretsError.WriteFailed;
+        var transaction_open = true;
+        errdefer if (transaction_open) self.db.exec("ROLLBACK;", .{}, .{}) catch {};
 
         // re-encrypt all secrets with the new key
+        const now = std.time.timestamp();
         for (names.items, 0..) |name, i| {
-            try self.set(name, plaintexts.items[i]);
+            const created_at = self.getTimestamp(name) orelse now;
+            const encrypted = encrypt(self.allocator, plaintexts.items[i], new_key) catch
+                return SecretsError.EncryptionFailed;
+            defer self.allocator.free(encrypted.ciphertext);
+
+            try write_fn(self, name, encrypted, created_at, now);
         }
+
+        self.db.exec("COMMIT;", .{}, .{}) catch return SecretsError.WriteFailed;
+        transaction_open = false;
+
+        secureZero(&self.key);
+        self.key = new_key;
     }
 
     /// re-encrypt a secret with the current key. useful after key rotation:
@@ -276,6 +284,38 @@ pub const SecretsStore = struct {
         ) catch return null) orelse return null;
 
         return row.created_at;
+    }
+
+    fn writeEncryptedValue(
+        self: *SecretsStore,
+        name: []const u8,
+        encrypted: EncryptResult,
+        created_at: i64,
+        updated_at: i64,
+    ) SecretsError!void {
+        self.db.exec(
+            "INSERT OR REPLACE INTO secrets (name, encrypted_value, nonce, tag, created_at, updated_at)" ++
+                " VALUES (?, ?, ?, ?, ?, ?);",
+            .{},
+            .{
+                name,
+                @as(sqlite.Blob, .{ .data = encrypted.ciphertext }),
+                @as(sqlite.Blob, .{ .data = &encrypted.nonce }),
+                @as(sqlite.Blob, .{ .data = &encrypted.tag }),
+                created_at,
+                updated_at,
+            },
+        ) catch return SecretsError.WriteFailed;
+    }
+
+    fn writeEncryptedValueForRotation(
+        self: *SecretsStore,
+        name: []const u8,
+        encrypted: EncryptResult,
+        created_at: i64,
+        updated_at: i64,
+    ) SecretsError!void {
+        return self.writeEncryptedValue(name, encrypted, created_at, updated_at);
     }
 };
 
@@ -757,4 +797,49 @@ test "store rotateKey with no secrets succeeds" {
     // should succeed even with no secrets
     try store_obj.rotateKey(new_key);
     try std.testing.expectEqualSlices(u8, &new_key, &store_obj.key);
+}
+
+test "store rotateKey rolls back on write failure" {
+    const FailingWriter = struct {
+        var calls: usize = 0;
+
+        fn write(
+            self: *SecretsStore,
+            name: []const u8,
+            encrypted: EncryptResult,
+            created_at: i64,
+            updated_at: i64,
+        ) SecretsError!void {
+            calls += 1;
+            if (calls == 2) return SecretsError.WriteFailed;
+            return self.writeEncryptedValue(name, encrypted, created_at, updated_at);
+        }
+    };
+
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    const alloc = std.testing.allocator;
+    const old_key = [_]u8{0x11} ** key_length;
+    const new_key = [_]u8{0x22} ** key_length;
+    var store_obj = try SecretsStore.initWithKey(&db, alloc, old_key);
+
+    try store_obj.set("secret_a", "value_a");
+    try store_obj.set("secret_b", "value_b");
+
+    FailingWriter.calls = 0;
+    try std.testing.expectError(
+        SecretsError.WriteFailed,
+        store_obj.rotateKeyWithWriter(new_key, FailingWriter.write),
+    );
+
+    try std.testing.expectEqualSlices(u8, &old_key, &store_obj.key);
+
+    const val_a = try store_obj.get("secret_a");
+    defer alloc.free(val_a);
+    try std.testing.expectEqualStrings("value_a", val_a);
+
+    const val_b = try store_obj.get("secret_b");
+    defer alloc.free(val_b);
+    try std.testing.expectEqualStrings("value_b", val_b);
 }

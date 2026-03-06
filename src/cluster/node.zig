@@ -122,6 +122,7 @@ pub const Node = struct {
         // initialize transport
         var transport = Transport.init(alloc, config.port) catch return NodeError.InitFailed;
         errdefer transport.deinit();
+        transport.setLocalNodeId(config.id);
 
         for (config.peers) |p| {
             transport.addPeer(p.id, p.addr, p.port) catch return NodeError.InitFailed;
@@ -447,47 +448,82 @@ pub const Node = struct {
     }
 
     fn handleMessage(self: *Node, received: transport_mod.ReceivedMessage) void {
-        const from_id = self.resolveNodeId(received.from_addr);
+        const sender_id = received.sender_id orelse self.resolveNodeId(received.from_addr);
 
         switch (received.message) {
             .request_vote => |args| {
+                const peer_id = sender_id orelse {
+                    logger.warn("request_vote from unknown address, dropping", .{});
+                    return;
+                };
+                if (args.candidate_id != peer_id) {
+                    logger.warn("request_vote claimed node {} from authenticated peer {}, dropping", .{ args.candidate_id, peer_id });
+                    return;
+                }
+
                 const reply = self.raft.handleRequestVote(args);
-                // send reply back using the candidate_id from the request
-                self.transport.send(args.candidate_id, .{
+                self.transport.send(peer_id, .{
                     .request_vote_reply = reply,
                 }) catch |e| {
-                    logger.warn("failed to send vote reply to node {}: {}", .{ args.candidate_id, e });
+                    logger.warn("failed to send vote reply to node {}: {}", .{ peer_id, e });
                 };
             },
             .request_vote_reply => |reply| {
-                // vote replies only matter for counting — raft ignores from_id
-                self.raft.handleRequestVoteReply(from_id orelse 0, reply);
+                if (sender_id) |peer_id| {
+                    self.raft.handleRequestVoteReply(peer_id, reply);
+                } else {
+                    logger.warn("request_vote_reply from unknown address, dropping", .{});
+                }
             },
             .append_entries => |args| {
+                const peer_id = sender_id orelse {
+                    logger.warn("append_entries from unknown address, dropping", .{});
+                    for (args.entries) |e| self.alloc.free(e.data);
+                    self.alloc.free(args.entries);
+                    return;
+                };
+                if (args.leader_id != peer_id) {
+                    logger.warn("append_entries claimed leader {} from authenticated peer {}, dropping", .{ args.leader_id, peer_id });
+                    for (args.entries) |e| self.alloc.free(e.data);
+                    self.alloc.free(args.entries);
+                    return;
+                }
+
                 const reply = self.raft.handleAppendEntries(args);
-                self.transport.send(args.leader_id, .{
+                self.transport.send(peer_id, .{
                     .append_entries_reply = reply,
                 }) catch |e| {
-                    logger.warn("failed to send append entries reply to node {}: {}", .{ args.leader_id, e });
+                    logger.warn("failed to send append entries reply to node {}: {}", .{ peer_id, e });
                 };
                 // free entries data
                 for (args.entries) |e| self.alloc.free(e.data);
                 self.alloc.free(args.entries);
             },
             .append_entries_reply => |reply| {
-                if (from_id) |id| {
+                if (sender_id) |id| {
                     self.raft.handleAppendEntriesReply(id, reply);
                 } else {
                     logger.warn("append_entries_reply from unknown address, dropping", .{});
                 }
             },
             .install_snapshot => |args| {
+                const peer_id = sender_id orelse {
+                    logger.warn("install_snapshot from unknown address, dropping", .{});
+                    self.alloc.free(@constCast(args.data));
+                    return;
+                };
+                if (args.leader_id != peer_id) {
+                    logger.warn("install_snapshot claimed leader {} from authenticated peer {}, dropping", .{ args.leader_id, peer_id });
+                    self.alloc.free(@constCast(args.data));
+                    return;
+                }
+
                 const commit_before = self.raft.commit_index;
                 const reply = self.raft.handleInstallSnapshot(args);
-                self.transport.send(args.leader_id, .{
+                self.transport.send(peer_id, .{
                     .install_snapshot_reply = reply,
                 }) catch |e| {
-                    logger.warn("failed to send snapshot reply to node {}: {}", .{ args.leader_id, e });
+                    logger.warn("failed to send snapshot reply to node {}: {}", .{ peer_id, e });
                 };
 
                 // ownership: args.data was heap-allocated by transport decode.
@@ -499,7 +535,7 @@ pub const Node = struct {
                 }
             },
             .install_snapshot_reply => |reply| {
-                if (from_id) |id| {
+                if (sender_id) |id| {
                     self.raft.handleInstallSnapshotReply(id, reply);
                 } else {
                     logger.warn("install_snapshot_reply from unknown address, dropping", .{});
@@ -715,4 +751,89 @@ test "node init and deinit" {
     defer node.deinit();
 
     try std.testing.expectEqual(types.Role.follower, node.role());
+}
+
+test "handleMessage drops request_vote with mismatched sender id" {
+    const alloc = std.testing.allocator;
+
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    node.handleMessage(.{
+        .from_addr = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .sender_id = 2,
+        .message = .{ .request_vote = .{
+            .term = 1,
+            .candidate_id = 9,
+            .last_log_index = 0,
+            .last_log_term = 0,
+        } },
+    });
+
+    try std.testing.expect(node.log.getVotedFor() == null);
+}
+
+test "handleMessage accepts append_entries only from authenticated leader" {
+    const alloc = std.testing.allocator;
+
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    node.handleMessage(.{
+        .from_addr = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .sender_id = 2,
+        .message = .{ .append_entries = .{
+            .term = 1,
+            .leader_id = 9,
+            .prev_log_index = 0,
+            .prev_log_term = 0,
+            .entries = try alloc.alloc(types.LogEntry, 0),
+            .leader_commit = 0,
+        } },
+    });
+    try std.testing.expectEqual(@as(types.Term, 0), node.currentTerm());
+
+    node.handleMessage(.{
+        .from_addr = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .sender_id = 2,
+        .message = .{ .append_entries = .{
+            .term = 1,
+            .leader_id = 2,
+            .prev_log_index = 0,
+            .prev_log_term = 0,
+            .entries = try alloc.alloc(types.LogEntry, 0),
+            .leader_commit = 0,
+        } },
+    });
+    try std.testing.expectEqual(@as(types.Term, 1), node.currentTerm());
 }

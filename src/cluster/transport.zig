@@ -8,12 +8,12 @@
 //   [4B length] [1B type] [payload...]
 //
 // wire format (authenticated, when shared_key is set):
-//   [4B length] [32B HMAC-SHA256] [1B type] [payload...]
+//   [4B length] [8B sender_id] [32B HMAC-SHA256] [1B type] [payload...]
 //
-// the HMAC is computed over [type byte + payload]. the 32-byte tag is
-// prepended to the body. the length prefix covers hmac + type + payload.
-// on receive, the HMAC is verified using constant-time comparison before
-// the message is decoded. connections are dropped on mismatch.
+// the HMAC is computed over [sender_id + type byte + payload]. the 32-byte
+// tag is inserted after sender_id. the length prefix covers sender_id + hmac
+// + type + payload. on receive, the HMAC is verified and sender_id must match
+// the configured peer for the remote socket address.
 //
 // message types:
 //   0x01 = RequestVote
@@ -73,6 +73,7 @@ pub const Message = union(enum) {
 
 pub const ReceivedMessage = struct {
     from_addr: std.net.Address,
+    sender_id: ?NodeId,
     message: Message,
     // entries data owned by the allocator passed to receive()
 };
@@ -97,6 +98,7 @@ pub const Transport = struct {
     alloc: std.mem.Allocator,
     listen_fd: posix.socket_t,
     peers: std.AutoHashMap(NodeId, PeerAddr),
+    local_id: ?NodeId,
 
     /// optional shared key for HMAC authentication on raft messages.
     /// when null, messages are sent/received without authentication
@@ -120,6 +122,7 @@ pub const Transport = struct {
             .alloc = alloc,
             .listen_fd = fd,
             .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+            .local_id = null,
             .shared_key = null,
         };
     }
@@ -133,6 +136,10 @@ pub const Transport = struct {
         try self.peers.put(id, .{
             .addr = std.net.Address.initIp4(addr, port),
         });
+    }
+
+    pub fn setLocalNodeId(self: *Transport, id: NodeId) void {
+        self.local_id = id;
     }
 
     /// cluster mode must authenticate raft messages. single-node mode
@@ -177,23 +184,30 @@ pub const Transport = struct {
         self.sendBytes(peer, final) catch return TransportError.SendFailed;
     }
 
-    /// if shared_key is set, compute HMAC over the body portion of `data`
-    /// (everything after the 4-byte length prefix) and produce a new buffer
-    /// with the HMAC inserted: [4B new_length] [32B HMAC] [type + payload].
+    /// if shared_key is set, compute HMAC over [sender_id + type + payload]
+    /// and produce a new buffer with the sender id and HMAC inserted:
+    /// [4B new_length] [8B sender_id] [32B HMAC] [type + payload].
     /// returns `data` unchanged if no key is configured.
     fn applyHmac(self: *Transport, data: []const u8) ![]const u8 {
         const key = self.shared_key orelse return data;
+        const local_id = self.local_id orelse return TransportError.SendFailed;
         if (data.len < 5) return TransportError.SendFailed;
 
         const body = data[4..]; // type + payload
+        var sender_buf: [8]u8 = undefined;
+        writeU64(&sender_buf, local_id);
         var hmac_tag: [32]u8 = undefined;
-        HmacSha256.create(&hmac_tag, body, &key);
+        var hmac = HmacSha256.init(&key);
+        hmac.update(&sender_buf);
+        hmac.update(body);
+        hmac.final(&hmac_tag);
 
-        const new_len: u32 = @intCast(body.len + 32); // hmac + original body
-        const out = try self.alloc.alloc(u8, 4 + 32 + body.len);
+        const new_len: u32 = @intCast(body.len + 8 + 32); // sender + hmac + original body
+        const out = try self.alloc.alloc(u8, 4 + 8 + 32 + body.len);
         std.mem.writeInt(u32, out[0..4], new_len, .little);
-        @memcpy(out[4..36], &hmac_tag);
-        @memcpy(out[36..], body);
+        @memcpy(out[4..12], &sender_buf);
+        @memcpy(out[12..44], &hmac_tag);
+        @memcpy(out[44..], body);
         return out;
     }
 
@@ -238,6 +252,12 @@ pub const Transport = struct {
         };
         defer posix.close(client_fd);
 
+        const from_addr = std.net.Address{ .any = client_addr };
+        const expected_peer_id = if (self.shared_key != null)
+            self.resolvePeerId(from_addr) orelse return TransportError.AuthenticationFailed
+        else
+            null;
+
         // set receive timeout — longer to accommodate snapshot transfers
         const timeout = posix.timeval{ .sec = 5, .usec = 0 };
         posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
@@ -255,31 +275,64 @@ pub const Transport = struct {
 
         readExact(client_fd, body) catch return TransportError.ReceiveFailed;
 
-        // if HMAC authentication is enabled, verify before decoding
-        const payload = if (self.shared_key) |key| blk: {
-            // authenticated format: [32B HMAC] [1B type] [payload...]
-            if (body.len < 33) return TransportError.AuthenticationFailed;
+        const verified = if (self.shared_key) |key|
+            try verifyAuthenticatedBody(body, expected_peer_id.?, key)
+        else
+            VerifiedBody{ .sender_id = null, .payload = body };
 
-            const received_hmac = body[0..32];
-            const signed_data = body[32..]; // type + payload
-
-            var expected: [32]u8 = undefined;
-            HmacSha256.create(&expected, signed_data, &key);
-            if (!std.crypto.timing_safe.eql([32]u8, received_hmac.*, expected)) {
-                return TransportError.AuthenticationFailed;
-            }
-
-            break :blk signed_data;
-        } else body;
-
-        const msg = decode(alloc, payload) catch return TransportError.InvalidMessage;
+        const msg = decode(alloc, verified.payload) catch return TransportError.InvalidMessage;
 
         return ReceivedMessage{
-            .from_addr = std.net.Address{ .any = client_addr },
+            .from_addr = from_addr,
+            .sender_id = verified.sender_id,
             .message = msg,
         };
     }
+
+    fn resolvePeerId(self: *const Transport, addr: std.net.Address) ?NodeId {
+        var iter = self.peers.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.addr.any.family != addr.any.family) continue;
+            if (std.mem.eql(u8, std.mem.asBytes(&entry.value_ptr.addr.in.sa.addr), std.mem.asBytes(&addr.in.sa.addr)) and
+                entry.value_ptr.addr.in.sa.port == addr.in.sa.port)
+            {
+                return entry.key_ptr.*;
+            }
+        }
+        return null;
+    }
 };
+
+const VerifiedBody = struct {
+    sender_id: ?NodeId,
+    payload: []const u8,
+};
+
+fn verifyAuthenticatedBody(body: []const u8, expected_peer_id: NodeId, key: [32]u8) TransportError!VerifiedBody {
+    if (body.len < 41) return TransportError.AuthenticationFailed;
+
+    const sender_bytes = body[0..8];
+    const received_hmac = body[8..40];
+    const signed_data = body[40..];
+
+    var expected: [32]u8 = undefined;
+    var hmac = HmacSha256.init(&key);
+    hmac.update(sender_bytes);
+    hmac.update(signed_data);
+    hmac.final(&expected);
+
+    if (!std.crypto.timing_safe.eql([32]u8, received_hmac[0..32].*, expected)) {
+        return TransportError.AuthenticationFailed;
+    }
+
+    const sender_id = readU64(sender_bytes);
+    if (sender_id != expected_peer_id) return TransportError.AuthenticationFailed;
+
+    return .{
+        .sender_id = sender_id,
+        .payload = signed_data,
+    };
+}
 
 // -- encoding --
 
@@ -886,6 +939,7 @@ test "applyHmac produces correct authenticated format" {
         .alloc = alloc,
         .listen_fd = -1,
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .local_id = 7,
         .shared_key = "test-key-32-bytes-exactly-here!!".*,
     };
     defer transport.peers.deinit();
@@ -893,21 +947,25 @@ test "applyHmac produces correct authenticated format" {
     const authenticated = try transport.applyHmac(&plain);
     defer alloc.free(authenticated);
 
-    // result should be: [4B new_length] [32B HMAC] [original body]
-    try std.testing.expectEqual(@as(usize, 4 + 32 + 6), authenticated.len);
+    // result should be: [4B new_length] [8B sender_id] [32B HMAC] [original body]
+    try std.testing.expectEqual(@as(usize, 4 + 8 + 32 + 6), authenticated.len);
 
-    // the new length should be 32 + 6 = 38
+    // the new length should be 8 + 32 + 6 = 46
     const new_len = std.mem.readInt(u32, authenticated[0..4], .little);
-    try std.testing.expectEqual(@as(u32, 38), new_len);
+    try std.testing.expectEqual(@as(u32, 46), new_len);
+
+    try std.testing.expectEqual(@as(NodeId, 7), readU64(authenticated[4..12]));
 
     // verify the HMAC matches what we expect
     const body = plain[4..]; // type + payload
     var expected_hmac: [32]u8 = undefined;
-    HmacSha256.create(&expected_hmac, body, &transport.shared_key.?);
-    try std.testing.expectEqualSlices(u8, &expected_hmac, authenticated[4..36]);
+    var hmac = HmacSha256.init(&transport.shared_key.?);
+    hmac.update(authenticated[4..12]);
+    hmac.update(body);
+    hmac.final(&expected_hmac);
+    try std.testing.expectEqualSlices(u8, &expected_hmac, authenticated[12..44]);
 
-    // the original body should be preserved after the HMAC
-    try std.testing.expectEqualSlices(u8, body, authenticated[36..]);
+    try std.testing.expectEqualSlices(u8, body, authenticated[44..]);
 }
 
 test "applyHmac returns data unchanged when no key" {
@@ -919,6 +977,7 @@ test "applyHmac returns data unchanged when no key" {
         .alloc = alloc,
         .listen_fd = -1,
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .local_id = null,
         .shared_key = null,
     };
     defer transport.peers.deinit();
@@ -926,4 +985,50 @@ test "applyHmac returns data unchanged when no key" {
     const result = try transport.applyHmac(&plain);
     // should return the same pointer — no allocation
     try std.testing.expectEqual(@as(*const u8, &plain[0]), &result[0]);
+}
+
+test "verifyAuthenticatedBody rejects mismatched sender id" {
+    const key: [32]u8 = "test-key-32-bytes-exactly-here!!".*;
+    var sender_buf: [8]u8 = undefined;
+    writeU64(&sender_buf, 2);
+    const payload = [_]u8{ msg_request_vote_reply, 0, 0, 0, 0, 0 };
+
+    var tag: [32]u8 = undefined;
+    var hmac = HmacSha256.init(&key);
+    hmac.update(&sender_buf);
+    hmac.update(&payload);
+    hmac.final(&tag);
+
+    var body: [8 + 32 + payload.len]u8 = undefined;
+    @memcpy(body[0..8], &sender_buf);
+    @memcpy(body[8..40], &tag);
+    @memcpy(body[40..], &payload);
+
+    try std.testing.expectError(
+        TransportError.AuthenticationFailed,
+        verifyAuthenticatedBody(&body, 3, key),
+    );
+}
+
+test "resolvePeerId matches configured peer" {
+    const alloc = std.testing.allocator;
+
+    var transport = Transport{
+        .alloc = alloc,
+        .listen_fd = -1,
+        .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .local_id = 1,
+        .shared_key = null,
+    };
+    defer transport.peers.deinit();
+
+    try transport.addPeer(2, .{ 10, 0, 0, 2 }, 9700);
+
+    try std.testing.expectEqual(
+        @as(?NodeId, 2),
+        transport.resolvePeerId(std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700)),
+    );
+    try std.testing.expect(
+        transport.resolvePeerId(std.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700)) == null,
+    );
 }

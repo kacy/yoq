@@ -83,6 +83,7 @@ pub const RateLimiter = struct {
         const start_idx = @as(usize, ip *% 2654435761); // knuth multiplicative hash
         var probe: usize = 0;
         var first_empty: ?usize = null;
+        var stale_slot: ?usize = null;
 
         while (probe < rate_table_size) : (probe += 1) {
             const idx = (start_idx +% probe) % rate_table_size;
@@ -108,10 +109,14 @@ pub const RateLimiter = struct {
                 entry.count += 1;
                 return entry.count <= rate_limit_burst;
             }
+
+            if (entry.window_start != now and stale_slot == null) {
+                stale_slot = idx;
+            }
         }
 
-        // IP not found — create new entry in the first empty slot
-        if (first_empty) |idx| {
+        // IP not found — reuse an empty slot first, then any stale slot.
+        if (first_empty orelse stale_slot) |idx| {
             self.entries[idx] = .{
                 .ip = ip,
                 .count = 1,
@@ -512,4 +517,15 @@ test "rate limiter handles table collision gracefully" {
 
     // a new IP when table is full should be rejected (fail-closed)
     try std.testing.expect(!limiter.checkRateAt(0xFFFFFFFF, now));
+}
+
+test "rate limiter reuses stale slots for new ips" {
+    var limiter = RateLimiter.init();
+
+    for (0..rate_table_size) |i| {
+        const ip: u32 = @intCast(i + 1);
+        try std.testing.expect(limiter.checkRateAt(ip, 6000));
+    }
+
+    try std.testing.expect(limiter.checkRateAt(0xABCDEF01, 6001));
 }
