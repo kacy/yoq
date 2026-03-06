@@ -107,6 +107,7 @@ fn printUsage() void {
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
         \\  up [-f manifest.toml] [--dev]     start services (--dev: watch + restart)
         \\     [--server host:port]           deploy to cluster instead of locally
+        \\     [service...]                   start only named services + deps
         \\  down [-f manifest.toml]          stop all services from manifest
         \\  serve [--port PORT]             start the API server (default: 7700)
         \\  init-server [opts]              start a cluster server node
