@@ -60,7 +60,7 @@ pub const BindMount = struct {
     /// absolute path inside the container
     target: []const u8,
     /// mount read-only
-    read_only: bool = false,
+    read_only: bool = true,
 
     /// check that the source path doesn't point into sensitive system directories.
     /// a manifest could otherwise mount /etc/shadow or /root/.ssh into a container.
@@ -414,7 +414,7 @@ fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
 
         // 1.5 apply bind mounts into the merged overlay
         for (ctx.mounts) |m| {
-            if (!m.isSourceAllowed()) return 1;
+            if (!m.isSourceAllowed() or !isCanonicalBindSource(m.source)) return 1;
             filesystem.bindMount(ctx.fs_config.merged_dir, m.source, m.target, m.read_only) catch return 1;
         }
 
@@ -422,7 +422,7 @@ fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     } else {
         // bind mounts with a local rootfs — mount into rootfs before pivot
         for (ctx.mounts) |m| {
-            if (!m.isSourceAllowed()) return 1;
+            if (!m.isSourceAllowed() or !isCanonicalBindSource(m.source)) return 1;
             filesystem.bindMount(ctx.rootfs, m.source, m.target, m.read_only) catch return 1;
         }
 
@@ -501,6 +501,14 @@ fn execCommand(command: []const u8, args: []const []const u8, env: []const []con
 fn setHostname(name: []const u8) void {
     if (name.len == 0) return;
     _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
+}
+
+fn isCanonicalBindSource(source: []const u8) bool {
+    if (source.len == 0 or source[0] != '/') return false;
+
+    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = std.fs.cwd().realpath(source, &resolved_buf) catch return false;
+    return std.mem.eql(u8, resolved, source);
 }
 
 /// base directory for per-container overlay storage
@@ -658,6 +666,29 @@ test "bind mount allows safe source paths" {
         const m = BindMount{ .source = source, .target = "/mnt" };
         try std.testing.expect(m.isSourceAllowed());
     }
+}
+
+test "bind mount defaults to read-only" {
+    const mount = BindMount{ .source = "/tmp/data", .target = "/mnt" };
+    try std.testing.expect(mount.read_only);
+}
+
+test "canonical bind source rejects symlink path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("real");
+    try tmp.dir.symLink("real", "link", .{});
+
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_path = try tmp.dir.realpath("real", &real_buf);
+    try std.testing.expect(isCanonicalBindSource(real_path));
+
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_path = try tmp.dir.realpath(".", &base_buf);
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/link", .{base_path});
+    try std.testing.expect(!isCanonicalBindSource(link_path));
 }
 
 test "generate id varies between calls" {

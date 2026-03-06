@@ -31,11 +31,11 @@ const ebpf = if (builtin.os.tag == .linux) @import("../network/ebpf.zig") else s
     };
 
     pub const Collector = struct {
-        pub fn readMetrics(_: *@This(), _: u32) ?Metrics {
+        pub fn readMetrics(_: *const @This(), _: u32) ?Metrics {
             return null;
         }
 
-        pub fn readPairMetrics(_: *@This(), _: []PairEntry) usize {
+        pub fn readPairMetrics(_: *const @This(), _: []PairEntry) usize {
             return 0;
         }
     };
@@ -398,7 +398,8 @@ fn metricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) void {
 
         var packets: u64 = 0;
         var bytes: u64 = 0;
-        if (mc) |collector| {
+        if (mc) |collector_const| {
+            var collector: *ebpf.MetricsCollector = @constCast(collector_const);
             if (ip.parseIp(ip_str)) |addr| {
                 const ip_net = ebpf.ipToNetworkOrder(addr);
                 if (collector.readMetrics(ip_net)) |m| {
@@ -631,7 +632,7 @@ fn metricsLocalJson(records: []const store.ContainerRecord, mc: ?*const ebpf.Met
 
 fn metricsPairsJson(records: []const store.ContainerRecord, mc: *const ebpf.MetricsCollector) void {
     var entries: [1024]ebpf.PairEntry = undefined;
-    const count = mc.readPairMetrics(&entries);
+    const count = @constCast(mc).readPairMetrics(&entries);
 
     var w = json_out.JsonWriter{};
     w.beginArray();

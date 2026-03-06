@@ -186,6 +186,11 @@ pub fn pivotRoot(new_root: []const u8) FilesystemError!void {
 /// rather than the threadlocal sentinelize (we need source and target
 /// simultaneously).
 pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8, read_only: bool) FilesystemError!void {
+    if (!isCanonicalAbsolutePath(source)) {
+        log.warn("bind mount source must be canonical absolute path: {s}", .{source});
+        return FilesystemError.MountFailed;
+    }
+
     // reject paths with ".." components to prevent directory traversal.
     // in cluster mode a remote deploy request could specify arbitrary paths,
     // so we validate at the filesystem layer as defense-in-depth.
@@ -398,6 +403,14 @@ fn isSymlink(path: []const u8) bool {
     return stat.mode & posix.S.IFMT == posix.S.IFLNK;
 }
 
+fn isCanonicalAbsolutePath(path: []const u8) bool {
+    if (path.len == 0 or path[0] != '/') return false;
+
+    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = std.fs.cwd().realpath(path, &resolved_buf) catch return false;
+    return std.mem.eql(u8, resolved, path);
+}
+
 /// check that a path doesn't contain ':' or ',' which would break
 /// overlayfs mount options parsing.
 fn isValidOverlayPath(path: []const u8) bool {
@@ -451,15 +464,10 @@ test "bindMount path construction" {
     // but we can verify the path construction logic by checking that
     // the function returns PathTooLong for oversized inputs
 
-    // path that's way too long should fail
-    const long_path = "a" ** 4096;
-    const result = bindMount("/root", long_path, "/target", false);
-    try std.testing.expectError(FilesystemError.PathTooLong, result);
-
     // target_root + target too long should also fail
     const long_root = "x" ** 2048;
     const long_target = "y" ** 2048;
-    const result2 = bindMount(long_root, "/src", long_target, false);
+    const result2 = bindMount(long_root, "/tmp", long_target, false);
     try std.testing.expectError(FilesystemError.PathTooLong, result2);
 }
 
@@ -522,4 +530,25 @@ test "isSymlink detects symlinks" {
 
 test "isSymlink returns false for non-existent path" {
     try std.testing.expect(!isSymlink("/nonexistent/path/that/does/not/exist"));
+}
+
+test "isCanonicalAbsolutePath rejects non-canonical and relative paths" {
+    try std.testing.expect(!isCanonicalAbsolutePath("./relative"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("real");
+    try tmp.dir.symLink("real", "link", .{});
+
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try tmp.dir.realpath(".", &base_buf);
+
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real = try tmp.dir.realpath("real", &real_buf);
+    try std.testing.expect(isCanonicalAbsolutePath(real));
+
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link = try std.fmt.bufPrint(&link_buf, "{s}/link", .{base});
+    try std.testing.expect(!isCanonicalAbsolutePath(link));
 }

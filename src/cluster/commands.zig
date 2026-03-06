@@ -23,6 +23,7 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const readApiToken = cli.readApiToken;
 const generateAndSaveToken = cli.generateAndSaveToken;
+const isValidApiToken = cli.isValidApiToken;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 
@@ -55,7 +56,8 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         const token_path = paths.dataPath(&path_buf, "api_token") catch "~/.local/share/yoq/api_token";
         writeErr("API token: {s}\n", .{token_path});
     } else {
-        writeErr("warning: failed to set up API token, running without auth\n", .{});
+        writeErr("failed to set up API token; refusing to run without auth\n", .{});
+        std.process.exit(1);
     }
     defer routes.api_token = null;
 
@@ -74,7 +76,8 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     var raft_port: u16 = 9700;
     var api_port: u16 = 7700;
     var peers_str: []const u8 = "";
-    var token: ?[]const u8 = null;
+    var join_token: ?[]const u8 = null;
+    var api_token_arg: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--id")) {
@@ -110,8 +113,13 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "--token")) {
-            token = args.next() orelse {
+            join_token = args.next() orelse {
                 writeErr("--token requires a join token\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--api-token")) {
+            api_token_arg = args.next() orelse {
+                writeErr("--api-token requires a 64-character hex token\n", .{});
                 std.process.exit(1);
             };
         }
@@ -131,16 +139,38 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     };
     defer alloc.free(peers);
 
+    if (join_token == null) {
+        writeErr("cluster mode requires --token for join authentication and raft transport auth\n", .{});
+        std.process.exit(1);
+    }
+
     // derive a shared key from the join token for raft transport authentication.
     // uses HMAC-SHA256 as a simple KDF: HMAC(key=token, data="yoq-raft-transport-key").
     // this ensures cluster comms are always authenticated when a token is set.
     var shared_key: ?[32]u8 = null;
-    if (token) |t| {
+    if (join_token) |t| {
         const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
         var derived: [32]u8 = undefined;
         HmacSha256.create(&derived, "yoq-raft-transport-key", t);
         shared_key = derived;
     }
+
+    var api_token_buf: [64]u8 = undefined;
+    const api_token = blk: {
+        if (api_token_arg) |provided| {
+            if (!isValidApiToken(provided)) {
+                writeErr("--api-token must be a 64-character lowercase hex token\n", .{});
+                std.process.exit(1);
+            }
+            break :blk provided;
+        }
+
+        const from_file = readApiToken(&api_token_buf) orelse {
+            writeErr("cluster mode requires an API token. provide --api-token or create ~/.local/share/yoq/api_token with 0o600 permissions\n", .{});
+            std.process.exit(1);
+        };
+        break :blk from_file;
+    };
 
     writeErr("starting server node {d} on :{d} (api :{d}) with {d} peers\n", .{
         node_id, raft_port, api_port, peers.len,
@@ -162,6 +192,10 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     if (shared_key) |key| {
         node.transport.shared_key = key;
     }
+    if (peers.len > 0 and node.transport.shared_key == null) {
+        writeErr("cluster mode requires raft transport authentication when peers are configured\n", .{});
+        std.process.exit(1);
+    }
 
     node.start() catch |err| {
         writeErr("failed to start raft node: {}\n", .{err});
@@ -170,7 +204,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
 
     // set cluster node and join token for API routes
     routes.cluster = &node;
-    routes.join_token = token;
+    routes.join_token = join_token;
     defer {
         routes.cluster = null;
         routes.join_token = null;
@@ -186,7 +220,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     // start API server — cluster mode binds to all interfaces since
     // agents on other nodes need to reach this server.
     // set api_token so all endpoints (except health/version) require auth.
-    routes.api_token = token;
+    routes.api_token = api_token;
     defer routes.api_token = null;
 
     var server = api_server.Server.init(alloc, api_port, .{ 0, 0, 0, 0 }) catch |err| {

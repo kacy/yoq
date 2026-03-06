@@ -102,12 +102,10 @@ fn resolveDestination(workdir: []const u8, dest: []const u8, out: []u8) types.Bu
 
 fn withTempLayerDir(
     out_path: *[paths.max_path]u8,
-    comptime name_fmt: []const u8,
-    args: anytype,
+    prefix: []const u8,
 ) types.BuildError![]const u8 {
     paths.ensureDataDir("tmp") catch return types.BuildError.CopyStepFailed;
-    const layer_dir = paths.dataPathFmt(out_path, name_fmt, args) catch return types.BuildError.CopyStepFailed;
-    std.fs.cwd().deleteTree(layer_dir) catch {};
+    const layer_dir = paths.uniqueDataTempPath(out_path, "tmp", prefix, "") catch return types.BuildError.CopyStepFailed;
     std.fs.cwd().makePath(layer_dir) catch return types.BuildError.CopyStepFailed;
     return layer_dir;
 }
@@ -263,7 +261,7 @@ pub fn processCopy(alloc: std.mem.Allocator, state: *types.BuildState, args: []c
     defer alloc.free(cache_key);
 
     var layer_dir_buf: [paths.max_path]u8 = undefined;
-    const layer_dir = try withTempLayerDir(&layer_dir_buf, "tmp/build-copy-layer", .{});
+    const layer_dir = try withTempLayerDir(&layer_dir_buf, "build-copy-layer");
     defer std.fs.cwd().deleteTree(layer_dir) catch {};
 
     var actual_dest_buf: [1024]u8 = undefined;
@@ -411,7 +409,7 @@ fn processAddExtract(alloc: std.mem.Allocator, state: *types.BuildState, args: [
     defer alloc.free(cache_key);
 
     var layer_dir_buf: [paths.max_path]u8 = undefined;
-    const layer_dir = try withTempLayerDir(&layer_dir_buf, "tmp/build-add-layer", .{});
+    const layer_dir = try withTempLayerDir(&layer_dir_buf, "build-add-layer");
     defer std.fs.cwd().deleteTree(layer_dir) catch {};
 
     var actual_dest_buf: [1024]u8 = undefined;

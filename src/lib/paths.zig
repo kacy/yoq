@@ -5,6 +5,7 @@
 // don't each reimplement the HOME lookup and bufPrint boilerplate.
 
 const std = @import("std");
+const fmtx = std.fmt;
 
 pub const PathError = error{ HomeDirNotFound, PathTooLong };
 
@@ -29,6 +30,24 @@ pub fn ensureDataDir(subpath: []const u8) PathError!void {
     var buf: [max_path]u8 = undefined;
     const path = try dataPath(&buf, subpath);
     std.fs.cwd().makePath(path) catch {};
+}
+
+/// build a unique temp path under ~/.local/share/yoq/<subdir>/.
+/// suffix keeps the caller's file type visible (for example ".tar").
+pub fn uniqueDataTempPath(
+    buf: *[max_path]u8,
+    subdir: []const u8,
+    prefix: []const u8,
+    suffix: []const u8,
+) PathError![]const u8 {
+    var rand: [6]u8 = undefined;
+    std.crypto.random.bytes(&rand);
+
+    var hex: [12]u8 = undefined;
+    _ = fmtx.bufPrint(&hex, "{s}", .{fmtx.bytesToHex(rand, .lower)}) catch
+        return PathError.PathTooLong;
+
+    return dataPathFmt(buf, "{s}/.{s}.{s}{s}", .{ subdir, prefix, hex, suffix });
 }
 
 // -- tests --
@@ -61,4 +80,11 @@ test "dataPath without HOME returns error" {
     } else |_| {
         // HOME not set — expected in some CI environments
     }
+}
+
+test "uniqueDataTempPath stays in target directory" {
+    var buf: [max_path]u8 = undefined;
+    const path = try uniqueDataTempPath(&buf, "tmp", "blob", ".tmp");
+    try std.testing.expect(std.mem.indexOf(u8, path, "/.local/share/yoq/tmp/.blob.") != null);
+    try std.testing.expect(std.mem.endsWith(u8, path, ".tmp"));
 }
