@@ -160,17 +160,23 @@ fn helpHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 }
 
 fn psHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    _ = args;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
+    }
     container_cmds.ps(alloc);
 }
 
 fn imagesHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    _ = args;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
+    }
     image_cmds.images(alloc);
 }
 
 fn pruneHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    _ = args;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
+    }
     image_cmds.prune(alloc);
 }
 
