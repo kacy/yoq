@@ -547,7 +547,13 @@ fn sortByDependency(alloc: std.mem.Allocator, services: []const spec.Service) Lo
 
     for (services) |svc| {
         const idx = name_to_idx.get(svc.name).?;
-        in_degree[idx] = svc.depends_on.len;
+        // only count dependencies on other services — worker deps are
+        // validated by validateDependencies() but don't affect sort order
+        var service_dep_count: usize = 0;
+        for (svc.depends_on) |dep| {
+            if (name_to_idx.contains(dep)) service_dep_count += 1;
+        }
+        in_degree[idx] = service_dep_count;
     }
 
     // initialize queue with services that have no dependencies
@@ -1800,6 +1806,7 @@ test "tls config — domain and acme" {
         \\[service.web.tls]
         \\domain = "example.com"
         \\acme = true
+        \\email = "admin@example.com"
     );
     defer manifest.deinit();
 
@@ -1869,7 +1876,7 @@ test "worker parsing — basic worker" {
     const w = manifest.workers[0];
     try std.testing.expectEqualStrings("migrate", w.name);
     try std.testing.expectEqualStrings("myapp:latest", w.image);
-    try std.testing.expectEqual(@as(usize, 2), w.command.len);
+    try std.testing.expectEqual(@as(usize, 3), w.command.len);
     try std.testing.expectEqualStrings("python", w.command[0]);
     try std.testing.expectEqual(@as(usize, 1), w.env.len);
 }
@@ -1941,7 +1948,7 @@ test "cron parsing — basic cron" {
     try std.testing.expectEqualStrings("backup", c.name);
     try std.testing.expectEqualStrings("postgres:15", c.image);
     try std.testing.expectEqual(@as(u64, 86400), c.every);
-    try std.testing.expectEqual(@as(usize, 4), c.command.len);
+    try std.testing.expectEqual(@as(usize, 5), c.command.len);
     try std.testing.expectEqual(@as(usize, 1), c.env.len);
 }
 
