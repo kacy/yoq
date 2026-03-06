@@ -159,6 +159,8 @@ int dns_intercept(struct __sk_buff *skb)
         return TC_ACT_OK;
 
     __u8 *dns = data + dns_offset;
+    if ((void *)(dns + DNS_HEADER_SIZE) > data_end)
+        return TC_ACT_OK;
 
     // check QR=0 (query) — QR is the high bit of byte 2
     __u16 flags = (dns[2] << 8) | dns[3];
@@ -182,6 +184,8 @@ int dns_intercept(struct __sk_buff *skb)
         return TC_ACT_OK;
 
     __u8 *qtype_ptr = data + qtype_offset;
+    if ((void *)(qtype_ptr + 4) > data_end)
+        return TC_ACT_OK;
     __u16 qtype = (qtype_ptr[0] << 8) | qtype_ptr[1];
     __u16 qclass = (qtype_ptr[2] << 8) | qtype_ptr[3];
 
