@@ -594,7 +594,7 @@ fn metricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) void {
     }
 }
 
-fn metricsLocalJson(records: []const store.ContainerRecord, mc: ?*ebpf.MetricsCollector, service_filter: ?[]const u8) void {
+fn metricsLocalJson(records: []const store.ContainerRecord, mc: ?*const ebpf.MetricsCollector, service_filter: ?[]const u8) void {
     var w = json_out.JsonWriter{};
     w.beginArray();
     for (records) |rec| {
@@ -629,7 +629,7 @@ fn metricsLocalJson(records: []const store.ContainerRecord, mc: ?*ebpf.MetricsCo
     w.flush();
 }
 
-fn metricsPairsJson(records: []const store.ContainerRecord, mc: *ebpf.MetricsCollector) void {
+fn metricsPairsJson(records: []const store.ContainerRecord, mc: *const ebpf.MetricsCollector) void {
     var entries: [1024]ebpf.PairEntry = undefined;
     const count = mc.readPairMetrics(&entries);
 

@@ -1,7 +1,7 @@
 .PHONY: build run test test-integration test-privileged clean bpf install fmt loc
 
 build:
-	zig build
+	zig build -Doptimize=ReleaseSafe
 
 run:
 	zig build run
