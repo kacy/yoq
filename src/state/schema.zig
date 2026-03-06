@@ -185,7 +185,7 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
 /// creates parent directories if needed.
-pub fn defaultDbPath(buf: *[512]u8) SchemaError![:0]const u8 {
+pub fn defaultDbPath(buf: *[paths.max_path]u8) SchemaError![:0]const u8 {
     // ensure the data directory exists
     paths.ensureDataDir("") catch return SchemaError.HomeDirNotFound;
 

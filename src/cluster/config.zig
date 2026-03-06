@@ -75,7 +75,7 @@ fn parseSinglePeer(s: []const u8) !PeerConfig {
 pub const snapshot_threshold: u64 = 10000;
 
 /// get the default data directory for cluster state
-pub fn defaultDataDir(buf: *[512]u8) ![]const u8 {
+pub fn defaultDataDir(buf: *[paths.max_path]u8) ![]const u8 {
     paths.ensureDataDir("cluster") catch return ConfigError.DataDirFailed;
     const path = paths.dataPath(buf, "cluster") catch return ConfigError.DataDirFailed;
     return path;
@@ -121,4 +121,3 @@ test "parsePeers rejects missing port" {
     const result = parsePeers(alloc, "2@10.0.0.2");
     try std.testing.expectError(ConfigError.InvalidPeerFormat, result);
 }
-

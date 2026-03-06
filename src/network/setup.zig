@@ -11,12 +11,48 @@
 // networking if permissions are insufficient.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const sqlite = @import("sqlite");
 
 const bridge = @import("bridge.zig");
 const dns = @import("dns.zig");
-const ebpf = @import("ebpf.zig");
+const ebpf = if (builtin.os.tag == .linux) @import("ebpf.zig") else struct {
+    pub const PortMapper = struct {
+        pub fn addMapping(_: *@This(), _: u16, _: u8, _: [4]u8, _: u16) void {}
+        pub fn removeMapping(_: *@This(), _: u16, _: u8) void {}
+    };
+
+    var port_mapper: PortMapper = .{};
+
+    pub fn getPortMapper() ?*PortMapper {
+        return &port_mapper;
+    }
+
+    pub fn getDnsInterceptor() ?*anyopaque {
+        return null;
+    }
+
+    pub fn getPolicyEnforcer() ?*anyopaque {
+        return null;
+    }
+
+    pub fn loadPolicyEnforcer(_: u32) error{NotSupported}!void {
+        return error.NotSupported;
+    }
+
+    pub fn loadDnsInterceptor(_: u32) error{NotSupported}!void {
+        return error.NotSupported;
+    }
+
+    pub fn loadLoadBalancer(_: u32) error{NotSupported}!void {
+        return error.NotSupported;
+    }
+
+    pub fn loadPortMapper(_: u32) error{NotSupported}!void {
+        return error.NotSupported;
+    }
+};
 const ip = @import("ip.zig");
 const nat = @import("nat.zig");
 const nl = @import("netlink.zig");
@@ -86,8 +122,10 @@ pub const PeerInfo = struct {
 pub fn setupClusterNetworking(config: ClusterNetworkConfig) !void {
     log.info("setting up cluster networking (node_id={d}, overlay={d}.{d}.{d}.{d})", .{
         config.node_id,
-        config.overlay_ip[0], config.overlay_ip[1],
-        config.overlay_ip[2], config.overlay_ip[3],
+        config.overlay_ip[0],
+        config.overlay_ip[1],
+        config.overlay_ip[2],
+        config.overlay_ip[3],
     });
 
     // create the wireguard interface, set private key + listen port, bring it up
@@ -130,8 +168,8 @@ fn addClusterPeerInternal(peer: PeerInfo) !void {
     // build allowed-ips: "overlay_ip/32,container_subnet/24"
     var allowed_buf: [64]u8 = undefined;
     const allowed_ips = std.fmt.bufPrint(&allowed_buf, "{d}.{d}.{d}.{d}/32,10.42.{d}.0/24", .{
-        peer.overlay_ip[0], peer.overlay_ip[1],
-        peer.overlay_ip[2], peer.overlay_ip[3],
+        peer.overlay_ip[0],         peer.overlay_ip[1],
+        peer.overlay_ip[2],         peer.overlay_ip[3],
         peer.container_subnet_node,
     }) catch return error.ConfigFailed;
 

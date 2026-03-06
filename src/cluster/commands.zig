@@ -118,7 +118,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     }
 
     // resolve data directory
-    var data_dir_buf: [512]u8 = undefined;
+    var data_dir_buf: [paths.max_path]u8 = undefined;
     const data_dir = cluster_config.defaultDataDir(&data_dir_buf) catch {
         writeErr("failed to create cluster data directory\n", .{});
         std.process.exit(1);

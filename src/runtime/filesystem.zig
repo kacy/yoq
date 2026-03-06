@@ -330,8 +330,9 @@ fn createDeviceNodes() void {
     for (devices) |dev| {
         // dev_t = makedev(major, minor) = (major << 8) | minor for Linux
         const device_num: u32 = (dev.major << 8) | dev.minor;
-        const rc = linux.syscall3(
-            .mknod,
+        const rc = linux.syscall4(
+            .mknodat,
+            @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))),
             @intFromPtr(dev.path),
             dev.mode,
             device_num,
@@ -356,10 +357,12 @@ fn createDeviceNodes() void {
     };
 
     for (symlinks) |link| {
-        const rc = linux.syscall2(
-            .symlink,
+        const rc = linux.syscall4(
+            .symlinkat,
             @intFromPtr(link.target),
+            @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))),
             @intFromPtr(link.path),
+            0,
         );
         if (syscall_util.isError(rc)) {
             log.info("symlink creation failed: {s}", .{std.mem.span(link.path)});
@@ -391,15 +394,8 @@ fn isPathSafe(path: []const u8) bool {
 /// errors (e.g. path doesn't exist) are treated as "not a symlink"
 /// since the mount will fail later with a clear error anyway.
 fn isSymlink(path: []const u8) bool {
-    if (path.len >= 4096) return false;
-    var path_buf: [4096]u8 = undefined;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const path_z: [*:0]const u8 = @ptrCast(&path_buf);
-    var stat_buf: linux.Stat = undefined;
-    const rc = linux.lstat(path_z, &stat_buf);
-    if (syscall_util.isError(rc)) return false;
-    return stat_buf.mode & linux.S.IFMT == linux.S.IFLNK;
+    const stat = posix.fstatat(posix.AT.FDCWD, path, posix.AT.SYMLINK_NOFOLLOW) catch return false;
+    return stat.mode & posix.S.IFMT == posix.S.IFLNK;
 }
 
 /// check that a path doesn't contain ':' or ',' which would break

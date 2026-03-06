@@ -15,6 +15,7 @@
 // fine for a management API and keeps the implementation simple.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const http = @import("http.zig");
@@ -203,6 +204,8 @@ pub const Server = struct {
     /// io_uring-based accept loop using multishot accept.
     /// returns true if it ran successfully, false if io_uring isn't available.
     fn runIoUring(self: *Server) bool {
+        if (builtin.os.tag != .linux) return false;
+
         var ring = linux.IoUring.init(64, 0) catch return false;
         defer ring.deinit();
 

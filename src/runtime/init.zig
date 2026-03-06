@@ -107,7 +107,7 @@ fn reapLoop(target_pid: i32) u8 {
             }
             // killed by signal — convention: 128 + signal number
             const sig = status & 0x7f;
-            const code: u16 = 128 + sig;
+            const code: u16 = @intCast(128 + sig);
             return @intCast(code & 0xff);
         }
 
@@ -133,7 +133,7 @@ fn forwardSignal(sig: c_int) callconv(.c) void {
 fn installHandlers() void {
     const act = std.posix.Sigaction{
         .handler = .{ .handler = forwardSignal },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = @bitCast(@as(u32, 0x10000000)), // SA_RESTART
     };
     std.posix.sigaction(std.posix.SIG.TERM, &act, null);

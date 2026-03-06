@@ -22,11 +22,33 @@
 // an array scan + 4-byte IP copy.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const sqlite = @import("sqlite");
 const log = @import("../lib/log.zig");
 const ip_mod = @import("ip.zig");
-const ebpf = @import("ebpf.zig");
+const ebpf = if (builtin.os.tag == .linux) @import("ebpf.zig") else struct {
+    pub const DnsInterceptor = struct {
+        pub fn updateService(_: *@This(), _: []const u8, _: [4]u8) void {}
+        pub fn deleteService(_: *@This(), _: []const u8) void {}
+    };
+
+    pub const LoadBalancer = struct {
+        pub fn addBackend(_: *@This(), _: [4]u8, _: [4]u8) void {}
+        pub fn removeBackend(_: *@This(), _: [4]u8, _: [4]u8) void {}
+    };
+
+    var dns_interceptor: DnsInterceptor = .{};
+    var load_balancer: LoadBalancer = .{};
+
+    pub fn getDnsInterceptor() ?*DnsInterceptor {
+        return &dns_interceptor;
+    }
+
+    pub fn getLoadBalancer() ?*LoadBalancer {
+        return &load_balancer;
+    }
+};
 const policy = @import("policy.zig");
 
 // -- service registry --
@@ -135,9 +157,15 @@ pub fn registerService(name: []const u8, container_id: []const u8, container_ip:
     if (detectNameConflict(name, container_id, container_ip)) |prev| {
         log.warn("dns: service name '{s}' reassigned from {d}.{d}.{d}.{d} ({s}) to {d}.{d}.{d}.{d} ({s})", .{
             name,
-            prev.ip[0],   prev.ip[1],   prev.ip[2],   prev.ip[3],
+            prev.ip[0],
+            prev.ip[1],
+            prev.ip[2],
+            prev.ip[3],
             prev.container_id[0..prev.container_id_len],
-            container_ip[0], container_ip[1], container_ip[2], container_ip[3],
+            container_ip[0],
+            container_ip[1],
+            container_ip[2],
+            container_ip[3],
             container_id[0..@min(container_id.len, 12)],
         });
     }
@@ -535,7 +563,6 @@ pub fn parseResolvConf(content: []const u8) ?[4]u8 {
 
     return null;
 }
-
 
 var resolver_thread: ?std.Thread = null;
 var resolver_socket: ?posix.socket_t = null;
@@ -1154,7 +1181,6 @@ test "detectNameConflict — unknown name is not a conflict" {
     const conflict = detectNameConflict("new_svc", "ctr_001", .{ 10, 42, 0, 10 });
     try std.testing.expect(conflict == null);
 }
-
 
 // -- ipToU32 tests --
 

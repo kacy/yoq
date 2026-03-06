@@ -227,7 +227,7 @@ pub const Cgroup = struct {
     pub fn readAllMetrics(self: *const Cgroup) CgroupMetrics {
         var metrics: CgroupMetrics = .{};
 
-        const dir = std.fs.cwd().openDir(self.path(), .{}) catch return metrics;
+        var dir = std.fs.cwd().openDir(self.path(), .{}) catch return metrics;
         defer dir.close();
 
         // memory.current
@@ -278,7 +278,7 @@ pub const Cgroup = struct {
         };
 
         // brief sleep to let the kernel reap killed processes
-        std.time.sleep(10 * std.time.ns_per_ms);
+        std.Thread.sleep(10 * std.time.ns_per_ms);
 
         std.fs.cwd().deleteDir(self.path()) catch return CgroupError.DeleteFailed;
     }
