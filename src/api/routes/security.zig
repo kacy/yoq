@@ -22,7 +22,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
     if (path.len > "/v1/secrets/".len and std.mem.startsWith(u8, path, "/v1/secrets/")) {
         const name = path["/v1/secrets/".len..];
         if (std.mem.indexOf(u8, name, "/") == null and name.len > 0) {
-            if (request.method == .GET) return handleGetSecret(alloc, name);
+            if (request.method == .GET) return common.methodNotAllowed();
             if (request.method == .DELETE) return handleDeleteSecret(alloc, name);
             return common.methodNotAllowed();
         }
@@ -100,33 +100,6 @@ fn handleListSecrets(alloc: std.mem.Allocator) Response {
         writer.writeByte('"') catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
-}
-
-fn handleGetSecret(alloc: std.mem.Allocator, name: []const u8) Response {
-    var sec = openSecretsStore(alloc) orelse return common.internalError();
-    defer closeSecretsStore(alloc, &sec);
-
-    const value = sec.get(name) catch |err| {
-        if (err == secrets.SecretsError.NotFound) return common.notFound();
-        return common.internalError();
-    };
-    defer {
-        std.crypto.secureZero(u8, value);
-        alloc.free(value);
-    }
-
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeAll("{\"name\":\"") catch return common.internalError();
-    json_helpers.writeJsonEscaped(writer, name) catch return common.internalError();
-    writer.writeAll("\",\"value\":\"") catch return common.internalError();
-    json_helpers.writeJsonEscaped(writer, value) catch return common.internalError();
-    writer.writeAll("\"}") catch return common.internalError();
 
     const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };

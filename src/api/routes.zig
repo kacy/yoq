@@ -1623,10 +1623,8 @@ test "dispatch GET /v1/secrets/mykey routes correctly" {
         "GET /v1/secrets/mykey HTTP/1.1\r\nHost: localhost\r\n\r\n",
     )).?;
     const resp = dispatch(req, std.testing.allocator);
-    defer if (resp.allocated) std.testing.allocator.free(resp.body);
 
-    // will fail to open DB, but routing is correct
-    try std.testing.expect(resp.status == .not_found or resp.status == .internal_server_error);
+    try std.testing.expectEqual(http.StatusCode.method_not_allowed, resp.status);
 }
 
 test "dispatch DELETE /v1/secrets/mykey routes correctly" {
