@@ -86,7 +86,7 @@ yoq policy list                      list all policy rules
 # certificates
 yoq cert provision <domain>          provision TLS certificate via ACME
 yoq cert renew <domain>              renew an existing certificate
-yoq cert install <domain> --cert-file <path> --key-file <path>
+yoq cert install <domain> --cert <path> --key <path>
 yoq cert list                        list managed certificates
 yoq cert rm <domain>                 remove a certificate
 
