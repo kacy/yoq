@@ -178,8 +178,8 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     defer img.deinit();
 
     // resolve effective command per OCI spec
-    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, flags.user_argv.items) catch {
-        writeErr("failed to resolve command: out of memory\n", .{});
+    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, flags.user_argv.items) catch |err| {
+        writeErr("failed to resolve command: {}\n", .{err});
         std.process.exit(1);
     };
     defer resolved.args.deinit(alloc);
@@ -199,8 +199,8 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         .pid = null,
         .exit_code = null,
         .created_at = std.time.timestamp(),
-    }) catch {
-        writeErr("failed to save container state\n", .{});
+    }) catch |err| {
+        writeErr("failed to save container state: {}\n", .{err});
         std.process.exit(1);
     };
 
@@ -231,11 +231,12 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // forward SIGINT/SIGTERM to the container so Ctrl+C stops it
     installSignalHandlers();
 
-    c.start() catch {
+    c.start() catch |err| {
         // clean up the DB record and dirs so yoq ps doesn't show a ghost
         store.remove(id) catch {};
         container.cleanupContainerDirs(id);
-        writeErr("failed to start container\n", .{});
+        writeErr("failed to start container: {}\n", .{err});
+        writeErr("hint: container start requires root or user namespace support\n", .{});
         std.process.exit(1);
     };
 
@@ -247,8 +248,8 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 }
 
 pub fn ps(alloc: std.mem.Allocator) void {
-    var ids = store.listIds(alloc) catch {
-        writeErr("failed to list containers\n", .{});
+    var ids = store.listIds(alloc) catch |err| {
+        writeErr("failed to list containers: {}\n", .{err});
         std.process.exit(1);
     };
     defer {
@@ -263,8 +264,8 @@ pub fn ps(alloc: std.mem.Allocator) void {
 
     write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ "CONTAINER ID", "STATUS", "IP", "COMMAND" });
     for (ids.items) |id| {
-        const record = store.load(alloc, id) catch {
-            write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, "unknown", "-", "-" });
+        const record = store.load(alloc, id) catch |err| {
+            write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, @tagName(err), "-", "-" });
             continue;
         };
         defer record.deinit(alloc);
@@ -290,8 +291,8 @@ pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const id = requireArg(args, "usage: yoq stop <container-id>\n");
 
     // load container record to get the pid
-    const record = store.load(alloc, id) catch {
-        writeErr("container not found: {s}\n", .{id});
+    const record = store.load(alloc, id) catch |err| {
+        writeErr("container not found: {s} ({})\n", .{ id, err });
         std.process.exit(1);
     };
     defer record.deinit(alloc);
@@ -314,8 +315,8 @@ pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         return;
     };
 
-    process.terminate(pid) catch {
-        writeErr("failed to stop container {s}\n", .{id});
+    process.terminate(pid) catch |err| {
+        writeErr("failed to stop container {s}: {}\n", .{ id, err });
         std.process.exit(1);
     };
 
@@ -335,8 +336,8 @@ pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    const record = store.load(alloc, id) catch {
-        writeErr("container not found: {s}\n", .{id});
+    const record = store.load(alloc, id) catch |err| {
+        writeErr("container not found: {s} ({})\n", .{ id, err });
         std.process.exit(1);
     };
     defer record.deinit(alloc);
@@ -371,8 +372,8 @@ pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         .args = exec_args.items,
         .env = &.{},
         .working_dir = "/",
-    }) catch {
-        writeErr("failed to exec in container {s}\n", .{id});
+    }) catch |err| {
+        writeErr("failed to exec in container {s}: {}\n", .{ id, err });
         std.process.exit(1);
     };
 
@@ -383,8 +384,8 @@ pub fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const id = requireArg(args, "usage: yoq rm <container-id>\n");
 
     // load record to check status and get network info
-    const record = store.load(alloc, id) catch {
-        writeErr("container not found: {s}\n", .{id});
+    const record = store.load(alloc, id) catch |err| {
+        writeErr("container not found: {s} ({})\n", .{ id, err });
         std.process.exit(1);
     };
 
@@ -423,8 +424,8 @@ pub fn log(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     else
         logs.readLogs(alloc, id);
 
-    const data = content catch {
-        writeErr("no logs found for container: {s}\n", .{id});
+    const data = content catch |err| {
+        writeErr("no logs found for container: {s} ({})\n", .{ id, err });
         std.process.exit(1);
     };
     defer alloc.free(data);
