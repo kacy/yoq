@@ -8,7 +8,7 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 ## status
 
-**~95% complete.** ~48k lines of Zig, ~984 tests. all seven phases are implemented.
+**~95% complete.** ~51k lines of Zig, ~1019 tests. all seven phases are implemented.
 
 **container runtime (phase 1) — complete:** containers run in isolated namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. process supervision, log capture, and exec into running containers all work. rootless containers via user namespace uid/gid mappings are implemented.
 
@@ -31,19 +31,20 @@ Linux kernel 6.1+ required. commands grouped by function:
 ```
 # containers
 yoq run <image|rootfs> [command]     pull and run a container
-yoq ps                               list containers
-yoq stop <id>                        stop a running container
-yoq rm <id>                          remove a stopped container
-yoq logs <id> [--tail N]             view container output
-yoq exec <id> <cmd> [args...]        run a command in a running container
+yoq ps [--json]                      list containers
+yoq stop <id|name>                   stop a running container
+yoq rm <id|name>                     remove a stopped container
+yoq logs <id|name> [--tail N]        view container output
+yoq restart <id|name>                restart a container
+yoq exec <id|name> <cmd> [args...]   run a command in a running container
 
 # images
 yoq pull <image>                     pull an image from a registry
 yoq push <source> [target]           push an image to a registry
-yoq images                           list pulled images
+yoq images [--json]                  list pulled images
 yoq inspect <image>                  show image metadata and layers
 yoq rmi <image>                      remove a pulled image
-yoq prune                            remove unreferenced blobs and layers
+yoq prune [--json]                   remove unreferenced blobs and layers
 
 # build
 yoq build [-t tag] [-f Dockerfile] . build an image from a Dockerfile
@@ -103,7 +104,7 @@ yoq nodes [--server host:port]       list cluster agent nodes
 yoq drain <id> [--server host:port]  drain an agent node
 
 # meta
-yoq version                          print version
+yoq version [--json]                 print version
 yoq help                             show help
 yoq completion <bash|zsh|fish>       output shell completion script
 ```
@@ -111,6 +112,8 @@ yoq completion <bash|zsh|fish>       output shell completion script
 crons defined in the manifest run automatically when `yoq up` starts — no separate command needed.
 
 deployment, metrics, and certificate commands accept `--server host:port` for remote cluster operation.
+
+`--json` is currently available on `ps`, `images`, `prune`, and `version`.
 
 ## requirements
 
@@ -267,6 +270,7 @@ the [`examples/`](examples/) directory has ready-to-use manifests:
 - **[redis](examples/redis/)** — single service, simplest possible manifest
 - **[web-app](examples/web-app/)** — multi-service app with postgres, redis, workers, and health checks
 - **[cron](examples/cron/)** — scheduled database backups with `every = "1h"`
+- **[cluster](examples/cluster/)** — minimal multi-node cluster setup and agent join flow
 
 ```bash
 yoq up -f examples/redis/manifest.toml
@@ -276,7 +280,6 @@ yoq up -f examples/redis/manifest.toml
 
 ### future directions
 
-- `--json` output flag for scripting
 - web UI (explicitly deferred — CLI only for now)
 - GPU scheduling
 - multi-region federation

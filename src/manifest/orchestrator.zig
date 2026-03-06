@@ -909,7 +909,7 @@ pub fn runOneShot(
         return false;
     };
 
-    const exit_code = c.exit_code orelse 255;
+    const exit_code = c.wait() catch 255;
 
     // clean up
     logs.deleteLogFile(id);
@@ -1038,14 +1038,13 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
 
         const start_time = std.time.nanoTimestamp();
 
-        // this blocks until the container exits
         c.start() catch {
             orch.states[idx].status = .failed;
             return;
         };
 
         const run_duration_ns = std.time.nanoTimestamp() - start_time;
-        const exit_code = c.exit_code orelse 255;
+        const exit_code = c.wait() catch 255;
 
         // clean up this container's resources before potentially restarting
         logs.deleteLogFile(id);

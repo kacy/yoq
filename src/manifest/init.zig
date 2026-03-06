@@ -219,6 +219,6 @@ test "generateManifest round-trip through loader" {
     try testing.expectEqualStrings("api", manifest.services[0].name);
     try testing.expectEqualStrings("node:20", manifest.services[0].image);
     try testing.expectEqual(@as(usize, 1), manifest.services[0].ports.len);
-    try testing.expectEqual(@as(u16, 8080), manifest.services[0].ports[0].host);
-    try testing.expectEqual(@as(u16, 8080), manifest.services[0].ports[0].container);
+    try testing.expectEqual(@as(u16, 8080), manifest.services[0].ports[0].host_port);
+    try testing.expectEqual(@as(u16, 8080), manifest.services[0].ports[0].container_port);
 }

@@ -208,6 +208,24 @@ pub fn load(alloc: std.mem.Allocator, id: []const u8) StoreError!ContainerRecord
     return rowToRecord(row);
 }
 
+/// find the most recent container record by hostname.
+/// caller owns the returned strings.
+pub fn findByHostname(alloc: std.mem.Allocator, hostname: []const u8) StoreError!?ContainerRecord {
+    const db = try getDb();
+    defer releaseDb();
+
+    const row = (db.oneAlloc(
+        ContainerRow,
+        alloc,
+        "SELECT id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at" ++
+            " FROM containers WHERE hostname = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{hostname},
+    ) catch return StoreError.ReadFailed) orelse return null;
+
+    return rowToRecord(row);
+}
+
 /// delete a container record
 pub fn remove(id: []const u8) StoreError!void {
     const db = try getDb();
