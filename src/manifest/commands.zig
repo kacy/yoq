@@ -69,15 +69,18 @@ pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 
     // load and parse the manifest (catches syntax errors, missing fields, cycles, etc.)
-    var manifest = manifest_loader.load(alloc, manifest_path) catch {
-        if (!quiet) writeErr("failed to load manifest: {s}\n", .{manifest_path});
+    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
+        if (!quiet) {
+            writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
+            writeErr("hint: create one with 'yoq init'\n", .{});
+        }
         std.process.exit(1);
     };
     defer manifest.deinit();
 
     // run semantic checks on the parsed manifest
-    var result = validator.check(alloc, &manifest) catch {
-        if (!quiet) writeErr("validation failed: out of memory\n", .{});
+    var result = validator.check(alloc, &manifest) catch |err| {
+        if (!quiet) writeErr("validation failed: {}\n", .{err});
         std.process.exit(1);
     };
     defer result.deinit();
@@ -151,8 +154,9 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 
     // load and validate manifest
-    var manifest = manifest_loader.load(alloc, manifest_path) catch {
-        writeErr("failed to load manifest: {s}\n", .{manifest_path});
+    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
+        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
+        writeErr("hint: create one with 'yoq init'\n", .{});
         std.process.exit(1);
     };
     defer manifest.deinit();
@@ -173,8 +177,8 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     // derive app name from cwd basename
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch {
-        writeErr("failed to resolve working directory\n", .{});
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
+        writeErr("failed to resolve working directory: {}\n", .{err});
         std.process.exit(1);
     };
     const app_name = std.fs.path.basename(cwd);
@@ -197,8 +201,8 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     orchestrator.installSignalHandlers();
 
     // create and run orchestrator
-    var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name) catch {
-        writeErr("failed to initialize orchestrator\n", .{});
+    var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name) catch |err| {
+        writeErr("failed to initialize orchestrator: {}\n", .{err});
         std.process.exit(1);
     };
     defer orch.deinit();
@@ -209,8 +213,8 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         orch.service_filter = service_names.items;
     }
 
-    orch.startAll() catch {
-        writeErr("failed to start services\n", .{});
+    orch.startAll() catch |err| {
+        writeErr("failed to start services: {}\n", .{err});
         std.process.exit(1);
     };
 
@@ -321,8 +325,9 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
-    var resp = http_client.postWithAuth(alloc, server_ip, server_port, "/deploy", json_buf.items, token) catch {
-        writeErr("failed to connect to cluster server\n", .{});
+    var resp = http_client.postWithAuth(alloc, server_ip, server_port, "/deploy", json_buf.items, token) catch |err| {
+        writeErr("failed to connect to cluster server: {}\n", .{err});
+        writeErr("hint: is the server running? try 'yoq serve' or 'yoq init-server'\n", .{});
         std.process.exit(1);
     };
     defer resp.deinit(alloc);
@@ -348,23 +353,24 @@ pub fn down(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 
     // load manifest to get service names and ordering
-    var manifest = manifest_loader.load(alloc, manifest_path) catch {
-        writeErr("failed to load manifest: {s}\n", .{manifest_path});
+    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
+        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
+        writeErr("hint: create one with 'yoq init'\n", .{});
         std.process.exit(1);
     };
     defer manifest.deinit();
 
     // derive app name from cwd basename
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch {
-        writeErr("failed to resolve working directory\n", .{});
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
+        writeErr("failed to resolve working directory: {}\n", .{err});
         std.process.exit(1);
     };
     const app_name = std.fs.path.basename(cwd);
 
     // find all containers belonging to this app
-    var ids = store.listAppContainerIds(alloc, app_name) catch {
-        writeErr("failed to query app containers\n", .{});
+    var ids = store.listAppContainerIds(alloc, app_name) catch |err| {
+        writeErr("failed to query app containers: {}\n", .{err});
         std.process.exit(1);
     };
     defer {
@@ -454,8 +460,8 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    var deployments = store.listDeployments(alloc, service_name) catch {
-        writeErr("failed to read deployment history\n", .{});
+    var deployments = store.listDeployments(alloc, service_name) catch |err| {
+        writeErr("failed to read deployment history: {}\n", .{err});
         std.process.exit(1);
     };
     defer {
@@ -509,8 +515,9 @@ pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         std.process.exit(1);
     };
 
-    var manifest = manifest_loader.load(alloc, manifest_path) catch {
-        writeErr("failed to load manifest: {s}\n", .{manifest_path});
+    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
+        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
+        writeErr("hint: create one with 'yoq init'\n", .{});
         std.process.exit(1);
     };
     defer manifest.deinit();

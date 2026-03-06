@@ -59,8 +59,8 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
     defer routes.api_token = null;
 
-    var server = api_server.Server.init(alloc, port, .{ 127, 0, 0, 1 }) catch {
-        writeErr("failed to start server on port {d}\n", .{port});
+    var server = api_server.Server.init(alloc, port, .{ 127, 0, 0, 1 }) catch |err| {
+        writeErr("failed to start server on port {d}: {}\n", .{ port, err });
         std.process.exit(1);
     };
     defer server.deinit();
@@ -119,14 +119,14 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
 
     // resolve data directory
     var data_dir_buf: [paths.max_path]u8 = undefined;
-    const data_dir = cluster_config.defaultDataDir(&data_dir_buf) catch {
-        writeErr("failed to create cluster data directory\n", .{});
+    const data_dir = cluster_config.defaultDataDir(&data_dir_buf) catch |err| {
+        writeErr("failed to create cluster data directory: {}\n", .{err});
         std.process.exit(1);
     };
 
     // parse peers
-    const peers = cluster_config.parsePeers(alloc, peers_str) catch {
-        writeErr("invalid peers format. use: id@host:port,id@host:port\n", .{});
+    const peers = cluster_config.parsePeers(alloc, peers_str) catch |err| {
+        writeErr("invalid peers format: {} (expected id@host:port,id@host:port)\n", .{err});
         std.process.exit(1);
     };
     defer alloc.free(peers);
@@ -152,8 +152,8 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
         .port = raft_port,
         .peers = peers,
         .data_dir = data_dir,
-    }) catch {
-        writeErr("failed to initialize raft node\n", .{});
+    }) catch |err| {
+        writeErr("failed to initialize raft node: {}\n", .{err});
         std.process.exit(1);
     };
     defer node.deinit();
@@ -163,8 +163,8 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
         node.transport.shared_key = key;
     }
 
-    node.start() catch {
-        writeErr("failed to start raft node\n", .{});
+    node.start() catch |err| {
+        writeErr("failed to start raft node: {}\n", .{err});
         std.process.exit(1);
     };
 
@@ -189,8 +189,8 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     routes.api_token = token;
     defer routes.api_token = null;
 
-    var server = api_server.Server.init(alloc, api_port, .{ 0, 0, 0, 0 }) catch {
-        writeErr("failed to start API server on port {d}\n", .{api_port});
+    var server = api_server.Server.init(alloc, api_port, .{ 0, 0, 0, 0 }) catch |err| {
+        writeErr("failed to start API server on port {d}: {}\n", .{ api_port, err });
         std.process.exit(1);
     };
     defer server.deinit();
@@ -247,8 +247,9 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var agent = cluster_agent.Agent.init(alloc, server_addr, api_port, join_token);
 
     // register with server
-    agent.register() catch {
-        writeErr("failed to register with server\n", .{});
+    agent.register() catch |err| {
+        writeErr("failed to register with server: {}\n", .{err});
+        writeErr("hint: check that the server is running and the token is correct\n", .{});
         std.process.exit(1);
     };
 
@@ -269,8 +270,8 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 
     // start heartbeat loop
-    agent.start() catch {
-        writeErr("failed to start agent loop\n", .{});
+    agent.start() catch |err| {
+        writeErr("failed to start agent loop: {}\n", .{err});
         std.process.exit(1);
     };
 
@@ -303,8 +304,8 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
         agent.server_port,
         "/wireguard/peers",
         agent.token,
-    ) catch {
-        writeErr("warning: failed to fetch wireguard peers, will retry on heartbeat\n", .{});
+    ) catch |err| {
+        writeErr("warning: failed to fetch wireguard peers: {}\n", .{err});
         // still set up the interface with no peers — they'll be added
         // on the first heartbeat cycle via reconcilePeers
         net_setup.setupClusterNetworking(.{
@@ -313,8 +314,8 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
             .listen_port = agent.wg_listen_port,
             .overlay_ip = overlay_ip,
             .peers = &.{},
-        }) catch {
-            writeErr("warning: failed to set up wireguard interface\n", .{});
+        }) catch |err2| {
+            writeErr("warning: failed to set up wireguard interface: {}\n", .{err2});
         };
         return;
     };
@@ -359,8 +360,8 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
         .listen_port = agent.wg_listen_port,
         .overlay_ip = overlay_ip,
         .peers = peers_buf[0..peer_count],
-    }) catch {
-        writeErr("warning: failed to set up wireguard interface\n", .{});
+    }) catch |err| {
+        writeErr("warning: failed to set up wireguard interface: {}\n", .{err});
         return;
     };
 
@@ -403,8 +404,8 @@ pub fn cluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
 fn clusterStatus(alloc: std.mem.Allocator) void {
     // query the local API server for cluster status
-    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch {
-        writeErr("failed to create socket\n", .{});
+    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch |err| {
+        writeErr("failed to create socket: {}\n", .{err});
         return;
     };
     defer std.posix.close(fd);
@@ -414,14 +415,15 @@ fn clusterStatus(alloc: std.mem.Allocator) void {
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 7700);
-    std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {
-        writeErr("cannot connect to API server at localhost:7700\n", .{});
+    std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| {
+        writeErr("cannot connect to API server at localhost:7700: {}\n", .{err});
+        writeErr("hint: start the server with 'yoq serve' or 'yoq init-server'\n", .{});
         return;
     };
 
     const request = "GET /cluster/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    _ = std.posix.write(fd, request) catch {
-        writeErr("failed to send request\n", .{});
+    _ = std.posix.write(fd, request) catch |err| {
+        writeErr("failed to send request: {}\n", .{err});
         return;
     };
 
@@ -462,8 +464,9 @@ pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var token_buf: [64]u8 = undefined;
     const token = readApiToken(&token_buf);
 
-    var resp = http_client.getWithAuth(alloc, server_addr, server_port, "/agents", token) catch {
-        writeErr("failed to connect to server\n", .{});
+    var resp = http_client.getWithAuth(alloc, server_addr, server_port, "/agents", token) catch |err| {
+        writeErr("failed to connect to server: {}\n", .{err});
+        writeErr("hint: start the server with 'yoq serve' or 'yoq init-server'\n", .{});
         std.process.exit(1);
     };
     defer resp.deinit(alloc);
@@ -542,8 +545,9 @@ pub fn drain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var token_buf: [64]u8 = undefined;
     const token = readApiToken(&token_buf);
 
-    var resp = http_client.postWithAuth(alloc, server_addr, server_port, path, "", token) catch {
-        writeErr("failed to connect to server\n", .{});
+    var resp = http_client.postWithAuth(alloc, server_addr, server_port, path, "", token) catch |err| {
+        writeErr("failed to connect to server: {}\n", .{err});
+        writeErr("hint: start the server with 'yoq serve' or 'yoq init-server'\n", .{});
         std.process.exit(1);
     };
     defer resp.deinit(alloc);
