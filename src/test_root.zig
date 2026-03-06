@@ -1,0 +1,77 @@
+const std = @import("std");
+
+test "smoke test" {
+    try std.testing.expect(true);
+}
+
+// pull in tests from all modules
+comptime {
+    _ = @import("runtime/container.zig");
+    _ = @import("runtime/cgroups.zig");
+    _ = @import("runtime/namespaces.zig");
+    _ = @import("runtime/filesystem.zig");
+    _ = @import("runtime/security.zig");
+    _ = @import("runtime/process.zig");
+    _ = @import("runtime/exec.zig");
+    _ = @import("runtime/logs.zig");
+    _ = @import("runtime/commands.zig");
+    _ = @import("runtime/container_commands.zig");
+    _ = @import("state/store.zig");
+    _ = @import("state/schema.zig");
+    _ = @import("state/commands.zig");
+    _ = @import("lib/cli.zig");
+    _ = @import("lib/cmd.zig");
+    _ = @import("lib/command_registry.zig");
+    _ = @import("lib/exec_helpers.zig");
+    _ = @import("lib/log.zig");
+    _ = @import("lib/paths.zig");
+    _ = @import("lib/toml.zig");
+    _ = @import("lib/json_helpers.zig");
+    _ = @import("lib/sql.zig");
+    _ = @import("image/spec.zig");
+    _ = @import("image/store.zig");
+    _ = @import("image/registry.zig");
+    _ = @import("image/layer.zig");
+    _ = @import("image/oci.zig");
+    _ = @import("image/commands.zig");
+    _ = @import("network/netlink.zig");
+    _ = @import("network/bridge.zig");
+    _ = @import("network/dns.zig");
+    _ = @import("network/ip.zig");
+    _ = @import("network/nat.zig");
+    _ = @import("network/setup.zig");
+    _ = @import("network/wireguard.zig");
+    _ = @import("network/ebpf.zig");
+    _ = @import("network/commands.zig");
+    _ = @import("build/dockerfile.zig");
+    _ = @import("build/context.zig");
+    _ = @import("build/engine.zig");
+    _ = @import("build/manifest.zig");
+    _ = @import("build/commands.zig");
+    _ = @import("manifest/spec.zig");
+    _ = @import("manifest/loader.zig");
+    _ = @import("manifest/orchestrator.zig");
+    _ = @import("manifest/health.zig");
+    _ = @import("manifest/update.zig");
+    _ = @import("manifest/commands.zig");
+    _ = @import("manifest/cron_scheduler.zig");
+    _ = @import("dev/log_mux.zig");
+    _ = @import("dev/watcher.zig");
+    _ = @import("api/http.zig");
+    _ = @import("api/routes.zig");
+    _ = @import("api/server.zig");
+    _ = @import("cluster/raft_types.zig");
+    _ = @import("cluster/log.zig");
+    _ = @import("cluster/raft.zig");
+    _ = @import("cluster/transport.zig");
+    _ = @import("cluster/state_machine.zig");
+    _ = @import("cluster/node.zig");
+    _ = @import("cluster/config.zig");
+    _ = @import("cluster/agent_types.zig");
+    _ = @import("cluster/registry.zig");
+    _ = @import("cluster/http_client.zig");
+    _ = @import("cluster/agent.zig");
+    _ = @import("cluster/scheduler.zig");
+    _ = @import("cluster/commands.zig");
+    _ = @import("tls/commands.zig");
+}
