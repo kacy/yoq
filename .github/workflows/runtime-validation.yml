@@ -1,0 +1,115 @@
+name: runtime-validation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 15 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  container-runtime-smoke:
+    name: container-runtime-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-runtime
+
+      - name: build yoq
+        shell: bash
+        run: zig build
+
+      - name: run safe cli smoke checks
+        shell: bash
+        run: |
+          ./zig-out/bin/yoq version
+          ./zig-out/bin/yoq help > /dev/null
+          ./zig-out/bin/yoq validate -f examples/redis/manifest.toml
+          ./zig-out/bin/yoq validate -f examples/web-app/manifest.toml
+          ./zig-out/bin/yoq validate -f examples/cron/manifest.toml
+
+  linux-feature-probe:
+    name: linux-feature-probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: collect host feature report
+        shell: bash
+        run: |
+          report="$RUNNER_TEMP/linux-feature-report.txt"
+          {
+            echo "# yoq runtime probe"
+            echo
+            echo "## kernel"
+            uname -a
+            echo
+            echo "## os-release"
+            cat /etc/os-release
+            echo
+            echo "## cgroup"
+            mount | grep cgroup || true
+            echo
+            echo "## namespace tools"
+            command -v unshare || true
+            command -v nsenter || true
+            echo
+            echo "## bpf tools"
+            command -v bpftool || true
+            command -v clang || true
+            echo
+            echo "## sysctls"
+            sysctl kernel.unprivileged_userns_clone || true
+            sysctl user.max_user_namespaces || true
+          } > "$report"
+
+      - name: upload runtime probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-feature-probe
+          path: ${{ runner.temp }}/linux-feature-report.txt
+          retention-days: 7
+
+  manual-bpf-runtime-check:
+    name: manual-bpf-runtime-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-runtime-bpf
+
+      - name: install clang
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang llvm
+
+      - name: compile bpf assets
+        shell: bash
+        run: zig build bpf
+
+      - name: record generated bpf diff
+        shell: bash
+        run: git diff -- src/network/bpf > "$RUNNER_TEMP/runtime-bpf-diff.patch" || true
+
+      - name: upload bpf runtime diff
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-bpf-diff
+          path: ${{ runner.temp }}/runtime-bpf-diff.patch
+          retention-days: 7

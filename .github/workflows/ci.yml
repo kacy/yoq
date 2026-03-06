@@ -1,0 +1,159 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed-files:
+    name: changed-files
+    runs-on: ubuntu-latest
+    outputs:
+      non_docs: ${{ steps.filter.outputs.non_docs }}
+      bpf: ${{ steps.filter.outputs.bpf }}
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: detect changed files
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            non_docs:
+              - 'src/**'
+              - 'tools/**'
+              - 'bpf/**'
+              - 'examples/**'
+              - 'build.zig'
+              - 'build.zig.zon'
+              - 'Dockerfile'
+              - 'Makefile'
+              - '.github/**'
+            bpf:
+              - 'bpf/**'
+              - 'tools/bpf_gen.zig'
+              - 'src/network/bpf/**'
+
+  fmt-check:
+    name: fmt-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+
+      - name: verify formatting
+        shell: bash
+        run: zig fmt --check src/ tools/ build.zig
+
+  build-debug:
+    name: build-debug
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: build-debug
+      command: zig build
+      failure-artifact-name: build-debug-log
+
+  docker-build:
+    name: docker-build
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: build Docker image
+        shell: bash
+        run: docker build --tag yoq-ci:${{ github.sha }} .
+
+  unit-tests:
+    name: unit-tests
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: unit-tests
+      command: zig build test
+      timeout-minutes: 30
+      failure-artifact-name: unit-tests-log
+
+  bpf-consistency:
+    name: bpf-consistency
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.bpf == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-bpf
+
+      - name: install clang
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang llvm
+
+      - name: regenerate checked-in bpf bytecode
+        shell: bash
+        run: zig build bpf
+
+      - name: verify checked-in bpf artifacts
+        shell: bash
+        run: |
+          git diff -- src/network/bpf > "$RUNNER_TEMP/bpf-diff.patch" || true
+          git diff --exit-code -- src/network/bpf
+
+      - name: upload bpf diff
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bpf-consistency-diff
+          path: ${{ runner.temp }}/bpf-diff.patch
+          retention-days: 7
+
+  examples-validate:
+    name: examples-validate
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+
+      - name: build yoq
+        shell: bash
+        run: zig build
+
+      - name: validate example manifests
+        shell: bash
+        run: |
+          for manifest in examples/*/manifest.toml; do
+            ./zig-out/bin/yoq validate -f "$manifest"
+          done

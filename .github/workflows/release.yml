@@ -1,0 +1,223 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: version tag to release, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.version || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    name: validate-tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: resolve tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${INPUT_VERSION}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid release tag: $tag" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+  fmt-check:
+    name: fmt-check
+    needs:
+      - validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-release
+
+      - name: verify formatting
+        shell: bash
+        run: zig fmt --check src/ tools/ build.zig
+
+  build-debug:
+    name: build-debug
+    needs:
+      - validate-tag
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: build-debug
+      command: zig build
+      failure-artifact-name: release-build-debug-log
+
+  docker-build:
+    name: docker-build
+    needs:
+      - validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: build Docker image
+        shell: bash
+        run: docker build --tag yoq-release:${{ needs.validate-tag.outputs.tag }} .
+
+  examples-validate:
+    name: examples-validate
+    needs:
+      - validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-release
+
+      - name: build yoq
+        shell: bash
+        run: zig build
+
+      - name: validate example manifests
+        shell: bash
+        run: |
+          for manifest in examples/*/manifest.toml; do
+            ./zig-out/bin/yoq validate -f "$manifest"
+          done
+
+  release-build:
+    name: release-build
+    needs:
+      - validate-tag
+      - fmt-check
+      - build-debug
+      - docker-build
+      - examples-validate
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: release-build
+      command: zig build -Doptimize=ReleaseSafe
+      timeout-minutes: 30
+      failure-artifact-name: release-build-log
+      upload-path: zig-out/bin/yoq
+      upload-artifact-name: yoq-release-linux-amd64-raw
+
+  package:
+    name: package
+    needs:
+      - validate-tag
+      - release-build
+    runs-on: ubuntu-latest
+    outputs:
+      archive_name: ${{ steps.package.outputs.archive_name }}
+      checksum_name: ${{ steps.package.outputs.checksum_name }}
+    steps:
+      - name: download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: yoq-release-linux-amd64-raw
+          path: dist/raw
+
+      - name: package release artifacts
+        id: package
+        shell: bash
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          archive_name="yoq-linux-amd64-${TAG}.tar.gz"
+          checksum_name="yoq-linux-amd64-${TAG}.sha256"
+
+          chmod +x dist/raw/yoq
+          tar -C dist/raw -czf "dist/${archive_name}" yoq
+          sha256sum "dist/${archive_name}" > "dist/${checksum_name}"
+
+          echo "archive_name=$archive_name" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=$checksum_name" >> "$GITHUB_OUTPUT"
+
+      - name: upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: yoq-release-bundle
+          path: dist/*
+          retention-days: 14
+
+  publish-release:
+    name: publish-release
+    needs:
+      - validate-tag
+      - package
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: yoq-release-bundle
+          path: dist
+
+      - name: write release notes
+        shell: bash
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          notes="dist/release-notes.md"
+          {
+            echo "## yoq ${VERSION}"
+            echo
+            echo "release tag: ${TAG}"
+            echo
+            echo "artifacts:"
+            echo "- linux amd64 tarball"
+            echo "- sha256 checksum"
+            echo
+            echo "## changelog"
+            if [ -f CHANGELOG.md ]; then
+              awk '
+                BEGIN { printing = 0; seen = 0 }
+                tolower($0) == "## unreleased" { printing = 1; seen = 1 }
+                printing { print }
+              ' CHANGELOG.md
+            else
+              echo "CHANGELOG.md not found."
+            fi
+          } > "$notes"
+
+      - name: publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate-tag.outputs.tag }}
+          name: yoq ${{ needs.validate-tag.outputs.tag }}
+          body_path: dist/release-notes.md
+          files: |
+            dist/${{ needs.package.outputs.archive_name }}
+            dist/${{ needs.package.outputs.checksum_name }}
