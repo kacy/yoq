@@ -1,0 +1,24 @@
+# service with a scheduled backup cron
+#
+# the backup cron runs pg_dump every hour automatically when `yoq up` starts.
+
+[service.postgres]
+image = "postgres:15"
+env = ["POSTGRES_PASSWORD=secret", "POSTGRES_DB=app"]
+volumes = ["pgdata:/var/lib/postgresql/data"]
+restart = "always"
+
+[service.postgres.health_check]
+type = "tcp"
+port = 5432
+
+[cron.backup]
+image = "postgres:15"
+command = ["pg_dump", "-h", "postgres", "-U", "postgres", "-d", "app", "-f", "/backups/dump.sql"]
+every = "1h"
+env = ["PGPASSWORD=secret"]
+volumes = ["backups:/backups"]
+
+[volume.pgdata]
+
+[volume.backups]

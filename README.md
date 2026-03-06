@@ -256,6 +256,18 @@ src/
     cmd.zig                shared command execution helpers
 ```
 
+## examples
+
+the [`examples/`](examples/) directory has ready-to-use manifests:
+
+- **[redis](examples/redis/)** — single service, simplest possible manifest
+- **[web-app](examples/web-app/)** — multi-service app with postgres, redis, workers, and health checks
+- **[cron](examples/cron/)** — scheduled database backups with `every = "1h"`
+
+```bash
+yoq up -f examples/redis/manifest.toml
+```
+
 ## what's next
 
 ### remaining work
