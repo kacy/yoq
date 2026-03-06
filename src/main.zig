@@ -226,6 +226,7 @@ comptime {
     _ = @import("manifest/health.zig");
     _ = @import("manifest/update.zig");
     _ = @import("manifest/commands.zig");
+    _ = @import("manifest/cron_scheduler.zig");
     _ = @import("dev/log_mux.zig");
     _ = @import("dev/watcher.zig");
     _ = @import("api/http.zig");

@@ -45,6 +45,8 @@ pub const LoadError = error{
     CircularDependency,
     /// the manifest contains no service definitions
     NoServices,
+    /// a cron schedule interval is missing or malformed (expected "30s", "5m", "1h")
+    InvalidSchedule,
     /// memory allocation failed during parsing
     OutOfMemory,
 };
@@ -216,6 +218,25 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
+    // parse crons from [cron.*] subtables
+    var crons: std.ArrayListUnmanaged(spec.Cron) = .empty;
+    defer {
+        for (crons.items) |c| c.deinit(alloc);
+        crons.deinit(alloc);
+    }
+
+    if (root.getTable("cron")) |cron_table| {
+        for (cron_table.entries.keys(), cron_table.entries.values()) |name, val| {
+            switch (val) {
+                .table => |tbl| {
+                    const c = try parseCron(alloc, name, tbl);
+                    crons.append(alloc, c) catch return LoadError.OutOfMemory;
+                },
+                else => {},
+            }
+        }
+    }
+
     // parse volumes from [volume.*] subtables
     var volumes: std.ArrayListUnmanaged(spec.Volume) = .empty;
     defer {
@@ -252,6 +273,12 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         alloc.free(owned_workers);
     }
 
+    const owned_crons = crons.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+    errdefer {
+        for (owned_crons) |c| c.deinit(alloc);
+        alloc.free(owned_crons);
+    }
+
     const owned_volumes = volumes.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
     errdefer {
         for (owned_volumes) |vol| vol.deinit(alloc);
@@ -261,6 +288,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
     return spec.Manifest{
         .services = sorted,
         .workers = owned_workers,
+        .crons = owned_crons,
         .volumes = owned_volumes,
         .alloc = alloc,
     };
@@ -387,6 +415,78 @@ fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
         .depends_on = depends_on,
         .working_dir = working_dir,
         .volumes = volume_mounts,
+    };
+}
+
+/// parse a cron definition from its TOML subtable.
+/// crons are like workers but with a required `every` interval field.
+fn parseCron(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Cron {
+    const image_raw = table.getString("image") orelse {
+        log.err("manifest: cron '{s}' is missing required field 'image'", .{name});
+        return LoadError.MissingImage;
+    };
+
+    const every_str = table.getString("every") orelse {
+        log.err("manifest: cron '{s}' is missing required field 'every'", .{name});
+        return LoadError.InvalidSchedule;
+    };
+
+    const every = parseDuration(every_str) orelse {
+        log.err("manifest: cron '{s}' has invalid schedule '{s}' (expected e.g. '30s', '5m', '1h')", .{ name, every_str });
+        return LoadError.InvalidSchedule;
+    };
+
+    const command = try parseStringArray(alloc, table.getArray("command"));
+    errdefer {
+        for (command) |cmd| alloc.free(cmd);
+        alloc.free(command);
+    }
+
+    const env = try parseEnvVars(alloc, table.getArray("env"));
+    errdefer {
+        for (env) |e| alloc.free(e);
+        alloc.free(env);
+    }
+
+    const volume_mounts = try parseVolumeMounts(alloc, table.getArray("volumes"));
+    errdefer {
+        for (volume_mounts) |vm| vm.deinit(alloc);
+        alloc.free(volume_mounts);
+    }
+
+    const working_dir: ?[]const u8 = if (table.getString("working_dir")) |wd|
+        alloc.dupe(u8, wd) catch return LoadError.OutOfMemory
+    else
+        null;
+    errdefer if (working_dir) |wd| alloc.free(wd);
+
+    return .{
+        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
+        .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
+        .command = command,
+        .env = env,
+        .working_dir = working_dir,
+        .volumes = volume_mounts,
+        .every = every,
+    };
+}
+
+/// parse a duration string like "30s", "5m", "1h", "24h" into seconds.
+/// returns null if the format is invalid.
+fn parseDuration(s: []const u8) ?u64 {
+    if (s.len < 2) return null;
+
+    const suffix = s[s.len - 1];
+    const number_part = s[0 .. s.len - 1];
+
+    const value = std.fmt.parseInt(u64, number_part, 10) catch return null;
+    if (value == 0) return null;
+
+    return switch (suffix) {
+        's' => value,
+        'm' => value * 60,
+        'h' => value * 3600,
+        else => null,
     };
 }
 
@@ -1800,5 +1900,71 @@ test "worker — missing image returns error" {
         \\
         \\[worker.migrate]
         \\command = ["python", "manage.py", "migrate"]
+    ));
+}
+
+// -- cron tests --
+
+test "parseDuration — valid durations" {
+    try std.testing.expectEqual(@as(?u64, 30), parseDuration("30s"));
+    try std.testing.expectEqual(@as(?u64, 300), parseDuration("5m"));
+    try std.testing.expectEqual(@as(?u64, 3600), parseDuration("1h"));
+    try std.testing.expectEqual(@as(?u64, 86400), parseDuration("24h"));
+    try std.testing.expectEqual(@as(?u64, 1), parseDuration("1s"));
+}
+
+test "parseDuration — invalid durations" {
+    try std.testing.expectEqual(@as(?u64, null), parseDuration(""));
+    try std.testing.expectEqual(@as(?u64, null), parseDuration("s"));
+    try std.testing.expectEqual(@as(?u64, null), parseDuration("0s"));
+    try std.testing.expectEqual(@as(?u64, null), parseDuration("5d"));
+    try std.testing.expectEqual(@as(?u64, null), parseDuration("abc"));
+    try std.testing.expectEqual(@as(?u64, null), parseDuration("10"));
+}
+
+test "cron parsing — basic cron" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\
+        \\[cron.backup]
+        \\image = "postgres:15"
+        \\command = ["pg_dump", "-h", "db", "-U", "postgres"]
+        \\every = "24h"
+        \\env = ["PGPASSWORD=secret"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.crons.len);
+    const c = manifest.crons[0];
+    try std.testing.expectEqualStrings("backup", c.name);
+    try std.testing.expectEqualStrings("postgres:15", c.image);
+    try std.testing.expectEqual(@as(u64, 86400), c.every);
+    try std.testing.expectEqual(@as(usize, 4), c.command.len);
+    try std.testing.expectEqual(@as(usize, 1), c.env.len);
+}
+
+test "cron — missing every returns error" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(LoadError.InvalidSchedule, loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\
+        \\[cron.backup]
+        \\image = "postgres:15"
+        \\command = ["pg_dump"]
+    ));
+}
+
+test "cron — invalid every returns error" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(LoadError.InvalidSchedule, loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\
+        \\[cron.backup]
+        \\image = "postgres:15"
+        \\every = "5d"
     ));
 }
