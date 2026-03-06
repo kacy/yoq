@@ -1,4 +1,4 @@
-.PHONY: build run test clean bpf
+.PHONY: build run test clean bpf install fmt loc
 
 build:
 	zig build
@@ -14,3 +14,12 @@ clean:
 
 bpf:
 	zig build bpf
+
+install: build
+	cp zig-out/bin/yoq /usr/local/bin/yoq
+
+fmt:
+	zig fmt src/
+
+loc:
+	@find src -name '*.zig' | xargs wc -l | tail -1
