@@ -91,7 +91,7 @@ jobs:
     uses: ./.github/workflows/_build-test.yml
     with:
       job-name: unit-tests
-      command: zig build test
+      command: zig build test -Doptimize=ReleaseSafe
       timeout-minutes: 30
       failure-artifact-name: unit-tests-log
 
@@ -149,7 +149,7 @@ jobs:
 
       - name: build yoq
         shell: bash
-        run: zig build
+        run: zig build -Doptimize=ReleaseSafe
 
       - name: validate example manifests
         shell: bash
