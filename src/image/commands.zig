@@ -524,10 +524,10 @@ pub fn prune(alloc: std.mem.Allocator) void {
     }
 
     // add build cache digests
-    var cache_digests = store.listBuildCacheDigests(alloc) catch std.ArrayList([]const u8).init(alloc);
+    var cache_digests = store.listBuildCacheDigests(alloc) catch std.ArrayList([]const u8).empty;
     defer {
         for (cache_digests.items) |d| alloc.free(d);
-        cache_digests.deinit();
+        cache_digests.deinit(alloc);
     }
     for (cache_digests.items) |d| {
         addDigestHex(&referenced, d);
@@ -540,7 +540,7 @@ pub fn prune(alloc: std.mem.Allocator) void {
     };
     defer {
         for (blobs.items) |item| alloc.free(item);
-        blobs.deinit();
+        blobs.deinit(alloc);
     }
 
     var blobs_removed: usize = 0;
@@ -568,7 +568,7 @@ pub fn prune(alloc: std.mem.Allocator) void {
     };
     defer {
         for (layers.items) |item| alloc.free(item);
-        layers.deinit();
+        layers.deinit(alloc);
     }
 
     var layers_removed: usize = 0;

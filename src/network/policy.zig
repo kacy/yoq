@@ -19,7 +19,27 @@
 // incremental operations add/remove entries for a single IP.
 
 const std = @import("std");
-const ebpf = @import("ebpf.zig");
+const builtin = @import("builtin");
+const ebpf = if (builtin.os.tag == .linux) @import("ebpf.zig") else struct {
+    pub const Enforcer = struct {
+        pub fn isolate(_: *@This(), _: u32) void {}
+        pub fn unisolate(_: *@This(), _: u32) void {}
+        pub fn addAllow(_: *@This(), _: u32, _: u32) void {}
+        pub fn addDeny(_: *@This(), _: u32, _: u32) void {}
+        pub fn removeAllow(_: *@This(), _: u32, _: u32) void {}
+        pub fn removeDeny(_: *@This(), _: u32, _: u32) void {}
+    };
+
+    var stub_enforcer: Enforcer = .{};
+
+    pub fn getPolicyEnforcer() ?*Enforcer {
+        return &stub_enforcer;
+    }
+
+    pub fn ipToNetworkOrder(addr: [4]u8) u32 {
+        return std.mem.readInt(u32, &addr, .big);
+    }
+};
 const store = @import("../state/store.zig");
 const ip_mod = @import("ip.zig");
 const log = @import("../lib/log.zig");

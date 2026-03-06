@@ -201,7 +201,6 @@ fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []cons
     const size = stat.size;
 
     // reopen and hash the compressed file
-    dst_file.close();
     const verify_file = try std.fs.cwd().openFile(dst_path, .{});
     defer verify_file.close();
 
@@ -282,8 +281,6 @@ fn writeTarFromDir(alloc: std.mem.Allocator, dir_path: []const u8, tar_path: []c
     };
 
     // now hash the tar file for uncompressed digest
-    tar_file.close();
-
     const hash_file = try std.fs.cwd().openFile(tar_path, .{});
     defer hash_file.close();
 
@@ -318,14 +315,14 @@ pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) LayerError!std.ArrayL
     const dir_path = layerDir(&dir_buf) catch return LayerError.PathTooLong;
 
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
-        return std.ArrayList([]const u8).init(alloc);
+        return std.ArrayList([]const u8).empty;
     };
     defer dir.close();
 
-    var layers = std.ArrayList([]const u8).init(alloc);
+    var layers = std.ArrayList([]const u8).empty;
     errdefer {
         for (layers.items) |item| alloc.free(item);
-        layers.deinit();
+        layers.deinit(alloc);
     }
 
     var iter = dir.iterate();
@@ -333,7 +330,7 @@ pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) LayerError!std.ArrayL
         if (entry.kind != .directory) continue;
         if (entry.name.len != 64) continue;
         const owned = alloc.dupe(u8, entry.name) catch continue;
-        layers.append(owned) catch {
+        layers.append(alloc, owned) catch {
             alloc.free(owned);
             continue;
         };
@@ -466,7 +463,7 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                 // preserve rwx bits for user/group/other, but strip
                 // setuid/setgid/sticky (security: never grant elevated
                 // privileges from extracted layers)
-                const mode: std.fs.File.Mode = entry.mode & 0o777;
+                const mode: std.fs.File.Mode = @intCast(entry.mode & 0o777);
                 const fs_file = createDirAndFile(dest_dir, entry.name, mode) catch |e| {
                     log.warn("extract: failed to create file '{s}': {}", .{ entry.name, e });
                     continue;
@@ -724,7 +721,7 @@ test "listExtractedLayersOnDisk returns empty for fresh install" {
     var layers = try listExtractedLayersOnDisk(alloc);
     defer {
         for (layers.items) |item| alloc.free(item);
-        layers.deinit();
+        layers.deinit(alloc);
     }
     // may or may not be empty depending on prior test runs, just verify no crash
     try std.testing.expect(layers.items.len >= 0);

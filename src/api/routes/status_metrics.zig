@@ -1,8 +1,46 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const http = @import("../http.zig");
 const store = @import("../../state/store.zig");
 const monitor = @import("../../runtime/monitor.zig");
-const ebpf = @import("../../network/ebpf.zig");
+const ebpf = if (builtin.os.tag == .linux) @import("../../network/ebpf.zig") else struct {
+    pub const PairEntry = struct {
+        key: struct {
+            src_ip: u32,
+            dst_ip: u32,
+            dst_port: u16,
+        },
+        value: struct {
+            connections: u64,
+            packets: u64,
+            bytes: u64,
+            errors: u64,
+        },
+    };
+
+    pub const Metrics = struct {
+        packets: u64 = 0,
+        bytes: u64 = 0,
+    };
+
+    pub const Collector = struct {
+        pub fn readMetrics(_: *@This(), _: u32) ?Metrics {
+            return null;
+        }
+
+        pub fn readPairMetrics(_: *@This(), _: []PairEntry) usize {
+            return 0;
+        }
+    };
+
+    pub fn getMetricsCollector() ?*Collector {
+        return null;
+    }
+
+    pub fn ipToNetworkOrder(_: [4]u8) u32 {
+        return 0;
+    }
+};
 const ip_mod = @import("../../network/ip.zig");
 const common = @import("common.zig");
 

@@ -114,7 +114,7 @@ fn forwardSignal(sig: c_int) callconv(.c) void {
 fn installSignalHandlers() void {
     const act = std.posix.Sigaction{
         .handler = .{ .handler = forwardSignal },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = @bitCast(@as(u32, 0x10000000)), // SA_RESTART
     };
     std.posix.sigaction(std.posix.SIG.INT, &act, null);

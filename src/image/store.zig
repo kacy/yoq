@@ -300,14 +300,14 @@ pub fn listBlobsOnDisk(alloc: std.mem.Allocator) BlobError!std.ArrayList([]const
 
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
         // directory doesn't exist yet â no blobs
-        return std.ArrayList([]const u8).init(alloc);
+        return std.ArrayList([]const u8).empty;
     };
     defer dir.close();
 
-    var blobs = std.ArrayList([]const u8).init(alloc);
+    var blobs = std.ArrayList([]const u8).empty;
     errdefer {
         for (blobs.items) |item| alloc.free(item);
-        blobs.deinit();
+        blobs.deinit(alloc);
     }
 
     var iter = dir.iterate();
@@ -316,7 +316,7 @@ pub fn listBlobsOnDisk(alloc: std.mem.Allocator) BlobError!std.ArrayList([]const
         // blob filenames are 64-char hex strings
         if (entry.name.len != 64) continue;
         const owned = alloc.dupe(u8, entry.name) catch continue;
-        blobs.append(owned) catch {
+        blobs.append(alloc, owned) catch {
             alloc.free(owned);
             continue;
         };
@@ -456,7 +456,7 @@ test "listBlobsOnDisk returns stored blobs" {
     var blobs = try listBlobsOnDisk(alloc);
     defer {
         for (blobs.items) |item| alloc.free(item);
-        blobs.deinit();
+        blobs.deinit(alloc);
     }
 
     // should contain at least the blob we just stored

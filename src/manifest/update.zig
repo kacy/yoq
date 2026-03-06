@@ -198,8 +198,8 @@ pub fn performRollingUpdate(
     });
 
     // track new containers we've started (for rollback if needed)
-    var new_container_ids = std.ArrayList([12]u8).init(alloc);
-    defer new_container_ids.deinit();
+    var new_container_ids = std.ArrayList([12]u8).empty;
+    defer new_container_ids.deinit(alloc);
 
     var progress = UpdateProgress{
         .total_containers = total,
@@ -218,17 +218,17 @@ pub fn performRollingUpdate(
         log.info("update: batch {d}-{d} of {d}", .{ batch_start, batch_end - 1, total });
 
         // step 1: start new containers for this batch
-        var batch_new_ids = std.ArrayList([12]u8).init(alloc);
-        defer batch_new_ids.deinit();
+        var batch_new_ids = std.ArrayList([12]u8).empty;
+        defer batch_new_ids.deinit(alloc);
 
         var start_failures: usize = 0;
         for (0..batch_size) |i| {
             if (context.callbacks.startContainer(context.config_snapshot, batch_start + i)) |new_id| {
-                batch_new_ids.append(new_id) catch {
+                batch_new_ids.append(alloc, new_id) catch {
                     start_failures += 1;
                     continue;
                 };
-                new_container_ids.append(new_id) catch {
+                new_container_ids.append(alloc, new_id) catch {
                     log.warn("update: failed to track new container ID for rollback (possible orphan on failure)", .{});
                 };
             } else {
@@ -473,7 +473,7 @@ fn testStopContainer(_: []const u8) bool {
 fn testStartContainer(_: []const u8, _: usize) ?[12]u8 {
     if (test_start_should_fail) return null;
     test_starts += 1;
-    return "newcontainer1".*;
+    return "newcontainer".*;
 }
 
 fn testIsHealthy(_: []const u8) bool {
