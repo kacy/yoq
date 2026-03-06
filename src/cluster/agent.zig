@@ -563,7 +563,7 @@ pub const Agent = struct {
             return;
         };
 
-        // create and start the container (blocks until exit)
+        // create and start the container
         var c = container.Container{
             .config = .{
                 .id = container_id,
@@ -585,6 +585,8 @@ pub const Agent = struct {
             cleanup(container_id);
             return;
         };
+
+        _ = c.wait() catch 255;
 
         // container exited normally
         log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });

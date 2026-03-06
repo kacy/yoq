@@ -110,6 +110,55 @@ pub fn parsePortMap(str: []const u8) ?net_setup.PortMap {
     return .{ .host_port = host_port, .container_port = container_port };
 }
 
+pub const VolumeMountSpec = struct {
+    source: []const u8,
+    target: []const u8,
+    read_only: bool = false,
+};
+
+/// parse an env var in KEY=VALUE form.
+pub fn parseEnvVar(str: []const u8) ?[]const u8 {
+    const eq = std.mem.indexOfScalar(u8, str, '=') orelse return null;
+    if (eq == 0) return null;
+    return str;
+}
+
+/// parse a volume mount in source:target[:ro] form.
+pub fn parseVolumeMount(str: []const u8) ?VolumeMountSpec {
+    var parts = std.mem.splitScalar(u8, str, ':');
+    const source = parts.next() orelse return null;
+    const target = parts.next() orelse return null;
+    const mode = parts.next();
+    if (source.len == 0 or target.len == 0 or parts.next() != null) return null;
+
+    var read_only = false;
+    if (mode) |m| {
+        if (!std.mem.eql(u8, m, "ro")) return null;
+        read_only = true;
+    }
+
+    return .{ .source = source, .target = target, .read_only = read_only };
+}
+
+/// parse human-readable memory sizes like 512k, 256m, or 1g.
+pub fn parseMemorySize(str: []const u8) ?u64 {
+    if (str.len == 0) return null;
+
+    const suffix = std.ascii.toLower(str[str.len - 1]);
+    const has_suffix = suffix == 'k' or suffix == 'm' or suffix == 'g';
+    const number_part = if (has_suffix) str[0 .. str.len - 1] else str;
+    if (number_part.len == 0) return null;
+
+    const base = std.fmt.parseInt(u64, number_part, 10) catch return null;
+    const multiplier: u64 = switch (suffix) {
+        'k' => 1024,
+        'm' => 1024 * 1024,
+        'g' => 1024 * 1024 * 1024,
+        else => 1,
+    };
+    return std.math.mul(u64, base, multiplier) catch null;
+}
+
 // -- display formatting --
 
 /// format a unix timestamp as "YYYY-MM-DD HH:MM"
@@ -228,6 +277,34 @@ test "parse port map invalid" {
     try std.testing.expect(parsePortMap(":80") == null);
     try std.testing.expect(parsePortMap("8080:") == null);
     try std.testing.expect(parsePortMap("99999:80") == null);
+}
+
+test "parse env var" {
+    try std.testing.expectEqualStrings("FOO=bar", parseEnvVar("FOO=bar").?);
+    try std.testing.expect(parseEnvVar("NOVALUE") == null);
+    try std.testing.expect(parseEnvVar("=bar") == null);
+}
+
+test "parse volume mount" {
+    const mount = parseVolumeMount("./src:/app:ro").?;
+    try std.testing.expectEqualStrings("./src", mount.source);
+    try std.testing.expectEqualStrings("/app", mount.target);
+    try std.testing.expect(mount.read_only);
+}
+
+test "parse volume mount invalid" {
+    try std.testing.expect(parseVolumeMount(":/app") == null);
+    try std.testing.expect(parseVolumeMount("./src") == null);
+    try std.testing.expect(parseVolumeMount("./src:/app:rw") == null);
+    try std.testing.expect(parseVolumeMount("./src:/app:ro:extra") == null);
+}
+
+test "parse memory size" {
+    try std.testing.expectEqual(@as(?u64, 512), parseMemorySize("512"));
+    try std.testing.expectEqual(@as(?u64, 512 * 1024), parseMemorySize("512k"));
+    try std.testing.expectEqual(@as(?u64, 256 * 1024 * 1024), parseMemorySize("256m"));
+    try std.testing.expectEqual(@as(?u64, 1024 * 1024 * 1024), parseMemorySize("1g"));
+    try std.testing.expect(parseMemorySize("bad") == null);
 }
 
 test "valid container names" {

@@ -11,8 +11,10 @@
 
 const std = @import("std");
 const posix = std.posix;
+const linux = std.os.linux;
 const paths = @import("../lib/paths.zig");
 const log_mux = @import("../dev/log_mux.zig");
+const syscall = @import("../lib/syscall.zig");
 
 pub const LogError = error{
     /// could not create the log file or log directory
@@ -225,6 +227,7 @@ pub fn captureStream(
     stream_label: []const u8,
     dev_service: ?[]const u8,
     dev_color: usize,
+    mirror_output: bool,
 ) void {
     var buf: [4096]u8 = undefined;
     var leftover: [4096]u8 = undefined;
@@ -246,13 +249,16 @@ pub fn captureStream(
                         @memcpy(leftover[leftover_len .. leftover_len + chunk_len], buf[start..i]);
                         const line = leftover[0 .. leftover_len + chunk_len];
                         writeLogLine(log_file, stream_label, line);
+                        if (mirror_output) writeTerminalLine(stream_label, line);
                         if (dev_service) |svc| log_mux.writeLine(svc, dev_color, line);
                     } else {
                         // buffer full or no new data — write what we have
                         writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
+                        if (mirror_output) writeTerminalLine(stream_label, leftover[0..leftover_len]);
                         if (dev_service) |svc| log_mux.writeLine(svc, dev_color, leftover[0..leftover_len]);
                         if (chunk_len > 0) {
                             writeLogLine(log_file, stream_label, buf[start..i]);
+                            if (mirror_output) writeTerminalLine(stream_label, buf[start..i]);
                             if (dev_service) |svc| log_mux.writeLine(svc, dev_color, buf[start..i]);
                         }
                     }
@@ -260,6 +266,7 @@ pub fn captureStream(
                 } else {
                     const line = buf[start..i];
                     writeLogLine(log_file, stream_label, line);
+                    if (mirror_output) writeTerminalLine(stream_label, line);
                     if (dev_service) |svc| log_mux.writeLine(svc, dev_color, line);
                 }
                 start = i + 1;
@@ -279,10 +286,76 @@ pub fn captureStream(
     // flush any remaining data
     if (leftover_len > 0) {
         writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
+        if (mirror_output) writeTerminalLine(stream_label, leftover[0..leftover_len]);
         if (dev_service) |svc| log_mux.writeLine(svc, dev_color, leftover[0..leftover_len]);
     }
 
     posix.close(pipe_fd);
+}
+
+fn writeTerminalLine(stream_label: []const u8, line: []const u8) void {
+    const file = if (std.mem.eql(u8, stream_label, "stderr")) std.fs.File.stderr() else std.fs.File.stdout();
+    file.writeAll(line) catch return;
+    file.writeAll("\n") catch {};
+}
+
+pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t) LogError!void {
+    var path_buf: [paths.max_path]u8 = undefined;
+    const file_path = try logPath(&path_buf, container_id);
+
+    const file = std.fs.cwd().openFile(file_path, .{}) catch return LogError.NotFound;
+    defer file.close();
+
+    if (tail_lines > 0) {
+        const tail = try readTail(std.heap.page_allocator, container_id, tail_lines);
+        defer std.heap.page_allocator.free(tail);
+        if (tail.len > 0) std.fs.File.stdout().writeAll(tail) catch return LogError.WriteFailed;
+    } else {
+        const end_pos = file.getEndPos() catch return LogError.ReadFailed;
+        file.seekTo(end_pos) catch return LogError.ReadFailed;
+    }
+
+    const fd = @as(posix.fd_t, @intCast(syscall.unwrap(linux.inotify_init1(linux.IN.CLOEXEC)) catch return LogError.ReadFailed));
+    defer posix.close(fd);
+
+    var watch_path_buf: [paths.max_path]u8 = undefined;
+    const watch_path = sentinelizePath(&watch_path_buf, file_path) catch return LogError.PathTooLong;
+    const wd = linux.inotify_add_watch(fd, watch_path, linux.IN.MODIFY | linux.IN.CLOSE_WRITE | linux.IN.MOVE_SELF);
+    _ = syscall.unwrap(wd) catch return LogError.ReadFailed;
+
+    var event_buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
+    var read_buf: [4096]u8 = undefined;
+
+    while (true) {
+        if (drainNewBytes(file, &read_buf) == false and !isPidRunning(pid)) break;
+        _ = posix.read(fd, &event_buf) catch break;
+    }
+
+    _ = drainNewBytes(file, &read_buf);
+}
+
+fn drainNewBytes(file: std.fs.File, buf: []u8) bool {
+    var saw_bytes = false;
+    while (true) {
+        const n = file.read(buf) catch return saw_bytes;
+        if (n == 0) break;
+        saw_bytes = true;
+        std.fs.File.stdout().writeAll(buf[0..n]) catch return saw_bytes;
+    }
+    return saw_bytes;
+}
+
+fn isPidRunning(pid: ?posix.pid_t) bool {
+    const proc_pid = pid orelse return false;
+    const rc = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, proc_pid))), 0);
+    return !syscall.isError(rc);
+}
+
+fn sentinelizePath(buf: *[paths.max_path]u8, path: []const u8) ![:0]const u8 {
+    if (path.len >= buf.len) return error.PathTooLong;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    return buf[0..path.len :0];
 }
 
 // -- tests --

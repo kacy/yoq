@@ -30,15 +30,17 @@ pub const CommandSpec = struct {
     usage: []const u8,
     description: []const u8,
     handler: CommandHandler,
+    hidden: bool = false,
 };
 
 pub const command_specs = [_]CommandSpec{
     .{ .name = "run", .group = .runtime, .usage = "run [opts] <image|rootfs> [cmd]", .description = "create and run a container", .handler = container_cmds.run },
     .{ .name = "ps", .group = .runtime, .usage = "ps", .description = "list containers", .handler = psHandler },
-    .{ .name = "logs", .group = .runtime, .usage = "logs <id>", .description = "show container output", .handler = container_cmds.log },
-    .{ .name = "stop", .group = .runtime, .usage = "stop <id>", .description = "stop a running container", .handler = container_cmds.stop },
-    .{ .name = "rm", .group = .runtime, .usage = "rm <id>", .description = "remove a stopped container", .handler = container_cmds.rm },
-    .{ .name = "exec", .group = .runtime, .usage = "exec <id> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
+    .{ .name = "logs", .group = .runtime, .usage = "logs <id|name>", .description = "show container output", .handler = container_cmds.log },
+    .{ .name = "stop", .group = .runtime, .usage = "stop <id|name>", .description = "stop a running container", .handler = container_cmds.stop },
+    .{ .name = "rm", .group = .runtime, .usage = "rm <id|name>", .description = "remove a stopped container", .handler = container_cmds.rm },
+    .{ .name = "restart", .group = .runtime, .usage = "restart <id|name>", .description = "restart a container", .handler = container_cmds.restart },
+    .{ .name = "exec", .group = .runtime, .usage = "exec <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
     .{ .name = "status", .group = .runtime, .usage = "status [--verbose] [--server h:p]", .description = "show service status and resources", .handler = runtime_cmds.status },
     .{ .name = "metrics", .group = .runtime, .usage = "metrics [service] [--server h:p]", .description = "show per-service network metrics", .handler = runtime_cmds.metrics },
 
@@ -72,6 +74,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "version", .group = .misc, .usage = "version", .description = "print version", .handler = versionHandler },
     .{ .name = "help", .group = .misc, .usage = "help", .description = "show this help", .handler = helpHandler },
     .{ .name = "completion", .group = .misc, .usage = "completion <bash|zsh|fish>", .description = "output shell completion script", .handler = completion.handler },
+    .{ .name = "__run-supervisor", .group = .misc, .usage = "__run-supervisor <id>", .description = "internal detached run supervisor", .handler = container_cmds.runSupervisor, .hidden = true },
 };
 
 const group_order = [_]struct {
@@ -109,7 +112,13 @@ pub fn printUsage() void {
         \\
         \\run options:
         \\  --name <name>             assign a name (used for DNS service discovery)
+        \\  -e, --env KEY=VALUE       set an environment variable
+        \\  -v, --volume src:dst[:ro] bind mount a host path
         \\  -p host:container         map host port to container port
+        \\  --memory <size>           set memory limit (e.g. 256m)
+        \\  --cpus <n>                set CPU quota in cores
+        \\  -d, --detach              run in the background
+        \\  --restart <policy>        restart policy: no, always, on-failure
         \\  --no-net                  disable networking
         \\
         \\build options:
@@ -125,6 +134,7 @@ pub fn printUsage() void {
         \\
         \\other options:
         \\  logs --tail N             show last N lines only
+        \\  logs -f, --follow         stream logs until the container exits
         \\
     , .{});
 }
@@ -133,6 +143,7 @@ fn printGroup(group: CommandGroup, title: []const u8) void {
     var has_commands = false;
     for (command_specs) |spec| {
         if (spec.group == group) {
+            if (spec.hidden) continue;
             has_commands = true;
             break;
         }
@@ -141,7 +152,7 @@ fn printGroup(group: CommandGroup, title: []const u8) void {
 
     write("{s}:\n", .{title});
     for (command_specs) |spec| {
-        if (spec.group != group) continue;
+        if (spec.group != group or spec.hidden) continue;
         write("  {s:<44} {s}\n", .{ spec.usage, spec.description });
     }
     write("\n", .{});

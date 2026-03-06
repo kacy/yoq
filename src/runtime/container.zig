@@ -124,12 +124,21 @@ pub const ContainerConfig = struct {
 
 /// a running or stopped container
 pub const Container = struct {
+    const RuntimeHandles = struct {
+        cgroup: ?cgroups.Cgroup = null,
+        log_file: ?std.fs.File = null,
+        stdout_thread: ?std.Thread = null,
+        stderr_thread: ?std.Thread = null,
+        mirror_output: bool = false,
+    };
+
     config: ContainerConfig,
     status: Status,
     pid: ?posix.pid_t,
     exit_code: ?u8,
     created_at: i64,
     net_info: ?net_setup.NetworkInfo = null,
+    runtime: RuntimeHandles = .{},
 
     /// check if the container's process is still alive.
     /// updates status if it has exited.
@@ -172,7 +181,7 @@ pub const Container = struct {
     }
 
     /// start the container: set up filesystem, spawn process in namespaces,
-    /// capture logs, and block until the process exits.
+    /// and begin log capture. returns once the container is running.
     pub fn start(self: *Container) ContainerError!void {
         const config = self.config;
         const has_overlay = config.lower_dirs.len > 0;
@@ -211,7 +220,7 @@ pub const Container = struct {
         };
 
         // create cgroup (non-fatal — container runs without limits if this fails)
-        var cgroup: ?cgroups.Cgroup = cgroups.Cgroup.create(config.id) catch |e| blk: {
+        self.runtime.cgroup = cgroups.Cgroup.create(config.id) catch |e| blk: {
             log.warn("cgroup setup failed for {s}: {}", .{ config.id, e });
             break :blk null;
         };
@@ -226,7 +235,7 @@ pub const Container = struct {
             @ptrCast(&child_ctx),
         ) catch {
             if (has_overlay) cleanupContainerDirs(config.id);
-            if (cgroup) |*cg| cg.destroy() catch {};
+            if (self.runtime.cgroup) |*cg| cg.destroy() catch {};
             return ContainerError.StartFailed;
         };
 
@@ -235,7 +244,7 @@ pub const Container = struct {
         active_pid.store(spawn_result.pid, .release);
 
         // add child to cgroup and set resource limits
-        if (cgroup) |*cg| {
+        if (self.runtime.cgroup) |*cg| {
             cg.addProcess(spawn_result.pid) catch |e| {
                 log.warn("failed to add process to cgroup for {s}: {}", .{ config.id, e });
             };
@@ -278,22 +287,29 @@ pub const Container = struct {
         spawn_result.signalReady();
 
         // open log file and start capture threads
-        const log_file = logs.createLogFile(config.id) catch null;
+        self.runtime.log_file = logs.createLogFile(config.id) catch null;
         const stdout_label: []const u8 = "stdout";
         const stderr_label: []const u8 = "stderr";
 
-        var stdout_thread: ?std.Thread = null;
-        var stderr_thread: ?std.Thread = null;
-
-        if (log_file) |lf| {
-            stdout_thread = std.Thread.spawn(.{}, logs.captureStream, .{
-                lf, spawn_result.stdout_fd, stdout_label, config.dev_service_name, config.dev_color_idx,
+        if (self.runtime.log_file) |lf| {
+            self.runtime.stdout_thread = std.Thread.spawn(.{}, logs.captureStream, .{
+                lf,
+                spawn_result.stdout_fd,
+                stdout_label,
+                config.dev_service_name,
+                config.dev_color_idx,
+                self.runtime.mirror_output,
             }) catch |err| blk: {
                 log.warn("failed to spawn stdout capture thread: {}", .{err});
                 break :blk null;
             };
-            stderr_thread = std.Thread.spawn(.{}, logs.captureStream, .{
-                lf, spawn_result.stderr_fd, stderr_label, config.dev_service_name, config.dev_color_idx,
+            self.runtime.stderr_thread = std.Thread.spawn(.{}, logs.captureStream, .{
+                lf,
+                spawn_result.stderr_fd,
+                stderr_label,
+                config.dev_service_name,
+                config.dev_color_idx,
+                self.runtime.mirror_output,
             }) catch |err| blk: {
                 log.warn("failed to spawn stderr capture thread: {}", .{err});
                 break :blk null;
@@ -301,23 +317,28 @@ pub const Container = struct {
         }
 
         // close pipe fds that aren't being captured by a thread
-        if (stdout_thread == null) posix.close(spawn_result.stdout_fd);
-        if (stderr_thread == null) posix.close(spawn_result.stderr_fd);
+        if (self.runtime.stdout_thread == null) posix.close(spawn_result.stdout_fd);
+        if (self.runtime.stderr_thread == null) posix.close(spawn_result.stderr_fd);
 
         // update sqlite to "running"
         store.updateStatus(config.id, "running", spawn_result.pid, null) catch |e| {
             log.warn("failed to update status for {s}: {}", .{ config.id, e });
         };
+    }
 
-        // block until the child exits
-        const wait_result = process.wait(spawn_result.pid, false) catch {
+    /// wait for the running container to exit, then clean up runtime resources.
+    pub fn wait(self: *Container) ContainerError!u8 {
+        const pid = self.pid orelse return ContainerError.NotRunning;
+
+        const wait_result = process.wait(pid, false) catch {
             self.status = .stopped;
             self.exit_code = 255;
-            store.updateStatus(config.id, "stopped", null, 255) catch {};
-            return;
+            self.pid = null;
+            active_pid.store(0, .release);
+            store.updateStatus(self.config.id, "stopped", null, 255) catch {};
+            return 255;
         };
 
-        // determine exit code
         const exit_code: u8 = switch (wait_result.status) {
             .exited => |code| code,
             .signaled => 128,
@@ -328,32 +349,32 @@ pub const Container = struct {
         self.exit_code = exit_code;
         self.pid = null;
         active_pid.store(0, .release);
+        self.finalize(exit_code);
+        return exit_code;
+    }
 
-        // join log capture threads and close log file
-        if (stdout_thread) |t| t.join();
-        if (stderr_thread) |t| t.join();
-        if (log_file) |lf| lf.close();
+    fn finalize(self: *Container, exit_code: u8) void {
+        if (self.runtime.stdout_thread) |t| t.join();
+        if (self.runtime.stderr_thread) |t| t.join();
+        if (self.runtime.log_file) |lf| lf.close();
 
-        // tear down networking
         if (self.net_info) |*info| {
-            if (config.network) |net_config| {
+            if (self.config.network) |net_config| {
                 var db = store.openDb() catch null;
                 defer if (db) |*d| d.deinit();
-                if (db) |*d| {
-                    net_setup.teardownContainer(config.id, info, net_config, d);
-                }
+                if (db) |*d| net_setup.teardownContainer(self.config.id, info, net_config, d);
             }
         }
 
-        // destroy cgroup
-        if (cgroup) |*cg| cg.destroy() catch |err| {
-            log.warn("failed to destroy cgroup for {s}: {}", .{ config.id, err });
+        if (self.runtime.cgroup) |*cg| cg.destroy() catch |err| {
+            log.warn("failed to destroy cgroup for {s}: {}", .{ self.config.id, err });
         };
 
-        // update sqlite with final status
-        store.updateStatus(config.id, "stopped", null, exit_code) catch |e| {
-            log.warn("failed to update final status for {s}: {}", .{ config.id, e });
+        store.updateStatus(self.config.id, "stopped", null, exit_code) catch |e| {
+            log.warn("failed to update final status for {s}: {}", .{ self.config.id, e });
         };
+
+        self.runtime = .{};
     }
 };
 
