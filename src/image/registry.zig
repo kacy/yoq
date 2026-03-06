@@ -973,7 +973,7 @@ fn fetchBlobFromUrl(
 
         var location_summary_buf: [256]u8 = undefined;
         const location_summary = summarizeUrl(location_copy, &location_summary_buf);
-        log.warn("blob fetch: redirect {d} from {s} to {s} (auth={})", .{
+        log.debug("blob fetch: redirect {d} from {s} to {s} (auth={})", .{
             @intFromEnum(response.head.status),
             url_summary,
             location_summary,
