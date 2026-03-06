@@ -496,6 +496,16 @@ fn fetchManifest(
     // read the content type to determine what we got
     const content_type = response.head.content_type orelse "";
 
+    // capture Docker-Content-Digest before reading the body: std.http.Response.reader()
+    // invalidates header strings in response.head.
+    var expected_digest: ?blob_store.Digest = null;
+    var header_it = response.head.iterateHeaders();
+    while (header_it.next()) |h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, "docker-content-digest")) continue;
+        expected_digest = blob_store.Digest.parse(h.value);
+        break;
+    }
+
     // read the body using stream API, tracking bytes to enforce size limit
     var transfer_buf: [8192]u8 = undefined;
     const body_reader = response.reader(&transfer_buf);
@@ -516,17 +526,13 @@ fn fetchManifest(
     var computed_str_buf: [71]u8 = undefined;
     const computed_str = computed.string(&computed_str_buf);
 
-    // if the server sent a Docker-Content-Digest header, verify it matches
-    var header_it = response.head.iterateHeaders();
-    while (header_it.next()) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "docker-content-digest")) {
-            if (blob_store.Digest.parse(h.value)) |header_digest| {
-                if (!computed.eql(header_digest)) {
-                    log.warn("manifest digest mismatch: computed {s}, header {s}", .{ computed_str, h.value });
-                    return error.DigestMismatch;
-                }
-            }
-            break;
+    // if the server sent a parseable Docker-Content-Digest header, verify it matches.
+    if (expected_digest) |header_digest| {
+        var header_digest_buf: [71]u8 = undefined;
+        const header_digest_str = header_digest.string(&header_digest_buf);
+        if (!computed.eql(header_digest)) {
+            log.warn("manifest digest mismatch: computed {s}, header {s}", .{ computed_str, header_digest_str });
+            return error.DigestMismatch;
         }
     }
 
