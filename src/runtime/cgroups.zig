@@ -220,6 +220,10 @@ pub const Cgroup = struct {
         cpu_usec: ?u64 = null,
         psi_cpu: ?PsiMetrics = null,
         psi_memory: ?PsiMetrics = null,
+        // current limits (read from cgroup control files)
+        memory_limit: ?u64 = null, // memory.max (null = "max" / unlimited)
+        cpu_max_usec: ?u64 = null, // cpu.max quota (null = "max" / unlimited)
+        cpu_max_period: ?u64 = null, // cpu.max period
     };
 
     /// read all metrics in a single pass by opening the cgroup directory once.
@@ -249,6 +253,24 @@ pub const Cgroup = struct {
                         break;
                     }
                 }
+            }
+        }
+
+        // memory.max — "max" means unlimited, otherwise bytes as u64
+        {
+            var buf: [64]u8 = undefined;
+            if (readFromDir(dir, "memory.max", &buf)) |content| {
+                if (!std.mem.eql(u8, content, "max")) {
+                    metrics.memory_limit = std.fmt.parseInt(u64, content, 10) catch null;
+                }
+            }
+        }
+
+        // cpu.max — format is "quota period" or "max period"
+        {
+            var buf: [64]u8 = undefined;
+            if (readFromDir(dir, "cpu.max", &buf)) |content| {
+                parseCpuMax(content, &metrics);
             }
         }
 
@@ -381,6 +403,21 @@ fn parsePsiFromContent(content: []const u8) ?PsiMetrics {
     return metrics;
 }
 
+/// parse cpu.max content: "quota period" or "max period".
+/// quota = "max" means unlimited (leave cpu_max_usec null).
+/// e.g. "50000 100000" → quota=50000, period=100000.
+fn parseCpuMax(content: []const u8, metrics: *Cgroup.CgroupMetrics) void {
+    var parts = std.mem.splitScalar(u8, content, ' ');
+    const quota_str = parts.next() orelse return;
+    const period_str = parts.next() orelse return;
+
+    metrics.cpu_max_period = std.fmt.parseInt(u64, period_str, 10) catch return;
+
+    if (!std.mem.eql(u8, quota_str, "max")) {
+        metrics.cpu_max_usec = std.fmt.parseInt(u64, quota_str, 10) catch return;
+    }
+}
+
 /// parse the avg10 value from a PSI line like "some avg10=0.00 avg60=0.00 avg300=0.00 total=0"
 fn parsePsiAvg10(line: []const u8) !f64 {
     const prefix = "avg10=";
@@ -463,4 +500,25 @@ test "parsePsiAvg10 with high pressure" {
 test "parsePsiAvg10 rejects missing avg10 field" {
     const result = parsePsiAvg10("some total=12345");
     try std.testing.expectError(error.ParseError, result);
+}
+
+test "parseCpuMax — quota and period" {
+    var metrics: Cgroup.CgroupMetrics = .{};
+    parseCpuMax("50000 100000", &metrics);
+    try std.testing.expectEqual(@as(u64, 50000), metrics.cpu_max_usec.?);
+    try std.testing.expectEqual(@as(u64, 100000), metrics.cpu_max_period.?);
+}
+
+test "parseCpuMax — unlimited (max period)" {
+    var metrics: Cgroup.CgroupMetrics = .{};
+    parseCpuMax("max 100000", &metrics);
+    try std.testing.expect(metrics.cpu_max_usec == null);
+    try std.testing.expectEqual(@as(u64, 100000), metrics.cpu_max_period.?);
+}
+
+test "parseCpuMax — empty content" {
+    var metrics: Cgroup.CgroupMetrics = .{};
+    parseCpuMax("", &metrics);
+    try std.testing.expect(metrics.cpu_max_usec == null);
+    try std.testing.expect(metrics.cpu_max_period == null);
 }

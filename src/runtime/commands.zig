@@ -117,6 +117,19 @@ fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool)
         const psi_cpu = parsePsiFromJson(obj, "psi_cpu_some", "psi_cpu_full");
         const psi_mem = parsePsiFromJson(obj, "psi_mem_some", "psi_mem_full");
 
+        // parse cpu quota percentage if present
+        const cpu_quota_pct: ?f64 = if (extractJsonFloat(obj, "cpu_quota_pct")) |v|
+            (if (v > 0.0) v else null)
+        else
+            null;
+
+        // parse memory limit (0 or absent means unlimited)
+        const mem_limit_raw = extractJsonInt(obj, "memory_limit");
+        const memory_limit: ?u64 = if (mem_limit_raw) |v|
+            (if (v > 0) @as(u64, @intCast(v)) else null)
+        else
+            null;
+
         snapshots.append(alloc, .{
             .name = name,
             .status = status_val,
@@ -128,6 +141,8 @@ fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool)
             .running_count = @intCast(extractJsonInt(obj, "running") orelse 0),
             .desired_count = @intCast(extractJsonInt(obj, "desired") orelse 0),
             .uptime_secs = extractJsonInt(obj, "uptime_secs") orelse 0,
+            .memory_limit = memory_limit,
+            .cpu_quota_pct = cpu_quota_pct,
         }) catch {
             writeErr("failed to parse status response\n", .{});
             std.process.exit(1);
@@ -190,16 +205,25 @@ fn printVerboseDetails(snap: monitor.ServiceSnapshot) void {
         write("  memory pressure: some={d:.1}%  full={d:.1}%\n", .{ psi.some_avg10, psi.full_avg10 });
     }
 
-    // auto-tuning suggestions based on PSI
-    if (snap.psi_memory) |psi| {
-        if (psi.some_avg10 > 25.0) {
-            write("  \xe2\x9a\xa0 memory pressure high \xe2\x80\x94 consider increasing memory limit\n", .{});
+    // resource limits
+    if (snap.memory_limit) |limit| {
+        var limit_buf: [16]u8 = undefined;
+        var usage_buf: [16]u8 = undefined;
+        const limit_str = monitor.formatBytes(&limit_buf, limit);
+        const usage_str = monitor.formatBytes(&usage_buf, snap.memory_bytes);
+        if (limit > 0) {
+            const pct = @as(f64, @floatFromInt(snap.memory_bytes)) / @as(f64, @floatFromInt(limit)) * 100.0;
+            write("  memory limit:    {s} (using {s}, {d:.0}%)\n", .{ limit_str, usage_str, pct });
         }
     }
-    if (snap.psi_cpu) |psi| {
-        if (psi.some_avg10 > 50.0) {
-            write("  \xe2\x9a\xa0 cpu pressure high \xe2\x80\x94 consider increasing cpu allocation\n", .{});
-        }
+    if (snap.cpu_quota_pct) |quota| {
+        write("  cpu quota:       {d:.0}%\n", .{quota});
+    }
+
+    // auto-tuning suggestions with concrete numbers
+    var suggestion_buf: [256]u8 = undefined;
+    if (monitor.suggestTuning(&suggestion_buf, snap)) |msg| {
+        write("  {s}\n", .{msg});
     }
 }
 
