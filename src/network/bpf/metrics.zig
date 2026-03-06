@@ -167,4 +167,3 @@ pub const insns = [_]BPF.Insn{
     .{ .code = 0xb7, .dst = 0, .src = 0, .off = 0, .imm = 0 },
     .{ .code = 0x95, .dst = 0, .src = 0, .off = 0, .imm = 0 },
 };
-

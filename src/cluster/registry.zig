@@ -94,7 +94,8 @@ pub fn drainSql(buf: []u8, id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
 
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "UPDATE agents SET status = 'draining' WHERE id = '{s}';",
         .{id_esc},
     );
@@ -107,7 +108,8 @@ pub fn updateAssignmentStatusSql(buf: []u8, assignment_id: []const u8, new_statu
     var status_esc_buf: [64]u8 = undefined;
     const status_esc = try sql_escape.escapeSqlString(&status_esc_buf, new_status);
 
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "UPDATE assignments SET status = '{s}' WHERE id = '{s}';",
         .{ status_esc, id_esc },
     );
@@ -118,7 +120,8 @@ pub fn markOfflineSql(buf: []u8, id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
 
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "UPDATE agents SET status = 'offline' WHERE id = '{s}';",
         .{id_esc},
     );
@@ -129,7 +132,8 @@ pub fn removeSql(buf: []u8, id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
 
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "DELETE FROM agents WHERE id = '{s}';",
         .{id_esc},
     );
@@ -142,7 +146,8 @@ pub fn orphanAssignmentsSql(buf: []u8, agent_id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, agent_id);
 
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "UPDATE assignments SET agent_id = '', status = 'pending' WHERE agent_id = '{s}' AND status IN ('pending', 'running');",
         .{id_esc},
     );
@@ -156,7 +161,8 @@ pub fn reassignSql(buf: []u8, assignment_id: []const u8, new_agent_id: []const u
     var agent_esc_buf: [64]u8 = undefined;
     const agent_esc = try sql_escape.escapeSqlString(&agent_esc_buf, new_agent_id);
 
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "UPDATE assignments SET agent_id = '{s}' WHERE id = '{s}' AND agent_id = '';",
         .{ agent_esc, id_esc },
     );
@@ -168,7 +174,8 @@ pub fn deleteAgentAssignmentsSql(buf: []u8, agent_id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, agent_id);
 
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "DELETE FROM assignments WHERE agent_id = '{s}';",
         .{id_esc},
     );
@@ -245,7 +252,8 @@ pub fn wireguardPeerSql(
 
 /// generate SQL to remove a wireguard peer by node_id.
 pub fn removeWireguardPeerSql(buf: []u8, node_id: u8) ![]const u8 {
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "DELETE FROM wireguard_peers WHERE node_id = {d};",
         .{node_id},
     );
@@ -380,7 +388,9 @@ pub fn getAgent(alloc: Allocator, db: *sqlite.Db, id: []const u8) !?AgentRecord 
         overlay_ip: ?sqlite.Text,
     };
 
-    const row = (db.oneAlloc(Row, alloc,
+    const row = (db.oneAlloc(
+        Row,
+        alloc,
         "SELECT id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip FROM agents WHERE id = ?;",
         .{},
         .{id},

@@ -123,7 +123,8 @@ pub const Agent = struct {
 
         // build registration JSON with wireguard info
         var body_buf: [1024]u8 = undefined;
-        const body = std.fmt.bufPrint(&body_buf,
+        const body = std.fmt.bufPrint(
+            &body_buf,
             "{{\"token\":\"{s}\",\"address\":\"{s}\",\"cpu_cores\":{d},\"memory_mb\":{d},\"wg_public_key\":\"{s}\",\"wg_listen_port\":{d}}}",
             .{ self.token, local_ip, resources.cpu_cores, resources.memory_mb, pub_key, self.wg_listen_port },
         ) catch return AgentError.RegisterFailed;
@@ -248,7 +249,8 @@ pub const Agent = struct {
         const resources = getSystemResources();
 
         var body_buf: [256]u8 = undefined;
-        const body = std.fmt.bufPrint(&body_buf,
+        const body = std.fmt.bufPrint(
+            &body_buf,
             "{{\"cpu_cores\":{d},\"memory_mb\":{d},\"cpu_used\":{d},\"memory_used_mb\":{d},\"containers\":{d}}}",
             .{
                 resources.cpu_cores,

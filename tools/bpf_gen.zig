@@ -187,7 +187,10 @@ fn parseMaps(section_data: []const u8, alloc: std.mem.Allocator, maps: *std.Arra
     const map_def_size = @sizeOf(BpfMapDef);
     var offset: usize = 0;
     var map_idx: usize = 0;
-    while (offset + map_def_size <= section_data.len) : ({ offset += map_def_size; map_idx += 1; }) {
+    while (offset + map_def_size <= section_data.len) : ({
+        offset += map_def_size;
+        map_idx += 1;
+    }) {
         const def: *const BpfMapDef = @ptrCast(@alignCast(&section_data[offset]));
         const name = findSymbolName(symtab_shdr, strtab_data, elf_data, ehdr, maps_section_idx, offset) orelse "unknown";
         try maps.append(alloc, .{ .name = name, .map_type = def.type, .key_size = def.key_size, .value_size = def.value_size, .max_entries = def.max_entries });
@@ -245,7 +248,11 @@ fn generateZig(writer: anytype, source_file: []const u8, maps: []const MapInfo, 
             try writer.print("pub const egress_prog_name = \"{s}\";\n\n", .{prog.name});
         }
 
-        if (is_primary) { try writer.writeAll("pub const relocs = [_]Reloc{\n"); } else { try writer.writeAll("pub const egress_relocs = [_]Reloc{\n"); }
+        if (is_primary) {
+            try writer.writeAll("pub const relocs = [_]Reloc{\n");
+        } else {
+            try writer.writeAll("pub const egress_relocs = [_]Reloc{\n");
+        }
         for (relocs) |r| {
             if (r.target_section_idx != prog.section_idx) continue;
             try writer.print("    .{{ .insn_idx = {d}, .map_idx = {d} }},\n", .{ r.insn_idx, findMapIndex(maps, r.map_name) });
@@ -253,7 +260,11 @@ fn generateZig(writer: anytype, source_file: []const u8, maps: []const MapInfo, 
         try writer.writeAll("};\n\n");
 
         const insn_count = prog.insn_data.len / BPF_INSN_SIZE;
-        if (is_primary) { try writer.print("pub const insns = [_]BPF.Insn{{\n", .{}); } else { try writer.print("pub const egress_insns = [_]BPF.Insn{{\n", .{}); }
+        if (is_primary) {
+            try writer.print("pub const insns = [_]BPF.Insn{{\n", .{});
+        } else {
+            try writer.print("pub const egress_insns = [_]BPF.Insn{{\n", .{});
+        }
         for (0..insn_count) |ii| {
             const off = ii * BPF_INSN_SIZE;
             const code = prog.insn_data[off];

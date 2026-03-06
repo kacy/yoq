@@ -1158,7 +1158,6 @@ pub fn watcherThread(orch: *Orchestrator, w: *watcher_mod.Watcher) void {
     }
 }
 
-
 /// extract the key part from a "KEY=VALUE" env var string
 fn envKey(env_var: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, env_var, '=')) |eq| {
@@ -1210,7 +1209,6 @@ test "ServiceState defaults" {
 test "shutdown_requested starts false" {
     try std.testing.expect(!shutdown_requested.load(.acquire));
 }
-
 
 // -- restart policy tests --
 
