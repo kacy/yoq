@@ -78,6 +78,12 @@ pub const Orchestrator = struct {
     proxy: ?*tls_proxy.TlsProxy = null,
     tls_certs: ?*cert_store_mod.CertStore = null,
     tls_db: ?*sqlite.Db = null,
+    /// when set, only start these services (+ transitive deps).
+    /// null means start everything.
+    service_filter: ?[]const []const u8 = null,
+    /// computed from service_filter — the full set of service names to start
+    /// (targets + all transitive dependencies). null means start everything.
+    start_set: ?std.StringHashMapUnmanaged(void) = null,
 
     pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) !Orchestrator {
         const states = try alloc.alloc(ServiceState, manifest.services.len);
@@ -122,6 +128,9 @@ pub const Orchestrator = struct {
             r.deinit();
             self.alloc.destroy(r);
         }
+        if (self.start_set) |*set| {
+            set.deinit(self.alloc);
+        }
         if (self.states.len > 0) {
             self.alloc.free(self.states);
         }
@@ -130,14 +139,57 @@ pub const Orchestrator = struct {
         }
     }
 
+    /// compute the set of services to start from a list of target names.
+    /// walks depends_on transitively to include all required dependencies.
+    /// returns error if a target name doesn't match any service.
+    pub fn computeStartSet(self: *Orchestrator) OrchestratorError!void {
+        const targets = self.service_filter orelse return;
+
+        var set: std.StringHashMapUnmanaged(void) = .empty;
+
+        // seed with the requested targets
+        for (targets) |name| {
+            set.put(self.alloc, name, {}) catch return OrchestratorError.StartFailed;
+        }
+
+        // fixed-point iteration: keep adding deps until nothing changes
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.manifest.services) |svc| {
+                if (!set.contains(svc.name)) continue;
+                for (svc.depends_on) |dep| {
+                    if (!set.contains(dep)) {
+                        set.put(self.alloc, dep, {}) catch return OrchestratorError.StartFailed;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        self.start_set = set;
+    }
+
+    /// check if a service should be started (passes the filter)
+    fn shouldStart(self: *const Orchestrator, name: []const u8) bool {
+        const set = self.start_set orelse return true;
+        return set.contains(name);
+    }
+
     /// pull all images, then start services in dependency order.
     /// blocks until all services are running or one fails.
+    /// respects service_filter — only starts filtered services + their deps.
     pub fn startAll(self: *Orchestrator) OrchestratorError!void {
         const services = self.manifest.services;
         if (services.len == 0) return OrchestratorError.ManifestEmpty;
 
-        // phase 1: pull images sequentially
+        // compute the start set from service_filter (if any)
+        try self.computeStartSet();
+
+        // phase 1: pull images sequentially (only for services we'll start)
         for (services, 0..) |svc, i| {
+            if (!self.shouldStart(svc.name)) continue;
+
             self.states[i].status = .pulling;
             writeErr("pulling {s}...\n", .{svc.image});
 
@@ -151,6 +203,8 @@ pub const Orchestrator = struct {
 
         // phase 2: start services in dependency order (already sorted)
         for (services, 0..) |svc, i| {
+            if (!self.shouldStart(svc.name)) continue;
+
             // wait for dependencies to be running
             for (svc.depends_on) |dep_name| {
                 const dep_idx = self.serviceIndex(dep_name) orelse continue;
@@ -202,6 +256,7 @@ pub const Orchestrator = struct {
         var has_checks = false;
 
         for (self.manifest.services, 0..) |svc, i| {
+            if (!self.shouldStart(svc.name)) continue;
             const hc = svc.health_check orelse continue;
             has_checks = true;
 
@@ -233,6 +288,7 @@ pub const Orchestrator = struct {
         // check if any services have TLS configs
         var has_tls = false;
         for (self.manifest.services) |svc| {
+            if (!self.shouldStart(svc.name)) continue;
             if (svc.tls != null) {
                 has_tls = true;
                 break;
@@ -250,6 +306,7 @@ pub const Orchestrator = struct {
 
         // register backends for TLS-enabled services
         for (self.manifest.services, 0..) |svc, i| {
+            if (!self.shouldStart(svc.name)) continue;
             const tls = svc.tls orelse continue;
 
             // look up the container's IP from the store
@@ -1093,4 +1150,146 @@ test "restart policy decision logic" {
             .on_failure => exit_code_128 != 0,
         });
     }
+}
+
+// -- start set tests --
+
+/// helper: build a minimal service for testing (no allocations to free)
+fn testSvc(name: []const u8, deps: []const []const u8) spec.Service {
+    return .{
+        .name = name,
+        .image = "scratch",
+        .command = &.{},
+        .ports = &.{},
+        .env = &.{},
+        .depends_on = deps,
+        .working_dir = null,
+        .volumes = &.{},
+    };
+}
+
+test "computeStartSet: single target with no deps" {
+    const alloc = std.testing.allocator;
+
+    var services = [_]spec.Service{
+        testSvc("web", &.{}),
+        testSvc("db", &.{}),
+    };
+    var manifest = spec.Manifest{
+        .services = &services,
+        .volumes = &.{},
+        .alloc = alloc,
+    };
+
+    const states = try alloc.alloc(ServiceState, 2);
+    defer alloc.free(states);
+    for (states) |*s| s.* = .{ .container_id = undefined, .thread = null, .status = .pending };
+
+    const flags = try alloc.alloc(std.atomic.Value(bool), 2);
+    defer alloc.free(flags);
+    for (flags) |*f| f.* = std.atomic.Value(bool).init(false);
+
+    const filter = [_][]const u8{"web"};
+
+    var orch = Orchestrator{
+        .alloc = alloc,
+        .manifest = &manifest,
+        .app_name = "test",
+        .states = states,
+        .restart_requested = flags,
+        .service_filter = &filter,
+    };
+
+    try orch.computeStartSet();
+    defer {
+        if (orch.start_set) |*set| set.deinit(alloc);
+    }
+
+    try std.testing.expect(orch.start_set != null);
+    try std.testing.expect(orch.shouldStart("web"));
+    try std.testing.expect(!orch.shouldStart("db"));
+}
+
+test "computeStartSet: transitive dependencies" {
+    const alloc = std.testing.allocator;
+
+    // web -> api -> db
+    const api_deps = [_][]const u8{"db"};
+    const web_deps = [_][]const u8{"api"};
+    var services = [_]spec.Service{
+        testSvc("db", &.{}),
+        testSvc("api", &api_deps),
+        testSvc("web", &web_deps),
+    };
+    var manifest = spec.Manifest{
+        .services = &services,
+        .volumes = &.{},
+        .alloc = alloc,
+    };
+
+    const states = try alloc.alloc(ServiceState, 3);
+    defer alloc.free(states);
+    for (states) |*s| s.* = .{ .container_id = undefined, .thread = null, .status = .pending };
+
+    const flags = try alloc.alloc(std.atomic.Value(bool), 3);
+    defer alloc.free(flags);
+    for (flags) |*f| f.* = std.atomic.Value(bool).init(false);
+
+    const filter = [_][]const u8{"web"};
+
+    var orch = Orchestrator{
+        .alloc = alloc,
+        .manifest = &manifest,
+        .app_name = "test",
+        .states = states,
+        .restart_requested = flags,
+        .service_filter = &filter,
+    };
+
+    try orch.computeStartSet();
+    defer {
+        if (orch.start_set) |*set| set.deinit(alloc);
+    }
+
+    // web depends on api which depends on db — all three should be in the set
+    try std.testing.expect(orch.shouldStart("web"));
+    try std.testing.expect(orch.shouldStart("api"));
+    try std.testing.expect(orch.shouldStart("db"));
+}
+
+test "computeStartSet: no filter starts everything" {
+    const alloc = std.testing.allocator;
+
+    var services = [_]spec.Service{
+        testSvc("web", &.{}),
+        testSvc("db", &.{}),
+    };
+    var manifest = spec.Manifest{
+        .services = &services,
+        .volumes = &.{},
+        .alloc = alloc,
+    };
+
+    const states = try alloc.alloc(ServiceState, 2);
+    defer alloc.free(states);
+    for (states) |*s| s.* = .{ .container_id = undefined, .thread = null, .status = .pending };
+
+    const flags = try alloc.alloc(std.atomic.Value(bool), 2);
+    defer alloc.free(flags);
+    for (flags) |*f| f.* = std.atomic.Value(bool).init(false);
+
+    var orch = Orchestrator{
+        .alloc = alloc,
+        .manifest = &manifest,
+        .app_name = "test",
+        .states = states,
+        .restart_requested = flags,
+    };
+
+    try orch.computeStartSet();
+
+    // no filter — shouldStart returns true for everything
+    try std.testing.expect(orch.shouldStart("web"));
+    try std.testing.expect(orch.shouldStart("db"));
+    try std.testing.expect(orch.shouldStart("anything"));
 }

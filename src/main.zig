@@ -1279,6 +1279,8 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var dev_mode = false;
     var server_addr: ?[]const u8 = null;
+    var service_names: std.ArrayList([]const u8) = .empty;
+    defer service_names.deinit(alloc);
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f")) {
@@ -1293,6 +1295,12 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 writeErr("--server requires a host:port address\n", .{});
                 std.process.exit(1);
             };
+        } else {
+            // positional arg = service name to start
+            service_names.append(alloc, arg) catch {
+                writeErr("out of memory\n", .{});
+                std.process.exit(1);
+            };
         }
     }
 
@@ -1302,6 +1310,14 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
     defer manifest.deinit();
+
+    // validate service filter names
+    for (service_names.items) |name| {
+        if (manifest.serviceByName(name) == null) {
+            writeErr("unknown service: {s}\n", .{name});
+            std.process.exit(1);
+        }
+    }
 
     // if --server is set, deploy to cluster instead of running locally
     if (server_addr) |addr| {
@@ -1317,7 +1333,15 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     };
     const app_name = std.fs.path.basename(cwd);
 
-    if (dev_mode) {
+    // startup message
+    if (service_names.items.len > 0) {
+        writeErr("starting", .{});
+        for (service_names.items, 0..) |name, i| {
+            if (i > 0) writeErr(",", .{});
+            writeErr(" {s}", .{name});
+        }
+        writeErr(" ({d} services)...\n", .{service_names.items.len});
+    } else if (dev_mode) {
         writeErr("starting {s} in dev mode ({d} services)...\n", .{ app_name, manifest.services.len });
     } else {
         writeErr("starting {s} ({d} services)...\n", .{ app_name, manifest.services.len });
@@ -1333,6 +1357,11 @@ fn cmdUp(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     };
     defer orch.deinit();
     orch.dev_mode = dev_mode;
+
+    // set service filter if specific services were requested
+    if (service_names.items.len > 0) {
+        orch.service_filter = service_names.items;
+    }
 
     orch.startAll() catch {
         writeErr("failed to start services\n", .{});
@@ -3269,6 +3298,7 @@ fn printUsage() void {
         \\  run [opts] <image|rootfs> [cmd]  create and run a container
         \\  up [-f manifest.toml] [--dev]     start services (--dev: watch + restart)
         \\     [--server host:port]           deploy to cluster instead of locally
+        \\     [service...]                   start only named services + deps
         \\  down [-f manifest.toml]          stop all services from manifest
         \\  serve [--port PORT]             start the API server (default: 7700)
         \\  init-server [opts]              start a cluster server node
