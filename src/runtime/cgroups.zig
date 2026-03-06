@@ -131,6 +131,11 @@ pub const Cgroup = struct {
             else => return CgroupError.CreateFailed,
         };
 
+        // enable controllers on the yoq parent so child cgroups can use them.
+        // without this, writes to cpu.weight/memory.max/pids.max in child
+        // cgroups fail because the controllers aren't delegated.
+        enableSubtreeControllers(cgroup_root ++ "/" ++ yoq_prefix);
+
         // create container cgroup dir
         std.fs.cwd().makeDir(cg.path()) catch |e| switch (e) {
             error.PathAlreadyExists => {},
@@ -379,6 +384,18 @@ pub const Cgroup = struct {
         return metrics;
     }
 };
+
+/// enable cpu, memory, and pids controllers on a cgroup directory's
+/// subtree_control so that child cgroups inherit those controllers.
+/// best-effort: silently ignores failures (e.g. controllers already
+/// enabled, or the kernel doesn't support one).
+fn enableSubtreeControllers(dir_path: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const ctrl_path = std.fmt.bufPrint(&buf, "{s}/cgroup.subtree_control", .{dir_path}) catch return;
+    const file = std.fs.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch return;
+    defer file.close();
+    file.writeAll("+cpu +memory +pids") catch {};
+}
 
 /// read a file from an already-opened directory handle.
 /// avoids the overhead of constructing full paths and opening the cgroup dir again.
