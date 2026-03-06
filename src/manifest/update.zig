@@ -474,6 +474,7 @@ fn testStartContainer(_: []const u8, _: usize) ?[12]u8 {
     if (test_start_should_fail) return null;
     test_starts += 1;
     return "newcontainer".*;
+    return "newcontainer".*;
 }
 
 fn testIsHealthy(_: []const u8) bool {

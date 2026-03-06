@@ -18,6 +18,7 @@
 // cleaned up when the yoq process exits.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const BPF = linux.BPF;
@@ -54,6 +55,8 @@ pub fn createMap(
     value_size: u32,
     max_entries: u32,
 ) EbpfError!posix.fd_t {
+    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
+
     const fd = BPF.map_create(map_type, key_size, value_size, max_entries) catch |e| {
         log.warn("ebpf: map_create failed (type={d}, key={d}, val={d}): {}", .{
             @intFromEnum(map_type), key_size, value_size, e,
@@ -66,6 +69,8 @@ pub fn createMap(
 /// look up a value in a BPF map by key.
 /// returns true if found (value is written to the output buffer).
 pub fn mapLookup(map_fd: posix.fd_t, key: []const u8, value: []u8) bool {
+    if (comptime builtin.os.tag != .linux) return false;
+
     BPF.map_lookup_elem(map_fd, key, value) catch return false;
     return true;
 }
@@ -73,12 +78,16 @@ pub fn mapLookup(map_fd: posix.fd_t, key: []const u8, value: []u8) bool {
 /// get the next key in a BPF map (for iteration).
 /// returns true if a next key was found.
 pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
+    if (comptime builtin.os.tag != .linux) return false;
+
     const found = BPF.map_get_next_key(map_fd, key, next_key) catch return false;
     return found;
 }
 
 /// insert or update a key/value pair in a BPF map.
 pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) EbpfError!void {
+    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
+
     BPF.map_update_elem(map_fd, key, value, BPF.ANY) catch |e| {
         log.warn("ebpf: map_update failed: {}", .{e});
         return EbpfError.MapUpdateFailed;
@@ -87,6 +96,8 @@ pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) EbpfErr
 
 /// delete a key from a BPF map.
 pub fn mapDelete(map_fd: posix.fd_t, key: []const u8) void {
+    if (comptime builtin.os.tag != .linux) return;
+
     BPF.map_delete_elem(map_fd, key) catch {};
 }
 
@@ -111,6 +122,8 @@ pub fn loadProgram(
     comptime prog: type,
     map_fds: []posix.fd_t,
 ) EbpfError!posix.fd_t {
+    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
+
     const insns = prog.insns;
     const relocs = prog.relocs;
     const maps = prog.maps;
@@ -172,6 +185,8 @@ pub fn loadProgramWithType(
     map_fds: []posix.fd_t,
     prog_type: BPF.ProgType,
 ) EbpfError!posix.fd_t {
+    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
+
     const insns = prog.insns;
     const relocs = prog.relocs;
     const maps = prog.maps;
@@ -227,6 +242,8 @@ fn loadEgressProgram(
     comptime prog: type,
     map_fds: []posix.fd_t,
 ) EbpfError!posix.fd_t {
+    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
+
     const insns = prog.egress_insns;
     const relocs_arr = prog.egress_relocs;
     const maps = prog.maps;
@@ -1241,6 +1258,8 @@ pub fn detachXdp(if_index: u32) EbpfError!void {
 /// tries to create a minimal hash map — if it fails (typically EPERM
 /// or ENOSYS), BPF is not available. the test map is immediately closed.
 pub fn isSupported() bool {
+    if (comptime builtin.os.tag != .linux) return false;
+
     const fd = BPF.map_create(.hash, 4, 4, 1) catch return false;
     posix.close(fd);
     return true;
