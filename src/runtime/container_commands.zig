@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
+const json_out = @import("../lib/json_output.zig");
 const store = @import("../state/store.zig");
 const container = @import("container.zig");
 const process = @import("process.zig");
@@ -257,6 +258,11 @@ pub fn ps(alloc: std.mem.Allocator) void {
         ids.deinit(alloc);
     }
 
+    if (cli.output_mode == .json) {
+        psJson(alloc, ids.items);
+        return;
+    }
+
     if (ids.items.len == 0) {
         write("no containers\n", .{});
         return;
@@ -285,6 +291,46 @@ pub fn ps(alloc: std.mem.Allocator) void {
         const ip_display: []const u8 = record.ip_address orelse "-";
         write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, status, ip_display, record.command });
     }
+}
+
+fn psJson(alloc: std.mem.Allocator, ids: []const []const u8) void {
+    var w = json_out.JsonWriter{};
+    w.beginArray();
+
+    for (ids) |id| {
+        const record = store.load(alloc, id) catch continue;
+        defer record.deinit(alloc);
+
+        var status = record.status;
+        if (std.mem.eql(u8, status, "running")) {
+            if (record.pid) |pid| {
+                process.sendSignal(pid, 0) catch {
+                    store.updateStatus(id, "stopped", null, null) catch {};
+                    status = "stopped";
+                };
+            }
+        }
+
+        w.beginObject();
+        w.stringField("id", id);
+        w.stringField("status", status);
+        if (record.ip_address) |addr| {
+            w.stringField("ip", addr);
+        } else {
+            w.nullField("ip");
+        }
+        w.stringField("command", record.command);
+        if (record.pid) |pid| {
+            w.intField("pid", pid);
+        } else {
+            w.nullField("pid");
+        }
+        w.intField("created_at", record.created_at);
+        w.endObject();
+    }
+
+    w.endArray();
+    w.flush();
 }
 
 pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
+const json_out = @import("../lib/json_output.zig");
 const spec = @import("spec.zig");
 const registry = @import("registry.zig");
 const layer = @import("layer.zig");
@@ -230,6 +231,11 @@ pub fn images(alloc: std.mem.Allocator) void {
         imgs.deinit(alloc);
     }
 
+    if (cli.output_mode == .json) {
+        imagesJson(imgs.items);
+        return;
+    }
+
     if (imgs.items.len == 0) {
         write("no images\n", .{});
         return;
@@ -248,6 +254,51 @@ pub fn images(alloc: std.mem.Allocator) void {
             size_mb,
         });
     }
+}
+
+fn imagesJson(imgs: []const store.ImageRecord) void {
+    var w = json_out.JsonWriter{};
+    w.beginArray();
+    for (imgs) |img| {
+        w.beginObject();
+        w.stringField("repository", img.repository);
+        w.stringField("tag", img.tag);
+        w.stringField("id", img.id);
+        w.stringField("manifest_digest", img.manifest_digest);
+        w.stringField("config_digest", img.config_digest);
+        w.uintField("size_bytes", img.total_size);
+        w.intField("created_at", img.created_at);
+        w.endObject();
+    }
+    w.endArray();
+    w.flush();
+}
+
+fn inspectJson(image: *const store.ImageRecord, config: *const spec.ImageConfig, manifest: *const spec.Manifest) void {
+    var w = json_out.JsonWriter{};
+    w.beginObject();
+    w.stringField("repository", image.repository);
+    w.stringField("tag", image.tag);
+    w.stringField("manifest_digest", image.manifest_digest);
+    w.uintField("size_bytes", image.total_size);
+    w.intField("created_at", image.created_at);
+
+    if (config.architecture) |arch| w.stringField("architecture", arch);
+    if (config.os) |os_name| w.stringField("os", os_name);
+    if (config.created) |created| w.stringField("created", created);
+
+    w.uintField("layer_count", manifest.layers.len);
+
+    if (config.config) |cc| {
+        w.beginObjectField("config");
+        if (cc.WorkingDir) |wd| w.stringField("working_dir", wd);
+        if (cc.User) |user| w.stringField("user", user);
+        if (cc.StopSignal) |sig| w.stringField("stop_signal", sig);
+        w.endObject(); // config
+    }
+
+    w.endObject();
+    w.flush();
 }
 
 pub fn rmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
@@ -277,6 +328,11 @@ pub fn rmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
 pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const image_str = requireArg(args, "usage: yoq inspect <image>\n");
+
+    // check for --json flag in remaining args
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
+    }
 
     // find the image (same pattern as rmi)
     const ref = spec.parseImageRef(image_str);
@@ -322,6 +378,11 @@ pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     const config = parsed_config.value;
     const manifest = parsed_manifest.value;
+
+    if (cli.output_mode == .json) {
+        inspectJson(&image, &config, &manifest);
+        return;
+    }
 
     // -- display --
     write("{s}:{s}\n\n", .{ image.repository, image.tag });
@@ -579,7 +640,15 @@ pub fn prune(alloc: std.mem.Allocator) void {
     }
 
     // report
-    if (blobs_removed == 0 and layers_removed == 0) {
+    if (cli.output_mode == .json) {
+        var w = json_out.JsonWriter{};
+        w.beginObject();
+        w.uintField("blobs_removed", blobs_removed);
+        w.uintField("layers_removed", layers_removed);
+        w.uintField("bytes_reclaimed", bytes_reclaimed);
+        w.endObject();
+        w.flush();
+    } else if (blobs_removed == 0 and layers_removed == 0) {
         write("nothing to prune\n", .{});
     } else {
         const mb = @divTrunc(bytes_reclaimed, 1024 * 1024);
