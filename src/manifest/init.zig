@@ -32,7 +32,7 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
     // check if file already exists (unless --force)
     if (!opts.force) {
         if (std.fs.cwd().statFile(opts.output_path)) |_| {
-            const stderr = std.io.getStdErr().writer();
+            const stderr = std.fs.File.stderr().deprecatedWriter();
             stderr.print("{s} already exists (use -f to specify a different path)\n", .{opts.output_path}) catch {};
             return InitError.FileExists;
         } else |_| {
@@ -56,11 +56,11 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
     }) catch return InitError.WriteFailed;
 
     if (is_tty) {
-        const stderr = std.io.getStdErr().writer();
+        const stderr = std.fs.File.stderr().deprecatedWriter();
         stderr.print("\ncreated {s}\n\n  yoq up        start services\n  yoq up --dev  start with hot reload\n", .{opts.output_path}) catch {};
     } else {
         // non-interactive: just print the path to stdout
-        const stdout = std.io.getStdOut().writer();
+        const stdout = std.fs.File.stdout().deprecatedWriter();
         stdout.print("{s}\n", .{opts.output_path}) catch {};
     }
 }
@@ -76,8 +76,8 @@ fn defaultProjectName(alloc: std.mem.Allocator) ?[]const u8 {
 /// run the 4 interactive prompts
 fn gatherInteractive(alloc: std.mem.Allocator) ?Answers {
     const default_project = defaultProjectName(alloc) orelse return null;
-    const stdin = std.io.getStdIn().reader();
     var buf: [256]u8 = undefined;
+    const stdin = std.fs.File.stdin().deprecatedReader();
 
     const project = prompt(stdin, &buf, "project name", default_project);
     const service = prompt(stdin, &buf, "service name", "app");
@@ -106,7 +106,7 @@ fn gatherDefaults(alloc: std.mem.Allocator) ?Answers {
 
 /// display `? label (default): `, read a line, return default on empty/EOF
 fn prompt(reader: anytype, buf: []u8, label: []const u8, default: []const u8) []const u8 {
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr().deprecatedWriter();
     stderr.print("? {s} ({s}): ", .{ label, default }) catch {};
 
     const line = reader.readUntilDelimiterOrEof(buf, '\n') catch return default;
@@ -120,7 +120,7 @@ fn prompt(reader: anytype, buf: []u8, label: []const u8, default: []const u8) []
 
 /// prompt that parses a port number, returns null for "none"
 fn promptPort(reader: anytype, buf: []u8, label: []const u8, default: []const u8) ?u16 {
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr().deprecatedWriter();
     stderr.print("? {s} ({s}): ", .{ label, default }) catch {};
 
     const line = reader.readUntilDelimiterOrEof(buf, '\n') catch return null;

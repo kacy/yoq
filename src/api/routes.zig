@@ -2,7 +2,57 @@
 
 const std = @import("std");
 const http = @import("http.zig");
+const container = @import("../runtime/container.zig");
+const logs = @import("../runtime/logs.zig");
+const store = @import("../state/store.zig");
+const secrets = @import("../state/secrets.zig");
+const cert_store = @import("../tls/cert_store.zig");
+const sqlite = @import("sqlite");
+const monitor = @import("../runtime/monitor.zig");
+const ip_mod = @import("../network/ip.zig");
+const net_policy = @import("../network/policy.zig");
 const cluster_node = @import("../cluster/node.zig");
+const agent_registry = @import("../cluster/registry.zig");
+const scheduler = @import("../cluster/scheduler.zig");
+const builtin = @import("builtin");
+const ebpf = if (builtin.os.tag == .linux) @import("../network/ebpf.zig") else struct {
+    pub const PairEntry = struct {
+        key: struct {
+            src_ip: u32,
+            dst_ip: u32,
+            dst_port: u16,
+        },
+        value: struct {
+            connections: u64,
+            packets: u64,
+            bytes: u64,
+            errors: u64,
+        },
+    };
+
+    pub const Metrics = struct {
+        packets: u64 = 0,
+        bytes: u64 = 0,
+    };
+
+    pub const Collector = struct {
+        pub fn readMetrics(_: *@This(), _: u32) ?Metrics {
+            return null;
+        }
+
+        pub fn readPairMetrics(_: *@This(), _: []PairEntry) usize {
+            return 0;
+        }
+    };
+
+    pub fn getMetricsCollector() ?*Collector {
+        return null;
+    }
+
+    pub fn ipToNetworkOrder(_: [4]u8) u32 {
+        return 0;
+    }
+};
 const json_helpers = @import("../lib/json_helpers.zig");
 const common = @import("routes/common.zig");
 const containers_images = @import("routes/containers_images.zig");
@@ -91,7 +141,7 @@ fn handleListImages(alloc: std.mem.Allocator) Response {
         if (!first) writer.writeByte(',') catch return internalError();
         first = false;
 
-        writeImageJson(writer, img) catch return internalError();
+        containers_images.writeImageJson(writer, img) catch return internalError();
     }
 
     writer.writeByte(']') catch return internalError();

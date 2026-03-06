@@ -233,7 +233,7 @@ fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void {
     try writer.writeByte('}');
 }
 
-fn writeImageJson(writer: anytype, img: store.ImageRecord) !void {
+pub fn writeImageJson(writer: anytype, img: store.ImageRecord) !void {
     try writer.writeAll("{\"id\":\"");
     try json_helpers.writeJsonEscaped(writer, img.id);
     try writer.writeAll("\",\"repository\":\"");
