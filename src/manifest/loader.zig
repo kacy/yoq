@@ -829,48 +829,42 @@ fn parseHealthCheck(
         return LoadError.InvalidHealthCheck;
     };
 
-    const check_type: spec.CheckType = if (std.mem.eql(u8, type_str, "http"))
-        blk: {
-            const path = hc_table.getString("path") orelse {
-                log.err("manifest: service '{s}' http health_check is missing 'path'", .{service_name});
-                return LoadError.InvalidHealthCheck;
-            };
-            const port = hc_table.getInt("port") orelse {
-                log.err("manifest: service '{s}' http health_check is missing 'port'", .{service_name});
-                return LoadError.InvalidHealthCheck;
-            };
-            if (port < 1 or port > 65535) {
-                log.err("manifest: service '{s}' health_check port out of range", .{service_name});
-                return LoadError.InvalidHealthCheck;
-            }
-            break :blk .{ .http = .{
-                .path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory,
-                .port = @intCast(port),
-            } };
+    const check_type: spec.CheckType = if (std.mem.eql(u8, type_str, "http")) blk: {
+        const path = hc_table.getString("path") orelse {
+            log.err("manifest: service '{s}' http health_check is missing 'path'", .{service_name});
+            return LoadError.InvalidHealthCheck;
+        };
+        const port = hc_table.getInt("port") orelse {
+            log.err("manifest: service '{s}' http health_check is missing 'port'", .{service_name});
+            return LoadError.InvalidHealthCheck;
+        };
+        if (port < 1 or port > 65535) {
+            log.err("manifest: service '{s}' health_check port out of range", .{service_name});
+            return LoadError.InvalidHealthCheck;
         }
-    else if (std.mem.eql(u8, type_str, "tcp"))
-        blk: {
-            const port = hc_table.getInt("port") orelse {
-                log.err("manifest: service '{s}' tcp health_check is missing 'port'", .{service_name});
-                return LoadError.InvalidHealthCheck;
-            };
-            if (port < 1 or port > 65535) {
-                log.err("manifest: service '{s}' health_check port out of range", .{service_name});
-                return LoadError.InvalidHealthCheck;
-            }
-            break :blk .{ .tcp = .{ .port = @intCast(port) } };
+        break :blk .{ .http = .{
+            .path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory,
+            .port = @intCast(port),
+        } };
+    } else if (std.mem.eql(u8, type_str, "tcp")) blk: {
+        const port = hc_table.getInt("port") orelse {
+            log.err("manifest: service '{s}' tcp health_check is missing 'port'", .{service_name});
+            return LoadError.InvalidHealthCheck;
+        };
+        if (port < 1 or port > 65535) {
+            log.err("manifest: service '{s}' health_check port out of range", .{service_name});
+            return LoadError.InvalidHealthCheck;
         }
-    else if (std.mem.eql(u8, type_str, "exec"))
-        blk: {
-            const cmd = try parseStringArray(alloc, hc_table.getArray("command"));
-            if (cmd.len == 0) {
-                alloc.free(cmd);
-                log.err("manifest: service '{s}' exec health_check has empty command", .{service_name});
-                return LoadError.InvalidHealthCheck;
-            }
-            break :blk .{ .exec = .{ .command = cmd } };
+        break :blk .{ .tcp = .{ .port = @intCast(port) } };
+    } else if (std.mem.eql(u8, type_str, "exec")) blk: {
+        const cmd = try parseStringArray(alloc, hc_table.getArray("command"));
+        if (cmd.len == 0) {
+            alloc.free(cmd);
+            log.err("manifest: service '{s}' exec health_check has empty command", .{service_name});
+            return LoadError.InvalidHealthCheck;
         }
-    else {
+        break :blk .{ .exec = .{ .command = cmd } };
+    } else {
         log.err("manifest: service '{s}' health_check has unknown type '{s}'", .{ service_name, type_str });
         return LoadError.InvalidHealthCheck;
     };

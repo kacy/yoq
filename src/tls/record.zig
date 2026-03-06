@@ -113,9 +113,8 @@ pub fn encryptRecord(
     // additional data is the record header (outer type 0x17 + version + length)
     const record_len: u16 = @intCast(total_len);
     const aad = [_]u8{
-        0x17, 0x03, 0x03,
-        @intCast(record_len >> 8),
-        @intCast(record_len & 0xFF),
+        0x17,                      0x03,                        0x03,
+        @intCast(record_len >> 8), @intCast(record_len & 0xFF),
     };
 
     var tag: [aead_tag_size]u8 = undefined;
@@ -193,9 +192,8 @@ test "encrypt and decrypt round-trip" {
 
     const record_len: u16 = @intCast(ct_len);
     const header = [_]u8{
-        0x17, 0x03, 0x03,
-        @intCast(record_len >> 8),
-        @intCast(record_len & 0xFF),
+        0x17,                      0x03,                        0x03,
+        @intCast(record_len >> 8), @intCast(record_len & 0xFF),
     };
 
     const result = try decryptRecord(key, iv, 0, out[0..ct_len], header);
@@ -218,9 +216,8 @@ test "decrypt fails with wrong key" {
 
     const record_len: u16 = @intCast(ct_len);
     const header = [_]u8{
-        0x17, 0x03, 0x03,
-        @intCast(record_len >> 8),
-        @intCast(record_len & 0xFF),
+        0x17,                      0x03,                        0x03,
+        @intCast(record_len >> 8), @intCast(record_len & 0xFF),
     };
 
     try std.testing.expectError(
@@ -241,9 +238,8 @@ test "decrypt fails with wrong sequence number" {
 
     const record_len: u16 = @intCast(ct_len);
     const header = [_]u8{
-        0x17, 0x03, 0x03,
-        @intCast(record_len >> 8),
-        @intCast(record_len & 0xFF),
+        0x17,                      0x03,                        0x03,
+        @intCast(record_len >> 8), @intCast(record_len & 0xFF),
     };
 
     // wrong sequence number
@@ -300,9 +296,8 @@ test "encrypt preserves content type" {
 
     const record_len: u16 = @intCast(ct_len);
     const header = [_]u8{
-        0x17, 0x03, 0x03,
-        @intCast(record_len >> 8),
-        @intCast(record_len & 0xFF),
+        0x17,                      0x03,                        0x03,
+        @intCast(record_len >> 8), @intCast(record_len & 0xFF),
     };
 
     const result = try decryptRecord(key, iv, 5, out[0..ct_len], header);

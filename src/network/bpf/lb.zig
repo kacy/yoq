@@ -398,4 +398,3 @@ pub const egress_insns = [_]BPF.Insn{
     .{ .code = 0x73, .dst = 6, .src = 1, .off = 6, .imm = 0 },
     .{ .code = 0x05, .dst = 0, .src = 0, .off = -101, .imm = 0 },
 };
-

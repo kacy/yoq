@@ -63,12 +63,14 @@ pub fn post(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []
 pub fn postWithAuth(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []const u8, auth_token: ?[]const u8) HttpClientError!Response {
     var req_buf: [2048]u8 = undefined;
     const request = if (auth_token) |token|
-        std.fmt.bufPrint(&req_buf,
+        std.fmt.bufPrint(
+            &req_buf,
             "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\nAuthorization: Bearer {s}\r\n\r\n{s}",
             .{ path, body.len, token, body },
         ) catch return HttpClientError.SendFailed
     else
-        std.fmt.bufPrint(&req_buf,
+        std.fmt.bufPrint(
+            &req_buf,
             "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\n\r\n{s}",
             .{ path, body.len, body },
         ) catch return HttpClientError.SendFailed;

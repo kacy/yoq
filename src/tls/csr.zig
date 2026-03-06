@@ -67,7 +67,10 @@ fn buildCsr(
     inner.appendSlice(&[_]u8{
         0x30, 0x0A, // SEQUENCE, length 10
         0x06, 0x08, // OID, length 8
-        0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02,
+        0x2A, 0x86,
+        0x48, 0xCE,
+        0x3D, 0x04,
+        0x03, 0x02,
     }) catch return CsrError.EncodingFailed;
 
     // signature: BIT STRING wrapping DER-encoded ECDSA signature
