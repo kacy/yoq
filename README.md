@@ -8,7 +8,7 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 ## status
 
-**~90% complete.** ~46k lines of Zig, ~951 tests. phases 1-4 and 6 are complete. phase 5 and 7 have remaining work.
+**~95% complete.** ~48k lines of Zig, ~984 tests. all seven phases are implemented.
 
 **container runtime (phase 1) — complete:** containers run in isolated namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) with cgroups v2 resource limits, overlayfs from OCI image layers, seccomp syscall filters, and dropped capabilities. process supervision, log capture, and exec into running containers all work. rootless containers via user namespace uid/gid mappings are implemented.
 
@@ -18,11 +18,11 @@ yoq combines container runtime, orchestration, networking, and service mesh into
 
 **build engine (phase 4) — complete:** Dockerfile parser supports all major directives (FROM, RUN, COPY, ADD, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD) and produces OCI images with content-hash caching. identical build steps are never re-executed, regardless of instruction order. `--build-arg` substitution and multi-stage builds (`COPY --from`) are supported. ADD auto-extracts tar archives (gzip, bzip2, xz, zstd, plain tar) with URL source support. ONBUILD triggers are stored in image config and executed when used as a base image. TOML declarative build manifest (`--format toml`) provides an alternative to Dockerfiles with automatic stage dependency resolution.
 
-**manifest + dev mode (phase 5) — ~80%:** TOML manifest format defines multi-service applications with dependency ordering, health checks, readiness probes, rolling update strategies, and secret references. `yoq up` starts all services, `yoq down` stops them in reverse order. dev mode (`--dev`) watches source directories with inotify and hot-restarts containers on file changes. colored log multiplexing prefixes output with service names. rolling updates with automatic rollback on health check failure. gaps: workers and crons not implemented in manifest spec, `up <service>` (start individual service) not implemented.
+**manifest + dev mode (phase 5) — complete:** TOML manifest format defines multi-service applications with dependency ordering, health checks, readiness probes, rolling update strategies, and secret references. `yoq up` starts all services, `yoq down` stops them in reverse order. `yoq up <service>` starts individual services with their dependencies. workers provide one-shot tasks (e.g., database migrations) that run to completion. crons run on a fixed interval (e.g., `every = "1h"`) and are automatically scheduled when `yoq up` starts. dev mode (`--dev`) watches source directories with inotify and hot-restarts containers on file changes. colored log multiplexing prefixes output with service names. rolling updates with automatic rollback on health check failure.
 
-**clustering (phase 6) — ~95%:** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. raft snapshots keep the log bounded and bring lagging followers up to date via InstallSnapshot RPC. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. WireGuard mesh with automatic key exchange on join encrypts cross-node traffic. cross-node service discovery works via cluster DNS. the API server exposes endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`.
+**clustering (phase 6) — complete:** raft consensus with TCP transport replicates state across server nodes using SQLite as the state machine. raft snapshots keep the log bounded and bring lagging followers up to date via InstallSnapshot RPC. agents join with tokens, report capacity via heartbeats every 5 seconds, and get work assigned by a bin-packing scheduler. WireGuard mesh with automatic key exchange on join encrypts cross-node traffic. cross-node service discovery works via cluster DNS. the API server exposes endpoints for cluster management. CLI commands cover the full lifecycle: `init-server`, `join`, `nodes`, `drain`, `cluster status`.
 
-**production features (phase 7) — ~55%:** health checks (HTTP, TCP, exec) with configurable intervals and readiness probes. rolling updates with automatic rollback on failure. encrypted secrets store with rotation (mounted as files or env vars). TLS termination with ACME auto-provisioning, TLS 1.3 handshake, bidirectional proxy with SNI routing, and auto-renewal on startup. certificate management CLI. eBPF observability with per-IP and per-service-pair metrics. eBPF network policies (allow/deny between services). PSI metrics reading from cgroups v2. remaining: PSI-based auto-tuning suggestions.
+**production features (phase 7) — complete:** health checks (HTTP, TCP, exec) with configurable intervals and readiness probes. rolling updates with automatic rollback on failure. encrypted secrets store with rotation (mounted as files or env vars). TLS termination with ACME auto-provisioning, TLS 1.3 handshake, bidirectional proxy with SNI routing, and auto-renewal on startup. certificate management CLI. eBPF observability with per-IP and per-service-pair metrics. eBPF network policies (allow/deny between services). PSI metrics reading from cgroups v2. remaining: PSI-based auto-tuning suggestions.
 
 ## what works
 
@@ -51,9 +51,11 @@ yoq build [-t tag] [-f Dockerfile] . build an image from a Dockerfile
 
 # manifest
 yoq up [-f manifest.toml]            start services from manifest
+yoq up [service...]                  start only named services + deps
 yoq up --dev                         dev mode: watch + hot restart
 yoq up --server host:port            deploy to cluster
 yoq down [-f manifest.toml]          stop all services
+yoq run-worker <name>                run a one-shot worker task
 
 # deployment
 yoq rollback <service>               rollback to previous version
@@ -66,9 +68,18 @@ yoq secret rm <name>                 delete a secret
 yoq secret list                      list all secrets
 yoq secret rotate <name>             rotate a secret
 
+# status
+yoq status [--verbose]               show service status and resources
+
 # metrics
 yoq metrics [service]                show per-service network stats
 yoq metrics --pairs                  show service-to-service metrics
+
+# network policies
+yoq policy deny <src> <tgt>          block traffic between services
+yoq policy allow <src> <tgt>         allow traffic between services
+yoq policy rm <src> <tgt>            remove a policy rule
+yoq policy list                      list all policy rules
 
 # certificates
 yoq cert provision <domain>          provision TLS certificate via ACME
@@ -94,6 +105,8 @@ yoq version                          print version
 yoq help                             show help
 ```
 
+crons defined in the manifest run automatically when `yoq up` starts — no separate command needed.
+
 deployment, metrics, and certificate commands accept `--server host:port` for remote cluster operation.
 
 ## requirements
@@ -105,6 +118,37 @@ deployment, metrics, and certificate commands accept `--server host:port` for re
 
 ```
 make build
+```
+
+## quickstart
+
+```bash
+# run a container
+yoq run alpine:latest echo "hello from yoq"
+
+# pull and inspect an image
+yoq pull redis:7
+yoq inspect redis:7
+
+# multi-service app from a manifest
+cat > manifest.toml << 'EOF'
+[service.redis]
+image = "redis:7"
+ports = ["6379:6379"]
+
+[service.web]
+image = "nginx:latest"
+ports = ["8080:80"]
+depends_on = ["redis"]
+EOF
+yoq up -f manifest.toml
+
+# run a one-shot worker
+yoq run-worker -f manifest.toml migrate
+
+# check status
+yoq ps
+yoq status
 ```
 
 ## architecture
@@ -122,12 +166,15 @@ src/
     logs.zig               stdout/stderr capture to files
     exec.zig               execute commands in running containers
     monitor.zig            resource monitoring
+    commands.zig           status/metrics CLI handlers
+    container_commands.zig container lifecycle CLI handlers
   image/
     registry.zig           OCI registry client (token auth, manifests, blobs, push)
     store.zig              content-addressable blob storage
     layer.zig              layer extraction and deduplication
     spec.zig               OCI image/manifest spec types
     oci.zig                OCI image config resolution
+    commands.zig           image CLI handlers
   network/
     setup.zig              network orchestrator (bridge + veth + NAT)
     bridge.zig             bridge and veth pair management via netlink
@@ -138,6 +185,7 @@ src/
     wireguard.zig          WireGuard mesh setup and key exchange
     ebpf.zig               eBPF program loading, map management
     policy.zig             eBPF-based network policy enforcement
+    commands.zig           network policy CLI handlers
     bpf/
       dns_intercept.zig    eBPF: DNS service discovery
       lb.zig               eBPF: round-robin load balancing + reverse SNAT
@@ -149,12 +197,15 @@ src/
     engine.zig             build engine with content-hash caching
     context.zig            build context file hashing and copying
     manifest.zig           TOML declarative build manifest
+    commands.zig           build CLI handlers
   manifest/
     spec.zig               manifest type definitions (services, volumes, ports)
     loader.zig             TOML manifest parser with dependency ordering
     orchestrator.zig       service lifecycle and dependency management
     health.zig             health checks and readiness probes
     update.zig             rolling updates and rollback
+    cron_scheduler.zig     cron scheduling thread
+    commands.zig           manifest CLI handlers (up/down/run-worker)
   dev/
     watcher.zig            inotify file watcher for dev mode
     log_mux.zig            colored log multiplexing by service name
@@ -169,6 +220,7 @@ src/
     acme.zig               ACME client (Let's Encrypt)
     cert_store.zig         certificate storage and management
     backend.zig            backend registry for domain routing
+    commands.zig           certificate CLI handlers
   cluster/
     raft.zig               raft consensus (leader election, log replication)
     raft_types.zig         raft protocol types and constants
@@ -182,6 +234,7 @@ src/
     agent.zig              worker node agent (heartbeat, resource reporting)
     http_client.zig        HTTP client for agent-server communication
     scheduler.zig          bin-packing container placement
+    commands.zig           cluster CLI handlers
   api/
     http.zig               HTTP request/response parsing
     routes.zig             API route dispatch and handlers
@@ -190,6 +243,7 @@ src/
     store.zig              sqlite container/image metadata
     schema.zig             database schema and migrations
     secrets.zig            encrypted secret storage
+    commands.zig           secret CLI handlers
   lib/
     log.zig                structured logging
     paths.zig              XDG data directory helpers
@@ -199,19 +253,24 @@ src/
     exec_helpers.zig       process exec helpers
     syscall.zig            low-level syscall wrappers
     sql.zig                SQL escaping for raft proposals
-    cmd.zig                shared command execution
+    cmd.zig                shared command execution helpers
 ```
 
 ## what's next
 
-### high priority (unblocks production use)
+### remaining work
 
 - PSI-based auto-tuning suggestions from resource monitoring
 
-### medium priority (completes phase promises)
+### future directions
 
-- workers and crons in manifest spec
-
-### lower priority (polish)
-
-- `up <service>` (start individual service from manifest)
+- `yoq init` — scaffold a manifest.toml interactively
+- `yoq validate` — validate a manifest without starting services
+- shell completions (bash/zsh/fish)
+- `--json` output flag for scripting
+- web UI (explicitly deferred — CLI only for now)
+- GPU scheduling
+- multi-region federation
+- advanced L7 routing (path-based HTTP routing)
+- plugin system
+- image signing (use cosign externally for now)
