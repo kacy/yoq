@@ -46,6 +46,40 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
+    // -- integration tests (no sqlite required) --
+    //
+    // these test the manifest loader, validator, CLI helpers, and JSON output
+    // without requiring sqlite or root. they import source modules directly.
+    //
+    // usage:
+    //   zig build test-integration    — run all integration tests
+    //   make test-integration         — same via Makefile
+
+    const integration_test_step = b.step("test-integration", "Run integration tests (no sqlite/root required)");
+
+    // integration test root lives inside src/ so that relative imports
+    // from modules under test (e.g. loader → ../lib/toml) resolve correctly.
+    // tests cover manifest loading, validation, and JSON output — all without
+    // sqlite, so they run in any environment.
+    const integration_tests_mod = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    integration_test_step.dependOn(&b.addRunArtifact(integration_tests_mod).step);
+
+    // helper module tests (subprocess runner, temp dirs)
+    const helper_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/helpers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    integration_test_step.dependOn(&b.addRunArtifact(helper_tests).step);
+
     // -- BPF compilation (optional) --
     //
     // compiles BPF C programs in bpf/ and generates Zig bytecode arrays

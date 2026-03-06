@@ -1,4 +1,4 @@
-.PHONY: build run test clean bpf install fmt loc
+.PHONY: build run test test-integration clean bpf install fmt loc
 
 build:
 	zig build
@@ -8,6 +8,9 @@ run:
 
 test:
 	zig build test
+
+test-integration:
+	zig build test-integration
 
 clean:
 	rm -rf zig-out .zig-cache
