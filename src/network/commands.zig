@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
+const json_out = @import("../lib/json_output.zig");
 const store = @import("../state/store.zig");
 const net_policy = @import("policy.zig");
 
@@ -10,7 +11,18 @@ const formatTimestamp = cli.formatTimestamp;
 // -- network policy commands --
 
 pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const subcmd = args.next() orelse {
+    var subcmd: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else {
+            subcmd = arg;
+            break;
+        }
+    }
+
+    const cmd = subcmd orelse {
         writeErr(
             \\usage: yoq policy <command> [options]
             \\
@@ -24,16 +36,20 @@ pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    if (std.mem.eql(u8, subcmd, "deny")) {
+    if (std.mem.eql(u8, cmd, "deny")) {
         policyDeny(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "allow")) {
+    } else if (std.mem.eql(u8, cmd, "allow")) {
         policyAllow(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "rm")) {
+    } else if (std.mem.eql(u8, cmd, "rm")) {
         policyRm(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "list")) {
+    } else if (std.mem.eql(u8, cmd, "list")) {
+        // also check remaining args for --json
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
+        }
         policyList(alloc);
     } else {
-        writeErr("unknown policy command: {s}\n", .{subcmd});
+        writeErr("unknown policy command: {s}\n", .{cmd});
         std.process.exit(1);
     }
 }
@@ -109,6 +125,22 @@ fn policyList(alloc: std.mem.Allocator) void {
     defer {
         for (policies.items) |p| p.deinit(alloc);
         policies.deinit(alloc);
+    }
+
+    if (cli.output_mode == .json) {
+        var w = json_out.JsonWriter{};
+        w.beginArray();
+        for (policies.items) |pol| {
+            w.beginObject();
+            w.stringField("source", pol.source_service);
+            w.stringField("target", pol.target_service);
+            w.stringField("action", pol.action);
+            w.intField("created_at", pol.created_at);
+            w.endObject();
+        }
+        w.endArray();
+        w.flush();
+        return;
     }
 
     if (policies.items.len == 0) {

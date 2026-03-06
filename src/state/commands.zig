@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
+const json_out = @import("../lib/json_output.zig");
 const secrets = @import("secrets.zig");
 const store = @import("store.zig");
 const sqlite = @import("sqlite");
@@ -9,7 +10,19 @@ const writeErr = cli.writeErr;
 const requireArg = cli.requireArg;
 
 pub fn secret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const subcmd = args.next() orelse {
+    var subcmd: ?[]const u8 = null;
+
+    // peek at first arg — could be subcommand or --json
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else {
+            subcmd = arg;
+            break;
+        }
+    }
+
+    const cmd = subcmd orelse {
         writeErr(
             \\usage: yoq secret <command> [options]
             \\
@@ -24,18 +37,22 @@ pub fn secret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    if (std.mem.eql(u8, subcmd, "set")) {
+    if (std.mem.eql(u8, cmd, "set")) {
         set(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "get")) {
+    } else if (std.mem.eql(u8, cmd, "get")) {
         get(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "rm")) {
+    } else if (std.mem.eql(u8, cmd, "rm")) {
         rm(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "list")) {
+    } else if (std.mem.eql(u8, cmd, "list")) {
+        // also check remaining args for --json
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
+        }
         list(alloc);
-    } else if (std.mem.eql(u8, subcmd, "rotate")) {
+    } else if (std.mem.eql(u8, cmd, "rotate")) {
         rotate(args, alloc);
     } else {
-        writeErr("unknown secret command: {s}\n", .{subcmd});
+        writeErr("unknown secret command: {s}\n", .{cmd});
         std.process.exit(1);
     }
 }
@@ -137,6 +154,17 @@ fn list(alloc: std.mem.Allocator) void {
     defer {
         for (names.items) |n| alloc.free(n);
         names.deinit(alloc);
+    }
+
+    if (cli.output_mode == .json) {
+        var w = json_out.JsonWriter{};
+        w.beginArray();
+        for (names.items) |name| {
+            w.stringValue(name);
+        }
+        w.endArray();
+        w.flush();
+        return;
     }
 
     if (names.items.len == 0) {

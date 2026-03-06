@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
+const json_out = @import("../lib/json_output.zig");
 const cert_store = @import("cert_store.zig");
 const acme = @import("acme.zig");
 const store = @import("../state/store.zig");
@@ -11,7 +12,18 @@ const requireArg = cli.requireArg;
 const formatTimestamp = cli.formatTimestamp;
 
 pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
-    const subcmd = args.next() orelse {
+    var subcmd: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else {
+            subcmd = arg;
+            break;
+        }
+    }
+
+    const cmd = subcmd orelse {
         writeErr(
             \\usage: yoq cert <command> [options]
             \\
@@ -26,18 +38,22 @@ pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         std.process.exit(1);
     };
 
-    if (std.mem.eql(u8, subcmd, "install")) {
+    if (std.mem.eql(u8, cmd, "install")) {
         cmdCertInstall(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "provision")) {
+    } else if (std.mem.eql(u8, cmd, "provision")) {
         cmdCertProvision(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "renew")) {
+    } else if (std.mem.eql(u8, cmd, "renew")) {
         cmdCertRenew(args, alloc);
-    } else if (std.mem.eql(u8, subcmd, "list")) {
+    } else if (std.mem.eql(u8, cmd, "list")) {
+        // also check remaining args for --json
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
+        }
         cmdCertList(alloc);
-    } else if (std.mem.eql(u8, subcmd, "rm")) {
+    } else if (std.mem.eql(u8, cmd, "rm")) {
         cmdCertRm(args, alloc);
     } else {
-        writeErr("unknown cert command: {s}\n", .{subcmd});
+        writeErr("unknown cert command: {s}\n", .{cmd});
         std.process.exit(1);
     }
 }
@@ -119,6 +135,22 @@ fn cmdCertList(alloc: std.mem.Allocator) void {
     defer {
         for (certs.items) |c| c.deinit(alloc);
         certs.deinit(alloc);
+    }
+
+    if (cli.output_mode == .json) {
+        var w = json_out.JsonWriter{};
+        w.beginArray();
+        for (certs.items) |c| {
+            w.beginObject();
+            w.stringField("domain", c.domain);
+            w.intField("not_after", c.not_after);
+            w.stringField("source", c.source);
+            w.intField("created_at", c.created_at);
+            w.endObject();
+        }
+        w.endArray();
+        w.flush();
+        return;
     }
 
     if (certs.items.len == 0) {
