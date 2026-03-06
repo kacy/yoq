@@ -263,17 +263,14 @@ pub const Server = struct {
 
     /// spawn a detached worker thread to handle a single connection.
     fn spawnWorker(self: *Server, client_fd: posix.fd_t) void {
-        // reject if at connection limit
-        const current = active_connections.load(.acquire);
-        if (current >= max_connections) {
+        if (!tryAcquireConnectionSlot()) {
             posix.close(client_fd);
             return;
         }
-        _ = active_connections.fetchAdd(1, .acq_rel);
 
         const alloc = self.alloc;
         const thread = std.Thread.spawn(.{}, connectionWrapper, .{ alloc, client_fd }) catch {
-            _ = active_connections.fetchSub(1, .acq_rel);
+            releaseConnectionSlot();
             posix.close(client_fd);
             return;
         };
@@ -283,8 +280,24 @@ pub const Server = struct {
 
 /// wrapper that decrements the connection counter on exit.
 fn connectionWrapper(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
-    defer _ = active_connections.fetchSub(1, .acq_rel);
+    defer releaseConnectionSlot();
     handleConnection(alloc, client_fd);
+}
+
+/// reserve a connection slot, respecting max_connections.
+/// uses CAS to avoid races around check-then-increment.
+fn tryAcquireConnectionSlot() bool {
+    while (true) {
+        const current = active_connections.load(.acquire);
+        if (current >= max_connections) return false;
+        if (active_connections.cmpxchgWeak(current, current + 1, .acq_rel, .acquire) == null) {
+            return true;
+        }
+    }
+}
+
+fn releaseConnectionSlot() void {
+    _ = active_connections.fetchSub(1, .acq_rel);
 }
 
 /// extract the IPv4 address of the peer connected to a socket.
@@ -304,57 +317,60 @@ fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
     // rate limit check — extract client IP from the socket
     const client_ip = getPeerIp(client_fd);
     if (client_ip != 0 and !rate_limiter.checkRate(client_ip)) {
-        var resp_buf: [1024]u8 = undefined;
-        const resp = http.formatError(&resp_buf, .too_many_requests, "rate limit exceeded");
-        writeAll(client_fd, resp);
+        sendError(client_fd, .too_many_requests, "rate limit exceeded");
         return;
     }
 
-    // set receive timeout to 5 seconds
-    const timeout = posix.timeval{ .sec = 5, .usec = 0 };
-    posix.setsockopt(
-        client_fd,
-        posix.SOL.SOCKET,
-        posix.SO.RCVTIMEO,
-        std.mem.asBytes(&timeout),
-    ) catch {};
+    setReadTimeout(client_fd, 5);
 
-    // read request into a stack buffer
     var buf: [65536]u8 = undefined;
-    var total: usize = 0;
+    const request = readRequest(client_fd, &buf) catch |err| switch (err) {
+        error.MalformedRequest => {
+            sendError(client_fd, .bad_request, "malformed request");
+            return;
+        },
+        error.ReadIncomplete => {
+            sendError(client_fd, .bad_request, "request too large or timed out");
+            return;
+        },
+    };
 
+    const response = routes.dispatch(request, alloc);
+    defer if (response.allocated) alloc.free(response.body);
+
+    var resp_buf: [4096]u8 = undefined;
+    const resp = http.formatResponse(&resp_buf, response.status, response.body);
+    writeAll(client_fd, resp);
+}
+
+const ReadRequestError = error{
+    MalformedRequest,
+    ReadIncomplete,
+};
+
+fn readRequest(fd: posix.fd_t, buf: []u8) ReadRequestError!http.Request {
+    var total: usize = 0;
     while (total < buf.len) {
-        const n = posix.read(client_fd, buf[total..]) catch break;
-        if (n == 0) break; // EOF
+        const n = posix.read(fd, buf[total..]) catch break;
+        if (n == 0) break;
         total += n;
 
-        // try to parse what we have
-        const request = http.parseRequest(buf[0..total]) catch {
-            // malformed request — send 400
-            var resp_buf: [1024]u8 = undefined;
-            const resp = http.formatError(&resp_buf, .bad_request, "malformed request");
-            writeAll(client_fd, resp);
-            return;
-        };
-
-        if (request) |req| {
-            // got a complete request — handle it
-            const response = routes.dispatch(req, alloc);
-            defer if (response.allocated) alloc.free(response.body);
-
-            var resp_buf: [4096]u8 = undefined;
-            const resp = http.formatResponse(&resp_buf, response.status, response.body);
-            writeAll(client_fd, resp);
-            return;
-        }
-
-        // request incomplete — keep reading
+        const parsed = http.parseRequest(buf[0..total]) catch return error.MalformedRequest;
+        if (parsed) |req| return req;
     }
 
-    // if we get here, we ran out of buffer or timed out
+    return error.ReadIncomplete;
+}
+
+fn setReadTimeout(fd: posix.fd_t, seconds: i64) void {
+    const timeout = posix.timeval{ .sec = seconds, .usec = 0 };
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+}
+
+fn sendError(fd: posix.fd_t, status: http.StatusCode, message: []const u8) void {
     var resp_buf: [1024]u8 = undefined;
-    const resp = http.formatError(&resp_buf, .bad_request, "request too large or timed out");
-    writeAll(client_fd, resp);
+    const resp = http.formatError(&resp_buf, status, message);
+    writeAll(fd, resp);
 }
 
 /// write all bytes to a file descriptor, handling partial writes.
@@ -362,6 +378,7 @@ fn writeAll(fd: posix.fd_t, data: []const u8) void {
     var written: usize = 0;
     while (written < data.len) {
         const n = posix.write(fd, data[written..]) catch return;
+        if (n == 0) return;
         written += n;
     }
 }
@@ -379,6 +396,20 @@ test "server init and deinit" {
     // the listen fd should be valid
     try std.testing.expect(server.listen_fd >= 0);
     try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, server.bind_addr);
+}
+
+test "connection slot limit enforcement" {
+    active_connections.store(0, .release);
+    defer active_connections.store(0, .release);
+
+    var acquired: usize = 0;
+    while (acquired < max_connections and tryAcquireConnectionSlot()) : (acquired += 1) {}
+    try std.testing.expectEqual(max_connections, acquired);
+    try std.testing.expect(!tryAcquireConnectionSlot());
+
+    while (acquired > 0) : (acquired -= 1) {
+        releaseConnectionSlot();
+    }
 }
 
 // -- rate limiter tests --

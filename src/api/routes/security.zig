@@ -1,0 +1,277 @@
+const std = @import("std");
+const http = @import("../http.zig");
+const store = @import("../../state/store.zig");
+const json_helpers = @import("../../lib/json_helpers.zig");
+const sqlite = @import("sqlite");
+const secrets = @import("../../state/secrets.zig");
+const net_policy = @import("../../network/policy.zig");
+const cert_store = @import("../../tls/cert_store.zig");
+const common = @import("common.zig");
+
+const Response = common.Response;
+const extractJsonString = json_helpers.extractJsonString;
+
+pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
+    const path = request.path_only;
+
+    if (std.mem.eql(u8, path, "/v1/secrets")) {
+        if (request.method == .GET) return handleListSecrets(alloc);
+        if (request.method == .POST) return handleSetSecret(alloc, request);
+        return common.methodNotAllowed();
+    }
+    if (path.len > "/v1/secrets/".len and std.mem.startsWith(u8, path, "/v1/secrets/")) {
+        const name = path["/v1/secrets/".len..];
+        if (std.mem.indexOf(u8, name, "/") == null and name.len > 0) {
+            if (request.method == .GET) return handleGetSecret(alloc, name);
+            if (request.method == .DELETE) return handleDeleteSecret(alloc, name);
+            return common.methodNotAllowed();
+        }
+    }
+
+    if (std.mem.eql(u8, path, "/v1/policies")) {
+        if (request.method == .GET) return handleListPolicies(alloc);
+        if (request.method == .POST) return handleAddPolicy(alloc, request);
+        return common.methodNotAllowed();
+    }
+    if (path.len > "/v1/policies/".len and std.mem.startsWith(u8, path, "/v1/policies/")) {
+        const rest = path["/v1/policies/".len..];
+        if (std.mem.indexOf(u8, rest, "/")) |slash| {
+            const source = rest[0..slash];
+            const target = rest[slash + 1 ..];
+            if (source.len > 0 and target.len > 0 and std.mem.indexOf(u8, target, "/") == null) {
+                if (request.method == .DELETE) return handleDeletePolicy(alloc, source, target);
+                return common.methodNotAllowed();
+            }
+        }
+    }
+
+    if (std.mem.eql(u8, path, "/v1/certificates")) {
+        if (request.method == .GET) return handleListCertificates(alloc);
+        return common.methodNotAllowed();
+    }
+    if (path.len > "/v1/certificates/".len and std.mem.startsWith(u8, path, "/v1/certificates/")) {
+        const domain = path["/v1/certificates/".len..];
+        if (std.mem.indexOf(u8, domain, "/") == null and domain.len > 0) {
+            if (request.method == .DELETE) return handleDeleteCertificate(alloc, domain);
+            return common.methodNotAllowed();
+        }
+    }
+
+    return null;
+}
+
+fn openSecretsStore(alloc: std.mem.Allocator) ?secrets.SecretsStore {
+    const db_ptr = alloc.create(sqlite.Db) catch return null;
+    db_ptr.* = store.openDb() catch {
+        alloc.destroy(db_ptr);
+        return null;
+    };
+    return secrets.SecretsStore.init(db_ptr, alloc) catch {
+        db_ptr.deinit();
+        alloc.destroy(db_ptr);
+        return null;
+    };
+}
+
+fn closeSecretsStore(alloc: std.mem.Allocator, sec: *secrets.SecretsStore) void {
+    sec.db.deinit();
+    alloc.destroy(sec.db);
+}
+
+fn handleListSecrets(alloc: std.mem.Allocator) Response {
+    var sec = openSecretsStore(alloc) orelse return common.internalError();
+    defer closeSecretsStore(alloc, &sec);
+
+    var names = sec.list() catch return common.internalError();
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return common.internalError();
+    for (names.items, 0..) |name, i| {
+        if (i > 0) writer.writeByte(',') catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, name) catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+    }
+    writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleGetSecret(alloc: std.mem.Allocator, name: []const u8) Response {
+    var sec = openSecretsStore(alloc) orelse return common.internalError();
+    defer closeSecretsStore(alloc, &sec);
+
+    const value = sec.get(name) catch |err| {
+        if (err == secrets.SecretsError.NotFound) return common.notFound();
+        return common.internalError();
+    };
+    defer {
+        std.crypto.secureZero(u8, value);
+        alloc.free(value);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeAll("{\"name\":\"") catch return common.internalError();
+    json_helpers.writeJsonEscaped(writer, name) catch return common.internalError();
+    writer.writeAll("\",\"value\":\"") catch return common.internalError();
+    json_helpers.writeJsonEscaped(writer, value) catch return common.internalError();
+    writer.writeAll("\"}") catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleSetSecret(alloc: std.mem.Allocator, request: http.Request) Response {
+    if (request.body.len == 0) return common.badRequest("missing request body");
+
+    const name = extractJsonString(request.body, "name") orelse return common.badRequest("missing name field");
+    const value = extractJsonString(request.body, "value") orelse return common.badRequest("missing value field");
+
+    if (name.len == 0) return common.badRequest("name cannot be empty");
+
+    var sec = openSecretsStore(alloc) orelse return common.internalError();
+    defer closeSecretsStore(alloc, &sec);
+
+    sec.set(name, value) catch return common.internalError();
+
+    return .{ .status = .ok, .body = "{\"status\":\"ok\"}", .allocated = false };
+}
+
+fn handleDeleteSecret(alloc: std.mem.Allocator, name: []const u8) Response {
+    var sec = openSecretsStore(alloc) orelse return common.internalError();
+    defer closeSecretsStore(alloc, &sec);
+
+    sec.remove(name) catch |err| {
+        if (err == secrets.SecretsError.NotFound) return common.notFound();
+        return common.internalError();
+    };
+
+    return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn openCertStore(alloc: std.mem.Allocator) ?cert_store.CertStore {
+    const db_ptr = alloc.create(sqlite.Db) catch return null;
+    db_ptr.* = store.openDb() catch {
+        alloc.destroy(db_ptr);
+        return null;
+    };
+    return cert_store.CertStore.init(db_ptr, alloc) catch {
+        db_ptr.deinit();
+        alloc.destroy(db_ptr);
+        return null;
+    };
+}
+
+fn closeCertStore(alloc: std.mem.Allocator, cs: *cert_store.CertStore) void {
+    cs.db.deinit();
+    alloc.destroy(cs.db);
+}
+
+fn handleListCertificates(alloc: std.mem.Allocator) Response {
+    var cs = openCertStore(alloc) orelse return common.internalError();
+    defer closeCertStore(alloc, &cs);
+
+    var certs = cs.list() catch return common.internalError();
+    defer {
+        for (certs.items) |c| c.deinit(alloc);
+        certs.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return common.internalError();
+    for (certs.items, 0..) |cert, i| {
+        if (i > 0) writer.writeByte(',') catch return common.internalError();
+        writer.writeAll("{\"domain\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, cert.domain) catch return common.internalError();
+        writer.writeAll("\",\"not_after\":") catch return common.internalError();
+        std.fmt.format(writer, "{d}", .{cert.not_after}) catch return common.internalError();
+        writer.writeAll(",\"source\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, cert.source) catch return common.internalError();
+        writer.writeAll("\"}") catch return common.internalError();
+    }
+    writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleDeleteCertificate(alloc: std.mem.Allocator, domain: []const u8) Response {
+    var cs = openCertStore(alloc) orelse return common.internalError();
+    defer closeCertStore(alloc, &cs);
+
+    cs.remove(domain) catch |err| {
+        if (err == cert_store.CertError.NotFound) return common.notFound();
+        return common.internalError();
+    };
+
+    return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn handleListPolicies(alloc: std.mem.Allocator) Response {
+    var policies = store.listNetworkPolicies(alloc) catch return common.internalError();
+    defer {
+        for (policies.items) |p| p.deinit(alloc);
+        policies.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return common.internalError();
+    for (policies.items, 0..) |pol, i| {
+        if (i > 0) writer.writeByte(',') catch return common.internalError();
+        writer.writeAll("{\"source\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, pol.source_service) catch return common.internalError();
+        writer.writeAll("\",\"target\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, pol.target_service) catch return common.internalError();
+        writer.writeAll("\",\"action\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, pol.action) catch return common.internalError();
+        writer.writeAll("\"}") catch return common.internalError();
+    }
+    writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleAddPolicy(alloc: std.mem.Allocator, request: http.Request) Response {
+    if (request.body.len == 0) return common.badRequest("missing request body");
+
+    const source = extractJsonString(request.body, "source") orelse return common.badRequest("missing source field");
+    const target = extractJsonString(request.body, "target") orelse return common.badRequest("missing target field");
+    const action = extractJsonString(request.body, "action") orelse return common.badRequest("missing action field");
+
+    if (source.len == 0) return common.badRequest("source cannot be empty");
+    if (target.len == 0) return common.badRequest("target cannot be empty");
+
+    if (!std.mem.eql(u8, action, "deny") and !std.mem.eql(u8, action, "allow")) {
+        return common.badRequest("action must be 'deny' or 'allow'");
+    }
+
+    store.addNetworkPolicy(source, target, action) catch return common.internalError();
+    net_policy.syncPolicies(alloc);
+
+    return .{ .status = .ok, .body = "{\"status\":\"ok\"}", .allocated = false };
+}
+
+fn handleDeletePolicy(alloc: std.mem.Allocator, source: []const u8, target: []const u8) Response {
+    store.removeNetworkPolicy(source, target) catch return common.internalError();
+    net_policy.syncPolicies(alloc);
+
+    return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
