@@ -115,6 +115,7 @@ pub const Node = struct {
 
         // collect peer IDs for raft
         const peer_ids = try alloc.alloc(NodeId, config.peers.len);
+        errdefer alloc.free(peer_ids);
         for (config.peers, 0..) |p, i| {
             peer_ids[i] = p.id;
         }

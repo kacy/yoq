@@ -1404,24 +1404,43 @@ test "dispatch GET on container stop returns method not allowed" {
 }
 
 test "dispatch DELETE container" {
+    // initialize test database
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    // insert a test container
+    const record = store.ContainerRecord{
+        .id = "abc123def456",
+        .hostname = "test-container",
+        .image = "test:latest",
+        .status = "stopped",
+        .command = "sleep 100",
+        .created_at = 1234567890,
+    };
+    try store.save(record);
+
     const req = (try http.parseRequest(
-        "DELETE /containers/abc123 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        "DELETE /containers/abc123def456 HTTP/1.1\r\nHost: localhost\r\n\r\n",
     )).?;
     const resp = dispatch(req, std.testing.allocator);
     defer if (resp.allocated) std.testing.allocator.free(resp.body);
 
-    // will fail because no DB, but routing is correct
-    try std.testing.expect(resp.status == .not_found or resp.status == .internal_server_error);
+    // should succeed now that DB is initialized
+    try std.testing.expectEqual(http.StatusCode.ok, resp.status);
 }
 
 test "dispatch DELETE image" {
+    // initialize test database
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
     const req = (try http.parseRequest(
         "DELETE /images/sha256:abc HTTP/1.1\r\nHost: localhost\r\n\r\n",
     )).?;
     const resp = dispatch(req, std.testing.allocator);
 
-    // no DB configured, so this will error
-    try std.testing.expect(resp.status == .not_found or resp.status == .internal_server_error);
+    // image doesn't exist in test DB, should return not_found
+    try std.testing.expectEqual(http.StatusCode.not_found, resp.status);
 }
 
 test "matchSubpath" {

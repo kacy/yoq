@@ -99,6 +99,41 @@ fn rowToRecord(row: ContainerRow) ContainerRecord {
 var global_db: ?sqlite.Db = null;
 var db_mutex: std.Thread.Mutex = .{};
 
+/// initialize a test database (in-memory). call this at the start of tests
+/// that need database state. this replaces any existing global_db.
+pub fn initTestDb() StoreError!void {
+    db_mutex.lock();
+    defer db_mutex.unlock();
+
+    // close existing db if any
+    if (global_db) |*db| {
+        db.deinit();
+        global_db = null;
+    }
+
+    global_db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true, .create = true },
+    }) catch return StoreError.DbOpenFailed;
+
+    schema.init(&global_db.?) catch {
+        global_db.?.deinit();
+        global_db = null;
+        return StoreError.DbOpenFailed;
+    };
+}
+
+/// close the test database and reset global state.
+pub fn deinitTestDb() void {
+    db_mutex.lock();
+    defer db_mutex.unlock();
+
+    if (global_db) |*db| {
+        db.deinit();
+        global_db = null;
+    }
+}
+
 /// get the shared database connection, opening it on first call.
 /// caller must call releaseDb() when done (via defer).
 fn getDb() StoreError!*sqlite.Db {
