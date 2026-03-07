@@ -7,6 +7,7 @@
 // format: "\x1b[36m[web]     \x1b[0m | log line here"
 
 const std = @import("std");
+const log = @import("../lib/log.zig");
 
 /// ansi colors for service name prefixes
 const colors = [_][]const u8{
@@ -21,27 +22,46 @@ const colors = [_][]const u8{
 };
 const reset = "\x1b[0m";
 
-var write_mutex: std.Thread.Mutex = .{};
+/// tracks number of stderr write failures for debugging
+pub var write_failures: usize = 0;
+
+/// mutex for thread-safe output. initialized explicitly to avoid
+/// relying on compile-time zero initialization.
+var write_mutex: std.Thread.Mutex = std.Thread.Mutex{};
 
 /// write a single log line to stderr with a colored service name prefix.
 /// thread-safe — uses a mutex to prevent interleaved output.
+/// tracks write failures in write_failures counter.
 pub fn writeLine(service_name: []const u8, color_idx: usize, line: []const u8) void {
     const color = colors[color_idx % colors.len];
 
+    // use a single buffer that's large enough for both formatting and writing
     var buf: [8192]u8 = undefined;
     const formatted = std.fmt.bufPrint(&buf, "{s}[{s}]{s} | {s}\n", .{
         color, service_name, reset, line,
-    }) catch return;
+    }) catch {
+        // formatting error - probably buffer too small for long line
+        log.warn("log_mux: failed to format log line for service '{s}'", .{service_name});
+        return;
+    };
 
     write_mutex.lock();
     defer write_mutex.unlock();
 
     // write to stderr (stdout is reserved for machine-readable output)
-    var backing: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&backing);
+    // use the same buffer for the writer to avoid size mismatch
+    var w = std.fs.File.stderr().writer(&buf);
     const out = &w.interface;
-    out.writeAll(formatted) catch {};
-    out.flush() catch {};
+
+    out.writeAll(formatted) catch |e| {
+        write_failures += 1;
+        log.warn("log_mux: failed to write log line for '{s}': {}", .{ service_name, e });
+        return;
+    };
+    out.flush() catch |e| {
+        write_failures += 1;
+        log.warn("log_mux: failed to flush log for '{s}': {}", .{ service_name, e });
+    };
 }
 
 // -- tests --
