@@ -1130,31 +1130,53 @@ const healthy_run_threshold_ns: i128 = 10 * std.time.ns_per_s;
 /// watcher thread for dev mode — monitors bind-mounted directories
 /// and triggers container restarts when files change.
 pub fn watcherThread(orch: *Orchestrator, w: *watcher_mod.Watcher) void {
+    var services: [64]usize = undefined;
+
     while (!shutdown_requested.load(.acquire)) {
-        const service_idx = w.waitForChange() orelse break;
+        // wait for changes, collect up to 64 services
+        const changed_services = w.waitForChange(&services);
+        if (changed_services.len == 0) break; // watcher closed
 
         if (shutdown_requested.load(.acquire)) break;
 
-        const svc = orch.manifest.services[service_idx];
-        writeErr("change detected in {s}, restarting...\n", .{svc.name});
+        // process all services that had changes
+        for (changed_services) |service_idx| {
+            const svc = orch.manifest.services[service_idx];
+            writeErr("change detected in {s}, restarting...\n", .{svc.name});
 
-        // stop the running container by sending SIGTERM to its process
-        const id = orch.states[service_idx].container_id;
-        const record = store.load(orch.alloc, id[0..]) catch {
-            // container might already be stopped
-            orch.restart_requested[service_idx].store(true, .release);
-            continue;
-        };
-        defer record.deinit(orch.alloc);
+            // stop the running container by sending SIGTERM to its process
+            const id = orch.states[service_idx].container_id;
 
-        if (record.pid) |pid| {
-            process.terminate(pid) catch {
-                process.kill(pid) catch {};
+            // load container record - if this fails, container might already be stopped
+            const record = store.load(orch.alloc, id[0..]) catch |e| {
+                log.debug("watcher: container {s} not found (may have exited): {}", .{ svc.name, e });
+                // still request restart since file changed
+                orch.restart_requested[service_idx].store(true, .release);
+                continue;
             };
-        }
+            defer record.deinit(orch.alloc);
 
-        // signal the service thread to restart
-        orch.restart_requested[service_idx].store(true, .release);
+            if (record.pid) |pid| {
+                // double-check PID to avoid race with container restart
+                // re-load record to verify PID hasn't changed
+                const verify_record = store.load(orch.alloc, id[0..]) catch null;
+                if (verify_record) |vr| {
+                    defer vr.deinit(orch.alloc);
+                    if (vr.pid == record.pid) {
+                        // PID is stable, safe to terminate
+                        process.terminate(pid) catch {
+                            process.kill(pid) catch {};
+                        };
+                    } else {
+                        const new_pid = vr.pid orelse 0;
+                        log.debug("watcher: PID changed for {s} (was {d}, now {d}), skipping terminate", .{ svc.name, pid, new_pid });
+                    }
+                }
+            }
+
+            // signal the service thread to restart
+            orch.restart_requested[service_idx].store(true, .release);
+        }
     }
 }
 
