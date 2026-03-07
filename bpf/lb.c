@@ -15,6 +15,12 @@
 // connection tracking ensures that all packets in a flow go to
 // the same backend (connection affinity).
 //
+// SECURITY HARDENING:
+//   - All packet accesses validated against data_end
+//   - IP header length (IHL) validated before use
+//   - Backend selection bounds-checked
+//   - Connection tracking key fully initialized
+//
 // BPF verifier constraints:
 //   - IHL forced to 5 (no IP options) for fixed-offset access
 //   - all packet reads/writes happen BEFORE bpf_l3_csum_replace
@@ -97,6 +103,7 @@ struct bpf_map_def SEC("maps") rev_conntrack_map = {
 static __attribute__((always_inline)) __u32
 select_backend(struct service_backends *svc)
 {
+    // SECURITY: Validate backend count
     if (svc->count == 0 || svc->count > 16)
         return 0;
 
@@ -144,8 +151,14 @@ int lb_ingress(struct __sk_buff *skb)
     if ((void *)(ip + 1) > data_end)
         return TC_ACT_OK;
 
+    // SECURITY: Validate IP total length
+    __u16 ip_tot_len = ntohs(ip->tot_len);
+    if (ip_tot_len < 40 || ip_tot_len > 1500) // min: IP+TCP/UDP headers
+        return TC_ACT_OK;
+
     // require IHL=5 (no options) for fixed-offset transport header access
-    if ((ip->ihl_version & 0x0F) != 5)
+    __u8 ihl = ip->ihl_version & 0x0F;
+    if (ihl != 5)
         return TC_ACT_OK;
 
     __u8 proto = ip->protocol;
@@ -178,12 +191,14 @@ int lb_ingress(struct __sk_buff *skb)
         return TC_ACT_OK; // not a service IP
 
     // -- connection tracking --
+    // SECURITY: Fully initialize all fields to prevent info leaks
     struct conn_key key = {
         .src_ip = ip->saddr,
         .dst_ip = ip->daddr,
         .src_port = src_port,
         .dst_port = dst_port,
         .protocol = proto,
+        ._pad = {0, 0, 0},
     };
 
     __u32 *existing = bpf_map_lookup_elem(&conntrack_map, &key);
@@ -232,6 +247,7 @@ int lb_ingress(struct __sk_buff *skb)
         .src_port = dst_port,
         .dst_port = src_port,
         .protocol = proto,
+        ._pad = {0, 0, 0},
     };
     __u32 vip = old_daddr;
     bpf_map_update_elem(&rev_conntrack_map, &rev_key, &vip, 0);
@@ -258,8 +274,14 @@ int lb_egress(struct __sk_buff *skb)
     if ((void *)(ip + 1) > data_end)
         return TC_ACT_OK;
 
+    // SECURITY: Validate IP total length
+    __u16 ip_tot_len = ntohs(ip->tot_len);
+    if (ip_tot_len < 40 || ip_tot_len > 1500)
+        return TC_ACT_OK;
+
     // require IHL=5 for fixed offsets
-    if ((ip->ihl_version & 0x0F) != 5)
+    __u8 ihl = ip->ihl_version & 0x0F;
+    if (ihl != 5)
         return TC_ACT_OK;
 
     __u8 proto = ip->protocol;
@@ -290,6 +312,7 @@ int lb_egress(struct __sk_buff *skb)
         .src_port = src_port,
         .dst_port = dst_port,
         .protocol = proto,
+        ._pad = {0, 0, 0},
     };
 
     __u32 *vip = bpf_map_lookup_elem(&rev_conntrack_map, &rev_key);

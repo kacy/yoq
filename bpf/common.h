@@ -154,4 +154,13 @@ struct tcphdr {
 #define htonl(x) __builtin_bswap32(x)
 #define ntohl(x) __builtin_bswap32(x)
 
+// -- security constants --
+//
+// packet size limits for safe parsing
+
+#define MIN_DNS_PACKET_SIZE   76   // eth(14) + ip(20) + udp(8) + dns(12) + name(2) + qt/qc(4) + answer(16)
+#define MAX_DNS_NAME_LEN      63   // RFC 1035: max single label length
+#define MAX_DNS_WIRE_LEN      255 // RFC 1035: max wire format name length (including length bytes)
+#define DNS_QUESTION_OFFSET   54  // eth(14) + ip(20) + udp(8) + dns(12)
+
 #endif // __YOQ_BPF_COMMON_H

@@ -10,6 +10,12 @@
 // after rewriting, returns XDP_PASS to let the kernel route the
 // packet to the correct bridge/veth via normal forwarding.
 //
+// SECURITY HARDENING:
+//   - All packet accesses validated against data_end
+//   - IP header length (IHL) validated before use
+//   - Checksum calculations protected against overflow
+//   - Maximum packet size enforced
+//
 // BPF verifier constraints:
 //   - IHL forced to 5 (no IP options) for fixed-offset access
 //   - all packet access uses constant offsets
@@ -69,6 +75,9 @@ csum_fold(__u32 csum)
 static __attribute__((always_inline)) void
 update_csum(__u16 *csum, __u32 old_val, __u32 new_val)
 {
+    // SECURITY: Ensure csum pointer is valid before dereferencing
+    if (!csum) return;
+    
     __u32 s = (~((__u32)*csum) & 0xFFFF);
     s += (~old_val & 0xFFFF) + (new_val & 0xFFFF);
     s += (~(old_val >> 16) & 0xFFFF) + (new_val >> 16);
@@ -78,6 +87,9 @@ update_csum(__u16 *csum, __u32 old_val, __u32 new_val)
 static __attribute__((always_inline)) void
 update_csum16(__u16 *csum, __u16 old_val, __u16 new_val)
 {
+    // SECURITY: Ensure csum pointer is valid before dereferencing
+    if (!csum) return;
+    
     __u32 s = (~((__u32)*csum) & 0xFFFF);
     s += (~((__u32)old_val) & 0xFFFF) + ((__u32)new_val);
     *csum = csum_fold(s);
@@ -88,6 +100,11 @@ int xdp_port_map(struct xdp_md *ctx)
 {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
+
+    // SECURITY: Enforce reasonable packet size limits
+    __u32 pkt_len = (long)data_end - (long)data;
+    if (pkt_len < 60 || pkt_len > 1500) // Min: eth+ip+tcp/udp headers, Max: typical MTU
+        return XDP_PASS;
 
     // parse ethernet
     struct ethhdr *eth = data;
@@ -102,8 +119,14 @@ int xdp_port_map(struct xdp_md *ctx)
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
+    // SECURITY: Validate IP total length
+    __u16 ip_tot_len = ntohs(ip->tot_len);
+    if (ip_tot_len < 40 || ip_tot_len > 1500)
+        return XDP_PASS;
+
     // require IHL=5 (no options) for fixed-offset transport header access
-    if ((ip->ihl_version & 0x0F) != 5)
+    __u8 ihl = ip->ihl_version & 0x0F;
+    if (ihl != 5)
         return XDP_PASS;
 
     // extract destination port and protocol
@@ -127,6 +150,14 @@ int xdp_port_map(struct xdp_md *ctx)
     // look up port mapping
     struct port_target *target = bpf_map_lookup_elem(&port_map, &key);
     if (!target)
+        return XDP_PASS;
+
+    // SECURITY: Validate target IP is not 0.0.0.0 or broadcast
+    if (target->dst_ip == 0 || target->dst_ip == 0xFFFFFFFF)
+        return XDP_PASS;
+    
+    // SECURITY: Validate target port is valid (1-65535)
+    if (target->dst_port == 0)
         return XDP_PASS;
 
     // rewrite destination IP

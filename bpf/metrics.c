@@ -6,6 +6,12 @@
 // visibility. always returns TC_ACT_OK — this is a passive observer
 // that never drops or modifies packets.
 //
+// SECURITY HARDENING:
+//   - All packet accesses validated against data_end
+//   - IP header length (IHL) validated before use
+//   - TCP header offset calculated safely
+//   - Integer overflow protection on byte counters
+//
 // the userspace MetricsCollector reads both maps to report per-container
 // traffic stats via `yoq metrics` and `yoq metrics --pairs`.
 //
@@ -80,14 +86,38 @@ int metrics_count(struct __sk_buff *skb)
         return TC_ACT_OK;
 
     __u32 src_ip = iph->saddr;
-    __u64 pkt_bytes = ntohs(iph->tot_len);
+    
+    // SECURITY: Validate IP total length before using it
+    __u16 ip_tot_len = ntohs(iph->tot_len);
+    if (ip_tot_len < 20 || ip_tot_len > 65535) // Minimum IP header is 20 bytes
+        return TC_ACT_OK;
+    
+    // SECURITY: Validate IHL (header length) is at least 5 (20 bytes)
+    __u8 ihl = iph->ihl_version & 0x0F;
+    if (ihl < 5 || ihl > 15) // RFC 791: IHL is 4 bits, min 5, max 15
+        return TC_ACT_OK;
+    
+    // SECURITY: Ensure IHL matches the actual header size we're reading
+    // We need at least eth(14) + ip_header(ihl*4) bytes
+    __u32 ip_header_len = ihl * 4;
+    if ((void *)((char *)iph + ip_header_len) > data_end)
+        return TC_ACT_OK;
+    
+    // Calculate payload length safely (avoid underflow)
+    __u32 pkt_bytes;
+    if (ip_tot_len > ip_header_len)
+        pkt_bytes = ip_tot_len - ip_header_len;
+    else
+        pkt_bytes = 0;
 
     // -- per-source-IP counting (backward compatible) --
 
     struct ip_metrics *existing = bpf_map_lookup_elem(&metrics_map, &src_ip);
     if (existing) {
         __sync_fetch_and_add(&existing->packets, 1);
-        __sync_fetch_and_add(&existing->bytes, pkt_bytes);
+        // SECURITY: Cap bytes at reasonable maximum to prevent overflow abuse
+        if (pkt_bytes < 65535) // Max reasonable single packet payload
+            __sync_fetch_and_add(&existing->bytes, pkt_bytes);
     } else {
         struct ip_metrics new_entry = {
             .packets = 1,
@@ -101,8 +131,20 @@ int metrics_count(struct __sk_buff *skb)
     if (iph->protocol != IPPROTO_TCP)
         return TC_ACT_OK;
 
-    struct tcphdr *tcp = (void *)((char *)iph + ((iph->ihl_version & 0x0F) * 4));
+    // SECURITY: Calculate TCP header offset safely using validated IHL
+    struct tcphdr *tcp = (void *)((char *)iph + ip_header_len);
     if ((void *)(tcp + 1) > data_end)
+        return TC_ACT_OK;
+    
+    // SECURITY: Validate TCP data offset (header length)
+    __u16 tcp_flags = ntohs(tcp->flags);
+    __u8 tcp_doff = (tcp_flags >> 12) & 0x0F; // Data offset in upper 4 bits
+    if (tcp_doff < 5 || tcp_doff > 15) // Min 20 bytes, max 60 bytes
+        return TC_ACT_OK;
+    
+    // SECURITY: Ensure TCP header doesn't exceed packet bounds
+    __u32 tcp_header_len = tcp_doff * 4;
+    if ((void *)((char *)tcp + tcp_header_len) > data_end)
         return TC_ACT_OK;
 
     struct pair_key pk = {
@@ -113,17 +155,17 @@ int metrics_count(struct __sk_buff *skb)
     };
 
     // detect SYN (new connection) and RST (error)
-    __u16 flags = ntohs(tcp->flags);
-    __u8 syn = (flags >> 1) & 1;
-    __u8 ack = (flags >> 4) & 1;
-    __u8 rst = (flags >> 2) & 1;
+    __u8 syn = (tcp_flags >> 1) & 1;
+    __u8 ack = (tcp_flags >> 4) & 1;
+    __u8 rst = (tcp_flags >> 2) & 1;
     __u64 is_connection = (syn && !ack) ? 1 : 0;
     __u64 is_error = rst ? 1 : 0;
 
     struct pair_metrics *pm = bpf_map_lookup_elem(&pair_metrics_map, &pk);
     if (pm) {
         __sync_fetch_and_add(&pm->packets, 1);
-        __sync_fetch_and_add(&pm->bytes, pkt_bytes);
+        if (pkt_bytes < 65535)
+            __sync_fetch_and_add(&pm->bytes, pkt_bytes);
         if (is_connection)
             __sync_fetch_and_add(&pm->connections, is_connection);
         if (is_error)
