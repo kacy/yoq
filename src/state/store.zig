@@ -509,10 +509,10 @@ pub fn removeImage(id: []const u8) StoreError!void {
     const db = try getDb();
     defer releaseDb();
 
-    // First check if the image exists
+    // First check if the image exists (SELECT 1 doesn't need allocator)
     const exists = db.one(
-        struct { id: sqlite.Text },
-        "SELECT id FROM images WHERE id = ?;",
+        struct { exists: i32 },
+        "SELECT 1 as exists FROM images WHERE id = ?;",
         .{},
         .{id},
     ) catch return StoreError.ReadFailed;
