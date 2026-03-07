@@ -10,6 +10,10 @@
 // after rewriting, returns XDP_PASS to let the kernel route the
 // packet to the correct bridge/veth via normal forwarding.
 //
+// BPF verifier constraints:
+//   - IHL forced to 5 (no IP options) for fixed-offset access
+//   - all packet access uses constant offsets
+//
 // compile: clang -target bpf -O2 -g -c -o port_map.o port_map.c
 
 #include "common.h"
@@ -98,8 +102,8 @@ int xdp_port_map(struct xdp_md *ctx)
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
-    __u8 ihl = (ip->ihl_version & 0x0F) * 4;
-    if (ihl < 20)
+    // require IHL=5 (no options) for fixed-offset transport header access
+    if ((ip->ihl_version & 0x0F) != 5)
         return XDP_PASS;
 
     // extract destination port and protocol
@@ -107,12 +111,12 @@ int xdp_port_map(struct xdp_md *ctx)
     key.protocol = ip->protocol;
 
     if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)((char *)ip + ihl);
+        struct tcphdr *tcp = (void *)((char *)ip + 20);
         if ((void *)(tcp + 1) > data_end)
             return XDP_PASS;
         key.port = tcp->dest;
     } else if (ip->protocol == IPPROTO_UDP) {
-        struct udphdr *udp = (void *)((char *)ip + ihl);
+        struct udphdr *udp = (void *)((char *)ip + 20);
         if ((void *)(udp + 1) > data_end)
             return XDP_PASS;
         key.port = udp->dest;
@@ -129,12 +133,12 @@ int xdp_port_map(struct xdp_md *ctx)
     __u32 old_daddr = ip->daddr;
     ip->daddr = target->dst_ip;
 
-    // update IP checksum (incremental)
+    // update IP checksum (incremental, inline — no helper call)
     update_csum(&ip->check, old_daddr, target->dst_ip);
 
     // rewrite destination port and update L4 checksum
     if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)((char *)ip + ihl);
+        struct tcphdr *tcp = (void *)((char *)ip + 20);
         if ((void *)(tcp + 1) > data_end)
             return XDP_PASS;
         __u16 old_port = tcp->dest;
@@ -143,7 +147,7 @@ int xdp_port_map(struct xdp_md *ctx)
         update_csum(&tcp->check, old_daddr, target->dst_ip);
         update_csum16(&tcp->check, old_port, target->dst_port);
     } else {
-        struct udphdr *udp = (void *)((char *)ip + ihl);
+        struct udphdr *udp = (void *)((char *)ip + 20);
         if ((void *)(udp + 1) > data_end)
             return XDP_PASS;
         udp->dest = target->dst_port;
