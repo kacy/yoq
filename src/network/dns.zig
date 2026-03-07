@@ -88,11 +88,14 @@ var registry_mutex: std.Thread.Mutex = .{};
 // the DB is owned by the raft state machine — we just read from it.
 
 var cluster_db: ?*sqlite.Db = null;
+var cluster_db_mutex: std.Thread.Mutex = .{};
 
 /// set the cluster database for cross-node DNS lookups.
 /// called during agent startup after raft state machine is initialized.
 /// pass null to disable cluster lookups (single-node mode).
 pub fn setClusterDb(db: ?*sqlite.Db) void {
+    cluster_db_mutex.lock();
+    defer cluster_db_mutex.unlock();
     cluster_db = db;
 }
 
@@ -100,6 +103,9 @@ pub fn setClusterDb(db: ?*sqlite.Db) void {
 /// queries the service_names table for the IP address.
 /// returns null if the name isn't found or the DB isn't available.
 pub fn lookupClusterService(name: []const u8) ?[4]u8 {
+    cluster_db_mutex.lock();
+    defer cluster_db_mutex.unlock();
+
     const db = cluster_db orelse return null;
 
     const Row = struct { ip_address: sqlite.Text };
@@ -439,8 +445,10 @@ pub fn parseQuestion(buf: []const u8) ?DnsQuestion {
 
         if (label_len == 0) break; // end of name
 
-        // sanity checks
-        if (label_len > 63) return null; // label too long or compression pointer
+        // SECURITY: Check for compression pointers (0xC0-0xFF) which we don't support
+        // RFC 1035: values 0xC0-0xFF indicate compression or reserved
+        if (label_len >= 0xC0) return null; // compression pointer or reserved
+        if (label_len > 63) return null; // label too long per RFC 1035
         if (pos + label_len > buf.len) return null; // truncated
 
         // add dot separator between labels
@@ -606,6 +614,58 @@ var resolver_socket: ?posix.socket_t = null;
 var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var resolver_mutex: std.Thread.Mutex = .{};
 
+// -- rate limiting for DNS amplification protection --
+// simple token bucket: max 100 queries per second per client
+const rate_limit_max_tokens: u32 = 100;
+const rate_limit_refill_ms: i64 = 10; // refill 1 token every 10ms = 100/sec
+
+const RateLimitEntry = struct {
+    ip: u32,
+    tokens: u32,
+    last_refill: i64,
+};
+
+var rate_limits: [256]RateLimitEntry = [_]RateLimitEntry{.{
+    .ip = 0,
+    .tokens = rate_limit_max_tokens,
+    .last_refill = 0,
+}} ** 256;
+var rate_limit_mutex: std.Thread.Mutex = .{};
+
+/// check if a client IP is within rate limits. returns false if rate limited.
+fn checkRateLimit(client_ip: u32) bool {
+    rate_limit_mutex.lock();
+    defer rate_limit_mutex.unlock();
+
+    const now = std.time.milliTimestamp();
+
+    // simple hash to find entry (collision acceptable - we'll just share tokens)
+    const idx = @as(usize, @intCast(client_ip % 256));
+    var entry = &rate_limits[idx];
+
+    // refill tokens based on time elapsed
+    if (entry.ip == client_ip) {
+        const elapsed = now - entry.last_refill;
+        const refill_amount = @divTrunc(elapsed, rate_limit_refill_ms);
+        const max_new = rate_limit_max_tokens - entry.tokens;
+        const new_tokens = @as(u32, @intCast(@min(refill_amount, max_new)));
+        entry.tokens += new_tokens;
+        entry.last_refill = now;
+
+        if (entry.tokens > 0) {
+            entry.tokens -= 1;
+            return true;
+        }
+        return false; // rate limited
+    } else {
+        // new client or collision - reset
+        entry.ip = client_ip;
+        entry.tokens = rate_limit_max_tokens - 1;
+        entry.last_refill = now;
+        return true;
+    }
+}
+
 /// start the DNS resolver thread. idempotent — safe to call multiple times.
 pub fn startResolver() void {
     resolver_mutex.lock();
@@ -693,6 +753,18 @@ fn resolverLoop(sock: posix.socket_t) void {
 
         if (n < 12) continue; // too short for DNS header
 
+        // SECURITY: Rate limit queries to prevent DNS amplification attacks
+        const client_ip = std.mem.nativeToBig(u32, client_addr.addr);
+        if (!checkRateLimit(client_ip)) {
+            log.debug("dns: rate limiting client {d}.{d}.{d}.{d}", .{
+                (client_ip >> 24) & 0xFF,
+                (client_ip >> 16) & 0xFF,
+                (client_ip >> 8) & 0xFF,
+                client_ip & 0xFF,
+            });
+            continue;
+        }
+
         handleQuery(sock, recv_buf[0..n], &client_addr, addr_len);
     }
 }
@@ -704,6 +776,23 @@ fn handleQuery(
     client_addr: *const posix.sockaddr.in,
     addr_len: posix.socklen_t,
 ) void {
+    const header = parseHeader(query) orelse return;
+
+    // SECURITY: Validate QDCOUNT == 1 (we only handle single queries)
+    // Reject packets with QDCOUNT != 1 to prevent parsing issues
+    if (header.qdcount != 1) {
+        log.debug("dns: rejecting query with QDCOUNT={d} (expected 1)", .{header.qdcount});
+        return;
+    }
+
+    // SECURITY: Validate flags - must be standard query (opcode 0, not response)
+    const qr = (header.flags >> 15) & 1;
+    const opcode = (header.flags >> 11) & 0xF;
+    if (qr != 0 or opcode != 0) {
+        log.debug("dns: rejecting non-query packet (QR={d}, OPCODE={d})", .{ qr, opcode });
+        return;
+    }
+
     const question = parseQuestion(query) orelse return;
 
     // only handle A record queries for IN class

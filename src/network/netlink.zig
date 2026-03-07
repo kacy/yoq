@@ -24,6 +24,12 @@ pub const NetlinkError = error{
     RecvFailed,
     /// the kernel returned a non-zero error code in the ACK
     KernelError,
+    /// permission denied (EPERM/EACCES)
+    PermissionDenied,
+    /// resource not found (ENOENT)
+    NotFound,
+    /// out of memory (ENOMEM)
+    OutOfMemory,
     /// the message buffer is too small for the header or attributes
     BufferFull,
     /// the kernel response was too short or had an unexpected type
@@ -383,7 +389,16 @@ pub fn sendAndCheck(fd: posix.fd_t, msg: []const u8) NetlinkError!void {
         if (n < @sizeOf(linux.nlmsghdr) + 4) return NetlinkError.InvalidResponse;
         const err_code: *const i32 = @ptrCast(@alignCast(&recv_buf[@sizeOf(linux.nlmsghdr)]));
         if (err_code.* == 0) return; // success (ACK)
-        return NetlinkError.KernelError;
+
+        // SECURITY: Map specific errno values to error types for better handling
+        const errno_value = -err_code.*; // errno is negative in netlink
+        return switch (errno_value) {
+            1 => NetlinkError.PermissionDenied, // EPERM
+            2 => NetlinkError.NotFound, // ENOENT
+            12 => NetlinkError.OutOfMemory, // ENOMEM
+            13 => NetlinkError.PermissionDenied, // EACCES
+            else => NetlinkError.KernelError,
+        };
     }
 }
 
