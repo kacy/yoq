@@ -38,10 +38,37 @@ pub fn exec(args: *const ArgList) ExecError!void {
     child.spawn() catch return ExecError.ExecFailed;
     const result = child.wait() catch return ExecError.ExecFailed;
 
-    if (result.Exited != 0) return ExecError.ExecFailed;
+    switch (result) {
+        .Exited => |code| if (code != 0) return ExecError.ExecFailed,
+        else => return ExecError.ExecFailed, // Signal, Stopped, Continued all indicate failure
+    }
 }
 
 /// format a port number into a caller-provided buffer, returning the slice.
 pub fn portStr(buf: *[8]u8, port: u16) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{port}) catch "0";
+}
+
+// -- tests --
+
+test "exec handles zero exit code" {
+    // Test that a command that exits with code 0 succeeds
+    var argv: ArgList = .{null} ** max_args;
+    argv[0] = "true"; // 'true' always exits 0
+    try exec(&argv);
+}
+
+test "exec handles non-zero exit code" {
+    // Test that a command that exits with non-zero code fails
+    var argv: ArgList = .{null} ** max_args;
+    argv[0] = "false"; // 'false' always exits 1
+    try std.testing.expectError(ExecError.ExecFailed, exec(&argv));
+}
+
+test "portStr formats valid ports" {
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("80", portStr(&buf, 80));
+    try std.testing.expectEqualStrings("443", portStr(&buf, 443));
+    try std.testing.expectEqualStrings("65535", portStr(&buf, 65535));
+    try std.testing.expectEqualStrings("0", portStr(&buf, 0));
 }

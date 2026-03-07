@@ -44,6 +44,7 @@ pub fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
     while (pos < json.len) : (pos += 1) {
         if (json[pos] == '\\') {
             pos += 1; // skip escaped character
+            if (pos >= json.len) return null; // Escape at end of string
             continue;
         }
         if (json[pos] == '"') break;
@@ -297,4 +298,21 @@ test "extractJsonFloat basic" {
 test "extractJsonFloat zero" {
     const json = "{\"value\":0.0}";
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), extractJsonFloat(json, "value").?, 0.001);
+}
+
+test "extractJsonString handles escape at end" {
+    // Test that a string ending with an escape sequence is handled safely
+    // Previously this could cause out-of-bounds read
+    // Create JSON with backslash as last char before closing quote
+    var json_buf: [32]u8 = undefined;
+    const json = std.fmt.bufPrint(&json_buf, "{{\"key\":\"value{c}\"}}", .{'\\'}) catch unreachable;
+    const result = extractJsonString(json, "key");
+    // Should return null for malformed JSON (unterminated string due to escape)
+    try std.testing.expect(result == null);
+}
+
+test "extractJsonString handles normal escapes" {
+    const json = "{\"key\":\"hello\\nworld\"}";
+    const result = extractJsonString(json, "key");
+    try std.testing.expectEqualStrings("hello\\nworld", result.?);
 }

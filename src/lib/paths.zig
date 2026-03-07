@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const fmtx = std.fmt;
+const log = @import("log.zig");
 
 pub const PathError = error{ HomeDirNotFound, PathTooLong };
 
@@ -29,7 +30,11 @@ pub fn dataPathFmt(buf: *[max_path]u8, comptime fmt: []const u8, args: anytype) 
 pub fn ensureDataDir(subpath: []const u8) PathError!void {
     var buf: [max_path]u8 = undefined;
     const path = try dataPath(&buf, subpath);
-    std.fs.cwd().makePath(path) catch {};
+    std.fs.cwd().makePath(path) catch |e| {
+        log.warn("paths: failed to create directory {s}: {}. " ++
+            "This may cause subsequent operations to fail.", .{ path, e });
+        // Don't propagate the error - let callers decide if this is fatal
+    };
 }
 
 /// build a unique temp path under ~/.local/share/yoq/<subdir>/.
@@ -87,4 +92,14 @@ test "uniqueDataTempPath stays in target directory" {
     const path = try uniqueDataTempPath(&buf, "tmp", "blob", ".tmp");
     try std.testing.expect(std.mem.indexOf(u8, path, "/.local/share/yoq/tmp/.blob.") != null);
     try std.testing.expect(std.mem.endsWith(u8, path, ".tmp"));
+}
+
+test "ensureDataDir logs errors but doesn't panic" {
+    // This should not panic even if directory creation fails
+    // The function logs warnings for debugging purposes
+    ensureDataDir("test_subdir") catch |e| {
+        // If this fails, it should be due to HOME not being set
+        // rather than the directory creation itself
+        try std.testing.expect(e == PathError.HomeDirNotFound);
+    };
 }

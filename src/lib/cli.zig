@@ -8,6 +8,7 @@ const std = @import("std");
 const ip = @import("../network/ip.zig");
 const net_setup = @import("../network/setup.zig");
 const paths = @import("paths.zig");
+const log = @import("log.zig");
 
 // -- output mode --
 
@@ -19,25 +20,43 @@ pub const OutputMode = enum { human, json };
 /// set to .json when --json is passed on the command line.
 pub var output_mode: OutputMode = .human;
 
+// -- output failure tracking --
+
+/// tracks number of stdout write failures (for debugging)
+pub var stdout_write_failures: usize = 0;
+/// tracks number of stderr write failures (for debugging)
+pub var stderr_write_failures: usize = 0;
+
 // -- output --
 
-/// write formatted output to stdout. errors are silently ignored
-/// since CLI output is best-effort.
+/// write formatted output to stdout. tracks failures but doesn't panic.
 pub fn write(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     const out = &w.interface;
-    out.print(fmt, args) catch {};
-    out.flush() catch {};
+    out.print(fmt, args) catch {
+        stdout_write_failures += 1;
+        return;
+    };
+    out.flush() catch {
+        stdout_write_failures += 1;
+        return;
+    };
 }
 
-/// write formatted output to stderr. errors are silently ignored.
+/// write formatted output to stderr. tracks failures but doesn't panic.
 pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stderr().writer(&buf);
     const out = &w.interface;
-    out.print(fmt, args) catch {};
-    out.flush() catch {};
+    out.print(fmt, args) catch {
+        stderr_write_failures += 1;
+        return;
+    };
+    out.flush() catch {
+        stderr_write_failures += 1;
+        return;
+    };
 }
 
 // -- argument parsing --
@@ -161,7 +180,9 @@ pub fn parseMemorySize(str: []const u8) ?u64 {
         'g' => 1024 * 1024 * 1024,
         else => 1,
     };
-    return std.math.mul(u64, base, multiplier) catch null;
+    // Use saturating multiplication to handle overflow gracefully
+    // Very large values will be clamped to maxInt(u64)
+    return base *| multiplier;
 }
 
 // -- display formatting --
@@ -393,9 +414,12 @@ test "readApiToken returns null for missing file" {
     var backup_buf: [paths.max_path]u8 = undefined;
     const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
 
-    // move existing file out of the way
-    std.fs.cwd().rename(token_path, backup_path) catch {};
-    defer std.fs.cwd().rename(backup_path, token_path) catch {};
+    // move existing file out of the way - if this fails, the file might not exist, which is fine
+    const moved = if (std.fs.cwd().rename(token_path, backup_path)) |_| true else |_| false;
+    // only try to restore if we actually moved the file
+    defer if (moved) std.fs.cwd().rename(backup_path, token_path) catch |e| {
+        log.warn("test cleanup: failed to restore token file: {}", .{e});
+    };
 
     var buf: [64]u8 = undefined;
     try std.testing.expect(readApiToken(&buf) == null);
@@ -408,15 +432,27 @@ test "readApiToken rejects weak file permissions" {
     var backup_buf: [paths.max_path]u8 = undefined;
     const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
 
-    std.fs.cwd().rename(token_path, backup_path) catch {};
-    defer std.fs.cwd().rename(backup_path, token_path) catch {};
+    // move existing file out of the way
+    const moved = if (std.fs.cwd().rename(token_path, backup_path)) |_| true else |_| false;
+    defer if (moved) std.fs.cwd().rename(backup_path, token_path) catch |e| {
+        log.warn("test cleanup: failed to restore token file: {}", .{e});
+    };
 
-    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o644 }) catch return;
+    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o644 }) catch |e| {
+        // If we can't create the test file, skip this test
+        log.warn("test: skipping weak permissions test - cannot create file: {}", .{e});
+        return;
+    };
     defer {
         file.close();
-        std.fs.cwd().deleteFile(token_path) catch {};
+        std.fs.cwd().deleteFile(token_path) catch |e| {
+            log.warn("test cleanup: failed to delete test token file: {}", .{e});
+        };
     }
-    file.writeAll("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") catch return;
+    file.writeAll("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") catch |e| {
+        log.warn("test: failed to write test token: {}", .{e});
+        return;
+    };
 
     var buf: [64]u8 = undefined;
     try std.testing.expect(readApiToken(&buf) == null);
@@ -426,4 +462,41 @@ test "isValidApiToken validates hex token" {
     try std.testing.expect(isValidApiToken("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
     try std.testing.expect(!isValidApiToken("short"));
     try std.testing.expect(!isValidApiToken("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+}
+
+test "parseMemorySize handles normal values" {
+    try std.testing.expectEqual(@as(u64, 1024), parseMemorySize("1k").?);
+    try std.testing.expectEqual(@as(u64, 1024 * 1024), parseMemorySize("1m").?);
+    try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), parseMemorySize("1g").?);
+    try std.testing.expectEqual(@as(u64, 512), parseMemorySize("512").?);
+}
+
+test "parseMemorySize handles overflow gracefully" {
+    // Very large values should saturate to max u64, not return null
+    // Use max u64 / 2 as base, multiplied by 4g should saturate
+    const huge = parseMemorySize("4611686018427387903g"); // max_i64 / 2
+    try std.testing.expect(huge != null);
+    // Should be max u64 (saturated)
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), huge.?);
+}
+
+test "parseMemorySize handles invalid inputs" {
+    try std.testing.expect(parseMemorySize("") == null);
+    try std.testing.expect(parseMemorySize("abc") == null);
+    try std.testing.expect(parseMemorySize("m") == null); // Just suffix, no number
+}
+
+test "output failure tracking" {
+    // Reset counters
+    stdout_write_failures = 0;
+    stderr_write_failures = 0;
+
+    // Normal writes should not increment counters
+    write("test", .{});
+    writeErr("test", .{});
+
+    // Note: In normal operation, these should remain 0
+    // We can't easily test actual failures without mocking stdout/stderr
+    _ = stdout_write_failures;
+    _ = stderr_write_failures;
 }

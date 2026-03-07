@@ -20,6 +20,8 @@ pub const JsonWriter = struct {
     /// each bit: 0 = first element (no comma needed), 1 = subsequent (comma needed).
     needs_comma: u32 = 0,
     depth: u5 = 0,
+    /// tracks if the last flush operation failed
+    flush_failed: bool = false,
 
     // -- structure --
 
@@ -135,14 +137,25 @@ pub const JsonWriter = struct {
     // -- output --
 
     /// flush the buffer to stdout with a trailing newline.
+    /// tracks if flush failed in flush_failed field.
     pub fn flush(self: *JsonWriter) void {
         const data = self.buf[0..self.pos];
         var buf: [4096]u8 = undefined;
         var w = std.fs.File.stdout().writer(&buf);
         const out = &w.interface;
-        out.writeAll(data) catch {};
-        out.writeAll("\n") catch {};
-        out.flush() catch {};
+
+        out.writeAll(data) catch {
+            self.flush_failed = true;
+            return;
+        };
+        out.writeAll("\n") catch {
+            self.flush_failed = true;
+            return;
+        };
+        out.flush() catch {
+            self.flush_failed = true;
+            return;
+        };
         self.pos = 0;
     }
 
@@ -154,7 +167,8 @@ pub const JsonWriter = struct {
     // -- internal helpers --
 
     fn maybeComma(self: *JsonWriter) void {
-        const mask = @as(u32, 1) << self.depth;
+        if (self.depth > 31) return; // Guard against shift overflow
+        const mask = @as(u32, 1) << @intCast(self.depth);
         if (self.needs_comma & mask != 0) {
             self.put(',');
         } else {
@@ -163,9 +177,10 @@ pub const JsonWriter = struct {
     }
 
     fn pushNesting(self: *JsonWriter) void {
-        if (self.depth < 31) self.depth += 1;
-        // clear the comma bit for this new level
-        const mask = @as(u32, 1) << self.depth;
+        if (self.depth >= 31) return; // Guard against shift overflow
+        self.depth += 1;
+        // clear the comma bit for this new level (depth is now 1-31, shift is safe)
+        const mask = @as(u32, 1) << @intCast(self.depth);
         self.needs_comma &= ~mask;
     }
 
@@ -340,4 +355,40 @@ test "control character escaping" {
         "{\"data\":\"\\u0001\\u0002\"}",
         w.getWritten(),
     );
+}
+
+test "depth overflow protection" {
+    // Test that depth is capped at 31 to prevent bit shift overflow
+    var w = JsonWriter{};
+    
+    // Push nesting 40 times (exceeds the 31 limit)
+    for (0..40) |_| {
+        w.beginObject();
+    }
+    
+    // Depth should be capped at 31
+    try std.testing.expect(w.depth <= 31);
+    
+    // Should still be able to write fields without crashing
+    w.stringField("key", "value");
+    
+    // Pop all nesting
+    for (0..40) |_| {
+        w.endObject();
+    }
+    
+    // Verify we can flush without error
+    w.flush();
+    try std.testing.expect(!w.flush_failed);
+}
+
+test "flush failure tracking" {
+    var w = JsonWriter{};
+    w.beginObject();
+    w.stringField("key", "value");
+    w.endObject();
+    w.flush();
+    
+    // In normal operation, flush should succeed
+    try std.testing.expect(!w.flush_failed);
 }

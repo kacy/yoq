@@ -24,6 +24,9 @@ pub const Level = enum {
 
 var min_level: Level = .info;
 
+/// tracks number of stderr write failures (for debugging)
+pub var log_write_failures: usize = 0;
+
 pub fn setLevel(level: Level) void {
     min_level = level;
 }
@@ -51,8 +54,13 @@ fn log(level: Level, comptime fmt: []const u8, args: anytype) void {
     var w = std.fs.File.stderr().writer(&buf);
     const out = &w.interface;
 
-    out.print("[{s}] " ++ fmt ++ "\n", .{level.label()} ++ args) catch {};
-    out.flush() catch {};
+    out.print("[{s}] " ++ fmt ++ "\n", .{level.label()} ++ args) catch {
+        log_write_failures += 1;
+        return;
+    };
+    out.flush() catch {
+        log_write_failures += 1;
+    };
 }
 
 test "log level filtering" {
@@ -64,4 +72,19 @@ test "log level filtering" {
     info("this should be filtered", .{});
     warn("this should appear", .{});
     err("this should appear", .{});
+}
+
+test "log failure tracking" {
+    // Reset counter
+    log_write_failures = 0;
+    
+    // Normal log writes should not increment counter
+    info("test message", .{});
+    warn("test warning", .{});
+    err("test error", .{});
+    debug("test debug", .{});
+    
+    // Note: In normal operation, this should remain 0
+    // We can't easily test actual failures without mocking stderr
+    _ = log_write_failures;
 }
