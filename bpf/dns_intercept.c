@@ -147,6 +147,19 @@ int dns_intercept(struct __sk_buff *skb)
     __u16 ip_tot_len = ntohs(ip->tot_len);
     if (ip_tot_len < 40 || ip_tot_len > 1500) // min: IP(20)+UDP(8)+payload, max: typical MTU
         return TC_ACT_OK;
+    
+    // SECURITY: Validate TTL is reasonable (prevent routing loops and suspicious packets)
+    // Normal DNS queries should have TTL >= 1, but very high TTL (>128) might be suspicious
+    if (ip->ttl < 1 || ip->ttl > 128)
+        return TC_ACT_OK;
+    
+    // SECURITY: Reject obviously spoofed or invalid source IPs
+    // 0.0.0.0, broadcast, multicast, loopback as source
+    __u32 src_ip = ip->saddr;
+    if (src_ip == 0 || src_ip == 0xFFFFFFFF ||          // 0.0.0.0, 255.255.255.255
+        (src_ip & 0xF0000000) == 0xE0000000 ||          // 224.0.0.0/4 multicast
+        (src_ip & 0xFF000000) == 0x7F000000)           // 127.0.0.0/8 loopback
+        return TC_ACT_OK;
 
     // -- parse UDP header (offset 34, 8 bytes) --
     struct udphdr *udp = (void *)((char *)ip + 20);
@@ -234,7 +247,7 @@ int dns_intercept(struct __sk_buff *skb)
     __builtin_memcpy(dst_mac, eth->h_dest, 6);
     __builtin_memcpy(src_mac, eth->h_source, 6);
 
-    __u32 src_ip = ip->saddr;
+    // src_ip already validated above
     __u32 dst_ip = ip->daddr;
     __u16 old_ip_len = ip->tot_len;
     __u16 src_port = udp->source;

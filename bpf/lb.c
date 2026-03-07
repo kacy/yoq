@@ -153,7 +153,18 @@ int lb_ingress(struct __sk_buff *skb)
 
     // SECURITY: Validate IP total length
     __u16 ip_tot_len = ntohs(ip->tot_len);
-    if (ip_tot_len < 40 || ip_tot_len > 1500) // min: IP+TCP/UDP headers
+    if (ip_tot_len < 40 || ip_tot_len > 9000) // min: IP+TCP/UDP headers, max: jumbo frame
+        return TC_ACT_OK;
+    
+    // SECURITY: Validate TTL is reasonable
+    if (ip->ttl < 1 || ip->ttl > 128)
+        return TC_ACT_OK;
+    
+    // SECURITY: Reject obviously spoofed source IPs
+    __u32 src_ip = ip->saddr;
+    if (src_ip == 0 || src_ip == 0xFFFFFFFF ||
+        (src_ip & 0xF0000000) == 0xE0000000 ||
+        (src_ip & 0xFF000000) == 0x7F000000)
         return TC_ACT_OK;
 
     // require IHL=5 (no options) for fixed-offset transport header access
@@ -276,7 +287,18 @@ int lb_egress(struct __sk_buff *skb)
 
     // SECURITY: Validate IP total length
     __u16 ip_tot_len = ntohs(ip->tot_len);
-    if (ip_tot_len < 40 || ip_tot_len > 1500)
+    if (ip_tot_len < 40 || ip_tot_len > 9000) // Support jumbo frames
+        return TC_ACT_OK;
+    
+    // SECURITY: Validate TTL is reasonable
+    if (ip->ttl < 1 || ip->ttl > 128)
+        return TC_ACT_OK;
+    
+    // SECURITY: Reject obviously spoofed source IPs
+    __u32 src_ip = ip->saddr;
+    if (src_ip == 0 || src_ip == 0xFFFFFFFF ||
+        (src_ip & 0xF0000000) == 0xE0000000 ||
+        (src_ip & 0xFF000000) == 0x7F000000)
         return TC_ACT_OK;
 
     // require IHL=5 for fixed offsets

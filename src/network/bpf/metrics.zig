@@ -28,10 +28,10 @@ pub const Reloc = struct {
 pub const prog_name = "tc_ingress";
 
 pub const relocs = [_]Reloc{
-    .{ .insn_idx = 48, .map_idx = 0 },
-    .{ .insn_idx = 71, .map_idx = 0 },
-    .{ .insn_idx = 129, .map_idx = 1 },
-    .{ .insn_idx = 160, .map_idx = 1 },
+    .{ .insn_idx = 51, .map_idx = 0 },
+    .{ .insn_idx = 74, .map_idx = 0 },
+    .{ .insn_idx = 132, .map_idx = 1 },
+    .{ .insn_idx = 163, .map_idx = 1 },
 };
 
 pub const insns = [_]BPF.Insn{
@@ -39,15 +39,15 @@ pub const insns = [_]BPF.Insn{
     .{ .code = 0x61, .dst = 7, .src = 1, .off = 76, .imm = 0 },
     .{ .code = 0xbf, .dst = 6, .src = 7, .off = 0, .imm = 0 },
     .{ .code = 0x07, .dst = 6, .src = 0, .off = 0, .imm = 14 },
-    .{ .code = 0x2d, .dst = 6, .src = 9, .off = 159, .imm = 0 },
+    .{ .code = 0x2d, .dst = 6, .src = 9, .off = 162, .imm = 0 },
     .{ .code = 0x71, .dst = 1, .src = 7, .off = 13, .imm = 0 },
     .{ .code = 0x67, .dst = 1, .src = 0, .off = 0, .imm = 8 },
     .{ .code = 0x71, .dst = 2, .src = 7, .off = 12, .imm = 0 },
     .{ .code = 0x4f, .dst = 1, .src = 2, .off = 0, .imm = 0 },
-    .{ .code = 0x55, .dst = 1, .src = 0, .off = 154, .imm = 8 },
+    .{ .code = 0x55, .dst = 1, .src = 0, .off = 157, .imm = 8 },
     .{ .code = 0xbf, .dst = 1, .src = 7, .off = 0, .imm = 0 },
     .{ .code = 0x07, .dst = 1, .src = 0, .off = 0, .imm = 34 },
-    .{ .code = 0x2d, .dst = 1, .src = 9, .off = 151, .imm = 0 },
+    .{ .code = 0x2d, .dst = 1, .src = 9, .off = 154, .imm = 0 },
     .{ .code = 0x71, .dst = 1, .src = 7, .off = 27, .imm = 0 },
     .{ .code = 0x67, .dst = 1, .src = 0, .off = 0, .imm = 8 },
     .{ .code = 0x71, .dst = 2, .src = 7, .off = 26, .imm = 0 },
@@ -65,7 +65,10 @@ pub const insns = [_]BPF.Insn{
     .{ .code = 0x4f, .dst = 1, .src = 2, .off = 0, .imm = 0 },
     .{ .code = 0xdc, .dst = 1, .src = 0, .off = 0, .imm = 16 },
     .{ .code = 0xb7, .dst = 2, .src = 0, .off = 0, .imm = 20 },
-    .{ .code = 0x2d, .dst = 2, .src = 1, .off = 133, .imm = 0 },
+    .{ .code = 0x2d, .dst = 2, .src = 1, .off = 136, .imm = 0 },
+    .{ .code = 0x71, .dst = 2, .src = 7, .off = 22, .imm = 0 },
+    .{ .code = 0x15, .dst = 2, .src = 0, .off = 134, .imm = 0 },
+    .{ .code = 0x25, .dst = 2, .src = 0, .off = 133, .imm = 128 },
     .{ .code = 0x71, .dst = 2, .src = 6, .off = 0, .imm = 0 },
     .{ .code = 0x57, .dst = 2, .src = 0, .off = 0, .imm = 15 },
     .{ .code = 0xb7, .dst = 3, .src = 0, .off = 0, .imm = 5 },

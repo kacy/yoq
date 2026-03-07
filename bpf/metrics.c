@@ -92,6 +92,10 @@ int metrics_count(struct __sk_buff *skb)
     if (ip_tot_len < 20 || ip_tot_len > 65535) // Minimum IP header is 20 bytes
         return TC_ACT_OK;
     
+    // SECURITY: Validate TTL is reasonable
+    if (iph->ttl < 1 || iph->ttl > 128)
+        return TC_ACT_OK;
+    
     // SECURITY: Validate IHL (header length) is at least 5 (20 bytes)
     __u8 ihl = iph->ihl_version & 0x0F;
     if (ihl < 5 || ihl > 15) // RFC 791: IHL is 4 bits, min 5, max 15
