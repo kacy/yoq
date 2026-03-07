@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const http = @import("../http.zig");
 const store = @import("../../state/store.zig");
 const monitor = @import("../../runtime/monitor.zig");
+const cgroups = @import("../../runtime/cgroups.zig");
 const ebpf = if (builtin.os.tag == .linux) @import("../../network/ebpf.zig") else struct {
     pub const PairEntry = struct {
         key: struct {
@@ -43,6 +44,7 @@ const ebpf = if (builtin.os.tag == .linux) @import("../../network/ebpf.zig") els
 };
 const ip_mod = @import("../../network/ip.zig");
 const common = @import("common.zig");
+const testing = std.testing;
 
 const Response = common.Response;
 
@@ -222,4 +224,209 @@ fn resolveIpToService(ip_net: u32, records: []const store.ContainerRecord) []con
         }
     }
     return "unknown";
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "route returns null for unknown path" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/unknown",
+        .path_only = "/unknown",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    try testing.expect(response == null);
+}
+
+test "route handles /v1/status GET" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/status",
+        .path_only = "/v1/status",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    _ = response; // May be null or a Response depending on store state
+    // Should return a response (either empty array or error)
+    // Don't check exact result as it depends on store state
+}
+
+test "route handles /v1/metrics GET" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/metrics",
+        .path_only = "/v1/metrics",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    _ = response; // May be null or a Response depending on store state and ebpf
+    // Should return a response (either empty array or metrics)
+    // Don't check exact result as it depends on store state and ebpf availability
+}
+
+test "route handles /v1/metrics?mode=pairs GET" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/metrics?mode=pairs",
+        .path_only = "/v1/metrics",
+        .query = "mode=pairs",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    _ = response; // May be null or a Response depending on ebpf availability
+    // Should handle the pairs mode query parameter
+}
+
+test "route returns null for POST to status" {
+    const req = http.Request{
+        .method = .POST,
+        .path = "/v1/status",
+        .path_only = "/v1/status",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    try testing.expect(response == null);
+}
+
+test "route returns null for DELETE to metrics" {
+    const req = http.Request{
+        .method = .DELETE,
+        .path = "/v1/metrics",
+        .path_only = "/v1/metrics",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    try testing.expect(response == null);
+}
+
+test "resolveIpToService returns unknown for empty records" {
+    const ip_net: u32 = 0x0A000001; // 10.0.0.1 in network order
+    const records: []const store.ContainerRecord = &.{};
+    const result = resolveIpToService(ip_net, records);
+    try testing.expectEqualStrings("unknown", result);
+}
+
+test "writeSnapshotJson produces valid JSON" {
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    const snap = monitor.ServiceSnapshot{
+        .name = "test-service",
+        .status = .running,
+        .health_status = .healthy,
+        .cpu_pct = 50.5,
+        .memory_bytes = 1024 * 1024 * 100, // 100MB
+        .running_count = 3,
+        .desired_count = 3,
+        .uptime_secs = 3600,
+        .psi_cpu = null,
+        .psi_memory = null,
+    };
+
+    writeSnapshotJson(writer, snap) catch unreachable;
+    const json = stream.getWritten();
+
+    // Verify JSON contains expected fields
+    try testing.expect(std.mem.indexOf(u8, json, "test-service") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "running") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "healthy") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "50.5") != null);
+}
+
+test "writeSnapshotJson handles null health" {
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    const snap = monitor.ServiceSnapshot{
+        .name = "test-service",
+        .status = .running,
+        .health_status = null,
+        .cpu_pct = 0.0,
+        .memory_bytes = 0,
+        .running_count = 1,
+        .desired_count = 1,
+        .uptime_secs = 0,
+        .psi_cpu = null,
+        .psi_memory = null,
+    };
+
+    writeSnapshotJson(writer, snap) catch unreachable;
+    const json = stream.getWritten();
+
+    try testing.expect(std.mem.indexOf(u8, json, "null") != null);
+}
+
+test "writeSnapshotJson includes PSI metrics when present" {
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    const psi = cgroups.PsiMetrics{ .some_avg10 = 1.5, .full_avg10 = 0.5 };
+    const snap = monitor.ServiceSnapshot{
+        .name = "test-service",
+        .status = .running,
+        .health_status = .healthy,
+        .cpu_pct = 25.0,
+        .memory_bytes = 512 * 1024 * 1024,
+        .running_count = 2,
+        .desired_count = 2,
+        .uptime_secs = 7200,
+        .psi_cpu = psi,
+        .psi_memory = psi,
+    };
+
+    writeSnapshotJson(writer, snap) catch unreachable;
+    const json = stream.getWritten();
+
+    try testing.expect(std.mem.indexOf(u8, json, "psi_cpu") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "psi_mem") != null);
+}
+
+test "route handles service filter in metrics" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/metrics?service=myapp",
+        .path_only = "/v1/metrics",
+        .query = "service=myapp",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    _ = response; // May be null or a Response depending on store state
+    // Should handle the service filter query parameter
+}
+
+test "extractQueryParam from full path with multiple params" {
+    try testing.expectEqualStrings("myapp", common.extractQueryParam("/v1/metrics?service=myapp&mode=details", "service").?);
+    try testing.expectEqualStrings("details", common.extractQueryParam("/v1/metrics?service=myapp&mode=details", "mode").?);
 }

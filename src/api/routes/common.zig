@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("../http.zig");
 const cluster_node = @import("../../cluster/node.zig");
+const testing = std.testing;
 
 pub const Response = struct {
     status: http.StatusCode,
@@ -133,4 +134,258 @@ pub fn extractQueryParam(path: []const u8, param: []const u8) ?[]const u8 {
     }
 
     return null;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "notFound returns correct response" {
+    const resp = notFound();
+    try testing.expectEqual(http.StatusCode.not_found, resp.status);
+    try testing.expectEqualStrings("{\"error\":\"not found\"}", resp.body);
+    try testing.expect(!resp.allocated);
+}
+
+test "unauthorized returns correct response" {
+    const resp = unauthorized();
+    try testing.expectEqual(http.StatusCode.unauthorized, resp.status);
+    try testing.expectEqualStrings("{\"error\":\"unauthorized\"}", resp.body);
+    try testing.expect(!resp.allocated);
+}
+
+test "methodNotAllowed returns correct response" {
+    const resp = methodNotAllowed();
+    try testing.expectEqual(http.StatusCode.method_not_allowed, resp.status);
+    try testing.expectEqualStrings("{\"error\":\"method not allowed\"}", resp.body);
+    try testing.expect(!resp.allocated);
+}
+
+test "internalError returns correct response" {
+    const resp = internalError();
+    try testing.expectEqual(http.StatusCode.internal_server_error, resp.status);
+    try testing.expectEqualStrings("{\"error\":\"internal error\"}", resp.body);
+    try testing.expect(!resp.allocated);
+}
+
+test "badRequest returns correct response with message" {
+    const resp = badRequest("invalid input");
+    try testing.expectEqual(http.StatusCode.bad_request, resp.status);
+    try testing.expectEqualStrings("{\"error\":\"invalid input\"}", resp.body);
+    try testing.expect(!resp.allocated);
+}
+
+test "jsonOkOwned returns allocated ok response" {
+    const body = "{\"status\":\"ok\"}";
+    const resp = jsonOkOwned(testing.allocator, body);
+    try testing.expectEqual(http.StatusCode.ok, resp.status);
+    try testing.expectEqualStrings(body, resp.body);
+    try testing.expect(resp.allocated);
+    testing.allocator.free(resp.body);
+}
+
+test "extractBearerToken extracts valid token" {
+    const request = http.Request{
+        .method = .GET,
+        .path = "/test",
+        .path_only = "/test",
+        .query = "",
+        .headers_raw = "Authorization: Bearer token123",
+        .body = "",
+        .content_length = 0,
+    };
+    const token = extractBearerToken(&request);
+    try testing.expect(token != null);
+    try testing.expectEqualStrings("token123", token.?);
+}
+
+test "extractBearerToken returns null for missing header" {
+    const request = http.Request{
+        .method = .GET,
+        .path = "/test",
+        .path_only = "/test",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+    const token = extractBearerToken(&request);
+    try testing.expect(token == null);
+}
+
+test "extractBearerToken returns null for non-Bearer prefix" {
+    const request = http.Request{
+        .method = .GET,
+        .path = "/test",
+        .path_only = "/test",
+        .query = "",
+        .headers_raw = "Authorization: Basic token123",
+        .body = "",
+        .content_length = 0,
+    };
+    const token = extractBearerToken(&request);
+    try testing.expect(token == null);
+}
+
+test "extractBearerToken returns null for short auth value" {
+    const request = http.Request{
+        .method = .GET,
+        .path = "/test",
+        .path_only = "/test",
+        .query = "",
+        .headers_raw = "Authorization: Bearer ",
+        .body = "",
+        .content_length = 0,
+    };
+    const token = extractBearerToken(&request);
+    try testing.expect(token == null);
+}
+
+test "hasValidBearerToken validates correct token" {
+    const request = http.Request{
+        .method = .GET,
+        .path = "/test",
+        .path_only = "/test",
+        .query = "",
+        .headers_raw = "Authorization: Bearer secrettoken",
+        .body = "",
+        .content_length = 0,
+    };
+    try testing.expect(hasValidBearerToken(&request, "secrettoken"));
+}
+
+test "hasValidBearerToken rejects invalid token" {
+    const request = http.Request{
+        .method = .GET,
+        .path = "/test",
+        .path_only = "/test",
+        .query = "",
+        .headers_raw = "Authorization: Bearer wrongtoken",
+        .body = "",
+        .content_length = 0,
+    };
+    try testing.expect(!hasValidBearerToken(&request, "secrettoken"));
+}
+
+test "hasValidBearerToken rejects different length token" {
+    const request = http.Request{
+        .method = .GET,
+        .path = "/test",
+        .path_only = "/test",
+        .query = "",
+        .headers_raw = "Authorization: Bearer short",
+        .body = "",
+        .content_length = 0,
+    };
+    try testing.expect(!hasValidBearerToken(&request, "secrettoken"));
+}
+
+test "validateClusterInput accepts valid input" {
+    try testing.expect(validateClusterInput("valid-address"));
+    try testing.expect(validateClusterInput("192.168.1.1:8080"));
+    try testing.expect(validateClusterInput("hostname.example.com"));
+}
+
+test "validateClusterInput rejects empty string" {
+    try testing.expect(!validateClusterInput(""));
+}
+
+test "validateClusterInput rejects long string" {
+    var long_input: [300]u8 = undefined;
+    @memset(&long_input, 'a');
+    try testing.expect(!validateClusterInput(&long_input));
+}
+
+test "validateClusterInput rejects special characters" {
+    try testing.expect(!validateClusterInput("value'with'quotes"));
+    try testing.expect(!validateClusterInput("value\"with\"quotes"));
+    try testing.expect(!validateClusterInput("value;with;semicolons"));
+    try testing.expect(!validateClusterInput("value\\with\\backslash"));
+}
+
+test "validateClusterInput rejects control characters" {
+    try testing.expect(!validateClusterInput("value\x00with\x01nulls"));
+    try testing.expect(!validateClusterInput("value\nwith\rnewlines"));
+}
+
+test "validateContainerId accepts valid hex id" {
+    try testing.expect(validateContainerId("abc123def4567890123456789012345678901234567890123456789012345678"));
+    try testing.expect(validateContainerId("deadbeef"));
+    try testing.expect(validateContainerId("1234567890abcdef"));
+}
+
+test "validateContainerId rejects empty id" {
+    try testing.expect(!validateContainerId(""));
+}
+
+test "validateContainerId rejects long id" {
+    var long_id: [70]u8 = undefined;
+    @memset(&long_id, 'a');
+    try testing.expect(!validateContainerId(&long_id));
+}
+
+test "validateContainerId rejects non-hex characters" {
+    try testing.expect(!validateContainerId("abc123xyz"));
+    try testing.expect(!validateContainerId("ABC123")); // uppercase not allowed
+    try testing.expect(!validateContainerId("container_id"));
+}
+
+test "matchSubpath matches valid subpath" {
+    const result = matchSubpath("agent123/heartbeat", "/heartbeat");
+    try testing.expect(result != null);
+    try testing.expectEqualStrings("agent123", result.?);
+}
+
+test "matchSubpath returns null for non-matching suffix" {
+    const result = matchSubpath("agent123/logs", "/heartbeat");
+    try testing.expect(result == null);
+}
+
+test "matchSubpath returns null for missing slash" {
+    const result = matchSubpath("agent123heartbeat", "/heartbeat");
+    try testing.expect(result == null);
+}
+
+test "matchSubpath returns null for empty id" {
+    const result = matchSubpath("/heartbeat", "/heartbeat");
+    try testing.expect(result == null);
+}
+
+test "matchAssignmentStatusPath matches valid path" {
+    const result = matchAssignmentStatusPath("agent123/assignments/assign456/status");
+    try testing.expect(result != null);
+    try testing.expectEqualStrings("agent123", result.?.agent_id);
+    try testing.expectEqualStrings("assign456", result.?.assignment_id);
+}
+
+test "matchAssignmentStatusPath returns null for missing agent" {
+    const result = matchAssignmentStatusPath("/assignments/assign456/status");
+    try testing.expect(result == null);
+}
+
+test "matchAssignmentStatusPath returns null for missing assignment" {
+    const result = matchAssignmentStatusPath("agent123/assignments//status");
+    try testing.expect(result == null);
+}
+
+test "matchAssignmentStatusPath returns null for wrong suffix" {
+    const result = matchAssignmentStatusPath("agent123/assignments/assign456/wrong");
+    try testing.expect(result == null);
+}
+
+test "extractQueryParam extracts param from query string" {
+    try testing.expectEqualStrings("value1", extractQueryParam("/path?param=value1", "param").?);
+    try testing.expectEqualStrings("value2", extractQueryParam("/path?other=val&param=value2", "param").?);
+}
+
+test "extractQueryParam returns null for missing param" {
+    try testing.expect(extractQueryParam("/path?other=value", "param") == null);
+}
+
+test "extractQueryParam returns null for empty path" {
+    try testing.expect(extractQueryParam("/path", "param") == null);
+}
+
+test "extractQueryParam returns null for empty value" {
+    try testing.expect(extractQueryParam("/path?param=", "param") == null);
 }
