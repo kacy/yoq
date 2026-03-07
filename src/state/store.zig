@@ -509,10 +509,18 @@ pub fn removeImage(id: []const u8) StoreError!void {
     const db = try getDb();
     defer releaseDb();
 
-    const rows_affected = db.exec("DELETE FROM images WHERE id = ?;", .{}, .{id}) catch
-        return StoreError.WriteFailed;
+    // First check if the image exists
+    const exists = db.one(
+        struct { id: sqlite.Text },
+        "SELECT id FROM images WHERE id = ?;",
+        .{},
+        .{id},
+    ) catch return StoreError.ReadFailed;
 
-    if (rows_affected == 0) return StoreError.NotFound;
+    if (exists == null) return StoreError.NotFound;
+
+    db.exec("DELETE FROM images WHERE id = ?;", .{}, .{id}) catch
+        return StoreError.WriteFailed;
 }
 
 // -- build cache --
