@@ -206,7 +206,7 @@ test "processArg — key=value" {
     var state = types.BuildState.init(alloc);
     defer state.deinit();
 
-    processArg(alloc, &state, "VERSION=1.0");
+    try processArg(alloc, &state, "VERSION=1.0");
     try std.testing.expectEqualStrings("1.0", state.build_args.get("VERSION").?);
 }
 

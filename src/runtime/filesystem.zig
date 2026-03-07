@@ -610,7 +610,7 @@ test "validatePathNoSymlink accepts regular files" {
     defer tmp.cleanup();
 
     // create a regular file
-    try tmp.dir.writeFile("testfile", "test content");
+    try tmp.dir.writeFile(.{ .sub_path = "testfile", .data = "test content" });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath("testfile", &path_buf);
@@ -638,7 +638,7 @@ test "validatePathNoSymlink rejects symlinks" {
     defer tmp.cleanup();
 
     // create a file and symlink to it
-    try tmp.dir.writeFile("realfile", "content");
+    try tmp.dir.writeFile(.{ .sub_path = "realfile", .data = "content" });
     try tmp.dir.symLink("realfile", "linkfile", .{});
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
