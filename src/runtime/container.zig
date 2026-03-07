@@ -283,10 +283,9 @@ pub const Container = struct {
             }
         }
 
-        // signal child that all parent-side setup is complete
-        spawn_result.signalReady();
-
-        // open log file and start capture threads
+        // open log file and start capture threads BEFORE signaling child ready.
+        // if we signal ready first, fast-exiting commands (like echo) complete
+        // before the capture threads start, resulting in empty logs.
         self.runtime.log_file = logs.createLogFile(config.id) catch null;
         const stdout_label: []const u8 = "stdout";
         const stderr_label: []const u8 = "stderr";
@@ -319,6 +318,9 @@ pub const Container = struct {
         // close pipe fds that aren't being captured by a thread
         if (self.runtime.stdout_thread == null) posix.close(spawn_result.stdout_fd);
         if (self.runtime.stderr_thread == null) posix.close(spawn_result.stderr_fd);
+
+        // signal child that all parent-side setup is complete
+        spawn_result.signalReady();
 
         // update sqlite to "running"
         store.updateStatus(config.id, "running", spawn_result.pid, null) catch |e| {
