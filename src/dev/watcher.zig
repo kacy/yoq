@@ -11,6 +11,7 @@
 // - closing the inotify fd unblocks the waiting thread for clean shutdown
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const syscall = @import("../lib/syscall.zig");
@@ -216,7 +217,12 @@ pub const Watcher = struct {
 
 // -- tests --
 
+fn requireLinuxTest() !void {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+}
+
 test "init and deinit" {
+    try requireLinuxTest();
     var w = try Watcher.init();
     // fd should be valid (non-negative)
     try std.testing.expect(w.fd >= 0);
@@ -225,6 +231,7 @@ test "init and deinit" {
 }
 
 test "watch temp directory and detect file change" {
+    try requireLinuxTest();
     var w = try Watcher.init();
     defer w.deinit();
 
@@ -267,6 +274,7 @@ test "watch temp directory and detect file change" {
 }
 
 test "too many watches" {
+    try requireLinuxTest();
     var w = try Watcher.init();
     defer w.deinit();
 
@@ -277,6 +285,7 @@ test "too many watches" {
 }
 
 test "path too long" {
+    try requireLinuxTest();
     var w = try Watcher.init();
     defer w.deinit();
 
