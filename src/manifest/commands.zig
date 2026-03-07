@@ -232,34 +232,46 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var watcher_thread: ?std.Thread = null;
 
     if (dev_mode) {
-        w = watcher_mod.Watcher.init() catch |e| blk: {
+        w = watcher_mod.Watcher.init(alloc) catch |e| blk: {
             writeErr("warning: file watcher unavailable: {}\n", .{e});
             break :blk null;
         };
 
         if (w != null) {
             // add watches for each service's bind-mounted volumes
+            // track if any watches failed
+            var any_watch_failed = false;
             for (manifest.services, 0..) |svc, i| {
                 for (svc.volumes) |vol| {
                     if (vol.kind != .bind) continue;
 
                     // resolve relative source path to absolute
                     var resolve_buf: [4096]u8 = undefined;
-                    const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch continue;
+                    const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch |e| {
+                        writeErr("warning: failed to resolve path {s}: {}\n", .{ vol.source, e });
+                        any_watch_failed = true;
+                        continue;
+                    };
 
                     w.?.addRecursive(abs_source, i) catch |e| {
                         writeErr("warning: failed to watch {s}: {}\n", .{ vol.source, e });
+                        any_watch_failed = true;
                     };
                 }
             }
 
-            // spawn watcher thread
-            watcher_thread = std.Thread.spawn(.{}, orchestrator.watcherThread, .{
-                &orch, &w.?,
-            }) catch |e| blk: {
-                writeErr("warning: failed to start watcher thread: {}\n", .{e});
-                break :blk null;
-            };
+            // only spawn watcher thread if we successfully added at least one watch
+            if (!any_watch_failed or w.?.watch_count > 0) {
+                // spawn watcher thread
+                watcher_thread = std.Thread.spawn(.{}, orchestrator.watcherThread, .{
+                    &orch, &w.?,
+                }) catch |e| blk: {
+                    writeErr("warning: failed to start watcher thread: {}\n", .{e});
+                    break :blk null;
+                };
+            } else {
+                writeErr("warning: no directories could be watched, file change detection disabled\n", .{});
+            }
         }
 
         writeErr("all services running. watching for changes...\n", .{});

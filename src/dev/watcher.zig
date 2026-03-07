@@ -21,8 +21,10 @@ pub const Watcher = struct {
     fd: posix.fd_t,
     watches: [max_watches]WatchEntry,
     watch_count: usize,
+    alloc: std.mem.Allocator, // allocator for path storage
 
     const max_watches = 256;
+    const max_path_len = 4096;
 
     const watch_mask: u32 = linux.IN.CLOSE_WRITE |
         linux.IN.CREATE |
@@ -34,11 +36,12 @@ pub const Watcher = struct {
     const WatchEntry = struct {
         wd: i32,
         service_idx: usize,
+        path: []const u8, // owned slice - must be freed on deinit
     };
 
     /// create a new inotify watcher.
     /// the returned fd has CLOEXEC set so child processes don't inherit it.
-    pub fn init() !Watcher {
+    pub fn init(alloc: std.mem.Allocator) !Watcher {
         const rc = linux.inotify_init1(linux.IN.CLOEXEC);
         const fd_usize = try syscall.unwrap(rc);
 
@@ -46,19 +49,24 @@ pub const Watcher = struct {
             .fd = @intCast(fd_usize),
             .watches = undefined,
             .watch_count = 0,
+            .alloc = alloc,
         };
     }
 
     /// close the inotify fd. any thread blocked in waitForChange will
     /// get an error on read() and return null, allowing clean shutdown.
     pub fn deinit(self: *Watcher) void {
+        // free all stored paths
+        for (self.watches[0..self.watch_count]) |entry| {
+            self.alloc.free(entry.path);
+        }
         posix.close(self.fd);
         self.fd = -1; // Mark as invalid to prevent use-after-close
         self.watch_count = 0;
     }
 
     /// add a single directory to the watch list for a given service.
-    /// the path must fit in a stack buffer (4095 bytes + null terminator).
+    /// the path is copied and stored for auto-adding subdirectories.
     pub fn addDir(self: *Watcher, path: []const u8, service_idx: usize) !void {
         if (self.watch_count >= max_watches) {
             log.warn("inotify watch limit reached ({d}), ignoring {s}", .{ max_watches, path });
@@ -79,9 +87,14 @@ pub const Watcher = struct {
             return error.WatchFailed;
         };
 
+        // allocate and copy the path for storage
+        const path_copy = try self.alloc.dupe(u8, path);
+        errdefer self.alloc.free(path_copy);
+
         self.watches[self.watch_count] = .{
             .wd = @intCast(wd_usize),
             .service_idx = service_idx,
+            .path = path_copy,
         };
         self.watch_count += 1;
 
@@ -142,27 +155,153 @@ pub const Watcher = struct {
         }
     }
 
-    /// block until a watched file changes. returns the service index
-    /// that needs restarting, or null if the watcher was closed (shutdown).
+    /// maximum number of services that can be returned in one wait
+    const max_services_per_wait = 64;
+
+    /// block until watched files change. returns an array of service indices
+    /// that need restarting (up to max_services_per_wait), or empty array if
+    /// the watcher was closed (shutdown).
     ///
-    /// after detecting a change, sleeps 500ms and drains any pending
+    /// after detecting changes, sleeps 500ms and drains any pending
     /// events to debounce rapid sequences (editors saving multiple files).
-    pub fn waitForChange(self: *Watcher) ?usize {
+    pub fn waitForChange(self: *Watcher, services: []usize) []usize {
         var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
 
         // blocking read — will return error when fd is closed
-        const bytes_read = posix.read(self.fd, &buf) catch return null;
-        if (bytes_read == 0) return null;
+        const bytes_read = posix.read(self.fd, &buf) catch return services[0..0];
+        if (bytes_read == 0) return services[0..0];
 
-        // find which service triggered this event
-        const service_idx = self.processEvents(buf[0..bytes_read]);
+        // find all services that triggered events (up to buffer limit)
+        var service_count = self.processEventsMulti(buf[0..bytes_read], services);
 
         // debounce: wait for the editor to finish writing, then drain
         // any events that piled up during the wait
         std.Thread.sleep(debounce_ns);
-        self.drainPending();
 
-        return service_idx;
+        // during drain, collect additional services that had events
+        service_count = self.drainPendingMulti(services, service_count);
+
+        return services[0..service_count];
+    }
+
+    /// scan an event buffer and fill the services array with unique
+    /// service indices. returns the number of services found.
+    /// also handles auto-adding new subdirectories when IN.CREATE fires.
+    fn processEventsMulti(self: *Watcher, buf: []const u8, services: []usize) usize {
+        var offset: usize = 0;
+        var count: usize = 0;
+
+        while (offset + @sizeOf(linux.inotify_event) <= buf.len and count < services.len) {
+            const event: *const linux.inotify_event = @ptrCast(@alignCast(buf.ptr + offset));
+
+            // validate that the event name (if any) fits within the buffer
+            const name_offset = offset + @sizeOf(linux.inotify_event);
+            if (name_offset + event.len > buf.len) {
+                log.warn("watcher: invalid event length {d} at offset {d}, skipping", .{ event.len, offset });
+                break;
+            }
+
+            // safely calculate next offset
+            const next_offset = name_offset + event.len;
+            if (next_offset < offset or next_offset > buf.len) {
+                log.warn("watcher: offset overflow, stopping event processing", .{});
+                break;
+            }
+            offset = next_offset;
+
+            // if a new subdirectory was created, watch it too
+            if (event.mask & linux.IN.CREATE != 0 and event.mask & linux.IN.ISDIR != 0) {
+                if (event.getName()) |name| {
+                    self.autoAddSubdir(event.wd, name);
+                }
+            }
+
+            // find the service that owns this watch descriptor
+            // and add it to the array if not already present
+            const service_idx = self.findServiceForWd(event.wd);
+            if (service_idx) |idx| {
+                // check if this service is already in the array
+                var found = false;
+                for (services[0..count]) |existing| {
+                    if (existing == idx) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    services[count] = idx;
+                    count += 1;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    /// find the service index for a given watch descriptor
+    fn findServiceForWd(self: *Watcher, wd: i32) ?usize {
+        for (self.watches[0..self.watch_count]) |entry| {
+            if (entry.wd == wd) {
+                return entry.service_idx;
+            }
+        }
+        return null;
+    }
+
+    /// drain any pending inotify events without blocking and collect
+    /// additional service indices. returns the updated service count.
+    fn drainPendingMulti(self: *Watcher, services: []usize, initial_count: usize) usize {
+        // check if fd is still valid before modifying flags
+        if (self.fd < 0) return initial_count;
+
+        var count = initial_count;
+
+        // set nonblocking temporarily to drain without waiting
+        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
+            log.warn("watcher: failed to get fd flags: {}", .{e});
+            return count;
+        };
+        const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
+        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
+            log.warn("watcher: failed to set non-blocking mode: {}", .{e});
+            return count;
+        };
+
+        var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
+        while (count < services.len) {
+            const bytes_read = posix.read(self.fd, &buf) catch break;
+            if (bytes_read == 0) break;
+
+            // process this batch of events and add any new services
+            const new_count = self.processEventsMulti(buf[0..bytes_read], services[count..]);
+
+            // merge new services into the main array (avoid duplicates)
+            var i: usize = 0;
+            while (i < new_count and count < services.len) {
+                const new_idx = services[count + i];
+                var found = false;
+                for (services[0..count]) |existing| {
+                    if (existing == new_idx) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    services[count] = new_idx;
+                    count += 1;
+                }
+                i += 1;
+            }
+        }
+
+        // restore original flags - but only if fd is still valid
+        if (self.fd >= 0) {
+            _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
+                log.warn("watcher: failed to restore fd flags: {}", .{e});
+            };
+        }
+
+        return count;
     }
 
     /// scan an event buffer and return the service index for the first
@@ -218,52 +357,46 @@ pub const Watcher = struct {
     /// add an inotify watch for it automatically so we don't miss changes
     /// in newly created directories.
     fn autoAddSubdir(self: *Watcher, parent_wd: i32, name: [:0]const u8) void {
-        // find the parent entry to get the service index
-        var service_idx: usize = 0;
-        for (self.watches[0..self.watch_count]) |entry| {
+        // find the parent entry to get the path and service index
+        var parent_entry: ?*const WatchEntry = null;
+        for (self.watches[0..self.watch_count]) |*entry| {
             if (entry.wd == parent_wd) {
-                service_idx = entry.service_idx;
+                parent_entry = entry;
                 break;
             }
         }
 
-        log.debug("new subdirectory created in watched parent (wd={d}, name={s}), service={d}. " ++
-            "Will be watched on next restart.", .{ parent_wd, name, service_idx });
+        const parent = parent_entry orelse {
+            log.warn("autoAddSubdir: unknown parent watch descriptor {d}", .{parent_wd});
+            return;
+        };
 
-        // NOTE: To fully implement this, we would need to store paths for each watch.
-        // This is a limitation of the current fixed-size struct design.
-        // For now, we log the event but don't add the watch - the new directory
-        // will be picked up when the service restarts.
+        // build the full path: parent_path + "/" + name
+        var path_buf: [max_path_len]u8 = undefined;
+        const subdir_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ parent.path, name }) catch |e| {
+            log.warn("autoAddSubdir: path too long for '{s}/{s}': {}", .{ parent.path, name, e });
+            return;
+        };
+
+        // add watch for the new subdirectory
+        self.addDir(subdir_path, parent.service_idx) catch |e| {
+            log.warn("autoAddSubdir: failed to watch new directory '{s}': {}", .{ subdir_path, e });
+            return;
+        };
+
+        log.debug("auto-added watch for new subdirectory: {s} (service {d})", .{ subdir_path, parent.service_idx });
     }
 
     /// drain any pending inotify events without blocking.
     /// used after debounce sleep to clear the queue.
+    /// note: this version just discards events; use drainPendingMulti to collect services.
     fn drainPending(self: *Watcher) void {
         // check if fd is still valid before modifying flags
         if (self.fd < 0) return;
 
-        // set nonblocking temporarily to drain without waiting
-        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
-            log.warn("watcher: failed to get fd flags: {}", .{e});
-            return;
-        };
-        const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
-            // failed to set non-blocking, don't try to restore
-            log.warn("watcher: failed to set non-blocking mode: {}", .{e});
-            return;
-        };
-
         var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
         while (true) {
             _ = posix.read(self.fd, &buf) catch break;
-        }
-
-        // restore original flags - but only if fd is still valid
-        if (self.fd >= 0) {
-            _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
-                log.warn("watcher: failed to restore fd flags: {}", .{e});
-            };
         }
     }
 };
@@ -276,7 +409,7 @@ fn requireLinuxTest() !void {
 
 test "init and deinit" {
     try requireLinuxTest();
-    var w = try Watcher.init();
+    var w = try Watcher.init(std.testing.allocator);
     // fd should be valid (non-negative)
     try std.testing.expect(w.fd >= 0);
     try std.testing.expectEqual(@as(usize, 0), w.watch_count);
@@ -285,7 +418,7 @@ test "init and deinit" {
 
 test "watch temp directory and detect file change" {
     try requireLinuxTest();
-    var w = try Watcher.init();
+    var w = try Watcher.init(std.testing.allocator);
     defer w.deinit();
 
     // create a temp directory
@@ -302,7 +435,8 @@ test "watch temp directory and detect file change" {
     // use a semaphore to synchronize watcher thread startup
     const Context = struct {
         watcher: *Watcher,
-        value: ?usize = null,
+        services: [64]usize = undefined,
+        count: usize = 0,
         sem: std.Thread.Semaphore = .{},
     };
     var ctx = Context{ .watcher = &w };
@@ -311,7 +445,9 @@ test "watch temp directory and detect file change" {
         fn run(context: *Context) void {
             // signal that we're about to start watching
             context.sem.post();
-            context.value = context.watcher.waitForChange();
+            // wait for changes, collect up to 64 services
+            const services_found = context.watcher.waitForChange(&context.services);
+            context.count = services_found.len;
         }
     }.run, .{&ctx});
 
@@ -329,12 +465,13 @@ test "watch temp directory and detect file change" {
     thread.join();
 
     // should have detected service 42
-    try std.testing.expectEqual(@as(?usize, 42), ctx.value);
+    try std.testing.expect(ctx.count > 0);
+    try std.testing.expectEqual(@as(usize, 42), ctx.services[0]);
 }
 
 test "too many watches" {
     try requireLinuxTest();
-    var w = try Watcher.init();
+    var w = try Watcher.init(std.testing.allocator);
     defer w.deinit();
 
     // we can't actually add 256 watches in a test easily,
@@ -345,7 +482,7 @@ test "too many watches" {
 
 test "path too long" {
     try requireLinuxTest();
-    var w = try Watcher.init();
+    var w = try Watcher.init(std.testing.allocator);
     defer w.deinit();
 
     // create a path that's too long (4096+ bytes)
