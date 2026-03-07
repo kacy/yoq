@@ -584,7 +584,9 @@ pub const DnsInterceptor = struct {
 
     /// detach the program and close all fds.
     pub fn deinit(self: *DnsInterceptor) void {
-        detachTC(self.if_index) catch {};
+        detachTC(self.if_index) catch |e| {
+            log.debug("ebpf: failed to detach DNS interceptor: {}", .{e});
+        };
         if (self.prog_fd >= 0) {
             posix.close(self.prog_fd);
             trackBpfFdClosed();
@@ -941,12 +943,16 @@ pub const LoadBalancer = struct {
             // last backend — remove the service entry
             _ = mapDelete(self.backends_fd, key);
         } else {
-            mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch {};
+            mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch |e| {
+                log.warn("ebpf: failed to update load balancer backends after removal: {}", .{e});
+            };
         }
     }
 
     pub fn deinit(self: *LoadBalancer) void {
-        detachTC(self.if_index) catch {};
+        detachTC(self.if_index) catch |e| {
+            log.debug("ebpf: failed to detach load balancer: {}", .{e});
+        };
         if (self.prog_fd >= 0) {
             posix.close(self.prog_fd);
             trackBpfFdClosed();
@@ -1167,7 +1173,9 @@ pub const MetricsCollector = struct {
     }
 
     pub fn deinit(self: *MetricsCollector) void {
-        detachTC(self.if_index) catch {};
+        detachTC(self.if_index) catch |e| {
+            log.debug("ebpf: failed to detach metrics collector: {}", .{e});
+        };
         if (self.prog_fd >= 0) {
             posix.close(self.prog_fd);
             trackBpfFdClosed();
@@ -1322,7 +1330,9 @@ pub const PolicyEnforcer = struct {
     }
 
     pub fn deinit(self: *PolicyEnforcer) void {
-        detachTC(self.if_index) catch {};
+        detachTC(self.if_index) catch |e| {
+            log.debug("ebpf: failed to detach policy enforcer: {}", .{e});
+        };
         if (self.prog_fd >= 0) {
             posix.close(self.prog_fd);
             trackBpfFdClosed();
@@ -1461,7 +1471,9 @@ pub const PortMapper = struct {
     }
 
     pub fn deinit(self: *PortMapper) void {
-        detachXdp(self.if_index) catch {};
+        detachXdp(self.if_index) catch |e| {
+            log.debug("ebpf: failed to detach port mapper: {}", .{e});
+        };
         if (self.prog_fd >= 0) {
             posix.close(self.prog_fd);
             trackBpfFdClosed();
