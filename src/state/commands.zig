@@ -9,7 +9,15 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const requireArg = cli.requireArg;
 
-pub fn secret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+const SecretCommandsError = error{
+    InvalidArgument,
+    SecretNotFound,
+    StoreFailed,
+    NotSupported,
+    OutOfMemory,
+};
+
+pub fn secret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var subcmd: ?[]const u8 = null;
 
     // peek at first arg — could be subcommand or --json
@@ -34,30 +42,30 @@ pub fn secret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             \\  rotate <name>               re-encrypt with current key
             \\
         , .{});
-        std.process.exit(1);
+        return SecretCommandsError.InvalidArgument;
     };
 
     if (std.mem.eql(u8, cmd, "set")) {
-        set(args, alloc);
+        set(args, alloc) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "get")) {
-        get(args, alloc);
+        get(args, alloc) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "rm")) {
-        rm(args, alloc);
+        rm(args, alloc) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "list")) {
         // also check remaining args for --json
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
         }
-        list(alloc);
+        list(alloc) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "rotate")) {
-        rotate(args, alloc);
+        rotate(args, alloc) catch |e| return e;
     } else {
         writeErr("unknown secret command: {s}\n", .{cmd});
-        std.process.exit(1);
+        return SecretCommandsError.InvalidArgument;
     }
 }
 
-fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     var name: ?[]const u8 = null;
     var value_flag: ?[]const u8 = null;
 
@@ -65,7 +73,7 @@ fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         if (std.mem.eql(u8, arg, "--value")) {
             value_flag = args.next() orelse {
                 writeErr("--value requires a value\n", .{});
-                std.process.exit(1);
+                return SecretCommandsError.InvalidArgument;
             };
         } else if (name == null) {
             name = arg;
@@ -74,7 +82,7 @@ fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     const secret_name = name orelse {
         writeErr("usage: yoq secret set <name> [--value <val>]\n", .{});
-        std.process.exit(1);
+        return SecretCommandsError.InvalidArgument;
     };
 
     // get value from --value flag or stdin
@@ -85,7 +93,7 @@ fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         const stdin_file: std.fs.File = .{ .handle = std.posix.STDIN_FILENO };
         const stdin_data = stdin_file.readToEndAlloc(alloc, 1024 * 1024) catch {
             writeErr("failed to read from stdin\n", .{});
-            std.process.exit(1);
+            return SecretCommandsError.StoreFailed;
         };
         // trim trailing newline — users typically pipe from echo or here-string
         break :blk std.mem.trimRight(u8, stdin_data, "\n\r");
@@ -96,13 +104,13 @@ fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     sec_store.set(secret_name, value) catch {
         writeErr("failed to store secret\n", .{});
-        std.process.exit(1);
+        return SecretCommandsError.StoreFailed;
     };
 
     write("{s}\n", .{secret_name});
 }
 
-fn get(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn get(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret get <name>\n");
 
     var sec_store = openSecretsStore(alloc);
@@ -111,10 +119,11 @@ fn get(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const value = sec_store.get(name) catch |err| {
         if (err == secrets.SecretsError.NotFound) {
             writeErr("secret not found: {s}\n", .{name});
+            return SecretCommandsError.SecretNotFound;
         } else {
             writeErr("failed to read secret\n", .{});
+            return SecretCommandsError.StoreFailed;
         }
-        std.process.exit(1);
     };
     defer {
         // zero before freeing — don't leave secrets in freed memory
@@ -125,7 +134,7 @@ fn get(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s}\n", .{value});
 }
 
-fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret rm <name>\n");
 
     var sec_store = openSecretsStore(alloc);
@@ -134,22 +143,23 @@ fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     sec_store.remove(name) catch |err| {
         if (err == secrets.SecretsError.NotFound) {
             writeErr("secret not found: {s}\n", .{name});
+            return SecretCommandsError.SecretNotFound;
         } else {
             writeErr("failed to remove secret\n", .{});
+            return SecretCommandsError.StoreFailed;
         }
-        std.process.exit(1);
     };
 
     write("{s}\n", .{name});
 }
 
-fn list(alloc: std.mem.Allocator) void {
+fn list(alloc: std.mem.Allocator) SecretCommandsError!void {
     var sec_store = openSecretsStore(alloc);
     defer closeSecretsStore(alloc, &sec_store);
 
     var names = sec_store.list() catch {
         writeErr("failed to list secrets\n", .{});
-        std.process.exit(1);
+        return SecretCommandsError.StoreFailed;
     };
     defer {
         for (names.items) |n| alloc.free(n);
@@ -177,7 +187,7 @@ fn list(alloc: std.mem.Allocator) void {
     }
 }
 
-fn rotate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn rotate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret rotate <name>\n");
 
     var sec_store = openSecretsStore(alloc);
@@ -186,10 +196,11 @@ fn rotate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     sec_store.rotate(name) catch |err| {
         if (err == secrets.SecretsError.NotFound) {
             writeErr("secret not found: {s}\n", .{name});
+            return SecretCommandsError.SecretNotFound;
         } else {
             writeErr("failed to rotate secret\n", .{});
+            return SecretCommandsError.StoreFailed;
         }
-        std.process.exit(1);
     };
 
     write("{s}\n", .{name});

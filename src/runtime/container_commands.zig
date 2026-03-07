@@ -29,6 +29,21 @@ const parseMemorySize = cli.parseMemorySize;
 const isValidContainerName = cli.isValidContainerName;
 const requireArg = cli.requireArg;
 
+const ContainerError = error{
+    InvalidArgument,
+    NotSupported,
+    ContainerNotFound,
+    OutOfMemory,
+    ProcessNotFound,
+    ContainerRunning,
+    InvalidStatus,
+    PullFailed,
+    CommandResolveFailed,
+    ConfigSaveFailed,
+    InvalidLimits,
+    StoreError,
+};
+
 // -- types --
 
 const RunFlags = struct {
@@ -76,7 +91,7 @@ fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
 
 /// parse CLI flags for `yoq run`. consumes args up to and including the target,
 /// then collects remaining args as user command.
-fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFlags {
+fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) ContainerError!RunFlags {
     var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
     var env: std.ArrayList([]const u8) = .empty;
     var volume_specs: std.ArrayList(cli.VolumeMountSpec) = .empty;
@@ -91,52 +106,44 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFl
         if (std.mem.eql(u8, arg, "--name")) {
             const name_val = args.next() orelse {
                 writeErr("--name requires a container name\n", .{});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
             if (!isValidContainerName(name_val)) {
                 writeErr("invalid container name: {s}\n", .{name_val});
                 writeErr("names must be 1-63 chars, alphanumeric or hyphens, no leading/trailing hyphen\n", .{});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             }
             container_name = name_val;
         } else if (std.mem.eql(u8, arg, "-p")) {
             const port_str = args.next() orelse {
                 writeErr("-p requires host_port:container_port\n", .{});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
             const pm = parsePortMap(port_str) orelse {
                 writeErr("invalid port mapping: {s}\n", .{port_str});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
-            port_maps.append(alloc, pm) catch |e| {
-                writeErr("failed to add port mapping: {}\n", .{e});
-            };
+            port_maps.append(alloc, pm) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--env")) {
             const env_str = args.next() orelse {
                 writeErr("{s} requires KEY=VALUE\n", .{arg});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
             if (parseEnvVar(env_str) == null) {
                 writeErr("invalid env var: {s}\n", .{env_str});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             }
-            env.append(alloc, env_str) catch |e| {
-                writeErr("failed to add env var: {}\n", .{e});
-                std.process.exit(1);
-            };
+            env.append(alloc, env_str) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--volume")) {
             const mount_str = args.next() orelse {
                 writeErr("{s} requires source:target[:ro]\n", .{arg});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
             const mount = parseVolumeMount(mount_str) orelse {
                 writeErr("invalid volume mount: {s}\n", .{mount_str});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
-            volume_specs.append(alloc, mount) catch |e| {
-                writeErr("failed to add volume mount: {}\n", .{e});
-                std.process.exit(1);
-            };
+            volume_specs.append(alloc, mount) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "--no-net")) {
             networking_enabled = false;
         } else if (std.mem.eql(u8, arg, "--net")) {
@@ -144,24 +151,24 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFl
         } else if (std.mem.eql(u8, arg, "--memory")) {
             const mem_str = args.next() orelse {
                 writeErr("--memory requires a size like 256m\n", .{});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
             limits.memory_max = parseMemorySize(mem_str) orelse {
                 writeErr("invalid memory size: {s}\n", .{mem_str});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--cpus")) {
             const cpu_str = args.next() orelse {
                 writeErr("--cpus requires a number like 2 or 0.5\n", .{});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
             const cpu_count = std.fmt.parseFloat(f64, cpu_str) catch {
                 writeErr("invalid CPU value: {s}\n", .{cpu_str});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
             if (cpu_count <= 0) {
                 writeErr("--cpus must be greater than 0\n", .{});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             }
             limits.cpu_max_usec = @intFromFloat(cpu_count * @as(f64, @floatFromInt(limits.cpu_max_period)));
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--detach")) {
@@ -169,11 +176,11 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFl
         } else if (std.mem.eql(u8, arg, "--restart")) {
             const policy_str = args.next() orelse {
                 writeErr("--restart requires one of: no, always, on-failure\n", .{});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
             restart_policy = run_state.RestartPolicy.parse(policy_str) orelse {
                 writeErr("invalid restart policy: {s}\n", .{policy_str});
-                std.process.exit(1);
+                return ContainerError.InvalidArgument;
             };
         } else {
             target = arg;
@@ -183,15 +190,13 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFl
 
     const run_target = target orelse {
         writeErr("usage: yoq run [--name <name>] [-e KEY=VALUE] [-v source:target[:ro]] [-p host:container] [--memory SIZE] [--cpus N] [-d] [--restart POLICY] [--no-net] <image|rootfs> [command]\n", .{});
-        std.process.exit(1);
+        return ContainerError.InvalidArgument;
     };
 
     // collect user-provided command + args
     var user_argv: std.ArrayList([]const u8) = .empty;
     while (args.next()) |arg| {
-        user_argv.append(alloc, arg) catch |e| {
-            writeErr("failed to add command argument: {}\n", .{e});
-        };
+        user_argv.append(alloc, arg) catch return ContainerError.OutOfMemory;
     }
 
     return .{
@@ -208,48 +213,39 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFl
     };
 }
 
-fn resolveContainerRef(alloc: std.mem.Allocator, ref: []const u8) store.ContainerRecord {
+fn resolveContainerRef(alloc: std.mem.Allocator, ref: []const u8) ContainerError!store.ContainerRecord {
     return store.load(alloc, ref) catch {
         const record = store.findByHostname(alloc, ref) catch |err| {
-            writeErr("container not found: {s} ({})\n", .{ ref, err });
-            std.process.exit(1);
+            writeErr("container not found: {s} ({})", .{ ref, err });
+            return ContainerError.ContainerNotFound;
         };
         return record orelse {
             writeErr("container not found: {s}\n", .{ref});
-            std.process.exit(1);
+            return ContainerError.ContainerNotFound;
         };
     };
 }
 
-fn dupStringList(alloc: std.mem.Allocator, values: []const []const u8) [][]const u8 {
-    const result = alloc.alloc([]const u8, values.len) catch {
-        writeErr("out of memory\n", .{});
-        std.process.exit(1);
-    };
+fn dupStringList(alloc: std.mem.Allocator, values: []const []const u8) ContainerError![][]const u8 {
+    const result = alloc.alloc([]const u8, values.len) catch return ContainerError.OutOfMemory;
     var idx: usize = 0;
     errdefer {
         for (result[0..idx]) |value| alloc.free(value);
         alloc.free(result);
     }
     for (values, 0..) |value, i| {
-        result[i] = alloc.dupe(u8, value) catch {
-            writeErr("out of memory\n", .{});
-            std.process.exit(1);
-        };
+        result[i] = alloc.dupe(u8, value) catch return ContainerError.OutOfMemory;
         idx += 1;
     }
     return result;
 }
 
-fn mergeEnv(alloc: std.mem.Allocator, base_env: []const []const u8, override_env: []const []const u8) [][]const u8 {
+fn mergeEnv(alloc: std.mem.Allocator, base_env: []const []const u8, override_env: []const []const u8) ContainerError![][]const u8 {
     var merged: std.ArrayList([]const u8) = .empty;
     defer merged.deinit(alloc);
 
     for (base_env) |value| {
-        merged.append(alloc, value) catch {
-            writeErr("out of memory\n", .{});
-            std.process.exit(1);
-        };
+        merged.append(alloc, value) catch return ContainerError.OutOfMemory;
     }
 
     for (override_env) |value| {
@@ -265,29 +261,25 @@ fn mergeEnv(alloc: std.mem.Allocator, base_env: []const []const u8, override_env
             }
         }
         if (!replaced) {
-            merged.append(alloc, value) catch {
-                writeErr("out of memory\n", .{});
-                std.process.exit(1);
-            };
+            merged.append(alloc, value) catch return ContainerError.OutOfMemory;
         }
     }
 
     return dupStringList(alloc, merged.items);
 }
 
-fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSpec) []container.BindMount {
-    if (volume_specs.len == 0) return alloc.alloc(container.BindMount, 0) catch unreachable;
+fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSpec) ContainerError![]container.BindMount {
+    if (volume_specs.len == 0) {
+        return alloc.alloc(container.BindMount, 0) catch return ContainerError.OutOfMemory;
+    }
 
     const cwd = std.fs.cwd().realpathAlloc(alloc, ".") catch {
         writeErr("failed to resolve current working directory\n", .{});
-        std.process.exit(1);
+        return ContainerError.OutOfMemory;
     };
     defer alloc.free(cwd);
 
-    const mounts = alloc.alloc(container.BindMount, volume_specs.len) catch {
-        writeErr("out of memory\n", .{});
-        std.process.exit(1);
-    };
+    const mounts = alloc.alloc(container.BindMount, volume_specs.len) catch return ContainerError.OutOfMemory;
     var idx: usize = 0;
     errdefer {
         for (mounts[0..idx]) |mount| {
@@ -303,11 +295,11 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
             std.mem.startsWith(u8, spec.source, "../");
         if (!is_host_path) {
             writeErr("volume sources must be host paths: {s}\n", .{spec.source});
-            std.process.exit(1);
+            return ContainerError.InvalidArgument;
         }
         if (!std.mem.startsWith(u8, spec.target, "/")) {
             writeErr("volume target must be an absolute container path: {s}\n", .{spec.target});
-            std.process.exit(1);
+            return ContainerError.InvalidArgument;
         }
 
         const source_input = if (std.mem.startsWith(u8, spec.source, "/"))
@@ -318,7 +310,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
 
         const source = std.fs.cwd().realpathAlloc(alloc, source_input) catch {
             writeErr("volume source must exist and be canonicalizable: {s}\n", .{spec.source});
-            std.process.exit(1);
+            return ContainerError.InvalidArgument;
         };
 
         mounts[i] = .{
@@ -328,7 +320,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
         };
         if (!mounts[i].isSourceAllowed()) {
             writeErr("volume source is not allowed: {s}\n", .{mounts[i].source});
-            std.process.exit(1);
+            return ContainerError.InvalidArgument;
         }
         idx += 1;
     }
@@ -341,30 +333,30 @@ fn buildSavedRunConfig(
     flags: *const RunFlags,
     img: *const image_cmds.ImageResolution,
     resolved: *const oci.ResolvedCommand,
-) run_state.SavedRunConfig {
-    const merged_env = mergeEnv(alloc, img.image_env, flags.env.items);
+) ContainerError!run_state.SavedRunConfig {
+    const merged_env = mergeEnv(alloc, img.image_env, flags.env.items) catch |e| return e;
     errdefer {
         for (merged_env) |value| alloc.free(value);
         alloc.free(merged_env);
     }
 
     return .{
-        .rootfs = alloc.dupe(u8, img.rootfs) catch unreachable,
-        .command = alloc.dupe(u8, resolved.command) catch unreachable,
-        .hostname = alloc.dupe(u8, flags.container_name orelse "container") catch unreachable,
-        .working_dir = alloc.dupe(u8, img.working_dir) catch unreachable,
-        .args = dupStringList(alloc, resolved.args.items),
+        .rootfs = alloc.dupe(u8, img.rootfs) catch return ContainerError.OutOfMemory,
+        .command = alloc.dupe(u8, resolved.command) catch return ContainerError.OutOfMemory,
+        .hostname = alloc.dupe(u8, flags.container_name orelse "container") catch return ContainerError.OutOfMemory,
+        .working_dir = alloc.dupe(u8, img.working_dir) catch return ContainerError.OutOfMemory,
+        .args = dupStringList(alloc, resolved.args.items) catch |e| return e,
         .env = merged_env,
-        .lower_dirs = dupStringList(alloc, img.layer_paths),
-        .mounts = buildMounts(alloc, flags.volume_specs.items),
+        .lower_dirs = dupStringList(alloc, img.layer_paths) catch |e| return e,
+        .mounts = buildMounts(alloc, flags.volume_specs.items) catch |e| return e,
         .network_enabled = flags.networking_enabled,
-        .port_maps = alloc.dupe(net_setup.PortMap, flags.port_maps.items) catch unreachable,
+        .port_maps = alloc.dupe(net_setup.PortMap, flags.port_maps.items) catch return ContainerError.OutOfMemory,
         .limits = flags.limits,
         .restart_policy = flags.restart_policy,
     };
 }
 
-fn saveCreatedRecord(id: []const u8, cfg: *const run_state.SavedRunConfig) void {
+fn saveCreatedRecord(id: []const u8, cfg: *const run_state.SavedRunConfig) ContainerError!void {
     store.save(.{
         .id = id,
         .rootfs = cfg.rootfs,
@@ -376,7 +368,7 @@ fn saveCreatedRecord(id: []const u8, cfg: *const run_state.SavedRunConfig) void 
         .created_at = std.time.timestamp(),
     }) catch |err| {
         writeErr("failed to save container state: {}\n", .{err});
-        std.process.exit(1);
+        return ContainerError.ConfigSaveFailed;
     };
 }
 
@@ -450,11 +442,8 @@ fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, attac
     return last_exit;
 }
 
-fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) void {
-    const exe_path = std.fs.selfExePathAlloc(alloc) catch {
-        writeErr("failed to locate yoq binary\n", .{});
-        std.process.exit(1);
-    };
+fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
+    const exe_path = std.fs.selfExePathAlloc(alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
 
     var child = std.process.Child.init(&.{ exe_path, "__run-supervisor", id }, alloc);
@@ -463,11 +452,11 @@ fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) void {
     child.stderr_behavior = .Ignore;
     child.spawn() catch |err| {
         writeErr("failed to spawn detached supervisor: {}\n", .{err});
-        std.process.exit(1);
+        return ContainerError.ProcessNotFound;
     };
 }
 
-fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) void {
+fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         const record = store.load(alloc, id) catch {
@@ -479,20 +468,20 @@ fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) void {
         if (std.mem.eql(u8, record.status, "running") and record.pid != null) return;
         if (std.mem.eql(u8, record.status, "stopped")) {
             writeErr("failed to start detached container\n", .{});
-            std.process.exit(1);
+            return ContainerError.ProcessNotFound;
         }
 
         std.Thread.sleep(50 * std.time.ns_per_ms);
     }
 
     writeErr("timed out waiting for container start\n", .{});
-    std.process.exit(1);
+    return ContainerError.ProcessNotFound;
 }
 
-fn stopProcess(pid: i32) void {
+fn stopProcess(pid: i32) ContainerError!void {
     process.terminate(pid) catch |err| {
         writeErr("failed to stop container process: {}\n", .{err});
-        std.process.exit(1);
+        return ContainerError.ProcessNotFound;
     };
 
     var attempts: usize = 0;
@@ -572,10 +561,10 @@ pub fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_ho
 
 // -- commands --
 
-pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     if (builtin.os.tag != .linux) {
         writeErr("yoq run is only supported on linux (kernel 6.1+)\n", .{});
-        std.process.exit(1);
+        return ContainerError.NotSupported;
     }
 
     // warn if not running as root (required for cgroups and networking)
@@ -583,7 +572,7 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         writeErr("warning: yoq run requires root privileges for cgroups and networking\n", .{});
     }
 
-    var flags = parseRunFlags(args, alloc);
+    var flags = parseRunFlags(args, alloc) catch |e| return e;
     defer flags.port_maps.deinit(alloc);
     defer flags.env.deinit(alloc);
     defer flags.volume_specs.deinit(alloc);
@@ -602,31 +591,31 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // resolve effective command per OCI spec
     var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, flags.user_argv.items) catch |err| {
         writeErr("failed to resolve command: {}\n", .{err});
-        std.process.exit(1);
+        return ContainerError.CommandResolveFailed;
     };
     defer resolved.args.deinit(alloc);
 
-    var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved);
+    var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved) catch |e| return e;
     defer saved.deinit(alloc);
     saved.limits.validate() catch |err| {
         writeErr("invalid resource limits: {}\n", .{err});
-        std.process.exit(1);
+        return ContainerError.InvalidLimits;
     };
 
     var id_buf: [12]u8 = undefined;
     container.generateId(&id_buf);
     const id = id_buf[0..];
 
-    saveCreatedRecord(id, &saved);
+    saveCreatedRecord(id, &saved) catch |e| return e;
     run_state.saveConfig(id, saved) catch |err| {
         store.remove(id) catch {};
         writeErr("failed to save container config: {}\n", .{err});
-        std.process.exit(1);
+        return ContainerError.ConfigSaveFailed;
     };
 
     if (flags.detach) {
-        spawnSupervisor(alloc, id);
-        waitForContainerStart(alloc, id);
+        spawnSupervisor(alloc, id) catch |e| return e;
+        waitForContainerStart(alloc, id) catch |e| return e;
         write("{s}\n", .{id});
         return;
     }
@@ -636,10 +625,10 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     std.process.exit(exit_code);
 }
 
-pub fn ps(alloc: std.mem.Allocator) void {
+pub fn ps(alloc: std.mem.Allocator) !void {
     var ids = store.listIds(alloc) catch |err| {
         writeErr("failed to list containers: {}\n", .{err});
-        std.process.exit(1);
+        return ContainerError.StoreError;
     };
     defer {
         for (ids.items) |id| alloc.free(id);
@@ -721,20 +710,20 @@ fn psJson(alloc: std.mem.Allocator, ids: []const []const u8) void {
     w.flush();
 }
 
-pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const id = requireArg(args, "usage: yoq stop <container-id|name>\n");
 
-    const record = resolveContainerRef(alloc, id);
+    const record = resolveContainerRef(alloc, id) catch |e| return e;
     defer record.deinit(alloc);
 
     if (!std.mem.eql(u8, record.status, "running")) {
         writeErr("container {s} is not running (status: {s})\n", .{ id, record.status });
-        std.process.exit(1);
+        return ContainerError.InvalidStatus;
     }
 
     const pid = record.pid orelse {
         writeErr("container {s} has no pid\n", .{id});
-        std.process.exit(1);
+        return ContainerError.ProcessNotFound;
     };
 
     // check if the process is actually still alive before sending SIGTERM
@@ -745,44 +734,42 @@ pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         return;
     };
 
-    stopProcess(pid);
+    stopProcess(pid) catch |e| return e;
     if (!waitForStoppedState(alloc, record.id)) {
         persistStoppedState(&record, null);
     }
     write("{s}\n", .{record.id});
 }
 
-pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const id = args.next() orelse {
         writeErr("usage: yoq exec <container-id|name> <command> [args...]\n", .{});
-        std.process.exit(1);
+        return ContainerError.InvalidArgument;
     };
 
-    const record = resolveContainerRef(alloc, id);
+    const record = resolveContainerRef(alloc, id) catch |e| return e;
     defer record.deinit(alloc);
 
     if (!std.mem.eql(u8, record.status, "running")) {
         writeErr("container {s} is not running (status: {s})\n", .{ id, record.status });
-        std.process.exit(1);
+        return ContainerError.InvalidStatus;
     }
 
     const pid = record.pid orelse {
         writeErr("container {s} has no pid\n", .{id});
-        std.process.exit(1);
+        return ContainerError.ProcessNotFound;
     };
 
     const command = args.next() orelse {
         writeErr("usage: yoq exec <container-id|name> <command> [args...]\n", .{});
-        std.process.exit(1);
+        return ContainerError.InvalidArgument;
     };
 
     // collect remaining args
     var exec_args: std.ArrayList([]const u8) = .empty;
     defer exec_args.deinit(alloc);
     while (args.next()) |arg| {
-        exec_args.append(alloc, arg) catch |e| {
-            writeErr("failed to add exec argument: {}\n", .{e});
-        };
+        exec_args.append(alloc, arg) catch return ContainerError.OutOfMemory;
     }
 
     const exit_code = exec.execInContainer(.{
@@ -793,21 +780,21 @@ pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         .working_dir = "/",
     }) catch |err| {
         writeErr("failed to exec in container {s}: {}\n", .{ id, err });
-        std.process.exit(1);
+        return ContainerError.ProcessNotFound;
     };
 
     std.process.exit(exit_code);
 }
 
-pub fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const id = requireArg(args, "usage: yoq rm <container-id|name>\n");
 
-    const record = resolveContainerRef(alloc, id);
+    const record = resolveContainerRef(alloc, id) catch |e| return e;
 
     if (std.mem.eql(u8, record.status, "running")) {
         writeErr("cannot remove running container {s} — stop it first\n", .{record.id});
         record.deinit(alloc);
-        std.process.exit(1);
+        return ContainerError.ContainerRunning;
     }
 
     cleanupStoppedContainer(record.id, record.ip_address, record.veth_host);
@@ -865,30 +852,30 @@ pub fn log(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s}", .{data});
 }
 
-pub fn restart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn restart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const ref = requireArg(args, "usage: yoq restart <container-id|name>\n");
-    const record = resolveContainerRef(alloc, ref);
+    const record = resolveContainerRef(alloc, ref) catch |e| return e;
     defer record.deinit(alloc);
 
     if (std.mem.eql(u8, record.status, "running")) {
         const pid = record.pid orelse {
             writeErr("container {s} has no pid\n", .{record.id});
-            std.process.exit(1);
+            return ContainerError.ProcessNotFound;
         };
-        stopProcess(pid);
+        stopProcess(pid) catch |e| return e;
     }
 
     store.updateStatus(record.id, "created", null, null) catch {};
-    spawnSupervisor(alloc, record.id);
-    waitForContainerStart(alloc, record.id);
+    spawnSupervisor(alloc, record.id) catch |e| return e;
+    waitForContainerStart(alloc, record.id) catch |e| return e;
     write("{s}\n", .{record.id});
 }
 
-pub fn runSupervisor(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn runSupervisor(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const id = requireArg(args, "usage: yoq __run-supervisor <container-id>\n");
     var cfg = run_state.loadConfig(alloc, id) catch |err| {
         writeErr("failed to load container config for {s}: {}\n", .{ id, err });
-        std.process.exit(1);
+        return ContainerError.ConfigSaveFailed;
     };
     defer cfg.deinit(alloc);
 

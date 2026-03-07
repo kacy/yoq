@@ -12,6 +12,17 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const requireArg = cli.requireArg;
 
+const ImageCommandsError = error{
+    InvalidArgument,
+    PullFailed,
+    PushFailed,
+    ImageNotFound,
+    StoreFailed,
+    OutOfMemory,
+    InvalidDigest,
+    PruneFailed,
+};
+
 fn writePullError(target: []const u8, err: anyerror) void {
     writeErr("failed to pull image: {s} ({})\n", .{ target, err });
 
@@ -53,7 +64,7 @@ pub const ImageResolution = struct {
 
 /// pull an image and extract its config. returns the rootfs path,
 /// image defaults, and layer paths for overlayfs.
-pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageResolution {
+pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageCommandsError!ImageResolution {
     const ref = spec.parseImageRef(target);
 
     writeErr("pulling {s}...\n", .{target});
@@ -62,12 +73,12 @@ pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageRe
 
     result.pull_result = registry.pull(alloc, ref) catch |err| {
         writePullError(target, err);
-        std.process.exit(1);
+        return ImageCommandsError.PullFailed;
     };
 
     result.config_parsed = spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch |err| {
         writeErr("failed to parse image config: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.PullFailed;
     };
 
     // extract defaults from image config
@@ -83,7 +94,7 @@ pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageRe
     // extract layers for overlayfs
     result.layer_paths = layer.assembleRootfs(alloc, result.pull_result.?.layer_digests) catch |err| {
         writeErr("failed to extract image layers: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.PullFailed;
     };
     result.alloc = alloc;
 
@@ -113,7 +124,7 @@ pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageRe
     return result;
 }
 
-pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const image_str = requireArg(args, "usage: yoq pull <image>\n");
 
     const ref = spec.parseImageRef(image_str);
@@ -122,14 +133,14 @@ pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     var result = registry.pull(alloc, ref) catch |err| {
         writePullError(image_str, err);
-        std.process.exit(1);
+        return ImageCommandsError.PullFailed;
     };
     defer result.deinit();
 
     // extract layers so they're cached for future runs
     const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch |err| {
         writeErr("failed to extract image layers: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.PullFailed;
     };
     defer {
         for (layer_paths) |p| alloc.free(p);
@@ -151,7 +162,7 @@ pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         result.total_size,
     ) catch |err| {
         writeErr("failed to save image record: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.StoreFailed;
     };
 
     // format size for display
@@ -163,7 +174,7 @@ pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     });
 }
 
-pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const source_str = requireArg(args, "usage: yoq push <source> [target]\n");
 
     // optional target — if not given, push to the same ref
@@ -172,40 +183,40 @@ pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // look up the source image in the local store
     const source_ref = spec.parseImageRef(source_str);
     const image_record = store.findImage(alloc, source_ref.repository, source_ref.reference) catch |err| {
-        writeErr("image not found: {s} ({})\n", .{ source_str, err });
+        writeErr("image not found: {s} ({})", .{ source_str, err });
         writeErr("hint: pull or build the image first, then push\n", .{});
-        std.process.exit(1);
+        return ImageCommandsError.ImageNotFound;
     };
     defer image_record.deinit(alloc);
 
     // read manifest bytes from the blob store
     const manifest_parsed_digest = blob_store.Digest.parse(image_record.manifest_digest) orelse {
         writeErr("invalid manifest digest in image record\n", .{});
-        std.process.exit(1);
+        return ImageCommandsError.InvalidDigest;
     };
     const manifest_bytes = blob_store.getBlob(alloc, manifest_parsed_digest) catch |err| {
         writeErr("failed to read manifest from blob store: {}\n", .{err});
         writeErr("hint: the image may be corrupted — try pulling again\n", .{});
-        std.process.exit(1);
+        return ImageCommandsError.StoreFailed;
     };
     defer alloc.free(manifest_bytes);
 
     // read config bytes from the blob store
     const config_parsed_digest = blob_store.Digest.parse(image_record.config_digest) orelse {
         writeErr("invalid config digest in image record\n", .{});
-        std.process.exit(1);
+        return ImageCommandsError.InvalidDigest;
     };
     const config_bytes = blob_store.getBlob(alloc, config_parsed_digest) catch |err| {
         writeErr("failed to read config from blob store: {}\n", .{err});
         writeErr("hint: the image may be corrupted — try pulling again\n", .{});
-        std.process.exit(1);
+        return ImageCommandsError.StoreFailed;
     };
     defer alloc.free(config_bytes);
 
     // parse manifest to get layer digests
     var parsed_manifest = spec.parseManifest(alloc, manifest_bytes) catch |err| {
         writeErr("failed to parse image manifest: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.InvalidDigest;
     };
     defer parsed_manifest.deinit();
 
@@ -213,10 +224,7 @@ pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var layer_digest_strs: std.ArrayListUnmanaged([]const u8) = .empty;
     defer layer_digest_strs.deinit(alloc);
     for (parsed_manifest.value.layers) |l| {
-        layer_digest_strs.append(alloc, l.digest) catch {
-            writeErr("out of memory\n", .{});
-            std.process.exit(1);
-        };
+        layer_digest_strs.append(alloc, l.digest) catch return ImageCommandsError.OutOfMemory;
     }
 
     // parse the target reference for pushing
@@ -226,7 +234,7 @@ pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     var result = registry.push(alloc, target_ref, manifest_bytes, config_bytes, layer_digest_strs.items) catch |e| {
         writeErr("failed to push image: {}\n", .{e});
-        std.process.exit(1);
+        return ImageCommandsError.PushFailed;
     };
     defer result.deinit();
 
@@ -237,10 +245,10 @@ pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     });
 }
 
-pub fn images(alloc: std.mem.Allocator) void {
+pub fn images(alloc: std.mem.Allocator) !void {
     var imgs = store.listImages(alloc) catch |err| {
         writeErr("failed to list images: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.StoreFailed;
     };
     defer {
         for (imgs.items) |img| img.deinit(alloc);
@@ -317,21 +325,21 @@ fn inspectJson(image: *const store.ImageRecord, config: *const spec.ImageConfig,
     w.flush();
 }
 
-pub fn rmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn rmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const image_str = requireArg(args, "usage: yoq rmi <image>\n");
 
     // try to find the image by repository:tag
     const ref = spec.parseImageRef(image_str);
     const image = store.findImage(alloc, ref.repository, ref.reference) catch |err| {
-        writeErr("image not found: {s} ({})\n", .{ image_str, err });
-        std.process.exit(1);
+        writeErr("image not found: {s} ({})", .{ image_str, err });
+        return ImageCommandsError.ImageNotFound;
     };
     defer image.deinit(alloc);
 
     // remove the image record from the database
     store.removeImage(image.id) catch |err| {
         writeErr("failed to remove image record: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.StoreFailed;
     };
 
     // note: we don't delete the blobs or extracted layers here.
@@ -342,7 +350,7 @@ pub fn rmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("untagged: {s}:{s}\n", .{ image.repository, image.tag });
 }
 
-pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const image_str = requireArg(args, "usage: yoq inspect <image>\n");
 
     // check for --json flag in remaining args
@@ -353,42 +361,42 @@ pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // find the image (same pattern as rmi)
     const ref = spec.parseImageRef(image_str);
     const image = store.findImage(alloc, ref.repository, ref.reference) catch |err| {
-        writeErr("image not found: {s} ({})\n", .{ image_str, err });
-        std.process.exit(1);
+        writeErr("image not found: {s} ({})", .{ image_str, err });
+        return ImageCommandsError.ImageNotFound;
     };
     defer image.deinit(alloc);
 
     // read manifest blob
     const manifest_digest = blob_store.Digest.parse(image.manifest_digest) orelse {
         writeErr("invalid manifest digest\n", .{});
-        std.process.exit(1);
+        return ImageCommandsError.InvalidDigest;
     };
     const manifest_bytes = blob_store.getBlob(alloc, manifest_digest) catch |err| {
         writeErr("failed to read manifest blob: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.StoreFailed;
     };
     defer alloc.free(manifest_bytes);
 
     var parsed_manifest = spec.parseManifest(alloc, manifest_bytes) catch |err| {
         writeErr("failed to parse manifest: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.InvalidDigest;
     };
     defer parsed_manifest.deinit();
 
     // read config blob
     const config_digest = blob_store.Digest.parse(image.config_digest) orelse {
         writeErr("invalid config digest\n", .{});
-        std.process.exit(1);
+        return ImageCommandsError.InvalidDigest;
     };
     const config_bytes = blob_store.getBlob(alloc, config_digest) catch |err| {
         writeErr("failed to read config blob: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.StoreFailed;
     };
     defer alloc.free(config_bytes);
 
     var parsed_config = spec.parseImageConfig(alloc, config_bytes) catch |err| {
         writeErr("failed to parse config: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.InvalidDigest;
     };
     defer parsed_config.deinit();
 
@@ -554,14 +562,14 @@ pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 }
 
-pub fn prune(alloc: std.mem.Allocator) void {
+pub fn prune(alloc: std.mem.Allocator) !void {
     // step 1: collect all referenced digests from image records
     var referenced = std.StringHashMap(void).init(alloc);
     defer referenced.deinit();
 
     var imgs = store.listImages(alloc) catch |err| {
         writeErr("failed to list images: {}\n", .{err});
-        std.process.exit(1);
+        return ImageCommandsError.StoreFailed;
     };
     defer {
         for (imgs.items) |img| img.deinit(alloc);
