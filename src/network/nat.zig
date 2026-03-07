@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const cmd = @import("../lib/cmd.zig");
+const log = @import("../lib/log.zig");
 
 pub const NatError = error{
     /// an iptables command failed to execute or returned a non-zero exit code
@@ -71,17 +72,23 @@ pub fn addPortMap(
 
     // DNAT rule
     const dnat_args = buildDnatArgs(.add, host_port, container_ip, container_port, protocol, &port_buf, &dest_buf);
-    _ = exec(&dnat_args) catch return NatError.ExecFailed;
+    _ = exec(&dnat_args) catch |e| {
+        log.warn("nat: failed to add DNAT rule for port {d}: {}", .{ host_port, e });
+        return NatError.ExecFailed;
+    };
 
     // FORWARD rule
     var fwd_port_buf: [8]u8 = undefined;
     const fwd_args = buildForwardArgs(.add, container_ip, container_port, protocol, &fwd_port_buf);
-    _ = exec(&fwd_args) catch {
+    _ = exec(&fwd_args) catch |e| {
+        log.warn("nat: failed to add FORWARD rule for {s}:{d}: {}", .{ container_ip, container_port, e });
         // try to clean up the DNAT rule we just added
         var cleanup_port_buf: [8]u8 = undefined;
         var cleanup_dest_buf: [32]u8 = undefined;
         const cleanup = buildDnatArgs(.delete, host_port, container_ip, container_port, protocol, &cleanup_port_buf, &cleanup_dest_buf);
-        _ = exec(&cleanup) catch {};
+        _ = exec(&cleanup) catch |cleanup_err| {
+            log.warn("nat: failed to cleanup DNAT rule after FORWARD failure: {}", .{cleanup_err});
+        };
         return NatError.ExecFailed;
     };
 }
@@ -96,11 +103,15 @@ pub fn removePortMap(
     var port_buf: [8]u8 = undefined;
     var dest_buf: [32]u8 = undefined;
     const dnat_args = buildDnatArgs(.delete, host_port, container_ip, container_port, protocol, &port_buf, &dest_buf);
-    _ = exec(&dnat_args) catch {};
+    _ = exec(&dnat_args) catch |e| {
+        log.debug("nat: failed to remove DNAT rule for port {d}: {}", .{ host_port, e });
+    };
 
     var fwd_port_buf: [8]u8 = undefined;
     const fwd_args = buildForwardArgs(.delete, container_ip, container_port, protocol, &fwd_port_buf);
-    _ = exec(&fwd_args) catch {};
+    _ = exec(&fwd_args) catch |e| {
+        log.debug("nat: failed to remove FORWARD rule for {s}:{d}: {}", .{ container_ip, container_port, e });
+    };
 }
 
 pub const Protocol = enum {

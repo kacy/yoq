@@ -80,6 +80,9 @@ pub fn subnetForNode(node_id: u8) SubnetConfig {
 /// fetches all allocated IPs in a single query and finds the first
 /// gap using a bitset, rather than issuing one query per address.
 pub fn allocate(db: *sqlite.Db, container_id: []const u8) IpError![4]u8 {
+    // validate container_id is not empty
+    if (container_id.len == 0) return IpError.AllocationFailed;
+
     // acquire exclusive write lock before reading to prevent race conditions.
     // without this, two concurrent allocations could see the same IP as free.
     db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return IpError.AllocationFailed;
@@ -213,6 +216,8 @@ fn incrementWithinRange(current: *[4]u8, range_end: [4]u8) bool {
 
 /// release an IP allocation for a container
 pub fn release(db: *sqlite.Db, container_id: []const u8) IpError!void {
+    if (container_id.len == 0) return IpError.ReleaseFailed;
+
     db.exec(
         "DELETE FROM ip_allocations WHERE container_id = ?;",
         .{},
@@ -222,6 +227,8 @@ pub fn release(db: *sqlite.Db, container_id: []const u8) IpError!void {
 
 /// look up the IP address for a container
 pub fn lookup(db: *sqlite.Db, alloc: std.mem.Allocator, container_id: []const u8) IpError![4]u8 {
+    if (container_id.len == 0) return IpError.NotFound;
+
     const IpRow = struct { ip_address: sqlite.Text };
     const row = (db.oneAlloc(
         IpRow,

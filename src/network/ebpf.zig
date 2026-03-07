@@ -908,7 +908,9 @@ pub const LoadBalancer = struct {
             backends.ips[0] = backend_net;
         }
 
-        mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch {};
+        mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch |e| {
+            log.warn("ebpf: failed to update load balancer backends: {}", .{e});
+        };
     }
 
     /// remove a backend IP from a service.
@@ -1293,7 +1295,9 @@ pub const PolicyEnforcer = struct {
     pub fn addDeny(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
         var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
         var action: u8 = 0; // deny
-        mapUpdate(self.policy_fd, std.mem.asBytes(&key), std.mem.asBytes(&action)) catch {};
+        mapUpdate(self.policy_fd, std.mem.asBytes(&key), std.mem.asBytes(&action)) catch |e| {
+            log.warn("ebpf: failed to add deny rule for {x} -> {x}: {}", .{ src_ip, dst_ip, e });
+        };
     }
 
     /// remove a deny rule.
@@ -1306,7 +1310,9 @@ pub const PolicyEnforcer = struct {
     pub fn addAllow(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
         var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
         var action: u8 = 1; // allow
-        mapUpdate(self.policy_fd, std.mem.asBytes(&key), std.mem.asBytes(&action)) catch {};
+        mapUpdate(self.policy_fd, std.mem.asBytes(&key), std.mem.asBytes(&action)) catch |e| {
+            log.warn("ebpf: failed to add allow rule for {x} -> {x}: {}", .{ src_ip, dst_ip, e });
+        };
     }
 
     /// remove an allow rule.
@@ -1320,7 +1326,9 @@ pub const PolicyEnforcer = struct {
     pub fn isolate(self: *const PolicyEnforcer, src_ip: u32) void {
         var key = src_ip;
         var flag: u8 = 1;
-        mapUpdate(self.isolation_fd, std.mem.asBytes(&key), std.mem.asBytes(&flag)) catch {};
+        mapUpdate(self.isolation_fd, std.mem.asBytes(&key), std.mem.asBytes(&flag)) catch |e| {
+            log.warn("ebpf: failed to isolate IP {x}: {}", .{ src_ip, e });
+        };
     }
 
     /// remove isolation for a source IP (return to default-allow).
@@ -1458,7 +1466,14 @@ pub const PortMapper = struct {
             .dst_ip = ipToNetworkOrder(container_ip),
             .dst_port = std.mem.nativeToBig(u16, container_port),
         };
-        mapUpdate(self.map_fd, std.mem.asBytes(&key), std.mem.asBytes(&target)) catch {};
+        mapUpdate(self.map_fd, std.mem.asBytes(&key), std.mem.asBytes(&target)) catch |e| {
+            log.warn("ebpf: failed to add port mapping {d}/{d} -> {d}.{d}.{d}.{d}:{d}: {}", .{
+                host_port,       protocol,
+                container_ip[0], container_ip[1],
+                container_ip[2], container_ip[3],
+                container_port,  e,
+            });
+        };
     }
 
     /// remove a port mapping.
