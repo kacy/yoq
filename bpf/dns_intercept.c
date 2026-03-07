@@ -7,29 +7,16 @@
 // SECURITY HARDENING:
 //   - All packet accesses validated against data_end
 //   - Minimum packet size checks prevent out-of-bounds reads
-//   - DNS name length validated against RFC 1035 limits
+//   - DNS name length validated using bounded fixed-offset checks only
 //   - Integer overflow protection on offset calculations
 //   - All variable-length reads use bpf_skb_load_bytes
 //
-// flow:
-//   1. parse eth → IP → UDP headers at fixed offsets, check dst port 53
-//   2. parse DNS header: verify QR=0 (query), QDCOUNT=1
-//   3. bpf_skb_load_bytes: copy question section to stack key buffer
-//   4. look up wire-format name in service_names BPF hash map
-//   5. HIT: validate QTYPE=A QCLASS=IN, build DNS response, redirect
-//   6. MISS: pass to userspace dns.zig resolver (TC_ACT_OK)
-//
-// BPF verifier constraints this program respects:
+// BPF verifier constraints:
 //   - all packet access uses fixed offsets (IHL forced to 5)
-//   - all stack reads use compile-time constant offsets (unrolled loops)
-//   - no variable-offset packet or stack access
+//   - all stack reads use compile-time constant offsets (no variable offsets)
+//   - no loops with variable bounds for stack access
 //   - uses bpf_skb_load_bytes/bpf_skb_store_bytes for variable offsets
 //   - stays within 512-byte stack limit
-//
-// map key format: raw DNS wire-format name (length-prefixed labels),
-// null-padded to 64 bytes. e.g. "mydb" → "\x04mydb\x00" + 58 zero bytes.
-// the userspace side (dns.zig / ebpf.zig) converts dot-separated names
-// to wire format when updating the map.
 //
 // compile: clang -target bpf -O2 -g -c -o dns_intercept.o dns_intercept.c
 
@@ -53,63 +40,93 @@ struct bpf_map_def SEC("maps") service_names = {
 static long (*bpf_skb_load_bytes)(const void *skb, __u32 offset,
                                    void *to, __u32 len) = (void *)26;
 static long (*bpf_skb_store_bytes)(void *skb, __u32 offset, const void *from,
-                                   __u32 len, __u64 flags) = (void *)9;
+                                    __u32 len, __u64 flags) = (void *)9;
 static long (*bpf_skb_change_tail)(void *skb, __u32 new_len,
-                                   __u64 flags) = (void *)38;
+                                    __u64 flags) = (void *)38;
 static long (*bpf_redirect)(int ifindex, __u64 flags) = (void *)23;
 
 #define DNS_PORT 53
 #define DNS_HEADER_SIZE 12
 
-// Simplified DNS name validation
-// Returns wire length if valid, 0 if invalid
+// Simple DNS name length finder - returns position of null terminator + 1
+// Uses fully unrolled checks to satisfy BPF verifier
 static __attribute__((always_inline)) __u32
-validate_dns_name_simple(const char *name, __u32 max_len)
+find_name_length(const char *name, __u32 max_len)
 {
-    // SECURITY: Check minimum length (at least 1-byte label + null)
-    if (max_len < 2) return 0;
+    // Bounds check for verifier
+    if (max_len < 2 || max_len > 64) return 0;
     
-    // SECURITY: Find null terminator and validate structure
-    __u32 pos = 0;
-    __u8 label_count = 0;
+    // Check first byte
+    if (name[0] == 0) return 0; // Empty name
+    if (((__u8)name[0] & 0xC0) == 0xC0) return 0; // Compression pointer
     
-    // Max 127 labels, max 255 bytes total
-    while (pos < max_len && pos < 255) {
-        __u8 label_len = (__u8)name[pos];
-        
-        // Found null terminator - end of name
-        if (label_len == 0) {
-            // Name must be at least 2 bytes
-            if (pos < 1) return 0;
-            return pos + 1;
-        }
-        
-        // Check for compression pointers (0xC0 in first byte)
-        if ((label_len & 0xC0) == 0xC0) return 0;
-        
-        // RFC 1035: label max 63 bytes
-        if (label_len > 63) return 0;
-        
-        // Check if label fits in remaining buffer
-        if (pos + 1 + label_len > max_len) return 0;
-        
-        // SECURITY: Validate label characters are printable ASCII
-        // Allow alphanumeric, hyphen, underscore for SRV records
-        for (__u32 i = 0; i < label_len; i++) {
-            char c = name[pos + 1 + i];
-            // Reject control chars and high bytes
-            if (c < 32 || c > 126) return 0;
-        }
-        
-        pos += 1 + label_len;
-        label_count++;
-        
-        // RFC 1035: max 127 labels
-        if (label_count > 127) return 0;
-    }
+    // Fully unrolled null terminator search
+    // Each check uses a compile-time constant offset
+    if (1 < max_len && name[1] == 0) return 2;
+    if (2 < max_len && name[2] == 0) return 3;
+    if (3 < max_len && name[3] == 0) return 4;
+    if (4 < max_len && name[4] == 0) return 5;
+    if (5 < max_len && name[5] == 0) return 6;
+    if (6 < max_len && name[6] == 0) return 7;
+    if (7 < max_len && name[7] == 0) return 8;
+    if (8 < max_len && name[8] == 0) return 9;
+    if (9 < max_len && name[9] == 0) return 10;
+    if (10 < max_len && name[10] == 0) return 11;
+    if (11 < max_len && name[11] == 0) return 12;
+    if (12 < max_len && name[12] == 0) return 13;
+    if (13 < max_len && name[13] == 0) return 14;
+    if (14 < max_len && name[14] == 0) return 15;
+    if (15 < max_len && name[15] == 0) return 16;
+    if (16 < max_len && name[16] == 0) return 17;
+    if (17 < max_len && name[17] == 0) return 18;
+    if (18 < max_len && name[18] == 0) return 19;
+    if (19 < max_len && name[19] == 0) return 20;
+    if (20 < max_len && name[20] == 0) return 21;
+    if (21 < max_len && name[21] == 0) return 22;
+    if (22 < max_len && name[22] == 0) return 23;
+    if (23 < max_len && name[23] == 0) return 24;
+    if (24 < max_len && name[24] == 0) return 25;
+    if (25 < max_len && name[25] == 0) return 26;
+    if (26 < max_len && name[26] == 0) return 27;
+    if (27 < max_len && name[27] == 0) return 28;
+    if (28 < max_len && name[28] == 0) return 29;
+    if (29 < max_len && name[29] == 0) return 30;
+    if (30 < max_len && name[30] == 0) return 31;
+    if (31 < max_len && name[31] == 0) return 32;
+    if (32 < max_len && name[32] == 0) return 33;
+    if (33 < max_len && name[33] == 0) return 34;
+    if (34 < max_len && name[34] == 0) return 35;
+    if (35 < max_len && name[35] == 0) return 36;
+    if (36 < max_len && name[36] == 0) return 37;
+    if (37 < max_len && name[37] == 0) return 38;
+    if (38 < max_len && name[38] == 0) return 39;
+    if (39 < max_len && name[39] == 0) return 40;
+    if (40 < max_len && name[40] == 0) return 41;
+    if (41 < max_len && name[41] == 0) return 42;
+    if (42 < max_len && name[42] == 0) return 43;
+    if (43 < max_len && name[43] == 0) return 44;
+    if (44 < max_len && name[44] == 0) return 45;
+    if (45 < max_len && name[45] == 0) return 46;
+    if (46 < max_len && name[46] == 0) return 47;
+    if (47 < max_len && name[47] == 0) return 48;
+    if (48 < max_len && name[48] == 0) return 49;
+    if (49 < max_len && name[49] == 0) return 50;
+    if (50 < max_len && name[50] == 0) return 51;
+    if (51 < max_len && name[51] == 0) return 52;
+    if (52 < max_len && name[52] == 0) return 53;
+    if (53 < max_len && name[53] == 0) return 54;
+    if (54 < max_len && name[54] == 0) return 55;
+    if (55 < max_len && name[55] == 0) return 56;
+    if (56 < max_len && name[56] == 0) return 57;
+    if (57 < max_len && name[57] == 0) return 58;
+    if (58 < max_len && name[58] == 0) return 59;
+    if (59 < max_len && name[59] == 0) return 60;
+    if (60 < max_len && name[60] == 0) return 61;
+    if (61 < max_len && name[61] == 0) return 62;
+    if (62 < max_len && name[62] == 0) return 63;
+    if (63 < max_len && name[63] == 0) return 64;
     
-    // No null terminator found
-    return 0;
+    return 0; // No null terminator found
 }
 
 SEC("tc_ingress")
@@ -201,20 +218,27 @@ int dns_intercept(struct __sk_buff *skb)
     char key_buf[64] = {};
     
     // Calculate safe read length - don't exceed packet bounds
+    // Use unsigned arithmetic and explicit bounds for verifier
     __u32 pkt_len = (long)data_end - (long)data;
-    __u32 read_len = 64;
-    if (DNS_QUESTION_OFFSET + read_len > pkt_len)
-        read_len = pkt_len - DNS_QUESTION_OFFSET;
+    if (pkt_len > 1500) return TC_ACT_OK; // Sanity check
     
-    // SECURITY: Ensure we have at least a minimal question section
-    if (read_len < 2)
+    __u32 read_len = 64;
+    if (DNS_QUESTION_OFFSET + 64 > pkt_len) {
+        read_len = pkt_len - DNS_QUESTION_OFFSET;
+        // Explicitly bound read_len for verifier - ensure it's at least 2
+        if (read_len > 64) read_len = 64;
+        if (read_len > 512) read_len = 64; // Sanity cap
+    }
+    
+    // Final bounds check: must be 2-64 bytes (ensures positive, verifier-safe value)
+    if (read_len < 2 || read_len > 64)
         return TC_ACT_OK;
     
     if (bpf_skb_load_bytes(skb, DNS_QUESTION_OFFSET, key_buf, read_len) != 0)
         return TC_ACT_OK;
 
     // -- validate the DNS name is well-formed --
-    __u32 wire_len = validate_dns_name_simple(key_buf, read_len);
+    __u32 wire_len = find_name_length(key_buf, read_len);
     if (wire_len == 0 || wire_len > 63) // 63 = max we can handle in our 64-byte key
         return TC_ACT_OK;
 

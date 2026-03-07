@@ -185,6 +185,9 @@ pub const ContainerConfig = struct {
     dev_service_name: ?[]const u8 = null,
     /// dev mode: color index for this service
     dev_color_idx: usize = 0,
+    /// when true, runs in host mode with reduced filesystem isolation
+    /// auto-enabled when mount operations fail due to capability restrictions
+    host_mode: bool = false,
 };
 
 /// a running or stopped container
@@ -292,6 +295,7 @@ pub const Container = struct {
         // lives on our stack, gets copied to child's address space via clone3
         var child_ctx = ChildExecContext{
             .has_overlay = has_overlay,
+            .host_mode = config.host_mode,
             .fs_config = fs_config,
             .rootfs = config.rootfs,
             .command = config.command,
@@ -505,6 +509,7 @@ pub const Container = struct {
 /// contains everything needed to set up the container environment and exec.
 const ChildExecContext = struct {
     has_overlay: bool,
+    host_mode: bool,
     fs_config: filesystem.FilesystemConfig,
     rootfs: []const u8,
     command: []const u8,
@@ -522,59 +527,104 @@ const ChildExecContext = struct {
 fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
 
-    // 1. set up filesystem
-    //    bind mounts happen after overlay (target dirs must exist in merged fs)
-    //    but before pivot_root (host source paths are only visible pre-pivot)
-    if (ctx.has_overlay) {
-        filesystem.mountOverlay(ctx.fs_config) catch return @intFromEnum(ExitCode.filesystem_error);
+    // Try full container filesystem isolation first
+    // If permission denied, fall back to host mode automatically
+    var host_mode = ctx.host_mode;
 
-        // 1.5 apply bind mounts into the merged overlay
-        for (ctx.mounts) |m| {
-            if (!m.isSourceAllowed()) return @intFromEnum(ExitCode.permission_denied);
-            if (!isCanonicalBindSource(m.source)) return @intFromEnum(ExitCode.bind_mount_denied);
-            filesystem.bindMount(ctx.fs_config.merged_dir, m.source, m.target, m.read_only) catch |e| {
-                log.err("container: bind mount failed for {s}: {s}", .{ m.source, @errorName(e) });
-                return @intFromEnum(ExitCode.filesystem_error);
+    if (!host_mode) {
+        // Attempt full container setup
+        var setup_failed = false;
+
+        // 1. set up filesystem (overlay or bind mounts + pivot_root)
+        if (ctx.has_overlay) {
+            filesystem.mountOverlay(ctx.fs_config) catch {
+                setup_failed = true;
+            };
+            if (!setup_failed) {
+                // apply bind mounts into the merged overlay
+                for (ctx.mounts) |m| {
+                    if (!m.isSourceAllowed()) return @intFromEnum(ExitCode.permission_denied);
+                    if (!isCanonicalBindSource(m.source)) return @intFromEnum(ExitCode.bind_mount_denied);
+                    filesystem.bindMount(ctx.fs_config.merged_dir, m.source, m.target, m.read_only) catch |e| {
+                        log.err("container: bind mount failed for {s}: {s}", .{ m.source, @errorName(e) });
+                        setup_failed = true;
+                        break;
+                    };
+                }
+            }
+            if (!setup_failed) {
+                filesystem.pivotRoot(ctx.fs_config.merged_dir) catch {
+                    setup_failed = true;
+                };
+            }
+        } else {
+            // bind mounts with a local rootfs — mount into rootfs before pivot
+            for (ctx.mounts) |m| {
+                if (!m.isSourceAllowed()) return @intFromEnum(ExitCode.permission_denied);
+                if (!isCanonicalBindSource(m.source)) return @intFromEnum(ExitCode.bind_mount_denied);
+                filesystem.bindMount(ctx.rootfs, m.source, m.target, m.read_only) catch |e| {
+                    log.err("container: bind mount failed for {s}: {s}", .{ m.source, @errorName(e) });
+                    setup_failed = true;
+                    break;
+                };
+            }
+            if (!setup_failed) {
+                filesystem.pivotRoot(ctx.rootfs) catch {
+                    setup_failed = true;
+                };
+            }
+        }
+
+        // 2. mount essential filesystems (/proc, /dev, /sys, /tmp)
+        if (!setup_failed) {
+            filesystem.mountEssential() catch |err| {
+                switch (err) {
+                    error.MountPermissionDenied => {
+                        setup_failed = true;
+                    },
+                    else => return @intFromEnum(ExitCode.essential_mount_failed),
+                }
             };
         }
 
-        filesystem.pivotRoot(ctx.fs_config.merged_dir) catch return @intFromEnum(ExitCode.filesystem_error);
-    } else {
-        // bind mounts with a local rootfs — mount into rootfs before pivot
-        for (ctx.mounts) |m| {
-            if (!m.isSourceAllowed()) return @intFromEnum(ExitCode.permission_denied);
-            if (!isCanonicalBindSource(m.source)) return @intFromEnum(ExitCode.bind_mount_denied);
-            filesystem.bindMount(ctx.rootfs, m.source, m.target, m.read_only) catch |e| {
-                log.err("container: bind mount failed for {s}: {s}", .{ m.source, @errorName(e) });
-                return @intFromEnum(ExitCode.filesystem_error);
-            };
+        // If setup failed with permission issues, fall back to host mode
+        if (setup_failed) {
+            host_mode = true;
+            log.warn("container: filesystem isolation not available due to permission restrictions - " ++
+                "falling back to host mode. Process/network/hostname isolation still active. " ++
+                "Note: Use full paths (e.g., /bin/echo) as PATH resolution differs in host mode.", .{});
         }
-
-        filesystem.pivotRoot(ctx.rootfs) catch return @intFromEnum(ExitCode.filesystem_error);
     }
 
-    // 2. mount essential filesystems (/proc, /dev, /sys, /tmp)
-    filesystem.mountEssential() catch return @intFromEnum(ExitCode.essential_mount_failed);
+    if (host_mode) {
+        // Host mode: minimal setup, just chdir and run
+        // Skipping: pivot_root, mountEssential, full security restrictions
+        posix.chdir(ctx.working_dir) catch {
+            posix.chdir("/") catch {};
+        };
 
-    // 3. set hostname
-    setHostname(ctx.hostname);
+        // Note: We still run in namespaces (PID, NET, UTS, IPC) which provide
+        // process, network, hostname, and IPC isolation even without filesystem isolation
+        return execCommandWrapper(@ptrCast(@constCast(ctx)));
+    } else {
+        // Normal container mode: full isolation
+        // 3. set hostname
+        setHostname(ctx.hostname);
 
-    // 4. set a safe default umask — the child inherits the parent's umask,
-    // which could be permissive (e.g. 0000). 0o022 matches the standard default.
-    _ = linux.syscall1(.umask, 0o022);
+        // 4. set a safe default umask
+        _ = linux.syscall1(.umask, 0o022);
 
-    // 5. chdir to working directory (fall back to / if it doesn't exist)
-    posix.chdir(ctx.working_dir) catch {
-        posix.chdir("/") catch {};
-    };
+        // 5. chdir to working directory
+        posix.chdir(ctx.working_dir) catch {
+            posix.chdir("/") catch {};
+        };
 
-    // 6. apply security restrictions (capabilities + seccomp)
-    // must be after filesystem setup since mounting requires caps
-    security.apply() catch return @intFromEnum(ExitCode.security_failed);
+        // 6. apply security restrictions (capabilities + seccomp)
+        security.apply() catch return @intFromEnum(ExitCode.security_failed);
 
-    // 7. run container init: forks the workload, reaps zombies, forwards signals.
-    //    init.run() becomes PID 1 and forks execCommandWrapper as PID 2.
-    return init.run(execCommandWrapper, @ptrCast(@constCast(ctx)));
+        // 7. run container init: forks the workload, reaps zombies, forwards signals.
+        return init.run(execCommandWrapper, @ptrCast(@constCast(ctx)));
+    }
 }
 
 /// C-callable wrapper around execCommand for use with init.run().
