@@ -12,6 +12,13 @@ const spec = @import("../image/spec.zig");
 const write = cli.write;
 const writeErr = cli.writeErr;
 
+const BuildCommandsError = error{
+    InvalidArgument,
+    BuildFailed,
+    ParseFailed,
+    OutOfMemory,
+};
+
 /// validate an image tag per OCI distribution spec constraints.
 /// tags must be alphanumeric with '.', '-', '_' separators, max 128 chars.
 fn isValidTag(tag: []const u8) bool {
@@ -24,7 +31,7 @@ fn isValidTag(tag: []const u8) bool {
     return true;
 }
 
-pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var tag: ?[]const u8 = null;
     var dockerfile_path: []const u8 = "Dockerfile";
     var context_path: ?[]const u8 = null;
@@ -36,17 +43,17 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         if (std.mem.eql(u8, arg, "-t")) {
             tag = args.next() orelse {
                 writeErr("-t requires an image tag\n", .{});
-                std.process.exit(1);
+                return BuildCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "-f")) {
             dockerfile_path = args.next() orelse {
                 writeErr("-f requires a Dockerfile path\n", .{});
-                std.process.exit(1);
+                return BuildCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--format")) {
             const fmt = args.next() orelse {
                 writeErr("--format requires 'dockerfile' or 'toml'\n", .{});
-                std.process.exit(1);
+                return BuildCommandsError.InvalidArgument;
             };
             if (std.mem.eql(u8, fmt, "toml")) {
                 format = .toml;
@@ -54,17 +61,14 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
                 format = .dockerfile;
             } else {
                 writeErr("unknown format '{s}', expected 'dockerfile' or 'toml'\n", .{fmt});
-                std.process.exit(1);
+                return BuildCommandsError.InvalidArgument;
             }
         } else if (std.mem.eql(u8, arg, "--build-arg")) {
             const ba = args.next() orelse {
                 writeErr("--build-arg requires KEY=VALUE\n", .{});
-                std.process.exit(1);
+                return BuildCommandsError.InvalidArgument;
             };
-            build_args_list.append(alloc, ba) catch {
-                writeErr("out of memory\n", .{});
-                std.process.exit(1);
-            };
+            build_args_list.append(alloc, ba) catch return BuildCommandsError.OutOfMemory;
         } else {
             context_path = arg;
         }
@@ -77,7 +81,7 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         const ref = spec.parseImageRef(t);
         if (!isValidTag(ref.reference)) {
             writeErr("invalid tag: must be alphanumeric with '.', '-', '_' (max 128 chars)\n", .{});
-            std.process.exit(1);
+            return BuildCommandsError.InvalidArgument;
         }
     }
 
@@ -92,7 +96,7 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
     const effective_path = if (using_default)
         std.fmt.bufPrint(&df_path_buf, "{s}/{s}", .{ ctx_dir, default_filename }) catch {
             writeErr("path too long\n", .{});
-            std.process.exit(1);
+            return BuildCommandsError.InvalidArgument;
         }
     else
         dockerfile_path;
@@ -108,7 +112,7 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         .dockerfile => {
             const content = std.fs.cwd().readFileAlloc(alloc, effective_path, 1024 * 1024) catch {
                 writeErr("cannot read {s}\n", .{effective_path});
-                std.process.exit(1);
+                return BuildCommandsError.ParseFailed;
             };
             defer alloc.free(content);
 
@@ -116,9 +120,9 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
                 switch (err) {
                     dockerfile.ParseError.UnknownInstruction => writeErr("unknown instruction in Dockerfile\n", .{}),
                     dockerfile.ParseError.EmptyInstruction => writeErr("empty instruction in Dockerfile\n", .{}),
-                    dockerfile.ParseError.OutOfMemory => writeErr("out of memory\n", .{}),
+                    dockerfile.ParseError.OutOfMemory => return BuildCommandsError.OutOfMemory,
                 }
-                std.process.exit(1);
+                return BuildCommandsError.ParseFailed;
             };
             df_parsed = parsed;
             instructions = parsed.instructions;
@@ -133,9 +137,9 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
                     build_manifest.LoadError.InvalidStep => writeErr("invalid step in build manifest\n", .{}),
                     build_manifest.LoadError.EmptyManifest => writeErr("no stages found in build manifest\n", .{}),
                     build_manifest.LoadError.CyclicDependency => writeErr("circular dependency between stages\n", .{}),
-                    build_manifest.LoadError.OutOfMemory => writeErr("out of memory\n", .{}),
+                    build_manifest.LoadError.OutOfMemory => return BuildCommandsError.OutOfMemory,
                 }
-                std.process.exit(1);
+                return BuildCommandsError.ParseFailed;
             };
             toml_parsed = parsed;
             instructions = parsed.instructions;
@@ -154,7 +158,7 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
     var abs_ctx_buf: [4096]u8 = undefined;
     const abs_ctx = std.fs.cwd().realpath(ctx_dir, &abs_ctx_buf) catch {
         writeErr("cannot resolve context directory: {s}\n", .{ctx_dir});
-        std.process.exit(1);
+        return BuildCommandsError.InvalidArgument;
     };
 
     // build
@@ -173,7 +177,7 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
             build_engine.BuildError.ParseFailed => writeErr("failed to parse build instructions\n", .{}),
             build_engine.BuildError.CacheFailed => writeErr("cache error\n", .{}),
         }
-        std.process.exit(1);
+        return BuildCommandsError.BuildFailed;
     };
     defer result.deinit();
 

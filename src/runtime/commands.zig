@@ -63,9 +63,17 @@ const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 const extractJsonFloat = json_helpers.extractJsonFloat;
 
+const CommandsError = error{
+    InvalidArgument,
+    ConnectionFailed,
+    ServerError,
+    StoreError,
+    OutOfMemory,
+};
+
 // -- status command --
 
-pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var verbose = false;
     var server: ?cli.ServerAddr = null;
 
@@ -77,7 +85,7 @@ pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         } else if (std.mem.eql(u8, arg, "--server")) {
             const addr_str = args.next() orelse {
                 writeErr("--server requires a host:port address\n", .{});
-                std.process.exit(1);
+                return CommandsError.InvalidArgument;
             };
             server = cli.parseServerAddr(addr_str);
         }
@@ -85,18 +93,18 @@ pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     // cluster mode: query API endpoint
     if (server) |s| {
-        statusRemote(alloc, s.ip, s.port, verbose);
+        statusRemote(alloc, s.ip, s.port, verbose) catch |e| return e;
         return;
     }
 
     // local mode: read directly from store and cgroups
-    statusLocal(alloc, verbose);
+    statusLocal(alloc, verbose) catch |e| return e;
 }
 
-fn statusLocal(alloc: std.mem.Allocator, verbose: bool) void {
+fn statusLocal(alloc: std.mem.Allocator, verbose: bool) CommandsError!void {
     var records = store.listAll(alloc) catch {
         writeErr("failed to list containers\n", .{});
-        std.process.exit(1);
+        return CommandsError.StoreError;
     };
     defer {
         for (records.items) |rec| rec.deinit(alloc);
@@ -110,26 +118,26 @@ fn statusLocal(alloc: std.mem.Allocator, verbose: bool) void {
 
     var snapshots = monitor.collectSnapshots(alloc, &records) catch {
         writeErr("failed to collect service snapshots\n", .{});
-        std.process.exit(1);
+        return CommandsError.StoreError;
     };
     defer snapshots.deinit(alloc);
 
     printStatusTable(snapshots.items, verbose);
 }
 
-fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) void {
+fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) CommandsError!void {
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
     var resp = http_client.getWithAuth(alloc, addr, port, "/v1/status", token) catch {
         writeErr("failed to connect to server\n", .{});
-        std.process.exit(1);
+        return CommandsError.ConnectionFailed;
     };
     defer resp.deinit(alloc);
 
     if (resp.status_code != 200) {
         writeErr("server returned status {d}\n", .{resp.status_code});
-        std.process.exit(1);
+        return CommandsError.ServerError;
     }
 
     // parse JSON response into snapshots for display
@@ -186,10 +194,7 @@ fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool)
             .uptime_secs = extractJsonInt(obj, "uptime_secs") orelse 0,
             .memory_limit = memory_limit,
             .cpu_quota_pct = cpu_quota_pct,
-        }) catch {
-            writeErr("failed to parse status response\n", .{});
-            std.process.exit(1);
-        };
+        }) catch return CommandsError.OutOfMemory;
     }
 
     if (snapshots.items.len == 0) {
@@ -314,7 +319,7 @@ fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8
 
 // -- metrics command --
 
-pub fn metrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn metrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var service_filter: ?[]const u8 = null;
     var server: ?cli.ServerAddr = null;
     var pairs_mode = false;
@@ -325,7 +330,7 @@ pub fn metrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         } else if (std.mem.eql(u8, arg, "--server")) {
             const addr_str = args.next() orelse {
                 writeErr("--server requires a host:port address\n", .{});
-                std.process.exit(1);
+                return CommandsError.InvalidArgument;
             };
             server = cli.parseServerAddr(addr_str);
         } else if (std.mem.eql(u8, arg, "--pairs")) {
@@ -337,25 +342,25 @@ pub fn metrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     if (pairs_mode) {
         if (server) |s| {
-            metricsPairsRemote(alloc, s.ip, s.port);
+            metricsPairsRemote(alloc, s.ip, s.port) catch |e| return e;
         } else {
-            metricsPairs(alloc);
+            metricsPairs(alloc) catch |e| return e;
         }
         return;
     }
 
     if (server) |s| {
-        metricsRemote(alloc, s.ip, s.port, service_filter);
+        metricsRemote(alloc, s.ip, s.port, service_filter) catch |e| return e;
         return;
     }
 
-    metricsLocal(alloc, service_filter);
+    metricsLocal(alloc, service_filter) catch |e| return e;
 }
 
-fn metricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) void {
+fn metricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) CommandsError!void {
     var records = store.listAll(alloc) catch {
         writeErr("failed to list containers\n", .{});
-        std.process.exit(1);
+        return CommandsError.StoreError;
     };
     defer {
         for (records.items) |rec| rec.deinit(alloc);
@@ -430,7 +435,7 @@ fn metricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) void {
     }
 }
 
-fn metricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filter: ?[]const u8) void {
+fn metricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filter: ?[]const u8) CommandsError!void {
     // build path with optional query param
     var path_buf: [128]u8 = undefined;
     const path = if (service_filter) |svc|
@@ -443,13 +448,13 @@ fn metricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filte
 
     var resp = http_client.getWithAuth(alloc, addr, port, path, token) catch {
         writeErr("failed to connect to server\n", .{});
-        std.process.exit(1);
+        return CommandsError.ConnectionFailed;
     };
     defer resp.deinit(alloc);
 
     if (resp.status_code != 200) {
         writeErr("server returned status {d}\n", .{resp.status_code});
-        std.process.exit(1);
+        return CommandsError.ServerError;
     }
 
     // API already returns JSON — pass through directly
@@ -488,7 +493,7 @@ fn metricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filte
     }
 }
 
-fn metricsPairs(alloc: std.mem.Allocator) void {
+fn metricsPairs(alloc: std.mem.Allocator) CommandsError!void {
     const mc = ebpf.getMetricsCollector() orelse {
         write("metrics collector not loaded (requires root)\n", .{});
         return;
@@ -496,7 +501,7 @@ fn metricsPairs(alloc: std.mem.Allocator) void {
 
     var records = store.listAll(alloc) catch {
         writeErr("failed to list containers\n", .{});
-        std.process.exit(1);
+        return CommandsError.StoreError;
     };
     defer {
         for (records.items) |rec| rec.deinit(alloc);
@@ -540,19 +545,19 @@ fn metricsPairs(alloc: std.mem.Allocator) void {
     }
 }
 
-fn metricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) void {
+fn metricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) CommandsError!void {
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
     var resp = http_client.getWithAuth(alloc, addr, port, "/v1/metrics?mode=pairs", token) catch {
         writeErr("failed to connect to server\n", .{});
-        std.process.exit(1);
+        return CommandsError.ConnectionFailed;
     };
     defer resp.deinit(alloc);
 
     if (resp.status_code != 200) {
         writeErr("server returned status {d}\n", .{resp.status_code});
-        std.process.exit(1);
+        return CommandsError.ServerError;
     }
 
     if (cli.output_mode == .json) {

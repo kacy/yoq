@@ -27,18 +27,29 @@ const isValidApiToken = cli.isValidApiToken;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 
-pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+const ClusterCommandsError = error{
+    InvalidArgument,
+    ServerStartFailed,
+    ConfigFailed,
+    ConnectionFailed,
+    ServerError,
+    Unauthorized,
+    NetworkError,
+    OutOfMemory,
+};
+
+pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var port: u16 = 7700;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
             const port_str = args.next() orelse {
                 writeErr("--port requires a port number\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
             port = std.fmt.parseInt(u16, port_str, 10) catch {
                 writeErr("invalid port: {s}\n", .{port_str});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         }
     }
@@ -57,13 +68,13 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         writeErr("API token: {s}\n", .{token_path});
     } else {
         writeErr("failed to set up API token; refusing to run without auth\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.ServerStartFailed;
     }
     defer routes.api_token = null;
 
     var server = api_server.Server.init(alloc, port, .{ 127, 0, 0, 1 }) catch |err| {
         writeErr("failed to start server on port {d}: {}\n", .{ port, err });
-        std.process.exit(1);
+        return ClusterCommandsError.ServerStartFailed;
     };
     defer server.deinit();
 
@@ -71,7 +82,7 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     server.run();
 }
 
-pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var node_id: u64 = 1;
     var raft_port: u16 = 9700;
     var api_port: u16 = 7700;
@@ -83,44 +94,44 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
         if (std.mem.eql(u8, arg, "--id")) {
             const id_str = args.next() orelse {
                 writeErr("--id requires a node ID\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
             node_id = std.fmt.parseInt(u64, id_str, 10) catch {
                 writeErr("invalid node id: {s}\n", .{id_str});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--port")) {
             const port_str = args.next() orelse {
                 writeErr("--port requires a port number\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
             raft_port = std.fmt.parseInt(u16, port_str, 10) catch {
                 writeErr("invalid port: {s}\n", .{port_str});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--api-port")) {
             const port_str = args.next() orelse {
                 writeErr("--api-port requires a port number\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
             api_port = std.fmt.parseInt(u16, port_str, 10) catch {
                 writeErr("invalid port: {s}\n", .{port_str});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--peers")) {
             peers_str = args.next() orelse {
                 writeErr("--peers requires peer list\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--token")) {
             join_token = args.next() orelse {
                 writeErr("--token requires a join token\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--api-token")) {
             api_token_arg = args.next() orelse {
                 writeErr("--api-token requires a 64-character hex token\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         }
     }
@@ -129,19 +140,19 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     var data_dir_buf: [paths.max_path]u8 = undefined;
     const data_dir = cluster_config.defaultDataDir(&data_dir_buf) catch |err| {
         writeErr("failed to create cluster data directory: {}\n", .{err});
-        std.process.exit(1);
+        return ClusterCommandsError.ConfigFailed;
     };
 
     // parse peers
     const peers = cluster_config.parsePeers(alloc, peers_str) catch |err| {
         writeErr("invalid peers format: {} (expected id@host:port,id@host:port)\n", .{err});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     };
     defer alloc.free(peers);
 
     if (join_token == null) {
         writeErr("cluster mode requires --token for join authentication and raft transport auth\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     }
 
     // derive a shared key from the join token for raft transport authentication.
@@ -160,14 +171,14 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
         if (api_token_arg) |provided| {
             if (!isValidApiToken(provided)) {
                 writeErr("--api-token must be a 64-character lowercase hex token\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             }
             break :blk provided;
         }
 
         const from_file = readApiToken(&api_token_buf) orelse {
             writeErr("cluster mode requires an API token. provide --api-token or create ~/.local/share/yoq/api_token with 0o600 permissions\n", .{});
-            std.process.exit(1);
+            return ClusterCommandsError.InvalidArgument;
         };
         break :blk from_file;
     };
@@ -184,7 +195,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
         .data_dir = data_dir,
     }) catch |err| {
         writeErr("failed to initialize raft node: {}\n", .{err});
-        std.process.exit(1);
+        return ClusterCommandsError.ServerStartFailed;
     };
     defer node.deinit();
 
@@ -194,12 +205,12 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     }
     if (peers.len > 0 and node.transport.shared_key == null) {
         writeErr("cluster mode requires raft transport authentication when peers are configured\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     }
 
     node.start() catch |err| {
         writeErr("failed to start raft node: {}\n", .{err});
-        std.process.exit(1);
+        return ClusterCommandsError.ServerStartFailed;
     };
 
     // set cluster node and join token for API routes
@@ -225,7 +236,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
 
     var server = api_server.Server.init(alloc, api_port, .{ 0, 0, 0, 0 }) catch |err| {
         writeErr("failed to start API server on port {d}: {}\n", .{ api_port, err });
-        std.process.exit(1);
+        return ClusterCommandsError.ServerStartFailed;
     };
     defer server.deinit();
 
@@ -235,7 +246,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void
     node.stop();
 }
 
-pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var server_host: ?[]const u8 = null;
     var token: ?[]const u8 = null;
     var api_port: u16 = 7700;
@@ -244,16 +255,16 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         if (std.mem.eql(u8, arg, "--token")) {
             token = args.next() orelse {
                 writeErr("--token requires a join token\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--port")) {
             const port_str = args.next() orelse {
                 writeErr("--port requires a port number\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
             api_port = std.fmt.parseInt(u16, port_str, 10) catch {
                 writeErr("invalid port: {s}\n", .{port_str});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
         } else {
             server_host = arg;
@@ -262,18 +273,18 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     const host = server_host orelse {
         writeErr("usage: yoq join <server-host> --token <token> [--port <api-port>]\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     };
 
     const join_token = token orelse {
         writeErr("--token is required\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     };
 
     // parse server address
     const server_addr = ip.parseIp(host) orelse {
         writeErr("invalid server address: {s}\n", .{host});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     };
 
     writeErr("joining cluster at {s}:{d}...\n", .{ host, api_port });
@@ -284,7 +295,7 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     agent.register() catch |err| {
         writeErr("failed to register with server: {}\n", .{err});
         writeErr("hint: check that the server is running and the token is correct\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.ConnectionFailed;
     };
 
     writeErr("joined cluster as agent {s}\n", .{agent.id});
@@ -306,7 +317,7 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // start heartbeat loop
     agent.start() catch |err| {
         writeErr("failed to start agent loop: {}\n", .{err});
-        std.process.exit(1);
+        return ClusterCommandsError.ServerStartFailed;
     };
 
     // install signal handlers for graceful shutdown
@@ -422,7 +433,7 @@ fn parseIpv4Bytes(str: []const u8) ?[4]u8 {
     return result;
 }
 
-pub fn cluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn cluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var subcommand: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -435,14 +446,14 @@ pub fn cluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     const subcmd = subcommand orelse {
         writeErr("usage: yoq cluster <status>\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     };
 
     if (std.mem.eql(u8, subcmd, "status")) {
         clusterStatus(alloc);
     } else {
         writeErr("unknown cluster subcommand: {s}\n", .{subcmd});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     }
 }
 
@@ -490,7 +501,7 @@ fn clusterStatus(alloc: std.mem.Allocator) void {
     _ = alloc;
 }
 
-pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var server: cli.ServerAddr = .{};
 
     while (args.next()) |arg| {
@@ -499,7 +510,7 @@ pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         } else if (std.mem.eql(u8, arg, "--server")) {
             const addr_str = args.next() orelse {
                 writeErr("--server requires a host:port address\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
             server = cli.parseServerAddr(addr_str);
         }
@@ -513,13 +524,13 @@ pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var resp = http_client.getWithAuth(alloc, server_addr, server_port, "/agents", token) catch |err| {
         writeErr("failed to connect to server: {}\n", .{err});
         writeErr("hint: start the server with 'yoq serve' or 'yoq init-server'\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.ConnectionFailed;
     };
     defer resp.deinit(alloc);
 
     if (resp.status_code != 200) {
         writeErr("server returned status {d}\n", .{resp.status_code});
-        std.process.exit(1);
+        return ClusterCommandsError.ServerError;
     }
 
     // API already returns JSON — pass through directly
@@ -564,7 +575,7 @@ pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 }
 
-pub fn drain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn drain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var node_id: ?[]const u8 = null;
     var server: cli.ServerAddr = .{};
 
@@ -572,7 +583,7 @@ pub fn drain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         if (std.mem.eql(u8, arg, "--server")) {
             const addr_str = args.next() orelse {
                 writeErr("--server requires a host:port address\n", .{});
-                std.process.exit(1);
+                return ClusterCommandsError.InvalidArgument;
             };
             server = cli.parseServerAddr(addr_str);
         } else {
@@ -584,14 +595,14 @@ pub fn drain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     const id = node_id orelse {
         writeErr("usage: yoq drain <node-id> [--server host:port]\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     };
 
     // POST /agents/{id}/drain
     var path_buf: [128]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/drain", .{id}) catch {
         writeErr("node ID too long\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.InvalidArgument;
     };
 
     var token_buf: [64]u8 = undefined;
@@ -600,7 +611,7 @@ pub fn drain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var resp = http_client.postWithAuth(alloc, server_addr, server_port, path, "", token) catch |err| {
         writeErr("failed to connect to server: {}\n", .{err});
         writeErr("hint: start the server with 'yoq serve' or 'yoq init-server'\n", .{});
-        std.process.exit(1);
+        return ClusterCommandsError.ConnectionFailed;
     };
     defer resp.deinit(alloc);
 
@@ -608,6 +619,6 @@ pub fn drain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         write("node {s} marked for draining\n", .{id});
     } else {
         writeErr("drain failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
-        std.process.exit(1);
+        return ClusterCommandsError.ServerError;
     }
 }

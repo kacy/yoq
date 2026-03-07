@@ -10,6 +10,11 @@ const registry = @import("command_registry.zig");
 
 const write = cli.write;
 
+const CompletionError = error{
+    InvalidArgument,
+    UnknownShell,
+};
+
 // -- metadata --
 
 const SubcommandMeta = struct {
@@ -103,10 +108,10 @@ fn findMeta(name: []const u8) ?*const CommandMeta {
 
 // -- handler --
 
-pub fn handler(args: *std.process.ArgIterator, _: std.mem.Allocator) void {
+pub fn handler(args: *std.process.ArgIterator, _: std.mem.Allocator) !void {
     const shell = args.next() orelse {
         cli.writeErr("usage: yoq completion <bash|zsh|fish>\n", .{});
-        std.process.exit(1);
+        return CompletionError.InvalidArgument;
     };
 
     if (std.mem.eql(u8, shell, "bash")) {
@@ -118,7 +123,7 @@ pub fn handler(args: *std.process.ArgIterator, _: std.mem.Allocator) void {
     } else {
         cli.writeErr("unknown shell: {s}\n", .{shell});
         cli.writeErr("supported shells: bash, zsh, fish\n", .{});
-        std.process.exit(1);
+        return CompletionError.UnknownShell;
     }
 }
 

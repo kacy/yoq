@@ -23,35 +23,46 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const truncate = cli.truncate;
 
-pub fn init(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+const ManifestCommandsError = error{
+    InvalidArgument,
+    ManifestLoadFailed,
+    ValidationFailed,
+    DeploymentFailed,
+    ConnectionFailed,
+    StoreError,
+    OutOfMemory,
+    UnknownService,
+};
+
+pub fn init(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var opts: init_mod.Options = .{};
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f")) {
             opts.output_path = args.next() orelse {
                 writeErr("-f requires an output path\n", .{});
-                std.process.exit(1);
+                return ManifestCommandsError.InvalidArgument;
             };
         } else {
             writeErr("unknown option: {s}\n", .{arg});
-            std.process.exit(1);
+            return ManifestCommandsError.InvalidArgument;
         }
     }
 
     init_mod.run(alloc, opts) catch |err| switch (err) {
-        init_mod.InitError.FileExists => std.process.exit(1),
+        init_mod.InitError.FileExists => return ManifestCommandsError.InvalidArgument,
         init_mod.InitError.WriteFailed => {
             writeErr("failed to write manifest file\n", .{});
-            std.process.exit(1);
+            return ManifestCommandsError.ManifestLoadFailed;
         },
         init_mod.InitError.CwdFailed => {
             writeErr("failed to resolve working directory\n", .{});
-            std.process.exit(1);
+            return ManifestCommandsError.ManifestLoadFailed;
         },
     };
 }
 
-pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var quiet = false;
 
@@ -59,30 +70,30 @@ pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         if (std.mem.eql(u8, arg, "-f")) {
             manifest_path = args.next() orelse {
                 writeErr("-f requires a manifest path\n", .{});
-                std.process.exit(1);
+                return ManifestCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
         } else {
             writeErr("unknown option: {s}\n", .{arg});
-            std.process.exit(1);
+            return ManifestCommandsError.InvalidArgument;
         }
     }
 
     // load and parse the manifest (catches syntax errors, missing fields, cycles, etc.)
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
         if (!quiet) {
-            writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
+            writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
             writeErr("hint: create one with 'yoq init'\n", .{});
         }
-        std.process.exit(1);
+        return ManifestCommandsError.ManifestLoadFailed;
     };
     defer manifest.deinit();
 
     // run semantic checks on the parsed manifest
     var result = validator.check(alloc, &manifest) catch |err| {
         if (!quiet) writeErr("validation failed: {}\n", .{err});
-        std.process.exit(1);
+        return ManifestCommandsError.ValidationFailed;
     };
     defer result.deinit();
 
@@ -98,7 +109,7 @@ pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     if (result.hasErrors()) {
         if (!quiet) writeErr("validation failed\n", .{});
-        std.process.exit(1);
+        return ManifestCommandsError.ValidationFailed;
     }
 
     if (!quiet) {
@@ -125,7 +136,7 @@ pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     }
 }
 
-pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var dev_mode = false;
     var server_addr: ?[]const u8 = null;
@@ -136,29 +147,26 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
         if (std.mem.eql(u8, arg, "-f")) {
             manifest_path = args.next() orelse {
                 writeErr("-f requires a manifest path\n", .{});
-                std.process.exit(1);
+                return ManifestCommandsError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--dev")) {
             dev_mode = true;
         } else if (std.mem.eql(u8, arg, "--server")) {
             server_addr = args.next() orelse {
                 writeErr("--server requires a host:port address\n", .{});
-                std.process.exit(1);
+                return ManifestCommandsError.InvalidArgument;
             };
         } else {
             // positional arg = service name to start
-            service_names.append(alloc, arg) catch {
-                writeErr("out of memory\n", .{});
-                std.process.exit(1);
-            };
+            service_names.append(alloc, arg) catch return ManifestCommandsError.OutOfMemory;
         }
     }
 
     // load and validate manifest
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
+        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
         writeErr("hint: create one with 'yoq init'\n", .{});
-        std.process.exit(1);
+        return ManifestCommandsError.ManifestLoadFailed;
     };
     defer manifest.deinit();
 
@@ -166,13 +174,13 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     for (service_names.items) |name| {
         if (manifest.serviceByName(name) == null) {
             writeErr("unknown service: {s}\n", .{name});
-            std.process.exit(1);
+            return ManifestCommandsError.UnknownService;
         }
     }
 
     // if --server is set, deploy to cluster instead of running locally
     if (server_addr) |addr| {
-        deployToCluster(alloc, addr, &manifest);
+        deployToCluster(alloc, addr, &manifest) catch |e| return e;
         return;
     }
 
@@ -180,7 +188,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     var cwd_buf: [4096]u8 = undefined;
     const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
         writeErr("failed to resolve working directory: {}\n", .{err});
-        std.process.exit(1);
+        return ManifestCommandsError.StoreError;
     };
     const app_name = std.fs.path.basename(cwd);
 
@@ -204,7 +212,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // create and run orchestrator
     var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name) catch |err| {
         writeErr("failed to initialize orchestrator: {}\n", .{err});
-        std.process.exit(1);
+        return ManifestCommandsError.DeploymentFailed;
     };
     defer orch.deinit();
     orch.dev_mode = dev_mode;
@@ -216,7 +224,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     orch.startAll() catch |err| {
         writeErr("failed to start services: {}\n", .{err});
-        std.process.exit(1);
+        return ManifestCommandsError.DeploymentFailed;
     };
 
     // in dev mode, set up file watcher for bind-mounted volumes
@@ -273,7 +281,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 }
 
 /// deploy manifest services to a cluster server via POST /deploy.
-fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *const manifest_spec.Manifest) void {
+fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *const manifest_spec.Manifest) ManifestCommandsError!void {
     const server = cli.parseServerAddr(addr_str);
     const server_ip = server.ip;
     const server_port = server.port;
@@ -283,10 +291,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
     defer json_buf.deinit(alloc);
     const writer = json_buf.writer(alloc);
 
-    writer.writeAll("{\"services\":[") catch {
-        writeErr("failed to build deploy request\n", .{});
-        std.process.exit(1);
-    };
+    writer.writeAll("{\"services\":[") catch return ManifestCommandsError.OutOfMemory;
 
     for (manifest.services, 0..) |svc, i| {
         if (i > 0) writer.writeByte(',') catch break;
@@ -315,10 +320,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
         writer.writeAll("\",\"cpu_limit\":1000,\"memory_limit_mb\":256}") catch break;
     }
 
-    writer.writeAll("]}") catch {
-        writeErr("failed to build deploy request\n", .{});
-        std.process.exit(1);
-    };
+    writer.writeAll("]}") catch return ManifestCommandsError.OutOfMemory;
 
     writeErr("deploying {d} services to cluster {s}...\n", .{ manifest.services.len, addr_str });
 
@@ -329,7 +331,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
     var resp = http_client.postWithAuth(alloc, server_ip, server_port, "/deploy", json_buf.items, token) catch |err| {
         writeErr("failed to connect to cluster server: {}\n", .{err});
         writeErr("hint: is the server running? try 'yoq serve' or 'yoq init-server'\n", .{});
-        std.process.exit(1);
+        return ManifestCommandsError.ConnectionFailed;
     };
     defer resp.deinit(alloc);
 
@@ -337,27 +339,54 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *co
         write("{s}\n", .{resp.body});
     } else {
         writeErr("deploy failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
-        std.process.exit(1);
+        return ManifestCommandsError.DeploymentFailed;
     }
 }
 
-pub fn down(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn down(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f")) {
             manifest_path = args.next() orelse {
                 writeErr("-f requires a manifest path\n", .{});
-                std.process.exit(1);
+                return ManifestCommandsError.InvalidArgument;
             };
         }
     }
 
     // load manifest to get service names and ordering
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
+        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
         writeErr("hint: create one with 'yoq init'\n", .{});
-        std.process.exit(1);
+        return ManifestCommandsError.ManifestLoadFailed;
+    };
+    defer manifest.deinit();
+
+    // derive app name from cwd basename
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
+        writeErr("failed to resolve working directory: {}\n", .{err});
+        return ManifestCommandsError.StoreError;
+    };
+    const app_name = std.fs.path.basename(cwd);
+
+    // find all containers belonging to this app
+    var ids = store.listAppContainerIds(alloc, app_name) catch |err| {
+        writeErr("failed to query app containers: {}\n", .{err});
+        return ManifestCommandsError.StoreError;
+    };
+    defer {
+        for (ids.items) |id| alloc.free(id);
+        ids.deinit(alloc);
+    }
+
+    if (ids.items.len == 0) {
+        writeErr("no running services found for {s}\n", .{app_name});
+        return;
+    }
+
+    // stop containers in reverse dependency order.
     };
     defer manifest.deinit();
 
@@ -428,10 +457,10 @@ pub fn down(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     writeErr("all services stopped\n", .{});
 }
 
-pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const service_name = args.next() orelse {
         writeErr("usage: yoq rollback <service>\n", .{});
-        std.process.exit(1);
+        return ManifestCommandsError.InvalidArgument;
     };
 
     // look up the previous successful deployment
@@ -447,7 +476,7 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
                 writeErr("rollback failed\n", .{});
             },
         }
-        std.process.exit(1);
+        return ManifestCommandsError.StoreError;
     };
     defer alloc.free(config);
 
@@ -455,7 +484,7 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("\nto apply this rollback, redeploy with this config using 'yoq up'\n", .{});
 }
 
-pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var service_name: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -468,12 +497,12 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
     const svc = service_name orelse {
         writeErr("usage: yoq history <service> [--json]\n", .{});
-        std.process.exit(1);
+        return ManifestCommandsError.InvalidArgument;
     };
 
     var deployments = store.listDeployments(alloc, svc) catch |err| {
         writeErr("failed to read deployment history: {}\n", .{err});
-        std.process.exit(1);
+        return ManifestCommandsError.StoreError;
     };
     defer {
         for (deployments.items) |dep| dep.deinit(alloc);
@@ -526,7 +555,7 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
 
 /// run a worker defined in the manifest by name.
 /// loads the manifest, finds the worker, pulls the image, runs it to completion.
-pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var worker_name: ?[]const u8 = null;
 
@@ -534,11 +563,45 @@ pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void 
         if (std.mem.eql(u8, arg, "-f")) {
             manifest_path = args.next() orelse {
                 writeErr("-f requires a manifest path\n", .{});
-                std.process.exit(1);
+                return ManifestCommandsError.InvalidArgument;
             };
         } else {
             worker_name = arg;
         }
+    }
+
+    const name = worker_name orelse {
+        writeErr("usage: yoq run-worker [-f manifest.toml] <name>\n", .{});
+        return ManifestCommandsError.InvalidArgument;
+    };
+
+    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
+        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+        writeErr("hint: create one with 'yoq init'\n", .{});
+        return ManifestCommandsError.ManifestLoadFailed;
+    };
+    defer manifest.deinit();
+
+    const worker = manifest.workerByName(name) orelse {
+        writeErr("unknown worker: {s}\n", .{name});
+        return ManifestCommandsError.UnknownService;
+    };
+
+    // pull image first
+    writeErr("pulling {s}...\n", .{worker.image});
+    if (!orchestrator.ensureImageAvailable(alloc, worker.image)) {
+        writeErr("failed to pull image: {s}\n", .{worker.image});
+        return ManifestCommandsError.DeploymentFailed;
+    }
+
+    writeErr("running worker {s}...\n", .{name});
+    if (orchestrator.runOneShot(alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, name)) {
+        writeErr("worker {s} completed successfully\n", .{name});
+    } else {
+        writeErr("worker {s} failed\n", .{name});
+        return ManifestCommandsError.DeploymentFailed;
+    }
+}
     }
 
     const name = worker_name orelse {

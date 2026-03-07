@@ -8,9 +8,17 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const formatTimestamp = cli.formatTimestamp;
 
+const PolicyCommandsError = error{
+    InvalidArgument,
+    PolicyNotFound,
+    StoreFailed,
+    SyncFailed,
+    OutOfMemory,
+};
+
 // -- network policy commands --
 
-pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var subcmd: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -33,40 +41,40 @@ pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
             \\  list                     list all policy rules
             \\
         , .{});
-        std.process.exit(1);
+        return PolicyCommandsError.InvalidArgument;
     };
 
     if (std.mem.eql(u8, cmd, "deny")) {
-        policyDeny(args, alloc);
+        policyDeny(args, alloc) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "allow")) {
-        policyAllow(args, alloc);
+        policyAllow(args, alloc) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "rm")) {
-        policyRm(args, alloc);
+        policyRm(args, alloc) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "list")) {
         // also check remaining args for --json
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
         }
-        policyList(alloc);
+        policyList(alloc) catch |e| return e;
     } else {
         writeErr("unknown policy command: {s}\n", .{cmd});
-        std.process.exit(1);
+        return PolicyCommandsError.InvalidArgument;
     }
 }
 
-fn policyDeny(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn policyDeny(args: *std.process.ArgIterator, alloc: std.mem.Allocator) PolicyCommandsError!void {
     const source = args.next() orelse {
         writeErr("usage: yoq policy deny <source> <target>\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.InvalidArgument;
     };
     const target = args.next() orelse {
         writeErr("usage: yoq policy deny <source> <target>\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.InvalidArgument;
     };
 
     store.addNetworkPolicy(source, target, "deny") catch {
         writeErr("failed to add deny rule\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.StoreFailed;
     };
 
     // sync BPF maps with updated rules
@@ -75,19 +83,19 @@ fn policyDeny(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s} -> {s}: deny\n", .{ source, target });
 }
 
-fn policyAllow(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn policyAllow(args: *std.process.ArgIterator, alloc: std.mem.Allocator) PolicyCommandsError!void {
     const source = args.next() orelse {
         writeErr("usage: yoq policy allow <source> <target>\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.InvalidArgument;
     };
     const target = args.next() orelse {
         writeErr("usage: yoq policy allow <source> <target>\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.InvalidArgument;
     };
 
     store.addNetworkPolicy(source, target, "allow") catch {
         writeErr("failed to add allow rule\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.StoreFailed;
     };
 
     // sync BPF maps with updated rules
@@ -96,19 +104,19 @@ fn policyAllow(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s} -> {s}: allow\n", .{ source, target });
 }
 
-fn policyRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+fn policyRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) PolicyCommandsError!void {
     const source = args.next() orelse {
         writeErr("usage: yoq policy rm <source> <target>\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.InvalidArgument;
     };
     const target = args.next() orelse {
         writeErr("usage: yoq policy rm <source> <target>\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.InvalidArgument;
     };
 
     store.removeNetworkPolicy(source, target) catch {
         writeErr("failed to remove policy rule\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.StoreFailed;
     };
 
     // sync BPF maps with updated rules
@@ -117,10 +125,10 @@ fn policyRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     write("{s} -> {s}: removed\n", .{ source, target });
 }
 
-fn policyList(alloc: std.mem.Allocator) void {
+fn policyList(alloc: std.mem.Allocator) PolicyCommandsError!void {
     var policies = store.listNetworkPolicies(alloc) catch {
         writeErr("failed to list policies\n", .{});
-        std.process.exit(1);
+        return PolicyCommandsError.StoreFailed;
     };
     defer {
         for (policies.items) |p| p.deinit(alloc);
