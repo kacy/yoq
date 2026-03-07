@@ -85,7 +85,10 @@ pub fn syncPolicies(alloc: std.mem.Allocator) void {
 
         // add entries for each (src, dst) pair
         for (src_ips.items) |src_str| {
-            const src_addr = ip_mod.parseIp(src_str) orelse continue;
+            const src_addr = ip_mod.parseIp(src_str) orelse {
+                log.warn("policy: invalid source IP '{s}' in {s} -> {s}", .{ src_str, pol.source_service, pol.target_service });
+                continue;
+            };
             const src_net = ebpf.ipToNetworkOrder(src_addr);
 
             // if this is an allow rule, isolate the source
@@ -94,7 +97,10 @@ pub fn syncPolicies(alloc: std.mem.Allocator) void {
             }
 
             for (dst_ips.items) |dst_str| {
-                const dst_addr = ip_mod.parseIp(dst_str) orelse continue;
+                const dst_addr = ip_mod.parseIp(dst_str) orelse {
+                    log.warn("policy: invalid destination IP '{s}' in {s} -> {s}", .{ dst_str, pol.source_service, pol.target_service });
+                    continue;
+                };
                 const dst_net = ebpf.ipToNetworkOrder(dst_addr);
 
                 if (is_allow) {
@@ -147,7 +153,10 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
             }
 
             for (dst_ips.items) |dst_str| {
-                const dst_addr = ip_mod.parseIp(dst_str) orelse continue;
+                const dst_addr = ip_mod.parseIp(dst_str) orelse {
+                    log.warn("policy: invalid target IP '{s}' for service '{s}'", .{ dst_str, pol.target_service });
+                    continue;
+                };
                 const dst_net = ebpf.ipToNetworkOrder(dst_addr);
 
                 if (is_allow) {
@@ -170,7 +179,10 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
             }
 
             for (src_ips.items) |src_str| {
-                const src_addr = ip_mod.parseIp(src_str) orelse continue;
+                const src_addr = ip_mod.parseIp(src_str) orelse {
+                    log.warn("policy: invalid source IP '{s}' for service '{s}'", .{ src_str, pol.source_service });
+                    continue;
+                };
                 const src_net = ebpf.ipToNetworkOrder(src_addr);
 
                 if (is_allow) {
