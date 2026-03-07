@@ -103,17 +103,18 @@ fn parseStatus(status: u32) ExitStatus {
         return .{ .exited = @intCast((status >> 8) & 0xff) };
     }
 
+    // WIFSTOPPED: (status & 0xff) == 0x7f
+    // Must check this BEFORE signaled because stopped status (0x7f) passes signaled check too
+    if (status & 0xff == 0x7f) {
+        // WSTOPSIG: (status >> 8) & 0xff
+        const stop_sig = (status >> 8) & 0xff;
+        return .{ .stopped = stop_sig };
+    }
+
     // WIFSIGNALED: ((status & 0x7f) + 1) >> 1 > 0
     const sig = status & 0x7f;
     if (((sig + 1) >> 1) > 0) {
         return .{ .signaled = sig };
-    }
-
-    // WIFSTOPPED: (status & 0xff) == 0x7f
-    // the signal that stopped the process is (status >> 8) & 0xff
-    if (status & 0xff == 0x7f) {
-        const stop_sig = (status >> 8) & 0xff;
-        return .{ .stopped = stop_sig };
     }
 
     return .running;

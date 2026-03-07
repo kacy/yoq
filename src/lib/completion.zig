@@ -39,6 +39,7 @@ const command_meta = [_]CommandMeta{
     .{ .name = "logs", .flags = &.{"--tail"} },
     .{ .name = "stop" },
     .{ .name = "rm" },
+    .{ .name = "restart" },
     .{ .name = "exec" },
     .{ .name = "status", .flags = &.{ "--verbose", "-v", "--server" } },
     .{ .name = "metrics", .flags = &.{ "--server", "--pairs" } },

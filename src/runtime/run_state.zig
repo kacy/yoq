@@ -76,6 +76,9 @@ fn configPath(buf: *[paths.max_path]u8, id: []const u8) RunStateError![]const u8
 }
 
 pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
+    // validate container ID to prevent path traversal
+    if (!container.isValidContainerId(id)) return RunStateError.InvalidId;
+
     paths.ensureDataDir(configs_subdir) catch return RunStateError.CreateFailed;
 
     var path_buf: [paths.max_path]u8 = undefined;
