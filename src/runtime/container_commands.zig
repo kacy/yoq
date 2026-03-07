@@ -45,6 +45,34 @@ const RunFlags = struct {
 
 // -- helpers --
 
+fn isFilesystemTarget(target: []const u8) bool {
+    return std.mem.startsWith(u8, target, "/") or
+        std.mem.startsWith(u8, target, "./") or
+        std.mem.startsWith(u8, target, "../") or
+        std.mem.eql(u8, target, ".") or
+        std.mem.eql(u8, target, "..");
+}
+
+fn persistStoppedState(record: *const store.ContainerRecord, exit_code: ?u8) void {
+    store.updateStatus(record.id, "stopped", null, exit_code) catch {};
+}
+
+fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
+    var attempts: usize = 0;
+    while (attempts < 100) : (attempts += 1) {
+        const record = store.load(alloc, id) catch {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            continue;
+        };
+        defer record.deinit(alloc);
+
+        if (std.mem.eql(u8, record.status, "stopped") and record.pid == null) return true;
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+
+    return false;
+}
+
 /// parse CLI flags for `yoq run`. consumes args up to and including the target,
 /// then collects remaining args as user command.
 fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) RunFlags {
@@ -556,8 +584,7 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     defer flags.user_argv.deinit(alloc);
 
     // detect if target is an image reference or a local rootfs path
-    const is_image = !std.mem.startsWith(u8, flags.target, "/") and
-        !std.mem.startsWith(u8, flags.target, "./");
+    const is_image = !isFilesystemTarget(flags.target);
 
     // resolve image config or use local rootfs
     var img = if (is_image)
@@ -707,12 +734,15 @@ pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     // check if the process is actually still alive before sending SIGTERM
     process.sendSignal(pid, 0) catch {
         // already dead — just update the record
-        store.updateStatus(id, "stopped", null, null) catch {};
+        persistStoppedState(&record, null);
         write("{s} (already stopped)\n", .{id});
         return;
     };
 
     stopProcess(pid);
+    if (!waitForStoppedState(alloc, record.id)) {
+        persistStoppedState(&record, null);
+    }
     write("{s}\n", .{record.id});
 }
 
@@ -769,8 +799,8 @@ pub fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     const record = resolveContainerRef(alloc, id);
 
     if (std.mem.eql(u8, record.status, "running")) {
-        record.deinit(alloc);
         writeErr("cannot remove running container {s} — stop it first\n", .{record.id});
+        record.deinit(alloc);
         std.process.exit(1);
     }
 
@@ -858,4 +888,14 @@ pub fn runSupervisor(args: *std.process.ArgIterator, alloc: std.mem.Allocator) v
 
     const exit_code = superviseSavedRun(id, &cfg, false);
     std.process.exit(exit_code);
+}
+
+test "filesystem target detection matches supported rootfs shapes" {
+    try std.testing.expect(isFilesystemTarget("/tmp/rootfs"));
+    try std.testing.expect(isFilesystemTarget("./rootfs"));
+    try std.testing.expect(isFilesystemTarget("../rootfs"));
+    try std.testing.expect(isFilesystemTarget("."));
+    try std.testing.expect(isFilesystemTarget(".."));
+    try std.testing.expect(!isFilesystemTarget("nginx:latest"));
+    try std.testing.expect(!isFilesystemTarget("library/nginx"));
 }

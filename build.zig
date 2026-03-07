@@ -94,6 +94,7 @@ pub fn build(b: *std.Build) void {
     //   zig build                         — build the yoq binary first
 
     const privileged_test_step = b.step("test-privileged", "Run privileged integration tests (requires root)");
+    privileged_test_step.dependOn(b.getInstallStep());
 
     const priv_tests = [_][]const u8{
         "tests/privileged/test_container.zig",

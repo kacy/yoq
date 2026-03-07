@@ -11,6 +11,7 @@
 // std.tar for tar extraction/creation. no external dependencies.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const blob_store = @import("store.zig");
 const paths = @import("../lib/paths.zig");
 const log = @import("../lib/log.zig");
@@ -659,7 +660,12 @@ test "create layer from empty dir returns null" {
     try std.testing.expect(result == null);
 }
 
+fn requireLayerCreationTestHost() !void {
+    if (builtin.os.tag == .macos) return error.SkipZigTest;
+}
+
 test "create layer from dir — round trip" {
+    try requireLayerCreationTestHost();
     const home = std.posix.getenv("HOME") orelse return;
     _ = home;
     const alloc = std.testing.allocator;
@@ -697,6 +703,7 @@ test "create layer from dir — round trip" {
 }
 
 test "create layer from dir — deterministic digest" {
+    try requireLayerCreationTestHost();
     const home = std.posix.getenv("HOME") orelse return;
     _ = home;
     const alloc = std.testing.allocator;
@@ -728,6 +735,7 @@ test "create layer from dir — deterministic digest" {
 }
 
 test "different content produces different layer digests" {
+    try requireLayerCreationTestHost();
     const home = std.posix.getenv("HOME") orelse return;
     _ = home;
     const alloc = std.testing.allocator;
