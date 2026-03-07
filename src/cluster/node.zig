@@ -115,24 +115,38 @@ pub const Node = struct {
 
         // collect peer IDs for raft
         const peer_ids = try alloc.alloc(NodeId, config.peers.len);
-        errdefer alloc.free(peer_ids);
         for (config.peers, 0..) |p, i| {
             peer_ids[i] = p.id;
         }
+        // Note: peer_ids will be owned by Raft after successful init
+        // If Raft.init fails, we must clean up peer_ids manually
+        // If Raft.init succeeds, Raft.deinit will free peer_ids
 
         // initialize transport
-        var transport = Transport.init(alloc, config.port) catch return NodeError.InitFailed;
+        var transport = Transport.init(alloc, config.port) catch {
+            alloc.free(peer_ids);
+            return NodeError.InitFailed;
+        };
         errdefer transport.deinit();
         transport.setLocalNodeId(config.id);
 
         for (config.peers) |p| {
-            transport.addPeer(p.id, p.addr, p.port) catch return NodeError.InitFailed;
+            transport.addPeer(p.id, p.addr, p.port) catch {
+                alloc.free(peer_ids);
+                return NodeError.InitFailed;
+            };
         }
 
-        transport.requireAuth() catch return NodeError.InitFailed;
+        transport.requireAuth() catch {
+            alloc.free(peer_ids);
+            return NodeError.InitFailed;
+        };
 
-        // initialize raft
-        var raft = Raft.init(alloc, config.id, peer_ids, &log) catch return NodeError.InitFailed;
+        // initialize raft - takes ownership of peer_ids
+        var raft = Raft.init(alloc, config.id, peer_ids, &log) catch {
+            alloc.free(peer_ids);
+            return NodeError.InitFailed;
+        };
         errdefer raft.deinit();
 
         // copy raft's log pointer — the log is stored in the node, so

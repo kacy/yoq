@@ -138,6 +138,7 @@ pub const Raft = struct {
     pub fn deinit(self: *Raft) void {
         self.alloc.free(self.next_index);
         self.alloc.free(self.match_index);
+        self.alloc.free(self.peers);
         self.actions.deinit(self.alloc);
     }
 
@@ -414,8 +415,15 @@ pub const Raft = struct {
     }
 
     /// return all pending actions and clear the queue.
+    /// caller owns the returned slice and must free it with self.alloc.free(actions)
+    /// note: returns an empty non-owned slice on allocation failure - caller must NOT free in that case
     pub fn drainActions(self: *Raft) []Action {
-        return self.actions.toOwnedSlice(self.alloc) catch @constCast(&.{});
+        return self.actions.toOwnedSlice(self.alloc) catch blk: {
+            // on allocation failure, clear the queue and return empty
+            // caller must check if actions.len == 0 before freeing
+            self.actions.clearRetainingCapacity();
+            break :blk &.{};
+        };
     }
 
     /// called by the node after a successful snapshot. updates the
@@ -577,7 +585,7 @@ pub const Raft = struct {
         const last = self.log.lastIndex();
 
         var n = last;
-        while (n > self.commit_index) : (n -= 1) {
+        while (n > self.commit_index and n > 0) : (n -= 1) {
             if (self.log.termAt(n) != current_term) continue;
 
             // count peers with match_index >= n (including self)

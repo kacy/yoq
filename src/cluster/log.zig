@@ -15,6 +15,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const types = @import("raft_types.zig");
+const logger = @import("../lib/log.zig");
 
 const Term = types.Term;
 const LogIndex = types.LogIndex;
@@ -85,7 +86,9 @@ pub const Log = struct {
             "UPDATE raft_state SET current_term = ? WHERE id = 1;",
             .{},
             .{@as(i64, @intCast(term))},
-        ) catch {};
+        ) catch |e| {
+            logger.warn("raft_log: failed to set current_term to {d}: {}", .{ term, e });
+        };
     }
 
     pub fn getVotedFor(self: *Log) ?NodeId {
@@ -105,7 +108,9 @@ pub const Log = struct {
             "UPDATE raft_state SET voted_for = ? WHERE id = 1;",
             .{},
             .{val},
-        ) catch {};
+        ) catch |e| {
+            logger.warn("raft_log: failed to set voted_for to {?d}: {}", .{ id, e });
+        };
     }
 
     // -- snapshot metadata --
@@ -146,7 +151,9 @@ pub const Log = struct {
                 @as(i64, @intCast(meta.last_included_term)),
                 @as(i64, @intCast(meta.data_len)),
             },
-        ) catch {};
+        ) catch |e| {
+            logger.warn("raft_log: failed to set snapshot metadata: {}", .{e});
+        };
     }
 
     // -- log operations --
@@ -257,7 +264,9 @@ pub const Log = struct {
             "DELETE FROM raft_log WHERE log_index >= ?;",
             .{},
             .{@as(i64, @intCast(index))},
-        ) catch {};
+        ) catch |e| {
+            logger.warn("raft_log: failed to truncate from index {d}: {}", .{ index, e });
+        };
     }
 
     /// remove all entries up to and including the given index.
@@ -268,7 +277,9 @@ pub const Log = struct {
             "DELETE FROM raft_log WHERE log_index <= ?;",
             .{},
             .{@as(i64, @intCast(index))},
-        ) catch {};
+        ) catch |e| {
+            logger.warn("raft_log: failed to truncate up to index {d}: {}", .{ index, e });
+        };
     }
 
     /// get entries in range [from, to] inclusive.
