@@ -103,6 +103,9 @@ pub fn setClusterDb(db: ?*sqlite.Db) void {
 /// queries the service_names table for the IP address.
 /// returns null if the name isn't found or the DB isn't available.
 pub fn lookupClusterService(name: []const u8) ?[4]u8 {
+    // validate name parameter
+    if (name.len == 0 or name.len > max_name_len) return null;
+
     cluster_db_mutex.lock();
     defer cluster_db_mutex.unlock();
 
@@ -160,6 +163,12 @@ fn isSafeIpForDns(ip: [4]u8) bool {
 /// if the same name already exists, the IP is updated (last-write-wins).
 pub fn registerService(name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     if (name.len == 0 or name.len > max_name_len) return;
+
+    // validate container_id is not empty and contains safe characters
+    if (container_id.len == 0) {
+        log.warn("dns: rejected attempt to register service '{s}' with empty container_id", .{name});
+        return;
+    }
 
     // validate name contains only safe characters — reject control chars,
     // whitespace, and non-printable characters that could cause issues
@@ -235,6 +244,12 @@ pub fn registerService(name: []const u8, container_id: []const u8, container_ip:
 
 /// unregister all service names for a container.
 pub fn unregisterService(container_id: []const u8) void {
+    // validate container_id is not empty
+    if (container_id.len == 0) {
+        log.warn("dns: unregisterService called with empty container_id", .{});
+        return;
+    }
+
     registry_mutex.lock();
     defer registry_mutex.unlock();
 
