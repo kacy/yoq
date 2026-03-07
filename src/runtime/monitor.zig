@@ -429,8 +429,9 @@ test "suggestTuning — high memory usage with pressure" {
     const msg = suggestTuning(&buf, snap);
     try std.testing.expect(msg != null);
     // should contain concrete numbers and suggestion
+    try std.testing.expect(std.mem.indexOf(u8, msg.?, "450 MB") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg.?, "512 MB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg.?, "1024 MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg.?, "1.0 GB") != null); // 512*2 = 1024 MB = 1.0 GB
     try std.testing.expect(std.mem.indexOf(u8, msg.?, "suggest increasing") != null);
 }
 

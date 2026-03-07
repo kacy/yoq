@@ -768,17 +768,15 @@ fn readU16(buf: *const [2]u8) u16 {
 }
 
 fn writeU16(buf: *[2]u8, val: u16) void {
-    const be = std.mem.nativeToBig(u16, val);
-    buf[0] = @truncate(be >> 8);
-    buf[1] = @truncate(be);
+    buf[0] = @truncate(val >> 8);
+    buf[1] = @truncate(val);
 }
 
 fn writeU32(buf: *[4]u8, val: u32) void {
-    const be = std.mem.nativeToBig(u32, val);
-    buf[0] = @truncate(be >> 24);
-    buf[1] = @truncate(be >> 16);
-    buf[2] = @truncate(be >> 8);
-    buf[3] = @truncate(be);
+    buf[0] = @truncate(val >> 24);
+    buf[1] = @truncate(val >> 16);
+    buf[2] = @truncate(val >> 8);
+    buf[3] = @truncate(val);
 }
 
 // -- tests --
