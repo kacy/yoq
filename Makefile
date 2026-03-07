@@ -1,4 +1,4 @@
-.PHONY: build run test test-integration test-privileged clean bpf install fmt loc
+.PHONY: build run test test-integration test-privileged clean clean-all bpf install fmt loc cache-sqlite
 
 build:
 	zig build -Doptimize=ReleaseSafe
@@ -17,6 +17,12 @@ test-privileged: build
 
 clean:
 	rm -rf zig-out .zig-cache
+
+clean-all: clean
+	rm -rf vendor/prebuilt
+
+cache-sqlite:
+	zig build cache-sqlite
 
 bpf:
 	zig build bpf

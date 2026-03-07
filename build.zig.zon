@@ -36,6 +36,11 @@
             .url = "git+https://github.com/vrischmann/zig-sqlite?ref=zig-0.15.1#c1a5f2720bad283f870df77b41430bd461bb9182",
             .hash = "sqlite-3.48.0-F2R_a9eODgDPCO5CDptJHZINZSIn48IFVIWUhuxxwGTb",
         },
+        // upstream sqlite amalgamation - needed for cache-sqlite step
+        .sqlite_amalgamation = .{
+            .url = "https://www.sqlite.org/2025/sqlite-amalgamation-3490200.zip",
+            .hash = "N-V-__8AAH-mpwB7g3MnqYU-ooUBF1t99RP27dZ9addtMVXD",
+        },
     },
     .paths = .{
         "build.zig",
