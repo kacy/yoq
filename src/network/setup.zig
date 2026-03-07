@@ -310,10 +310,18 @@ pub fn setupContainer(
     bridge.createVethPair(host_veth, "eth0", bridge.default_bridge) catch {
         return SetupError.VethFailed;
     };
-    errdefer bridge.deleteVeth(host_veth) catch {};
+    errdefer {
+        // Clean up veth on any subsequent error
+        bridge.deleteVeth(host_veth) catch |e| {
+            log.warn("setup: failed to clean up veth {s} after error: {}", .{ host_veth, e });
+        };
+    }
 
     // 4. move peer into container namespace
-    bridge.moveToNamespace("eth0", pid) catch return SetupError.VethFailed;
+    bridge.moveToNamespace("eth0", pid) catch |e| {
+        log.err("setup: failed to move veth to container namespace: {}", .{e});
+        return SetupError.VethFailed;
+    };
 
     // 5. configure inside container namespace
     if (subnet_config) |sc| {

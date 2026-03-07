@@ -69,11 +69,11 @@ pub fn ensureBridgeWithConfig(config: BridgeConfig) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.CreateFailed;
     defer posix.close(fd);
 
-    // check if bridge already exists
+    // check if bridge already exists (TOCTOU race possible here, but NLM_F_EXCL handles it)
     const existing = nl.getIfIndex(fd, config.name) catch 0;
     if (existing != 0) return; // already exists
 
-    // create bridge
+    // create bridge with EXCL flag for atomic create-or-fail
     var buf: [nl.buf_size]u8 align(4) = undefined;
     var mb = nl.MessageBuilder.init(&buf);
 
@@ -90,7 +90,16 @@ pub fn ensureBridgeWithConfig(config: BridgeConfig) BridgeError!void {
     mb.putAttrStr(hdr, nl.IFLA.INFO_KIND, "bridge") catch return BridgeError.CreateFailed;
     mb.endNested(linkinfo);
 
-    nl.sendAndCheck(fd, mb.message()) catch return BridgeError.CreateFailed;
+    // Send and check for specific errors
+    nl.sendAndCheck(fd, mb.message()) catch |e| {
+        // If it already exists, that's fine (another process created it)
+        if (e == nl.NetlinkError.NotFound or e == nl.NetlinkError.KernelError) {
+            // Check again if it now exists
+            const idx = nl.getIfIndex(fd, config.name) catch return BridgeError.CreateFailed;
+            if (idx != 0) return; // Another process created it successfully
+        }
+        return BridgeError.CreateFailed;
+    };
 
     // assign IP address to bridge
     const bridge_idx = nl.getIfIndex(fd, config.name) catch return BridgeError.CreateFailed;
@@ -362,12 +371,34 @@ fn addDefaultRoute(fd: posix.fd_t, gw: *const [4]u8) BridgeError!void {
 
 // -- naming helpers --
 
+/// validate that a container ID contains only safe characters.
+/// only allows alphanumeric characters (no special chars that could
+/// cause issues in interface names or shell contexts).
+fn isValidContainerId(id: []const u8) bool {
+    // Allow empty IDs (will result in "veth_")
+    if (id.len > 64) return false;
+    for (id) |c| {
+        // Only allow alphanumeric characters
+        if (!((c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9')))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// generate the host-side veth name from a container id.
 /// format: "veth_" + first 10 chars of container id.
 /// linux interface names are limited to 15 chars (IFNAMSIZ - 1).
 /// "veth_" is 5 chars, leaving room for 10 ID chars. using 10 instead
 /// of 6 reduces collision probability from ~1/16M to ~1/1T.
 pub fn vethName(container_id: []const u8, buf: *[32]u8) []const u8 {
+    // SECURITY: Validate container ID to prevent injection
+    if (!isValidContainerId(container_id)) {
+        return "veth_invalid";
+    }
     const id_chars = @min(container_id.len, 10);
     const name = std.fmt.bufPrint(buf, "veth_{s}", .{container_id[0..id_chars]}) catch "veth_err";
     return name;
