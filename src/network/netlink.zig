@@ -159,14 +159,13 @@ pub const TC_H = struct {
 };
 
 /// TCA_BPF attributes — nested inside TCA_OPTIONS when kind="bpf".
-/// these share numeric values with top-level TCA attrs (e.g. FD=1,
-/// KIND=1) because they live at different nesting levels.
+/// values must match the kernel's TCA_BPF_* enum in pkt_cls.h.
 pub const TCA_BPF = struct {
     pub const FLAG_ACT_DIRECT: u32 = 1;
-    pub const FD: u16 = 1;
-    pub const NAME: u16 = 2;
-    pub const FLAGS: u16 = 3;
-    pub const FLAGS_GEN: u16 = 4;
+    pub const FD: u16 = 6;
+    pub const NAME: u16 = 7;
+    pub const FLAGS: u16 = 8;
+    pub const FLAGS_GEN: u16 = 9;
 };
 
 /// from linux/pkt_sched.h — used for TC qdisc/filter operations
