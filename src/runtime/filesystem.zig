@@ -16,6 +16,9 @@ const log = @import("../lib/log.zig");
 pub const FilesystemError = error{
     /// a mount syscall failed (overlayfs, bind, essential fs, or remount)
     MountFailed,
+    /// mount failed due to permission/capability restrictions (EPERM/EACCES)
+    /// this triggers auto-fallback to host mode
+    MountPermissionDenied,
     /// pivot_root syscall failed — could not switch to new rootfs
     PivotFailed,
     /// umount2 failed when detaching the old root after pivot
@@ -279,7 +282,14 @@ pub fn mountEssential() FilesystemError!void {
         linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC,
         0,
     );
-    if (syscall_util.isError(rc1)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc1)) {
+        const errno = syscall_util.getErrno(rc1);
+        // EPERM (1) or EACCES (13) indicates permission/capability restriction
+        if (errno == 1 or errno == 13) {
+            return FilesystemError.MountPermissionDenied;
+        }
+        return FilesystemError.MountFailed;
+    }
 
     // /dev — devices (tmpfs)
     mkdirIfNeeded("/dev") catch return FilesystemError.MkdirFailed;
@@ -290,7 +300,13 @@ pub fn mountEssential() FilesystemError!void {
         linux.MS.NOSUID | linux.MS.STRICTATIME,
         @intFromPtr(@as([*:0]const u8, "mode=755,size=65536k")),
     );
-    if (syscall_util.isError(rc2)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc2)) {
+        const errno = syscall_util.getErrno(rc2);
+        if (errno == 1 or errno == 13) {
+            return FilesystemError.MountPermissionDenied;
+        }
+        return FilesystemError.MountFailed;
+    }
 
     // /sys — kernel interface (sysfs, read-only)
     mkdirIfNeeded("/sys") catch return FilesystemError.MkdirFailed;

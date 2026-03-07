@@ -396,6 +396,7 @@ fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirr
             .hostname = cfg.hostname,
             .mounts = cfg.mounts,
             .limits = cfg.limits,
+            .host_mode = false, // auto-detected at runtime based on capability restrictions
         },
         .status = .created,
         .pid = null,
