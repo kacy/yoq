@@ -427,7 +427,7 @@ fn isSymlink(path: []const u8) bool {
 /// returns the file descriptor on success.
 fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
     // open with O_NOFOLLOW - this will fail if path is a symlink
-    const fd = posix.open(path, .{ .O_NOFOLLOW = true, .O_RDONLY = true, .O_CLOEXEC = true }, 0) catch |e| {
+    const fd = posix.open(path, .{ .NOFOLLOW = true, .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |e| {
         // check if this is specifically a symlink error
         if (e == error.NotDir or e == error.SymLinkLoop) {
             log.err("filesystem: path is a symlink or contains symlinks: {s}", .{path});

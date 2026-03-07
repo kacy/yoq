@@ -185,21 +185,21 @@ fn psHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
     }
-    container_cmds.ps(alloc);
+    try container_cmds.ps(alloc);
 }
 
 fn imagesHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
     }
-    image_cmds.images(alloc);
+    try image_cmds.images(alloc);
 }
 
 fn pruneHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
     }
-    image_cmds.prune(alloc);
+    try image_cmds.prune(alloc);
 }
 
 test "every command name is unique" {

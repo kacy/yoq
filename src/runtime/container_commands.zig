@@ -604,7 +604,7 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     // resolve image config or use local rootfs
     var img = if (is_image)
-        image_cmds.pullAndResolveImage(alloc, flags.target)
+        try image_cmds.pullAndResolveImage(alloc, flags.target)
     else
         image_cmds.ImageResolution{ .rootfs = flags.target };
     defer img.deinit();
@@ -824,9 +824,9 @@ pub fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     write("{s}\n", .{id});
 }
 
-pub fn log(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
+pub fn log(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const ref = requireArg(args, "usage: yoq logs <container-id|name> [--tail N] [-f]\n");
-    const record = resolveContainerRef(alloc, ref);
+    const record = try resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
 
     var tail_lines: usize = 0;

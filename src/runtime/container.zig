@@ -333,14 +333,14 @@ pub const Container = struct {
         // these are hard failures - resource limits must be enforced
         self.runtime.cgroup.?.addProcess(spawn_result.pid) catch |e| {
             log.err("failed to add process to cgroup for {s}: {}. stopping container.", .{ config.id, e });
-            _ = process.kill(spawn_result.pid);
+            _ = process.kill(spawn_result.pid) catch {};
             self.runtime.cgroup.?.destroy() catch {};
             return ContainerError.StartFailed;
         };
 
         self.runtime.cgroup.?.setLimits(config.limits) catch |e| {
             log.err("failed to set cgroup limits for {s}: {}. stopping container.", .{ config.id, e });
-            _ = process.kill(spawn_result.pid);
+            _ = process.kill(spawn_result.pid) catch {};
             self.runtime.cgroup.?.destroy() catch {};
             return ContainerError.StartFailed;
         };
@@ -480,9 +480,11 @@ pub const Container = struct {
         }
 
         // cgroup is now mandatory - always clean it up
-        self.runtime.cgroup.destroy() catch |err| {
-            log.warn("failed to destroy cgroup for {s}: {}", .{ self.config.id, err });
-        };
+        if (self.runtime.cgroup) |cg| {
+            cg.destroy() catch |err| {
+                log.warn("failed to destroy cgroup for {s}: {}", .{ self.config.id, err });
+            };
+        }
 
         store.updateStatus(self.config.id, "stopped", null, exit_code) catch |e| {
             log.warn("failed to update final status for {s}: {}", .{ self.config.id, e });

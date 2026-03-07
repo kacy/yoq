@@ -188,13 +188,13 @@ pub fn spawn(
             // redirect stdout and stderr to the log pipes
             // if this fails, the container output would leak to parent - abort
             posix.dup2(ctx.stdout_write_fd, posix.STDOUT_FILENO) catch {
-                log.err("namespace: failed to redirect stdout - aborting container start");
+                log.err("namespace: failed to redirect stdout - aborting container start", .{});
                 posix.close(ctx.stdout_write_fd);
                 posix.close(ctx.stderr_write_fd);
                 return 1;
             };
             posix.dup2(ctx.stderr_write_fd, posix.STDERR_FILENO) catch {
-                log.err("namespace: failed to redirect stderr - aborting container start");
+                log.err("namespace: failed to redirect stderr - aborting container start", .{});
                 posix.close(ctx.stderr_write_fd);
                 return 1;
             };

@@ -341,7 +341,7 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t
     // defer cleanup after successful watch creation
     defer {
         // explicitly remove watch before closing fd (good practice)
-        _ = linux.inotify_rm_watch(fd, wd);
+        _ = linux.inotify_rm_watch(fd, @intCast(wd));
         posix.close(fd);
     }
 

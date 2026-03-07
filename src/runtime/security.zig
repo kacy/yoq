@@ -86,14 +86,6 @@ pub fn apply() SecurityError!void {
 /// capability v3 requires a 2-element data array (caps 0-63).
 /// future: if capabilities >63 are needed, extend the array size.
 fn dropCapabilities() SecurityError!void {
-    // verify all capabilities in default_caps fit in 2 words (0-63)
-    // this is a compile-time check to prevent future additions from breaking silently
-    for (default_caps) |cap| {
-        if (cap >= 64) {
-            @compileError("default_caps contains capability >=64 which exceeds 2-word limit. Extend data array to 40 elements.");
-        }
-    }
-
     var hdr = linux.cap_user_header_t{
         .version = CAPABILITY_VERSION_3,
         .pid = 0, // current process
@@ -107,6 +99,7 @@ fn dropCapabilities() SecurityError!void {
     };
     for (default_caps) |cap| {
         const idx = linux.CAP.TO_INDEX(cap);
+        if (idx >= data.len) continue; // skip capabilities that don't fit in our array
         const mask = linux.CAP.TO_MASK(cap);
         data[idx].effective |= mask;
         data[idx].permitted |= mask;

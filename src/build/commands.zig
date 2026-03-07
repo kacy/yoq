@@ -176,6 +176,8 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
             build_engine.BuildError.ImageStoreFailed => writeErr("failed to store image\n", .{}),
             build_engine.BuildError.ParseFailed => writeErr("failed to parse build instructions\n", .{}),
             build_engine.BuildError.CacheFailed => writeErr("cache error\n", .{}),
+            error.OutOfMemory => writeErr("out of memory\n", .{}),
+            error.MetadataFailed => writeErr("metadata error\n", .{}),
         }
         return BuildCommandsError.BuildFailed;
     };

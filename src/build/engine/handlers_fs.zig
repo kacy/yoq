@@ -214,6 +214,7 @@ pub fn processRun(alloc: std.mem.Allocator, state: *types.BuildState, args: []co
         .exited => |code| code,
         .signaled => 128,
         .running => 0,
+        .stopped => 0,
     };
 
     if (exit_code != 0) return types.BuildError.RunStepFailed;

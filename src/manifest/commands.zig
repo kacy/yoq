@@ -387,33 +387,6 @@ pub fn down(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 
     // stop containers in reverse dependency order.
-    };
-    defer manifest.deinit();
-
-    // derive app name from cwd basename
-    var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
-        writeErr("failed to resolve working directory: {}\n", .{err});
-        std.process.exit(1);
-    };
-    const app_name = std.fs.path.basename(cwd);
-
-    // find all containers belonging to this app
-    var ids = store.listAppContainerIds(alloc, app_name) catch |err| {
-        writeErr("failed to query app containers: {}\n", .{err});
-        std.process.exit(1);
-    };
-    defer {
-        for (ids.items) |id| alloc.free(id);
-        ids.deinit(alloc);
-    }
-
-    if (ids.items.len == 0) {
-        writeErr("no running services found for {s}\n", .{app_name});
-        return;
-    }
-
-    // stop containers in reverse dependency order.
     // iterate services in reverse (manifest is topo-sorted, so reverse = dependents first)
     var i: usize = manifest.services.len;
     while (i > 0) {
@@ -600,39 +573,5 @@ pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
     } else {
         writeErr("worker {s} failed\n", .{name});
         return ManifestCommandsError.DeploymentFailed;
-    }
-}
-    }
-
-    const name = worker_name orelse {
-        writeErr("usage: yoq run-worker [-f manifest.toml] <name>\n", .{});
-        std.process.exit(1);
-    };
-
-    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
-        writeErr("hint: create one with 'yoq init'\n", .{});
-        std.process.exit(1);
-    };
-    defer manifest.deinit();
-
-    const worker = manifest.workerByName(name) orelse {
-        writeErr("unknown worker: {s}\n", .{name});
-        std.process.exit(1);
-    };
-
-    // pull image first
-    writeErr("pulling {s}...\n", .{worker.image});
-    if (!orchestrator.ensureImageAvailable(alloc, worker.image)) {
-        writeErr("failed to pull image: {s}\n", .{worker.image});
-        std.process.exit(1);
-    }
-
-    writeErr("running worker {s}...\n", .{name});
-    if (orchestrator.runOneShot(alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, name)) {
-        writeErr("worker {s} completed successfully\n", .{name});
-    } else {
-        writeErr("worker {s} failed\n", .{name});
-        std.process.exit(1);
     }
 }
