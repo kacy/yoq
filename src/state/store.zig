@@ -509,8 +509,10 @@ pub fn removeImage(id: []const u8) StoreError!void {
     const db = try getDb();
     defer releaseDb();
 
-    db.exec("DELETE FROM images WHERE id = ?;", .{}, .{id}) catch
+    const rows_affected = db.exec("DELETE FROM images WHERE id = ?;", .{}, .{id}) catch
         return StoreError.WriteFailed;
+
+    if (rows_affected == 0) return StoreError.NotFound;
 }
 
 // -- build cache --

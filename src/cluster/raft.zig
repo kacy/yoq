@@ -1143,10 +1143,10 @@ test "leader sends install_snapshot when entries are truncated" {
         .data_len = 1024,
     });
 
-    // peer 2's next_index is 1 (far behind the snapshot boundary).
-    // since entries 1..50 have been truncated, the leader should
-    // send a snapshot instead of append entries.
-    leader.next_index[0] = 1; // peer 2 is at index 0 in peers array
+    // peer 2's next_index is 2 (one entry behind, but entry 1 is before snapshot).
+    // since prev_index would be 1, and entry 1 has been truncated (term=0),
+    // the leader should send a snapshot instead of append entries.
+    leader.next_index[0] = 2; // peer 2 is at index 0 in peers array
 
     // trigger a heartbeat
     leader.heartbeat_ticks = heartbeat_interval;
