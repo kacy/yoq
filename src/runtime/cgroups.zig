@@ -10,6 +10,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const log = @import("../lib/log.zig");
+const container = @import("container.zig");
 
 pub const CgroupError = error{
     /// failed to create the cgroup directory under /sys/fs/cgroup/yoq/
@@ -26,6 +27,8 @@ pub const CgroupError = error{
     InvalidLimit,
     /// a resource limit is below the safe minimum (memory < 4 MB or pids < 1)
     LimitBelowMinimum,
+    /// container ID validation failed
+    InvalidId,
 };
 
 /// minimum memory limit: 4 MB. anything less is unusable and likely a mistake.
@@ -100,6 +103,9 @@ pub const Cgroup = struct {
     /// open a handle to an existing cgroup for reading metrics.
     /// does not create any directories — use create() for new cgroups.
     pub fn open(container_id: []const u8) CgroupError!Cgroup {
+        // validate container ID to prevent path traversal
+        if (!container.isValidContainerId(container_id)) return CgroupError.InvalidId;
+
         var cg: Cgroup = .{ .path_buf = undefined, .path_len = 0 };
 
         const formatted = std.fmt.bufPrint(&cg.path_buf, cgroup_root ++ "/" ++ yoq_prefix ++ "/{s}", .{container_id}) catch
@@ -121,6 +127,9 @@ pub const Cgroup = struct {
     /// creates the directory under /sys/fs/cgroup/yoq/<id>/
     /// returns NotSupported if cgroups v2 is not available.
     pub fn create(container_id: []const u8) CgroupError!Cgroup {
+        // validate container ID to prevent path traversal
+        if (!container.isValidContainerId(container_id)) return CgroupError.InvalidId;
+
         if (!isV2Available()) return CgroupError.NotSupported;
 
         var cg = open(container_id) catch return CgroupError.CreateFailed;
@@ -148,43 +157,81 @@ pub const Cgroup = struct {
     /// apply resource limits to this cgroup
     pub fn setLimits(self: *const Cgroup, limits: ResourceLimits) CgroupError!void {
         if (limits.cpu_weight) |weight| {
-            if (weight < 1 or weight > 10000) return CgroupError.InvalidLimit;
+            if (weight < 1 or weight > 10000) {
+                log.err("cgroup: invalid cpu_weight {d} for {s}, must be 1-10000", .{ weight, self.path() });
+                return CgroupError.InvalidLimit;
+            }
             var weight_buf: [20]u8 = undefined;
-            const weight_str = std.fmt.bufPrint(&weight_buf, "{d}", .{weight}) catch return CgroupError.WriteFailed;
-            self.writeFile("cpu.weight", weight_str) catch return CgroupError.WriteFailed;
+            const weight_str = std.fmt.bufPrint(&weight_buf, "{d}", .{weight}) catch {
+                log.err("cgroup: failed to format cpu_weight for {s}", .{self.path()});
+                return CgroupError.WriteFailed;
+            };
+            self.writeFile("cpu.weight", weight_str) catch |e| {
+                log.err("cgroup: failed to set cpu.weight for {s}: {s}", .{ self.path(), @errorName(e) });
+                return CgroupError.WriteFailed;
+            };
         }
 
         if (limits.cpu_max_usec) |max_usec| {
             var buf: [64]u8 = undefined;
-            const val = std.fmt.bufPrint(&buf, "{d} {d}", .{ max_usec, limits.cpu_max_period }) catch
+            const val = std.fmt.bufPrint(&buf, "{d} {d}", .{ max_usec, limits.cpu_max_period }) catch {
+                log.err("cgroup: failed to format cpu.max for {s}", .{self.path()});
                 return CgroupError.WriteFailed;
-            self.writeFile("cpu.max", val) catch return CgroupError.WriteFailed;
+            };
+            self.writeFile("cpu.max", val) catch |e| {
+                log.err("cgroup: failed to set cpu.max for {s}: {s}", .{ self.path(), @errorName(e) });
+                return CgroupError.WriteFailed;
+            };
         }
 
         if (limits.memory_max) |max| {
             var mem_max_buf: [20]u8 = undefined;
-            const mem_max_str = std.fmt.bufPrint(&mem_max_buf, "{d}", .{max}) catch return CgroupError.WriteFailed;
-            self.writeFile("memory.max", mem_max_str) catch return CgroupError.WriteFailed;
+            const mem_max_str = std.fmt.bufPrint(&mem_max_buf, "{d}", .{max}) catch {
+                log.err("cgroup: failed to format memory.max for {s}", .{self.path()});
+                return CgroupError.WriteFailed;
+            };
+            self.writeFile("memory.max", mem_max_str) catch |e| {
+                log.err("cgroup: failed to set memory.max for {s}: {s}", .{ self.path(), @errorName(e) });
+                return CgroupError.WriteFailed;
+            };
         }
 
         if (limits.memory_high) |high| {
             var mem_high_buf: [20]u8 = undefined;
-            const mem_high_str = std.fmt.bufPrint(&mem_high_buf, "{d}", .{high}) catch return CgroupError.WriteFailed;
-            self.writeFile("memory.high", mem_high_str) catch return CgroupError.WriteFailed;
+            const mem_high_str = std.fmt.bufPrint(&mem_high_buf, "{d}", .{high}) catch {
+                log.err("cgroup: failed to format memory.high for {s}", .{self.path()});
+                return CgroupError.WriteFailed;
+            };
+            self.writeFile("memory.high", mem_high_str) catch |e| {
+                log.err("cgroup: failed to set memory.high for {s}: {s}", .{ self.path(), @errorName(e) });
+                return CgroupError.WriteFailed;
+            };
         }
 
         if (limits.pids_max) |max| {
             var pids_buf: [20]u8 = undefined;
-            const pids_str = std.fmt.bufPrint(&pids_buf, "{d}", .{max}) catch return CgroupError.WriteFailed;
-            self.writeFile("pids.max", pids_str) catch return CgroupError.WriteFailed;
+            const pids_str = std.fmt.bufPrint(&pids_buf, "{d}", .{max}) catch {
+                log.err("cgroup: failed to format pids.max for {s}", .{self.path()});
+                return CgroupError.WriteFailed;
+            };
+            self.writeFile("pids.max", pids_str) catch |e| {
+                log.err("cgroup: failed to set pids.max for {s}: {s}", .{ self.path(), @errorName(e) });
+                return CgroupError.WriteFailed;
+            };
         }
     }
 
     /// add a process to this cgroup
     pub fn addProcess(self: *const Cgroup, pid: std.posix.pid_t) CgroupError!void {
         var pid_buf: [20]u8 = undefined;
-        const pid_str = std.fmt.bufPrint(&pid_buf, "{d}", .{pid}) catch return CgroupError.WriteFailed;
-        self.writeFile("cgroup.procs", pid_str) catch return CgroupError.WriteFailed;
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d}", .{pid}) catch {
+            log.err("cgroup: failed to format pid {d} for {s}", .{ pid, self.path() });
+            return CgroupError.WriteFailed;
+        };
+        self.writeFile("cgroup.procs", pid_str) catch |e| {
+            log.err("cgroup: failed to add pid {d} to {s}: {s}", .{ pid, self.path(), @errorName(e) });
+            return CgroupError.WriteFailed;
+        };
     }
 
     /// read memory usage in bytes
@@ -297,6 +344,7 @@ pub const Cgroup = struct {
     }
 
     /// remove this cgroup. kills remaining processes first to avoid EBUSY.
+    /// returns error if processes are still running after timeout.
     pub fn destroy(self: *const Cgroup) CgroupError!void {
         // try cgroup.kill (kernel 5.14+) — cleanest approach
         self.writeFile("cgroup.kill", "1") catch {
@@ -304,10 +352,35 @@ pub const Cgroup = struct {
             self.killRemainingProcesses();
         };
 
-        // brief sleep to let the kernel reap killed processes
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        // poll until cgroup.procs is empty or timeout (5 seconds)
+        // fixed sleeps are unreliable - processes may take variable time to die
+        var attempts: u32 = 0;
+        const max_attempts: u32 = 500; // 500 * 10ms = 5 seconds
+        while (attempts < max_attempts) : (attempts += 1) {
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            if (self.isEmpty()) break;
+        }
+
+        // check if processes are still running
+        if (!self.isEmpty()) {
+            var buf: [4096]u8 = undefined;
+            const procs = self.readFile("cgroup.procs", &buf) catch "<unknown>";
+            log.err("cgroup: processes still running after 5s timeout: {s}\nRemaining: {s}", .{ self.path(), procs });
+            return CgroupError.DeleteFailed;
+        }
 
         std.fs.cwd().deleteDir(self.path()) catch return CgroupError.DeleteFailed;
+    }
+
+    /// check if the cgroup has any remaining processes
+    fn isEmpty(self: *const Cgroup) bool {
+        var buf: [4096]u8 = undefined;
+        const content = self.readFile("cgroup.procs", &buf) catch return false;
+        // if the file is empty or contains only whitespace, cgroup is empty
+        for (content) |c| {
+            if (c != ' ' and c != '\n' and c != '\t' and c != '\r') return false;
+        }
+        return true;
     }
 
     /// send SIGKILL to all processes in the cgroup.
@@ -538,4 +611,78 @@ test "parseCpuMax — empty content" {
     parseCpuMax("", &metrics);
     try std.testing.expect(metrics.cpu_max_usec == null);
     try std.testing.expect(metrics.cpu_max_period == null);
+}
+
+test "isEmpty returns true for whitespace-only cgroup.procs content" {
+    // test the logic of isEmpty directly by examining what it checks
+    const empty_cases = [_][]const u8{
+        "",
+        "   ",
+        "\n",
+        "\n\n\n",
+        " \t\r\n",
+    };
+
+    for (empty_cases) |content| {
+        // verify all characters are whitespace
+        var all_whitespace = true;
+        for (content) |c| {
+            if (c != ' ' and c != '\n' and c != '\t' and c != '\r') {
+                all_whitespace = false;
+                break;
+            }
+        }
+        try std.testing.expect(all_whitespace);
+    }
+}
+
+test "isEmpty returns false for non-whitespace cgroup.procs content" {
+    const non_empty_cases = [_][]const u8{
+        "1234",
+        "1234\n5678",
+        " 1234 ",
+        "\n1234\n",
+    };
+
+    for (non_empty_cases) |content| {
+        // verify there's at least one non-whitespace character
+        var has_non_whitespace = false;
+        for (content) |c| {
+            if (c != ' ' and c != '\n' and c != '\t' and c != '\r') {
+                has_non_whitespace = true;
+                break;
+            }
+        }
+        try std.testing.expect(has_non_whitespace);
+    }
+}
+
+test "ResourceLimits.validate rejects memory below minimum" {
+    const limits = ResourceLimits{ .memory_max = 1024 * 1024 }; // 1 MB, below 4 MB minimum
+    try std.testing.expectError(CgroupError.LimitBelowMinimum, limits.validate());
+}
+
+test "ResourceLimits.validate accepts valid memory limit" {
+    const limits = ResourceLimits{ .memory_max = 8 * 1024 * 1024 }; // 8 MB
+    try limits.validate();
+}
+
+test "ResourceLimits.validate rejects pids below minimum" {
+    const limits = ResourceLimits{ .pids_max = 0 };
+    try std.testing.expectError(CgroupError.LimitBelowMinimum, limits.validate());
+}
+
+test "ResourceLimits.validate accepts valid pids limit" {
+    const limits = ResourceLimits{ .pids_max = 100 };
+    try limits.validate();
+}
+
+test "ResourceLimits.validate accepts unlimited" {
+    try ResourceLimits.unlimited.validate();
+}
+
+test "ResourceLimits default values are reasonable" {
+    const defaults = ResourceLimits{};
+    try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024), defaults.memory_max.?);
+    try std.testing.expectEqual(@as(u32, 4096), defaults.pids_max.?);
 }

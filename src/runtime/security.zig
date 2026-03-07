@@ -21,6 +21,15 @@ pub const SecurityError = error{
     PrctlFailed,
 };
 
+// -- constants --
+
+/// prctl option for setting no_new_privs bit
+const PR_SET_NO_NEW_PRIVS: usize = 38;
+
+/// Linux capabilities version 3 header magic number.
+/// this is the _LINUX_CAPABILITY_VERSION_3 constant from <linux/capability.h>
+const CAPABILITY_VERSION_3: u32 = 0x20080522;
+
 // -- classic BPF structs (not in zig stdlib, needed for seccomp) --
 
 /// classic BPF instruction for seccomp filters
@@ -74,15 +83,24 @@ pub fn apply() SecurityError!void {
 }
 
 /// drop all capabilities except the default allowlist.
-/// uses a 2-element data array as required by capability v3 —
-/// data[0] covers caps 0-31, data[1] covers caps 32-63.
+/// capability v3 requires a 2-element data array (caps 0-63).
+/// future: if capabilities >63 are needed, extend the array size.
 fn dropCapabilities() SecurityError!void {
+    // verify all capabilities in default_caps fit in 2 words (0-63)
+    // this is a compile-time check to prevent future additions from breaking silently
+    for (default_caps) |cap| {
+        if (cap >= 64) {
+            @compileError("default_caps contains capability >=64 which exceeds 2-word limit. Extend data array to 40 elements.");
+        }
+    }
+
     var hdr = linux.cap_user_header_t{
-        .version = 0x20080522, // _LINUX_CAPABILITY_VERSION_3
+        .version = CAPABILITY_VERSION_3,
         .pid = 0, // current process
     };
 
     // build capability masks from the allowlist
+    // v3 uses 2 words: data[0] = caps 0-31, data[1] = caps 32-63
     var data: [2]linux.cap_user_data_t = .{
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
@@ -110,7 +128,8 @@ fn dropCapabilities() SecurityError!void {
     const rc2 = linux.syscall2(.capget, @intFromPtr(&hdr), @intFromPtr(&verify_data));
     if (syscall_util.isError(rc2)) return SecurityError.CapabilityFailed;
 
-    // compare effective, permitted, and inheritable masks for both words
+    // compare effective, permitted, and inheritable masks for all words
+    // this ensures no extra capabilities were granted beyond what we requested
     for (0..2) |i| {
         if (verify_data[i].effective != data[i].effective or
             verify_data[i].permitted != data[i].permitted or
@@ -125,7 +144,6 @@ fn dropCapabilities() SecurityError!void {
 /// capabilities through exec. also required for unprivileged
 /// seccomp filter installation.
 fn setNoNewPrivs() SecurityError!void {
-    const PR_SET_NO_NEW_PRIVS = 38;
     const rc = linux.syscall5(.prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     if (syscall_util.isError(rc)) return SecurityError.PrctlFailed;
 }
@@ -392,5 +410,21 @@ test "CAP_SETFCAP not in default set" {
     // Docker includes it by default, but we intentionally exclude it.
     for (default_caps) |cap| {
         try std.testing.expect(cap != linux.CAP.SETFCAP);
+    }
+}
+
+test "all default capabilities fit in 2-word limit (0-63)" {
+    // verify all capabilities in default_caps are <64
+    // this ensures the 2-element data array is sufficient
+    for (default_caps) |cap| {
+        try std.testing.expect(cap < 64);
+    }
+}
+
+test "default_caps can be mapped to data array indices" {
+    // verify linux.CAP.TO_INDEX returns 0 or 1 for all default caps
+    for (default_caps) |cap| {
+        const idx = linux.CAP.TO_INDEX(cap);
+        try std.testing.expect(idx == 0 or idx == 1);
     }
 }

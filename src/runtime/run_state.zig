@@ -3,6 +3,7 @@ const paths = @import("../lib/paths.zig");
 const cgroups = @import("cgroups.zig");
 const container = @import("container.zig");
 const net_setup = @import("../network/setup.zig");
+const log = @import("../lib/log.zig");
 
 pub const RestartPolicy = enum {
     no,
@@ -63,6 +64,7 @@ pub const RunStateError = error{
     NotFound,
     InvalidFormat,
     PathTooLong,
+    InvalidId,
 };
 
 const configs_subdir = "run_configs";
@@ -103,6 +105,9 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
 }
 
 pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedRunConfig {
+    // validate container ID to prevent path traversal
+    if (!container.isValidContainerId(id)) return RunStateError.InvalidId;
+
     var path_buf: [paths.max_path]u8 = undefined;
     const path = try configPath(&path_buf, id);
 
@@ -166,6 +171,9 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
 }
 
 pub fn removeConfig(id: []const u8) void {
+    // validate container ID to prevent accidental deletion of wrong files
+    if (!container.isValidContainerId(id)) return;
+
     var path_buf: [paths.max_path]u8 = undefined;
     const path = configPath(&path_buf, id) catch return;
     std.fs.cwd().deleteFile(path) catch {};
@@ -391,4 +399,71 @@ test "save and load config round-trips" {
     try std.testing.expectEqual(@as(usize, 1), loaded.port_maps.len);
     try std.testing.expectEqual(@as(?u64, 256 * 1024 * 1024), loaded.limits.memory_max);
     try std.testing.expectEqual(RestartPolicy.always, loaded.restart_policy);
+}
+
+test "saveConfig validates container ID" {
+    const alloc = std.testing.allocator;
+
+    const cfg: SavedRunConfig = .{
+        .rootfs = "/tmp/rootfs",
+        .command = "/bin/sh",
+        .hostname = "test",
+        .working_dir = "/work",
+        .args = try alloc.alloc([]const u8, 0),
+        .env = try alloc.alloc([]const u8, 0),
+        .lower_dirs = try alloc.alloc([]const u8, 0),
+        .mounts = try alloc.alloc(container.BindMount, 0),
+        .network_enabled = false,
+        .port_maps = try alloc.alloc(net_setup.PortMap, 0),
+        .limits = .{},
+        .restart_policy = .no,
+    };
+    defer {
+        alloc.free(cfg.args);
+        alloc.free(cfg.env);
+        alloc.free(cfg.lower_dirs);
+        alloc.free(cfg.mounts);
+        alloc.free(cfg.port_maps);
+    }
+
+    // valid ID should succeed (or fail for other reasons, but not InvalidId)
+    saveConfig("abc123def456", cfg) catch |e| {
+        try std.testing.expect(e != RunStateError.InvalidId);
+    };
+    defer removeConfig("abc123def456");
+
+    // invalid IDs should return InvalidId
+    try std.testing.expectError(RunStateError.InvalidId, saveConfig("../etc/passwd", cfg));
+    try std.testing.expectError(RunStateError.InvalidId, saveConfig("/etc/passwd", cfg));
+    try std.testing.expectError(RunStateError.InvalidId, saveConfig("invalid", cfg));
+}
+
+test "loadConfig validates container ID" {
+    const alloc = std.testing.allocator;
+
+    // invalid IDs should return InvalidId before attempting to open file
+    try std.testing.expectError(RunStateError.InvalidId, loadConfig(alloc, "../etc/passwd"));
+    try std.testing.expectError(RunStateError.InvalidId, loadConfig(alloc, "/etc/passwd"));
+    try std.testing.expectError(RunStateError.InvalidId, loadConfig(alloc, "invalid"));
+}
+
+test "removeConfig validates container ID" {
+    // should silently return on invalid ID (no crash, no file deletion attempt)
+    removeConfig("../etc/passwd");
+    removeConfig("/etc/passwd");
+    // function should complete without error
+    try std.testing.expect(true);
+}
+
+test "RestartPolicy parsing" {
+    try std.testing.expectEqual(RestartPolicy.no, RestartPolicy.parse("no"));
+    try std.testing.expectEqual(RestartPolicy.always, RestartPolicy.parse("always"));
+    try std.testing.expectEqual(RestartPolicy.on_failure, RestartPolicy.parse("on-failure"));
+    try std.testing.expectEqual(@as(?RestartPolicy, null), RestartPolicy.parse("invalid"));
+}
+
+test "RestartPolicy labels" {
+    try std.testing.expectEqualStrings("no", RestartPolicy.no.label());
+    try std.testing.expectEqualStrings("always", RestartPolicy.always.label());
+    try std.testing.expectEqualStrings("on-failure", RestartPolicy.on_failure.label());
 }
