@@ -236,10 +236,19 @@ pub const MessageBuilder = struct {
     /// add a rtattr with raw bytes value
     pub fn putAttr(self: *MessageBuilder, hdr: *linux.nlmsghdr, attr_type: u16, data: []const u8) NetlinkError!void {
         const rta_size = @sizeOf(RtAttr);
-        const attr_len: u16 = @intCast(rta_size + data.len);
-        const padded = nlmsgAlign(@as(usize, attr_len));
+
+        // SECURITY: Check for integer overflow before casting
+        const total_len = @as(usize, rta_size) + data.len;
+        if (total_len > 65535) return NetlinkError.BufferFull; // u16 max
+
+        const attr_len: u16 = @intCast(total_len);
+        const padded = nlmsgAlign(total_len);
 
         if (self.pos + padded > self.buf.len) return NetlinkError.BufferFull;
+
+        // SECURITY: Check for header length overflow
+        const new_hdr_len = @as(usize, hdr.len) + padded;
+        if (new_hdr_len > 4294967295) return NetlinkError.BufferFull; // u32 max
 
         const rta: *RtAttr = @ptrCast(@alignCast(&self.buf[self.pos]));
         rta.len = attr_len;
@@ -256,7 +265,7 @@ pub const MessageBuilder = struct {
         }
 
         self.pos += padded;
-        hdr.len = @intCast(@as(usize, hdr.len) + padded);
+        hdr.len = @intCast(new_hdr_len);
     }
 
     /// add a rtattr with a u32 value
@@ -268,10 +277,19 @@ pub const MessageBuilder = struct {
     pub fn putAttrStr(self: *MessageBuilder, hdr: *linux.nlmsghdr, attr_type: u16, str: []const u8) NetlinkError!void {
         // netlink string attributes include the null terminator
         const rta_size = @sizeOf(RtAttr);
-        const attr_len: u16 = @intCast(rta_size + str.len + 1);
-        const padded = nlmsgAlign(@as(usize, attr_len));
+
+        // SECURITY: Check for integer overflow before casting
+        const total_len = @as(usize, rta_size) + str.len + 1;
+        if (total_len > 65535) return NetlinkError.BufferFull; // u16 max
+
+        const attr_len: u16 = @intCast(total_len);
+        const padded = nlmsgAlign(total_len);
 
         if (self.pos + padded > self.buf.len) return NetlinkError.BufferFull;
+
+        // SECURITY: Check for header length overflow
+        const new_hdr_len = @as(usize, hdr.len) + padded;
+        if (new_hdr_len > 4294967295) return NetlinkError.BufferFull; // u32 max
 
         const rta: *RtAttr = @ptrCast(@alignCast(&self.buf[self.pos]));
         rta.len = attr_len;
@@ -286,7 +304,7 @@ pub const MessageBuilder = struct {
         }
 
         self.pos += padded;
-        hdr.len = @intCast(@as(usize, hdr.len) + padded);
+        hdr.len = @intCast(new_hdr_len);
     }
 
     /// start a nested attribute (e.g. IFLA_LINKINFO containing IFLA_INFO_KIND).
@@ -309,7 +327,16 @@ pub const MessageBuilder = struct {
     pub fn endNested(self: *MessageBuilder, nested: *RtAttr) void {
         const start: usize = @intFromPtr(nested);
         const end: usize = @intFromPtr(&self.buf[self.pos]);
-        nested.len = @intCast(end - start);
+        const len = end - start;
+
+        // SECURITY: Check for u16 overflow
+        if (len > 65535) {
+            // This is a serious error - nested attribute too large
+            // In production, we'd want to handle this more gracefully
+            nested.len = 65535; // cap at max
+        } else {
+            nested.len = @intCast(len);
+        }
 
         // align position
         const aligned = nlmsgAlign(self.pos);

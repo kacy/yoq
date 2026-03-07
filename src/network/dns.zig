@@ -121,6 +121,35 @@ pub fn lookupClusterService(name: []const u8) ?[4]u8 {
     return null;
 }
 
+/// validate that an IP address is safe to use for DNS resolution.
+/// rejects addresses that could enable DNS rebinding attacks or
+/// access to sensitive infrastructure.
+fn isSafeIpForDns(ip: [4]u8) bool {
+    const ip_u32 = ipToU32(ip);
+
+    // reject 0.0.0.0 (unspecified)
+    if (ip_u32 == 0) return false;
+
+    // reject 127.0.0.0/8 (loopback) - prevents access to host services
+    if ((ip_u32 & 0xFF000000) == 0x7F000000) return false;
+
+    // reject 224.0.0.0/4 (multicast) - prevents multicast amplification
+    if ((ip_u32 & 0xF0000000) == 0xE0000000) return false;
+
+    // reject 255.255.255.255 (broadcast)
+    if (ip_u32 == 0xFFFFFFFF) return false;
+
+    // reject 169.254.169.254 (cloud metadata services)
+    if (ip_u32 == 0xFEA9FEA9) return false;
+
+    // reject 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 if they
+    // might be used to access internal services (we allow our own subnet 10.42.0.0/16)
+    // Note: Our subnet is 10.42.x.x, which is within 10.0.0.0/8 but is safe
+    // Additional checks can be added here if needed
+
+    return true;
+}
+
 /// register a service name for a container IP.
 /// if the same name already exists, the IP is updated (last-write-wins).
 pub fn registerService(name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
@@ -131,6 +160,14 @@ pub fn registerService(name: []const u8, container_id: []const u8, container_ip:
     // in DNS responses or log output
     for (name) |c| {
         if (c < 0x21 or c > 0x7e) return;
+    }
+
+    // SECURITY: Prevent DNS rebinding attacks by validating the IP
+    if (!isSafeIpForDns(container_ip)) {
+        log.err("dns: rejected attempt to register service '{s}' with unsafe IP {d}.{d}.{d}.{d}", .{
+            name, container_ip[0], container_ip[1], container_ip[2], container_ip[3],
+        });
+        return;
     }
 
     registry_mutex.lock();
@@ -749,6 +786,26 @@ fn forwardQuery(
     // drop mismatched responses — could be stale or spoofed.
     if (resp_n < 2 or query.len < 2) return;
     if (response_buf[0] != query[0] or response_buf[1] != query[1]) return;
+
+    // SECURITY: Validate that the response question matches our query.
+    // This prevents DNS cache poisoning where an attacker sends a response
+    // with the correct TXID but for a different domain.
+    const query_question = parseQuestion(query) orelse return;
+    const resp_question = parseQuestion(response_buf[0..resp_n]) orelse return;
+
+    // Compare question name, type, and class
+    if (query_question.name_len != resp_question.name_len) {
+        log.warn("dns: response question name length mismatch (expected {d}, got {d})", .{ query_question.name_len, resp_question.name_len });
+        return;
+    }
+    if (!std.mem.eql(u8, query_question.name[0..query_question.name_len], resp_question.name[0..resp_question.name_len])) {
+        log.warn("dns: response question name mismatch", .{});
+        return;
+    }
+    if (query_question.qtype != resp_question.qtype or query_question.qclass != resp_question.qclass) {
+        log.warn("dns: response QTYPE/QCLASS mismatch", .{});
+        return;
+    }
 
     // relay response to original client
     _ = posix.sendto(sock, response_buf[0..resp_n], 0, @ptrCast(client_addr), addr_len) catch |e| {

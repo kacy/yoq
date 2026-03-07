@@ -71,14 +71,13 @@ pub fn createMap(
     try validateAndTrackMapCreate(map_type, key_size, value_size, max_entries);
 
     const fd = BPF.map_create(map_type, key_size, value_size, max_entries) catch |e| {
+        // If creation fails, we need to decrement the counter we already incremented
+        trackBpfFdClosed();
         log.warn("ebpf: map_create failed (type={d}, key={d}, val={d}): {}", .{
             @intFromEnum(map_type), key_size, value_size, e,
         });
         return EbpfError.MapCreateFailed;
     };
-
-    // Track the successful FD creation
-    trackBpfFdCreated();
 
     return fd;
 }
@@ -646,7 +645,7 @@ var global_mutex: std.Thread.Mutex = .{};
 /// tracks total number of BPF file descriptors in use to prevent resource exhaustion
 var total_bpf_fds: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
-/// validates map parameters and tracks resource usage
+/// validates map parameters and tracks resource usage atomically
 fn validateAndTrackMapCreate(map_type: BPF.MapType, key_size: u32, value_size: u32, max_entries: u32) EbpfError!void {
     _ = map_type; // map_type validation could be added here in future
 
@@ -668,10 +667,13 @@ fn validateAndTrackMapCreate(map_type: BPF.MapType, key_size: u32, value_size: u
         return EbpfError.InvalidParameter;
     }
 
-    // Check resource limits
-    const current_fds = total_bpf_fds.load(.acquire);
-    if (current_fds >= max_total_fds) {
-        log.err("ebpf: too many BPF resources in use ({d}/{d})", .{ current_fds, max_total_fds });
+    // SECURITY: Atomic increment with overflow protection
+    // We increment first, then check if we exceeded the limit
+    const prev = total_bpf_fds.fetchAdd(1, .acq_rel);
+    if (prev >= max_total_fds) {
+        // We've exceeded the limit, decrement and return error
+        _ = total_bpf_fds.fetchSub(1, .acq_rel);
+        log.err("ebpf: too many BPF resources in use ({d}/{d})", .{ prev, max_total_fds });
         return EbpfError.ResourceExhausted;
     }
 }
@@ -688,15 +690,17 @@ fn trackBpfFdClosed() void {
 
 /// circuit breaker state for preventing cascading failures
 const CircuitBreaker = struct {
-    failures: std.atomic.Value(u32),
-    last_failure_time: std.atomic.Value(i64),
+    mutex: std.Thread.Mutex,
+    failures: u32,
+    last_failure_time: i64,
     threshold: u32,
     reset_timeout_ms: i64,
 
     fn init(threshold: u32, reset_timeout_ms: i64) CircuitBreaker {
         return .{
-            .failures = std.atomic.Value(u32).init(0),
-            .last_failure_time = std.atomic.Value(i64).init(0),
+            .mutex = .{},
+            .failures = 0,
+            .last_failure_time = 0,
             .threshold = threshold,
             .reset_timeout_ms = reset_timeout_ms,
         };
@@ -704,16 +708,17 @@ const CircuitBreaker = struct {
 
     /// returns true if operation should be allowed
     fn allow(self: *CircuitBreaker) bool {
-        const failure_count = self.failures.load(.acquire);
-        if (failure_count < self.threshold) return true;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.failures < self.threshold) return true;
 
         // Check if enough time has passed to reset
-        const last_failure = self.last_failure_time.load(.acquire);
         const now = std.time.milliTimestamp();
-        if (now - last_failure > self.reset_timeout_ms) {
+        if (now - self.last_failure_time > self.reset_timeout_ms) {
             // Reset the circuit breaker
-            self.failures.store(0, .release);
-            self.last_failure_time.store(0, .release);
+            self.failures = 0;
+            self.last_failure_time = 0;
             return true;
         }
 
@@ -722,16 +727,22 @@ const CircuitBreaker = struct {
 
     /// record a successful operation
     fn recordSuccess(self: *CircuitBreaker) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         // Reset on first success after failures
-        if (self.failures.load(.acquire) > 0) {
-            self.failures.store(0, .release);
+        if (self.failures > 0) {
+            self.failures = 0;
         }
     }
 
     /// record a failed operation
     fn recordFailure(self: *CircuitBreaker) void {
-        _ = self.failures.fetchAdd(1, .acquire);
-        self.last_failure_time.store(std.time.milliTimestamp(), .release);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.failures += 1;
+        self.last_failure_time = std.time.milliTimestamp();
     }
 };
 
