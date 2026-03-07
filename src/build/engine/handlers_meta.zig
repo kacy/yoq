@@ -2,117 +2,72 @@ const std = @import("std");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
 
-pub fn processEnv(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch {
-        log.warn("build: failed to allocate ENV value", .{});
-        return;
-    };
-    state.env.append(alloc, owned) catch {
-        log.warn("build: failed to store ENV value", .{});
-        alloc.free(owned);
-    };
+pub fn processEnv(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
+    errdefer alloc.free(owned);
+    try state.env.append(alloc, owned);
 }
 
-pub fn processWorkdir(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch {
-        log.warn("build: failed to allocate WORKDIR value", .{});
-        return;
-    };
+pub fn processWorkdir(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
     if (!std.mem.eql(u8, state.workdir, "/")) alloc.free(state.workdir);
     state.workdir = owned;
 }
 
-pub fn processCmd(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch {
-        log.warn("build: failed to allocate CMD value", .{});
-        return;
-    };
+pub fn processCmd(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
     if (state.cmd) |old| alloc.free(old);
     state.cmd = owned;
 }
 
-pub fn processEntrypoint(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch {
-        log.warn("build: failed to allocate ENTRYPOINT value", .{});
-        return;
-    };
+pub fn processEntrypoint(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
     if (state.entrypoint) |old| alloc.free(old);
     state.entrypoint = owned;
 }
 
-pub fn processExpose(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch {
-        log.warn("build: failed to allocate EXPOSE value", .{});
-        return;
-    };
-    state.exposed_ports.append(alloc, owned) catch {
-        log.warn("build: failed to store EXPOSE value", .{});
-        alloc.free(owned);
-    };
+pub fn processExpose(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
+    errdefer alloc.free(owned);
+    try state.exposed_ports.append(alloc, owned);
 }
 
-pub fn processUser(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch {
-        log.warn("build: failed to allocate USER value", .{});
-        return;
-    };
+pub fn processUser(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
     if (state.user) |old| alloc.free(old);
     state.user = owned;
 }
 
-pub fn processLabel(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch {
-        log.warn("build: failed to allocate LABEL value", .{});
-        return;
-    };
-    state.labels.append(alloc, owned) catch {
-        log.warn("build: failed to store LABEL value", .{});
-        alloc.free(owned);
-    };
+pub fn processLabel(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
+    errdefer alloc.free(owned);
+    try state.labels.append(alloc, owned);
 }
 
-pub fn processArg(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
+pub fn processArg(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
     const trimmed = std.mem.trim(u8, args, " \t");
     if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
         const key = trimmed[0..eq];
         const val = trimmed[eq + 1 ..];
         if (state.build_args.get(key) != null) return;
 
-        const owned_key = alloc.dupe(u8, key) catch {
-            log.warn("build: failed to allocate ARG key", .{});
-            return;
-        };
-        const owned_val = alloc.dupe(u8, val) catch {
-            log.warn("build: failed to allocate ARG value", .{});
-            alloc.free(owned_key);
-            return;
-        };
-        state.build_args.put(alloc, owned_key, owned_val) catch {
-            log.warn("build: failed to store ARG", .{});
-            alloc.free(owned_key);
-            alloc.free(owned_val);
-        };
+        const owned_key = alloc.dupe(u8, key) catch return types.BuildError.OutOfMemory;
+        errdefer alloc.free(owned_key);
+        const owned_val = alloc.dupe(u8, val) catch return types.BuildError.OutOfMemory;
+        errdefer alloc.free(owned_val);
+        try state.build_args.put(alloc, owned_key, owned_val);
     } else {
         if (state.build_args.get(trimmed) != null) return;
 
-        const owned_key = alloc.dupe(u8, trimmed) catch {
-            log.warn("build: failed to allocate ARG key", .{});
-            return;
-        };
-        const owned_val = alloc.dupe(u8, "") catch {
-            log.warn("build: failed to allocate ARG value", .{});
-            alloc.free(owned_key);
-            return;
-        };
-        state.build_args.put(alloc, owned_key, owned_val) catch {
-            log.warn("build: failed to store ARG", .{});
-            alloc.free(owned_key);
-            alloc.free(owned_val);
-        };
+        const owned_key = alloc.dupe(u8, trimmed) catch return types.BuildError.OutOfMemory;
+        errdefer alloc.free(owned_key);
+        const owned_val = alloc.dupe(u8, "") catch return types.BuildError.OutOfMemory;
+        errdefer alloc.free(owned_val);
+        try state.build_args.put(alloc, owned_key, owned_val);
     }
 }
 
-pub fn processVolume(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
+pub fn processVolume(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
     if (std.mem.trim(u8, args, " \t").len == 0) return;
 
     if (std.mem.startsWith(u8, std.mem.trim(u8, args, " \t"), "[")) {
@@ -121,40 +76,43 @@ pub fn processVolume(alloc: std.mem.Allocator, state: *types.BuildState, args: [
         while (iter.next()) |entry| {
             const path = std.mem.trim(u8, entry, " \t\"");
             if (path.len == 0) continue;
-            const owned = alloc.dupe(u8, path) catch continue;
-            state.volumes.append(alloc, owned) catch alloc.free(owned);
+            const owned = alloc.dupe(u8, path) catch return types.BuildError.OutOfMemory;
+            errdefer alloc.free(owned);
+            try state.volumes.append(alloc, owned);
         }
         return;
     }
 
     var iter = std.mem.tokenizeAny(u8, args, " \t");
     while (iter.next()) |path| {
-        const owned = alloc.dupe(u8, path) catch continue;
-        state.volumes.append(alloc, owned) catch alloc.free(owned);
+        const owned = alloc.dupe(u8, path) catch return types.BuildError.OutOfMemory;
+        errdefer alloc.free(owned);
+        try state.volumes.append(alloc, owned);
     }
 }
 
-pub fn processShell(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+pub fn processShell(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
     if (state.shell) |old| alloc.free(old);
     state.shell = owned;
 }
 
-pub fn processHealthcheck(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+pub fn processHealthcheck(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
     if (state.healthcheck) |old| alloc.free(old);
     state.healthcheck = owned;
 }
 
-pub fn processStopsignal(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
+pub fn processStopsignal(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
     if (state.stop_signal) |old| alloc.free(old);
     state.stop_signal = owned;
 }
 
-pub fn processOnbuild(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) void {
-    const owned = alloc.dupe(u8, args) catch return;
-    state.onbuild_triggers.append(alloc, owned) catch alloc.free(owned);
+pub fn processOnbuild(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
+    errdefer alloc.free(owned);
+    try state.onbuild_triggers.append(alloc, owned);
 }
 
 pub fn expandArgs(

@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const blob_store = @import("../image/store.zig");
+const log = @import("../lib/log.zig");
 
 pub const ContextError = error{
     /// content hashing failed (file read error or directory walk error)
@@ -25,6 +26,12 @@ pub const ContextError = error{
 /// for a file: hash its content. for a directory: recursively hash all
 /// files (sorted by path for determinism).
 pub fn hashFiles(alloc: std.mem.Allocator, context_dir: []const u8, src_path: []const u8) ContextError!blob_store.Digest {
+    // validate source path to prevent path traversal attacks
+    if (containsPathTraversal(src_path)) {
+        log.err("build: path traversal attempt in hashFiles: {s}", .{src_path});
+        return ContextError.PathTraversal;
+    }
+
     var dir = std.fs.cwd().openDir(context_dir, .{}) catch return ContextError.NotFound;
     defer dir.close();
 
@@ -44,10 +51,16 @@ pub fn hashFiles(alloc: std.mem.Allocator, context_dir: []const u8, src_path: []
     hasher.update(src_path);
     hasher.update("\x00");
 
-    const content = dir.readFileAlloc(alloc, src_path, 256 * 1024 * 1024) catch
-        return ContextError.HashFailed;
-    defer alloc.free(content);
-    hasher.update(content);
+    // stream file content instead of loading entire file into memory
+    var file = dir.openFile(src_path, .{}) catch return ContextError.HashFailed;
+    defer file.close();
+
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = file.read(&buf) catch return ContextError.HashFailed;
+        if (n == 0) break;
+        hasher.update(buf[0..n]);
+    }
 
     return blob_store.Digest{ .hash = hasher.finalResult() };
 }
@@ -113,6 +126,12 @@ pub fn copyFiles(
     layer_dir: []const u8,
     dest: []const u8,
 ) ContextError!void {
+    // validate source path to prevent path traversal
+    if (containsPathTraversal(src)) {
+        log.err("build: path traversal attempt in copyFiles source: {s}", .{src});
+        return ContextError.PathTraversal;
+    }
+
     var ctx_dir = std.fs.cwd().openDir(context_dir, .{}) catch
         return ContextError.NotFound;
     defer ctx_dir.close();

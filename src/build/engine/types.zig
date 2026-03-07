@@ -10,6 +10,8 @@ pub const BuildError = error{
     ImageStoreFailed,
     NoFromInstruction,
     CacheFailed,
+    OutOfMemory,
+    MetadataFailed,
 };
 
 pub const BuildResult = struct {

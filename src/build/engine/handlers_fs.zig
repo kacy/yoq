@@ -94,8 +94,19 @@ pub fn processFrom(alloc: std.mem.Allocator, state: *types.BuildState, args: []c
 }
 
 fn resolveDestination(workdir: []const u8, dest: []const u8, out: []u8) types.BuildError![]const u8 {
+    // validate total length to prevent buffer overflow
     if (dest.len > 0 and dest[0] != '/') {
+        const total_len = workdir.len + 1 + dest.len;
+        if (total_len > out.len) {
+            log.err("build: destination path too long: workdir={s} dest={s}", .{ workdir, dest });
+            return types.BuildError.CopyStepFailed;
+        }
         return std.fmt.bufPrint(out, "{s}/{s}", .{ workdir, dest }) catch types.BuildError.CopyStepFailed;
+    }
+    // check if absolute path fits in buffer
+    if (dest.len > out.len) {
+        log.err("build: destination path too long: {s}", .{dest});
+        return types.BuildError.CopyStepFailed;
     }
     return dest;
 }
@@ -264,7 +275,7 @@ pub fn processCopy(alloc: std.mem.Allocator, state: *types.BuildState, args: []c
     const layer_dir = try withTempLayerDir(&layer_dir_buf, "build-copy-layer");
     defer std.fs.cwd().deleteTree(layer_dir) catch {};
 
-    var actual_dest_buf: [1024]u8 = undefined;
+    var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try resolveDestination(state.workdir, split.dest, &actual_dest_buf);
 
     if (actual_dest.len > 0) {
@@ -347,7 +358,7 @@ pub fn processCopyFromStage(
     std.fs.cwd().makePath(layer_dir) catch return types.BuildError.CopyStepFailed;
     defer std.fs.cwd().deleteTree(layer_dir) catch {};
 
-    var actual_dest_buf: [1024]u8 = undefined;
+    var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try resolveDestination(state.workdir, dest, &actual_dest_buf);
 
     if (actual_dest.len > 0) {
@@ -412,7 +423,7 @@ fn processAddExtract(alloc: std.mem.Allocator, state: *types.BuildState, args: [
     const layer_dir = try withTempLayerDir(&layer_dir_buf, "build-add-layer");
     defer std.fs.cwd().deleteTree(layer_dir) catch {};
 
-    var actual_dest_buf: [1024]u8 = undefined;
+    var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try resolveDestination(state.workdir, dest, &actual_dest_buf);
 
     const extract_rel = if (actual_dest.len > 0 and actual_dest[0] == '/') actual_dest[1..] else actual_dest;
