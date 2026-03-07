@@ -1412,10 +1412,12 @@ test "dispatch DELETE container" {
     const record = store.ContainerRecord{
         .id = "abc123def456",
         .hostname = "test-container",
-        .image = "test:latest",
+        .rootfs = "/tmp/rootfs",
         .status = "stopped",
         .command = "sleep 100",
         .created_at = 1234567890,
+        .pid = null,
+        .exit_code = null,
     };
     try store.save(record);
 
