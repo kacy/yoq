@@ -125,23 +125,33 @@ pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
 
 /// insert or update a key/value pair in a BPF map.
 /// validates key and value buffer sizes before attempting update.
+/// uses circuit breaker pattern to prevent cascading failures.
 /// returns MapFull if the map has reached max_entries (for non-LRU maps).
 pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) EbpfError!void {
     if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
 
+    // Check circuit breaker before attempting operation
+    if (!map_op_circuit_breaker.allow()) {
+        log.warn("ebpf: mapUpdate circuit breaker open - skipping update", .{});
+        return EbpfError.MapUpdateFailed;
+    }
+
     // Validate key size
     if (key.len == 0 or key.len > max_key_size) {
         log.err("ebpf: mapUpdate invalid key size {d}, must be 1-{d}", .{ key.len, max_key_size });
+        map_op_circuit_breaker.recordFailure();
         return EbpfError.InvalidParameter;
     }
 
     // Validate value size
     if (value.len == 0 or value.len > max_value_size) {
         log.err("ebpf: mapUpdate invalid value size {d}, must be 1-{d}", .{ value.len, max_value_size });
+        map_op_circuit_breaker.recordFailure();
         return EbpfError.InvalidParameter;
     }
 
     BPF.map_update_elem(map_fd, key, value, BPF.ANY) catch |e| {
+        map_op_circuit_breaker.recordFailure();
         // Check for specific error conditions
         const err_name = @errorName(e);
         if (std.mem.indexOf(u8, err_name, "NoSpace")) |_| {
@@ -151,6 +161,9 @@ pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) EbpfErr
         log.warn("ebpf: map_update failed: {} ({s})", .{ e, err_name });
         return EbpfError.MapUpdateFailed;
     };
+
+    // Success - record it
+    map_op_circuit_breaker.recordSuccess();
 }
 
 /// delete a key from a BPF map.
@@ -671,6 +684,94 @@ fn trackBpfFdCreated() void {
 /// call when a BPF FD is closed
 fn trackBpfFdClosed() void {
     _ = total_bpf_fds.fetchSub(1, .release);
+}
+
+/// circuit breaker state for preventing cascading failures
+const CircuitBreaker = struct {
+    failures: std.atomic.Value(u32),
+    last_failure_time: std.atomic.Value(i64),
+    threshold: u32,
+    reset_timeout_ms: i64,
+
+    fn init(threshold: u32, reset_timeout_ms: i64) CircuitBreaker {
+        return .{
+            .failures = std.atomic.Value(u32).init(0),
+            .last_failure_time = std.atomic.Value(i64).init(0),
+            .threshold = threshold,
+            .reset_timeout_ms = reset_timeout_ms,
+        };
+    }
+
+    /// returns true if operation should be allowed
+    fn allow(self: *CircuitBreaker) bool {
+        const failure_count = self.failures.load(.acquire);
+        if (failure_count < self.threshold) return true;
+
+        // Check if enough time has passed to reset
+        const last_failure = self.last_failure_time.load(.acquire);
+        const now = std.time.milliTimestamp();
+        if (now - last_failure > self.reset_timeout_ms) {
+            // Reset the circuit breaker
+            self.failures.store(0, .release);
+            self.last_failure_time.store(0, .release);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// record a successful operation
+    fn recordSuccess(self: *CircuitBreaker) void {
+        // Reset on first success after failures
+        if (self.failures.load(.acquire) > 0) {
+            self.failures.store(0, .release);
+        }
+    }
+
+    /// record a failed operation
+    fn recordFailure(self: *CircuitBreaker) void {
+        _ = self.failures.fetchAdd(1, .acquire);
+        self.last_failure_time.store(std.time.milliTimestamp(), .release);
+    }
+};
+
+/// circuit breaker for map operations to prevent cascading failures
+var map_op_circuit_breaker = CircuitBreaker.init(5, 30000); // 5 failures, 30s timeout
+
+/// MapUpdate represents a single map update operation for batch processing
+pub const MapUpdateEntry = struct {
+    map_fd: posix.fd_t,
+    key: []const u8,
+    value: []const u8,
+};
+
+/// batch update multiple map entries.
+/// attempts to update all entries. if any update fails, attempts to rollback
+/// previously successful updates (best effort).
+/// returns the number of successful updates, or error on first failure.
+pub fn batchMapUpdate(entries: []const MapUpdateEntry) EbpfError!usize {
+    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
+
+    var successful: usize = 0;
+    var i: usize = 0;
+
+    // First pass: attempt all updates
+    while (i < entries.len) : (i += 1) {
+        mapUpdate(entries[i].map_fd, entries[i].key, entries[i].value) catch |e| {
+            log.err("ebpf: batch update failed at entry {d}/{d}: {}", .{ i, entries.len, e });
+
+            // Rollback: try to delete all successfully updated keys
+            for (0..successful) |j| {
+                _ = mapDelete(entries[j].map_fd, entries[j].key);
+            }
+
+            return e;
+        };
+        successful += 1;
+    }
+
+    log.info("ebpf: batch updated {d} map entries successfully", .{successful});
+    return successful;
 }
 
 /// global DNS interceptor instance. set after loadDnsInterceptor() succeeds.
