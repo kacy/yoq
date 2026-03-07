@@ -14,9 +14,11 @@ pub fn isError(rc: usize) bool {
 
 /// extract the errno value from a failed syscall return.
 /// only meaningful when isError(rc) is true.
+/// handles isize.MIN correctly (returns 2^63 which is valid errno range)
 pub fn getErrno(rc: usize) usize {
-    const signed: isize = @bitCast(rc);
-    return @bitCast(-signed);
+    // negate by subtracting from zero in unsigned space
+    // this avoids signed overflow undefined behavior
+    return 0 -% rc;
 }
 
 /// convert a raw syscall return to a usable value or error.

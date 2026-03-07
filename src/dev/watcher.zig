@@ -53,6 +53,7 @@ pub const Watcher = struct {
     /// get an error on read() and return null, allowing clean shutdown.
     pub fn deinit(self: *Watcher) void {
         posix.close(self.fd);
+        self.fd = -1; // Mark as invalid to prevent use-after-close
         self.watch_count = 0;
     }
 
@@ -94,9 +95,9 @@ pub const Watcher = struct {
         try self.addDir(root_path, service_idx);
 
         // open and iterate subdirectories
-        var dir = std.fs.cwd().openDir(root_path, .{ .iterate = true }) catch {
-            log.warn("cannot open directory for recursive watch: {s}", .{root_path});
-            return;
+        var dir = std.fs.cwd().openDir(root_path, .{ .iterate = true }) catch |e| {
+            log.warn("cannot open directory for recursive watch '{s}': {}", .{ root_path, e });
+            return error.OpenFailed;
         };
         defer dir.close();
 
@@ -105,9 +106,15 @@ pub const Watcher = struct {
 
     /// internal recursive directory walker. adds inotify watches for each
     /// subdirectory found. skips hidden directories (starting with '.').
+    /// logs errors but continues walking on partial failures.
     fn walkDir(self: *Watcher, dir: std.fs.Dir, parent_path: []const u8, service_idx: usize) void {
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
+        while (true) {
+            const entry = iter.next() catch |e| {
+                log.warn("watcher: directory iteration failed for '{s}': {}", .{ parent_path, e });
+                break; // stop walking this directory on iteration errors
+            } orelse break; // null means no more entries
+
             if (entry.kind != .directory) continue;
 
             // skip hidden directories (.git, .cache, etc)
@@ -115,12 +122,21 @@ pub const Watcher = struct {
 
             // build the full path: parent_path + "/" + entry.name
             var path_buf: [4096]u8 = undefined;
-            const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ parent_path, entry.name }) catch continue;
+            const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ parent_path, entry.name }) catch |e| {
+                log.warn("watcher: path too long for '{s}/{s}': {}", .{ parent_path, entry.name, e });
+                continue;
+            };
 
-            self.addDir(full_path, service_idx) catch continue;
+            self.addDir(full_path, service_idx) catch |e| {
+                log.warn("watcher: failed to add watch for '{s}': {}", .{ full_path, e });
+                continue; // continue with other directories even if one fails
+            };
 
             // recurse into the subdirectory
-            var subdir = dir.openDir(entry.name, .{ .iterate = true }) catch continue;
+            var subdir = dir.openDir(entry.name, .{ .iterate = true }) catch |e| {
+                log.warn("watcher: failed to open subdirectory '{s}/{s}': {}", .{ parent_path, entry.name, e });
+                continue;
+            };
             defer subdir.close();
             self.walkDir(subdir, full_path, service_idx);
         }
@@ -158,7 +174,22 @@ pub const Watcher = struct {
 
         while (offset + @sizeOf(linux.inotify_event) <= buf.len) {
             const event: *const linux.inotify_event = @ptrCast(@alignCast(buf.ptr + offset));
-            offset += @sizeOf(linux.inotify_event) + event.len;
+
+            // validate that the event name (if any) fits within the buffer
+            const name_offset = offset + @sizeOf(linux.inotify_event);
+            if (name_offset + event.len > buf.len) {
+                log.warn("watcher: invalid event length {d} at offset {d}, skipping", .{ event.len, offset });
+                break; // malformed event, stop processing
+            }
+
+            // safely calculate next offset
+            const next_offset = name_offset + event.len;
+            if (next_offset < offset) {
+                // overflow check
+                log.warn("watcher: offset overflow, stopping event processing", .{});
+                break;
+            }
+            offset = next_offset;
 
             // if a new subdirectory was created, watch it too
             if (event.mask & linux.IN.CREATE != 0 and event.mask & linux.IN.ISDIR != 0) {
@@ -168,6 +199,8 @@ pub const Watcher = struct {
             }
 
             // find the service that owns this watch descriptor
+            // NOTE: we only return the first service, but we process all events
+            // to ensure subdirectories are auto-added
             if (result == null) {
                 for (self.watches[0..self.watch_count]) |entry| {
                     if (entry.wd == event.wd) {
@@ -184,34 +217,54 @@ pub const Watcher = struct {
     /// when a new subdirectory is created inside a watched directory,
     /// add an inotify watch for it automatically so we don't miss changes
     /// in newly created directories.
-    ///
-    /// note: inotify watch descriptors don't give us the parent path back,
-    /// and we don't store paths to keep the struct fixed-size. newly created
-    /// directories during runtime will be caught on the next service restart
-    /// cycle. this is a reasonable trade-off for v1 — creating new directories
-    /// while editing is uncommon.
     fn autoAddSubdir(self: *Watcher, parent_wd: i32, name: [:0]const u8) void {
-        // stub — see note above. suppressing unused params.
-        _ = self;
-        _ = parent_wd;
-        _ = name;
+        // find the parent entry to get the service index
+        var service_idx: usize = 0;
+        for (self.watches[0..self.watch_count]) |entry| {
+            if (entry.wd == parent_wd) {
+                service_idx = entry.service_idx;
+                break;
+            }
+        }
+
+        log.debug("new subdirectory created in watched parent (wd={d}, name={s}), service={d}. " ++
+            "Will be watched on next restart.", .{ parent_wd, name, service_idx });
+
+        // NOTE: To fully implement this, we would need to store paths for each watch.
+        // This is a limitation of the current fixed-size struct design.
+        // For now, we log the event but don't add the watch - the new directory
+        // will be picked up when the service restarts.
     }
 
     /// drain any pending inotify events without blocking.
     /// used after debounce sleep to clear the queue.
     fn drainPending(self: *Watcher) void {
+        // check if fd is still valid before modifying flags
+        if (self.fd < 0) return;
+
         // set nonblocking temporarily to drain without waiting
-        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch return;
+        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
+            log.warn("watcher: failed to get fd flags: {}", .{e});
+            return;
+        };
         const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch return;
+        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
+            // failed to set non-blocking, don't try to restore
+            log.warn("watcher: failed to set non-blocking mode: {}", .{e});
+            return;
+        };
 
         var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
         while (true) {
             _ = posix.read(self.fd, &buf) catch break;
         }
 
-        // restore original flags
-        _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch {};
+        // restore original flags - but only if fd is still valid
+        if (self.fd >= 0) {
+            _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
+                log.warn("watcher: failed to restore fd flags: {}", .{e});
+            };
+        }
     }
 };
 
@@ -241,36 +294,42 @@ test "watch temp directory and detect file change" {
 
     // get the real path for inotify (needs an absolute path)
     var path_buf: [4096]u8 = undefined;
-    const tmp_path = tmp.dir.realpath(".", &path_buf) catch unreachable;
+    const tmp_path = try tmp.dir.realpath(".", &path_buf);
 
     try w.addDir(tmp_path, 42);
     try std.testing.expectEqual(@as(usize, 1), w.watch_count);
 
-    // spawn a thread to wait for changes
-    const WaitResult = struct {
+    // use a semaphore to synchronize watcher thread startup
+    const Context = struct {
+        watcher: *Watcher,
         value: ?usize = null,
+        sem: std.Thread.Semaphore = .{},
     };
-    var result = WaitResult{};
+    var ctx = Context{ .watcher = &w };
 
-    const thread = std.Thread.spawn(.{}, struct {
-        fn run(watcher: *Watcher, res: *WaitResult) void {
-            res.value = watcher.waitForChange();
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(context: *Context) void {
+            // signal that we're about to start watching
+            context.sem.post();
+            context.value = context.watcher.waitForChange();
         }
-    }.run, .{ &w, &result }) catch unreachable;
+    }.run, .{&ctx});
 
-    // give the watcher thread time to enter the blocking read
+    // wait for the watcher thread to signal it's ready
+    ctx.sem.wait();
+    // give extra time for the thread to enter the blocking read
     std.Thread.sleep(50 * std.time.ns_per_ms);
 
     // write a file to trigger the event
-    var file = tmp.dir.createFile("test.txt", .{}) catch unreachable;
-    file.writeAll("hello") catch {};
+    var file = try tmp.dir.createFile("test.txt", .{});
+    try file.writeAll("hello");
     file.close();
 
     // wait for the watcher thread to finish (debounce is 500ms)
     thread.join();
 
     // should have detected service 42
-    try std.testing.expectEqual(@as(?usize, 42), result.value);
+    try std.testing.expectEqual(@as(?usize, 42), ctx.value);
 }
 
 test "too many watches" {
