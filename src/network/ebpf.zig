@@ -885,7 +885,7 @@ pub const LoadBalancer = struct {
         const vip_net = ipToNetworkOrder(vip);
         const backend_net = ipToNetworkOrder(backend_ip);
 
-        var backends: ServiceBackends = undefined;
+        var backends: ServiceBackends = std.mem.zeroes(ServiceBackends);
         const key = std.mem.asBytes(&vip_net);
 
         if (mapLookup(self.backends_fd, key, std.mem.asBytes(&backends))) {
@@ -915,7 +915,7 @@ pub const LoadBalancer = struct {
         const vip_net = ipToNetworkOrder(vip);
         const backend_net = ipToNetworkOrder(backend_ip);
 
-        var backends: ServiceBackends = undefined;
+        var backends: ServiceBackends = std.mem.zeroes(ServiceBackends);
         const key = std.mem.asBytes(&vip_net);
 
         if (!mapLookup(self.backends_fd, key, std.mem.asBytes(&backends))) return;
@@ -1125,7 +1125,7 @@ pub const MetricsCollector = struct {
     /// read packet/byte counters for a single IP.
     /// the IP should be in network byte order (as stored by the BPF program).
     pub fn readMetrics(self: *const MetricsCollector, ip_net: u32) ?IpMetrics {
-        var value: IpMetrics = undefined;
+        var value: IpMetrics = std.mem.zeroes(IpMetrics);
         const key = std.mem.asBytes(&ip_net);
         if (mapLookup(self.metrics_fd, key, std.mem.asBytes(&value))) {
             return value;
@@ -1142,7 +1142,7 @@ pub const MetricsCollector = struct {
     ) usize {
         var count: usize = 0;
         var key: PairKey = std.mem.zeroes(PairKey);
-        var next_key: PairKey = undefined;
+        var next_key: PairKey = std.mem.zeroes(PairKey);
         var first = true;
 
         while (count < buf.len) {
@@ -1154,7 +1154,7 @@ pub const MetricsCollector = struct {
             if (!found) break;
             first = false;
 
-            var value: PairMetrics = undefined;
+            var value: PairMetrics = std.mem.zeroes(PairMetrics);
             if (mapLookup(self.pair_metrics_fd, std.mem.asBytes(&next_key), std.mem.asBytes(&value))) {
                 buf[count] = .{ .key = next_key, .value = value };
                 count += 1;
@@ -1488,14 +1488,24 @@ pub fn loadPortMapper(if_index: u32) EbpfError!void {
         port_map_prog.maps[0].value_size,
         port_map_prog.maps[0].max_entries,
     );
-    errdefer posix.close(map_fd);
+    // Don't use errdefer here - we'll handle cleanup manually for better control
 
     var map_fds = [_]posix.fd_t{map_fd};
-    const prog_fd = try loadProgramWithType(port_map_prog, &map_fds, .xdp);
-    errdefer posix.close(prog_fd);
+    const prog_fd = loadProgramWithType(port_map_prog, &map_fds, .xdp) catch |e| {
+        // Clean up map_fd on program load failure
+        posix.close(map_fd);
+        trackBpfFdClosed();
+        return e;
+    };
+    // Don't use errdefer here either
 
     attachXdp(if_index, prog_fd) catch |e| {
         log.warn("ebpf: failed to attach XDP on ifindex {d}: {}", .{ if_index, e });
+        // Clean up both resources on attach failure
+        posix.close(prog_fd);
+        trackBpfFdClosed();
+        posix.close(map_fd);
+        trackBpfFdClosed();
         return EbpfError.AttachFailed;
     };
 

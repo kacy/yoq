@@ -380,13 +380,14 @@ pub fn setupContainer(
 
 /// tear down networking for a container.
 /// removes port mappings, deletes veth pair, releases IP, unregisters DNS.
+/// logs errors for debugging but continues cleanup even if individual steps fail.
 pub fn teardownContainer(
     container_id: []const u8,
     net_info: *const NetworkInfo,
     config: NetworkConfig,
     db: *sqlite.Db,
 ) void {
-    // unregister from DNS
+    // unregister from DNS - log but continue on error
     dns.unregisterService(container_id);
 
     // remove port mapping rules
@@ -405,10 +406,14 @@ pub fn teardownContainer(
     }
 
     // delete host-side veth (kernel removes peer automatically)
-    bridge.deleteVeth(net_info.vethName()) catch {};
+    bridge.deleteVeth(net_info.vethName()) catch |e| {
+        log.warn("setup: failed to delete veth for {s}: {}", .{ container_id, e });
+    };
 
     // release IP allocation
-    ip.release(db, container_id) catch {};
+    ip.release(db, container_id) catch |e| {
+        log.warn("setup: failed to release IP for {s}: {}", .{ container_id, e });
+    };
 }
 
 /// validate a hostname per RFC 1123: printable ASCII (0x21-0x7e),
