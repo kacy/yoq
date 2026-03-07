@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const posix = std.posix;
 const cli = @import("../lib/cli.zig");
 const json_out = @import("../lib/json_output.zig");
 const store = @import("../state/store.zig");
@@ -575,6 +576,11 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) void {
     if (builtin.os.tag != .linux) {
         writeErr("yoq run is only supported on linux (kernel 6.1+)\n", .{});
         std.process.exit(1);
+    }
+
+    // warn if not running as root (required for cgroups and networking)
+    if (posix.getuid() != 0) {
+        writeErr("warning: yoq run requires root privileges for cgroups and networking\n", .{});
     }
 
     var flags = parseRunFlags(args, alloc);
