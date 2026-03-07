@@ -38,6 +38,16 @@ pub const EbpfError = error{
     DetachFailed,
     /// BPF is not available on this system (no CAP_BPF or old kernel)
     NotSupported,
+    /// invalid parameters passed to BPF operation
+    InvalidParameter,
+    /// map is full (reached max_entries limit)
+    MapFull,
+    /// key or value size doesn't match map definition
+    SizeMismatch,
+    /// too many BPF resources in use (approaching fd limit)
+    ResourceExhausted,
+    /// operation timed out (e.g., waiting for lock)
+    Timeout,
 };
 
 /// direction for TC program attachment
@@ -57,19 +67,37 @@ pub fn createMap(
 ) EbpfError!posix.fd_t {
     if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
 
+    // Validate parameters and check resource limits
+    try validateAndTrackMapCreate(map_type, key_size, value_size, max_entries);
+
     const fd = BPF.map_create(map_type, key_size, value_size, max_entries) catch |e| {
         log.warn("ebpf: map_create failed (type={d}, key={d}, val={d}): {}", .{
             @intFromEnum(map_type), key_size, value_size, e,
         });
         return EbpfError.MapCreateFailed;
     };
+
+    // Track the successful FD creation
+    trackBpfFdCreated();
+
     return fd;
 }
 
 /// look up a value in a BPF map by key.
 /// returns true if found (value is written to the output buffer).
+/// validates that key and value buffers are within acceptable size limits.
 pub fn mapLookup(map_fd: posix.fd_t, key: []const u8, value: []u8) bool {
     if (comptime builtin.os.tag != .linux) return false;
+
+    // Validate buffer sizes to prevent out-of-bounds access
+    if (key.len == 0 or key.len > max_key_size) {
+        log.warn("ebpf: mapLookup invalid key size {d}", .{key.len});
+        return false;
+    }
+    if (value.len == 0 or value.len > max_value_size) {
+        log.warn("ebpf: mapLookup invalid value size {d}", .{value.len});
+        return false;
+    }
 
     BPF.map_lookup_elem(map_fd, key, value) catch return false;
     return true;
@@ -77,28 +105,72 @@ pub fn mapLookup(map_fd: posix.fd_t, key: []const u8, value: []u8) bool {
 
 /// get the next key in a BPF map (for iteration).
 /// returns true if a next key was found.
+/// validates key buffer size for safety.
 pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
     if (comptime builtin.os.tag != .linux) return false;
+
+    // Validate buffer sizes
+    if (key.len > max_key_size) {
+        log.warn("ebpf: mapGetNextKey invalid key size {d}", .{key.len});
+        return false;
+    }
+    if (next_key.len == 0 or next_key.len > max_key_size) {
+        log.warn("ebpf: mapGetNextKey invalid next_key size {d}", .{next_key.len});
+        return false;
+    }
 
     const found = BPF.map_get_next_key(map_fd, key, next_key) catch return false;
     return found;
 }
 
 /// insert or update a key/value pair in a BPF map.
+/// validates key and value buffer sizes before attempting update.
+/// returns MapFull if the map has reached max_entries (for non-LRU maps).
 pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) EbpfError!void {
     if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
 
+    // Validate key size
+    if (key.len == 0 or key.len > max_key_size) {
+        log.err("ebpf: mapUpdate invalid key size {d}, must be 1-{d}", .{ key.len, max_key_size });
+        return EbpfError.InvalidParameter;
+    }
+
+    // Validate value size
+    if (value.len == 0 or value.len > max_value_size) {
+        log.err("ebpf: mapUpdate invalid value size {d}, must be 1-{d}", .{ value.len, max_value_size });
+        return EbpfError.InvalidParameter;
+    }
+
     BPF.map_update_elem(map_fd, key, value, BPF.ANY) catch |e| {
-        log.warn("ebpf: map_update failed: {}", .{e});
+        // Check for specific error conditions
+        const err_name = @errorName(e);
+        if (std.mem.indexOf(u8, err_name, "NoSpace")) |_| {
+            log.warn("ebpf: map_update failed: map is full", .{});
+            return EbpfError.MapFull;
+        }
+        log.warn("ebpf: map_update failed: {} ({s})", .{ e, err_name });
         return EbpfError.MapUpdateFailed;
     };
 }
 
 /// delete a key from a BPF map.
-pub fn mapDelete(map_fd: posix.fd_t, key: []const u8) void {
-    if (comptime builtin.os.tag != .linux) return;
+/// validates key size before attempting deletion.
+/// returns true if the key was found and deleted, false otherwise.
+pub fn mapDelete(map_fd: posix.fd_t, key: []const u8) bool {
+    if (comptime builtin.os.tag != .linux) return false;
 
-    BPF.map_delete_elem(map_fd, key) catch {};
+    // Validate key size
+    if (key.len == 0 or key.len > max_key_size) {
+        log.warn("ebpf: mapDelete invalid key size {d}", .{key.len});
+        return false;
+    }
+
+    BPF.map_delete_elem(map_fd, key) catch |e| {
+        // Log the error for debugging but don't crash
+        log.debug("ebpf: map_delete failed: {s}", .{@errorName(e)});
+        return false;
+    };
+    return true;
 }
 
 // -- program loading --
@@ -110,6 +182,18 @@ const max_insns = 4096;
 
 /// maximum number of maps a single program can reference.
 const max_maps = 16;
+
+/// maximum key size for BPF maps (matches kernel limit for hash maps)
+const max_key_size = 512;
+
+/// maximum value size for BPF maps
+const max_value_size = 4096;
+
+/// maximum number of entries in a single BPF map
+const max_map_entries = 1048576; // 1M entries
+
+/// maximum total BPF file descriptors we allow across all programs
+const max_total_fds = 128;
 
 /// load a BPF program from comptime instruction and relocation arrays.
 ///
@@ -479,10 +563,11 @@ pub const DnsInterceptor = struct {
     }
 
     /// remove a service name from the BPF map.
-    pub fn deleteService(self: *const DnsInterceptor, name: []const u8) void {
-        var key = makeKey(name) orelse return;
+    /// returns true if the service was found and removed, false otherwise.
+    pub fn deleteService(self: *const DnsInterceptor, name: []const u8) bool {
+        var key = makeKey(name) orelse return false;
 
-        mapDelete(self.map_fd, &key);
+        return mapDelete(self.map_fd, &key);
     }
 
     /// detach the program and close all fds.
@@ -538,6 +623,49 @@ fn makeKey(name: []const u8) ?[64]u8 {
 /// startup is sequential, but this protects against future parallel
 /// startup (e.g. `yoq up` with multiple services).
 var global_mutex: std.Thread.Mutex = .{};
+
+/// tracks total number of BPF file descriptors in use to prevent resource exhaustion
+var total_bpf_fds: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+/// validates map parameters and tracks resource usage
+fn validateAndTrackMapCreate(map_type: BPF.MapType, key_size: u32, value_size: u32, max_entries: u32) EbpfError!void {
+    _ = map_type; // map_type validation could be added here in future
+
+    // Validate key size
+    if (key_size == 0 or key_size > max_key_size) {
+        log.err("ebpf: invalid key size {d}, must be 1-{d}", .{ key_size, max_key_size });
+        return EbpfError.InvalidParameter;
+    }
+
+    // Validate value size
+    if (value_size == 0 or value_size > max_value_size) {
+        log.err("ebpf: invalid value size {d}, must be 1-{d}", .{ value_size, max_value_size });
+        return EbpfError.InvalidParameter;
+    }
+
+    // Validate max entries
+    if (max_entries == 0 or max_entries > max_map_entries) {
+        log.err("ebpf: invalid max_entries {d}, must be 1-{d}", .{ max_entries, max_map_entries });
+        return EbpfError.InvalidParameter;
+    }
+
+    // Check resource limits
+    const current_fds = total_bpf_fds.load(.acquire);
+    if (current_fds >= max_total_fds) {
+        log.err("ebpf: too many BPF resources in use ({d}/{d})", .{ current_fds, max_total_fds });
+        return EbpfError.ResourceExhausted;
+    }
+}
+
+/// call when a BPF FD is successfully created
+fn trackBpfFdCreated() void {
+    _ = total_bpf_fds.fetchAdd(1, .acquire);
+}
+
+/// call when a BPF FD is closed
+fn trackBpfFdClosed() void {
+    _ = total_bpf_fds.fetchSub(1, .release);
+}
 
 /// global DNS interceptor instance. set after loadDnsInterceptor() succeeds.
 var dns_interceptor: ?DnsInterceptor = null;
@@ -693,7 +821,7 @@ pub const LoadBalancer = struct {
 
         if (backends.count == 0) {
             // last backend — remove the service entry
-            mapDelete(self.backends_fd, key);
+            _ = mapDelete(self.backends_fd, key);
         } else {
             mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch {};
         }
@@ -1018,7 +1146,7 @@ pub const PolicyEnforcer = struct {
     /// remove a deny rule.
     pub fn removeDeny(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
         var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
-        mapDelete(self.policy_fd, std.mem.asBytes(&key));
+        _ = mapDelete(self.policy_fd, std.mem.asBytes(&key));
     }
 
     /// add an allow rule: permit packets from src_ip to dst_ip.
@@ -1031,7 +1159,7 @@ pub const PolicyEnforcer = struct {
     /// remove an allow rule.
     pub fn removeAllow(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
         var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
-        mapDelete(self.policy_fd, std.mem.asBytes(&key));
+        _ = mapDelete(self.policy_fd, std.mem.asBytes(&key));
     }
 
     /// mark a source IP as isolated (allow-only mode).
@@ -1045,7 +1173,7 @@ pub const PolicyEnforcer = struct {
     /// remove isolation for a source IP (return to default-allow).
     pub fn unisolate(self: *const PolicyEnforcer, src_ip: u32) void {
         var key = src_ip;
-        mapDelete(self.isolation_fd, std.mem.asBytes(&key));
+        _ = mapDelete(self.isolation_fd, std.mem.asBytes(&key));
     }
 
     pub fn deinit(self: *PolicyEnforcer) void {
@@ -1175,7 +1303,7 @@ pub const PortMapper = struct {
             .port = std.mem.nativeToBig(u16, host_port),
             .protocol = protocol,
         };
-        mapDelete(self.map_fd, std.mem.asBytes(&key));
+        _ = mapDelete(self.map_fd, std.mem.asBytes(&key));
     }
 
     pub fn deinit(self: *PortMapper) void {

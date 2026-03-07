@@ -244,7 +244,7 @@ fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
 
 fn deleteBpfMap(name: []const u8) void {
     if (ebpf.getDnsInterceptor()) |interceptor| {
-        interceptor.deleteService(name);
+        _ = interceptor.deleteService(name);
     }
 }
 
