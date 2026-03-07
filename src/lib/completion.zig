@@ -98,6 +98,7 @@ const command_meta = [_]CommandMeta{
     .{ .name = "version" },
     .{ .name = "help" },
     .{ .name = "completion" },
+    .{ .name = "__run-supervisor" }, // internal hidden command
 };
 
 fn findMeta(name: []const u8) ?*const CommandMeta {

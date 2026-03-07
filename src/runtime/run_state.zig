@@ -384,10 +384,10 @@ test "save and load config round-trips" {
         .restart_policy = .always,
     };
 
-    try saveConfig("run-state-test", cfg);
-    defer removeConfig("run-state-test");
+    try saveConfig("deadbeefcafe", cfg);
+    defer removeConfig("deadbeefcafe");
 
-    const loaded = try loadConfig(alloc, "run-state-test");
+    const loaded = try loadConfig(alloc, "deadbeefcafe");
     defer loaded.deinit(alloc);
 
     try std.testing.expectEqualStrings("/tmp/rootfs", loaded.rootfs);
