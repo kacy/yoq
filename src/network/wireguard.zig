@@ -12,6 +12,7 @@ const std = @import("std");
 const posix = std.posix;
 const nl = @import("netlink.zig");
 const cmd = @import("../lib/cmd.zig");
+const log = std.log;
 
 pub const WireguardError = error{
     /// failed to generate an X25519 keypair for WireGuard
@@ -183,37 +184,53 @@ pub fn createInterface(name: []const u8, private_key: []const u8, listen_port: u
     // step 2: write private key to a temp file on tmpfs (RAM-only, never hits disk).
     // wg set requires reading the key from a file path.
     // /dev/shm is a standard Linux tmpfs — the key only exists in memory.
+    // SECURITY: Use 64-bit random for stronger collision resistance
     var tmp_path_buf: [64]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/dev/shm/yoq-wg-{d}", .{std.crypto.random.int(u32)}) catch
+    const random_val = std.crypto.random.int(u64);
+    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/dev/shm/yoq-wg-{x:016}", .{random_val}) catch
         return WireguardError.DeviceCreateFailed;
 
     // write the key, configure wg, then delete the file
-    const tmp_file = std.fs.cwd().createFile(tmp_path, .{ .mode = 0o600 }) catch
+    // SECURITY: Create with 0o600 permissions (owner read/write only)
+    const tmp_file = std.fs.cwd().createFile(tmp_path, .{ .mode = 0o600 }) catch |e| {
+        log.err("wireguard: failed to create temp key file: {}", .{e});
         return WireguardError.DeviceCreateFailed;
+    };
 
-    tmp_file.writeAll(private_key) catch {
+    tmp_file.writeAll(private_key) catch |e| {
+        log.err("wireguard: failed to write private key: {}", .{e});
         tmp_file.close();
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return WireguardError.DeviceCreateFailed;
     };
     tmp_file.close();
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer {
+        std.fs.cwd().deleteFile(tmp_path) catch |e| {
+            log.warn("wireguard: failed to cleanup temp key file: {}", .{e});
+        };
+    }
 
     // step 3: configure the interface with wg set
     var port_buf: [8]u8 = undefined;
     const wg_args = buildWgSetArgs(name, tmp_path, listen_port, &port_buf);
-    exec(&wg_args) catch {
+    exec(&wg_args) catch |e| {
+        log.err("wireguard: failed to configure interface: {}", .{e});
         // try to clean up the interface we created
         const del_args = buildDeleteArgs(name);
-        exec(&del_args) catch {};
+        exec(&del_args) catch |del_e| {
+            log.warn("wireguard: failed to cleanup interface after config error: {}", .{del_e});
+        };
         return WireguardError.DeviceCreateFailed;
     };
 
     // step 4: bring the interface up
     const up_args = buildLinkUpArgs(name);
-    exec(&up_args) catch {
+    exec(&up_args) catch |e| {
+        log.err("wireguard: failed to bring interface up: {}", .{e});
         const del_args = buildDeleteArgs(name);
-        exec(&del_args) catch {};
+        exec(&del_args) catch |del_e| {
+            log.warn("wireguard: failed to cleanup interface after link-up error: {}", .{del_e});
+        };
         return WireguardError.DeviceCreateFailed;
     };
 }
