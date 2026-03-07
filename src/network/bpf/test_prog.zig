@@ -14,8 +14,7 @@ pub const MapDef = struct {
     max_entries: u32,
 };
 
-pub const maps = [_]MapDef{
-};
+pub const maps = [_]MapDef{};
 
 pub const Reloc = struct {
     insn_idx: u32,
@@ -25,11 +24,9 @@ pub const Reloc = struct {
 /// BPF program section: "tc_ingress"
 pub const prog_name = "tc_ingress";
 
-pub const relocs = [_]Reloc{
-};
+pub const relocs = [_]Reloc{};
 
 pub const insns = [_]BPF.Insn{
     .{ .code = 0xb7, .dst = 0, .src = 0, .off = 0, .imm = 0 },
     .{ .code = 0x95, .dst = 0, .src = 0, .off = 0, .imm = 0 },
 };
-
