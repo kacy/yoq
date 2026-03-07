@@ -257,8 +257,11 @@ test "route returns null for unknown path" {
     const req = http.Request{
         .method = .GET,
         .path = "/unknown",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/unknown",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -291,8 +294,11 @@ test "route rejects wrong method for /containers" {
     const post_req = http.Request{
         .method = .POST,
         .path = "/containers",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/containers",
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     const response = route(post_req, testing.allocator);
@@ -410,8 +416,11 @@ test "route handles /images/{id} DELETE" {
     const req = http.Request{
         .method = .DELETE,
         .path = "/images/abc123def4567890123456789012345678901234567890123456789012345678",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/images/abc123def4567890123456789012345678901234567890123456789012345678",
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     // This will fail with NotFound since image doesn't exist, but route should handle it
@@ -429,8 +438,11 @@ test "route returns method not allowed for wrong HTTP methods" {
     const put_req = http.Request{
         .method = .PUT,
         .path = "/containers",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/containers",
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     const put_resp = route(put_req, testing.allocator);
@@ -438,10 +450,13 @@ test "route returns method not allowed for wrong HTTP methods" {
 
     // PATCH to /containers/{id} should not match
     const patch_req = http.Request{
-        .method = .PATCH,
+        .method = .PUT, // Testing wrong method handling
         .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/containers/abc123def4567890123456789012345678901234567890123456789012345678",
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     const patch_resp = route(patch_req, testing.allocator);
@@ -454,8 +469,11 @@ test "route correctly matches container subpaths" {
     const logs_req = http.Request{
         .method = .GET,
         .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/logs",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/logs",
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     const logs_resp = route(logs_req, testing.allocator);
@@ -468,8 +486,11 @@ test "route correctly matches container subpaths" {
     const stop_req = http.Request{
         .method = .POST,
         .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/stop",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/stop",
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     const stop_resp = route(stop_req, testing.allocator);
@@ -483,15 +504,18 @@ test "route correctly matches container subpaths" {
 test "route returns bad request for invalid container ID" {
     const req = http.Request{
         .method = .GET,
-        .path = "/containers/invalid-id/logs", // Invalid ID
-        .body = null,
-        .headers = &.{},
+        .path = "/containers/invalid-id/logs",
+        .path_only = "/containers/invalid-id/logs", // Invalid ID
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -501,8 +525,11 @@ test "route method not allowed for POST to container without subpath" {
     const req = http.Request{
         .method = .POST,
         .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/containers/abc123def4567890123456789012345678901234567890123456789012345678",
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -511,7 +538,7 @@ test "route method not allowed for POST to container without subpath" {
     if (response) |resp| {
         // Route returns null for unmatched, dispatch handles the rest
         // So we expect null here
-        if (resp.status == .MethodNotAllowed) {
+        if (resp.status == .method_not_allowed) {
             if (resp.allocated) testing.allocator.free(resp.body);
         }
     }
@@ -522,13 +549,18 @@ test "container ID validation through route" {
     const valid_id = "abc123def4567890123456789012345678901234567890123456789012345678";
 
     // Valid ID should reach handler (and likely return 404 since container doesn't exist)
+    const path = std.fmt.allocPrint(testing.allocator, "/containers/{s}", .{valid_id}) catch unreachable;
+    defer testing.allocator.free(path);
+
     const valid_req = http.Request{
         .method = .GET,
-        .path = std.fmt.allocPrint(testing.allocator, "/containers/{s}", .{valid_id}) catch unreachable,
-        .body = null,
-        .headers = &.{},
+        .path = path,
+        .path_only = path,
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
-    defer testing.allocator.free(valid_req.path);
 
     const valid_resp = route(valid_req, testing.allocator);
     try testing.expect(valid_resp != null); // Handler reached
@@ -565,8 +597,11 @@ test "route handles trailing slashes on container paths" {
     const req = http.Request{
         .method = .GET,
         .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/",
+        .body = "",
+        .headers_raw = "",
+        .query = "",
+        .content_length = 0,
     };
 
     // Trailing slash after ID - path has "/" so it won't match simple GET
