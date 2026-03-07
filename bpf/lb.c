@@ -15,9 +15,21 @@
 // connection tracking ensures that all packets in a flow go to
 // the same backend (connection affinity).
 //
+// BPF verifier constraints:
+//   - IHL forced to 5 (no IP options) for fixed-offset access
+//   - all packet reads/writes happen BEFORE bpf_l3_csum_replace
+//     (which invalidates packet pointers)
+//   - L4 checksum updates use skb offset helpers, not packet pointers
+//   - reverse conntrack built from saved stack variables
+//
 // compile: clang -target bpf -O2 -g -c -o lb.o lb.c
 
 #include "common.h"
+
+// -- BPF helpers (not in common.h) --
+
+static long (*bpf_skb_store_bytes)(void *skb, __u32 offset, const void *from,
+                                   __u32 len, __u64 flags) = (void *)9;
 
 // -- BPF maps --
 
@@ -99,9 +111,19 @@ select_backend(struct service_backends *svc)
         return svc->ips[0]; // fallback to first
 
     __sync_fetch_and_add(counter, 1);
-    __u32 idx = *counter % svc->count;
+    // mask with 0xF so the verifier can prove idx < 16 (array bounds).
+    // without this, the verifier sees unbounded offset into map_value.
+    __u32 idx = (*counter % svc->count) & 0xF;
     return svc->ips[idx];
 }
+
+// fixed offsets with IHL=5 (no IP options):
+//   IP checksum:  14 (eth) + 10 (checksum field) = 24
+//   TCP checksum: 14 + 20 + 16 = 50
+//   UDP checksum: 14 + 20 + 6  = 40
+#define IP_CSUM_OFF  24
+#define TCP_CSUM_OFF 50
+#define UDP_CSUM_OFF 40
 
 SEC("tc_ingress")
 int lb_ingress(struct __sk_buff *skb)
@@ -109,7 +131,7 @@ int lb_ingress(struct __sk_buff *skb)
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
 
-    // -- parse headers --
+    // -- parse ethernet header (14 bytes) --
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return TC_ACT_OK;
@@ -117,28 +139,30 @@ int lb_ingress(struct __sk_buff *skb)
     if (eth->h_proto != htons(ETH_P_IP))
         return TC_ACT_OK;
 
+    // -- parse IP header (20 bytes, fixed) --
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
         return TC_ACT_OK;
 
-    __u8 ihl = (ip->ihl_version & 0x0F) * 4;
-    if (ihl < 20)
+    // require IHL=5 (no options) for fixed-offset transport header access
+    if ((ip->ihl_version & 0x0F) != 5)
         return TC_ACT_OK;
 
-    // only handle TCP and UDP
-    if (ip->protocol != IPPROTO_TCP && ip->protocol != IPPROTO_UDP)
+    __u8 proto = ip->protocol;
+    if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
         return TC_ACT_OK;
 
-    // extract ports based on protocol
+    // -- extract ports at fixed offset (eth 14 + ip 20 = 34) --
     __u16 src_port = 0, dst_port = 0;
-    if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)((char *)ip + ihl);
+
+    if (proto == IPPROTO_TCP) {
+        struct tcphdr *tcp = (void *)((char *)ip + 20);
         if ((void *)(tcp + 1) > data_end)
             return TC_ACT_OK;
         src_port = tcp->source;
         dst_port = tcp->dest;
     } else {
-        struct udphdr *udp = (void *)((char *)ip + ihl);
+        struct udphdr *udp = (void *)((char *)ip + 20);
         if ((void *)(udp + 1) > data_end)
             return TC_ACT_OK;
         // skip DNS queries (port 53) — handled by dns_intercept
@@ -159,7 +183,7 @@ int lb_ingress(struct __sk_buff *skb)
         .dst_ip = ip->daddr,
         .src_port = src_port,
         .dst_port = dst_port,
-        .protocol = ip->protocol,
+        .protocol = proto,
     };
 
     __u32 *existing = bpf_map_lookup_elem(&conntrack_map, &key);
@@ -182,39 +206,34 @@ int lb_ingress(struct __sk_buff *skb)
     if (backend_ip == ip->daddr)
         return TC_ACT_OK; // already pointing at the right backend
 
+    // save values needed after helper calls invalidate packet pointers
     __u32 old_daddr = ip->daddr;
+    __u32 saved_saddr = ip->saddr;
+
+    // direct packet write (pointers still valid)
     ip->daddr = backend_ip;
 
-    // update IP checksum (incremental)
-    bpf_l3_csum_replace(skb, (char *)&ip->check - (char *)data,
-                        old_daddr, backend_ip, 4);
+    // IP checksum at fixed offset (invalidates packet pointers)
+    bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_daddr, backend_ip, 4);
 
-    // update L4 checksum (TCP/UDP both have checksum in same relative position concept)
-    if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)((char *)ip + ihl);
-        if ((void *)(tcp + 1) > data_end)
-            return TC_ACT_OK;
-        bpf_l4_csum_replace(skb, (char *)&tcp->check - (char *)data,
-                            old_daddr, backend_ip, 4 | 0x10);
+    // L4 checksum updates via skb offset helpers (no packet pointers needed)
+    if (proto == IPPROTO_TCP) {
+        bpf_l4_csum_replace(skb, TCP_CSUM_OFF, old_daddr, backend_ip, 4 | 0x10);
     } else {
-        struct udphdr *udp = (void *)((char *)ip + ihl);
-        if ((void *)(udp + 1) > data_end)
-            return TC_ACT_OK;
-        // UDP checksum is optional for IPv4 — zero it
-        udp->check = 0;
+        // UDP checksum is optional for IPv4 — zero it via store helper
+        __u16 zero = 0;
+        bpf_skb_store_bytes(skb, UDP_CSUM_OFF, &zero, 2, 0);
     }
 
-    // populate reverse conntrack for egress SNAT.
-    // the reverse key matches what return traffic from the backend
-    // will look like: src=backend, dst=client.
+    // populate reverse conntrack for egress SNAT (use saved values only)
     struct conn_key rev_key = {
-        .src_ip = backend_ip,     // return traffic src = backend
-        .dst_ip = ip->saddr,      // return traffic dst = client (unchanged)
-        .src_port = dst_port,     // return traffic src_port = service port
-        .dst_port = src_port,     // return traffic dst_port = client port
-        .protocol = ip->protocol,
+        .src_ip = backend_ip,
+        .dst_ip = saved_saddr,
+        .src_port = dst_port,
+        .dst_port = src_port,
+        .protocol = proto,
     };
-    __u32 vip = old_daddr;        // the original VIP before DNAT
+    __u32 vip = old_daddr;
     bpf_map_update_elem(&rev_conntrack_map, &rev_key, &vip, 0);
 
     return TC_ACT_OK;
@@ -226,7 +245,7 @@ int lb_egress(struct __sk_buff *skb)
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
 
-    // -- parse headers --
+    // -- parse ethernet --
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return TC_ACT_OK;
@@ -234,26 +253,30 @@ int lb_egress(struct __sk_buff *skb)
     if (eth->h_proto != htons(ETH_P_IP))
         return TC_ACT_OK;
 
+    // -- parse IP --
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
         return TC_ACT_OK;
 
-    __u8 ihl = (ip->ihl_version & 0x0F) * 4;
-    if (ihl < 20)
+    // require IHL=5 for fixed offsets
+    if ((ip->ihl_version & 0x0F) != 5)
         return TC_ACT_OK;
 
-    if (ip->protocol != IPPROTO_TCP && ip->protocol != IPPROTO_UDP)
+    __u8 proto = ip->protocol;
+    if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
         return TC_ACT_OK;
 
+    // -- extract ports at fixed offset --
     __u16 src_port = 0, dst_port = 0;
-    if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)((char *)ip + ihl);
+
+    if (proto == IPPROTO_TCP) {
+        struct tcphdr *tcp = (void *)((char *)ip + 20);
         if ((void *)(tcp + 1) > data_end)
             return TC_ACT_OK;
         src_port = tcp->source;
         dst_port = tcp->dest;
     } else {
-        struct udphdr *udp = (void *)((char *)ip + ihl);
+        struct udphdr *udp = (void *)((char *)ip + 20);
         if ((void *)(udp + 1) > data_end)
             return TC_ACT_OK;
         src_port = udp->source;
@@ -261,15 +284,12 @@ int lb_egress(struct __sk_buff *skb)
     }
 
     // -- reverse conntrack lookup --
-    // look up the reverse conntrack map to find the original VIP.
-    // the key matches the return traffic tuple exactly as populated
-    // by lb_ingress after DNAT.
     struct conn_key rev_key = {
-        .src_ip = ip->saddr,      // backend IP (source in return traffic)
-        .dst_ip = ip->daddr,      // client IP (destination in return traffic)
-        .src_port = src_port,     // service port
-        .dst_port = dst_port,     // client port
-        .protocol = ip->protocol,
+        .src_ip = ip->saddr,
+        .dst_ip = ip->daddr,
+        .src_port = src_port,
+        .dst_port = dst_port,
+        .protocol = proto,
     };
 
     __u32 *vip = bpf_map_lookup_elem(&rev_conntrack_map, &rev_key);
@@ -277,29 +297,24 @@ int lb_egress(struct __sk_buff *skb)
         return TC_ACT_OK; // not a tracked connection
 
     // SNAT: rewrite source IP from backend back to VIP
-    if (*vip == ip->saddr)
-        return TC_ACT_OK; // already correct, nothing to do
+    __u32 vip_val = *vip;
+    if (vip_val == ip->saddr)
+        return TC_ACT_OK; // already correct
 
+    // save old source and do direct packet write (pointers still valid)
     __u32 old_saddr = ip->saddr;
-    ip->saddr = *vip;
+    ip->saddr = vip_val;
 
-    // update IP checksum (incremental)
-    bpf_l3_csum_replace(skb, (char *)&ip->check - (char *)data,
-                        old_saddr, *vip, 4);
+    // IP checksum at fixed offset (invalidates packet pointers)
+    bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_saddr, vip_val, 4);
 
-    // update L4 checksum
-    if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)((char *)ip + ihl);
-        if ((void *)(tcp + 1) > data_end)
-            return TC_ACT_OK;
-        bpf_l4_csum_replace(skb, (char *)&tcp->check - (char *)data,
-                            old_saddr, *vip, 4 | 0x10);
+    // L4 checksum via skb offset helpers (no packet pointers needed)
+    if (proto == IPPROTO_TCP) {
+        bpf_l4_csum_replace(skb, TCP_CSUM_OFF, old_saddr, vip_val, 4 | 0x10);
     } else {
-        struct udphdr *udp = (void *)((char *)ip + ihl);
-        if ((void *)(udp + 1) > data_end)
-            return TC_ACT_OK;
-        // UDP checksum is optional for IPv4 — zero it
-        udp->check = 0;
+        // UDP checksum optional — zero it
+        __u16 zero = 0;
+        bpf_skb_store_bytes(skb, UDP_CSUM_OFF, &zero, 2, 0);
     }
 
     return TC_ACT_OK;
