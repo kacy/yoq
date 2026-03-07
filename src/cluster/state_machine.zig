@@ -66,7 +66,10 @@ pub const StateMachine = struct {
         }) catch return StateMachineError.DbOpenFailed;
 
         // create cluster tables (agents, assignments) in the replicated DB
-        schema.init(&db) catch {};
+        schema.init(&db) catch |e| {
+            log.err("state_machine: failed to initialize schema: {}. Database may be corrupted.", .{e});
+            return StateMachineError.DbOpenFailed;
+        };
 
         return .{
             .db = db,
@@ -80,7 +83,10 @@ pub const StateMachine = struct {
             .open_flags = .{ .write = true },
         }) catch return StateMachineError.DbOpenFailed;
 
-        schema.init(&db) catch {};
+        schema.init(&db) catch |e| {
+            log.err("state_machine: failed to initialize schema: {}. Database may be corrupted.", .{e});
+            return StateMachineError.DbOpenFailed;
+        };
 
         return .{
             .db = db,
