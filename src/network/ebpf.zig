@@ -573,10 +573,16 @@ pub const DnsInterceptor = struct {
     /// detach the program and close all fds.
     pub fn deinit(self: *DnsInterceptor) void {
         detachTC(self.if_index) catch {};
-        posix.close(self.prog_fd);
-        posix.close(self.map_fd);
-        self.prog_fd = -1;
-        self.map_fd = -1;
+        if (self.prog_fd >= 0) {
+            posix.close(self.prog_fd);
+            trackBpfFdClosed();
+            self.prog_fd = -1;
+        }
+        if (self.map_fd >= 0) {
+            posix.close(self.map_fd);
+            trackBpfFdClosed();
+            self.map_fd = -1;
+        }
     }
 };
 
@@ -829,12 +835,30 @@ pub const LoadBalancer = struct {
 
     pub fn deinit(self: *LoadBalancer) void {
         detachTC(self.if_index) catch {};
-        posix.close(self.prog_fd);
-        if (self.egress_prog_fd >= 0) posix.close(self.egress_prog_fd);
-        posix.close(self.backends_fd);
-        posix.close(self.conntrack_fd);
-        posix.close(self.rr_counter_fd);
-        posix.close(self.rev_conntrack_fd);
+        if (self.prog_fd >= 0) {
+            posix.close(self.prog_fd);
+            trackBpfFdClosed();
+        }
+        if (self.egress_prog_fd >= 0) {
+            posix.close(self.egress_prog_fd);
+            trackBpfFdClosed();
+        }
+        if (self.backends_fd >= 0) {
+            posix.close(self.backends_fd);
+            trackBpfFdClosed();
+        }
+        if (self.conntrack_fd >= 0) {
+            posix.close(self.conntrack_fd);
+            trackBpfFdClosed();
+        }
+        if (self.rr_counter_fd >= 0) {
+            posix.close(self.rr_counter_fd);
+            trackBpfFdClosed();
+        }
+        if (self.rev_conntrack_fd >= 0) {
+            posix.close(self.rev_conntrack_fd);
+            trackBpfFdClosed();
+        }
     }
 };
 
@@ -1032,9 +1056,18 @@ pub const MetricsCollector = struct {
 
     pub fn deinit(self: *MetricsCollector) void {
         detachTC(self.if_index) catch {};
-        posix.close(self.prog_fd);
-        posix.close(self.metrics_fd);
-        posix.close(self.pair_metrics_fd);
+        if (self.prog_fd >= 0) {
+            posix.close(self.prog_fd);
+            trackBpfFdClosed();
+        }
+        if (self.metrics_fd >= 0) {
+            posix.close(self.metrics_fd);
+            trackBpfFdClosed();
+        }
+        if (self.pair_metrics_fd >= 0) {
+            posix.close(self.pair_metrics_fd);
+            trackBpfFdClosed();
+        }
     }
 };
 
@@ -1178,9 +1211,18 @@ pub const PolicyEnforcer = struct {
 
     pub fn deinit(self: *PolicyEnforcer) void {
         detachTC(self.if_index) catch {};
-        posix.close(self.prog_fd);
-        posix.close(self.policy_fd);
-        posix.close(self.isolation_fd);
+        if (self.prog_fd >= 0) {
+            posix.close(self.prog_fd);
+            trackBpfFdClosed();
+        }
+        if (self.policy_fd >= 0) {
+            posix.close(self.policy_fd);
+            trackBpfFdClosed();
+        }
+        if (self.isolation_fd >= 0) {
+            posix.close(self.isolation_fd);
+            trackBpfFdClosed();
+        }
     }
 };
 
@@ -1308,8 +1350,14 @@ pub const PortMapper = struct {
 
     pub fn deinit(self: *PortMapper) void {
         detachXdp(self.if_index) catch {};
-        posix.close(self.prog_fd);
-        posix.close(self.map_fd);
+        if (self.prog_fd >= 0) {
+            posix.close(self.prog_fd);
+            trackBpfFdClosed();
+        }
+        if (self.map_fd >= 0) {
+            posix.close(self.map_fd);
+            trackBpfFdClosed();
+        }
     }
 };
 
