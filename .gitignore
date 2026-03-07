@@ -21,3 +21,6 @@ zig-out/
 
 # private notes
 personal/
+
+# prebuilt dependencies (rebuild on version bump)
+vendor/prebuilt/
