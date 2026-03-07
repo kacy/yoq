@@ -53,8 +53,8 @@ struct bpf_map_def SEC("maps") isolation_map = {
 SEC("tc_ingress")
 int policy_enforce(struct __sk_buff *skb)
 {
-    void *data     = (void *)(__u64)skb->data;
-    void *data_end = (void *)(__u64)skb->data_end;
+    void *data     = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
 
     // parse ethernet header
     struct ethhdr *eth = data;

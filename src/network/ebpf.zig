@@ -149,22 +149,30 @@ pub fn loadProgram(
         patchMapFd(&mutable_insns[reloc.insn_idx], fd);
     }
 
-    // load the program
-    var log_buf: [4096]u8 = undefined;
-    var bpf_log = BPF.Log{
-        .level = 1,
-        .buf = &log_buf,
-    };
-
+    // first attempt: no verbose log (avoids ENOSPC from log buffer overflow)
     const prog_fd = BPF.prog_load(
         .sched_cls,
         &mutable_insns,
-        &bpf_log,
+        null,
         "GPL",
         0,
         0,
     ) catch |e| {
-        // log the verifier output for debugging
+        // retry with logging to capture the verifier error message
+        var log_buf: [65536]u8 = undefined;
+        var bpf_log = BPF.Log{
+            .level = 1,
+            .buf = &log_buf,
+        };
+        _ = BPF.prog_load(
+            .sched_cls,
+            &mutable_insns,
+            &bpf_log,
+            "GPL",
+            0,
+            0,
+        ) catch {};
+
         const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
         if (log_end > 0) {
             log.warn("ebpf: verifier output: {s}", .{log_buf[0..log_end]});
@@ -202,20 +210,29 @@ pub fn loadProgramWithType(
         patchMapFd(&mutable_insns[reloc.insn_idx], map_fds[reloc.map_idx]);
     }
 
-    var log_buf: [4096]u8 = undefined;
-    var bpf_log = BPF.Log{
-        .level = 1,
-        .buf = &log_buf,
-    };
-
     const prog_fd = BPF.prog_load(
         prog_type,
         &mutable_insns,
-        &bpf_log,
+        null,
         "GPL",
         0,
         0,
     ) catch |e| {
+        // retry with logging to capture verifier error
+        var log_buf: [65536]u8 = undefined;
+        var bpf_log = BPF.Log{
+            .level = 1,
+            .buf = &log_buf,
+        };
+        _ = BPF.prog_load(
+            prog_type,
+            &mutable_insns,
+            &bpf_log,
+            "GPL",
+            0,
+            0,
+        ) catch {};
+
         const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
         if (log_end > 0) {
             log.warn("ebpf: verifier output: {s}", .{log_buf[0..log_end]});
@@ -259,20 +276,29 @@ fn loadEgressProgram(
         patchMapFd(&mutable_insns[reloc.insn_idx], map_fds[reloc.map_idx]);
     }
 
-    var log_buf: [4096]u8 = undefined;
-    var bpf_log = BPF.Log{
-        .level = 1,
-        .buf = &log_buf,
-    };
-
     const prog_fd = BPF.prog_load(
         .sched_cls,
         &mutable_insns,
-        &bpf_log,
+        null,
         "GPL",
         0,
         0,
     ) catch |e| {
+        // retry with logging to capture verifier error
+        var log_buf: [65536]u8 = undefined;
+        var bpf_log = BPF.Log{
+            .level = 1,
+            .buf = &log_buf,
+        };
+        _ = BPF.prog_load(
+            .sched_cls,
+            &mutable_insns,
+            &bpf_log,
+            "GPL",
+            0,
+            0,
+        ) catch {};
+
         const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
         if (log_end > 0) {
             log.warn("ebpf: egress verifier: {s}", .{log_buf[0..log_end]});
@@ -469,12 +495,41 @@ pub const DnsInterceptor = struct {
     }
 };
 
-/// build a 64-byte zero-padded key from a service name.
-/// returns null if the name is empty or too long for the BPF map key.
+/// build a 64-byte BPF map key from a dot-separated service name.
+/// converts to DNS wire format (length-prefixed labels) so the key
+/// matches what the BPF program copies directly from the packet.
+/// e.g. "mydb" → "\x04mydb\x00" + zero padding to 64 bytes.
+///      "web.db" → "\x03web\x02db\x00" + zero padding.
+/// returns null if the name is empty, too long, or has invalid labels.
 fn makeKey(name: []const u8) ?[64]u8 {
-    if (name.len == 0 or name.len > 63) return null;
+    if (name.len == 0 or name.len > 62) return null; // need room for length prefix + null
+
     var key: [64]u8 = [_]u8{0} ** 64;
-    @memcpy(key[0..name.len], name);
+    var pos: usize = 0;
+    var label_start: usize = 0;
+
+    for (name, 0..) |c, i| {
+        if (c == '.') {
+            const label_len = i - label_start;
+            if (label_len == 0 or label_len > 63) return null;
+            if (pos + 1 + label_len >= 63) return null; // would overflow key
+            key[pos] = @intCast(label_len);
+            pos += 1;
+            @memcpy(key[pos .. pos + label_len], name[label_start..i]);
+            pos += label_len;
+            label_start = i + 1;
+        }
+    }
+
+    // last (or only) label
+    const label_len = name.len - label_start;
+    if (label_len == 0 or label_len > 63) return null;
+    if (pos + 1 + label_len >= 63) return null;
+    key[pos] = @intCast(label_len);
+    pos += 1;
+    @memcpy(key[pos .. pos + label_len], name[label_start..name.len]);
+    pos += label_len;
+    key[pos] = 0; // null terminator (end of DNS name)
     return key;
 }
 
@@ -1309,16 +1364,29 @@ test "isSupported returns a boolean" {
     try std.testing.expect(result == true or result == false);
 }
 
-test "DnsInterceptor key padding" {
-    // verify that service name keys are correctly padded to 64 bytes
-    // (this tests the key format that updateService/deleteService use)
-    var key: [64]u8 = [_]u8{0} ** 64;
-    const name = "mydb";
-    @memcpy(key[0..name.len], name);
-
-    try std.testing.expectEqualStrings("mydb", key[0..4]);
-    try std.testing.expectEqual(@as(u8, 0), key[4]);
+test "makeKey produces wire-format DNS name" {
+    // "mydb" → "\x04mydb\x00" + zero padding
+    const key = makeKey("mydb").?;
+    try std.testing.expectEqual(@as(u8, 4), key[0]); // label length
+    try std.testing.expectEqualStrings("mydb", key[1..5]);
+    try std.testing.expectEqual(@as(u8, 0), key[5]); // null terminator
     try std.testing.expectEqual(@as(u8, 0), key[63]);
+}
+
+test "makeKey handles dotted names" {
+    // "web.db" → "\x03web\x02db\x00"
+    const key = makeKey("web.db").?;
+    try std.testing.expectEqual(@as(u8, 3), key[0]);
+    try std.testing.expectEqualStrings("web", key[1..4]);
+    try std.testing.expectEqual(@as(u8, 2), key[4]);
+    try std.testing.expectEqualStrings("db", key[5..7]);
+    try std.testing.expectEqual(@as(u8, 0), key[7]);
+}
+
+test "makeKey rejects invalid names" {
+    try std.testing.expect(makeKey("") == null);
+    try std.testing.expect(makeKey(".foo") == null); // empty label
+    try std.testing.expect(makeKey("foo.") == null); // trailing dot = empty label
 }
 
 test "dns_intercept bytecode has expected structure" {
