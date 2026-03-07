@@ -2,7 +2,7 @@
 
 ## Audit Date: March 7, 2026
 ## Total Issues Found: 35
-## Issues Fixed: 20 (57%)
+## Issues Fixed: 23 (66%)
 
 ---
 
@@ -72,11 +72,25 @@
 6. **Container ID Validation** - Alphanumeric only (bridge.zig:379-392)
 7. **Bridge Race Condition** - Better error handling (bridge.zig:68-103)
 
+### Setup Reliability
+8. **Veth Cleanup** - Fixed cleanup on namespace move failure (setup.zig:310-327)
+
 ---
 
-## 🔵 LOW Priority Issues (8 remaining)
+## 🔵 LOW Priority Issues Fixed (3/8 - 38%)
 
-- Additional error logging improvements
+1. **BPF Error Logging** - Added logging to deinit functions (ebpf.zig)
+2. **Map Update Logging** - Log load balancer update failures (ebpf.zig:909, 944)
+3. **Detach Logging** - Log TC/XDP detach failures (ebpf.zig)
+
+---
+
+## 🔵 Remaining LOW Priority Issues (5)
+
+- Additional error logging in edge cases
+- Documentation updates
+- Code style consistency improvements
+- Minor input validation enhancements
 - Minor race conditions in edge cases
 - Documentation updates
 - Code style consistency
@@ -110,15 +124,17 @@
 
 ## 📝 Commits
 
-1. `b7511a3` - Additional MEDIUM priority fixes
-2. `609eee3` - DNS validation, rate limiting, error codes
-3. `dc14cad` - HIGH priority resource leaks and error handling
-4. `b238f23` - Critical vulnerabilities in network stack
-5. `6194e86` - BPF TTL validation, source IP filtering
-6. `43c61bc` - BPF comprehensive security checks
-7. `114cdca` - BPF circuit breaker pattern
-8. `cb0be7d` - BPF FD tracking cleanup paths
-9. `deb5859` - BPF map operations hardening
+1. `d8fa997` - LOW priority: BPF error logging improvements
+2. `b7511a3` - Additional MEDIUM priority fixes (container ID validation)
+3. `609eee3` - MEDIUM: DNS validation, rate limiting, error codes
+4. `dc14cad` - HIGH priority resource leaks and error handling
+5. `9476a86` - Documentation: security audit summary
+6. `b238f23` - CRITICAL: DNS cache poisoning, rebinding, overflows
+7. `6194e86` - BPF TTL validation, source IP filtering
+8. `43c61bc` - BPF comprehensive security checks
+9. `114cdca` - BPF circuit breaker pattern
+10. `cb0be7d` - BPF FD tracking cleanup paths
+11. `deb5859` - BPF map operations hardening
 
 ---
 
