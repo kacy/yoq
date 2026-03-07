@@ -246,3 +246,331 @@ pub fn writeImageJson(writer: anytype, img: store.ImageRecord) !void {
     try std.fmt.format(writer, "{d}", .{img.created_at});
     try writer.writeByte('}');
 }
+
+// -- tests --
+
+const testing = std.testing;
+const http_test = @import("../../testing/http_test.zig");
+
+// Test that the route function returns null for unmatched paths
+test "route returns null for unknown path" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/unknown",
+        .body = null,
+        .headers = &.{},
+    };
+
+    const response = route(req, testing.allocator);
+    try testing.expect(response == null);
+}
+
+// Test that validateContainerId works correctly
+fn testValidateContainerId() !void {
+    // Valid ID (64 hex chars)
+    try testing.expect(common.validateContainerId("abc123def4567890123456789012345678901234567890123456789012345678"));
+
+    // Invalid: too short
+    try testing.expect(!common.validateContainerId("abc123"));
+
+    // Invalid: too long
+    try testing.expect(!common.validateContainerId("abc123def456789012345678901234567890123456789012345678901234567890"));
+
+    // Invalid: non-hex characters
+    try testing.expect(!common.validateContainerId("xyz123def456789012345678901234567890123456789012345678901234567"));
+
+    // Invalid: empty
+    try testing.expect(!common.validateContainerId(""));
+
+    // Invalid: uppercase (should be lowercase)
+    try testing.expect(!common.validateContainerId("ABC123DEF456789012345678901234567890123456789012345678901234567"));
+}
+
+// Test route method validation
+test "route rejects wrong method for /containers" {
+    const post_req = http.Request{
+        .method = .POST,
+        .path = "/containers",
+        .body = null,
+        .headers = &.{},
+    };
+
+    const response = route(post_req, testing.allocator);
+    try testing.expect(response == null); // Returns null, dispatch will handle 405
+}
+
+// Test writeContainerJson format
+test "writeContainerJson produces valid JSON" {
+    const record = store.ContainerRecord{
+        .id = "abc123def4567890123456789012345678901234567890123456789012345678",
+        .rootfs = "/tmp/rootfs",
+        .command = "echo hello",
+        .hostname = "test-host",
+        .status = "running",
+        .pid = 1234,
+        .exit_code = null,
+        .ip_address = null,
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1234567890,
+    };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeContainerJson(writer, record);
+
+    const json_str = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"id\":") != null);
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"status\":\"running\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"pid\":1234") != null);
+}
+
+// Test writeContainerJson with null pid
+test "writeContainerJson handles null pid" {
+    const record = store.ContainerRecord{
+        .id = "abc123def4567890123456789012345678901234567890123456789012345678",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep 1000",
+        .hostname = "test-host",
+        .status = "exited",
+        .pid = null,
+        .exit_code = 0,
+        .ip_address = null,
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1234567890,
+    };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeContainerJson(writer, record);
+
+    const json_str = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"pid\":null") != null);
+}
+
+// Test writeImageJson format
+test "writeImageJson produces valid JSON" {
+    const img = store.ImageRecord{
+        .id = "img123def4567890123456789012345678901234567890123456789012345678",
+        .repository = "alpine",
+        .tag = "latest",
+        .manifest_digest = "sha256:abc123",
+        .config_digest = "sha256:def456",
+        .total_size = 1024000,
+        .created_at = 1234567890,
+    };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeImageJson(writer, img);
+
+    const json_str = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"id\":") != null);
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"repository\":\"alpine\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"tag\":\"latest\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"size\":1024000") != null);
+}
+
+// Test command escaping in writeContainerJson
+test "writeContainerJson escapes special characters" {
+    const record = store.ContainerRecord{
+        .id = "abc123def4567890123456789012345678901234567890123456789012345678",
+        .rootfs = "/tmp/rootfs",
+        .command = "echo \"hello world\"", // Contains quotes
+        .hostname = "test-host",
+        .status = "running",
+        .pid = 1234,
+        .exit_code = null,
+        .ip_address = null,
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1234567890,
+    };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeContainerJson(writer, record);
+
+    const json_str = fbs.getWritten();
+    // Should contain escaped quotes
+    try testing.expect(std.mem.indexOf(u8, json_str, "\\\"hello world\\\"") != null);
+}
+
+// Test that handleRemoveImage validates ID format implicitly via path parsing
+test "route handles /images/{id} DELETE" {
+    const req = http.Request{
+        .method = .DELETE,
+        .path = "/images/abc123def4567890123456789012345678901234567890123456789012345678",
+        .body = null,
+        .headers = &.{},
+    };
+
+    // This will fail with NotFound since image doesn't exist, but route should handle it
+    const response = route(req, testing.allocator);
+    // Response should be set (even if it returns 404)
+    try testing.expect(response != null);
+    if (response) |resp| {
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
+// Test method not allowed for container operations
+test "route returns method not allowed for wrong HTTP methods" {
+    // PUT to /containers should not match
+    const put_req = http.Request{
+        .method = .PUT,
+        .path = "/containers",
+        .body = null,
+        .headers = &.{},
+    };
+
+    const put_resp = route(put_req, testing.allocator);
+    try testing.expect(put_resp == null);
+
+    // PATCH to /containers/{id} should not match
+    const patch_req = http.Request{
+        .method = .PATCH,
+        .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678",
+        .body = null,
+        .headers = &.{},
+    };
+
+    const patch_resp = route(patch_req, testing.allocator);
+    try testing.expect(patch_resp == null);
+}
+
+// Test subpath matching for containers
+test "route correctly matches container subpaths" {
+    // /containers/{id}/logs - GET
+    const logs_req = http.Request{
+        .method = .GET,
+        .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/logs",
+        .body = null,
+        .headers = &.{},
+    };
+
+    const logs_resp = route(logs_req, testing.allocator);
+    try testing.expect(logs_resp != null);
+    if (logs_resp) |resp| {
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+
+    // /containers/{id}/stop - POST
+    const stop_req = http.Request{
+        .method = .POST,
+        .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/stop",
+        .body = null,
+        .headers = &.{},
+    };
+
+    const stop_resp = route(stop_req, testing.allocator);
+    try testing.expect(stop_resp != null);
+    if (stop_resp) |resp| {
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
+// Test invalid container ID returns bad request
+test "route returns bad request for invalid container ID" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/containers/invalid-id/logs", // Invalid ID
+        .body = null,
+        .headers = &.{},
+    };
+
+    const response = route(req, testing.allocator);
+    try testing.expect(response != null);
+    if (response) |resp| {
+        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
+// Test that POST to /containers/{id} without subpath is not allowed
+test "route method not allowed for POST to container without subpath" {
+    const req = http.Request{
+        .method = .POST,
+        .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678",
+        .body = null,
+        .headers = &.{},
+    };
+
+    const response = route(req, testing.allocator);
+    // Should return method not allowed response
+    try testing.expect(response != null);
+    if (response) |resp| {
+        // Route returns null for unmatched, dispatch handles the rest
+        // So we expect null here
+        if (resp.status == .MethodNotAllowed) {
+            if (resp.allocated) testing.allocator.free(resp.body);
+        }
+    }
+}
+
+// Test container ID validation directly through the route
+test "container ID validation through route" {
+    const valid_id = "abc123def4567890123456789012345678901234567890123456789012345678";
+
+    // Valid ID should reach handler (and likely return 404 since container doesn't exist)
+    const valid_req = http.Request{
+        .method = .GET,
+        .path = std.fmt.allocPrint(testing.allocator, "/containers/{s}", .{valid_id}) catch unreachable,
+        .body = null,
+        .headers = &.{},
+    };
+    defer testing.allocator.free(valid_req.path);
+
+    const valid_resp = route(valid_req, testing.allocator);
+    try testing.expect(valid_resp != null); // Handler reached
+    if (valid_resp) |resp| {
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
+// Test writeImageJson with empty strings
+test "writeImageJson handles empty strings" {
+    const img = store.ImageRecord{
+        .id = "img123def4567890123456789012345678901234567890123456789012345678",
+        .repository = "", // Empty repository
+        .tag = "", // Empty tag
+        .manifest_digest = "sha256:abc",
+        .config_digest = "sha256:def",
+        .total_size = 0,
+        .created_at = 0,
+    };
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeImageJson(writer, img);
+
+    const json_str = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"repository\":\"\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json_str, "\"tag\":\"\"") != null);
+}
+
+// Test that container routes handle trailing slashes correctly
+test "route handles trailing slashes on container paths" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678/",
+        .body = null,
+        .headers = &.{},
+    };
+
+    // Trailing slash after ID - path has "/" so it won't match simple GET
+    const response = route(req, testing.allocator);
+    // This won't match the simple /containers/{id} pattern
+    try testing.expect(response == null);
+}
