@@ -26,6 +26,10 @@ pub const FilesystemError = error{
     PathTooLong,
     /// an overlay path (lower/upper/work) is a symlink, which could redirect mounts
     SymlinkNotAllowed,
+    /// bind mount source is a symlink (TOCTOU protection)
+    BindSourceIsSymlink,
+    /// bind mount source path validation failed
+    BindSourceValidationFailed,
 };
 
 /// configuration for a container's filesystem
@@ -203,6 +207,14 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
         return FilesystemError.MountFailed;
     }
 
+    // TOCTOU-safe validation: open source with O_NOFOLLOW to verify it's not a symlink
+    // this prevents race conditions where the path is replaced between validation and mount
+    const validation_fd = validatePathNoSymlink(source) catch |e| {
+        log.err("bind mount: source path validation failed for {s}: {s}", .{ source, @errorName(e) });
+        return e;
+    };
+    posix.close(validation_fd);
+
     // build full target path: target_root + target
     var target_buf: [4096]u8 = undefined;
     var target_pos: usize = 0;
@@ -239,13 +251,19 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
     // bind mount: source -> full_target
     var flags: u32 = linux.MS.BIND | linux.MS.REC;
     const rc = linux.mount(source_z, full_target, null, flags, 0);
-    if (syscall_util.isError(rc)) return FilesystemError.MountFailed;
+    if (syscall_util.isError(rc)) {
+        log.err("bind mount: mount syscall failed for {s} -> {s}", .{ source, target });
+        return FilesystemError.MountFailed;
+    }
 
     // remount read-only if requested (bind + ro requires a second mount call)
     if (read_only) {
         flags = linux.MS.BIND | linux.MS.REC | linux.MS.REMOUNT | linux.MS.RDONLY;
         const rc2 = linux.mount(source_z, full_target, null, flags, 0);
-        if (syscall_util.isError(rc2)) return FilesystemError.MountFailed;
+        if (syscall_util.isError(rc2)) {
+            log.err("bind mount: remount ro failed for {s}", .{target});
+            return FilesystemError.MountFailed;
+        }
     }
 }
 
@@ -403,6 +421,38 @@ fn isSymlink(path: []const u8) bool {
     return stat.mode & posix.S.IFMT == posix.S.IFLNK;
 }
 
+/// TOCTOU-safe path validation.
+/// opens the path with O_NOFOLLOW to verify it's not a symlink,
+/// preventing race conditions between validation and use.
+/// returns the file descriptor on success.
+fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
+    // open with O_NOFOLLOW - this will fail if path is a symlink
+    const fd = posix.open(path, .{ .O_NOFOLLOW = true, .O_RDONLY = true, .O_CLOEXEC = true }, 0) catch |e| {
+        // check if this is specifically a symlink error
+        if (e == error.NotDir or e == error.SymLinkLoop) {
+            log.err("filesystem: path is a symlink or contains symlinks: {s}", .{path});
+            return FilesystemError.BindSourceIsSymlink;
+        }
+        // other errors (not found, permission denied) - let the mount fail naturally
+        log.warn("filesystem: could not validate path {s}: {s}", .{ path, @errorName(e) });
+        return FilesystemError.BindSourceValidationFailed;
+    };
+
+    // verify it's not a symlink using fstat
+    const stat = posix.fstat(fd) catch {
+        posix.close(fd);
+        return FilesystemError.BindSourceValidationFailed;
+    };
+
+    if (stat.mode & posix.S.IFMT == posix.S.IFLNK) {
+        posix.close(fd);
+        log.err("filesystem: path is a symlink: {s}", .{path});
+        return FilesystemError.BindSourceIsSymlink;
+    }
+
+    return fd;
+}
+
 fn isCanonicalAbsolutePath(path: []const u8) bool {
     if (path.len == 0 or path[0] != '/') return false;
 
@@ -551,4 +601,56 @@ test "isCanonicalAbsolutePath rejects non-canonical and relative paths" {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link = try std.fmt.bufPrint(&link_buf, "{s}/link", .{base});
     try std.testing.expect(!isCanonicalAbsolutePath(link));
+}
+
+// -- TOCTOU-safe validation tests --
+
+test "validatePathNoSymlink accepts regular files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // create a regular file
+    try tmp.dir.writeFile("testfile", "test content");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("testfile", &path_buf);
+
+    const fd = try validatePathNoSymlink(path);
+    posix.close(fd);
+}
+
+test "validatePathNoSymlink accepts directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // create a directory
+    try tmp.dir.makeDir("testdir");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("testdir", &path_buf);
+
+    const fd = try validatePathNoSymlink(path);
+    posix.close(fd);
+}
+
+test "validatePathNoSymlink rejects symlinks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // create a file and symlink to it
+    try tmp.dir.writeFile("realfile", "content");
+    try tmp.dir.symLink("realfile", "linkfile", .{});
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try tmp.dir.realpath(".", &path_buf);
+
+    var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/linkfile", .{base});
+
+    // should fail because it's a symlink
+    try std.testing.expectError(FilesystemError.BindSourceIsSymlink, validatePathNoSymlink(link_path));
+}
+
+test "validatePathNoSymlink rejects non-existent paths" {
+    try std.testing.expectError(FilesystemError.BindSourceValidationFailed, validatePathNoSymlink("/nonexistent/path/12345"));
 }

@@ -170,6 +170,11 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) Conta
                 writeErr("--cpus must be greater than 0\n", .{});
                 return ContainerError.InvalidArgument;
             }
+            // add reasonable upper bound to prevent overflow
+            if (cpu_count > 1024) {
+                writeErr("--cpus exceeds maximum of 1024\n", .{});
+                return ContainerError.InvalidArgument;
+            }
             limits.cpu_max_usec = @intFromFloat(cpu_count * @as(f64, @floatFromInt(limits.cpu_max_period)));
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--detach")) {
             detach = true;
@@ -409,7 +414,7 @@ fn shouldRestart(policy: run_state.RestartPolicy, exit_code: u8) bool {
 }
 
 fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool) u8 {
-    var backoff_ms: u64 = 1000;
+    var backoff_ms: u32 = 1000;
     var first_start = true;
     var last_exit: u8 = 0;
 
@@ -434,8 +439,9 @@ fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, attac
         if (attach) {
             writeErr("container {s} exited ({d}), restarting in {d}ms...\n", .{ id, last_exit, backoff_ms });
         }
-        std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
-        backoff_ms = @min(backoff_ms * 2, 30_000);
+        std.Thread.sleep(@as(u64, backoff_ms) * std.time.ns_per_ms);
+        // use saturating multiplication to prevent overflow
+        backoff_ms = @min(std.math.mul(u32, backoff_ms, 2) catch 30_000, 30_000);
         first_start = false;
     }
 
@@ -450,10 +456,25 @@ fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) ContainerError!void
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
+
     child.spawn() catch |err| {
         writeErr("failed to spawn detached supervisor: {}\n", .{err});
         return ContainerError.ProcessNotFound;
     };
+
+    // don't wait for the supervisor - it should daemonize itself
+    // but we do need to ensure it didn't immediately fail
+    std.Thread.sleep(100 * std.time.ns_per_ms);
+
+    // check if process is still running (signal 0 is no-op check)
+    if (process.sendSignal(child.id, 0)) |_| {
+        // process exists, detach from it so it continues running
+        _ = child.wait() catch {};
+    } else |_| {
+        // process already exited - something went wrong
+        writeErr("supervisor process exited immediately\n", .{});
+        return ContainerError.ProcessNotFound;
+    }
 }
 
 fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) ContainerError!void {

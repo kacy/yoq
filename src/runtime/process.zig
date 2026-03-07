@@ -30,6 +30,8 @@ pub const ExitStatus = union(enum) {
     exited: u8,
     /// process was killed by this signal
     signaled: u32,
+    /// process was stopped (e.g., by SIGSTOP)
+    stopped: u32,
     /// process is still running
     running,
 };
@@ -40,7 +42,7 @@ pub const ExitStatus = union(enum) {
 /// retries automatically on EINTR (signal interrupted the wait).
 pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
     var status: u32 = 0;
-    var flags: u32 = 0;
+    var flags: u32 = linux.W.UNTRACED; // report stopped children too
     if (no_hang) flags |= linux.W.NOHANG;
 
     while (true) {
@@ -107,6 +109,13 @@ fn parseStatus(status: u32) ExitStatus {
         return .{ .signaled = sig };
     }
 
+    // WIFSTOPPED: (status & 0xff) == 0x7f
+    // the signal that stopped the process is (status >> 8) & 0xff
+    if (status & 0xff == 0x7f) {
+        const stop_sig = (status >> 8) & 0xff;
+        return .{ .stopped = stop_sig };
+    }
+
     return .running;
 }
 
@@ -140,4 +149,17 @@ test "parse exit status: killed by SIGTERM" {
     // SIGTERM (15) produces status 0x000f
     const result = parseStatus(0x000f);
     try std.testing.expectEqual(ExitStatus{ .signaled = 15 }, result);
+}
+
+test "parse exit status: stopped by SIGSTOP" {
+    // stopped status: signal << 8 | 0x7f
+    // SIGSTOP (19) stopped produces status 0x137f
+    const result = parseStatus(0x137f);
+    try std.testing.expectEqual(ExitStatus{ .stopped = 19 }, result);
+}
+
+test "parse exit status: stopped by SIGTSTP" {
+    // SIGTSTP (20) stopped produces status 0x147f
+    const result = parseStatus(0x147f);
+    try std.testing.expectEqual(ExitStatus{ .stopped = 20 }, result);
 }

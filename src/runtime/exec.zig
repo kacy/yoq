@@ -118,6 +118,7 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
     return switch (result.status) {
         .exited => |code| code,
         .signaled => 128,
+        .stopped => 128, // stopped processes treated as signaled
         .running => 0,
     };
 }

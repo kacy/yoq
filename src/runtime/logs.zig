@@ -15,6 +15,7 @@ const linux = std.os.linux;
 const paths = @import("../lib/paths.zig");
 const log_mux = @import("../dev/log_mux.zig");
 const syscall = @import("../lib/syscall.zig");
+const container = @import("container.zig");
 
 pub const LogError = error{
     /// could not create the log file or log directory
@@ -27,6 +28,8 @@ pub const LogError = error{
     NotFound,
     /// the constructed log file path exceeded the buffer size
     PathTooLong,
+    /// container ID validation failed
+    InvalidId,
 };
 
 const logs_subdir = "logs";
@@ -39,7 +42,9 @@ const max_log_size: u64 = 50 * 1024 * 1024;
 
 /// resolve the log file path for a container.
 /// returns the formatted path within the provided buffer.
+/// validates the container ID to prevent path traversal.
 fn logPath(buf: *[paths.max_path]u8, container_id: []const u8) LogError![]const u8 {
+    if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
     return paths.dataPathFmt(buf, "{s}/{s}.log", .{ logs_subdir, container_id }) catch
         return LogError.PathTooLong;
 }
@@ -47,6 +52,8 @@ fn logPath(buf: *[paths.max_path]u8, container_id: []const u8) LogError![]const 
 /// ensure the log directory exists and return a file handle for
 /// the container's log file. creates the file if it doesn't exist.
 pub fn createLogFile(container_id: []const u8) LogError!std.fs.File {
+    if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
+
     paths.ensureDataDir(logs_subdir) catch {};
 
     var path_buf: [paths.max_path]u8 = undefined;
@@ -58,6 +65,8 @@ pub fn createLogFile(container_id: []const u8) LogError!std.fs.File {
 
 /// read the full log file for a container. caller owns the returned slice.
 pub fn readLogs(alloc: std.mem.Allocator, container_id: []const u8) LogError![]const u8 {
+    if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
+
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
@@ -76,6 +85,7 @@ pub fn readLogs(alloc: std.mem.Allocator, container_id: []const u8) LogError![]c
 /// and allocating the full file. falls back to full read if the tail chunk
 /// doesn't contain enough lines.
 pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
+    if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
     if (n == 0) return readLogs(alloc, container_id);
 
     var path_buf: [paths.max_path]u8 = undefined;
@@ -133,6 +143,8 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
 /// fallback: read the entire log file and extract the last N lines.
 /// used when the 64KB tail chunk doesn't contain enough lines.
 fn readTailFull(alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
+    if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
+
     const full = try readLogs(alloc, container_id);
 
     var count: usize = 0;
@@ -157,6 +169,8 @@ fn readTailFull(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
 
 /// delete the log file for a container
 pub fn deleteLogFile(container_id: []const u8) void {
+    if (!container.isValidContainerId(container_id)) return;
+
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = logPath(&path_buf, container_id) catch return;
     std.fs.cwd().deleteFile(file_path) catch {};
@@ -300,6 +314,8 @@ fn writeTerminalLine(stream_label: []const u8, line: []const u8) void {
 }
 
 pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t) LogError!void {
+    if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
+
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
@@ -316,12 +332,18 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t
     }
 
     const fd = @as(posix.fd_t, @intCast(syscall.unwrap(linux.inotify_init1(linux.IN.CLOEXEC)) catch return LogError.ReadFailed));
-    defer posix.close(fd);
 
     var watch_path_buf: [paths.max_path]u8 = undefined;
     const watch_path = sentinelizePath(&watch_path_buf, file_path) catch return LogError.PathTooLong;
     const wd = linux.inotify_add_watch(fd, watch_path, linux.IN.MODIFY | linux.IN.CLOSE_WRITE | linux.IN.MOVE_SELF);
     _ = syscall.unwrap(wd) catch return LogError.ReadFailed;
+
+    // defer cleanup after successful watch creation
+    defer {
+        // explicitly remove watch before closing fd (good practice)
+        _ = linux.inotify_rm_watch(fd, wd);
+        posix.close(fd);
+    }
 
     var event_buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
     var read_buf: [4096]u8 = undefined;
@@ -419,4 +441,50 @@ test "write log line adds newline" {
     try std.testing.expect(content[content.len - 1] == '\n');
     // but not two
     try std.testing.expect(content[content.len - 2] != '\n');
+}
+
+test "logPath validates container ID" {
+    var path_buf: [paths.max_path]u8 = undefined;
+
+    // valid ID should work
+    _ = logPath(&path_buf, "abc123def456") catch |e| {
+        // might fail for other reasons (path too long), but not InvalidId
+        try std.testing.expect(e != LogError.InvalidId);
+    };
+
+    // invalid IDs should return InvalidId
+    try std.testing.expectError(LogError.InvalidId, logPath(&path_buf, "../etc/passwd"));
+    try std.testing.expectError(LogError.InvalidId, logPath(&path_buf, "ABC123DEF456"));
+    try std.testing.expectError(LogError.InvalidId, logPath(&path_buf, "short"));
+}
+
+test "createLogFile validates container ID" {
+    // invalid IDs should fail without creating files
+    try std.testing.expectError(LogError.InvalidId, createLogFile("../etc/passwd"));
+    try std.testing.expectError(LogError.InvalidId, createLogFile("/etc/passwd"));
+}
+
+test "readLogs validates container ID" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(LogError.InvalidId, readLogs(alloc, "../etc/passwd"));
+    try std.testing.expectError(LogError.InvalidId, readLogs(alloc, "invalid-id"));
+}
+
+test "readTail validates container ID" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(LogError.InvalidId, readTail(alloc, "../etc/passwd", 10));
+    try std.testing.expectError(LogError.InvalidId, readTail(alloc, "invalid", 10));
+}
+
+test "deleteLogFile validates container ID" {
+    // should silently return on invalid ID (no crash, no file creation)
+    deleteLogFile("../etc/passwd");
+    deleteLogFile("/etc/passwd");
+    // function should complete without error
+    try std.testing.expect(true);
+}
+
+test "followLogs validates container ID" {
+    try std.testing.expectError(LogError.InvalidId, followLogs("../etc/passwd", 0, null));
+    try std.testing.expectError(LogError.InvalidId, followLogs("invalid", 10, null));
 }

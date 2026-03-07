@@ -10,6 +10,19 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const syscall_util = @import("../lib/syscall.zig");
+const log = @import("../lib/log.zig");
+
+/// child process stack size (1MB).
+/// must be large enough for the child process to set up filesystem,
+/// apply security restrictions, and exec the container command.
+const child_stack_size = 1024 * 1024;
+
+comptime {
+    // minimum: 128KB (should fit basic setup)
+    // maximum: 16MB (reasonable upper bound)
+    std.debug.assert(child_stack_size >= 128 * 1024);
+    std.debug.assert(child_stack_size <= 16 * 1024 * 1024);
+}
 
 pub const NamespaceError = error{
     CloneFailed,
@@ -120,8 +133,20 @@ pub fn spawn(
 
     // create stdout and stderr pipes for log capture.
     // parent gets the read ends, child gets the write ends (dup2'd to fd 1/2).
-    const stdout_pipe = posix.pipe() catch return NamespaceError.PipeFailed;
-    const stderr_pipe = posix.pipe() catch return NamespaceError.PipeFailed;
+    const stdout_pipe = posix.pipe() catch {
+        // cleanup first pipe on failure
+        posix.close(pipe_read);
+        posix.close(pipe_write);
+        return NamespaceError.PipeFailed;
+    };
+    const stderr_pipe = posix.pipe() catch {
+        // cleanup first two pipes on failure
+        posix.close(pipe_read);
+        posix.close(pipe_write);
+        posix.close(stdout_pipe[0]);
+        posix.close(stdout_pipe[1]);
+        return NamespaceError.PipeFailed;
+    };
 
     errdefer {
         posix.close(pipe_read);
@@ -133,10 +158,9 @@ pub fn spawn(
     }
 
     // allocate child stack. clone3 needs an explicit stack for the child.
-    const stack_size: usize = 1024 * 1024; // 1MB
     const stack_mem = posix.mmap(
         null,
-        stack_size,
+        child_stack_size,
         posix.PROT.READ | posix.PROT.WRITE,
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
@@ -162,8 +186,18 @@ pub fn spawn(
             posix.close(ctx.pipe_read_fd);
 
             // redirect stdout and stderr to the log pipes
-            posix.dup2(ctx.stdout_write_fd, posix.STDOUT_FILENO) catch {};
-            posix.dup2(ctx.stderr_write_fd, posix.STDERR_FILENO) catch {};
+            // if this fails, the container output would leak to parent - abort
+            posix.dup2(ctx.stdout_write_fd, posix.STDOUT_FILENO) catch {
+                log.err("namespace: failed to redirect stdout - aborting container start");
+                posix.close(ctx.stdout_write_fd);
+                posix.close(ctx.stderr_write_fd);
+                return 1;
+            };
+            posix.dup2(ctx.stderr_write_fd, posix.STDERR_FILENO) catch {
+                log.err("namespace: failed to redirect stderr - aborting container start");
+                posix.close(ctx.stderr_write_fd);
+                return 1;
+            };
             posix.close(ctx.stdout_write_fd);
             posix.close(ctx.stderr_write_fd);
 
@@ -184,7 +218,7 @@ pub fn spawn(
         .flags = ns_flags.toCloneFlags(),
         .exit_signal = linux.SIG.CHLD,
         .stack = @intFromPtr(stack_mem.ptr),
-        .stack_size = stack_size,
+        .stack_size = child_stack_size,
     };
 
     const rc = linux.syscall2(
@@ -243,14 +277,16 @@ pub fn spawn(
 /// write uid_map, gid_map, and setgroups for a child process.
 /// must be called from the parent after clone3.
 fn writeUserMapping(child_pid: posix.pid_t, mapping: UserMapping) !void {
-    var path_buf: [64]u8 = undefined;
+    // use a larger buffer to handle max PID (2^22 = 4194304, 7 digits)
+    // max path: /proc/4194304/uid_map = 22 chars, but we add margin
+    var path_buf: [128]u8 = undefined;
 
     // step 1: deny setgroups (required before writing gid_map unprivileged)
     const setgroups_path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/setgroups", .{child_pid});
     try writeProc(setgroups_path, "deny\n");
 
     // step 2: write uid_map
-    var map_buf: [64]u8 = undefined;
+    var map_buf: [128]u8 = undefined;
     const uid_map_path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/uid_map", .{child_pid});
     const uid_val = try std.fmt.bufPrint(&map_buf, "{d} {d} {d}\n", .{
         mapping.inner_uid,
@@ -273,13 +309,21 @@ fn writeUserMapping(child_pid: posix.pid_t, mapping: UserMapping) !void {
 fn writeProc(path: []const u8, value: []const u8) !void {
     // need a sentinel-terminated path for openat
     var path_z: [128]u8 = .{0} ** 128;
-    if (path.len >= path_z.len) return error.PathTooLong;
+    if (path.len >= path_z.len) {
+        log.err("namespace: path too long for procfs write: {s}", .{path});
+        return error.PathTooLong;
+    }
     @memcpy(path_z[0..path.len], path);
 
-    const file = std.fs.cwd().openFile(path_z[0..path.len :0], .{ .mode = .write_only }) catch
+    const file = std.fs.cwd().openFile(path_z[0..path.len :0], .{ .mode = .write_only }) catch |e| {
+        log.err("namespace: failed to open {s}: {s}", .{ path, @errorName(e) });
         return error.WriteFailed;
+    };
     defer file.close();
-    file.writeAll(value) catch return error.WriteFailed;
+    file.writeAll(value) catch |e| {
+        log.err("namespace: failed to write to {s}: {s}", .{ path, @errorName(e) });
+        return error.WriteFailed;
+    };
 }
 
 // -- tests --
