@@ -22,3 +22,10 @@ format is based on [keep a changelog](https://keepachangelog.com/).
 - **TLS:** ACME auto-provisioning, TLS 1.3 handshake, SNI routing, auto-renewal
 - **observability:** eBPF per-service and per-pair metrics, PSI resource monitoring
 - **network policies:** eBPF-based allow/deny between services
+
+### fixed
+
+- **raft transport:** fixed authentication to work with TCP ephemeral ports (previously rejected valid messages due to port mismatch between ephemeral source port and peer's listening port)
+- **cluster node initialization:** fixed shared_key timing bug where authentication was checked before the key was set
+- **cluster node cleanup:** fixed double-free bug where raft peers were freed twice (once in raft.deinit, once in node.deinit)
+- **cluster test harness:** fixed simultaneous startup with proper full peer list configuration
