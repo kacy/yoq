@@ -61,6 +61,11 @@ pub fn schedule(
             // skip non-active agents
             if (!std.mem.eql(u8, a.status, "active")) continue;
 
+            // skip server-only agents — they run raft consensus, not workloads
+            if (a.role) |role| {
+                if (std.mem.eql(u8, role, "server")) continue;
+            }
+
             // check capacity (cpu in millicores: cores * 1000)
             const free_cpu = a.cpu_cores * 1000 - used_cpu[agent_idx];
             const free_mem = a.memory_mb - used_mem[agent_idx];
@@ -124,6 +129,10 @@ pub fn generateAssignmentId(buf: *[12]u8) void {
 // -- tests --
 
 fn makeAgent(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64) AgentRecord {
+    return makeAgentWithRole(id, status, cores, mem, cpu_used, mem_used, null);
+}
+
+fn makeAgentWithRole(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64, role: ?[]const u8) AgentRecord {
     return .{
         .id = id,
         .address = "localhost",
@@ -135,6 +144,7 @@ fn makeAgent(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used:
         .containers = 0,
         .last_heartbeat = 0,
         .registered_at = 0,
+        .role = role,
     };
 }
 
@@ -292,6 +302,72 @@ test "generateAssignmentId produces 12 hex chars" {
         const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
         try std.testing.expect(is_hex);
     }
+}
+
+test "schedule skips server-role agent" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentWithRole("server1", "active", 8, 16384, 0, 0, "server"),
+        makeAgentWithRole("worker1", "active", 2, 4096, 0, 0, "agent"),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
+    };
+
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+
+    // should skip server1 and place on worker1
+    try std.testing.expect(results[0] != null);
+    try std.testing.expectEqualStrings("worker1", results[0].?.agent_id);
+}
+
+test "schedule allows both-role agent" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentWithRole("node1", "active", 4, 8192, 0, 0, "both"),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
+    };
+
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+
+    try std.testing.expect(results[0] != null);
+    try std.testing.expectEqualStrings("node1", results[0].?.agent_id);
+}
+
+test "schedule allows null-role agent (backwards compat)" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentWithRole("legacy1", "active", 4, 8192, 0, 0, null),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
+    };
+
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+
+    try std.testing.expect(results[0] != null);
+    try std.testing.expectEqualStrings("legacy1", results[0].?.agent_id);
+}
+
+test "schedule all server-role returns null" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentWithRole("server1", "active", 8, 16384, 0, 0, "server"),
+        makeAgentWithRole("server2", "active", 8, 16384, 0, 0, "server"),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
+    };
+
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+
+    try std.testing.expect(results[0] == null);
 }
 
 test "assignmentSql generates valid SQL" {
