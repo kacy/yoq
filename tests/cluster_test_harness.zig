@@ -144,6 +144,10 @@ pub const TestCluster = struct {
         var env_map = try std.process.getEnvMap(self.alloc);
         defer env_map.deinit();
 
+        // Set up environment for yoq to find its data directory
+        try env_map.put("HOME", node.data_dir);
+        try env_map.put("XDG_DATA_HOME", node.data_dir);
+
         const cwd = try std.fs.cwd().realpathAlloc(self.alloc, ".");
         defer self.alloc.free(cwd);
 
