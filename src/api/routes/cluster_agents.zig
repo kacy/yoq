@@ -115,7 +115,7 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
     var id_buf: [12]u8 = undefined;
     agent_registry.generateAgentId(&id_buf);
 
-    var assigned_node_id: ?u8 = null;
+    var assigned_node_id: ?u16 = null;
     var overlay_ip_str: ?[]const u8 = null;
     var overlay_ip_buf: [16]u8 = undefined;
     var container_subnet_buf: [20]u8 = undefined;
@@ -132,8 +132,17 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
         };
         assigned_node_id = nid;
 
-        overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.0.{d}", .{nid}) catch null;
-        container_subnet = std.fmt.bufPrint(&container_subnet_buf, "10.42.{d}.0/24", .{nid}) catch null;
+        if (nid <= 254) {
+            overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.0.{d}", .{nid}) catch null;
+        } else {
+            overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.{d}.{d}", .{ nid >> 8, nid & 0xFF }) catch null;
+        }
+
+        // derive container subnet from ip.subnetForNode addressing
+        const subnet_cfg = @import("../../network/ip.zig").subnetForNode(nid);
+        container_subnet = std.fmt.bufPrint(&container_subnet_buf, "{d}.{d}.{d}.0/24", .{
+            subnet_cfg.base[0], subnet_cfg.base[1], subnet_cfg.base[2],
+        }) catch null;
 
         const port: u16 = if (wg_listen_port) |p| @intCast(p) else 51820;
         endpoint = std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;

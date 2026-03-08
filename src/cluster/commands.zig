@@ -376,7 +376,7 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
         // skip ourselves
         if (node_id_val == node_id) continue;
 
-        const peer_node: u8 = if (node_id_val >= 1 and node_id_val <= 254)
+        const peer_node: u16 = if (node_id_val >= 1 and node_id_val <= 65534)
             @intCast(node_id_val)
         else
             continue;
@@ -384,7 +384,10 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
         peers_buf[peer_count] = .{
             .public_key = pub_key,
             .endpoint = endpoint,
-            .overlay_ip = .{ 10, 40, 0, peer_node },
+            .overlay_ip = if (peer_node <= 254)
+                [4]u8{ 10, 40, 0, @intCast(peer_node) }
+            else
+                [4]u8{ 10, 40, @intCast(peer_node >> 8), @intCast(peer_node & 0xFF) },
             .container_subnet_node = peer_node,
         };
 

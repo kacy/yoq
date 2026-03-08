@@ -52,8 +52,8 @@ pub const ContainerState = enum {
     failed,
 };
 
-// max peers in the wireguard mesh — matches max node_id (1-254).
-const max_peers = 254;
+// max peers in the wireguard mesh — matches max node_id (1-65534).
+const max_peers = 65534;
 
 pub const Agent = struct {
     alloc: Allocator,
@@ -71,7 +71,7 @@ pub const Agent = struct {
 
     // wireguard mesh networking fields (set during registration if the
     // server assigns a node_id)
-    node_id: ?u8 = null,
+    node_id: ?u16 = null,
     wg_keypair: ?wireguard.KeyPair = null,
     overlay_ip: ?[4]u8 = null,
     wg_listen_port: u16 = 51820,
@@ -82,12 +82,10 @@ pub const Agent = struct {
     /// and reconcile.
     known_peers_count: u32 = 0,
 
-    /// public keys of currently configured wireguard peers.
+    /// maps node_id → public_key for currently configured wireguard peers.
     /// used by reconcilePeers to detect which peers to add/remove.
-    /// fixed capacity of 254 matches the max node count (node_id 1-254).
-    known_peer_keys: [max_peers][44]u8 = undefined,
-    known_peer_key_lens: [max_peers]u8 = [_]u8{0} ** max_peers,
-    known_peer_nodes: [max_peers]u8 = [_]u8{0} ** max_peers,
+    /// dynamic sizing supports up to 65534 nodes.
+    known_peers: std.AutoHashMap(u16, [44]u8),
 
     pub fn init(alloc: Allocator, server_addr: [4]u8, server_port: u16, token: []const u8) Agent {
         return .{
@@ -100,6 +98,7 @@ pub const Agent = struct {
             .loop_thread = null,
             .local_containers = std.StringHashMap(ContainerState).init(alloc),
             .container_lock = .{},
+            .known_peers = std.AutoHashMap(u16, [44]u8).init(alloc),
         };
     }
 
@@ -162,7 +161,7 @@ pub const Agent = struct {
 
         // parse optional node_id and overlay_ip from the response
         if (extractJsonInt(resp.body, "node_id")) |nid| {
-            if (nid >= 1 and nid <= 254) {
+            if (nid >= 1 and nid <= 65534) {
                 self.node_id = @intCast(nid);
             }
         }
@@ -222,6 +221,9 @@ pub const Agent = struct {
             self.alloc.free(entry.key_ptr.*);
         }
         self.local_containers.deinit();
+
+        // clean up the peer tracking map
+        self.known_peers.deinit();
     }
 
     /// block until the agent stops (used by cmdJoin).
@@ -313,17 +315,13 @@ pub const Agent = struct {
         var resp = self.fetchPeers() orelse return;
         defer resp.deinit(self.alloc);
 
-        // parse peer objects from the response.
+        // parse peer objects from the response into a new map.
         // each peer is: {"node_id":N,"public_key":"...","endpoint":"...","overlay_ip":"...","container_subnet":"..."}
-        var new_count: u32 = 0;
-        var new_keys: [max_peers][44]u8 = undefined;
-        var new_key_lens: [max_peers]u8 = [_]u8{0} ** max_peers;
-        var new_nodes: [max_peers]u8 = [_]u8{0} ** max_peers;
+        var new_peers = std.AutoHashMap(u16, [44]u8).init(self.alloc);
+        defer new_peers.deinit();
 
         var iter = json_helpers.extractJsonObjects(resp.body);
         while (iter.next()) |obj| {
-            if (new_count >= max_peers) break;
-
             const pub_key = extractJsonString(obj, "public_key") orelse continue;
             const overlay_str = extractJsonString(obj, "overlay_ip") orelse continue;
             const node_id_val = extractJsonInt(obj, "node_id") orelse continue;
@@ -334,7 +332,7 @@ pub const Agent = struct {
                 if (node_id_val == our_id) continue;
             }
 
-            const peer_node: u8 = if (node_id_val >= 1 and node_id_val <= 254)
+            const peer_node: u16 = if (node_id_val >= 1 and node_id_val <= 65534)
                 @intCast(node_id_val)
             else
                 continue;
@@ -342,18 +340,9 @@ pub const Agent = struct {
             const overlay_ip = ip_mod.parseIp(overlay_str) orelse continue;
 
             // check if this peer is already configured
-            var found = false;
-            for (0..self.known_peers_count) |i| {
-                const existing_key = self.known_peer_keys[i][0..self.known_peer_key_lens[i]];
-                if (pub_key.len == existing_key.len and
-                    std.mem.eql(u8, pub_key, existing_key))
-                {
-                    found = true;
-                    break;
-                }
-            }
+            const already_known = self.known_peers.contains(peer_node);
 
-            if (!found) {
+            if (!already_known) {
                 // new peer — add it
                 log.info("adding peer node_id={d}", .{peer_node});
                 setup.addClusterPeer(.{
@@ -366,50 +355,47 @@ pub const Agent = struct {
                 };
             }
 
-            // track this peer in the new list
+            // track this peer in the new map
             if (pub_key.len <= 44) {
-                const idx = new_count;
-                @memcpy(new_keys[idx][0..pub_key.len], pub_key);
-                new_key_lens[idx] = @intCast(pub_key.len);
-                new_nodes[idx] = peer_node;
-                new_count += 1;
+                var key_buf: [44]u8 = undefined;
+                @memcpy(key_buf[0..pub_key.len], pub_key);
+                // zero the rest so the buffer is deterministic
+                @memset(key_buf[pub_key.len..], 0);
+                new_peers.put(peer_node, key_buf) catch {};
             }
         }
 
         // remove peers that are no longer in the server's list
-        for (0..self.known_peers_count) |i| {
-            const old_key = self.known_peer_keys[i][0..self.known_peer_key_lens[i]];
-            const old_node = self.known_peer_nodes[i];
+        var old_iter = self.known_peers.iterator();
+        while (old_iter.next()) |entry| {
+            const old_node = entry.key_ptr.*;
 
-            var still_present = false;
-            for (0..new_count) |j| {
-                const new_key = new_keys[j][0..new_key_lens[j]];
-                if (old_key.len == new_key.len and std.mem.eql(u8, old_key, new_key)) {
-                    still_present = true;
-                    break;
+            if (!new_peers.contains(old_node)) {
+                const old_key = entry.value_ptr;
+                // find the length of the key (first null byte)
+                var key_len: usize = 44;
+                for (old_key, 0..) |b, i| {
+                    if (b == 0) {
+                        key_len = i;
+                        break;
+                    }
                 }
-            }
-
-            if (!still_present) {
                 log.info("removing peer node_id={d}", .{old_node});
                 setup.removeClusterPeer(.{
-                    .public_key = old_key,
+                    .public_key = old_key[0..key_len],
                     .endpoint = "", // not needed for removal
-                    .overlay_ip = .{ 10, 40, 0, old_node },
+                    .overlay_ip = overlayIpForNode(old_node),
                     .container_subnet_node = old_node,
                 });
             }
         }
 
-        // update our local tracking state
-        self.known_peers_count = new_count;
-        for (0..new_count) |i| {
-            self.known_peer_keys[i] = new_keys[i];
-            self.known_peer_key_lens[i] = new_key_lens[i];
-            self.known_peer_nodes[i] = new_nodes[i];
-        }
+        // swap the maps: replace known_peers with new_peers
+        self.known_peers.deinit();
+        self.known_peers = new_peers.move();
+        self.known_peers_count = @intCast(self.known_peers.count());
 
-        log.info("peer reconciliation complete ({d} peers)", .{new_count});
+        log.info("peer reconciliation complete ({d} peers)", .{self.known_peers_count});
     }
 
     /// GET /wireguard/peers from the server.
@@ -704,6 +690,16 @@ pub fn detectLocalIp(target: [4]u8, buf: *[16]u8) []const u8 {
     return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] }) catch "127.0.0.1";
 }
 
+/// derive overlay IP from node_id.
+/// nodes 1-254:  10.40.0.{node_id}
+/// nodes 255+:   10.40.{node_id >> 8}.{node_id & 0xFF}
+fn overlayIpForNode(node_id: u16) [4]u8 {
+    if (node_id <= 254) {
+        return .{ 10, 40, 0, @intCast(node_id) };
+    }
+    return .{ 10, 40, @intCast(node_id >> 8), @intCast(node_id & 0xFF) };
+}
+
 // -- tests --
 
 test "getSystemResources returns reasonable values" {
@@ -724,6 +720,7 @@ test "Agent init creates empty local_containers" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
     defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), agent.local_containers.count());
     try std.testing.expect(!agent.running.load(.acquire));
@@ -733,6 +730,7 @@ test "Agent init wireguard fields default to null" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
     defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
 
     try std.testing.expect(agent.node_id == null);
     try std.testing.expect(agent.wg_keypair == null);
@@ -757,10 +755,25 @@ test "Agent init peer tracking defaults to zero" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
     defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), agent.known_peers_count);
 }
 
 test "max_peers matches node_id range" {
-    try std.testing.expectEqual(@as(usize, 254), max_peers);
+    try std.testing.expectEqual(@as(usize, 65534), max_peers);
+}
+
+test "overlayIpForNode original range" {
+    try std.testing.expectEqual([4]u8{ 10, 40, 0, 1 }, overlayIpForNode(1));
+    try std.testing.expectEqual([4]u8{ 10, 40, 0, 254 }, overlayIpForNode(254));
+}
+
+test "overlayIpForNode extended range" {
+    // 255: 255 >> 8 = 0, 255 & 0xFF = 255
+    try std.testing.expectEqual([4]u8{ 10, 40, 0, 255 }, overlayIpForNode(255));
+    // 256: 256 >> 8 = 1, 256 & 0xFF = 0
+    try std.testing.expectEqual([4]u8{ 10, 40, 1, 0 }, overlayIpForNode(256));
+    // 1000: 1000 >> 8 = 3, 1000 & 0xFF = 232
+    try std.testing.expectEqual([4]u8{ 10, 40, 3, 232 }, overlayIpForNode(1000));
 }

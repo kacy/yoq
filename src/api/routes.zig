@@ -258,7 +258,7 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
     agent_registry.generateAgentId(&id_buf);
 
     // if wireguard info is provided, assign a node_id and compute networking
-    var assigned_node_id: ?u8 = null;
+    var assigned_node_id: ?u16 = null;
     var overlay_ip_str: ?[]const u8 = null;
     var overlay_ip_buf: [16]u8 = undefined;
     var container_subnet_buf: [20]u8 = undefined;
@@ -281,11 +281,18 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
         };
         assigned_node_id = nid;
 
-        // overlay_ip: 10.40.0.{node_id}
-        overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.0.{d}", .{nid}) catch null;
+        // overlay_ip: 10.40.{high}.{low} based on node_id
+        if (nid <= 254) {
+            overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.0.{d}", .{nid}) catch null;
+        } else {
+            overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.{d}.{d}", .{ nid >> 8, nid & 0xFF }) catch null;
+        }
 
-        // container_subnet: 10.42.{node_id}.0/24
-        container_subnet = std.fmt.bufPrint(&container_subnet_buf, "10.42.{d}.0/24", .{nid}) catch null;
+        // container_subnet derived from ip.subnetForNode addressing
+        const subnet_cfg = ip_mod.subnetForNode(nid);
+        container_subnet = std.fmt.bufPrint(&container_subnet_buf, "{d}.{d}.{d}.0/24", .{
+            subnet_cfg.base[0], subnet_cfg.base[1], subnet_cfg.base[2],
+        }) catch null;
 
         // endpoint: {address}:{wg_listen_port}
         const port: u16 = if (wg_listen_port) |p| @intCast(p) else 51820;

@@ -92,7 +92,7 @@ const wg_interface = "wg-yoq";
 /// configuration for setting up the cross-node WireGuard mesh.
 /// passed to setupClusterNetworking() during agent startup.
 pub const ClusterNetworkConfig = struct {
-    node_id: u8,
+    node_id: u16,
     private_key: []const u8,
     listen_port: u16,
     overlay_ip: [4]u8,
@@ -105,9 +105,10 @@ pub const PeerInfo = struct {
     public_key: []const u8,
     endpoint: []const u8,
     overlay_ip: [4]u8,
-    /// the remote node's ID, used to derive its container subnet
-    /// (10.42.{container_subnet_node}.0/24).
-    container_subnet_node: u8,
+    /// the remote node's ID, used to derive its container subnet.
+    /// nodes 1-254: 10.42.{node}.0/24
+    /// nodes 255+:  10.{42 + (node >> 8)}.{node & 0xFF}.0/24
+    container_subnet_node: u16,
 };
 
 /// set up the WireGuard mesh interface for cluster networking.
@@ -165,12 +166,16 @@ pub fn addClusterPeer(peer: PeerInfo) !void {
 
 /// internal peer add — shared by setupClusterNetworking and addClusterPeer.
 fn addClusterPeerInternal(peer: PeerInfo) !void {
+    // derive the container subnet base from the node_id
+    const subnet_base = containerSubnetBase(peer.container_subnet_node);
+
     // build allowed-ips: "overlay_ip/32,container_subnet/24"
     var allowed_buf: [64]u8 = undefined;
-    const allowed_ips = std.fmt.bufPrint(&allowed_buf, "{d}.{d}.{d}.{d}/32,10.42.{d}.0/24", .{
-        peer.overlay_ip[0],         peer.overlay_ip[1],
-        peer.overlay_ip[2],         peer.overlay_ip[3],
-        peer.container_subnet_node,
+    const allowed_ips = std.fmt.bufPrint(&allowed_buf, "{d}.{d}.{d}.{d}/32,{d}.{d}.{d}.0/24", .{
+        peer.overlay_ip[0], peer.overlay_ip[1],
+        peer.overlay_ip[2], peer.overlay_ip[3],
+        subnet_base[0],     subnet_base[1],
+        subnet_base[2],
     }) catch return error.ConfigFailed;
 
     wireguard.addPeer(wg_interface, .{
@@ -183,9 +188,9 @@ fn addClusterPeerInternal(peer: PeerInfo) !void {
     };
 
     // add route for the peer's container subnet via their overlay IP
-    const dest = [4]u8{ 10, 42, peer.container_subnet_node, 0 };
+    const dest = [4]u8{ subnet_base[0], subnet_base[1], subnet_base[2], 0 };
     wireguard.addRoute(dest, 24, peer.overlay_ip) catch |e| {
-        log.warn("failed to add route for 10.42.{d}.0/24: {}", .{ peer.container_subnet_node, e });
+        log.warn("failed to add route for {d}.{d}.{d}.0/24: {}", .{ subnet_base[0], subnet_base[1], subnet_base[2], e });
         // route failure is non-fatal — the peer is still added and may
         // work if there's already a matching route from a previous run
     };
@@ -200,9 +205,10 @@ pub fn removeClusterPeer(peer: PeerInfo) void {
         log.warn("failed to remove wireguard peer: {}", .{e});
     };
 
-    const dest = [4]u8{ 10, 42, peer.container_subnet_node, 0 };
+    const subnet_base = containerSubnetBase(peer.container_subnet_node);
+    const dest = [4]u8{ subnet_base[0], subnet_base[1], subnet_base[2], 0 };
     wireguard.removeRoute(dest, 24) catch |e| {
-        log.warn("failed to remove route for 10.42.{d}.0/24: {}", .{ peer.container_subnet_node, e });
+        log.warn("failed to remove route for {d}.{d}.{d}.0/24: {}", .{ subnet_base[0], subnet_base[1], subnet_base[2], e });
     };
 }
 
@@ -213,6 +219,19 @@ pub fn teardownClusterNetworking() void {
         log.warn("failed to delete wireguard interface: {}", .{e});
     };
     log.info("cluster networking torn down", .{});
+}
+
+/// derive the first 3 octets of a node's container subnet from its node_id.
+/// uses the same addressing scheme as ip.subnetForNode:
+///   nodes 1-254: 10.42.{node_id}
+///   nodes 255+:  10.{42 + (node_id >> 8)}.{node_id & 0xFF}
+fn containerSubnetBase(node_id: u16) [3]u8 {
+    if (node_id <= 254) {
+        return .{ 10, 42, @intCast(node_id) };
+    }
+    const high: u8 = @intCast(@as(u16, 42) + (node_id >> 8));
+    const low: u8 = @intCast(node_id & 0xFF);
+    return .{ 10, high, low };
 }
 
 /// network configuration for a container
@@ -226,7 +245,8 @@ pub const NetworkConfig = struct {
     /// cluster node ID for per-node subnet allocation.
     /// null means single-node mode (flat 10.42.0.0/16).
     /// 1-254 means cluster mode (10.42.{node_id}.0/24 per node).
-    node_id: ?u8 = null,
+    /// 255+ uses the extended addressing scheme.
+    node_id: ?u16 = null,
 };
 
 /// port mapping from host to container
@@ -622,8 +642,22 @@ test "NetworkConfig defaults to single-node mode" {
 
 test "NetworkConfig with node_id for cluster mode" {
     const config = NetworkConfig{ .node_id = 5 };
-    try std.testing.expectEqual(@as(?u8, 5), config.node_id);
+    try std.testing.expectEqual(@as(?u16, 5), config.node_id);
     try std.testing.expect(config.enabled);
+}
+
+test "containerSubnetBase for nodes 1-254" {
+    try std.testing.expectEqual([3]u8{ 10, 42, 1 }, containerSubnetBase(1));
+    try std.testing.expectEqual([3]u8{ 10, 42, 254 }, containerSubnetBase(254));
+}
+
+test "containerSubnetBase for extended nodes" {
+    // node 255: 42 + 0 = 42, 255 & 0xFF = 255
+    try std.testing.expectEqual([3]u8{ 10, 42, 255 }, containerSubnetBase(255));
+    // node 256: 42 + 1 = 43, 0
+    try std.testing.expectEqual([3]u8{ 10, 43, 0 }, containerSubnetBase(256));
+    // node 1000: 42 + 3 = 45, 232
+    try std.testing.expectEqual([3]u8{ 10, 45, 232 }, containerSubnetBase(1000));
 }
 
 // -- cluster networking tests --
@@ -636,7 +670,7 @@ test "ClusterNetworkConfig struct" {
         .overlay_ip = .{ 10, 40, 0, 3 },
         .peers = &.{},
     };
-    try std.testing.expectEqual(@as(u8, 3), config.node_id);
+    try std.testing.expectEqual(@as(u16, 3), config.node_id);
     try std.testing.expectEqual(@as(u16, 51820), config.listen_port);
     try std.testing.expectEqual([4]u8{ 10, 40, 0, 3 }, config.overlay_ip);
     try std.testing.expectEqual(@as(usize, 0), config.peers.len);
@@ -652,7 +686,7 @@ test "PeerInfo struct" {
     try std.testing.expectEqualStrings("peerpubkey==", peer.public_key);
     try std.testing.expectEqualStrings("10.0.0.5:51820", peer.endpoint);
     try std.testing.expectEqual([4]u8{ 10, 40, 0, 5 }, peer.overlay_ip);
-    try std.testing.expectEqual(@as(u8, 5), peer.container_subnet_node);
+    try std.testing.expectEqual(@as(u16, 5), peer.container_subnet_node);
 }
 
 test "PeerInfo with empty endpoint" {

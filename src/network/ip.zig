@@ -36,7 +36,7 @@ pub const IpError = error{
 /// each node in a cluster gets its own /24 within the 10.42.0.0/16 space,
 /// so container IPs never collide across nodes.
 pub const SubnetConfig = struct {
-    node_id: u8,
+    node_id: u16,
     base: [4]u8,
     gateway: [4]u8,
     prefix_len: u8,
@@ -47,8 +47,11 @@ pub const SubnetConfig = struct {
 /// return the subnet config for a given node.
 ///
 /// node_id 0 is special: single-node mode, uses the full 10.42.0.0/16.
-/// node_id 1-254: each gets 10.42.{node_id}.0/24.
-pub fn subnetForNode(node_id: u8) SubnetConfig {
+/// node_id 1-254: each gets 10.42.{node_id}.0/24 (backward compatible).
+/// node_id 255+: extended scheme using 10.{42 + (node_id >> 8)}.{node_id & 0xFF}.0/24.
+///   this supports up to ~54k nodes (second octet maxes at 255 when node_id >> 8 = 213).
+///   the @intCast will catch any overflow at runtime for node_ids beyond that range.
+pub fn subnetForNode(node_id: u16) SubnetConfig {
     if (node_id == 0) {
         // single-node mode — flat /16, same as the original behavior
         return .{
@@ -61,13 +64,29 @@ pub fn subnetForNode(node_id: u8) SubnetConfig {
         };
     }
 
+    if (node_id <= 254) {
+        // original scheme: 10.42.{node_id}.0/24
+        const nid: u8 = @intCast(node_id);
+        return .{
+            .node_id = node_id,
+            .base = .{ 10, 42, nid, 0 },
+            .gateway = .{ 10, 42, nid, 1 },
+            .prefix_len = 24,
+            .range_start = .{ 10, 42, nid, 2 },
+            .range_end = .{ 10, 42, nid, 254 },
+        };
+    }
+
+    // extended scheme for nodes 255+: 10.{42 + (node_id >> 8)}.{node_id & 0xFF}.0/24
+    const high: u8 = @intCast(@as(u16, 42) + (node_id >> 8));
+    const low: u8 = @intCast(node_id & 0xFF);
     return .{
         .node_id = node_id,
-        .base = .{ 10, 42, node_id, 0 },
-        .gateway = .{ 10, 42, node_id, 1 },
+        .base = .{ 10, high, low, 0 },
+        .gateway = .{ 10, high, low, 1 },
         .prefix_len = 24,
-        .range_start = .{ 10, 42, node_id, 2 },
-        .range_end = .{ 10, 42, node_id, 254 },
+        .range_start = .{ 10, high, low, 2 },
+        .range_end = .{ 10, high, low, 254 },
     };
 }
 
@@ -151,10 +170,12 @@ pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: Subn
     errdefer db.exec("ROLLBACK;", .{}, .{}) catch {};
 
     // build a LIKE prefix to filter only IPs in this /24.
-    // e.g. node_id=3 → "10.42.3.%"
+    // uses the actual base octets so it works for both the original
+    // scheme (10.42.{node_id}.%) and the extended scheme (10.{high}.{low}.%).
     var prefix_buf: [16]u8 = undefined;
-    const prefix = std.fmt.bufPrint(&prefix_buf, "10.42.{d}.%", .{config.node_id}) catch
-        return IpError.AllocationFailed;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "{d}.{d}.{d}.%", .{
+        config.base[0], config.base[1], config.base[2],
+    }) catch return IpError.AllocationFailed;
 
     // bitset for a /24: 256 bits = 32 bytes. offset = last octet.
     var allocated = std.StaticBitSet(256).initEmpty();
@@ -410,7 +431,7 @@ test "lookup returns error for unknown container" {
 
 test "subnetForNode(0) returns flat /16 for single-node mode" {
     const config = subnetForNode(0);
-    try std.testing.expectEqual(@as(u8, 0), config.node_id);
+    try std.testing.expectEqual(@as(u16, 0), config.node_id);
     try std.testing.expectEqual([4]u8{ 10, 42, 0, 0 }, config.base);
     try std.testing.expectEqual([4]u8{ 10, 42, 0, 1 }, config.gateway);
     try std.testing.expectEqual(@as(u8, 16), config.prefix_len);
@@ -420,7 +441,7 @@ test "subnetForNode(0) returns flat /16 for single-node mode" {
 
 test "subnetForNode(1) returns correct /24 subnet" {
     const config = subnetForNode(1);
-    try std.testing.expectEqual(@as(u8, 1), config.node_id);
+    try std.testing.expectEqual(@as(u16, 1), config.node_id);
     try std.testing.expectEqual([4]u8{ 10, 42, 1, 0 }, config.base);
     try std.testing.expectEqual([4]u8{ 10, 42, 1, 1 }, config.gateway);
     try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
@@ -430,12 +451,48 @@ test "subnetForNode(1) returns correct /24 subnet" {
 
 test "subnetForNode(254) returns correct /24 subnet" {
     const config = subnetForNode(254);
-    try std.testing.expectEqual(@as(u8, 254), config.node_id);
+    try std.testing.expectEqual(@as(u16, 254), config.node_id);
     try std.testing.expectEqual([4]u8{ 10, 42, 254, 0 }, config.base);
     try std.testing.expectEqual([4]u8{ 10, 42, 254, 1 }, config.gateway);
     try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
     try std.testing.expectEqual([4]u8{ 10, 42, 254, 2 }, config.range_start);
     try std.testing.expectEqual([4]u8{ 10, 42, 254, 254 }, config.range_end);
+}
+
+test "subnetForNode(255) uses extended scheme" {
+    const config = subnetForNode(255);
+    try std.testing.expectEqual(@as(u16, 255), config.node_id);
+    // 42 + (255 >> 8) = 42 + 0 = 42, 255 & 0xFF = 255
+    try std.testing.expectEqual([4]u8{ 10, 42, 255, 0 }, config.base);
+    try std.testing.expectEqual([4]u8{ 10, 42, 255, 1 }, config.gateway);
+    try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
+}
+
+test "subnetForNode(256) uses extended scheme" {
+    const config = subnetForNode(256);
+    try std.testing.expectEqual(@as(u16, 256), config.node_id);
+    // 42 + (256 >> 8) = 43, 256 & 0xFF = 0
+    try std.testing.expectEqual([4]u8{ 10, 43, 0, 0 }, config.base);
+    try std.testing.expectEqual([4]u8{ 10, 43, 0, 1 }, config.gateway);
+}
+
+test "subnetForNode(1000) uses extended scheme" {
+    const config = subnetForNode(1000);
+    try std.testing.expectEqual(@as(u16, 1000), config.node_id);
+    // 42 + (1000 >> 8) = 42 + 3 = 45, 1000 & 0xFF = 232
+    try std.testing.expectEqual([4]u8{ 10, 45, 232, 0 }, config.base);
+}
+
+test "subnetForNode backward compat: nodes 1-254 identical to old u8 scheme" {
+    // verify every node in the original range produces the same result
+    for (1..255) |i| {
+        const nid: u16 = @intCast(i);
+        const config = subnetForNode(nid);
+        const nid_u8: u8 = @intCast(i);
+        try std.testing.expectEqual([4]u8{ 10, 42, nid_u8, 0 }, config.base);
+        try std.testing.expectEqual([4]u8{ 10, 42, nid_u8, 1 }, config.gateway);
+        try std.testing.expectEqual(@as(u8, 24), config.prefix_len);
+    }
 }
 
 test "allocateWithSubnet allocates from correct range" {
