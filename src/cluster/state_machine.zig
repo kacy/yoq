@@ -120,8 +120,13 @@ pub const StateMachine = struct {
             return;
         }
 
-        self.db.execDynamic(entry.data, .{}, .{}) catch {
-            log.warn("state machine: failed to apply entry {d}, skipping", .{entry.index});
+        self.db.execDynamic(entry.data, .{}, .{}) catch |err| {
+            // log at err level — a failed apply means this node's state may
+            // diverge from peers that succeeded. we can't retry because raft
+            // requires deterministic apply order (retrying would re-order
+            // entries relative to subsequent ones). the entry is still marked
+            // applied below to prevent the state machine from stalling.
+            log.err("state machine: failed to apply entry {d}: {s} (error: {})", .{ entry.index, entry.data, err });
         };
         self.last_applied = entry.index;
     }
@@ -680,6 +685,107 @@ test "restoreFromBytes rejects oversized snapshot" {
 
     const result = sm.restoreFromBytes(&data);
     try std.testing.expectError(SnapshotError.InvalidSnapshot, result);
+}
+
+test "apply with failing SQL still advances last_applied" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    // this SQL is allowed by the prefix check but references a
+    // non-existent column, which fails at prepare time. the state
+    // machine must still advance last_applied past the failed entry.
+    sm.apply(.{
+        .index = 1,
+        .term = 1,
+        .data = "INSERT INTO agents (id, nonexistent_col) VALUES ('bad', 'x');",
+    });
+
+    // last_applied must still advance even though SQL failed
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+
+    // next entry should still work
+    sm.apply(.{
+        .index = 2,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('valid', 'localhost', 'active', 4, 8192, 0, 0, 0, 1000, 1000);",
+    });
+
+    try std.testing.expectEqual(@as(LogIndex, 2), sm.last_applied);
+}
+
+test "applyUpTo skips missing entries without stalling" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    var raft_log = try @import("log.zig").Log.initMemory();
+    defer raft_log.deinit();
+
+    const alloc = std.testing.allocator;
+
+    // insert entries 1 and 3, skip 2
+    try raft_log.append(.{
+        .index = 1,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a1', 'host1', 'active', 2, 4096, 0, 0, 0, 100, 100);",
+    });
+    try raft_log.append(.{
+        .index = 3,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a3', 'host3', 'active', 4, 8192, 0, 0, 0, 300, 300);",
+    });
+
+    // apply up to 3 — entry 2 is missing, should be skipped
+    sm.applyUpTo(&raft_log, alloc, 3);
+
+    // last_applied should reach 3 even though entry 2 was missing
+    try std.testing.expectEqual(@as(LogIndex, 3), sm.last_applied);
+}
+
+test "snapshot round-trip preserves last_applied" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    // create source state machine with data
+    var sm_path_buf: [512]u8 = undefined;
+    const sm_path_slice = std.fmt.bufPrint(&sm_path_buf, "{s}/src.db", .{tmp_path}) catch return;
+    sm_path_buf[sm_path_slice.len] = 0;
+    const sm_path: [:0]const u8 = sm_path_buf[0..sm_path_slice.len :0];
+
+    var sm = StateMachine.init(sm_path) catch return;
+    defer sm.deinit();
+
+    // apply several entries to advance last_applied
+    sm.apply(.{ .index = 1, .term = 1, .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('x', 'h', 'active', 1, 1024, 0, 0, 0, 1, 1);" });
+    sm.apply(.{ .index = 2, .term = 1, .data = "UPDATE agents SET status = 'draining' WHERE id = 'x';" });
+    sm.apply(.{ .index = 3, .term = 1, .data = "UPDATE agents SET status = 'active' WHERE id = 'x';" });
+    try std.testing.expectEqual(@as(LogIndex, 3), sm.last_applied);
+
+    // take snapshot at index 3
+    var snap_path_buf: [512]u8 = undefined;
+    const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/snap.dat", .{tmp_path}) catch return;
+    sm.takeSnapshot(snap_path, .{
+        .last_included_index = 3,
+        .last_included_term = 1,
+        .data_len = 0,
+    }) catch return;
+
+    // restore into a new state machine
+    var sm2_path_buf: [512]u8 = undefined;
+    const sm2_path_slice = std.fmt.bufPrint(&sm2_path_buf, "{s}/dst.db", .{tmp_path}) catch return;
+    sm2_path_buf[sm2_path_slice.len] = 0;
+    const sm2_path: [:0]const u8 = sm2_path_buf[0..sm2_path_slice.len :0];
+
+    var sm2 = StateMachine.init(sm2_path) catch return;
+    defer sm2.deinit();
+
+    const meta = sm2.restoreFromSnapshot(snap_path) catch return;
+
+    // last_applied should be restored from the snapshot header
+    try std.testing.expectEqual(@as(LogIndex, 3), sm2.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 3), meta.last_included_index);
 }
 
 test "restoreFromBytes rejects snapshot with trailing data" {

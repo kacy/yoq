@@ -494,13 +494,13 @@ pub const Node = struct {
                 const peer_id = sender_id orelse {
                     logger.warn("append_entries from unknown address, dropping", .{});
                     for (args.entries) |e| self.alloc.free(e.data);
-                    self.alloc.free(args.entries);
+                    if (args.entries.len > 0) self.alloc.free(args.entries);
                     return;
                 };
                 if (args.leader_id != peer_id) {
                     logger.warn("append_entries claimed leader {} from authenticated peer {}, dropping", .{ args.leader_id, peer_id });
                     for (args.entries) |e| self.alloc.free(e.data);
-                    self.alloc.free(args.entries);
+                    if (args.entries.len > 0) self.alloc.free(args.entries);
                     return;
                 }
 
@@ -510,9 +510,9 @@ pub const Node = struct {
                 }) catch |e| {
                     logger.warn("failed to send append entries reply to node {}: {}", .{ peer_id, e });
                 };
-                // free entries data
+                // free entries data — guard against &.{} (comptime empty slice)
                 for (args.entries) |e| self.alloc.free(e.data);
-                self.alloc.free(args.entries);
+                if (args.entries.len > 0) self.alloc.free(args.entries);
             },
             .append_entries_reply => |reply| {
                 if (sender_id) |id| {
