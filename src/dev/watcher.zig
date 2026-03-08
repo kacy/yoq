@@ -47,7 +47,7 @@ pub const Watcher = struct {
 
         return .{
             .fd = @intCast(fd_usize),
-            .watches = undefined,
+            .watches = std.mem.zeroes([max_watches]WatchEntry),
             .watch_count = 0,
             .alloc = alloc,
         };
@@ -478,6 +478,7 @@ test "too many watches" {
     // but we can verify the limit is checked
     w.watch_count = Watcher.max_watches;
     try std.testing.expectError(error.TooManyWatches, w.addDir("/tmp", 0));
+    w.watch_count = 0; // restore — no actual watches were added
 }
 
 test "path too long" {
