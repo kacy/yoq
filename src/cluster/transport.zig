@@ -180,6 +180,11 @@ pub const Transport = struct {
     /// reusable TCP connections to peers, keyed by NodeId.
     pool: ConnectionPool,
 
+    /// optional UDP socket for gossip protocol messages.
+    /// initialized separately from the TCP listener since gossip is
+    /// only active when the cluster exceeds a size threshold.
+    udp_fd: ?posix.socket_t,
+
     pub fn init(alloc: std.mem.Allocator, port: u16) !Transport {
         const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
         errdefer posix.close(fd);
@@ -199,10 +204,12 @@ pub const Transport = struct {
             .local_id = null,
             .shared_key = null,
             .pool = ConnectionPool.init(alloc),
+            .udp_fd = null,
         };
     }
 
     pub fn deinit(self: *Transport) void {
+        self.deinitUdp();
         self.pool.deinit();
         posix.close(self.listen_fd);
         self.peers.deinit();
@@ -358,6 +365,116 @@ pub const Transport = struct {
             .from_addr = from_addr,
             .sender_id = verified.sender_id,
             .message = msg,
+        };
+    }
+
+    // --- UDP gossip transport ---
+    //
+    // gossip messages use UDP for low-overhead, fire-and-forget delivery.
+    // the protocol handles message loss through redundant probing (SWIM).
+    //
+    // UDP frame: [8B sender_id] [32B HMAC-SHA256] [gossip payload...]
+    // HMAC is computed over [sender_id + payload].
+
+    /// bind a UDP socket for gossip protocol communication.
+    /// call this when gossip is activated (cluster exceeds size threshold).
+    pub fn initUdp(self: *Transport, port: u16) !void {
+        if (self.udp_fd != null) return; // already initialized
+
+        const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+        errdefer posix.close(fd);
+
+        const one: i32 = 1;
+        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
+
+        const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+        try posix.bind(fd, &addr.any, addr.getOsSockLen());
+
+        self.udp_fd = fd;
+    }
+
+    /// close the UDP socket.
+    pub fn deinitUdp(self: *Transport) void {
+        if (self.udp_fd) |fd| {
+            posix.close(fd);
+            self.udp_fd = null;
+        }
+    }
+
+    /// send an HMAC-authenticated gossip message over UDP.
+    /// the payload should be a serialized GossipMessage (from gossip.zig).
+    pub fn sendGossip(self: *Transport, ip: [4]u8, port: u16, payload: []const u8) TransportError!void {
+        const fd = self.udp_fd orelse return TransportError.SendFailed;
+        const key = self.shared_key orelse return TransportError.AuthenticationFailed;
+        const local_id = self.local_id orelse return TransportError.SendFailed;
+
+        // build frame: [8B sender_id] [32B HMAC] [payload]
+        var frame_buf: [1500]u8 = undefined; // MTU-sized buffer
+        const frame_len = 8 + 32 + payload.len;
+        if (frame_len > frame_buf.len) return TransportError.SendFailed;
+
+        // write sender_id
+        var sender_bytes: [8]u8 = undefined;
+        writeU64(&sender_bytes, local_id);
+        @memcpy(frame_buf[0..8], &sender_bytes);
+
+        // write payload after HMAC slot
+        @memcpy(frame_buf[40..][0..payload.len], payload);
+
+        // compute HMAC over [sender_id + payload]
+        var hmac = HmacSha256.init(&key);
+        hmac.update(&sender_bytes);
+        hmac.update(payload);
+        var tag: [32]u8 = undefined;
+        hmac.final(&tag);
+        @memcpy(frame_buf[8..40], &tag);
+
+        const dest = std.net.Address.initIp4(ip, port);
+        _ = posix.sendto(fd, frame_buf[0..frame_len], 0, &dest.any, dest.getOsSockLen()) catch
+            return TransportError.SendFailed;
+    }
+
+    pub const GossipReceiveResult = struct {
+        sender_id: u64,
+        /// payload slice within the buffer passed to receiveGossip.
+        /// valid until the next receiveGossip call with the same buffer.
+        payload: []const u8,
+    };
+
+    /// receive and verify an HMAC-authenticated gossip message from UDP.
+    /// returns null if no message is available (non-blocking).
+    /// the payload slice points into the provided buffer.
+    pub fn receiveGossip(self: *Transport, buf: []u8) TransportError!?GossipReceiveResult {
+        const fd = self.udp_fd orelse return TransportError.ReceiveFailed;
+        const key = self.shared_key orelse return TransportError.AuthenticationFailed;
+
+        const n = posix.recvfrom(fd, buf, 0, null, null) catch |err| {
+            return switch (err) {
+                error.WouldBlock => null,
+                else => TransportError.ReceiveFailed,
+            };
+        };
+
+        if (n < 40) return TransportError.AuthenticationFailed;
+
+        const sender_bytes = buf[0..8];
+        const received_hmac = buf[8..40];
+        const payload = buf[40..n];
+
+        // verify HMAC over [sender_id + payload]
+        var expected: [32]u8 = undefined;
+        var hmac = HmacSha256.init(&key);
+        hmac.update(sender_bytes);
+        hmac.update(payload);
+        hmac.final(&expected);
+
+        if (!std.crypto.timing_safe.eql([32]u8, received_hmac[0..32].*, expected)) {
+            return TransportError.AuthenticationFailed;
+        }
+
+        return .{
+            .sender_id = readU64(sender_bytes),
+            .payload = payload,
         };
     }
 
@@ -1024,6 +1141,7 @@ test "applyHmac produces correct authenticated format" {
         .local_id = 7,
         .shared_key = "test-key-32-bytes-exactly-here!!".*,
         .pool = ConnectionPool.init(alloc),
+        .udp_fd = null,
     };
     defer transport.peers.deinit();
     defer transport.pool.deinit();
@@ -1064,6 +1182,7 @@ test "applyHmac returns data unchanged when no key" {
         .local_id = null,
         .shared_key = null,
         .pool = ConnectionPool.init(alloc),
+        .udp_fd = null,
     };
     defer transport.peers.deinit();
     defer transport.pool.deinit();
@@ -1111,6 +1230,7 @@ test "resolvePeerId matches configured peer" {
         .local_id = 1,
         .shared_key = null,
         .pool = ConnectionPool.init(alloc),
+        .udp_fd = null,
     };
     defer transport.peers.deinit();
     defer transport.pool.deinit();
@@ -1149,4 +1269,109 @@ test "connection pool: removeConn on missing peer is safe" {
     // removing a peer that doesn't exist should be a no-op
     pool.removeConn(42);
     try std.testing.expectEqual(@as(u32, 0), pool.connections.count());
+}
+
+// -- UDP gossip transport tests --
+
+test "udp gossip: send and receive with HMAC" {
+    const alloc = std.testing.allocator;
+    const key: [32]u8 = "gossip-test-key-32bytes-exactly!".*;
+
+    // create two transports on different UDP ports
+    var sender = Transport{
+        .alloc = alloc,
+        .listen_fd = -1,
+        .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .local_id = 1,
+        .shared_key = key,
+        .pool = ConnectionPool.init(alloc),
+        .udp_fd = null,
+    };
+    defer sender.peers.deinit();
+    defer sender.pool.deinit();
+    defer sender.deinitUdp();
+
+    var receiver = Transport{
+        .alloc = alloc,
+        .listen_fd = -1,
+        .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .local_id = 2,
+        .shared_key = key,
+        .pool = ConnectionPool.init(alloc),
+        .udp_fd = null,
+    };
+    defer receiver.peers.deinit();
+    defer receiver.pool.deinit();
+    defer receiver.deinitUdp();
+
+    try sender.initUdp(0); // OS assigns port
+    try receiver.initUdp(0);
+
+    // get the receiver's assigned port
+    var recv_addr: posix.sockaddr.storage = undefined;
+    var recv_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+    try posix.getsockname(receiver.udp_fd.?, @ptrCast(&recv_addr), &recv_len);
+    const recv_in: *const posix.sockaddr.in = @ptrCast(@alignCast(&recv_addr));
+    const recv_port = std.mem.bigToNative(u16, recv_in.port);
+
+    // send a gossip payload
+    const payload = "hello-gossip";
+    try sender.sendGossip(.{ 127, 0, 0, 1 }, recv_port, payload);
+
+    // give the kernel a moment to deliver
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    // receive and verify
+    var buf: [1500]u8 = undefined;
+    const result = try receiver.receiveGossip(&buf);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u64, 1), result.?.sender_id);
+    try std.testing.expectEqualSlices(u8, payload, result.?.payload);
+}
+
+test "udp gossip: wrong key rejected" {
+    const alloc = std.testing.allocator;
+
+    var sender = Transport{
+        .alloc = alloc,
+        .listen_fd = -1,
+        .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .local_id = 1,
+        .shared_key = "sender-key-aaaaaaaaaaaaaaaaaaaaa".*,
+        .pool = ConnectionPool.init(alloc),
+        .udp_fd = null,
+    };
+    defer sender.peers.deinit();
+    defer sender.pool.deinit();
+    defer sender.deinitUdp();
+
+    var receiver = Transport{
+        .alloc = alloc,
+        .listen_fd = -1,
+        .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+        .local_id = 2,
+        .shared_key = "receiver-key-bbbbbbbbbbbbbbbbbbb".*,
+        .pool = ConnectionPool.init(alloc),
+        .udp_fd = null,
+    };
+    defer receiver.peers.deinit();
+    defer receiver.pool.deinit();
+    defer receiver.deinitUdp();
+
+    try sender.initUdp(0);
+    try receiver.initUdp(0);
+
+    var recv_addr: posix.sockaddr.storage = undefined;
+    var recv_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+    try posix.getsockname(receiver.udp_fd.?, @ptrCast(&recv_addr), &recv_len);
+    const recv_in: *const posix.sockaddr.in = @ptrCast(@alignCast(&recv_addr));
+    const recv_port = std.mem.bigToNative(u16, recv_in.port);
+
+    try sender.sendGossip(.{ 127, 0, 0, 1 }, recv_port, "secret-data");
+
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+
+    var buf: [1500]u8 = undefined;
+    const result = receiver.receiveGossip(&buf);
+    try std.testing.expectError(TransportError.AuthenticationFailed, result);
 }
