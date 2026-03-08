@@ -580,54 +580,27 @@ pub const Node = struct {
         return null;
     }
 
+    /// process raft actions in two phases:
+    ///   1. state actions (commits, snapshots, role changes) run under the lock
+    ///   2. send actions (vote requests, append entries, etc.) run with the lock
+    ///      released so the recv thread can process incoming messages during
+    ///      TCP I/O, reducing head-of-line blocking
+    ///
+    /// callers (tickLoop, recvLoop) hold self.mu when calling this function.
+    /// the unlock/re-lock in phase 2 is transparent to them.
     fn processActions(self: *Node) void {
         const actions = self.raft.drainActions();
         defer self.alloc.free(actions);
 
+        // phase 1: process state actions under the lock
+        var has_sends = false;
         for (actions) |action| {
             switch (action) {
-                .send_request_vote => |rv| {
-                    self.transport.send(rv.target, .{ .request_vote = rv.args }) catch |e| {
-                        logger.warn("failed to send vote request to node {}: {}", .{ rv.target, e });
-                    };
-                },
-                .send_append_entries => |ae| {
-                    self.transport.send(ae.target, .{ .append_entries = ae.args }) catch |e| {
-                        logger.warn("failed to send append entries to node {}: {}", .{ ae.target, e });
-                    };
-                    // free duplicated entries
-                    for (ae.args.entries) |e| self.alloc.free(e.data);
-                    if (ae.args.entries.len > 0) self.alloc.free(ae.args.entries);
-                },
-                .send_request_vote_reply => |rv| {
-                    self.transport.send(rv.target, .{ .request_vote_reply = rv.reply }) catch |e| {
-                        logger.warn("failed to send vote reply to node {}: {}", .{ rv.target, e });
-                    };
-                },
-                .send_append_entries_reply => |ae| {
-                    self.transport.send(ae.target, .{ .append_entries_reply = ae.reply }) catch |e| {
-                        logger.warn("failed to send append entries reply to node {}: {}", .{ ae.target, e });
-                    };
-                },
                 .commit_entries => |commit| {
                     self.state_machine.applyUpTo(&self.log, self.alloc, commit.up_to);
                 },
                 .become_leader => {},
                 .become_follower => {},
-
-                .send_install_snapshot => |snap| {
-                    // the raft module produces this action with empty data.
-                    // we need to read the snapshot file and fill in the data
-                    // before sending it over the wire.
-                    self.sendSnapshot(snap.target, snap.args);
-                },
-                .send_install_snapshot_reply => |snap| {
-                    self.transport.send(snap.target, .{
-                        .install_snapshot_reply = snap.reply,
-                    }) catch |e| {
-                        logger.warn("failed to send snapshot reply to node {}: {}", .{ snap.target, e });
-                    };
-                },
                 .apply_snapshot => |snap| {
                     // restore the state machine from the received snapshot bytes.
                     // ownership: the data was heap-allocated by transport decode
@@ -670,6 +643,61 @@ pub const Node = struct {
 
                     logger.info("snapshot: completed at index {}, term {}", .{ snap.up_to_index, snap.term });
                 },
+                // send actions — just note that we have some
+                else => {
+                    has_sends = true;
+                },
+            }
+        }
+
+        if (!has_sends) return;
+
+        // phase 2: release the lock and dispatch sends.
+        // this lets the recv thread process incoming messages while we're
+        // doing TCP I/O, reducing head-of-line blocking.
+        self.mu.unlock();
+        defer self.mu.lock();
+
+        for (actions) |action| {
+            switch (action) {
+                .send_request_vote => |rv| {
+                    self.transport.send(rv.target, .{ .request_vote = rv.args }) catch |e| {
+                        logger.warn("failed to send vote request to node {}: {}", .{ rv.target, e });
+                    };
+                },
+                .send_append_entries => |ae| {
+                    self.transport.send(ae.target, .{ .append_entries = ae.args }) catch |e| {
+                        logger.warn("failed to send append entries to node {}: {}", .{ ae.target, e });
+                    };
+                    // free duplicated entries
+                    for (ae.args.entries) |e| self.alloc.free(e.data);
+                    if (ae.args.entries.len > 0) self.alloc.free(ae.args.entries);
+                },
+                .send_request_vote_reply => |rv| {
+                    self.transport.send(rv.target, .{ .request_vote_reply = rv.reply }) catch |e| {
+                        logger.warn("failed to send vote reply to node {}: {}", .{ rv.target, e });
+                    };
+                },
+                .send_append_entries_reply => |ae| {
+                    self.transport.send(ae.target, .{ .append_entries_reply = ae.reply }) catch |e| {
+                        logger.warn("failed to send append entries reply to node {}: {}", .{ ae.target, e });
+                    };
+                },
+                .send_install_snapshot => |snap| {
+                    // the raft module produces this action with empty data.
+                    // we need to read the snapshot file and fill in the data
+                    // before sending it over the wire.
+                    self.sendSnapshot(snap.target, snap.args);
+                },
+                .send_install_snapshot_reply => |snap| {
+                    self.transport.send(snap.target, .{
+                        .install_snapshot_reply = snap.reply,
+                    }) catch |e| {
+                        logger.warn("failed to send snapshot reply to node {}: {}", .{ snap.target, e });
+                    };
+                },
+                // state actions already handled in phase 1
+                else => {},
             }
         }
     }
