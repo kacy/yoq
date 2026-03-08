@@ -187,22 +187,19 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
         node_id, raft_port, api_port, peers.len,
     });
 
-    // initialize raft node
+    // initialize raft node with shared key
     var node = cluster_node.Node.init(alloc, .{
         .id = node_id,
         .port = raft_port,
         .peers = peers,
         .data_dir = data_dir,
+        .shared_key = shared_key,
     }) catch |err| {
         writeErr("failed to initialize raft node: {}\n", .{err});
         return ClusterCommandsError.ServerStartFailed;
     };
     defer node.deinit();
 
-    // set transport authentication key derived from join token
-    if (shared_key) |key| {
-        node.transport.shared_key = key;
-    }
     if (peers.len > 0 and node.transport.shared_key == null) {
         writeErr("cluster mode requires raft transport authentication when peers are configured\n", .{});
         return ClusterCommandsError.InvalidArgument;

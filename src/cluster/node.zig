@@ -50,6 +50,7 @@ pub const NodeConfig = struct {
     port: u16,
     peers: []const PeerConfig,
     data_dir: []const u8,
+    shared_key: ?[32]u8 = null,
 };
 
 pub const PeerConfig = struct {
@@ -137,6 +138,11 @@ pub const Node = struct {
             };
         }
 
+        // Set shared key before requireAuth check
+        if (config.shared_key) |key| {
+            transport.shared_key = key;
+        }
+
         transport.requireAuth() catch {
             alloc.free(peer_ids);
             return NodeError.InitFailed;
@@ -182,7 +188,7 @@ pub const Node = struct {
         self.transport.deinit();
         self.state_machine.deinit();
         self.log.deinit();
-        self.alloc.free(self.raft.peers);
+        // Note: don't free self.raft.peers here - raft.deinit() already frees it
     }
 
     /// fix internal pointers after the node struct is moved in memory.
