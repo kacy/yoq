@@ -448,11 +448,11 @@ test "route returns method not allowed for wrong HTTP methods" {
     const put_resp = route(put_req, testing.allocator);
     try testing.expect(put_resp == null);
 
-    // PATCH to /containers/{id} should not match
+    // PUT to /containers/{id} should return method not allowed (only GET/DELETE supported)
     const patch_req = http.Request{
-        .method = .PUT, // Testing wrong method handling
-        .path = "/containers/abc123def4567890123456789012345678901234567890123456789012345678",
-        .path_only = "/containers/abc123def4567890123456789012345678901234567890123456789012345678",
+        .method = .PUT,
+        .path = "/containers/abc123def456",
+        .path_only = "/containers/abc123def456",
         .body = "",
         .headers_raw = "",
         .query = "",
@@ -460,7 +460,8 @@ test "route returns method not allowed for wrong HTTP methods" {
     };
 
     const patch_resp = route(patch_req, testing.allocator);
-    try testing.expect(patch_resp == null);
+    try testing.expect(patch_resp != null);
+    try testing.expectEqual(http.StatusCode.method_not_allowed, patch_resp.?.status);
 }
 
 // Test subpath matching for containers
