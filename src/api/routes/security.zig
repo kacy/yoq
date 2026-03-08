@@ -258,8 +258,11 @@ test "route returns null for unknown security path" {
     const req = http.Request{
         .method = .GET,
         .path = "/v1/unknown",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/unknown",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -271,8 +274,11 @@ test "route handles /v1/secrets GET" {
     const req = http.Request{
         .method = .GET,
         .path = "/v1/secrets",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/secrets",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -288,8 +294,11 @@ test "route handles /v1/secrets POST" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/secrets",
+        .path_only = "/v1/secrets",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -303,14 +312,17 @@ test "route rejects /v1/secrets PUT" {
     const req = http.Request{
         .method = .PUT,
         .path = "/v1/secrets",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/secrets",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.MethodNotAllowed, resp.status);
+        try testing.expectEqual(http.StatusCode.method_not_allowed, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -320,8 +332,11 @@ test "route handles /v1/secrets/{name} DELETE" {
     const req = http.Request{
         .method = .DELETE,
         .path = "/v1/secrets/test_secret",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/secrets/test_secret",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -335,14 +350,17 @@ test "route rejects /v1/secrets/{name} GET" {
     const req = http.Request{
         .method = .GET,
         .path = "/v1/secrets/test_secret",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/secrets/test_secret",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.MethodNotAllowed, resp.status);
+        try testing.expectEqual(http.StatusCode.method_not_allowed, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -352,8 +370,11 @@ test "route rejects empty secret name" {
     const req = http.Request{
         .method = .DELETE,
         .path = "/v1/secrets/",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/secrets/",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -366,8 +387,11 @@ test "route handles /v1/policies GET" {
     const req = http.Request{
         .method = .GET,
         .path = "/v1/policies",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -382,8 +406,11 @@ test "route handles /v1/policies POST" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -398,8 +425,11 @@ test "route handles /v1/policies/{source}/{target} DELETE" {
     const req = http.Request{
         .method = .DELETE,
         .path = "/v1/policies/web/db",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/policies/web/db",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -414,8 +444,11 @@ test "route rejects malformed policy delete path" {
     const req = http.Request{
         .method = .DELETE,
         .path = "/v1/policies/web",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/policies/web",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -427,8 +460,11 @@ test "route rejects policy path with too many segments" {
     const req = http.Request{
         .method = .DELETE,
         .path = "/v1/policies/web/db/extra",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/policies/web/db/extra",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -441,8 +477,11 @@ test "route handles /v1/certificates GET" {
     const req = http.Request{
         .method = .GET,
         .path = "/v1/certificates",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/certificates",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -456,14 +495,17 @@ test "route rejects /v1/certificates POST" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/certificates",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/certificates",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.MethodNotAllowed, resp.status);
+        try testing.expectEqual(http.StatusCode.method_not_allowed, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -472,8 +514,11 @@ test "route handles /v1/certificates/{domain} DELETE" {
     const req = http.Request{
         .method = .DELETE,
         .path = "/v1/certificates/example.com",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/certificates/example.com",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -487,8 +532,11 @@ test "route rejects empty certificate domain" {
     const req = http.Request{
         .method = .DELETE,
         .path = "/v1/certificates/",
-        .body = null,
-        .headers = &.{},
+        .path_only = "/v1/certificates/",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
@@ -502,15 +550,18 @@ test "policy action validation - allow is valid" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
         // Should be ok or error depending on store, but not bad request
-        try testing.expect(resp.status != .BadRequest);
+        try testing.expect(resp.status != .bad_request);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -520,14 +571,17 @@ test "policy action validation - deny is valid" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expect(resp.status != .BadRequest);
+        try testing.expect(resp.status != .bad_request);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -537,14 +591,17 @@ test "policy action validation - invalid action rejected" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -554,14 +611,17 @@ test "set secret rejects empty body" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/secrets",
+        .path_only = "/v1/secrets",
+        .query = "",
+        .headers_raw = "",
         .body = "",
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -570,14 +630,17 @@ test "add policy rejects empty body" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = "",
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -588,14 +651,17 @@ test "set secret requires name field" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/secrets",
+        .path_only = "/v1/secrets",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -605,14 +671,17 @@ test "set secret requires value field" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/secrets",
+        .path_only = "/v1/secrets",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -622,14 +691,17 @@ test "add policy requires source field" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -639,14 +711,17 @@ test "add policy requires target field" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -656,14 +731,17 @@ test "add policy requires action field" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -674,14 +752,17 @@ test "set secret rejects empty name" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/secrets",
+        .path_only = "/v1/secrets",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -691,14 +772,17 @@ test "add policy rejects empty source" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -708,14 +792,17 @@ test "add policy rejects empty target" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
@@ -726,15 +813,18 @@ test "policy action is case sensitive" {
     const req = http.Request{
         .method = .POST,
         .path = "/v1/policies",
+        .path_only = "/v1/policies",
+        .query = "",
+        .headers_raw = "",
         .body = body,
-        .headers = &.{},
+        .content_length = 0,
     };
 
     const response = route(req, testing.allocator);
     try testing.expect(response != null);
     if (response) |resp| {
         // Should be rejected (only lowercase 'allow'/'deny' accepted)
-        try testing.expectEqual(http.StatusCode.BadRequest, resp.status);
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
         if (resp.allocated) testing.allocator.free(resp.body);
     }
 }
