@@ -42,7 +42,7 @@ pub fn registerSqlFull(
     address: []const u8,
     resources: AgentResources,
     now: i64,
-    node_id: ?u8,
+    node_id: ?u16,
     wg_public_key: ?[]const u8,
     overlay_ip: ?[]const u8,
 ) ![]const u8 {
@@ -192,7 +192,7 @@ pub const NodeIdError = error{
 
 /// find the lowest available node_id (1-254) by checking which IDs
 /// are already in use. gaps left by removed agents are reused.
-pub fn assignNodeId(db: *sqlite.Db) NodeIdError!u8 {
+pub fn assignNodeId(db: *sqlite.Db) NodeIdError!u16 {
     const Row = struct { node_id: i64 };
 
     var stmt = db.prepare(
@@ -203,9 +203,9 @@ pub fn assignNodeId(db: *sqlite.Db) NodeIdError!u8 {
     var iter = stmt.iterator(Row, .{}) catch return NodeIdError.QueryFailed;
 
     // walk through assigned IDs looking for a gap
-    var next_id: u8 = 1;
+    var next_id: u16 = 1;
     while (iter.next(.{}) catch null) |row| {
-        const used: u8 = if (row.node_id >= 1 and row.node_id <= 254)
+        const used: u16 = if (row.node_id >= 1 and row.node_id <= 65534)
             @intCast(row.node_id)
         else
             continue;
@@ -214,10 +214,10 @@ pub fn assignNodeId(db: *sqlite.Db) NodeIdError!u8 {
             // found a gap — use it
             return next_id;
         }
-        next_id = used + 1;
+        next_id = used +| 1; // saturating add to avoid overflow at 65535
     }
 
-    if (next_id <= 254) return next_id;
+    if (next_id <= 65534) return next_id;
     return NodeIdError.NoAvailableNodeId;
 }
 
@@ -226,7 +226,7 @@ pub fn assignNodeId(db: *sqlite.Db) NodeIdError!u8 {
 /// generate SQL to insert a wireguard peer record.
 pub fn wireguardPeerSql(
     buf: []u8,
-    node_id: u8,
+    node_id: u16,
     agent_id: []const u8,
     public_key: []const u8,
     endpoint: []const u8,
@@ -251,7 +251,7 @@ pub fn wireguardPeerSql(
 }
 
 /// generate SQL to remove a wireguard peer by node_id.
-pub fn removeWireguardPeerSql(buf: []u8, node_id: u8) ![]const u8 {
+pub fn removeWireguardPeerSql(buf: []u8, node_id: u16) ![]const u8 {
     return std.fmt.bufPrint(
         buf,
         "DELETE FROM wireguard_peers WHERE node_id = {d};",

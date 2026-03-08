@@ -395,7 +395,7 @@ pub const Node = struct {
             // this cleans up the wireguard_peers table so other agents
             // won't try to route traffic to a dead node.
             if (agent.node_id) |nid| {
-                if (nid >= 1 and nid <= 254) {
+                if (nid >= 1 and nid <= 65534) {
                     var wg_buf: [256]u8 = undefined;
                     const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(nid)) catch continue;
                     _ = self.raft.propose(wg_sql) catch |e| {
