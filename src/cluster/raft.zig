@@ -97,7 +97,10 @@ pub const Raft = struct {
         log: *persistent_log.Log,
     ) !Raft {
         const peer_count = peers.len;
+        const owned_peers = try alloc.dupe(NodeId, peers);
+        errdefer alloc.free(owned_peers);
         const next_idx = try alloc.alloc(LogIndex, peer_count);
+        errdefer alloc.free(next_idx);
         const match_idx = try alloc.alloc(LogIndex, peer_count);
 
         // initialize leader state (will be reset when becoming leader)
@@ -117,7 +120,7 @@ pub const Raft = struct {
             .id = id,
             .role = .follower,
             .log = log,
-            .peers = peers,
+            .peers = owned_peers,
             .commit_index = 0,
             .last_applied = 0,
             .next_index = next_idx,
