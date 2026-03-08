@@ -549,7 +549,10 @@ pub const Raft = struct {
                     .leader_id = self.id,
                     .prev_log_index = prev_index,
                     .prev_log_term = prev_term,
-                    .entries = if (count > 0) self.alloc.dupe(LogEntry, entries_buf[0..count]) catch &.{} else &.{},
+                    .entries = if (count > 0) self.alloc.dupe(LogEntry, entries_buf[0..count]) catch {
+                        logger.warn("raft: failed to allocate entries for append_entries to node {}", .{self.peers[peer_idx]});
+                        return;
+                    } else &.{},
                     .leader_commit = self.commit_index,
                 },
             },

@@ -120,8 +120,13 @@ pub const StateMachine = struct {
             return;
         }
 
-        self.db.execDynamic(entry.data, .{}, .{}) catch {
-            log.warn("state machine: failed to apply entry {d}, skipping", .{entry.index});
+        self.db.execDynamic(entry.data, .{}, .{}) catch |err| {
+            // log at err level — a failed apply means this node's state may
+            // diverge from peers that succeeded. we can't retry because raft
+            // requires deterministic apply order (retrying would re-order
+            // entries relative to subsequent ones). the entry is still marked
+            // applied below to prevent the state machine from stalling.
+            log.err("state machine: failed to apply entry {d}: {s} (error: {})", .{ entry.index, entry.data, err });
         };
         self.last_applied = entry.index;
     }

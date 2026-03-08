@@ -426,23 +426,23 @@ pub const Gossip = struct {
     }
 
     fn checkSuspectTimeouts(self: *Gossip) !void {
-        var dead_list: [64]u64 = undefined;
-        var dead_count: usize = 0;
+        // collect suspects that have timed out. uses ArrayList instead of a
+        // fixed array so large clusters with network partitions don't silently
+        // drop suspects beyond an arbitrary limit.
+        var dead_list: std.ArrayListUnmanaged(u64) = .{};
+        defer dead_list.deinit(self.alloc);
 
         var iter = self.members.iterator();
         while (iter.next()) |entry| {
             const member = entry.value_ptr;
             if (member.state == .suspect) {
                 if (self.tick_count - member.state_changed_at >= self.suspect_timeout) {
-                    if (dead_count < dead_list.len) {
-                        dead_list[dead_count] = member.id;
-                        dead_count += 1;
-                    }
+                    try dead_list.append(self.alloc, member.id);
                 }
             }
         }
 
-        for (dead_list[0..dead_count]) |id| {
+        for (dead_list.items) |id| {
             if (self.members.getPtr(id)) |member| {
                 member.state = .dead;
                 member.state_changed_at = self.tick_count;
