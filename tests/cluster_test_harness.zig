@@ -310,6 +310,8 @@ pub const TestCluster = struct {
                 if (!node.isRunning()) continue;
 
                 const status = try self.getNodeStatus(node);
+                defer self.alloc.free(status);
+
                 if (std.mem.indexOf(u8, status, "\"role\":\"leader\"") != null) {
                     return node;
                 }
