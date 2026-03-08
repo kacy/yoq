@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const helpers = @import("helpers");
+const http_client = @import("http_client");
 
 pub const ClusterNode = struct {
     id: u64,
@@ -174,7 +175,7 @@ pub const TestCluster = struct {
         node.process = child;
 
         // Wait a moment for the node to start
-        std.time.sleep(500 * std.time.ns_per_ms);
+        std.Thread.sleep(500 * std.time.ns_per_ms);
     }
 
     pub fn stopAll(self: *TestCluster) void {
@@ -212,43 +213,31 @@ pub const TestCluster = struct {
                 }
             }
 
-            std.time.sleep(100 * std.time.ns_per_ms);
+            std.Thread.sleep(100 * std.time.ns_per_ms);
         }
 
         return null;
     }
 
     pub fn getNodeStatus(self: *TestCluster, node: *ClusterNode) ![]const u8 {
-        const url = try std.fmt.allocPrint(self.alloc, "http://127.0.0.1:{d}/cluster/status", .{
+        // Use the simple HTTP client from the cluster module
+        const addr = [4]u8{ 127, 0, 0, 1 };
+
+        var response = try http_client.getWithAuth(
+            self.alloc,
+            addr,
             node.api_port,
-        });
-        defer self.alloc.free(url);
+            "/cluster/status",
+            self.api_token,
+        );
+        defer response.deinit(self.alloc);
 
-        var client = std.http.Client{ .allocator = self.alloc };
-        defer client.deinit();
-
-        const uri = try std.Uri.parse(url);
-
-        var headers = std.http.Headers{ .allocator = self.alloc };
-        defer headers.deinit();
-
-        // Add authorization header
-        const auth_value = try std.fmt.allocPrint(self.alloc, "Bearer {s}", .{self.api_token});
-        defer self.alloc.free(auth_value);
-        try headers.append("Authorization", auth_value);
-
-        var req = try client.request(.GET, uri, headers, .{});
-        defer req.deinit();
-
-        try req.start();
-        try req.wait();
-
-        if (req.response.status != .ok) {
+        if (response.status_code != 200) {
             return error.RequestFailed;
         }
 
-        var body_reader = req.reader();
-        const body = try body_reader.readAllAlloc(self.alloc, 4096);
+        // Duplicate the body for return
+        const body = try self.alloc.dupe(u8, response.body);
         errdefer self.alloc.free(body);
 
         return body;

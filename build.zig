@@ -154,16 +154,25 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
-        priv_mod.root_module.addImport("helpers", b.createModule(.{
+        const helpers_mod = b.createModule(.{
             .root_source_file = b.path("tests/helpers.zig"),
             .target = target,
             .optimize = optimize,
-        }));
-        priv_mod.root_module.addImport("cluster_test_harness", b.createModule(.{
+        });
+        priv_mod.root_module.addImport("helpers", helpers_mod);
+
+        const cluster_harness_mod = b.createModule(.{
             .root_source_file = b.path("tests/cluster_test_harness.zig"),
             .target = target,
             .optimize = optimize,
+        });
+        cluster_harness_mod.addImport("helpers", helpers_mod);
+        cluster_harness_mod.addImport("http_client", b.createModule(.{
+            .root_source_file = b.path("src/cluster/http_client.zig"),
+            .target = target,
+            .optimize = optimize,
         }));
+        priv_mod.root_module.addImport("cluster_test_harness", cluster_harness_mod);
         // workaround for zig 0.15.2: avoid --listen=- hang
         const run_priv = std.Build.Step.Run.create(b, b.fmt("run {s}", .{test_file}));
         run_priv.producer = priv_mod;

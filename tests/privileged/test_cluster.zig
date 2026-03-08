@@ -32,8 +32,7 @@ test "3-node cluster forms and elects a leader" {
 
     // Wait for leader election (should happen within 5 seconds)
     const leader = try cluster.waitForLeader(5000);
-    try std.testing.expect(leader != null);
-    try std.testing.expect(leader.?.isRunning());
+    try std.testing.expect(leader.isRunning());
 
     // Verify all nodes see the same leader
     const all_agree = try cluster.verifyAllNodesAgreeOnLeader();
@@ -41,7 +40,7 @@ test "3-node cluster forms and elects a leader" {
 
     std.debug.print("✓ Cluster formed successfully with {d} nodes, leader is node {d}\n", .{
         cluster.nodes.items.len,
-        leader.?.id,
+        leader.id,
     });
 }
 
@@ -62,9 +61,8 @@ test "cluster continues after leader failure" {
     // Start all nodes and wait for leader
     try cluster.startAll();
     const original_leader = try cluster.waitForLeader(5000);
-    try std.testing.expect(original_leader != null);
 
-    const original_leader_id = original_leader.?.id;
+    const original_leader_id = original_leader.id;
     std.debug.print("✓ Original leader is node {d}\n", .{original_leader_id});
 
     // Kill the leader
@@ -73,10 +71,9 @@ test "cluster continues after leader failure" {
 
     // Wait for new leader to be elected
     const new_leader = try cluster.waitForLeader(10000);
-    try std.testing.expect(new_leader != null);
-    try std.testing.expect(new_leader.?.id != original_leader_id);
+    try std.testing.expect(new_leader.id != original_leader_id);
 
-    std.debug.print("✓ New leader elected: node {d}\n", .{new_leader.?.id});
+    std.debug.print("✓ New leader elected: node {d}\n", .{new_leader.id});
 
     // Verify cluster is still functional
     const all_agree = try cluster.verifyAllNodesAgreeOnLeader();
@@ -100,8 +97,7 @@ test "cluster maintains consensus with 5 nodes" {
     try cluster.startAll();
 
     // With 5 nodes, election might take slightly longer
-    const leader = try cluster.waitForLeader(8000);
-    try std.testing.expect(leader != null);
+    _ = try cluster.waitForLeader(8000);
 
     // Verify exactly one leader
     var leader_count: usize = 0;
