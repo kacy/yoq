@@ -143,6 +143,7 @@ pub fn build(b: *std.Build) void {
     const priv_tests = [_][]const u8{
         "tests/privileged/test_container.zig",
         "tests/privileged/test_networking.zig",
+        "tests/privileged/test_cluster.zig",
     };
 
     for (priv_tests) |test_file| {
@@ -155,6 +156,11 @@ pub fn build(b: *std.Build) void {
         });
         priv_mod.root_module.addImport("helpers", b.createModule(.{
             .root_source_file = b.path("tests/helpers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }));
+        priv_mod.root_module.addImport("cluster_test_harness", b.createModule(.{
+            .root_source_file = b.path("tests/cluster_test_harness.zig"),
             .target = target,
             .optimize = optimize,
         }));
