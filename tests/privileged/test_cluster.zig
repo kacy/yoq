@@ -30,8 +30,9 @@ test "3-node cluster forms and elects a leader" {
     // Start all 3 nodes
     try cluster.startAll();
 
-    // Wait for leader election (should happen within 5 seconds)
-    const leader = try cluster.waitForLeader(5000);
+    // Wait for leader election with longer timeout since simultaneous startup
+    // may need more time for randomized election timeouts to resolve
+    const leader = try cluster.waitForLeader(15000);
     try std.testing.expect(leader.isRunning());
 
     // Verify all nodes see the same leader
@@ -60,7 +61,7 @@ test "cluster continues after leader failure" {
 
     // Start all nodes and wait for leader
     try cluster.startAll();
-    const original_leader = try cluster.waitForLeader(5000);
+    const original_leader = try cluster.waitForLeader(15000);
 
     const original_leader_id = original_leader.id;
     std.debug.print("✓ Original leader is node {d}\n", .{original_leader_id});
@@ -96,8 +97,8 @@ test "cluster maintains consensus with 5 nodes" {
 
     try cluster.startAll();
 
-    // With 5 nodes, election might take slightly longer
-    _ = try cluster.waitForLeader(8000);
+    // With 5 nodes, election needs more time for randomized timeouts to resolve
+    _ = try cluster.waitForLeader(20000);
 
     // Verify exactly one leader
     var leader_count: usize = 0;

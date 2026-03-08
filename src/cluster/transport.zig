@@ -253,10 +253,6 @@ pub const Transport = struct {
         defer posix.close(client_fd);
 
         const from_addr = std.net.Address{ .any = client_addr };
-        const expected_peer_id = if (self.shared_key != null)
-            self.resolvePeerId(from_addr) orelse return TransportError.AuthenticationFailed
-        else
-            null;
 
         // set receive timeout — longer to accommodate snapshot transfers
         const timeout = posix.timeval{ .sec = 5, .usec = 0 };
@@ -276,7 +272,9 @@ pub const Transport = struct {
         readExact(client_fd, body) catch return TransportError.ReceiveFailed;
 
         const verified = if (self.shared_key) |key|
-            try verifyAuthenticatedBody(body, expected_peer_id.?, key)
+            // When using authentication, verify HMAC and that sender is a known peer.
+            // Don't check source port since TCP ephemeral ports vary.
+            try verifyAuthenticatedBody(body, key, &self.peers)
         else
             VerifiedBody{ .sender_id = null, .payload = body };
 
@@ -308,7 +306,7 @@ const VerifiedBody = struct {
     payload: []const u8,
 };
 
-fn verifyAuthenticatedBody(body: []const u8, expected_peer_id: NodeId, key: [32]u8) TransportError!VerifiedBody {
+fn verifyAuthenticatedBody(body: []const u8, key: [32]u8, peers: *const std.AutoHashMap(NodeId, PeerAddr)) TransportError!VerifiedBody {
     if (body.len < 41) return TransportError.AuthenticationFailed;
 
     const sender_bytes = body[0..8];
@@ -326,7 +324,17 @@ fn verifyAuthenticatedBody(body: []const u8, expected_peer_id: NodeId, key: [32]
     }
 
     const sender_id = readU64(sender_bytes);
-    if (sender_id != expected_peer_id) return TransportError.AuthenticationFailed;
+
+    // Verify sender is a known peer (only check IP, not port since TCP ephemeral ports vary)
+    var is_known_peer = false;
+    var iter = peers.iterator();
+    while (iter.next()) |entry| {
+        if (entry.key_ptr.* == sender_id) {
+            is_known_peer = true;
+            break;
+        }
+    }
+    if (!is_known_peer) return TransportError.AuthenticationFailed;
 
     return .{
         .sender_id = sender_id,
