@@ -82,6 +82,77 @@ const PeerAddr = struct {
     addr: std.net.Address,
 };
 
+/// connection pool for reusing TCP connections to raft peers.
+/// avoids the overhead of connect() + close() on every heartbeat.
+/// on write failure, the connection is evicted and recreated on next send.
+const ConnectionPool = struct {
+    connections: std.AutoHashMap(NodeId, posix.socket_t),
+
+    fn init(alloc: std.mem.Allocator) ConnectionPool {
+        return .{
+            .connections = std.AutoHashMap(NodeId, posix.socket_t).init(alloc),
+        };
+    }
+
+    fn deinit(self: *ConnectionPool) void {
+        var iter = self.connections.iterator();
+        while (iter.next()) |entry| {
+            posix.close(entry.value_ptr.*);
+        }
+        self.connections.deinit();
+    }
+
+    /// get an existing connection or create a new one.
+    /// new connections get TCP_KEEPALIVE enabled.
+    fn getOrConnect(self: *ConnectionPool, peer_id: NodeId, addr: std.net.Address) !posix.socket_t {
+        if (self.connections.get(peer_id)) |fd| {
+            return fd;
+        }
+
+        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        errdefer posix.close(fd);
+
+        // connect with timeout
+        const timeout = posix.timeval{ .sec = 5, .usec = 0 };
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+
+        // enable TCP keepalive
+        const one: i32 = 1;
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
+        // keepalive interval: 5 seconds (uses raw TCP option constants)
+        const keepalive_time: i32 = 5;
+        const TCP_KEEPIDLE = 4;
+        const TCP_KEEPINTVL = 5;
+        posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_KEEPIDLE, std.mem.asBytes(&keepalive_time)) catch {};
+        posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_KEEPINTVL, std.mem.asBytes(&keepalive_time)) catch {};
+
+        posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {
+            posix.close(fd);
+            return TransportError.ConnectFailed;
+        };
+
+        try self.connections.put(peer_id, fd);
+        return fd;
+    }
+
+    /// remove and close a connection (called on write failure).
+    fn removeConn(self: *ConnectionPool, peer_id: NodeId) void {
+        if (self.connections.fetchRemove(peer_id)) |kv| {
+            posix.close(kv.value);
+        }
+    }
+
+    /// close all pooled connections.
+    fn closeAll(self: *ConnectionPool) void {
+        var iter = self.connections.iterator();
+        while (iter.next()) |entry| {
+            posix.close(entry.value_ptr.*);
+        }
+        self.connections.clearRetainingCapacity();
+    }
+};
+
 // message type tags
 const msg_request_vote: u8 = 0x01;
 const msg_request_vote_reply: u8 = 0x02;
@@ -106,6 +177,9 @@ pub const Transport = struct {
     /// when set, all messages include a 32-byte HMAC-SHA256 tag.
     shared_key: ?[32]u8,
 
+    /// reusable TCP connections to peers, keyed by NodeId.
+    pool: ConnectionPool,
+
     pub fn init(alloc: std.mem.Allocator, port: u16) !Transport {
         const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
         errdefer posix.close(fd);
@@ -124,10 +198,12 @@ pub const Transport = struct {
             .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
             .local_id = null,
             .shared_key = null,
+            .pool = ConnectionPool.init(alloc),
         };
     }
 
     pub fn deinit(self: *Transport) void {
+        self.pool.deinit();
         posix.close(self.listen_fd);
         self.peers.deinit();
     }
@@ -150,8 +226,10 @@ pub const Transport = struct {
         }
     }
 
-    /// send a message to a peer. opens a new TCP connection each time.
-    /// raft heartbeats are ~1/sec so connection overhead is negligible.
+    /// send a message to a peer using a pooled TCP connection.
+    /// connections are reused across sends to reduce overhead for
+    /// raft heartbeats (~1/sec). on write failure the connection is
+    /// evicted and will be recreated on the next send.
     ///
     /// snapshot messages use dynamic allocation since they can be megabytes.
     /// all other RPCs use a fixed stack buffer.
@@ -170,7 +248,7 @@ pub const Transport = struct {
             const final = self.applyHmac(encoded) catch return TransportError.SendFailed;
             defer if (final.ptr != encoded.ptr) self.alloc.free(final);
 
-            self.sendBytes(peer, final) catch return TransportError.SendFailed;
+            self.sendBytes(target, peer, final) catch return TransportError.SendFailed;
             return;
         }
 
@@ -181,7 +259,7 @@ pub const Transport = struct {
         const final = self.applyHmac(buf[0..len]) catch return TransportError.SendFailed;
         defer if (final.ptr != buf[0..len].ptr) self.alloc.free(final);
 
-        self.sendBytes(peer, final) catch return TransportError.SendFailed;
+        self.sendBytes(target, peer, final) catch return TransportError.SendFailed;
     }
 
     /// if shared_key is set, compute HMAC over [sender_id + type + payload]
@@ -211,26 +289,22 @@ pub const Transport = struct {
         return out;
     }
 
-    /// open a TCP connection to a peer and send the bytes.
-    fn sendBytes(_: *Transport, peer: PeerAddr, data: []const u8) !void {
-        const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch
-            return TransportError.ConnectFailed;
-        defer posix.close(fd);
-
-        // set send/receive timeout (1 second for normal RPCs).
-        // snapshot sends get a longer timeout since they can be megabytes.
-        const timeout = posix.timeval{ .sec = 5, .usec = 0 };
-        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
-        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
-
-        posix.connect(fd, &peer.addr.any, peer.addr.getOsSockLen()) catch
+    /// send bytes using a pooled connection. evicts and returns error on write failure.
+    fn sendBytes(self: *Transport, peer_id: NodeId, peer: PeerAddr, data: []const u8) !void {
+        const fd = self.pool.getOrConnect(peer_id, peer.addr) catch
             return TransportError.ConnectFailed;
 
         // write all bytes, handling partial writes
         var total: usize = 0;
         while (total < data.len) {
-            const n = posix.write(fd, data[total..]) catch return TransportError.SendFailed;
-            if (n == 0) return TransportError.SendFailed;
+            const n = posix.write(fd, data[total..]) catch {
+                self.pool.removeConn(peer_id);
+                return TransportError.SendFailed;
+            };
+            if (n == 0) {
+                self.pool.removeConn(peer_id);
+                return TransportError.SendFailed;
+            }
             total += n;
         }
     }
@@ -949,8 +1023,10 @@ test "applyHmac produces correct authenticated format" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = 7,
         .shared_key = "test-key-32-bytes-exactly-here!!".*,
+        .pool = ConnectionPool.init(alloc),
     };
     defer transport.peers.deinit();
+    defer transport.pool.deinit();
 
     const authenticated = try transport.applyHmac(&plain);
     defer alloc.free(authenticated);
@@ -987,8 +1063,10 @@ test "applyHmac returns data unchanged when no key" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = null,
         .shared_key = null,
+        .pool = ConnectionPool.init(alloc),
     };
     defer transport.peers.deinit();
+    defer transport.pool.deinit();
 
     const result = try transport.applyHmac(&plain);
     // should return the same pointer — no allocation
@@ -996,6 +1074,7 @@ test "applyHmac returns data unchanged when no key" {
 }
 
 test "verifyAuthenticatedBody rejects mismatched sender id" {
+    const alloc = std.testing.allocator;
     const key: [32]u8 = "test-key-32-bytes-exactly-here!!".*;
     var sender_buf: [8]u8 = undefined;
     writeU64(&sender_buf, 2);
@@ -1012,9 +1091,13 @@ test "verifyAuthenticatedBody rejects mismatched sender id" {
     @memcpy(body[8..40], &tag);
     @memcpy(body[40..], &payload);
 
+    // empty peer map — sender_id=2 is not a known peer
+    var peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc);
+    defer peers.deinit();
+
     try std.testing.expectError(
         TransportError.AuthenticationFailed,
-        verifyAuthenticatedBody(&body, 3, key),
+        verifyAuthenticatedBody(&body, key, &peers),
     );
 }
 
@@ -1027,8 +1110,10 @@ test "resolvePeerId matches configured peer" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = 1,
         .shared_key = null,
+        .pool = ConnectionPool.init(alloc),
     };
     defer transport.peers.deinit();
+    defer transport.pool.deinit();
 
     try transport.addPeer(2, .{ 10, 0, 0, 2 }, 9700);
 
@@ -1039,4 +1124,29 @@ test "resolvePeerId matches configured peer" {
     try std.testing.expect(
         transport.resolvePeerId(std.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700)) == null,
     );
+}
+
+// -- connection pool tests --
+
+test "connection pool: getOrConnect and closeAll" {
+    const alloc = std.testing.allocator;
+    var pool = ConnectionPool.init(alloc);
+    defer pool.deinit();
+
+    // pool starts empty
+    try std.testing.expectEqual(@as(u32, 0), pool.connections.count());
+
+    // closeAll on empty pool doesn't crash
+    pool.closeAll();
+    try std.testing.expectEqual(@as(u32, 0), pool.connections.count());
+}
+
+test "connection pool: removeConn on missing peer is safe" {
+    const alloc = std.testing.allocator;
+    var pool = ConnectionPool.init(alloc);
+    defer pool.deinit();
+
+    // removing a peer that doesn't exist should be a no-op
+    pool.removeConn(42);
+    try std.testing.expectEqual(@as(u32, 0), pool.connections.count());
 }
