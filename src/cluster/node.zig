@@ -116,16 +116,13 @@ pub const Node = struct {
 
         // collect peer IDs for raft
         const peer_ids = try alloc.alloc(NodeId, config.peers.len);
+        defer alloc.free(peer_ids); // raft dupes internally
         for (config.peers, 0..) |p, i| {
             peer_ids[i] = p.id;
         }
-        // Note: peer_ids will be owned by Raft after successful init
-        // If Raft.init fails, we must clean up peer_ids manually
-        // If Raft.init succeeds, Raft.deinit will free peer_ids
 
         // initialize transport
         var transport = Transport.init(alloc, config.port) catch {
-            alloc.free(peer_ids);
             return NodeError.InitFailed;
         };
         errdefer transport.deinit();
@@ -133,7 +130,6 @@ pub const Node = struct {
 
         for (config.peers) |p| {
             transport.addPeer(p.id, p.addr, p.port) catch {
-                alloc.free(peer_ids);
                 return NodeError.InitFailed;
             };
         }
@@ -144,13 +140,11 @@ pub const Node = struct {
         }
 
         transport.requireAuth() catch {
-            alloc.free(peer_ids);
             return NodeError.InitFailed;
         };
 
-        // initialize raft - takes ownership of peer_ids
+        // initialize raft — dupes peer_ids internally
         var raft = Raft.init(alloc, config.id, peer_ids, &log) catch {
-            alloc.free(peer_ids);
             return NodeError.InitFailed;
         };
         errdefer raft.deinit();
