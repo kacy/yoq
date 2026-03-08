@@ -247,6 +247,8 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var server_host: ?[]const u8 = null;
     var token: ?[]const u8 = null;
     var api_port: u16 = 7700;
+    var role: cluster_config.NodeRole = .both;
+    var region: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--token")) {
@@ -261,6 +263,20 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
             };
             api_port = std.fmt.parseInt(u16, port_str, 10) catch {
                 writeErr("invalid port: {s}\n", .{port_str});
+                return ClusterCommandsError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--role")) {
+            const role_str = args.next() orelse {
+                writeErr("--role requires a value (server, agent, or both)\n", .{});
+                return ClusterCommandsError.InvalidArgument;
+            };
+            role = cluster_config.NodeRole.fromString(role_str) orelse {
+                writeErr("invalid role: {s} (expected server, agent, or both)\n", .{role_str});
+                return ClusterCommandsError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--region")) {
+            region = args.next() orelse {
+                writeErr("--region requires a region name\n", .{});
                 return ClusterCommandsError.InvalidArgument;
             };
         } else {
@@ -284,9 +300,11 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return ClusterCommandsError.InvalidArgument;
     };
 
-    writeErr("joining cluster at {s}:{d}...\n", .{ host, api_port });
+    writeErr("joining cluster at {s}:{d} (role={s})...\n", .{ host, api_port, role.toString() });
 
     var agent = cluster_agent.Agent.init(alloc, server_addr, api_port, join_token);
+    agent.role = role;
+    agent.region = region;
 
     // register with server
     agent.register() catch |err| {

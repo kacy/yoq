@@ -241,6 +241,10 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
     const wg_public_key = extractJsonString(request.body, "wg_public_key");
     const wg_listen_port = extractJsonInt(request.body, "wg_listen_port");
 
+    // optional role separation fields
+    const role_str = extractJsonString(request.body, "role");
+    const region_str = extractJsonString(request.body, "region");
+
     if (!validateClusterInput(address)) {
         return badRequest("invalid address");
     }
@@ -330,6 +334,8 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
         assigned_node_id,
         wg_public_key,
         overlay_ip_str,
+        role_str,
+        region_str,
     ) catch return internalError();
 
     _ = node.propose(sql) catch {
@@ -392,6 +398,22 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
             writer.writeAll("\",\"container_subnet\":\"") catch return internalError();
             json_helpers.writeJsonEscaped(writer, peer.container_subnet) catch return internalError();
             writer.writeAll("\"}") catch return internalError();
+        }
+        writer.writeByte(']') catch return internalError();
+    }
+
+    // include gossip seeds so the agent can bootstrap gossip membership
+    {
+        const db = node.stateMachineDb();
+        const seeds = agent_registry.getGossipSeeds(alloc, db, 5) catch &[_][]const u8{};
+        defer agent_registry.freeGossipSeeds(alloc, seeds);
+
+        writer.writeAll(",\"gossip_seeds\":[") catch return internalError();
+        for (seeds, 0..) |seed, i| {
+            if (i > 0) writer.writeByte(',') catch return internalError();
+            writer.writeByte('"') catch return internalError();
+            json_helpers.writeJsonEscaped(writer, seed) catch return internalError();
+            writer.writeByte('"') catch return internalError();
         }
         writer.writeByte(']') catch return internalError();
     }

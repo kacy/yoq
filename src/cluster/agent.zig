@@ -31,6 +31,8 @@ const wireguard = @import("../network/wireguard.zig");
 const ip_mod = @import("../network/ip.zig");
 const setup = @import("../network/setup.zig");
 
+const cluster_config = @import("config.zig");
+
 const Allocator = std.mem.Allocator;
 const AgentResources = agent_types.AgentResources;
 
@@ -76,6 +78,14 @@ pub const Agent = struct {
     overlay_ip: ?[4]u8 = null,
     wg_listen_port: u16 = 51820,
 
+    // role separation fields — set by the join command before registration
+    role: cluster_config.NodeRole = .both,
+    region: ?[]const u8 = null,
+
+    /// gossip seed addresses returned by the server during registration.
+    /// used to bootstrap the gossip protocol (PR6).
+    gossip_seeds: ?[][]const u8 = null,
+
     /// number of peers we currently have configured in the wireguard mesh.
     /// compared against the server's peers_count on each heartbeat to detect
     /// membership changes. when they differ, we re-fetch the full peer list
@@ -120,13 +130,33 @@ pub const Agent = struct {
         var local_ip_buf: [16]u8 = undefined;
         const local_ip = detectLocalIp(self.server_addr, &local_ip_buf);
 
-        // build registration JSON with wireguard info
+        // build registration JSON with wireguard and role info
         var body_buf: [1024]u8 = undefined;
-        const body = std.fmt.bufPrint(
+        var body_len: usize = 0;
+
+        // base fields
+        const base = std.fmt.bufPrint(
             &body_buf,
-            "{{\"token\":\"{s}\",\"address\":\"{s}\",\"cpu_cores\":{d},\"memory_mb\":{d},\"wg_public_key\":\"{s}\",\"wg_listen_port\":{d}}}",
-            .{ self.token, local_ip, resources.cpu_cores, resources.memory_mb, pub_key, self.wg_listen_port },
+            "{{\"token\":\"{s}\",\"address\":\"{s}\",\"cpu_cores\":{d},\"memory_mb\":{d},\"wg_public_key\":\"{s}\",\"wg_listen_port\":{d},\"role\":\"{s}\"",
+            .{ self.token, local_ip, resources.cpu_cores, resources.memory_mb, pub_key, self.wg_listen_port, self.role.toString() },
         ) catch return AgentError.RegisterFailed;
+        body_len = base.len;
+
+        // optional region
+        if (self.region) |reg| {
+            const suffix = std.fmt.bufPrint(
+                body_buf[body_len..],
+                ",\"region\":\"{s}\"",
+                .{reg},
+            ) catch return AgentError.RegisterFailed;
+            body_len += suffix.len;
+        }
+
+        // close object
+        if (body_len >= body_buf.len) return AgentError.RegisterFailed;
+        body_buf[body_len] = '}';
+        body_len += 1;
+        const body = body_buf[0..body_len];
 
         var resp = http_client.postWithAuth(
             self.alloc,
@@ -172,10 +202,14 @@ pub const Agent = struct {
             }
         }
 
+        // parse gossip_seeds from the response for future gossip bootstrap (PR6).
+        // format: "gossip_seeds":["addr1","addr2",...]
+        self.parseGossipSeeds(resp.body);
+
         if (self.node_id) |nid| {
-            log.info("registered as agent {s} (node_id={d})", .{ &self.id, nid });
+            log.info("registered as agent {s} (node_id={d}, role={s})", .{ &self.id, nid, self.role.toString() });
         } else {
-            log.info("registered as agent {s}", .{&self.id});
+            log.info("registered as agent {s} (role={s})", .{ &self.id, self.role.toString() });
         }
     }
 
@@ -224,6 +258,13 @@ pub const Agent = struct {
 
         // clean up the peer tracking map
         self.known_peers.deinit();
+
+        // clean up gossip seeds
+        if (self.gossip_seeds) |seeds| {
+            for (seeds) |s| self.alloc.free(s);
+            self.alloc.free(seeds);
+            self.gossip_seeds = null;
+        }
     }
 
     /// block until the agent stops (used by cmdJoin).
@@ -407,6 +448,47 @@ pub const Agent = struct {
             "/wireguard/peers",
             self.token,
         ) catch return null;
+    }
+
+    /// parse gossip seed addresses from a registration response body.
+    /// format: "gossip_seeds":["addr1","addr2",...]
+    /// best-effort — failure just means no seeds (gossip will discover peers).
+    fn parseGossipSeeds(self: *Agent, body: []const u8) void {
+        const key = "\"gossip_seeds\":[";
+        const key_pos = std.mem.indexOf(u8, body, key) orelse return;
+        const arr_start = key_pos + key.len;
+        const arr_end = std.mem.indexOfPos(u8, body, arr_start, "]") orelse return;
+        const arr = body[arr_start..arr_end];
+        if (arr.len == 0) return;
+
+        var seeds: std.ArrayListUnmanaged([]const u8) = .{};
+
+        // parse quoted strings from the array
+        var pos: usize = 0;
+        while (pos < arr.len) {
+            const quote_start = std.mem.indexOfPos(u8, arr, pos, "\"") orelse break;
+            const quote_end = std.mem.indexOfPos(u8, arr, quote_start + 1, "\"") orelse break;
+            const seed = arr[quote_start + 1 .. quote_end];
+            if (seed.len > 0) {
+                const dupe = self.alloc.dupe(u8, seed) catch break;
+                seeds.append(self.alloc, dupe) catch {
+                    self.alloc.free(dupe);
+                    break;
+                };
+            }
+            pos = quote_end + 1;
+        }
+
+        if (seeds.items.len > 0) {
+            self.gossip_seeds = seeds.toOwnedSlice(self.alloc) catch {
+                for (seeds.items) |s| self.alloc.free(s);
+                seeds.deinit(self.alloc);
+                return;
+            };
+            log.info("received {d} gossip seeds", .{self.gossip_seeds.?.len});
+        } else {
+            seeds.deinit(self.alloc);
+        }
     }
 
     /// fetch assignments from the server and start containers for any
@@ -776,4 +858,70 @@ test "overlayIpForNode extended range" {
     try std.testing.expectEqual([4]u8{ 10, 40, 1, 0 }, overlayIpForNode(256));
     // 1000: 1000 >> 8 = 3, 1000 & 0xFF = 232
     try std.testing.expectEqual([4]u8{ 10, 40, 3, 232 }, overlayIpForNode(1000));
+}
+
+test "Agent init role defaults to both" {
+    const alloc = std.testing.allocator;
+    var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
+    defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
+
+    try std.testing.expectEqual(cluster_config.NodeRole.both, agent.role);
+    try std.testing.expect(agent.region == null);
+    try std.testing.expect(agent.gossip_seeds == null);
+}
+
+test "Agent role can be set before registration" {
+    const alloc = std.testing.allocator;
+    var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
+    defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
+
+    agent.role = .agent;
+    agent.region = "us-east-1";
+
+    try std.testing.expectEqual(cluster_config.NodeRole.agent, agent.role);
+    try std.testing.expectEqualStrings("us-east-1", agent.region.?);
+}
+
+test "parseGossipSeeds with valid seeds" {
+    const alloc = std.testing.allocator;
+    var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
+    defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
+
+    agent.parseGossipSeeds("{\"gossip_seeds\":[\"10.0.0.1:9800\",\"10.0.0.2:9800\"]}");
+    defer {
+        if (agent.gossip_seeds) |seeds| {
+            for (seeds) |s| alloc.free(s);
+            alloc.free(seeds);
+        }
+    }
+
+    try std.testing.expect(agent.gossip_seeds != null);
+    try std.testing.expectEqual(@as(usize, 2), agent.gossip_seeds.?.len);
+    try std.testing.expectEqualStrings("10.0.0.1:9800", agent.gossip_seeds.?[0]);
+    try std.testing.expectEqualStrings("10.0.0.2:9800", agent.gossip_seeds.?[1]);
+}
+
+test "parseGossipSeeds with empty array" {
+    const alloc = std.testing.allocator;
+    var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
+    defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
+
+    agent.parseGossipSeeds("{\"gossip_seeds\":[]}");
+
+    try std.testing.expect(agent.gossip_seeds == null);
+}
+
+test "parseGossipSeeds with no seeds key" {
+    const alloc = std.testing.allocator;
+    var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
+    defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
+
+    agent.parseGossipSeeds("{\"id\":\"abc123\"}");
+
+    try std.testing.expect(agent.gossip_seeds == null);
 }
