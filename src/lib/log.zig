@@ -77,13 +77,13 @@ test "log level filtering" {
 test "log failure tracking" {
     // Reset counter
     log_write_failures = 0;
-    
+
     // Normal log writes should not increment counter
     info("test message", .{});
     warn("test warning", .{});
     err("test error", .{});
     debug("test debug", .{});
-    
+
     // Note: In normal operation, this should remain 0
     // We can't easily test actual failures without mocking stderr
     _ = log_write_failures;

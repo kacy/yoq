@@ -360,23 +360,23 @@ test "control character escaping" {
 test "depth overflow protection" {
     // Test that depth is capped at 31 to prevent bit shift overflow
     var w = JsonWriter{};
-    
+
     // Push nesting 40 times (exceeds the 31 limit)
     for (0..40) |_| {
         w.beginObject();
     }
-    
+
     // Depth should be capped at 31
     try std.testing.expect(w.depth <= 31);
-    
+
     // Should still be able to write fields without crashing
     w.stringField("key", "value");
-    
+
     // Pop all nesting
     for (0..40) |_| {
         w.endObject();
     }
-    
+
     // Verify we can flush without error
     w.flush();
     try std.testing.expect(!w.flush_failed);
@@ -388,7 +388,7 @@ test "flush failure tracking" {
     w.stringField("key", "value");
     w.endObject();
     w.flush();
-    
+
     // In normal operation, flush should succeed
     try std.testing.expect(!w.flush_failed);
 }
