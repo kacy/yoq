@@ -114,15 +114,136 @@ pub const TestCluster = struct {
     }
 
     pub fn startAll(self: *TestCluster) !void {
-        for (self.nodes.items) |*node| {
-            try self.startNode(node);
+        const start_time = std.time.milliTimestamp();
+
+        // Pre-compute the full peer list for each node (all nodes are peers)
+        var all_nodes_peers: [][512]u8 = try self.alloc.alloc([512]u8, self.nodes.items.len);
+        defer self.alloc.free(all_nodes_peers);
+
+        for (self.nodes.items, 0..) |*node, i| {
+            var peers_buf: [512]u8 = undefined;
+            var peers_stream = std.io.fixedBufferStream(&peers_buf);
+            const peers_writer = peers_stream.writer();
+
+            var first = true;
+            for (self.nodes.items) |other| {
+                if (other.id == node.id) continue;
+
+                if (!first) try peers_writer.writeByte(',');
+                first = false;
+
+                try peers_writer.print("{d}@127.0.0.1:{d}", .{
+                    other.id,
+                    other.raft_port,
+                });
+            }
+
+            const peers_len = peers_stream.pos;
+            @memcpy(all_nodes_peers[i][0..peers_len], peers_buf[0..peers_len]);
+            all_nodes_peers[i][peers_len] = 0; // null terminate
         }
+
+        // Start all nodes in parallel with full peer lists
+        for (self.nodes.items, 0..) |*node, i| {
+            const peers_len = std.mem.indexOf(u8, &all_nodes_peers[i], &[_]u8{0}) orelse 0;
+            const peers = if (peers_len > 0) all_nodes_peers[i][0..peers_len] else "";
+
+            try self.spawnNodeInternal(node, peers);
+        }
+
+        // Wait for all nodes to be ready
+        var all_ready = false;
+        var attempts: u32 = 0;
+        const wait_timeout_ms: u64 = 10000; // 10 second total timeout
+
+        const wait_start = std.time.milliTimestamp();
+        while (!all_ready and std.time.milliTimestamp() - wait_start < wait_timeout_ms) {
+            attempts += 1;
+            all_ready = true;
+
+            for (self.nodes.items) |*node| {
+                if (!node.isRunning()) {
+                    all_ready = false;
+                    continue;
+                }
+
+                // Check if process is still alive
+                if (node.process) |*child| {
+                    const check = std.posix.kill(child.id, 0);
+                    _ = check catch {
+                        all_ready = false;
+                        continue;
+                    };
+                }
+
+                // Check if API is responding
+                if (!tryConnect(node.api_port)) {
+                    all_ready = false;
+                }
+            }
+
+            if (!all_ready) {
+                // Simple backoff with max 500ms
+                const wait_ms: u64 = @min(50 * attempts, 500);
+                std.Thread.sleep(wait_ms * std.time.ns_per_ms);
+            }
+        }
+
+        if (!all_ready) {
+            std.debug.print("✗ Failed to start all nodes within timeout\n", .{});
+            return error.NodeStartupTimeout;
+        }
+
+        std.debug.print("✓ All {d} nodes ready after {d}ms ({d} attempts)\n", .{ self.nodes.items.len, std.time.milliTimestamp() - start_time, attempts });
+    }
+
+    fn spawnNodeInternal(self: *TestCluster, node: *ClusterNode, peers: []const u8) !void {
+        if (node.isRunning()) return;
+
+        var env_map = try std.process.getEnvMap(self.alloc);
+        defer env_map.deinit();
+        try env_map.put("HOME", node.data_dir);
+        try env_map.put("XDG_DATA_HOME", node.data_dir);
+
+        const cwd = try std.fs.cwd().realpathAlloc(self.alloc, ".");
+        defer self.alloc.free(cwd);
+
+        const id_str = try std.fmt.allocPrint(self.alloc, "{d}", .{node.id});
+        defer self.alloc.free(id_str);
+        const raft_port_str = try std.fmt.allocPrint(self.alloc, "{d}", .{node.raft_port});
+        defer self.alloc.free(raft_port_str);
+        const api_port_str = try std.fmt.allocPrint(self.alloc, "{d}", .{node.api_port});
+        defer self.alloc.free(api_port_str);
+
+        var child = std.process.Child.init(&.{
+            "zig-out/bin/yoq",
+            "init-server",
+            "--id",
+            id_str,
+            "--port",
+            raft_port_str,
+            "--api-port",
+            api_port_str,
+            "--peers",
+            peers,
+            "--token",
+            self.join_token,
+            "--api-token",
+            self.api_token,
+        }, self.alloc);
+
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        child.env_map = &env_map;
+        child.cwd = cwd;
+
+        try child.spawn();
+        node.process = child;
     }
 
     pub fn startNode(self: *TestCluster, node: *ClusterNode) !void {
-        if (node.isRunning()) return;
-
-        // Build peers string (all other nodes)
+        // Build full peer list for this node (all other nodes)
         var peers_buf: [512]u8 = undefined;
         var peers_stream = std.io.fixedBufferStream(&peers_buf);
         const peers_writer = peers_stream.writer();
@@ -133,7 +254,6 @@ pub const TestCluster = struct {
 
             if (!first) try peers_writer.writeByte(',');
             first = false;
-
             try peers_writer.print("{d}@127.0.0.1:{d}", .{
                 other.id,
                 other.raft_port,
@@ -141,45 +261,23 @@ pub const TestCluster = struct {
         }
         const peers = peers_stream.getWritten();
 
-        var env_map = try std.process.getEnvMap(self.alloc);
-        defer env_map.deinit();
+        try self.spawnNodeInternal(node, peers);
 
-        // Set up environment for yoq to find its data directory
-        try env_map.put("HOME", node.data_dir);
-        try env_map.put("XDG_DATA_HOME", node.data_dir);
+        // Wait for ready
+        var attempt: u32 = 0;
+        while (attempt < 50) : (attempt += 1) {
+            if (node.process) |*child| {
+                const check = std.posix.kill(child.id, 0);
+                _ = check catch continue;
 
-        const cwd = try std.fs.cwd().realpathAlloc(self.alloc, ".");
-        defer self.alloc.free(cwd);
+                if (tryConnect(node.api_port)) {
+                    return;
+                }
+            }
+            std.Thread.sleep(200 * std.time.ns_per_ms);
+        }
 
-        // Spawn yoq init-server process
-        var child = std.process.Child.init(&.{
-            "zig-out/bin/yoq",
-            "init-server",
-            "--id",
-            try std.fmt.allocPrint(self.alloc, "{d}", .{node.id}),
-            "--port",
-            try std.fmt.allocPrint(self.alloc, "{d}", .{node.raft_port}),
-            "--api-port",
-            try std.fmt.allocPrint(self.alloc, "{d}", .{node.api_port}),
-            "--peers",
-            peers,
-            "--token",
-            self.join_token,
-            "--api-token",
-            self.api_token,
-        }, self.alloc);
-
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-        child.env_map = &env_map;
-        child.cwd = cwd;
-
-        try child.spawn();
-        node.process = child;
-
-        // Wait a moment for the node to start
-        std.Thread.sleep(500 * std.time.ns_per_ms);
+        return error.NodeStartupTimeout;
     }
 
     pub fn stopAll(self: *TestCluster) void {
@@ -274,6 +372,14 @@ pub const TestCluster = struct {
         return leader_id != null;
     }
 };
+
+fn tryConnect(port: u16) bool {
+    const addr = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, port);
+    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return false;
+    defer std.posix.close(fd);
+    std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch return false;
+    return true;
+}
 
 fn generateHexToken(buf: *[64]u8) !void {
     var rand_bytes: [32]u8 = undefined;
