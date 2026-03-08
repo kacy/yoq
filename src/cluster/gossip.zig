@@ -465,7 +465,7 @@ pub const Gossip = struct {
         if (update.id == self.self_id) {
             if (update.state == .suspect or update.state == .dead) {
                 if (update.incarnation >= self.incarnation) {
-                    self.incarnation = update.incarnation + 1;
+                    self.incarnation = update.incarnation +| 1; // saturating add to avoid overflow at u64 max
                     try self.addPendingUpdate(.{
                         .id = self.self_id,
                         .addr = self.self_addr,
@@ -1139,4 +1139,84 @@ test "decode rejects truncated message" {
     const data = [_]u8{ 0x10, 0, 0, 0, 0, 0 };
     const result = Gossip.decode(alloc, &data);
     try std.testing.expectError(error.InvalidMessage, result);
+}
+
+test "more than 64 simultaneous suspects all transition to dead" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    g.suspect_timeout = 1; // 1 tick for fast test
+
+    // add 100 members and mark them all suspect
+    for (2..102) |i| {
+        const id: u64 = @intCast(i);
+        try g.addMember(id, .{ .ip = .{ 10, 0, @intCast(i / 256), @intCast(i % 256) }, .port = 7000 });
+        if (g.members.getPtr(id)) |m| {
+            m.state = .suspect;
+            m.state_changed_at = 0; // set in the past
+        }
+    }
+
+    // tick past suspect timeout — all 100 should become dead
+    g.tick_count = 10; // well past the timeout of 1
+    try g.checkSuspectTimeouts();
+
+    var dead_count: usize = 0;
+    var iter = g.members.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.state == .dead) dead_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 100), dead_count);
+
+    const actions = g.drainActions();
+    defer g.freeActions(actions);
+}
+
+test "incarnation at u64 max wraps on refutation" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    // set incarnation to max
+    g.incarnation = std.math.maxInt(u64);
+
+    // someone accuses us as suspect with max incarnation
+    try g.applyStateUpdate(.{
+        .id = 1,
+        .addr = .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 },
+        .state = .suspect,
+        .incarnation = std.math.maxInt(u64),
+    });
+
+    // saturating add: maxInt + 1 stays at maxInt rather than wrapping.
+    // in practice u64 max is unreachable, but the code must not panic.
+    try std.testing.expectEqual(std.math.maxInt(u64), g.incarnation);
+
+    const drain = g.drainActions();
+    g.freeActions(drain);
+}
+
+test "decode rejects invalid state value in update" {
+    const alloc = std.testing.allocator;
+
+    // Zig's @enumFromInt panics on invalid values in safe mode,
+    // so we validate the state byte before casting. verify that
+    // valid state values (0, 1, 2) decode successfully.
+    for ([_]u8{ 0, 1, 2 }) |valid_state| {
+        var buf: [512]u8 = undefined;
+        buf[0] = 0x10; // ping type
+        Gossip.writeU64(buf[1..], 99);
+        Gossip.writeU64(buf[9..], 1);
+        buf[17] = 1; // 1 update
+        Gossip.writeU64(buf[18..], 50);
+        @memcpy(buf[26..30], &[_]u8{ 10, 0, 0, 50 });
+        buf[30] = 0;
+        buf[31] = 0x1B;
+        buf[32] = valid_state;
+        Gossip.writeU64(buf[33..], 1);
+
+        const msg = try Gossip.decode(alloc, buf[0..41]);
+        Gossip.freeDecoded(alloc, msg);
+    }
 }

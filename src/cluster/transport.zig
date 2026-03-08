@@ -921,6 +921,30 @@ test "decode rejects truncated message" {
     try std.testing.expectError(error.InvalidMessage, result);
 }
 
+test "decode append_entries with zero entries produces safe slice" {
+    const alloc = std.testing.allocator;
+    // build an append_entries with entry_count = 0
+    var buf: [256]u8 = undefined;
+    const args = AppendEntriesArgs{
+        .term = 5,
+        .leader_id = 1,
+        .prev_log_index = 10,
+        .prev_log_term = 4,
+        .entries = &.{},
+        .leader_commit = 9,
+    };
+
+    const len = try encode(&buf, .{ .append_entries = args });
+    const decoded = try decode(alloc, buf[4..len]);
+
+    // entries should be an allocated zero-length slice, safe to free
+    try std.testing.expectEqual(@as(usize, 0), decoded.append_entries.entries.len);
+
+    // the slice is heap-allocated (alloc.alloc with count 0),
+    // so freeing it must not crash
+    alloc.free(decoded.append_entries.entries);
+}
+
 test "decode rejects inflated entry_count" {
     const alloc = std.testing.allocator;
     // build a minimal append_entries message with entry_count far exceeding
