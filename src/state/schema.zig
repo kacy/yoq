@@ -141,6 +141,11 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     db.exec("ALTER TABLE agents ADD COLUMN wg_public_key TEXT;", .{}, .{}) catch {};
     db.exec("ALTER TABLE agents ADD COLUMN overlay_ip TEXT;", .{}, .{}) catch {};
 
+    // role separation: agents can be 'server', 'agent', or 'both' (default).
+    // region is an optional string for region-aware scheduling.
+    db.exec("ALTER TABLE agents ADD COLUMN role TEXT DEFAULT 'both';", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN region TEXT;", .{}, .{}) catch {};
+
     db.exec(
         \\CREATE TABLE IF NOT EXISTS network_policies (
         \\    id INTEGER PRIMARY KEY AUTOINCREMENT,

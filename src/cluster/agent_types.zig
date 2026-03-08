@@ -57,12 +57,18 @@ pub const AgentRecord = struct {
     wg_public_key: ?[]const u8 = null,
     overlay_ip: ?[]const u8 = null,
 
+    // role separation fields (null for agents registered before role support)
+    role: ?[]const u8 = null,
+    region: ?[]const u8 = null,
+
     pub fn deinit(self: AgentRecord, alloc: Allocator) void {
         alloc.free(self.id);
         alloc.free(self.address);
         alloc.free(self.status);
         if (self.wg_public_key) |k| alloc.free(k);
         if (self.overlay_ip) |o| alloc.free(o);
+        if (self.role) |r| alloc.free(r);
+        if (self.region) |reg| alloc.free(reg);
     }
 };
 

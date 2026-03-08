@@ -15,6 +15,45 @@ const ip_mod = @import("../network/ip.zig");
 pub const NodeConfig = node_mod.NodeConfig;
 pub const PeerConfig = node_mod.PeerConfig;
 
+/// node role in the cluster. small clusters use 'both' (default).
+/// large clusters separate servers (raft consensus) from agents (workloads).
+pub const NodeRole = enum {
+    /// participates in raft consensus and runs workloads
+    both,
+    /// raft consensus only — no workloads
+    server,
+    /// workloads only — uses gossip for membership, not raft
+    agent,
+
+    pub fn toString(self: NodeRole) []const u8 {
+        return switch (self) {
+            .both => "both",
+            .server => "server",
+            .agent => "agent",
+        };
+    }
+
+    pub fn fromString(s: []const u8) ?NodeRole {
+        if (std.mem.eql(u8, s, "both")) return .both;
+        if (std.mem.eql(u8, s, "server")) return .server;
+        if (std.mem.eql(u8, s, "agent")) return .agent;
+        return null;
+    }
+};
+
+/// cluster-wide settings for scaling behavior.
+/// auto mode: ≤50 agents = all 'both', no gossip. >50 = gossip active.
+pub const ClusterSettings = struct {
+    role: NodeRole = .both,
+    region: ?[]const u8 = null,
+
+    /// gossip tick interval in milliseconds (default 500ms)
+    gossip_tick_ms: u32 = 500,
+
+    /// threshold for auto-activating gossip (agent count)
+    gossip_threshold: u32 = 50,
+};
+
 pub const ConfigError = error{
     /// peer string does not match the expected id@host:port format
     InvalidPeerFormat,
@@ -120,4 +159,25 @@ test "parsePeers rejects missing port" {
     const alloc = std.testing.allocator;
     const result = parsePeers(alloc, "2@10.0.0.2");
     try std.testing.expectError(ConfigError.InvalidPeerFormat, result);
+}
+
+test "NodeRole round-trip" {
+    const roles = [_]NodeRole{ .both, .server, .agent };
+    for (roles) |r| {
+        const str = r.toString();
+        const parsed = NodeRole.fromString(str).?;
+        try std.testing.expectEqual(r, parsed);
+    }
+}
+
+test "NodeRole unknown returns null" {
+    try std.testing.expect(NodeRole.fromString("leader") == null);
+}
+
+test "ClusterSettings defaults" {
+    const settings = ClusterSettings{};
+    try std.testing.expectEqual(NodeRole.both, settings.role);
+    try std.testing.expect(settings.region == null);
+    try std.testing.expectEqual(@as(u32, 500), settings.gossip_tick_ms);
+    try std.testing.expectEqual(@as(u32, 50), settings.gossip_threshold);
 }

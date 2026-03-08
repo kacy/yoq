@@ -330,6 +330,8 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
         assigned_node_id,
         wg_public_key,
         overlay_ip_str,
+        null,
+        null,
     ) catch return internalError();
 
     _ = node.propose(sql) catch {
