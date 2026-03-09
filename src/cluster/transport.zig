@@ -103,7 +103,10 @@ const ConnectionPool = struct {
     }
 
     /// get an existing connection or create a new one.
-    /// new connections get TCP_KEEPALIVE enabled.
+    /// uses non-blocking connect with a 500ms poll timeout so that a dead
+    /// peer doesn't block heartbeats to other live peers. see also the
+    /// 1s send/recv timeouts which cap blocking on established-but-dead
+    /// connections.
     fn getOrConnect(self: *ConnectionPool, peer_id: NodeId, addr: std.net.Address) !posix.socket_t {
         if (self.connections.get(peer_id)) |fd| {
             return fd;
@@ -112,8 +115,9 @@ const ConnectionPool = struct {
         const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
         errdefer posix.close(fd);
 
-        // connect with timeout
-        const timeout = posix.timeval{ .sec = 5, .usec = 0 };
+        // send/recv timeouts for established connections (caps blocking
+        // if a peer dies after the connection was established)
+        const timeout = posix.timeval{ .sec = 1, .usec = 0 };
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
@@ -127,10 +131,55 @@ const ConnectionPool = struct {
         posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_KEEPIDLE, std.mem.asBytes(&keepalive_time)) catch {};
         posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_KEEPINTVL, std.mem.asBytes(&keepalive_time)) catch {};
 
-        posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {
+        // non-blocking connect: set O_NONBLOCK, start connect, then poll
+        // for writability with a short timeout. this prevents a dead peer
+        // from blocking the entire raft action loop for seconds.
+        const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch {
+            return TransportError.ConnectFailed;
+        };
+        const nonblock_flag: usize = @as(u32, @bitCast(std.os.linux.O{ .NONBLOCK = true }));
+        _ = posix.fcntl(fd, posix.F.SETFL, flags | nonblock_flag) catch {
+            return TransportError.ConnectFailed;
+        };
+
+        posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| {
+            if (err != error.WouldBlock) {
+                posix.close(fd);
+                return TransportError.ConnectFailed;
+            }
+        };
+
+        // poll for connect completion (500ms — generous for LAN, fast
+        // enough to avoid starving heartbeats to live peers)
+        var poll_fds = [1]posix.pollfd{.{
+            .fd = fd,
+            .events = posix.POLL.OUT,
+            .revents = 0,
+        }};
+        const poll_result = posix.poll(&poll_fds, 500) catch {
             posix.close(fd);
             return TransportError.ConnectFailed;
         };
+
+        if (poll_result == 0 or (poll_fds[0].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0) {
+            posix.close(fd);
+            return TransportError.ConnectFailed;
+        }
+
+        // confirm connect actually succeeded via SO_ERROR
+        var err_buf = std.mem.toBytes(@as(i32, 0));
+        posix.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, &err_buf) catch {
+            posix.close(fd);
+            return TransportError.ConnectFailed;
+        };
+        const so_error = std.mem.bytesToValue(i32, &err_buf);
+        if (so_error != 0) {
+            posix.close(fd);
+            return TransportError.ConnectFailed;
+        }
+
+        // restore blocking mode for normal send/recv
+        _ = posix.fcntl(fd, posix.F.SETFL, flags) catch {};
 
         try self.connections.put(peer_id, fd);
         return fd;
