@@ -116,6 +116,132 @@ test "cluster maintains consensus with 5 nodes" {
     std.debug.print("✓ 5-node cluster formed with exactly 1 leader\n", .{});
 }
 
+test "leader replicates proposed data to followers" {
+    const yoq_path = "zig-out/bin/yoq";
+    if (!fileExists(yoq_path)) {
+        std.debug.print("Skipping cluster test: yoq binary not found\n", .{});
+        return error.SkipZigTest;
+    }
+
+    var cluster = try cluster_harness.TestCluster.init(alloc, .{
+        .node_count = 3,
+        .base_raft_port = 29730,
+        .base_api_port = 27730,
+    });
+    defer cluster.deinit();
+
+    try cluster.startAll();
+    const leader = try cluster.waitForLeader(15000);
+
+    // register an agent via the leader's API
+    var body_buf: [512]u8 = undefined;
+    const body = std.fmt.bufPrint(&body_buf, "{{\"token\":\"{s}\",\"address\":\"10.0.0.99:9090\",\"cpu_cores\":4,\"memory_mb\":8192}}", .{cluster.join_token}) catch unreachable;
+
+    var post_resp = try cluster.postToNode(leader, "/agents/register", body);
+    defer post_resp.deinit(alloc);
+    try std.testing.expectEqual(@as(u16, 200), post_resp.status_code);
+
+    // wait for replication
+    std.Thread.sleep(3 * std.time.ns_per_s);
+
+    // verify the agent appears on a follower
+    var follower: ?*cluster_harness.ClusterNode = null;
+    for (cluster.nodes.items) |*node| {
+        if (node.id != leader.id and node.isRunning()) {
+            follower = node;
+            break;
+        }
+    }
+
+    if (follower) |f| {
+        var get_resp = try cluster.getFromNode(f, "/agents");
+        defer get_resp.deinit(alloc);
+        try std.testing.expectEqual(@as(u16, 200), get_resp.status_code);
+
+        // the registered agent should appear in the follower's response
+        try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "10.0.0.99:9090") != null);
+
+        std.debug.print("data replicated to follower\n", .{});
+    }
+}
+
+test "5-node cluster survives minority failure" {
+    const yoq_path = "zig-out/bin/yoq";
+    if (!fileExists(yoq_path)) {
+        std.debug.print("Skipping cluster test: yoq binary not found\n", .{});
+        return error.SkipZigTest;
+    }
+
+    var cluster = try cluster_harness.TestCluster.init(alloc, .{
+        .node_count = 5,
+        .base_raft_port = 29740,
+        .base_api_port = 27740,
+    });
+    defer cluster.deinit();
+
+    try cluster.startAll();
+    const leader = try cluster.waitForLeader(20000);
+
+    // kill 2 non-leader nodes (minority)
+    var killed: u32 = 0;
+    for (cluster.nodes.items) |*node| {
+        if (node.id != leader.id and killed < 2) {
+            cluster.stopNode(node.id);
+            killed += 1;
+        }
+    }
+
+    // cluster should still have a leader (quorum of 3 from 5 met)
+    std.Thread.sleep(2 * std.time.ns_per_s);
+    const still_leader = try cluster.getLeader(5000);
+    try std.testing.expect(still_leader != null);
+
+    // verify status is queryable
+    if (still_leader) |l| {
+        const status = try cluster.getNodeStatus(l);
+        defer alloc.free(status);
+        try std.testing.expect(std.mem.indexOf(u8, status, "\"role\":\"leader\"") != null);
+    }
+
+    std.debug.print("5-node cluster survived 2 node failures\n", .{});
+}
+
+test "cluster loses quorum when majority fails" {
+    const yoq_path = "zig-out/bin/yoq";
+    if (!fileExists(yoq_path)) {
+        std.debug.print("Skipping cluster test: yoq binary not found\n", .{});
+        return error.SkipZigTest;
+    }
+
+    var cluster = try cluster_harness.TestCluster.init(alloc, .{
+        .node_count = 5,
+        .base_raft_port = 29750,
+        .base_api_port = 27750,
+    });
+    defer cluster.deinit();
+
+    try cluster.startAll();
+    _ = try cluster.waitForLeader(20000);
+
+    // kill 3 nodes (majority) — no quorum possible from remaining 2
+    var killed: u32 = 0;
+    for (cluster.nodes.items) |*node| {
+        if (killed < 3) {
+            cluster.stopNode(node.id);
+            killed += 1;
+        }
+    }
+
+    // wait for election timeout to expire
+    std.Thread.sleep(5 * std.time.ns_per_s);
+
+    // no leader should be elected (quorum of 3 not met with only 2 alive)
+    const no_leader = try cluster.getLeader(5000);
+    try std.testing.expect(no_leader == null);
+
+    std.debug.print("cluster correctly lost quorum with 3/5 nodes down\n", .{});
+}
+
 fn fileExists(path: []const u8) bool {
     const file = std.fs.cwd().openFile(path, .{}) catch return false;
     file.close();

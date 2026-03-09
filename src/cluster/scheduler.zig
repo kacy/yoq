@@ -384,3 +384,56 @@ test "assignmentSql generates valid SQL" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "agent1") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "nginx:latest") != null);
 }
+
+test "scheduler with registry data: server-only skipped, capacity-based placement" {
+    const alloc = std.testing.allocator;
+    const StateMachine = @import("state_machine.zig").StateMachine;
+    const registry = @import("registry.zig");
+
+    // create state machine and register 3 agents via SQL
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    // agent 1: server-only (should be skipped for scheduling)
+    sm.apply(.{
+        .index = 1,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role) VALUES ('server-1', '10.0.0.1:9090', 'active', 8, 16384, 0, 0, 0, 1000, 1000, 'server');",
+    });
+    // agent 2: large worker
+    sm.apply(.{
+        .index = 2,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role) VALUES ('worker-large', '10.0.0.2:9090', 'active', 8, 16384, 0, 0, 0, 1000, 1000, 'agent');",
+    });
+    // agent 3: small worker
+    sm.apply(.{
+        .index = 3,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role) VALUES ('worker-small', '10.0.0.3:9090', 'active', 2, 2048, 0, 0, 0, 1000, 1000, 'agent');",
+    });
+
+    // read agents from the DB via registry
+    const agents = try registry.listAgents(alloc, &sm.db);
+    defer {
+        for (agents) |*a| {
+            var agent = a.*;
+            agent.deinit(alloc);
+        }
+        alloc.free(agents);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), agents.len);
+
+    // schedule a container that fits on either worker
+    const requests = &[_]PlacementRequest{
+        .{ .image = "nginx:latest", .command = "", .cpu_limit = 1000, .memory_limit_mb = 512 },
+    };
+
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+
+    // server-only agent should be skipped, placed on the large worker (most resources)
+    try std.testing.expect(results[0] != null);
+    try std.testing.expectEqualStrings("worker-large", results[0].?.agent_id);
+}

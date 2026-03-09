@@ -353,6 +353,33 @@ pub const TestCluster = struct {
         return error.LeaderElectionTimeout;
     }
 
+    /// POST JSON to a node's API endpoint with auth.
+    /// caller must free the returned body.
+    pub fn postToNode(self: *TestCluster, node: *ClusterNode, path: []const u8, body: []const u8) !http_client.Response {
+        const addr = [4]u8{ 127, 0, 0, 1 };
+        return http_client.postWithAuth(
+            self.alloc,
+            addr,
+            node.api_port,
+            path,
+            body,
+            self.api_token,
+        );
+    }
+
+    /// GET from a node's API endpoint with auth.
+    /// caller must free the returned body.
+    pub fn getFromNode(self: *TestCluster, node: *ClusterNode, path: []const u8) !http_client.Response {
+        const addr = [4]u8{ 127, 0, 0, 1 };
+        return http_client.getWithAuth(
+            self.alloc,
+            addr,
+            node.api_port,
+            path,
+            self.api_token,
+        );
+    }
+
     pub fn verifyAllNodesAgreeOnLeader(self: *TestCluster) !bool {
         var leader_id: ?u64 = null;
 

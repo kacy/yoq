@@ -1483,3 +1483,223 @@ test "commit index requires majority in 5-node cluster" {
     const ca2 = leader.drainActions();
     defer alloc.free(ca2);
 }
+
+// -- multi-instance tests --
+//
+// these tests create multiple raft instances and route messages between
+// them to verify end-to-end consensus behavior. the key insight is that
+// raft is a pure state machine — we can simulate a cluster by manually
+// delivering drainActions() output to the correct peer.
+
+/// free any allocated entries in actions from drain
+fn freeActionEntries(alloc: std.mem.Allocator, actions: []const Action) void {
+    for (actions) |action| {
+        if (action == .send_append_entries) {
+            const entries = action.send_append_entries.args.entries;
+            for (entries) |e| {
+                if (e.data.len > 0) alloc.free(e.data);
+            }
+            if (entries.len > 0) alloc.free(entries);
+        }
+    }
+}
+
+test "3-node cluster: election + propose + commit" {
+    const alloc = testing.allocator;
+
+    // create 3 in-memory logs
+    var log1 = try Log.initMemory();
+    defer log1.deinit();
+    var log2 = try Log.initMemory();
+    defer log2.deinit();
+    var log3 = try Log.initMemory();
+    defer log3.deinit();
+
+    // create 3 raft instances
+    var r1 = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &log1);
+    defer r1.deinit();
+    var r2 = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &log2);
+    defer r2.deinit();
+    var r3 = try setupTestRaft(alloc, 3, &.{ 1, 2 }, &log3);
+    defer r3.deinit();
+
+    // -- step 1: elect node 1 as leader --
+
+    // tick node 1 past election timeout to trigger election
+    for (0..max_election_ticks + 1) |_| {
+        r1.tick();
+    }
+    try testing.expectEqual(Role.candidate, r1.role);
+
+    // drain vote requests, manually deliver to peers and route replies
+    const vote_actions = r1.drainActions();
+    defer alloc.free(vote_actions);
+
+    for (vote_actions) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 2) {
+                const reply = r2.handleRequestVote(rv.args);
+                r1.handleRequestVoteReply(2, reply);
+            } else if (rv.target == 3) {
+                const reply = r3.handleRequestVote(rv.args);
+                r1.handleRequestVoteReply(3, reply);
+            }
+        }
+    }
+
+    // node 1 should now be leader (got votes from self + 2 + 3)
+    try testing.expectEqual(Role.leader, r1.role);
+
+    // drain the become_leader + heartbeat actions (don't deliver heartbeats)
+    const leader_actions = r1.drainActions();
+    defer {
+        freeActionEntries(alloc, leader_actions);
+        alloc.free(leader_actions);
+    }
+
+    // verify exactly 1 leader
+    var leader_count: u32 = 0;
+    if (r1.role == .leader) leader_count += 1;
+    if (r2.role == .leader) leader_count += 1;
+    if (r3.role == .leader) leader_count += 1;
+    try testing.expectEqual(@as(u32, 1), leader_count);
+
+    // -- step 2: propose a command and replicate --
+
+    _ = try r1.propose("INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('test1', 'localhost', 'active', 4, 8192, 0, 0, 0, 1000, 1000);");
+
+    // drain append_entries actions
+    const propose_actions = r1.drainActions();
+    defer {
+        freeActionEntries(alloc, propose_actions);
+        alloc.free(propose_actions);
+    }
+
+    // deliver to followers manually and route ack replies back to leader
+    for (propose_actions) |action| {
+        if (action == .send_append_entries) {
+            const ae = action.send_append_entries;
+            if (ae.target == 2) {
+                const reply = r2.handleAppendEntries(ae.args);
+                r1.handleAppendEntriesReply(2, reply);
+            } else if (ae.target == 3) {
+                const reply = r3.handleAppendEntries(ae.args);
+                r1.handleAppendEntriesReply(3, reply);
+            }
+        }
+    }
+
+    // -- step 3: verify consensus --
+
+    // commit_index should advance (leader got acks from both followers)
+    try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
+
+    // verify commit_entries action was emitted
+    const commit_actions = r1.drainActions();
+    defer alloc.free(commit_actions);
+
+    var found_commit = false;
+    for (commit_actions) |a| {
+        if (a == .commit_entries) {
+            try testing.expectEqual(@as(LogIndex, 1), a.commit_entries.up_to);
+            found_commit = true;
+        }
+    }
+    try testing.expect(found_commit);
+
+    // followers got the entry (match_index=1 from their reply)
+    // but their commit_index only advances when leader sends next
+    // heartbeat with leader_commit=1. verify followers have the data:
+    try testing.expect(r2.log.lastIndex() >= 1);
+    try testing.expect(r3.log.lastIndex() >= 1);
+}
+
+test "leader loss triggers re-election with higher term" {
+    const alloc = testing.allocator;
+
+    var log1 = try Log.initMemory();
+    defer log1.deinit();
+    var log2 = try Log.initMemory();
+    defer log2.deinit();
+    var log3 = try Log.initMemory();
+    defer log3.deinit();
+
+    var r1 = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &log1);
+    defer r1.deinit();
+    var r2 = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &log2);
+    defer r2.deinit();
+    var r3 = try setupTestRaft(alloc, 3, &.{ 1, 2 }, &log3);
+    defer r3.deinit();
+
+    // elect node 1 as leader
+    for (0..max_election_ticks + 1) |_| {
+        r1.tick();
+    }
+    const va = r1.drainActions();
+    defer alloc.free(va);
+
+    for (va) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 2) {
+                const reply = r2.handleRequestVote(rv.args);
+                r1.handleRequestVoteReply(2, reply);
+            } else if (rv.target == 3) {
+                const reply = r3.handleRequestVote(rv.args);
+                r1.handleRequestVoteReply(3, reply);
+            }
+        }
+    }
+    try testing.expectEqual(Role.leader, r1.role);
+
+    const la = r1.drainActions();
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+
+    const original_term = r1.currentTerm();
+
+    // stop ticking node 1 (simulate crash). tick node 2 past timeout.
+    for (0..max_election_ticks + 1) |_| {
+        r2.tick();
+    }
+    try testing.expectEqual(Role.candidate, r2.role);
+
+    // route node 2's vote requests to node 3 only (node 1 is "dead")
+    const v2 = r2.drainActions();
+    defer alloc.free(v2);
+
+    for (v2) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 3) {
+                const reply = r3.handleRequestVote(rv.args);
+                r2.handleRequestVoteReply(3, reply);
+            }
+            // skip target == 1 (node 1 is dead)
+        }
+    }
+
+    // node 2 should be the new leader (got vote from self + node 3)
+    try testing.expectEqual(Role.leader, r2.role);
+    try testing.expect(r2.currentTerm() > original_term);
+
+    // drain new leader's actions (become_leader + heartbeats)
+    const nl = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, nl);
+        alloc.free(nl);
+    }
+
+    // verify become_leader was emitted
+    var found_become_leader = false;
+    for (nl) |a| {
+        if (a == .become_leader) found_become_leader = true;
+    }
+    try testing.expect(found_become_leader);
+
+    // old leader still thinks it's leader (we stopped processing it)
+    try testing.expectEqual(Role.leader, r1.role);
+}

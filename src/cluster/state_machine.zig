@@ -802,3 +802,78 @@ test "restoreFromBytes rejects snapshot with trailing data" {
     const result = sm.restoreFromBytes(&data);
     try std.testing.expectError(SnapshotError.CorruptSnapshot, result);
 }
+
+test "two state machines produce identical state from same log" {
+    const alloc = std.testing.allocator;
+    const RaftLog = @import("log.zig").Log;
+
+    // create a log with 5 realistic entries
+    var raft_log = try RaftLog.initMemory();
+    defer raft_log.deinit();
+
+    try raft_log.append(.{
+        .index = 1,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('agent-1', '10.0.0.1:9090', 'active', 4, 8192, 0, 0, 0, 1000, 1000);",
+    });
+    try raft_log.append(.{
+        .index = 2,
+        .term = 1,
+        .data = "UPDATE agents SET last_heartbeat = 2000, cpu_used = 1500, memory_used_mb = 2048 WHERE id = 'agent-1';",
+    });
+    try raft_log.append(.{
+        .index = 3,
+        .term = 1,
+        .data = "INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at) VALUES ('assign-001', 'agent-1', 'nginx:latest', '/bin/sh', 'pending', 1000, 256, 1500);",
+    });
+    try raft_log.append(.{
+        .index = 4,
+        .term = 2,
+        .data = "UPDATE assignments SET status = 'running' WHERE id = 'assign-001';",
+    });
+    try raft_log.append(.{
+        .index = 5,
+        .term = 2,
+        .data = "UPDATE agents SET status = 'draining' WHERE id = 'agent-1';",
+    });
+
+    // create two state machines and apply the same log
+    var sm1 = try StateMachine.initMemory();
+    defer sm1.deinit();
+    var sm2 = try StateMachine.initMemory();
+    defer sm2.deinit();
+
+    sm1.applyUpTo(&raft_log, alloc, 5);
+    sm2.applyUpTo(&raft_log, alloc, 5);
+
+    // both should have the same last_applied
+    try std.testing.expectEqual(@as(LogIndex, 5), sm1.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 5), sm2.last_applied);
+
+    // query both databases for agents — should be identical
+    const registry = @import("registry.zig");
+    const agents1 = try registry.listAgents(alloc, &sm1.db);
+    defer {
+        for (agents1) |*a| {
+            var agent = a.*;
+            agent.deinit(alloc);
+        }
+        alloc.free(agents1);
+    }
+    const agents2 = try registry.listAgents(alloc, &sm2.db);
+    defer {
+        for (agents2) |*a| {
+            var agent = a.*;
+            agent.deinit(alloc);
+        }
+        alloc.free(agents2);
+    }
+
+    try std.testing.expectEqual(agents1.len, agents2.len);
+    try std.testing.expectEqual(@as(usize, 1), agents1.len);
+
+    // verify same field values
+    try std.testing.expectEqualStrings(agents1[0].id, agents2[0].id);
+    try std.testing.expectEqualStrings("draining", agents1[0].status);
+    try std.testing.expectEqualStrings("draining", agents2[0].status);
+}
