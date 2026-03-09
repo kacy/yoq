@@ -309,7 +309,7 @@ pub const TestCluster = struct {
             for (self.nodes.items) |*node| {
                 if (!node.isRunning()) continue;
 
-                const status = try self.getNodeStatus(node);
+                const status = self.getNodeStatus(node) catch continue;
                 defer self.alloc.free(status);
 
                 if (std.mem.indexOf(u8, status, "\"role\":\"leader\"") != null) {
