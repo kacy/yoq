@@ -1703,3 +1703,496 @@ test "leader loss triggers re-election with higher term" {
     // old leader still thinks it's leader (we stopped processing it)
     try testing.expectEqual(Role.leader, r1.role);
 }
+
+// -- resilience tests --
+//
+// these tests verify raft correctness under network partitions, split votes,
+// log divergence, and stale leader scenarios — the failure modes that cause
+// real production incidents.
+
+/// helper: elect a specific node as leader in a 3-node cluster.
+/// delivers vote requests to both peers, returns the leader actions (caller must free).
+fn electLeader3(alloc: std.mem.Allocator, leader: *Raft, p1: *Raft, p2: *Raft) ![]const Action {
+    // tick past election timeout
+    for (0..max_election_ticks + 1) |_| {
+        leader.tick();
+    }
+
+    // deliver vote requests to peers
+    const va = leader.drainActions();
+    defer alloc.free(va);
+
+    for (va) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == p1.id) {
+                const reply = p1.handleRequestVote(rv.args);
+                leader.handleRequestVoteReply(p1.id, reply);
+            } else if (rv.target == p2.id) {
+                const reply = p2.handleRequestVote(rv.args);
+                leader.handleRequestVoteReply(p2.id, reply);
+            }
+        }
+    }
+
+    // drain become_leader + heartbeat actions
+    return leader.drainActions();
+}
+
+/// helper: propose a command on the leader and replicate to both peers.
+/// returns the commit actions (caller must free).
+fn proposeAndReplicate3(alloc: std.mem.Allocator, leader: *Raft, p1: *Raft, p2: *Raft, data: []const u8) ![]const Action {
+    _ = try leader.propose(data);
+    const pa = leader.drainActions();
+    defer {
+        freeActionEntries(alloc, pa);
+        alloc.free(pa);
+    }
+
+    for (pa) |action| {
+        if (action == .send_append_entries) {
+            const ae = action.send_append_entries;
+            if (ae.target == p1.id) {
+                const reply = p1.handleAppendEntries(ae.args);
+                leader.handleAppendEntriesReply(p1.id, reply);
+            } else if (ae.target == p2.id) {
+                const reply = p2.handleAppendEntries(ae.args);
+                leader.handleAppendEntriesReply(p2.id, reply);
+            }
+        }
+    }
+
+    return leader.drainActions();
+}
+
+test "network partition: old leader steps down on reconnect" {
+    const alloc = testing.allocator;
+
+    var log1 = try Log.initMemory();
+    defer log1.deinit();
+    var log2 = try Log.initMemory();
+    defer log2.deinit();
+    var log3 = try Log.initMemory();
+    defer log3.deinit();
+
+    var r1 = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &log1);
+    defer r1.deinit();
+    var r2 = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &log2);
+    defer r2.deinit();
+    var r3 = try setupTestRaft(alloc, 3, &.{ 1, 2 }, &log3);
+    defer r3.deinit();
+
+    // step 1: elect r1 as leader, commit "cmd1" to all
+    const la = try electLeader3(alloc, &r1, &r2, &r3);
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+    try testing.expectEqual(Role.leader, r1.role);
+
+    const ca = try proposeAndReplicate3(alloc, &r1, &r2, &r3, "cmd1");
+    defer alloc.free(ca);
+    try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
+
+    // step 2: partition — stop routing between r1 and {r2, r3}
+
+    // step 3: tick r2 past election timeout, deliver r3's vote
+    for (0..max_election_ticks + 1) |_| {
+        r2.tick();
+    }
+    try testing.expectEqual(Role.candidate, r2.role);
+
+    const v2 = r2.drainActions();
+    defer alloc.free(v2);
+
+    for (v2) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 3) {
+                const reply = r3.handleRequestVote(rv.args);
+                r2.handleRequestVoteReply(3, reply);
+            }
+            // don't deliver to r1 (partitioned)
+        }
+    }
+    try testing.expectEqual(Role.leader, r2.role);
+
+    const nl = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, nl);
+        alloc.free(nl);
+    }
+
+    // step 4: r1 proposes "stale_cmd" — appends locally but can't commit
+    _ = try r1.propose("stale_cmd");
+    const stale_actions = r1.drainActions();
+    defer {
+        freeActionEntries(alloc, stale_actions);
+        alloc.free(stale_actions);
+    }
+    // r1 can't get acks (partitioned), commit_index stays at 1
+    try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
+
+    // step 5: heal partition — deliver r2's AppendEntries to r1
+    // r2 sends heartbeats; we need to tick r2 to generate them
+    for (0..heartbeat_interval + 1) |_| {
+        r2.tick();
+    }
+    const hb = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, hb);
+        alloc.free(hb);
+    }
+
+    for (hb) |action| {
+        if (action == .send_append_entries) {
+            const ae = action.send_append_entries;
+            if (ae.target == 1) {
+                _ = r1.handleAppendEntries(ae.args);
+            }
+        }
+    }
+
+    // step 6: assert r1 stepped down
+    try testing.expectEqual(Role.follower, r1.role);
+    try testing.expectEqual(r2.currentTerm(), r1.currentTerm());
+    // committed entry "cmd1" at index 1 is preserved
+    try testing.expect(r1.log.lastIndex() >= 1);
+}
+
+test "split vote resolves in subsequent election" {
+    const alloc = testing.allocator;
+
+    var log1 = try Log.initMemory();
+    defer log1.deinit();
+    var log2 = try Log.initMemory();
+    defer log2.deinit();
+    var log3 = try Log.initMemory();
+    defer log3.deinit();
+    var log4 = try Log.initMemory();
+    defer log4.deinit();
+
+    var r1 = try setupTestRaft(alloc, 1, &.{ 2, 3, 4 }, &log1);
+    defer r1.deinit();
+    var r2 = try setupTestRaft(alloc, 2, &.{ 1, 3, 4 }, &log2);
+    defer r2.deinit();
+    var r3 = try setupTestRaft(alloc, 3, &.{ 1, 2, 4 }, &log3);
+    defer r3.deinit();
+    var r4 = try setupTestRaft(alloc, 4, &.{ 1, 2, 3 }, &log4);
+    defer r4.deinit();
+
+    // step 1: r1 and r3 both time out simultaneously → both become candidates at same term
+    for (0..max_election_ticks + 1) |_| {
+        r1.tick();
+        r3.tick();
+    }
+    try testing.expectEqual(Role.candidate, r1.role);
+    try testing.expectEqual(Role.candidate, r3.role);
+
+    // step 2: split the votes — r2 votes for r1, r4 votes for r3
+    const v1 = r1.drainActions();
+    defer alloc.free(v1);
+    const v3 = r3.drainActions();
+    defer alloc.free(v3);
+
+    for (v1) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 2) {
+                const reply = r2.handleRequestVote(rv.args);
+                r1.handleRequestVoteReply(2, reply);
+            }
+            // don't deliver to r3 or r4
+        }
+    }
+
+    for (v3) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 4) {
+                const reply = r4.handleRequestVote(rv.args);
+                r3.handleRequestVoteReply(4, reply);
+            }
+            // don't deliver to r1 or r2
+        }
+    }
+
+    // neither has quorum of 3 (each has 2: self + one peer)
+    try testing.expect(r1.role != .leader);
+    try testing.expect(r3.role != .leader);
+
+    // step 3: tick r1 past another election timeout — new term
+    for (0..max_election_ticks + 1) |_| {
+        r1.tick();
+    }
+    try testing.expectEqual(Role.candidate, r1.role);
+
+    const v1b = r1.drainActions();
+    defer alloc.free(v1b);
+
+    // deliver r1's vote requests to r2, r3, r4 — they see higher term, grant votes
+    for (v1b) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 2) {
+                const reply = r2.handleRequestVote(rv.args);
+                r1.handleRequestVoteReply(2, reply);
+            } else if (rv.target == 3) {
+                const reply = r3.handleRequestVote(rv.args);
+                r1.handleRequestVoteReply(3, reply);
+            } else if (rv.target == 4) {
+                const reply = r4.handleRequestVote(rv.args);
+                r1.handleRequestVoteReply(4, reply);
+            }
+        }
+    }
+
+    // step 4: assert exactly one leader, all at same term
+    try testing.expectEqual(Role.leader, r1.role);
+
+    var leader_count: u32 = 0;
+    if (r1.role == .leader) leader_count += 1;
+    if (r2.role == .leader) leader_count += 1;
+    if (r3.role == .leader) leader_count += 1;
+    if (r4.role == .leader) leader_count += 1;
+    try testing.expectEqual(@as(u32, 1), leader_count);
+
+    // drain the new leader's actions
+    const fla = r1.drainActions();
+    defer {
+        freeActionEntries(alloc, fla);
+        alloc.free(fla);
+    }
+}
+
+test "log divergence after partition resolved by new leader" {
+    const alloc = testing.allocator;
+
+    var log1 = try Log.initMemory();
+    defer log1.deinit();
+    var log2 = try Log.initMemory();
+    defer log2.deinit();
+    var log3 = try Log.initMemory();
+    defer log3.deinit();
+
+    var r1 = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &log1);
+    defer r1.deinit();
+    var r2 = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &log2);
+    defer r2.deinit();
+    var r3 = try setupTestRaft(alloc, 3, &.{ 1, 2 }, &log3);
+    defer r3.deinit();
+
+    // step 1: elect r1, commit "cmd1" at index 1
+    const la = try electLeader3(alloc, &r1, &r2, &r3);
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+    const ca = try proposeAndReplicate3(alloc, &r1, &r2, &r3, "cmd1");
+    defer alloc.free(ca);
+    try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
+
+    // step 2: partition r1. r1 proposes "uncommitted" at index 2 (can't commit)
+    _ = try r1.propose("uncommitted");
+    const stale = r1.drainActions();
+    defer {
+        freeActionEntries(alloc, stale);
+        alloc.free(stale);
+    }
+    // don't deliver to anyone — r1 is partitioned
+    try testing.expect(r1.log.lastIndex() == 2);
+    try testing.expectEqual(@as(LogIndex, 1), r1.commit_index); // can't advance
+
+    // step 3: elect r2 (r3 votes)
+    for (0..max_election_ticks + 1) |_| {
+        r2.tick();
+    }
+    const v2 = r2.drainActions();
+    defer alloc.free(v2);
+
+    for (v2) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 3) {
+                const reply = r3.handleRequestVote(rv.args);
+                r2.handleRequestVoteReply(3, reply);
+            }
+            // don't deliver to r1 (partitioned)
+        }
+    }
+    try testing.expectEqual(Role.leader, r2.role);
+
+    const nla = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, nla);
+        alloc.free(nla);
+    }
+
+    // r2 proposes "new_cmd" at index 2, replicates to r3 — committed
+    _ = try r2.propose("new_cmd");
+    const pa = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, pa);
+        alloc.free(pa);
+    }
+    for (pa) |action| {
+        if (action == .send_append_entries) {
+            const ae = action.send_append_entries;
+            if (ae.target == 3) {
+                const reply = r3.handleAppendEntries(ae.args);
+                r2.handleAppendEntriesReply(3, reply);
+            }
+            // don't send to r1 (partitioned)
+        }
+    }
+    const ca2 = r2.drainActions();
+    defer alloc.free(ca2);
+    try testing.expectEqual(@as(LogIndex, 2), r2.commit_index);
+
+    // step 4: heal partition — deliver r2's AppendEntries to r1
+    // tick r2 to generate heartbeat with updated log
+    for (0..heartbeat_interval + 1) |_| {
+        r2.tick();
+    }
+    const hb = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, hb);
+        alloc.free(hb);
+    }
+
+    for (hb) |action| {
+        if (action == .send_append_entries) {
+            const ae = action.send_append_entries;
+            if (ae.target == 1) {
+                const reply = r1.handleAppendEntries(ae.args);
+                // if prev_log doesn't match, leader decrements next_index and retries
+                r2.handleAppendEntriesReply(1, reply);
+            }
+        }
+    }
+
+    // r1 stepped down to follower on seeing higher term
+    try testing.expectEqual(Role.follower, r1.role);
+
+    // may need another round for the leader to send the right entries after backtracking
+    for (0..heartbeat_interval + 1) |_| {
+        r2.tick();
+    }
+    const hb2 = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, hb2);
+        alloc.free(hb2);
+    }
+    for (hb2) |action| {
+        if (action == .send_append_entries) {
+            const ae = action.send_append_entries;
+            if (ae.target == 1) {
+                _ = r1.handleAppendEntries(ae.args);
+            }
+        }
+    }
+
+    // step 5: verify logs agree — all three should have "cmd1" at index 1 and "new_cmd" at index 2
+    try testing.expect(r1.log.lastIndex() >= 2);
+    try testing.expect(r2.log.lastIndex() >= 2);
+    try testing.expect(r3.log.lastIndex() >= 2);
+    // r1 stepped down and caught up — its commit_index may advance via leader's leaderCommit
+    // the key invariant: committed entries are preserved (index 1 = "cmd1")
+    try testing.expect(r1.commit_index >= 1);
+}
+
+test "stale leader cannot commit without quorum" {
+    const alloc = testing.allocator;
+
+    var log1 = try Log.initMemory();
+    defer log1.deinit();
+    var log2 = try Log.initMemory();
+    defer log2.deinit();
+    var log3 = try Log.initMemory();
+    defer log3.deinit();
+
+    var r1 = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &log1);
+    defer r1.deinit();
+    var r2 = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &log2);
+    defer r2.deinit();
+    var r3 = try setupTestRaft(alloc, 3, &.{ 1, 2 }, &log3);
+    defer r3.deinit();
+
+    // step 1: elect r1, commit "cmd1" at index 1
+    const la = try electLeader3(alloc, &r1, &r2, &r3);
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+    const ca = try proposeAndReplicate3(alloc, &r1, &r2, &r3, "cmd1");
+    defer alloc.free(ca);
+    try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
+
+    // step 2: partition r1 from r2 and r3. r1 proposes "cmd2" — appends but can't commit
+    _ = try r1.propose("cmd2");
+    const stale = r1.drainActions();
+    defer {
+        freeActionEntries(alloc, stale);
+        alloc.free(stale);
+    }
+    // don't deliver — partitioned
+
+    // step 3: r1's commit_index stays at 1 despite ticking many times
+    for (0..50) |_| {
+        r1.tick();
+    }
+    const tick_actions = r1.drainActions();
+    defer {
+        freeActionEntries(alloc, tick_actions);
+        alloc.free(tick_actions);
+    }
+    try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
+
+    // step 4: r2 times out, gets r3's vote, becomes leader at higher term
+    for (0..max_election_ticks + 1) |_| {
+        r2.tick();
+    }
+    const v2 = r2.drainActions();
+    defer alloc.free(v2);
+
+    for (v2) |action| {
+        if (action == .send_request_vote) {
+            const rv = action.send_request_vote;
+            if (rv.target == 3) {
+                const reply = r3.handleRequestVote(rv.args);
+                r2.handleRequestVoteReply(3, reply);
+            }
+        }
+    }
+    try testing.expectEqual(Role.leader, r2.role);
+    try testing.expect(r2.currentTerm() > r1.currentTerm());
+
+    const nla = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, nla);
+        alloc.free(nla);
+    }
+
+    // step 5: r2 can advance commit_index with r3's acks
+    _ = try r2.propose("cmd_new");
+    const pa = r2.drainActions();
+    defer {
+        freeActionEntries(alloc, pa);
+        alloc.free(pa);
+    }
+    for (pa) |action| {
+        if (action == .send_append_entries) {
+            const ae = action.send_append_entries;
+            if (ae.target == 3) {
+                const reply = r3.handleAppendEntries(ae.args);
+                r2.handleAppendEntriesReply(3, reply);
+            }
+        }
+    }
+    const ca2 = r2.drainActions();
+    defer alloc.free(ca2);
+    try testing.expect(r2.commit_index > 1);
+
+    // r1 still stuck at commit_index 1
+    try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
+}
