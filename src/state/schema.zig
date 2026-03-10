@@ -222,6 +222,11 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     // databases (used in tests), so failures are silently ignored.
     _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA journal_mode=WAL;", null, null, null);
     _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA synchronous=NORMAL;", null, null, null);
+
+    // busy_timeout: wait up to 5 seconds if the database is locked by another
+    // writer rather than failing immediately. in WAL mode readers never block,
+    // so this only affects concurrent writers.
+    _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA busy_timeout=5000;", null, null, null);
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
