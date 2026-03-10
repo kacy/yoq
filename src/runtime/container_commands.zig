@@ -308,9 +308,9 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
         }
 
         const source_input = if (std.mem.startsWith(u8, spec.source, "/"))
-            alloc.dupe(u8, spec.source) catch unreachable
+            alloc.dupe(u8, spec.source) catch return error.OutOfMemory
         else
-            std.fs.path.resolve(alloc, &.{ cwd, spec.source }) catch unreachable;
+            std.fs.path.resolve(alloc, &.{ cwd, spec.source }) catch return error.OutOfMemory;
         defer alloc.free(source_input);
 
         const source = std.fs.cwd().realpathAlloc(alloc, source_input) catch {
@@ -320,7 +320,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
 
         mounts[i] = .{
             .source = source,
-            .target = alloc.dupe(u8, spec.target) catch unreachable,
+            .target = alloc.dupe(u8, spec.target) catch return error.OutOfMemory,
             .read_only = spec.read_only,
         };
         if (!mounts[i].isSourceAllowed()) {

@@ -336,7 +336,9 @@ pub const Transport = struct {
         hmac.update(body);
         hmac.final(&hmac_tag);
 
-        const new_len: u32 = @intCast(body.len + 8 + 32); // sender + hmac + original body
+        const authenticated_len = body.len + 8 + 32; // sender + hmac + original body
+        if (authenticated_len > std.math.maxInt(u32)) return TransportError.SendFailed;
+        const new_len: u32 = @intCast(authenticated_len);
         const out = try self.alloc.alloc(u8, 4 + 8 + 32 + body.len);
         std.mem.writeInt(u32, out[0..4], new_len, .little);
         @memcpy(out[4..12], &sender_buf);
@@ -630,6 +632,7 @@ fn encode(buf: []u8, msg: Message) !usize {
             writeU64(buf[offset..], args.leader_commit);
             offset += 8;
             // entry count
+            if (args.entries.len > std.math.maxInt(u32)) return error.BufferTooSmall;
             writeU32(buf[offset..], @intCast(args.entries.len));
             offset += 4;
             // entries
@@ -639,6 +642,7 @@ fn encode(buf: []u8, msg: Message) !usize {
                 offset += 8;
                 writeU64(buf[offset..], entry.term);
                 offset += 8;
+                if (entry.data.len > std.math.maxInt(u32)) return error.BufferTooSmall;
                 writeU32(buf[offset..], @intCast(entry.data.len));
                 offset += 4;
                 @memcpy(buf[offset..][0..entry.data.len], entry.data);
@@ -670,6 +674,7 @@ fn encode(buf: []u8, msg: Message) !usize {
     }
 
     // write length prefix (excludes the 4-byte length itself)
+    if (offset - 4 > std.math.maxInt(u32)) return error.BufferTooSmall;
     const body_len: u32 = @intCast(offset - 4);
     std.mem.writeInt(u32, buf[0..4], body_len, .little);
 
@@ -704,12 +709,14 @@ fn encodeSnapshot(alloc: std.mem.Allocator, args: InstallSnapshotArgs) ![]u8 {
     offset += 8;
     writeU64(buf[offset..], args.last_included_term);
     offset += 8;
+    if (args.data.len > std.math.maxInt(u32)) return error.OutOfMemory;
     writeU32(buf[offset..], @intCast(args.data.len));
     offset += 4;
     @memcpy(buf[offset..][0..args.data.len], args.data);
     offset += args.data.len;
 
     // write length prefix
+    if (offset - 4 > std.math.maxInt(u32)) return error.OutOfMemory;
     const body_len: u32 = @intCast(offset - 4);
     std.mem.writeInt(u32, buf[0..4], body_len, .little);
 

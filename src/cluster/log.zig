@@ -30,7 +30,14 @@ pub const LogError = error{
     WriteFailed,
     /// failed to read a log entry or query raft persistent state
     ReadFailed,
+    /// database contains negative or out-of-range values in raft columns
+    CorruptedLog,
 };
+
+/// safely cast a sqlite i64 to u64. returns CorruptedLog if negative.
+inline fn safeU64(val: i64) LogError!u64 {
+    return std.math.cast(u64, val) orelse LogError.CorruptedLog;
+}
 
 pub const Log = struct {
     db: sqlite.Db,
@@ -78,7 +85,7 @@ pub const Log = struct {
             .{},
             .{},
         ) catch return 0) orelse return 0;
-        return @intCast(row.current_term);
+        return safeU64(row.current_term) catch 0;
     }
 
     pub fn setCurrentTerm(self: *Log, term: Term) void {
@@ -99,7 +106,7 @@ pub const Log = struct {
             .{},
             .{},
         ) catch return null) orelse return null;
-        return if (row.voted_for) |v| @intCast(v) else null;
+        return if (row.voted_for) |v| safeU64(v) catch null else null;
     }
 
     pub fn setVotedFor(self: *Log, id: ?NodeId) void {
@@ -136,9 +143,9 @@ pub const Log = struct {
         if (row.last_included_index == 0) return null;
 
         return SnapshotMeta{
-            .last_included_index = @intCast(row.last_included_index),
-            .last_included_term = @intCast(row.last_included_term),
-            .data_len = @intCast(row.data_len),
+            .last_included_index = safeU64(row.last_included_index) catch return null,
+            .last_included_term = safeU64(row.last_included_term) catch return null,
+            .data_len = safeU64(row.data_len) catch return null,
         };
     }
 
@@ -180,8 +187,8 @@ pub const Log = struct {
             .{@as(i64, @intCast(index))},
         ) catch return LogError.ReadFailed) orelse return null;
         return LogEntry{
-            .index = @intCast(row.log_index),
-            .term = @intCast(row.term),
+            .index = safeU64(row.log_index) catch return LogError.ReadFailed,
+            .term = safeU64(row.term) catch return LogError.ReadFailed,
             .data = row.data.data,
         };
     }
@@ -198,7 +205,7 @@ pub const Log = struct {
         ) catch return self.snapshotLastIndex()) orelse return self.snapshotLastIndex();
 
         if (row.max_index) |m| {
-            return @intCast(m);
+            return safeU64(m) catch self.snapshotLastIndex();
         }
 
         // log is empty — fall back to snapshot
@@ -217,7 +224,7 @@ pub const Log = struct {
                 .{},
                 .{@as(i64, @intCast(last))},
             ) catch return 0) orelse return 0;
-            return @intCast(row.term);
+            return safeU64(row.term) catch 0;
         }
 
         // log is empty — fall back to snapshot
@@ -244,7 +251,7 @@ pub const Log = struct {
         ) catch return 0;
 
         if (row) |r| {
-            return @intCast(r.term);
+            return safeU64(r.term) catch 0;
         }
 
         // not in log — check if the snapshot covers this index
@@ -300,8 +307,8 @@ pub const Log = struct {
 
         while (iter.nextAlloc(alloc, .{}) catch return LogError.ReadFailed) |row| {
             entries.append(alloc, LogEntry{
-                .index = @intCast(row.log_index),
-                .term = @intCast(row.term),
+                .index = safeU64(row.log_index) catch return LogError.ReadFailed,
+                .term = safeU64(row.term) catch return LogError.ReadFailed,
                 .data = row.data.data,
             }) catch return LogError.ReadFailed;
         }
@@ -321,7 +328,7 @@ pub const Log = struct {
             .{},
             .{},
         ) catch return 0) orelse return 0;
-        return if (row.max_index) |m| @intCast(m) else 0;
+        return if (row.max_index) |m| safeU64(m) catch 0 else 0;
     }
 
     /// snapshot fallback for lastIndex

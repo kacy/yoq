@@ -341,8 +341,11 @@ pub fn processCopyFromStage(
     defer {
         std.fs.cwd().deleteTree(upper_dir) catch {};
         std.fs.cwd().deleteTree(work_dir) catch {};
-        const merged_z = std.posix.toPosixPath(merged_dir) catch unreachable;
-        _ = linux.syscall2(.umount2, @intFromPtr(&merged_z), 0);
+        if (std.posix.toPosixPath(merged_dir)) |merged_z| {
+            _ = linux.syscall2(.umount2, @intFromPtr(&merged_z), 0);
+        } else |_| {
+            log.warn("copy handler: merged_dir path too long for unmount", .{});
+        }
         std.fs.cwd().deleteTree(merged_dir) catch {};
     }
 
