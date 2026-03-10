@@ -559,6 +559,16 @@ fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void {
         try json_helpers.writeJsonEscaped(writer, oip);
         try writer.writeByte('"');
     }
+    if (agent.role) |r| {
+        try writer.writeAll(",\"role\":\"");
+        try json_helpers.writeJsonEscaped(writer, r);
+        try writer.writeByte('"');
+    }
+    if (agent.region) |reg| {
+        try writer.writeAll(",\"region\":\"");
+        try json_helpers.writeJsonEscaped(writer, reg);
+        try writer.writeByte('"');
+    }
 
     try writer.writeByte('}');
 }
