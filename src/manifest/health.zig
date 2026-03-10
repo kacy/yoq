@@ -235,6 +235,11 @@ fn checkerLoop() void {
             defer health_mutex.unlock();
 
             if (health_states[item.index]) |*entry| {
+                // verify the slot still belongs to the same container.
+                // between snapshot and update, the service could have been
+                // unregistered and the slot reused for a different service.
+                if (!std.mem.eql(u8, &entry.container_id, &item.container_id)) continue;
+
                 entry.last_check = now;
                 updateState(entry, success);
             }
