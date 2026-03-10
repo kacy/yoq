@@ -384,9 +384,10 @@ fn waitForHealth(
     callbacks: UpdateCallbacks,
     timeout: u32,
 ) bool {
-    const deadline = @as(u64, @intCast(std.time.timestamp())) + timeout;
+    const now = std.time.timestamp();
+    const deadline = @as(u64, @intCast(@max(0, now))) + timeout;
 
-    while (@as(u64, @intCast(std.time.timestamp())) < deadline) {
+    while (@as(u64, @intCast(@max(0, std.time.timestamp()))) < deadline) {
         var all_healthy = true;
 
         for (container_ids.items) |id| {
