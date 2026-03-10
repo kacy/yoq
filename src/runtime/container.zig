@@ -383,16 +383,18 @@ pub const Container = struct {
         // open log file and start capture threads BEFORE signaling child ready.
         // if we signal ready first, fast-exiting commands (like echo) complete
         // before the capture threads start, resulting in empty logs.
+        //
+        // fd ownership model:
+        //   - on success: each capture thread owns its fd and closes it on exit
+        //   - on failure: we close fds here before they'd otherwise leak
         self.runtime.log_file = logs.createLogFile(config.id) catch |err| blk: {
             log.warn("failed to create log file for {s}: {}", .{ config.id, err });
-            // ensure pipe fds are closed even if log file creation fails
             posix.close(spawn_result.stdout_fd);
             posix.close(spawn_result.stderr_fd);
             break :blk null;
         };
 
         if (self.runtime.log_file) |lf| {
-            // spawn stdout capture thread first
             self.runtime.stdout_thread = std.Thread.spawn(.{}, logs.captureStream, .{
                 lf,
                 spawn_result.stdout_fd,
@@ -402,13 +404,10 @@ pub const Container = struct {
                 self.runtime.mirror_output,
             }) catch |err| blk: {
                 log.warn("failed to spawn stdout capture thread: {}", .{err});
-                // if stdout thread fails, we must close stdout_fd here
-                // stderr_fd will be closed below since stderr_thread will be null
                 posix.close(spawn_result.stdout_fd);
                 break :blk null;
             };
 
-            // spawn stderr capture thread
             self.runtime.stderr_thread = std.Thread.spawn(.{}, logs.captureStream, .{
                 lf,
                 spawn_result.stderr_fd,
@@ -418,8 +417,6 @@ pub const Container = struct {
                 self.runtime.mirror_output,
             }) catch |err| blk: {
                 log.warn("failed to spawn stderr capture thread: {}", .{err});
-                // stderr thread failed - close stderr_fd
-                // stdout thread (if spawned) owns its fd and will close it
                 posix.close(spawn_result.stderr_fd);
                 break :blk null;
             };
