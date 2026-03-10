@@ -251,7 +251,12 @@ pub const Orchestrator = struct {
 
             // spawn service thread
             self.states[i].status = .starting;
-            container.generateId(&self.states[i].container_id);
+            container.generateId(&self.states[i].container_id) catch {
+                writeErr("failed to generate container ID for {s}\n", .{svc.name});
+                self.states[i].status = .failed;
+                self.stopAll();
+                return OrchestratorError.StartFailed;
+            };
 
             const thread = std.Thread.spawn(.{}, serviceThread, .{
                 self, i,
@@ -867,7 +872,10 @@ pub fn runOneShot(
 
     // generate container id
     var id_buf: [12]u8 = undefined;
-    container.generateId(&id_buf);
+    container.generateId(&id_buf) catch {
+        writeErr("failed to generate container ID for worker {s}\n", .{hostname});
+        return false;
+    };
     const id = id_buf[0..];
 
     // save record
@@ -989,7 +997,11 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
     while (true) {
         // generate a fresh container id for each run
         var id_buf: [12]u8 = undefined;
-        container.generateId(&id_buf);
+        container.generateId(&id_buf) catch {
+            writeErr("failed to generate container ID for {s}\n", .{svc.name});
+            orch.states[idx].status = .failed;
+            return;
+        };
         const id = id_buf[0..];
 
         // copy id into orchestrator state so stopAll can find it

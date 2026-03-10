@@ -22,6 +22,9 @@ pub const JsonWriter = struct {
     depth: u5 = 0,
     /// tracks if the last flush operation failed
     flush_failed: bool = false,
+    /// tracks if any data was dropped due to buffer overflow.
+    /// when true, the JSON output is incomplete and should not be trusted.
+    truncated: bool = false,
 
     // -- structure --
 
@@ -138,7 +141,15 @@ pub const JsonWriter = struct {
 
     /// flush the buffer to stdout with a trailing newline.
     /// tracks if flush failed in flush_failed field.
+    /// if the output was truncated, emits a warning to stderr.
     pub fn flush(self: *JsonWriter) void {
+        if (self.truncated) {
+            var err_buf: [128]u8 = undefined;
+            var err_w = std.fs.File.stderr().writer(&err_buf);
+            err_w.interface.writeAll("warning: JSON output truncated (exceeded 8192 byte buffer)\n") catch {};
+            err_w.interface.flush() catch {};
+        }
+
         const data = self.buf[0..self.pos];
         var buf: [4096]u8 = undefined;
         var w = std.fs.File.stdout().writer(&buf);
@@ -192,12 +203,15 @@ pub const JsonWriter = struct {
         if (self.pos < self.buf.len) {
             self.buf[self.pos] = c;
             self.pos += 1;
+        } else {
+            self.truncated = true;
         }
     }
 
     fn putSlice(self: *JsonWriter, s: []const u8) void {
         const remaining = self.buf.len - self.pos;
         const n = @min(s.len, remaining);
+        if (n < s.len) self.truncated = true;
         @memcpy(self.buf[self.pos..][0..n], s[0..n]);
         self.pos += n;
     }
@@ -391,4 +405,27 @@ test "flush failure tracking" {
 
     // In normal operation, flush should succeed
     try std.testing.expect(!w.flush_failed);
+}
+
+test "truncation tracking" {
+    var w = JsonWriter{};
+    try std.testing.expect(!w.truncated);
+
+    // fill the buffer with a large string value
+    w.beginObject();
+    var big: [8200]u8 = undefined;
+    @memset(&big, 'a');
+    w.stringField("data", &big);
+    w.endObject();
+
+    // buffer should have been exceeded
+    try std.testing.expect(w.truncated);
+}
+
+test "no truncation on small output" {
+    var w = JsonWriter{};
+    w.beginObject();
+    w.stringField("key", "value");
+    w.endObject();
+    try std.testing.expect(!w.truncated);
 }

@@ -181,7 +181,7 @@ pub fn processRun(alloc: std.mem.Allocator, state: *types.BuildState, args: []co
     try withExtractedLayers(alloc, state.layer_digests.items, &layer_paths_list);
 
     var id_buf: [12]u8 = undefined;
-    container.generateId(&id_buf);
+    container.generateId(&id_buf) catch return types.BuildError.RunStepFailed;
     const build_id = id_buf[0..];
 
     const dirs = container.createContainerDirs(build_id) catch return types.BuildError.RunStepFailed;
@@ -325,7 +325,7 @@ pub fn processCopyFromStage(
     paths.ensureDataDir("tmp") catch return types.BuildError.CopyStepFailed;
 
     var id_buf: [12]u8 = undefined;
-    container.generateId(&id_buf);
+    container.generateId(&id_buf) catch return types.BuildError.CopyStepFailed;
 
     var upper_buf: [paths.max_path]u8 = undefined;
     const upper_dir = paths.dataPathFmt(&upper_buf, "tmp/stage-copy-upper-{s}", .{id_buf}) catch return types.BuildError.CopyStepFailed;

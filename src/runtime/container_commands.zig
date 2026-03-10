@@ -625,7 +625,10 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 
     var id_buf: [12]u8 = undefined;
-    container.generateId(&id_buf);
+    container.generateId(&id_buf) catch {
+        writeErr("failed to generate unique container ID\n", .{});
+        return error.IdGenerationFailed;
+    };
     const id = id_buf[0..];
 
     saveCreatedRecord(id, &saved) catch |e| return e;

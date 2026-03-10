@@ -293,7 +293,9 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request) Response
         }
 
         // container_subnet derived from ip.subnetForNode addressing
-        const subnet_cfg = ip_mod.subnetForNode(nid);
+        const subnet_cfg = ip_mod.subnetForNode(nid) catch {
+            return badRequest("node_id too large for subnet allocation");
+        };
         container_subnet = std.fmt.bufPrint(&container_subnet_buf, "{d}.{d}.{d}.0/24", .{
             subnet_cfg.base[0], subnet_cfg.base[1], subnet_cfg.base[2],
         }) catch null;

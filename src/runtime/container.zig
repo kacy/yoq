@@ -35,6 +35,7 @@ pub const ContainerError = error{
     NotFound,
     IdTooLong,
     InvalidId,
+    IdGenerationFailed,
 };
 
 /// container exit codes (following standard conventions)
@@ -778,7 +779,7 @@ pub fn cleanupContainerDirs(container_id: []const u8) void {
 /// generate a unique container id (12 hex chars, 48 bits entropy).
 /// checks for collisions with existing containers up to 10 attempts.
 /// after 10 collisions, uses timestamp + counter to guarantee uniqueness.
-pub fn generateId(buf: *ContainerId) void {
+pub fn generateId(buf: *ContainerId) ContainerError!void {
     std.debug.assert(@sizeOf(ContainerId) == 12);
     const chars = "0123456789abcdef";
     const max_collision_attempts: u32 = 10;
@@ -837,8 +838,8 @@ pub fn generateId(buf: *ContainerId) void {
         };
     }
 
-    // absolute fallback - should never reach here
-    @panic("failed to generate unique container ID after exhaustive attempts");
+    // exhausted all attempts — return error instead of crashing the process
+    return ContainerError.IdGenerationFailed;
 }
 
 // -- tests --
@@ -867,7 +868,7 @@ test "container config defaults" {
 
 test "generate id produces 12 hex chars" {
     var id: ContainerId = undefined;
-    generateId(&id);
+    try generateId(&id);
     try std.testing.expect(isValidContainerId(&id));
 }
 
@@ -887,8 +888,8 @@ test "isValidContainerId rejects invalid IDs" {
 test "generate id varies between calls" {
     var id1: ContainerId = undefined;
     var id2: ContainerId = undefined;
-    generateId(&id1);
-    generateId(&id2);
+    try generateId(&id1);
+    try generateId(&id2);
 
     // two random IDs should (almost certainly) differ
     try std.testing.expect(!std.mem.eql(u8, &id1, &id2));
@@ -898,7 +899,7 @@ test "generate id avoids collisions" {
     // generate many IDs and verify no duplicates
     var ids: [100]ContainerId = undefined;
     for (&ids) |*id| {
-        generateId(id);
+        try generateId(id);
     }
 
     // check no collisions
@@ -911,7 +912,7 @@ test "generate id avoids collisions" {
 
 test "generate id produces valid hex characters" {
     var id: ContainerId = undefined;
-    generateId(&id);
+    try generateId(&id);
 
     const hex_chars = "0123456789abcdef";
     for (id) |c| {
