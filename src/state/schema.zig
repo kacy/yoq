@@ -186,6 +186,42 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    updated_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
+
+    // indexes for frequently queried columns — avoids full table scans
+    // on container lookups by app name, status, or hostname
+    db.exec(
+        \\CREATE INDEX IF NOT EXISTS idx_containers_app_name
+        \\    ON containers (app_name);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE INDEX IF NOT EXISTS idx_containers_status
+        \\    ON containers (status);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE INDEX IF NOT EXISTS idx_containers_hostname
+        \\    ON containers (hostname);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE INDEX IF NOT EXISTS idx_service_names_container
+        \\    ON service_names (container_id);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE INDEX IF NOT EXISTS idx_agents_status
+        \\    ON agents (status);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    // WAL mode for better concurrent read/write performance.
+    // NORMAL synchronous is safe — worst case is losing the last
+    // transaction on power loss, which is acceptable for container metadata.
+    // journal_mode returns a result row, so we use the raw C API (sqlite3_exec)
+    // which handles rows transparently. WAL doesn't work with in-memory
+    // databases (used in tests), so failures are silently ignored.
+    _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA journal_mode=WAL;", null, null, null);
+    _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA synchronous=NORMAL;", null, null, null);
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -482,4 +518,31 @@ test "init creates certificates table" {
         .{},
         .{ "example.com", "cert-data", "enc-key", "nonce", "tag", @as(i64, 1735689600), "manual", @as(i64, 1000), @as(i64, 1000) },
     ) catch unreachable;
+}
+
+test "init creates performance indexes" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    // verify indexes exist by querying sqlite_master
+    const alloc = std.testing.allocator;
+    const Row = struct { name: sqlite.Text };
+
+    // check one representative index
+    const row = (db.oneAlloc(
+        Row,
+        alloc,
+        "SELECT name FROM sqlite_master WHERE type='index' AND name=?;",
+        .{},
+        .{"idx_containers_status"},
+    ) catch unreachable);
+
+    if (row) |r| {
+        defer alloc.free(r.name.data);
+        try std.testing.expectEqualStrings("idx_containers_status", r.name.data);
+    } else {
+        return error.TestUnexpectedResult;
+    }
 }
