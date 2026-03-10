@@ -395,9 +395,14 @@ pub const Transport = struct {
 
         if (msg_len > max_receive_size or msg_len < 1) return TransportError.InvalidMessage;
 
-        // read message body
-        const body = alloc.alloc(u8, msg_len) catch return TransportError.ReceiveFailed;
-        defer alloc.free(body);
+        // use a stack buffer for small messages (heartbeats ~50B, typical RPCs ~1-2KB).
+        // only heap-allocate for large payloads like InstallSnapshot.
+        var stack_buf: [8192]u8 = undefined;
+        const body = if (msg_len <= stack_buf.len)
+            stack_buf[0..msg_len]
+        else
+            alloc.alloc(u8, msg_len) catch return TransportError.ReceiveFailed;
+        defer if (msg_len > stack_buf.len) alloc.free(body);
 
         readExact(client_fd, body) catch return TransportError.ReceiveFailed;
 
