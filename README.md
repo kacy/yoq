@@ -103,6 +103,9 @@ yoq is probably not the right fit if you already depend on the full Kubernetes e
 ### clustering
 
 - raft-based server nodes with SQLite-backed state replication
+- SWIM gossip protocol for scalable failure detection
+- role separation: server nodes (raft + API + scheduler) vs agent nodes (gossip + workloads)
+- HMAC-SHA256 authenticated cluster transport
 - agent registration, heartbeats, placement, drain, and cluster status
 - remote operations via `--server host:port`
 
@@ -290,6 +293,8 @@ yoq up -f examples/redis/manifest.toml
 ## what's next
 
 - web UI remains intentionally deferred; the CLI is the primary interface
+- adaptive heartbeat intervals
+- hub-and-spoke WireGuard topology
 - GPU scheduling
 - multi-region federation
 - advanced L7 routing

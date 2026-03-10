@@ -138,9 +138,13 @@ key files:
 
 ### cluster (`src/cluster/`)
 
-multi-node orchestration via Raft consensus.
+multi-node orchestration via Raft consensus and SWIM gossip.
+
+**role separation:** the cluster has two node types. server nodes run Raft consensus, the API server, and the scheduler. agent nodes run only the gossip protocol and container workloads. this keeps the consensus group small while allowing the agent pool to scale independently.
 
 **Raft:** a pure state machine implementation with no I/O. all side effects are described as `Action` values (send vote request, append entries, commit, etc.) that the caller executes. this makes the core algorithm testable without mocking. election timeout is 1.5-3s (randomized), heartbeat at 1s.
+
+**gossip:** SWIM (Scalable Weakly-consistent Infection-style Membership) protocol for failure detection. nodes probe each other directly (ping) and indirectly (ping-req through a third node) to detect failures without centralized health checking. protocol updates (joins, leaves, state changes) are piggybacked on protocol messages for efficient dissemination without extra round trips. gossip runs over UDP for protocol simplicity and lower overhead. the implementation is a pure state machine like raft — `tick()`, `handleMessage()`, `drainActions()`.
 
 **log replication:** the Raft log is persisted in SQLite (WAL mode for crash safety). committed entries are applied to a replicated state machine that updates the shared SQLite database. lagging followers receive snapshots via InstallSnapshot RPC.
 
@@ -148,15 +152,20 @@ multi-node orchestration via Raft consensus.
 
 **agents:** worker nodes register with the server via HTTP, then heartbeat every 5s reporting capacity. they pull assignments, download images, and start containers using the local runtime. WireGuard tunnels are set up on join for encrypted cross-node networking.
 
+**HMAC auth:** all cluster messages (Raft RPCs, gossip protocol) are authenticated with HMAC-SHA256. the key is derived from the join token. token comparison uses constant-time operations to prevent timing side-channels and avoids leaking token length.
+
+**connection pool:** the transport layer reuses TCP connections between nodes instead of opening a new connection per RPC. this reduces latency and file descriptor churn under load.
+
 key files:
 - `raft.zig` — pure Raft state machine
 - `raft_types.zig` — protocol message types
+- `gossip.zig` — SWIM gossip failure detection
 - `log.zig` — SQLite-backed persistent log
 - `state_machine.zig` — apply committed entries
 - `scheduler.zig` — bin-packing placement
 - `agent.zig` — worker node agent
-- `node.zig` — server node management
-- `transport.zig` — TCP RPC between nodes
+- `node.zig` — server node management (integrates raft + gossip)
+- `transport.zig` — TCP RPC (with connection pooling) and UDP gossip
 - `commands.zig` — serve, init-server, join, nodes, drain
 
 ### state (`src/state/`)
@@ -244,4 +253,4 @@ key files:
 
 5. **API auth:** bearer token authentication with constant-time comparison. tokens are generated on first server start.
 
-6. **cluster transport:** WireGuard encryption for all cross-node communication. keys are exchanged during the join handshake.
+6. **cluster transport:** HMAC-SHA256 authentication on all cluster messages (Raft RPCs, gossip protocol), derived from the join token. token comparison is constant-time and does not leak token length. WireGuard encryption for all cross-node communication with keys exchanged during the join handshake.

@@ -8,6 +8,20 @@ format is based on [keep a changelog](https://keepachangelog.com/).
 
 ### added
 
+- **gossip:** SWIM failure detection protocol for scalable membership and health monitoring
+- **cluster auth:** HMAC-SHA256 authentication on all cluster messages (raft and gossip), derived from join token
+- **agent API:** role and region fields in agent API JSON responses
+- **transport:** connection pooling in cluster transport for TCP connection reuse
+
+### fixed
+
+- **security:** token comparison timing side-channel — constant-time comparison regardless of token length
+- **state machine:** SQL statement redacted from state machine error logs
+- **network hardening:** message size limits and connection validation in registry and cluster transport
+- **robustness:** cgroup resource limit verification and safe integer casts for edge cases
+
+### added
+
 - **container runtime:** full namespace isolation (PID, NET, MNT, UTS, IPC, USER, CGROUP), cgroups v2 resource limits, overlayfs, seccomp filters, rootless containers
 - **OCI images:** pull/push to any OCI registry, content-addressable blob store, layer deduplication, image inspect and prune
 - **networking:** bridge + veth networking, eBPF DNS interception, load balancing, per-service metrics, network policy enforcement, WireGuard mesh
