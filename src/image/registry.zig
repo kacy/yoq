@@ -66,6 +66,11 @@ const max_blob_size: usize = 512 * 1024 * 1024;
 /// max concurrent layer downloads — each thread creates its own HTTP client
 const max_parallel_downloads = 4;
 
+/// socket-level read/write timeout for registry HTTP operations (30 seconds).
+/// prevents hanging indefinitely on slow or unresponsive registries.
+/// applied via SO_RCVTIMEO/SO_SNDTIMEO on the underlying TCP socket.
+const registry_timeout_sec = 30;
+
 /// bearer token from the registry's auth service
 const Token = struct {
     value: []const u8,
@@ -409,7 +414,9 @@ fn authenticate(
 
     // we need the lower-level request API to read the Www-Authenticate header
     const uri = std.Uri.parse(ping_url) catch return error.AuthFailed;
+    const conn = connectWithTimeout(client, uri) catch return error.NetworkError;
     var req = client.request(.GET, uri, .{
+        .connection = conn,
         .redirect_behavior = .not_allowed,
         .keep_alive = false,
     }) catch return error.NetworkError;
@@ -597,7 +604,9 @@ fn fetchManifest(
 
     var headers: [1]std.http.Header = .{accept_header};
 
+    const manifest_conn = connectWithTimeout(client, uri) catch return error.NetworkError;
     var req = client.request(.GET, uri, .{
+        .connection = manifest_conn,
         .redirect_behavior = @enumFromInt(3),
         .keep_alive = false,
         .headers = .{
@@ -841,7 +850,9 @@ pub fn uploadBlob(
     const auth_value = authHeaderValue(token, &auth_buf);
 
     const init_uri = std.Uri.parse(init_url) catch return RegistryError.UploadInitFailed;
+    const upload_conn = connectWithTimeout(client, init_uri) catch return RegistryError.UploadInitFailed;
     var init_req = client.request(.POST, init_uri, .{
+        .connection = upload_conn,
         .redirect_behavior = @enumFromInt(3),
         .keep_alive = false,
         .headers = .{
@@ -1007,7 +1018,12 @@ fn fetchBlobFromUrl(
         return error.BlobNotFound;
     };
 
+    const blob_conn = connectWithTimeout(client, uri) catch {
+        log.warn("blob fetch: connect failed for {s}", .{url_summary});
+        return error.NetworkError;
+    };
     var req = client.request(.GET, uri, .{
+        .connection = blob_conn,
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .headers = .{
@@ -1135,6 +1151,42 @@ fn downloadLayerBlob(
 
     // use putBlobDirect since we already verified the digest
     blob_store.putBlobDirect(data, expected) catch return error.BlobNotFound;
+}
+
+// -- timeout helpers --
+
+const posix = std.posix;
+
+/// pre-connect to a registry host and set socket-level timeouts.
+/// returns a connection that can be passed to client.request() via
+/// RequestOptions.connection. if the connect or timeout setup fails,
+/// returns NetworkError so callers can handle it uniformly.
+fn connectWithTimeout(
+    client: *std.http.Client,
+    uri: std.Uri,
+) !*std.http.Client.Connection {
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse
+        return error.UnsupportedUriScheme;
+    var host_buf: [std.Uri.host_name_max]u8 = undefined;
+    const host_name = uri.getHost(&host_buf) catch return error.NetworkError;
+    const default_port: u16 = if (protocol == .tls) 443 else 80;
+    const port = uri.port orelse default_port;
+
+    const conn = client.connectTcp(host_name, port, protocol) catch
+        return error.NetworkError;
+    setSocketTimeouts(conn);
+    return conn;
+}
+
+/// set read/write timeouts on a connection's underlying TCP socket.
+/// silently ignores failures — timeouts are best-effort defense against
+/// hangs, not a hard requirement.
+fn setSocketTimeouts(conn: *std.http.Client.Connection) void {
+    const stream = conn.stream_reader.getStream();
+    const tv = posix.timeval{ .sec = registry_timeout_sec, .usec = 0 };
+    const opt_bytes = std.mem.asBytes(&tv);
+    posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, opt_bytes) catch {};
+    posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, opt_bytes) catch {};
 }
 
 // -- tests --
