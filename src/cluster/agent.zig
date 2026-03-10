@@ -297,13 +297,25 @@ pub const Agent = struct {
         }
     }
 
+    /// compute adaptive heartbeat interval in 100ms ticks.
+    /// scales with ceil(log2(N)) where N is the gossip member count,
+    /// so large clusters heartbeat less frequently.
+    fn agentHeartbeatTicks(self: *Agent) u32 {
+        if (self.gossip) |g| {
+            const n = g.members.count() + 1;
+            const multiplier: u32 = @min(gossip_mod.Gossip.ceilLog2(n), gossip_mod.Gossip.max_interval_multiplier);
+            return 50 * multiplier;
+        }
+        return 50;
+    }
+
     fn agentLoop(self: *Agent) void {
         while (self.running.load(.acquire)) {
             self.doHeartbeat();
             self.reconcile();
 
-            // sleep 5 seconds between cycles, ticking gossip every 500ms
-            var remaining: u32 = 50; // 50 * 100ms = 5s
+            // sleep between cycles, ticking gossip every 500ms
+            var remaining: u32 = self.agentHeartbeatTicks();
             while (remaining > 0 and self.running.load(.acquire)) : (remaining -= 1) {
                 std.Thread.sleep(100 * std.time.ns_per_ms);
 

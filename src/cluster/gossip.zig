@@ -161,6 +161,12 @@ pub const Gossip = struct {
     suspect_timeout: u32,
     dead_timeout: u32,
 
+    // base intervals — scaled by ceil(log2(N)) for adaptive timing
+    const base_probe_interval: u32 = 5;
+    const base_suspect_timeout: u32 = 20;
+    const base_dead_timeout: u32 = 100;
+    pub const max_interval_multiplier: u32 = 10;
+
     pub fn init(alloc: std.mem.Allocator, self_id: u64, self_addr: MemberAddr) Gossip {
         return .{
             .alloc = alloc,
@@ -194,6 +200,29 @@ pub const Gossip = struct {
         self.probe_order.deinit(self.alloc);
     }
 
+    /// compute ceil(log2(n)), minimum 1. used for adaptive interval scaling
+    /// and gossip dissemination counts.
+    pub fn ceilLog2(n: usize) u32 {
+        if (n <= 2) return 1;
+        var log: u32 = 0;
+        var val: usize = n - 1;
+        while (val > 0) : (val >>= 1) {
+            log += 1;
+        }
+        return log;
+    }
+
+    /// recalculate probe/suspect/dead intervals based on cluster size.
+    /// uses ceil(log2(N)) where N = total members including self, capped
+    /// at max_interval_multiplier to bound worst-case detection time.
+    pub fn recalculateIntervals(self: *Gossip) void {
+        const n = self.members.count() + 1; // +1 for self
+        const multiplier = @min(ceilLog2(n), max_interval_multiplier);
+        self.probe_interval = base_probe_interval * multiplier;
+        self.suspect_timeout = base_suspect_timeout * multiplier;
+        self.dead_timeout = base_dead_timeout * multiplier;
+    }
+
     /// add a member to the membership list. if the member already exists,
     /// this is a no-op (use applyStateUpdate for state changes).
     pub fn addMember(self: *Gossip, id: u64, addr: MemberAddr) !void {
@@ -208,6 +237,7 @@ pub const Gossip = struct {
                 .state_changed_at = self.tick_count,
             };
             self.rebuildProbeOrder() catch {};
+            self.recalculateIntervals();
         }
     }
 
@@ -215,6 +245,7 @@ pub const Gossip = struct {
     pub fn removeMember(self: *Gossip, id: u64) void {
         _ = self.members.remove(id);
         self.rebuildProbeOrder() catch {};
+        self.recalculateIntervals();
     }
 
     /// advance the protocol by one tick. call this every ~500ms.
@@ -599,14 +630,7 @@ pub const Gossip = struct {
     fn addPendingUpdate(self: *Gossip, update: StateUpdate) !void {
         // compute gossip count: ceil(log2(N)) + 1
         const n = self.members.count() + 1; // +1 for self
-        const gossip_count: u8 = if (n <= 1) 1 else blk: {
-            var log: u8 = 0;
-            var val: usize = n - 1;
-            while (val > 0) : (val >>= 1) {
-                log += 1;
-            }
-            break :blk log + 1;
-        };
+        const gossip_count: u8 = @intCast(ceilLog2(n) + 1);
 
         // replace existing update for same id if present
         for (self.pending_updates.items) |*pending| {
@@ -615,6 +639,24 @@ pub const Gossip = struct {
                 pending.remaining = gossip_count;
                 return;
             }
+        }
+
+        // cap pending updates to avoid unbounded growth during rapid churn.
+        // when full, drop the lowest-priority (alive) update with fewest remaining rounds.
+        const max_pending: usize = 1000;
+        if (self.pending_updates.items.len >= max_pending) {
+            // find lowest-priority entry: lowest state enum, then lowest remaining
+            var worst: usize = 0;
+            for (self.pending_updates.items[1..], 1..) |item, idx| {
+                const w = self.pending_updates.items[worst];
+                if (@intFromEnum(item.update.state) < @intFromEnum(w.update.state) or
+                    (@intFromEnum(item.update.state) == @intFromEnum(w.update.state) and
+                        item.remaining < w.remaining))
+                {
+                    worst = idx;
+                }
+            }
+            _ = self.pending_updates.swapRemove(worst);
         }
 
         try self.pending_updates.append(self.alloc, .{
@@ -896,9 +938,8 @@ test "suspect to dead timeout" {
     var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
     defer g.deinit();
 
-    g.suspect_timeout = 5;
-
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    g.suspect_timeout = 5;
 
     // manually mark suspect
     if (g.members.getPtr(2)) |m| {
@@ -1148,8 +1189,6 @@ test "more than 64 simultaneous suspects all transition to dead" {
     var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
     defer g.deinit();
 
-    g.suspect_timeout = 1; // 1 tick for fast test
-
     // add 100 members and mark them all suspect
     for (2..102) |i| {
         const id: u64 = @intCast(i);
@@ -1159,6 +1198,8 @@ test "more than 64 simultaneous suspects all transition to dead" {
             m.state_changed_at = 0; // set in the past
         }
     }
+
+    g.suspect_timeout = 1; // 1 tick for fast test — set after addMember
 
     // tick past suspect timeout — all 100 should become dead
     g.tick_count = 10; // well past the timeout of 1
@@ -1526,13 +1567,7 @@ test "dead node doesn't cascade false suspicions" {
     var g5 = Gossip.init(alloc, 5, .{ .ip = .{ 10, 0, 0, 5 }, .port = 7000 });
     defer g5.deinit();
 
-    // short timeouts
     var all = [_]*Gossip{ &g1, &g2, &g3, &g4, &g5 };
-    for (&all) |g| {
-        g.probe_interval = 2;
-        g.suspect_timeout = 4;
-        g.dead_timeout = 10;
-    }
 
     // wire up full mesh
     const ids = [_]u64{ 1, 2, 3, 4, 5 };
@@ -1548,6 +1583,13 @@ test "dead node doesn't cascade false suspicions" {
             if (i == j) continue;
             try g.addMember(id, addrs[j]);
         }
+    }
+
+    // short timeouts — set after addMember so recalculateIntervals doesn't override
+    for (&all) |g| {
+        g.probe_interval = 2;
+        g.suspect_timeout = 4;
+        g.dead_timeout = 10;
     }
 
     // step 1: converge
@@ -1593,4 +1635,56 @@ test "dead node doesn't cascade false suspicions" {
             }
         }
     }
+}
+
+test "ceilLog2 basic values" {
+    // edge cases and powers of two
+    try std.testing.expectEqual(@as(u32, 1), Gossip.ceilLog2(1));
+    try std.testing.expectEqual(@as(u32, 1), Gossip.ceilLog2(2));
+    try std.testing.expectEqual(@as(u32, 2), Gossip.ceilLog2(3));
+    try std.testing.expectEqual(@as(u32, 2), Gossip.ceilLog2(4));
+    try std.testing.expectEqual(@as(u32, 3), Gossip.ceilLog2(5));
+    try std.testing.expectEqual(@as(u32, 7), Gossip.ceilLog2(128));
+    try std.testing.expectEqual(@as(u32, 10), Gossip.ceilLog2(1024));
+}
+
+test "recalculateIntervals scales with member count" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    // 1 node (just self) — multiplier 1
+    try std.testing.expectEqual(@as(u32, 5), g.probe_interval);
+    try std.testing.expectEqual(@as(u32, 20), g.suspect_timeout);
+    try std.testing.expectEqual(@as(u32, 100), g.dead_timeout);
+
+    // add 3 members (4 total) — multiplier 2
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    try g.addMember(3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    try g.addMember(4, .{ .ip = .{ 10, 0, 0, 4 }, .port = 7000 });
+    try std.testing.expectEqual(@as(u32, 10), g.probe_interval);
+    try std.testing.expectEqual(@as(u32, 40), g.suspect_timeout);
+    try std.testing.expectEqual(@as(u32, 200), g.dead_timeout);
+
+    // remove 2 members (2 total) — multiplier 1
+    g.removeMember(3);
+    g.removeMember(4);
+    try std.testing.expectEqual(@as(u32, 5), g.probe_interval);
+    try std.testing.expectEqual(@as(u32, 20), g.suspect_timeout);
+    try std.testing.expectEqual(@as(u32, 100), g.dead_timeout);
+}
+
+test "recalculateIntervals caps at max multiplier" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    // add 2048 members — should cap at 10x
+    for (2..2050) |i| {
+        try g.addMember(@intCast(i), .{ .ip = .{ 10, 0, 0, 1 }, .port = @intCast(i) });
+    }
+
+    try std.testing.expectEqual(@as(u32, 50), g.probe_interval);
+    try std.testing.expectEqual(@as(u32, 200), g.suspect_timeout);
+    try std.testing.expectEqual(@as(u32, 1000), g.dead_timeout);
 }

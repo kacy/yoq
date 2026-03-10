@@ -295,6 +295,50 @@ pub const Node = struct {
 
     fn tickLoop(self: *Node) void {
         while (self.running.load(.acquire)) {
+            // query DB state outside the lock for leader maintenance tasks.
+            // the snapshots may be slightly stale by the time we acquire the
+            // lock, but all proposals are idempotent so staleness is safe.
+            var health_agents: ?[]agent_registry.AgentRecord = null;
+            var reconcile_agents: ?[]agent_registry.AgentRecord = null;
+            var reconcile_orphans: ?[]agent_registry.Assignment = null;
+            var cleanup_agents: ?[]agent_registry.AgentRecord = null;
+
+            {
+                self.mu.lock();
+                const is_leader = self.raft.role == .leader;
+                const tick = self.tick_count +% 1;
+                self.mu.unlock();
+
+                if (is_leader) {
+                    if (tick % 300 == 0)
+                        health_agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
+                    if (tick % 100 == 0) {
+                        reconcile_orphans = agent_registry.getOrphanedAssignments(self.alloc, &self.state_machine.db) catch null;
+                        reconcile_agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
+                    }
+                    if (tick % 3600 == 0)
+                        cleanup_agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
+                }
+            }
+            defer {
+                if (health_agents) |agents| {
+                    for (agents) |a| a.deinit(self.alloc);
+                    self.alloc.free(agents);
+                }
+                if (reconcile_agents) |agents| {
+                    for (agents) |a| a.deinit(self.alloc);
+                    self.alloc.free(agents);
+                }
+                if (reconcile_orphans) |orphans| {
+                    for (orphans) |a| a.deinit(self.alloc);
+                    self.alloc.free(orphans);
+                }
+                if (cleanup_agents) |agents| {
+                    for (agents) |a| a.deinit(self.alloc);
+                    self.alloc.free(agents);
+                }
+            }
+
             {
                 self.mu.lock();
                 defer self.mu.unlock();
@@ -304,9 +348,10 @@ pub const Node = struct {
 
                 self.tick_count +%= 1;
                 if (self.raft.role == .leader) {
-                    if (self.tick_count % 300 == 0) self.checkAgentHealth(); // ~30s
-                    if (self.tick_count % 100 == 0) self.reconcileOrphanedAssignments(); // ~10s
-                    if (self.tick_count % 3600 == 0) self.cleanupDeadAgents(); // ~6 min
+                    if (health_agents) |agents| self.checkAgentHealth(agents);
+                    if (reconcile_orphans) |orphans|
+                        self.reconcileOrphanedAssignments(orphans, reconcile_agents orelse &.{});
+                    if (cleanup_agents) |agents| self.cleanupDeadAgents(agents);
                 }
 
                 // gossip tick every 500ms (5 × 100ms raft tick)
@@ -325,15 +370,19 @@ pub const Node = struct {
 
     /// mark agents as offline if they haven't sent a heartbeat in 30 seconds.
     /// only runs on the leader node. called with self.mu held.
-    fn checkAgentHealth(self: *Node) void {
-        const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
-        defer {
-            for (agents) |a| a.deinit(self.alloc);
-            self.alloc.free(agents);
-        }
-
+    ///
+    /// DB queries happen before this call (outside the lock) — the caller
+    /// passes the pre-fetched agent list. proposals are idempotent, so
+    /// staleness from the unlocked read is safe.
+    fn checkAgentHealth(self: *Node, agents: []const agent_registry.AgentRecord) void {
         const now = std.time.timestamp();
-        const timeout: i64 = 30; // seconds
+        // scale timeout with cluster size to match adaptive agent heartbeat
+        const base_timeout: i64 = 30;
+        const multiplier: i64 = if (self.gossip) |g| blk: {
+            const n = g.members.count() + 1;
+            break :blk @min(@as(i64, gossip_mod.Gossip.ceilLog2(n)), gossip_mod.Gossip.max_interval_multiplier);
+        } else 1;
+        const timeout: i64 = base_timeout * multiplier;
 
         for (agents) |agent| {
             // only check active agents — already drained/offline agents are fine
@@ -360,20 +409,14 @@ pub const Node = struct {
     /// reschedule orphaned assignments onto active agents.
     /// orphans are assignments with agent_id = '' that were detached
     /// when their agent went offline. called with self.mu held.
-    fn reconcileOrphanedAssignments(self: *Node) void {
-        const orphans = agent_registry.getOrphanedAssignments(self.alloc, &self.state_machine.db) catch return;
-        defer {
-            for (orphans) |a| a.deinit(self.alloc);
-            self.alloc.free(orphans);
-        }
-
+    ///
+    /// DB queries happen before this call (outside the lock).
+    fn reconcileOrphanedAssignments(
+        self: *Node,
+        orphans: []const agent_registry.Assignment,
+        agents: []const agent_registry.AgentRecord,
+    ) void {
         if (orphans.len == 0) return;
-
-        const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
-        defer {
-            for (agents) |a| a.deinit(self.alloc);
-            self.alloc.free(agents);
-        }
 
         // build placement requests from orphaned assignments
         var requests = self.alloc.alloc(scheduler.PlacementRequest, orphans.len) catch return;
@@ -405,13 +448,9 @@ pub const Node = struct {
     /// remove agents that have been offline for more than 1 hour.
     /// cleans up their remaining terminal assignments, wireguard peers,
     /// and the agent record itself. called with self.mu held.
-    fn cleanupDeadAgents(self: *Node) void {
-        const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
-        defer {
-            for (agents) |a| a.deinit(self.alloc);
-            self.alloc.free(agents);
-        }
-
+    ///
+    /// DB queries happen before this call (outside the lock).
+    fn cleanupDeadAgents(self: *Node, agents: []const agent_registry.AgentRecord) void {
         const now = std.time.timestamp();
         const dead_timeout: i64 = 3600; // 1 hour
 
@@ -641,47 +680,59 @@ pub const Node = struct {
 
     /// receive and dispatch incoming gossip UDP messages.
     /// called from recvLoop when no raft messages are pending.
+    ///
+    /// drains all available messages into a local buffer first, then
+    /// acquires the lock once to process the entire batch.
     fn receiveGossipMessages(self: *Node) void {
         const g = self.gossip orelse return;
 
+        const GossipMsg = gossip_mod.GossipMessage;
+        var msgs: [10]GossipMsg = undefined;
+        var msg_count: u32 = 0;
         var buf: [1500]u8 = undefined;
 
-        // drain up to 10 messages per call to avoid starving raft recv
-        var i: u32 = 0;
-        while (i < 10) : (i += 1) {
+        // drain up to 10 messages without holding the lock
+        while (msg_count < 10) {
             const result = self.transport.receiveGossip(&buf) catch break;
             const recv = result orelse break;
 
             const msg = gossip_mod.Gossip.decode(self.alloc, recv.payload) catch continue;
+            msgs[msg_count] = msg;
+            msg_count += 1;
+        }
 
-            self.mu.lock();
-            defer self.mu.unlock();
+        if (msg_count == 0) return;
 
+        // acquire lock once for the entire batch
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        for (msgs[0..msg_count]) |msg| {
             switch (msg) {
                 .ping => |p| g.handlePing(p) catch {},
                 .ping_ack => |p| g.handlePingAck(p) catch {},
                 .ping_req => |p| g.handlePingReq(p) catch {},
             }
+        }
 
-            // process any actions generated by handling this message
-            const actions = g.drainActions();
-            defer g.freeActions(actions);
+        // process all actions generated by the batch
+        const actions = g.drainActions();
+        defer g.freeActions(actions);
 
-            for (actions) |action| {
-                switch (action) {
-                    .send_message => |send| {
-                        var encode_buf: [512]u8 = undefined;
-                        const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
-                        self.transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
-                    },
-                    .member_dead => |m| {
-                        if (self.raft.role == .leader) self.handleGossipMemberDead(m.id);
-                    },
-                    .member_alive => |m| {
-                        if (self.raft.role == .leader) self.handleGossipMemberAlive(m.id);
-                    },
-                    .member_suspect => {},
-                }
+        for (actions) |action| {
+            switch (action) {
+                .send_message => |send| {
+                    var encode_buf: [512]u8 = undefined;
+                    const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
+                    self.transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
+                },
+                .member_dead => |m| {
+                    if (self.raft.role == .leader) self.handleGossipMemberDead(m.id);
+                },
+                .member_alive => |m| {
+                    if (self.raft.role == .leader) self.handleGossipMemberAlive(m.id);
+                },
+                .member_suspect => {},
             }
         }
     }
