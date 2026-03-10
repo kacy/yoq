@@ -57,11 +57,12 @@ pub fn extractBearerToken(request: *const http.Request) ?[]const u8 {
 
 pub fn hasValidBearerToken(request: *const http.Request, expected_token: []const u8) bool {
     const provided = extractBearerToken(request) orelse return false;
-    if (provided.len != expected_token.len) return false;
 
-    // constant-time comparison
-    var diff: u8 = 0;
-    for (provided, expected_token) |a, b| {
+    // constant-time: always compare expected_token.len bytes.
+    // length mismatch is folded into the diff, not returned early.
+    var diff: u8 = if (provided.len != expected_token.len) 1 else 0;
+    const n = @min(provided.len, expected_token.len);
+    for (provided[0..n], expected_token[0..n]) |a, b| {
         diff |= a ^ b;
     }
     return diff == 0;

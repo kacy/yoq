@@ -126,7 +126,7 @@ pub const StateMachine = struct {
             // requires deterministic apply order (retrying would re-order
             // entries relative to subsequent ones). the entry is still marked
             // applied below to prevent the state machine from stalling.
-            log.err("state machine: failed to apply entry {d}: {s} (error: {})", .{ entry.index, entry.data, err });
+            log.err("state machine: failed to apply entry {d}: {}", .{ entry.index, err });
         };
         self.last_applied = entry.index;
     }
