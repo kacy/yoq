@@ -59,6 +59,27 @@ pub const StateUpdate = struct {
     incarnation: u64,
 };
 
+/// fixed-capacity container for piggybacked state updates.
+/// avoids heap allocation — updates are stored inline in message payloads.
+pub const BoundedUpdates = struct {
+    buf: [max_piggyback_updates]StateUpdate = undefined,
+    len: u8 = 0,
+
+    pub fn slice(self: *const BoundedUpdates) []const StateUpdate {
+        return self.buf[0..self.len];
+    }
+
+    pub fn fromSlice(items: []const StateUpdate) BoundedUpdates {
+        var result: BoundedUpdates = .{};
+        const count: u8 = @intCast(@min(items.len, max_piggyback_updates));
+        for (0..count) |i| {
+            result.buf[i] = items[i];
+        }
+        result.len = count;
+        return result;
+    }
+};
+
 /// tracks how many more times a state update should be piggybacked.
 const PendingUpdate = struct {
     update: StateUpdate,
@@ -74,20 +95,20 @@ pub const GossipMessage = union(enum) {
 pub const PingPayload = struct {
     from: u64,
     sequence: u64,
-    updates: []const StateUpdate,
+    updates: BoundedUpdates = .{},
 };
 
 pub const PingAckPayload = struct {
     from: u64,
     sequence: u64,
-    updates: []const StateUpdate,
+    updates: BoundedUpdates = .{},
 };
 
 pub const PingReqPayload = struct {
     from: u64,
     target: u64,
     sequence: u64,
-    updates: []const StateUpdate,
+    updates: BoundedUpdates = .{},
 };
 
 pub const Action = union(enum) {
@@ -224,11 +245,11 @@ pub const Gossip = struct {
 
     /// process an incoming ping message
     pub fn handlePing(self: *Gossip, msg: PingPayload) !void {
-        for (msg.updates) |update| {
+        for (msg.updates.slice()) |update| {
             try self.applyStateUpdate(update);
         }
 
-        const updates = try self.collectPiggybackUpdates();
+        const updates = self.collectPiggybackUpdates();
         try self.actions.append(self.alloc, .{ .send_message = .{
             .target = msg.from,
             .addr = self.getMemberAddr(msg.from) orelse return,
@@ -242,7 +263,7 @@ pub const Gossip = struct {
 
     /// process an incoming ping ack
     pub fn handlePingAck(self: *Gossip, msg: PingAckPayload) !void {
-        for (msg.updates) |update| {
+        for (msg.updates.slice()) |update| {
             try self.applyStateUpdate(update);
         }
 
@@ -274,12 +295,12 @@ pub const Gossip = struct {
     /// process an incoming ping_req — forward a ping to the target on behalf
     /// of the requester, and relay any ack back.
     pub fn handlePingReq(self: *Gossip, msg: PingReqPayload) !void {
-        for (msg.updates) |update| {
+        for (msg.updates.slice()) |update| {
             try self.applyStateUpdate(update);
         }
 
         const target_addr = self.getMemberAddr(msg.target) orelse return;
-        const updates = try self.collectPiggybackUpdates();
+        const updates = self.collectPiggybackUpdates();
         try self.actions.append(self.alloc, .{ .send_message = .{
             .target = msg.target,
             .addr = target_addr,
@@ -304,20 +325,8 @@ pub const Gossip = struct {
         self.alloc.free(actions);
     }
 
-    fn freeActionUpdates(self: *Gossip, action: Action) void {
-        switch (action) {
-            .send_message => |sm| {
-                const updates = switch (sm.message) {
-                    .ping => |p| p.updates,
-                    .ping_ack => |p| p.updates,
-                    .ping_req => |p| p.updates,
-                };
-                if (updates.len > 0) {
-                    self.alloc.free(updates);
-                }
-            },
-            else => {},
-        }
+    fn freeActionUpdates(_: *Gossip, _: Action) void {
+        // updates are stored inline as BoundedUpdates — no heap free needed.
     }
 
     // --- internal ---
@@ -343,7 +352,7 @@ pub const Gossip = struct {
                 self.probe_sequence += 1;
                 self.ticks_in_phase = 0;
 
-                const updates = try self.collectPiggybackUpdates();
+                const updates = self.collectPiggybackUpdates();
                 try self.actions.append(self.alloc, .{ .send_message = .{
                     .target = target_id,
                     .addr = member.addr,
@@ -388,7 +397,7 @@ pub const Gossip = struct {
 
         for (candidates.items[0..k]) |relay_id| {
             if (self.members.get(relay_id)) |relay| {
-                const updates = try self.collectPiggybackUpdates();
+                const updates = self.collectPiggybackUpdates();
                 try self.actions.append(self.alloc, .{ .send_message = .{
                     .target = relay_id,
                     .addr = relay.addr,
@@ -552,9 +561,10 @@ pub const Gossip = struct {
 
     /// collect up to max_piggyback_updates updates to piggyback on a message.
     /// prioritizes dead > suspect > alive updates. decrements remaining counters.
-    fn collectPiggybackUpdates(self: *Gossip) ![]const StateUpdate {
+    /// returns a BoundedUpdates stored inline — no heap allocation.
+    fn collectPiggybackUpdates(self: *Gossip) BoundedUpdates {
         if (self.pending_updates.items.len == 0) {
-            return &[_]StateUpdate{};
+            return .{};
         }
 
         // sort by priority: dead first (enum value 2), then suspect (1), then alive (0)
@@ -565,10 +575,11 @@ pub const Gossip = struct {
         }.lessThan);
 
         const count = @min(max_piggyback_updates, self.pending_updates.items.len);
-        const updates = try self.alloc.alloc(StateUpdate, count);
+        var result: BoundedUpdates = .{};
+        result.len = @intCast(count);
 
         for (0..count) |i| {
-            updates[i] = self.pending_updates.items[i].update;
+            result.buf[i] = self.pending_updates.items[i].update;
             self.pending_updates.items[i].remaining -= 1;
         }
 
@@ -582,7 +593,7 @@ pub const Gossip = struct {
             }
         }
 
-        return updates;
+        return result;
     }
 
     fn addPendingUpdate(self: *Gossip, update: StateUpdate) !void {
@@ -626,31 +637,34 @@ pub const Gossip = struct {
 
         switch (msg) {
             .ping => |p| {
-                if (buf.len < 18 + p.updates.len * 23) return error.BufferTooSmall;
+                const updates = p.updates.slice();
+                if (buf.len < 18 + updates.len * 23) return error.BufferTooSmall;
                 buf[pos] = 0x10;
                 pos += 1;
                 writeU64(buf[pos..], p.from);
                 pos += 8;
                 writeU64(buf[pos..], p.sequence);
                 pos += 8;
-                buf[pos] = @intCast(p.updates.len);
+                buf[pos] = @intCast(updates.len);
                 pos += 1;
-                pos = encodeUpdates(buf, pos, p.updates);
+                pos = encodeUpdates(buf, pos, updates);
             },
             .ping_ack => |p| {
-                if (buf.len < 18 + p.updates.len * 23) return error.BufferTooSmall;
+                const updates = p.updates.slice();
+                if (buf.len < 18 + updates.len * 23) return error.BufferTooSmall;
                 buf[pos] = 0x11;
                 pos += 1;
                 writeU64(buf[pos..], p.from);
                 pos += 8;
                 writeU64(buf[pos..], p.sequence);
                 pos += 8;
-                buf[pos] = @intCast(p.updates.len);
+                buf[pos] = @intCast(updates.len);
                 pos += 1;
-                pos = encodeUpdates(buf, pos, p.updates);
+                pos = encodeUpdates(buf, pos, updates);
             },
             .ping_req => |p| {
-                if (buf.len < 26 + p.updates.len * 23) return error.BufferTooSmall;
+                const updates = p.updates.slice();
+                if (buf.len < 26 + updates.len * 23) return error.BufferTooSmall;
                 buf[pos] = 0x12;
                 pos += 1;
                 writeU64(buf[pos..], p.from);
@@ -659,16 +673,16 @@ pub const Gossip = struct {
                 pos += 8;
                 writeU64(buf[pos..], p.sequence);
                 pos += 8;
-                buf[pos] = @intCast(p.updates.len);
+                buf[pos] = @intCast(updates.len);
                 pos += 1;
-                pos = encodeUpdates(buf, pos, p.updates);
+                pos = encodeUpdates(buf, pos, updates);
             },
         }
 
         return pos;
     }
 
-    pub fn decode(alloc: std.mem.Allocator, data: []const u8) !GossipMessage {
+    pub fn decode(_: std.mem.Allocator, data: []const u8) !GossipMessage {
         if (data.len < 1) return error.InvalidMessage;
         const msg_type = data[0];
 
@@ -678,9 +692,10 @@ pub const Gossip = struct {
                 const from = readU64(data[1..]);
                 const sequence = readU64(data[9..]);
                 const count = data[17];
+                if (count > max_piggyback_updates) return error.InvalidMessage;
                 if (data.len < 18 + @as(usize, count) * 23) return error.InvalidMessage;
 
-                const updates = try decodeUpdates(alloc, data[18..], count);
+                const updates = decodeUpdates(data[18..], count);
 
                 if (msg_type == 0x10) {
                     return .{ .ping = .{
@@ -702,9 +717,10 @@ pub const Gossip = struct {
                 const target = readU64(data[9..]);
                 const sequence = readU64(data[17..]);
                 const count = data[25];
+                if (count > max_piggyback_updates) return error.InvalidMessage;
                 if (data.len < 26 + @as(usize, count) * 23) return error.InvalidMessage;
 
-                const updates = try decodeUpdates(alloc, data[26..], count);
+                const updates = decodeUpdates(data[26..], count);
                 return .{ .ping_req = .{
                     .from = from,
                     .target = target,
@@ -716,17 +732,9 @@ pub const Gossip = struct {
         }
     }
 
-    /// free updates allocated by decode
-    pub fn freeDecoded(alloc: std.mem.Allocator, msg: GossipMessage) void {
-        const updates = switch (msg) {
-            .ping => |p| p.updates,
-            .ping_ack => |p| p.updates,
-            .ping_req => |p| p.updates,
-        };
-        if (updates.len > 0) {
-            alloc.free(updates);
-        }
-    }
+    /// no-op — updates are stored inline, no heap memory to free.
+    /// retained for API compatibility.
+    pub fn freeDecoded(_: std.mem.Allocator, _: GossipMessage) void {}
 
     fn encodeUpdates(buf: []u8, start: usize, updates: []const StateUpdate) usize {
         var pos = start;
@@ -746,15 +754,13 @@ pub const Gossip = struct {
         return pos;
     }
 
-    fn decodeUpdates(alloc: std.mem.Allocator, data: []const u8, count: u8) ![]StateUpdate {
-        if (count == 0) return &[_]StateUpdate{};
-
-        const updates = try alloc.alloc(StateUpdate, count);
-        errdefer alloc.free(updates);
+    fn decodeUpdates(data: []const u8, count: u8) BoundedUpdates {
+        var result: BoundedUpdates = .{};
+        result.len = count;
 
         var pos: usize = 0;
         for (0..count) |i| {
-            updates[i] = .{
+            result.buf[i] = .{
                 .id = readU64(data[pos..]),
                 .addr = .{
                     .ip = data[pos + 8 ..][0..4].*,
@@ -766,7 +772,7 @@ pub const Gossip = struct {
             pos += 23;
         }
 
-        return updates;
+        return result;
     }
 
     fn writeU64(buf: []u8, val: u64) void {
@@ -811,7 +817,7 @@ test "ack clears probe" {
     defer g.freeActions(actions);
     const seq = actions[0].send_message.message.ping.sequence;
 
-    try g.handlePingAck(.{ .from = 2, .sequence = seq, .updates = &.{} });
+    try g.handlePingAck(.{ .from = 2, .sequence = seq });
 
     try std.testing.expect(g.probe_phase == .idle);
     try std.testing.expect(g.probe_target == null);
@@ -993,35 +999,33 @@ test "self-refutation increments incarnation" {
 
 test "encode decode round-trip: ping" {
     const alloc = std.testing.allocator;
-    const updates = try alloc.alloc(StateUpdate, 1);
-    defer alloc.free(updates);
-    updates[0] = .{
+    const items = [_]StateUpdate{.{
         .id = 42,
         .addr = .{ .ip = .{ 192, 168, 1, 1 }, .port = 8080 },
         .state = .alive,
         .incarnation = 7,
-    };
+    }};
 
     const msg: GossipMessage = .{ .ping = .{
         .from = 100,
         .sequence = 999,
-        .updates = updates,
+        .updates = BoundedUpdates.fromSlice(&items),
     } };
 
     var buf: [512]u8 = undefined;
     const len = try Gossip.encode(&buf, msg);
 
     const decoded = try Gossip.decode(alloc, buf[0..len]);
-    defer Gossip.freeDecoded(alloc, decoded);
+    const updates = decoded.ping.updates.slice();
 
     try std.testing.expect(decoded == .ping);
     try std.testing.expectEqual(@as(u64, 100), decoded.ping.from);
     try std.testing.expectEqual(@as(u64, 999), decoded.ping.sequence);
-    try std.testing.expectEqual(@as(usize, 1), decoded.ping.updates.len);
-    try std.testing.expectEqual(@as(u64, 42), decoded.ping.updates[0].id);
-    try std.testing.expectEqual(@as(u16, 8080), decoded.ping.updates[0].addr.port);
-    try std.testing.expectEqual(MemberState.alive, decoded.ping.updates[0].state);
-    try std.testing.expectEqual(@as(u64, 7), decoded.ping.updates[0].incarnation);
+    try std.testing.expectEqual(@as(usize, 1), updates.len);
+    try std.testing.expectEqual(@as(u64, 42), updates[0].id);
+    try std.testing.expectEqual(@as(u16, 8080), updates[0].addr.port);
+    try std.testing.expectEqual(MemberState.alive, updates[0].state);
+    try std.testing.expectEqual(@as(u64, 7), updates[0].incarnation);
 }
 
 test "encode decode round-trip: ping_req" {
@@ -1030,46 +1034,44 @@ test "encode decode round-trip: ping_req" {
         .from = 1,
         .target = 2,
         .sequence = 50,
-        .updates = &.{},
     } };
 
     var buf: [512]u8 = undefined;
     const len = try Gossip.encode(&buf, msg);
 
     const decoded = try Gossip.decode(alloc, buf[0..len]);
-    defer Gossip.freeDecoded(alloc, decoded);
 
     try std.testing.expect(decoded == .ping_req);
     try std.testing.expectEqual(@as(u64, 1), decoded.ping_req.from);
     try std.testing.expectEqual(@as(u64, 2), decoded.ping_req.target);
     try std.testing.expectEqual(@as(u64, 50), decoded.ping_req.sequence);
-    try std.testing.expectEqual(@as(usize, 0), decoded.ping_req.updates.len);
+    try std.testing.expectEqual(@as(u8, 0), decoded.ping_req.updates.len);
 }
 
 test "encode decode round-trip: ping_ack with multiple updates" {
     const alloc = std.testing.allocator;
-    const updates = try alloc.alloc(StateUpdate, 3);
-    defer alloc.free(updates);
-    updates[0] = .{ .id = 10, .addr = .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .state = .alive, .incarnation = 1 };
-    updates[1] = .{ .id = 20, .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7001 }, .state = .suspect, .incarnation = 3 };
-    updates[2] = .{ .id = 30, .addr = .{ .ip = .{ 10, 0, 0, 3 }, .port = 7002 }, .state = .dead, .incarnation = 5 };
+    const items = [_]StateUpdate{
+        .{ .id = 10, .addr = .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .state = .alive, .incarnation = 1 },
+        .{ .id = 20, .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7001 }, .state = .suspect, .incarnation = 3 },
+        .{ .id = 30, .addr = .{ .ip = .{ 10, 0, 0, 3 }, .port = 7002 }, .state = .dead, .incarnation = 5 },
+    };
 
     const msg: GossipMessage = .{ .ping_ack = .{
         .from = 99,
         .sequence = 12345,
-        .updates = updates,
+        .updates = BoundedUpdates.fromSlice(&items),
     } };
 
     var buf: [512]u8 = undefined;
     const len = try Gossip.encode(&buf, msg);
 
     const decoded = try Gossip.decode(alloc, buf[0..len]);
-    defer Gossip.freeDecoded(alloc, decoded);
+    const updates = decoded.ping_ack.updates.slice();
 
     try std.testing.expect(decoded == .ping_ack);
-    try std.testing.expectEqual(@as(usize, 3), decoded.ping_ack.updates.len);
-    try std.testing.expectEqual(MemberState.suspect, decoded.ping_ack.updates[1].state);
-    try std.testing.expectEqual(@as(u64, 5), decoded.ping_ack.updates[2].incarnation);
+    try std.testing.expectEqual(@as(usize, 3), updates.len);
+    try std.testing.expectEqual(MemberState.suspect, updates[1].state);
+    try std.testing.expectEqual(@as(u64, 5), updates[2].incarnation);
 }
 
 test "dead member not probed" {
@@ -1117,8 +1119,8 @@ test "piggybacked update lifecycle" {
 
     var collected_count: usize = 0;
     while (g.pending_updates.items.len > 0) {
-        const upd = try g.collectPiggybackUpdates();
-        if (upd.len > 0) alloc.free(upd);
+        const upd = g.collectPiggybackUpdates();
+        _ = upd;
         collected_count += 1;
         if (collected_count > 20) break;
     }
