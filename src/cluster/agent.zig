@@ -613,7 +613,12 @@ pub const Agent = struct {
 
         // generate a local container ID
         var id_buf: [12]u8 = undefined;
-        container.generateId(&id_buf);
+        container.generateId(&id_buf) catch {
+            log.warn("failed to generate container ID for assignment {s}", .{assignment_id});
+            self.setContainerState(assignment_id, .failed);
+            self.reportStatus(assignment_id, "failed");
+            return;
+        };
         const container_id = id_buf[0..];
 
         // save container record to local store
