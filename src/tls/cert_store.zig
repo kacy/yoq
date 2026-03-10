@@ -89,11 +89,14 @@ pub const CertStore = struct {
         const not_after = parseExpiryFromPem(cert_pem) catch
             return CertError.InvalidCert;
 
+        // reject already-expired certificates — installing one would just
+        // cause TLS failures at runtime
+        const now: i64 = std.time.timestamp();
+        if (not_after <= now) return CertError.InvalidCert;
+
         const encrypted = secrets.encrypt(self.allocator, key_pem, self.key) catch
             return CertError.EncryptionFailed;
         defer self.allocator.free(encrypted.ciphertext);
-
-        const now: i64 = std.time.timestamp();
 
         // preserve created_at if updating an existing cert
         const existing = self.getCreatedAt(domain);
