@@ -302,7 +302,7 @@ pub fn setupContainer(
     // determine subnet config based on node_id.
     // null = single-node mode (flat /16), otherwise per-node /24.
     const subnet_config: ?ip.SubnetConfig = if (config.node_id) |nid|
-        ip.subnetForNode(nid)
+        ip.subnetForNode(nid) catch return SetupError.BridgeFailed
     else
         null;
 
