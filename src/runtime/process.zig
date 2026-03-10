@@ -39,13 +39,17 @@ pub const ExitStatus = union(enum) {
 /// wait for a specific process to change state.
 /// returns immediately if the process has already exited.
 /// if `no_hang` is true, returns `.running` if still alive.
-/// retries automatically on EINTR (signal interrupted the wait).
+/// retries automatically on EINTR (signal interrupted the wait),
+/// up to a limit to prevent spinning under signal storms.
 pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
     var status: u32 = 0;
     var flags: u32 = linux.W.UNTRACED; // report stopped children too
     if (no_hang) flags |= linux.W.NOHANG;
 
-    while (true) {
+    const max_eintr_retries: u32 = 1000;
+    var eintr_count: u32 = 0;
+
+    while (eintr_count < max_eintr_retries) {
         const rc = linux.syscall4(
             .wait4,
             @as(usize, @bitCast(@as(isize, pid))),
@@ -55,8 +59,10 @@ pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
         );
 
         if (syscall_util.isError(rc)) {
-            // EINTR: a signal interrupted the wait — just retry
-            if (syscall_util.getErrno(rc) == @intFromEnum(linux.E.INTR)) continue;
+            if (syscall_util.getErrno(rc) == @intFromEnum(linux.E.INTR)) {
+                eintr_count += 1;
+                continue;
+            }
             return ProcessError.WaitFailed;
         }
 
@@ -72,6 +78,8 @@ pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
             .status = parseStatus(status),
         };
     }
+
+    return ProcessError.WaitFailed;
 }
 
 /// send a signal to a process.

@@ -329,7 +329,9 @@ pub const Orchestrator = struct {
             else
                 [4]u8{ 0, 0, 0, 0 };
 
-            health.registerService(svc.name, id, container_ip, hc);
+            health.registerService(svc.name, id, container_ip, hc) catch {
+                writeErr("health: registry full, health checks disabled for {s}\n", .{svc.name});
+            };
             self.states[i].health_status = .starting;
         }
 

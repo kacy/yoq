@@ -70,12 +70,17 @@ var health_mutex: std.Thread.Mutex = .{};
 /// register a service for health checking.
 /// called when a service starts and has a health_check configured.
 /// the service starts in "starting" status.
+pub const HealthError = error{
+    /// the health check registry is full (max 64 services)
+    RegistryFull,
+};
+
 pub fn registerService(
     service_name: []const u8,
     container_id: [12]u8,
     container_ip: [4]u8,
     config: spec.HealthCheck,
-) void {
+) HealthError!void {
     health_mutex.lock();
     defer health_mutex.unlock();
 
@@ -103,7 +108,8 @@ pub fn registerService(
         }
     }
 
-    log.warn("health: registry full, cannot track {s}", .{service_name});
+    log.err("health: registry full (max {d}), cannot track {s}", .{ max_services, service_name });
+    return HealthError.RegistryFull;
 }
 
 /// unregister a service from health checking.
@@ -533,7 +539,7 @@ test "isHttp2xx — malformed responses" {
 test "register and get status" {
     resetForTest();
 
-    registerService("web", "abcdef123456".*, .{ 10, 42, 0, 5 }, .{
+    try registerService("web", "abcdef123456".*, .{ 10, 42, 0, 5 }, .{
         .check_type = .{ .tcp = .{ .port = 8080 } },
     });
 
@@ -545,7 +551,7 @@ test "register and get status" {
 test "unregister removes service" {
     resetForTest();
 
-    registerService("web", "abcdef123456".*, .{ 10, 42, 0, 5 }, .{
+    try registerService("web", "abcdef123456".*, .{ 10, 42, 0, 5 }, .{
         .check_type = .{ .tcp = .{ .port = 8080 } },
     });
     unregisterService("web");
@@ -561,7 +567,7 @@ test "get status returns null for unknown service" {
 test "getServiceHealth returns full state" {
     resetForTest();
 
-    registerService("api", "abcdef123456".*, .{ 10, 42, 0, 10 }, .{
+    try registerService("api", "abcdef123456".*, .{ 10, 42, 0, 10 }, .{
         .check_type = .{ .http = .{
             .path = "/health",
             .port = 3000,

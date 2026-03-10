@@ -92,9 +92,17 @@ fn checkVolumeReferences(
     diagnostics: *std.ArrayList(Diagnostic),
 ) !void {
     // collect all service + worker + cron volume mounts
-    const all_mounts = collectAllMounts(manifest);
+    const collection = collectAllMounts(manifest);
 
-    for (all_mounts) |entry| {
+    if (collection.truncated) {
+        const msg = std.fmt.allocPrint(alloc, "manifest has more than 128 services/workers/crons — volume validation may be incomplete", .{}) catch return error.OutOfMemory;
+        diagnostics.append(alloc, .{ .severity = .warning, .message = msg }) catch {
+            alloc.free(msg);
+            return error.OutOfMemory;
+        };
+    }
+
+    for (collection.entries) |entry| {
         for (entry.volumes) |vol| {
             if (vol.kind != .named) continue;
 
@@ -150,32 +158,37 @@ const MountEntry = struct {
 
 /// gather volume mounts from services, workers, and crons into a
 /// unified view for the volume reference check.
-fn collectAllMounts(manifest: *const spec.Manifest) []const MountEntry {
+const MountCollection = struct {
+    entries: []const MountEntry,
+    truncated: bool,
+};
+
+fn collectAllMounts(manifest: *const spec.Manifest) MountCollection {
     // use a comptime-sized buffer — manifests won't have thousands of entries.
-    // if they do, this is still safe (we just won't check beyond the buffer).
     const max_entries = 128;
     const S = struct {
         var buf: [max_entries]MountEntry = undefined;
     };
     var count: usize = 0;
+    var truncated = false;
 
     for (manifest.services) |svc| {
-        if (count >= max_entries) break;
+        if (count >= max_entries) { truncated = true; break; }
         S.buf[count] = .{ .name = svc.name, .volumes = svc.volumes };
         count += 1;
     }
     for (manifest.workers) |w| {
-        if (count >= max_entries) break;
+        if (count >= max_entries) { truncated = true; break; }
         S.buf[count] = .{ .name = w.name, .volumes = w.volumes };
         count += 1;
     }
     for (manifest.crons) |c| {
-        if (count >= max_entries) break;
+        if (count >= max_entries) { truncated = true; break; }
         S.buf[count] = .{ .name = c.name, .volumes = c.volumes };
         count += 1;
     }
 
-    return S.buf[0..count];
+    return .{ .entries = S.buf[0..count], .truncated = truncated };
 }
 
 // -- tests --
