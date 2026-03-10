@@ -156,7 +156,8 @@ fn validateJsonDepth(json_bytes: []const u8) !void {
             depth += 1;
             if (depth > max_json_depth) return error.JsonDepthExceeded;
         } else if (c == '}' or c == ']') {
-            depth -|= 1; // saturating subtract, malformed JSON handled by parser
+            if (depth == 0) return error.JsonDepthExceeded;
+            depth -= 1;
         }
     }
 }
