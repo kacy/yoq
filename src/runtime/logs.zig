@@ -257,7 +257,9 @@ pub fn captureStream(
         while (i < n) : (i += 1) {
             if (buf[i] == '\n') {
                 if (leftover_len > 0) {
-                    // combine leftover + current chunk into one line
+                    // combine leftover + current chunk into one line.
+                    // invariant: leftover_len is always reset to 0 after
+                    // writing, regardless of which branch we take below.
                     const chunk_len = i - start;
                     if (chunk_len > 0 and leftover_len + chunk_len <= leftover.len) {
                         @memcpy(leftover[leftover_len .. leftover_len + chunk_len], buf[start..i]);
@@ -266,7 +268,8 @@ pub fn captureStream(
                         if (mirror_output) writeTerminalLine(stream_label, line);
                         if (dev_service) |svc| log_mux.writeLine(svc, dev_color, line);
                     } else {
-                        // buffer full or no new data — write what we have
+                        // buffer full or no new data — write leftover and
+                        // current chunk as separate lines
                         writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
                         if (mirror_output) writeTerminalLine(stream_label, leftover[0..leftover_len]);
                         if (dev_service) |svc| log_mux.writeLine(svc, dev_color, leftover[0..leftover_len]);
