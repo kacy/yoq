@@ -1385,3 +1385,212 @@ test "gossip detects unresponsive member" {
         try std.testing.expect(m3_on_g2.state == .suspect or m3_on_g2.state == .dead);
     }
 }
+
+// -- resilience tests --
+//
+// these tests verify gossip correctness under false positives, rapid churn,
+// and cascading failure scenarios.
+
+test "false positive suspect recovers via self-refutation" {
+    const alloc = std.testing.allocator;
+
+    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g1.deinit();
+    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    defer g2.deinit();
+    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    defer g3.deinit();
+
+    // wire up membership
+    try g1.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    try g1.addMember(3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    try g2.addMember(1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    try g2.addMember(3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    try g3.addMember(1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    try g3.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    var gossips = [_]*Gossip{ &g1, &g2, &g3 };
+
+    // step 1: converge with all three
+    for (0..20) |_| {
+        tickAndRouteAll(&gossips);
+    }
+
+    const initial_incarnation = g3.incarnation;
+
+    // step 2: directly mark g3 as suspect on g1 and g2 to simulate a false positive.
+    // this is equivalent to what happens after a transient network blip — the protocol
+    // has already marked g3 suspect. the interesting behavior is the recovery path.
+    if (g1.members.getPtr(3)) |m| {
+        m.state = .suspect;
+        m.incarnation = g3.incarnation;
+        m.state_changed_at = g1.tick_count;
+    }
+    if (g2.members.getPtr(3)) |m| {
+        m.state = .suspect;
+        m.incarnation = g3.incarnation;
+        m.state_changed_at = g2.tick_count;
+    }
+
+    // enqueue suspect updates so they get piggybacked to g3.
+    // send a ping directly to g3 with the suspect update piggybacked —
+    // this simulates g3 receiving gossip about itself being suspected.
+    // use g3's current incarnation so the refutation condition is met
+    // (update.incarnation >= self.incarnation).
+    const suspect_update = StateUpdate{
+        .id = 3,
+        .addr = .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 },
+        .state = .suspect,
+        .incarnation = g3.incarnation,
+    };
+    try g3.handlePing(.{
+        .from = 1,
+        .sequence = 9999,
+        .updates = BoundedUpdates.fromSlice(&.{suspect_update}),
+    });
+
+    // set long suspect timeout so g3 doesn't go dead before recovery
+    g1.suspect_timeout = 500;
+    g2.suspect_timeout = 500;
+    g3.suspect_timeout = 500;
+
+    // step 3: restore connectivity — g3 receives piggybacked suspect update about itself,
+    // triggers self-refutation (increments incarnation, broadcasts alive)
+    for (0..50) |_| {
+        tickAndRouteAll(&gossips);
+    }
+
+    // step 4: g3 should be alive on all nodes, incarnation incremented
+    for (&gossips) |g| {
+        if (g.self_id == 3) continue;
+        if (g.members.get(3)) |m| {
+            try std.testing.expectEqual(MemberState.alive, m.state);
+        }
+    }
+    try std.testing.expect(g3.incarnation > initial_incarnation);
+}
+
+test "rapid membership churn stays consistent" {
+    const alloc = std.testing.allocator;
+
+    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g1.deinit();
+
+    // step 1: add 3 initial members
+    try g1.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    try g1.addMember(3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    try g1.addMember(4, .{ .ip = .{ 10, 0, 0, 4 }, .port = 7000 });
+
+    // step 2: tick for 5 rounds (single node, just drain actions)
+    for (0..5) |_| {
+        g1.tick() catch {};
+        const a = g1.drainActions();
+        g1.freeActions(a);
+    }
+
+    // step 3: add 10 new members rapidly
+    for (5..15) |i| {
+        const id: u64 = @intCast(i);
+        try g1.addMember(id, .{ .ip = .{ 10, 0, 0, @intCast(id) }, .port = 7000 });
+    }
+
+    // immediately remove 5
+    for (5..10) |i| {
+        g1.removeMember(@intCast(i));
+    }
+
+    // step 4: tick for 10 more rounds
+    for (0..10) |_| {
+        g1.tick() catch {};
+        const a = g1.drainActions();
+        g1.freeActions(a);
+    }
+
+    // step 5: probe_order should match live member count
+    // live members: 2, 3, 4, 10, 11, 12, 13, 14 = 8 members
+    try std.testing.expectEqual(@as(usize, 8), g1.probe_order.items.len);
+    try std.testing.expectEqual(@as(usize, 8), g1.members.count());
+}
+
+test "dead node doesn't cascade false suspicions" {
+    const alloc = std.testing.allocator;
+
+    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g1.deinit();
+    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    defer g2.deinit();
+    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    defer g3.deinit();
+    var g4 = Gossip.init(alloc, 4, .{ .ip = .{ 10, 0, 0, 4 }, .port = 7000 });
+    defer g4.deinit();
+    var g5 = Gossip.init(alloc, 5, .{ .ip = .{ 10, 0, 0, 5 }, .port = 7000 });
+    defer g5.deinit();
+
+    // short timeouts
+    var all = [_]*Gossip{ &g1, &g2, &g3, &g4, &g5 };
+    for (&all) |g| {
+        g.probe_interval = 2;
+        g.suspect_timeout = 4;
+        g.dead_timeout = 10;
+    }
+
+    // wire up full mesh
+    const ids = [_]u64{ 1, 2, 3, 4, 5 };
+    const addrs = [_]MemberAddr{
+        .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 },
+        .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 },
+        .{ .ip = .{ 10, 0, 0, 4 }, .port = 7000 },
+        .{ .ip = .{ 10, 0, 0, 5 }, .port = 7000 },
+    };
+    for (&all, 0..) |g, i| {
+        for (ids, 0..) |id, j| {
+            if (i == j) continue;
+            try g.addMember(id, addrs[j]);
+        }
+    }
+
+    // step 1: converge
+    for (0..20) |_| {
+        tickAndRouteAll(&all);
+    }
+
+    // step 2: remove g5 from routing (simulate crash)
+    var live = [_]*Gossip{ &g1, &g2, &g3, &g4 };
+
+    // tick until g5 transitions to dead on all live nodes
+    for (0..60) |_| {
+        // tick all live nodes
+        for (&live) |g| {
+            g.tick() catch {};
+        }
+        // route only among live nodes
+        for (&live) |g| {
+            const actions = g.drainActions();
+            defer g.freeActions(actions);
+            routeGossipActions(actions, &live);
+        }
+        for (&live) |g| {
+            const reply_actions = g.drainActions();
+            defer g.freeActions(reply_actions);
+            routeGossipActions(reply_actions, &live);
+        }
+    }
+
+    // step 3: g5 should be dead on all live nodes
+    for (&live) |g| {
+        if (g.members.get(5)) |m| {
+            try std.testing.expectEqual(MemberState.dead, m.state);
+        }
+    }
+
+    // step 4: g1-g4 remain alive on each other — no cascade
+    for (&live) |g| {
+        for (&live) |other| {
+            if (g.self_id == other.self_id) continue;
+            if (g.members.get(other.self_id)) |m| {
+                try std.testing.expectEqual(MemberState.alive, m.state);
+            }
+        }
+    }
+}

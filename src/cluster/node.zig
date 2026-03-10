@@ -34,6 +34,8 @@ const state_machine_mod = @import("state_machine.zig");
 const types = @import("raft_types.zig");
 const agent_registry = @import("registry.zig");
 const scheduler = @import("scheduler.zig");
+const gossip_mod = @import("gossip.zig");
+const ip_mod = @import("../network/ip.zig");
 const logger = @import("../lib/log.zig");
 
 const Raft = raft_mod.Raft;
@@ -51,6 +53,8 @@ pub const NodeConfig = struct {
     peers: []const PeerConfig,
     data_dir: []const u8,
     shared_key: ?[32]u8 = null,
+    /// UDP port for gossip protocol. 0 means port + 100 (default: 9800 for port 9700).
+    gossip_port: u16 = 0,
 };
 
 pub const PeerConfig = struct {
@@ -73,6 +77,10 @@ pub const NodeError = error{
 // too-frequent snapshot I/O. at ~1 entry/sec this is ~16 min.
 const snapshot_threshold: u64 = 1000;
 
+/// default gossip port for agents. used when syncing agent membership
+/// into the gossip state machine — agents are expected to bind this port.
+const agent_gossip_port: u16 = 9800;
+
 pub const Node = struct {
     alloc: std.mem.Allocator,
     config: NodeConfig,
@@ -89,6 +97,12 @@ pub const Node = struct {
     // the commit index at the time of the last snapshot.
     // used to decide when a new snapshot is needed.
     last_snapshot_index: LogIndex,
+
+    /// SWIM gossip state machine for scalable agent failure detection.
+    /// null when gossip failed to initialize (node falls back to
+    /// heartbeat-based health checks only).
+    gossip: ?*gossip_mod.Gossip,
+    gossip_port: u16,
 
     pub fn init(alloc: std.mem.Allocator, config: NodeConfig) !Node {
         // open persistent log
@@ -143,6 +157,23 @@ pub const Node = struct {
             return NodeError.InitFailed;
         };
 
+        // initialize gossip for agent failure detection.
+        // non-fatal: if UDP binding fails, gossip is null and the node
+        // falls back to heartbeat-based health checks (30s timeout).
+        const gp: u16 = if (config.gossip_port != 0) config.gossip_port else config.port +| 100;
+        const gossip_inst: ?*gossip_mod.Gossip = blk: {
+            const g = alloc.create(gossip_mod.Gossip) catch break :blk null;
+            g.* = gossip_mod.Gossip.init(alloc, config.id, .{ .ip = .{ 0, 0, 0, 0 }, .port = gp });
+            transport.initUdp(gp) catch {
+                logger.warn("gossip: failed to bind UDP port {}, running without gossip", .{gp});
+                g.deinit();
+                alloc.destroy(g);
+                break :blk null;
+            };
+            logger.info("gossip: initialized on UDP port {}", .{gp});
+            break :blk g;
+        };
+
         // initialize raft — dupes peer_ids internally
         var raft = Raft.init(alloc, config.id, peer_ids, &log) catch {
             return NodeError.InitFailed;
@@ -173,13 +204,19 @@ pub const Node = struct {
             .tick_thread = null,
             .recv_thread = null,
             .last_snapshot_index = initial_snap_index,
+            .gossip = gossip_inst,
+            .gossip_port = gp,
         };
     }
 
     pub fn deinit(self: *Node) void {
         self.stop();
+        if (self.gossip) |g| {
+            g.deinit();
+            self.alloc.destroy(g);
+        }
         self.raft.deinit();
-        self.transport.deinit();
+        self.transport.deinit(); // also calls deinitUdp
         self.state_machine.deinit();
         self.log.deinit();
         // Note: don't free self.raft.peers here - raft.deinit() already frees it
@@ -270,6 +307,11 @@ pub const Node = struct {
                     if (self.tick_count % 300 == 0) self.checkAgentHealth(); // ~30s
                     if (self.tick_count % 100 == 0) self.reconcileOrphanedAssignments(); // ~10s
                     if (self.tick_count % 3600 == 0) self.cleanupDeadAgents(); // ~6 min
+                }
+
+                // gossip tick every 500ms (5 × 100ms raft tick)
+                if (self.gossip != null and self.tick_count % 5 == 0) {
+                    self.tickGossip();
                 }
 
                 // check if we should take a snapshot. this applies to all
@@ -456,7 +498,8 @@ pub const Node = struct {
                 self.handleMessage(received);
                 self.processActions();
             } else {
-                // no connection pending, sleep briefly
+                // no raft connection pending — check for gossip messages
+                self.receiveGossipMessages();
                 std.Thread.sleep(10 * std.time.ns_per_ms);
             }
         }
@@ -557,6 +600,155 @@ pub const Node = struct {
                 }
             },
         }
+    }
+
+    // -- gossip integration --
+
+    /// advance gossip state machine, process actions, and sync membership.
+    /// called every 5th tick (~500ms) with self.mu held.
+    fn tickGossip(self: *Node) void {
+        const g = self.gossip orelse return;
+
+        g.tick() catch return;
+
+        const actions = g.drainActions();
+        defer g.freeActions(actions);
+
+        for (actions) |action| {
+            switch (action) {
+                .send_message => |msg| {
+                    var encode_buf: [512]u8 = undefined;
+                    const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
+                    self.transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
+                },
+                .member_dead => |m| {
+                    if (self.raft.role != .leader) continue;
+                    self.handleGossipMemberDead(m.id);
+                },
+                .member_alive => |m| {
+                    if (self.raft.role != .leader) continue;
+                    self.handleGossipMemberAlive(m.id);
+                },
+                .member_suspect => {},
+            }
+        }
+
+        // sync gossip membership from agents table every ~10s (100ms × 100 ticks ÷ 5 = 20 gossip ticks)
+        if (self.tick_count % 100 == 0 and self.raft.role == .leader) {
+            self.syncGossipMembership();
+        }
+    }
+
+    /// receive and dispatch incoming gossip UDP messages.
+    /// called from recvLoop when no raft messages are pending.
+    fn receiveGossipMessages(self: *Node) void {
+        const g = self.gossip orelse return;
+
+        var buf: [1500]u8 = undefined;
+
+        // drain up to 10 messages per call to avoid starving raft recv
+        var i: u32 = 0;
+        while (i < 10) : (i += 1) {
+            const result = self.transport.receiveGossip(&buf) catch break;
+            const recv = result orelse break;
+
+            const msg = gossip_mod.Gossip.decode(self.alloc, recv.payload) catch continue;
+
+            self.mu.lock();
+            defer self.mu.unlock();
+
+            switch (msg) {
+                .ping => |p| g.handlePing(p) catch {},
+                .ping_ack => |p| g.handlePingAck(p) catch {},
+                .ping_req => |p| g.handlePingReq(p) catch {},
+            }
+
+            // process any actions generated by handling this message
+            const actions = g.drainActions();
+            defer g.freeActions(actions);
+
+            for (actions) |action| {
+                switch (action) {
+                    .send_message => |send| {
+                        var encode_buf: [512]u8 = undefined;
+                        const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
+                        self.transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
+                    },
+                    .member_dead => |m| {
+                        if (self.raft.role == .leader) self.handleGossipMemberDead(m.id);
+                    },
+                    .member_alive => |m| {
+                        if (self.raft.role == .leader) self.handleGossipMemberAlive(m.id);
+                    },
+                    .member_suspect => {},
+                }
+            }
+        }
+    }
+
+    /// mark an agent offline when gossip detects it as dead.
+    /// called with self.mu held, leader only.
+    fn handleGossipMemberDead(self: *Node, member_id: u64) void {
+        const agent_id = agent_registry.findAgentIdByNodeId(self.alloc, &self.state_machine.db, member_id) orelse return;
+        defer self.alloc.free(agent_id);
+
+        logger.info("gossip: member {} dead, marking agent {s} offline", .{ member_id, agent_id });
+
+        var sql_buf: [256]u8 = undefined;
+        const sql = agent_registry.markOfflineSql(&sql_buf, agent_id) catch return;
+        _ = self.raft.propose(sql) catch |e| {
+            logger.warn("gossip: failed to propose offline for agent {s}: {}", .{ agent_id, e });
+            return;
+        };
+
+        var orphan_buf: [256]u8 = undefined;
+        const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent_id) catch return;
+        _ = self.raft.propose(orphan_sql) catch |e| {
+            logger.warn("gossip: failed to orphan assignments for agent {s}: {}", .{ agent_id, e });
+        };
+    }
+
+    /// mark an agent active when gossip detects it as alive again.
+    /// called with self.mu held, leader only.
+    fn handleGossipMemberAlive(self: *Node, member_id: u64) void {
+        const agent_id = agent_registry.findAgentIdByNodeId(self.alloc, &self.state_machine.db, member_id) orelse return;
+        defer self.alloc.free(agent_id);
+
+        var sql_buf: [256]u8 = undefined;
+        const sql = agent_registry.markActiveSql(&sql_buf, agent_id) catch return;
+        _ = self.raft.propose(sql) catch |e| {
+            logger.warn("gossip: failed to propose active for agent {s}: {}", .{ agent_id, e });
+        };
+    }
+
+    /// sync gossip membership from the agents table. adds active agents
+    /// that have a node_id and removes agents no longer in the table.
+    /// called periodically (~10s) on the leader with self.mu held.
+    fn syncGossipMembership(self: *Node) void {
+        const g = self.gossip orelse return;
+
+        const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
+        defer {
+            for (agents) |a| a.deinit(self.alloc);
+            self.alloc.free(agents);
+        }
+
+        for (agents) |agent| {
+            if (!std.mem.eql(u8, agent.status, "active")) continue;
+            const nid = agent.node_id orelse continue;
+            if (nid < 1) continue;
+
+            const ip = ip_mod.parseIp(agent.address) orelse continue;
+            g.addMember(@intCast(nid), .{ .ip = ip, .port = agent_gossip_port }) catch {};
+        }
+    }
+
+    /// return the number of members tracked by gossip (for status endpoints).
+    pub fn gossipMemberCount(self: *Node) usize {
+        self.mu.lock();
+        defer self.mu.unlock();
+        const g = self.gossip orelse return 0;
+        return g.members.count();
     }
 
     /// resolve a network address to a peer's NodeId by matching against

@@ -32,6 +32,8 @@ const ip_mod = @import("../network/ip.zig");
 const setup = @import("../network/setup.zig");
 
 const cluster_config = @import("config.zig");
+const gossip_mod = @import("gossip.zig");
+const transport_mod = @import("transport.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentResources = agent_types.AgentResources;
@@ -83,8 +85,13 @@ pub const Agent = struct {
     region: ?[]const u8 = null,
 
     /// gossip seed addresses returned by the server during registration.
-    /// used to bootstrap the gossip protocol (PR6).
+    /// format: "node_id@address" — used to bootstrap gossip membership.
     gossip_seeds: ?[][]const u8 = null,
+
+    /// SWIM gossip state machine for failure detection.
+    /// initialized after registration if gossip_seeds are available.
+    gossip: ?*gossip_mod.Gossip = null,
+    gossip_transport: ?*transport_mod.Transport = null,
 
     /// number of peers we currently have configured in the wireguard mesh.
     /// compared against the server's peers_count on each heartbeat to detect
@@ -202,9 +209,12 @@ pub const Agent = struct {
             }
         }
 
-        // parse gossip_seeds from the response for future gossip bootstrap (PR6).
-        // format: "gossip_seeds":["addr1","addr2",...]
+        // parse gossip_seeds from the response for gossip bootstrap.
+        // format: "gossip_seeds":["node_id@addr",...]
         self.parseGossipSeeds(resp.body);
+
+        // initialize gossip if we have seeds and a node_id
+        self.initGossip();
 
         if (self.node_id) |nid| {
             log.info("registered as agent {s} (node_id={d}, role={s})", .{ &self.id, nid, self.role.toString() });
@@ -259,6 +269,18 @@ pub const Agent = struct {
         // clean up the peer tracking map
         self.known_peers.deinit();
 
+        // clean up gossip
+        if (self.gossip) |g| {
+            g.deinit();
+            self.alloc.destroy(g);
+            self.gossip = null;
+        }
+        if (self.gossip_transport) |t| {
+            t.deinit();
+            self.alloc.destroy(t);
+            self.gossip_transport = null;
+        }
+
         // clean up gossip seeds
         if (self.gossip_seeds) |seeds| {
             for (seeds) |s| self.alloc.free(s);
@@ -280,10 +302,14 @@ pub const Agent = struct {
             self.doHeartbeat();
             self.reconcile();
 
-            // sleep 5 seconds between cycles
+            // sleep 5 seconds between cycles, ticking gossip every 500ms
             var remaining: u32 = 50; // 50 * 100ms = 5s
             while (remaining > 0 and self.running.load(.acquire)) : (remaining -= 1) {
                 std.Thread.sleep(100 * std.time.ns_per_ms);
+
+                // tick gossip every 500ms and check for incoming messages
+                if (remaining % 5 == 0) self.tickGossipLoop();
+                self.receiveGossipLoop();
             }
         }
     }
@@ -489,6 +515,140 @@ pub const Agent = struct {
         } else {
             seeds.deinit(self.alloc);
         }
+    }
+
+    // -- gossip integration --
+
+    /// default gossip port for agents.
+    const default_gossip_port: u16 = 9800;
+
+    /// initialize gossip after registration if we have seeds and a node_id.
+    /// creates a gossip state machine and UDP transport, then adds each
+    /// seed as a member. non-fatal: if anything fails, agent runs without gossip.
+    fn initGossip(self: *Agent) void {
+        const nid = self.node_id orelse return;
+        const seeds = self.gossip_seeds orelse return;
+        if (seeds.len == 0) return;
+
+        // derive shared key from join token (same KDF as server)
+        const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+        var shared_key: [32]u8 = undefined;
+        HmacSha256.create(&shared_key, "yoq-raft-transport-key", self.token);
+
+        // create transport for UDP gossip (TCP port 0 = OS-assigned, unused)
+        const t = self.alloc.create(transport_mod.Transport) catch return;
+        t.* = transport_mod.Transport.init(self.alloc, 0) catch {
+            self.alloc.destroy(t);
+            return;
+        };
+        t.setLocalNodeId(@as(u64, nid));
+        t.shared_key = shared_key;
+        t.initUdp(default_gossip_port) catch {
+            log.warn("gossip: failed to bind UDP port {}, running without gossip", .{default_gossip_port});
+            t.deinit();
+            self.alloc.destroy(t);
+            return;
+        };
+
+        // create gossip state machine
+        const g = self.alloc.create(gossip_mod.Gossip) catch {
+            t.deinit();
+            self.alloc.destroy(t);
+            return;
+        };
+        g.* = gossip_mod.Gossip.init(self.alloc, @as(u64, nid), .{
+            .ip = self.overlay_ip orelse .{ 0, 0, 0, 0 },
+            .port = default_gossip_port,
+        });
+
+        // add seeds as gossip members. format: "node_id@address"
+        var added: u32 = 0;
+        for (seeds) |seed| {
+            const parsed = parseSeedAddr(seed) orelse continue;
+            g.addMember(parsed.id, .{ .ip = parsed.ip, .port = default_gossip_port }) catch continue;
+            added += 1;
+        }
+
+        if (added == 0) {
+            g.deinit();
+            self.alloc.destroy(g);
+            t.deinit();
+            self.alloc.destroy(t);
+            return;
+        }
+
+        self.gossip = g;
+        self.gossip_transport = t;
+        log.info("gossip: initialized with {d} seeds on UDP port {}", .{ added, default_gossip_port });
+    }
+
+    /// tick gossip state machine and process outgoing actions.
+    fn tickGossipLoop(self: *Agent) void {
+        const g = self.gossip orelse return;
+        const t = self.gossip_transport orelse return;
+
+        g.tick() catch return;
+
+        const actions = g.drainActions();
+        defer g.freeActions(actions);
+
+        for (actions) |action| {
+            switch (action) {
+                .send_message => |msg| {
+                    var encode_buf: [512]u8 = undefined;
+                    const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
+                    t.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
+                },
+                // agents don't act on membership changes — the server leader does
+                .member_dead, .member_alive, .member_suspect => {},
+            }
+        }
+    }
+
+    /// receive and dispatch incoming gossip UDP messages.
+    fn receiveGossipLoop(self: *Agent) void {
+        const g = self.gossip orelse return;
+        const t = self.gossip_transport orelse return;
+
+        var buf: [1500]u8 = undefined;
+
+        // drain up to 5 messages per call
+        var i: u32 = 0;
+        while (i < 5) : (i += 1) {
+            const result = t.receiveGossip(&buf) catch break;
+            const recv = result orelse break;
+
+            const msg = gossip_mod.Gossip.decode(self.alloc, recv.payload) catch continue;
+
+            switch (msg) {
+                .ping => |p| g.handlePing(p) catch {},
+                .ping_ack => |p| g.handlePingAck(p) catch {},
+                .ping_req => |p| g.handlePingReq(p) catch {},
+            }
+
+            // send any response actions immediately
+            const actions = g.drainActions();
+            defer g.freeActions(actions);
+
+            for (actions) |action| {
+                switch (action) {
+                    .send_message => |send| {
+                        var encode_buf: [512]u8 = undefined;
+                        const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
+                        t.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
+                    },
+                    .member_dead, .member_alive, .member_suspect => {},
+                }
+            }
+        }
+    }
+
+    /// parse a gossip seed string "node_id@ip_address" into its components.
+    fn parseSeedAddr(seed: []const u8) ?struct { id: u64, ip: [4]u8 } {
+        const at_pos = std.mem.indexOf(u8, seed, "@") orelse return null;
+        const id = std.fmt.parseInt(u64, seed[0..at_pos], 10) catch return null;
+        const ip = ip_mod.parseIp(seed[at_pos + 1 ..]) orelse return null;
+        return .{ .id = id, .ip = ip };
     }
 
     /// fetch assignments from the server and start containers for any
@@ -895,7 +1055,7 @@ test "parseGossipSeeds with valid seeds" {
     defer agent.local_containers.deinit();
     defer agent.known_peers.deinit();
 
-    agent.parseGossipSeeds("{\"gossip_seeds\":[\"10.0.0.1:9800\",\"10.0.0.2:9800\"]}");
+    agent.parseGossipSeeds("{\"gossip_seeds\":[\"5@10.0.0.1\",\"6@10.0.0.2\"]}");
     defer {
         if (agent.gossip_seeds) |seeds| {
             for (seeds) |s| alloc.free(s);
@@ -905,8 +1065,8 @@ test "parseGossipSeeds with valid seeds" {
 
     try std.testing.expect(agent.gossip_seeds != null);
     try std.testing.expectEqual(@as(usize, 2), agent.gossip_seeds.?.len);
-    try std.testing.expectEqualStrings("10.0.0.1:9800", agent.gossip_seeds.?[0]);
-    try std.testing.expectEqualStrings("10.0.0.2:9800", agent.gossip_seeds.?[1]);
+    try std.testing.expectEqualStrings("5@10.0.0.1", agent.gossip_seeds.?[0]);
+    try std.testing.expectEqualStrings("6@10.0.0.2", agent.gossip_seeds.?[1]);
 }
 
 test "parseGossipSeeds with empty array" {
@@ -929,4 +1089,28 @@ test "parseGossipSeeds with no seeds key" {
     agent.parseGossipSeeds("{\"id\":\"abc123\"}");
 
     try std.testing.expect(agent.gossip_seeds == null);
+}
+
+test "parseSeedAddr with valid seed" {
+    const result = Agent.parseSeedAddr("5@10.0.0.1");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u64, 5), result.?.id);
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, result.?.ip);
+}
+
+test "parseSeedAddr with invalid format" {
+    try std.testing.expect(Agent.parseSeedAddr("no-at-sign") == null);
+    try std.testing.expect(Agent.parseSeedAddr("abc@10.0.0.1") == null);
+    try std.testing.expect(Agent.parseSeedAddr("5@not-an-ip") == null);
+    try std.testing.expect(Agent.parseSeedAddr("") == null);
+}
+
+test "Agent gossip fields default to null" {
+    const alloc = std.testing.allocator;
+    var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
+    defer agent.local_containers.deinit();
+    defer agent.known_peers.deinit();
+
+    try std.testing.expect(agent.gossip == null);
+    try std.testing.expect(agent.gossip_transport == null);
 }

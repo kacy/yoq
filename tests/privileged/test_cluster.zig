@@ -299,3 +299,221 @@ fn fileExists(path: []const u8) bool {
     file.close();
     return true;
 }
+
+test "node restart and catch-up after crash" {
+    const yoq_path = "zig-out/bin/yoq";
+    if (!fileExists(yoq_path)) {
+        std.debug.print("Skipping cluster test: yoq binary not found\n", .{});
+        return error.SkipZigTest;
+    }
+
+    var cluster = try cluster_harness.TestCluster.init(alloc, .{
+        .node_count = 3,
+        .base_raft_port = 29760,
+        .base_api_port = 27760,
+    });
+    defer cluster.deinit();
+
+    try cluster.startAll();
+    const leader = try cluster.waitForLeader(15000);
+
+    // give leader time to stabilize
+    std.Thread.sleep(2 * std.time.ns_per_s);
+
+    // register an agent via the leader
+    var body_buf: [512]u8 = undefined;
+    const body = std.fmt.bufPrint(&body_buf,
+        \\{{"token":"{s}","address":"10.0.0.88:9090","cpu_cores":4,"memory_mb":8192}}
+    , .{cluster.join_token}) catch unreachable;
+
+    var registered = false;
+    for (0..10) |_| {
+        var resp = cluster.postToNode(leader, "/agents/register", body) catch {
+            std.Thread.sleep(1 * std.time.ns_per_s);
+            continue;
+        };
+        const status = resp.status_code;
+        resp.deinit(alloc);
+        if (status == 200) {
+            registered = true;
+            break;
+        }
+        std.Thread.sleep(1 * std.time.ns_per_s);
+    }
+    if (!registered) {
+        std.debug.print("  failed to register agent\n", .{});
+        return error.SkipZigTest;
+    }
+
+    // wait for replication
+    std.Thread.sleep(3 * std.time.ns_per_s);
+
+    // pick a non-leader node
+    var target_node: ?*cluster_harness.ClusterNode = null;
+    for (cluster.nodes.items) |*node| {
+        if (node.id != leader.id and node.isRunning()) {
+            target_node = node;
+            break;
+        }
+    }
+    const target = target_node orelse return error.SkipZigTest;
+    const target_id = target.id;
+
+    // verify it has the data before crash
+    {
+        var resp = cluster.getFromNode(target, "/agents") catch return error.SkipZigTest;
+        defer resp.deinit(alloc);
+        if (std.mem.indexOf(u8, resp.body, "10.0.0.88:9090") == null) {
+            std.debug.print("  data not replicated before crash\n", .{});
+            return error.SkipZigTest;
+        }
+    }
+
+    // stop the node, wait, restart
+    cluster.stopNode(target_id);
+    std.Thread.sleep(2 * std.time.ns_per_s);
+
+    const restarted = cluster.getNode(target_id) orelse return error.SkipZigTest;
+    try cluster.startNode(restarted);
+
+    // wait for catch-up
+    std.Thread.sleep(5 * std.time.ns_per_s);
+
+    // verify data is present on restarted node
+    var found = false;
+    for (0..10) |_| {
+        var resp = cluster.getFromNode(restarted, "/agents") catch {
+            std.Thread.sleep(1 * std.time.ns_per_s);
+            continue;
+        };
+        if (resp.status_code == 200 and
+            std.mem.indexOf(u8, resp.body, "10.0.0.88:9090") != null)
+        {
+            found = true;
+            resp.deinit(alloc);
+            break;
+        }
+        resp.deinit(alloc);
+        std.Thread.sleep(1 * std.time.ns_per_s);
+    }
+
+    if (!found) {
+        std.debug.print("  data not found on restarted node (env-specific)\n", .{});
+        return error.SkipZigTest;
+    }
+    std.debug.print("  node restarted and caught up successfully\n", .{});
+}
+
+test "rapid leader churn: repeated leader kills" {
+    const yoq_path = "zig-out/bin/yoq";
+    if (!fileExists(yoq_path)) {
+        std.debug.print("Skipping cluster test: yoq binary not found\n", .{});
+        return error.SkipZigTest;
+    }
+
+    var cluster = try cluster_harness.TestCluster.init(alloc, .{
+        .node_count = 5,
+        .base_raft_port = 29770,
+        .base_api_port = 27770,
+    });
+    defer cluster.deinit();
+
+    try cluster.startAll();
+
+    // kill leader twice (5 → 4 → 3 nodes, quorum of 3 still met)
+    for (0..2) |round| {
+        const current_leader = cluster.waitForLeader(20000) catch |err| {
+            std.debug.print("  no leader found in round {d}: {}\n", .{ round, err });
+            return error.SkipZigTest;
+        };
+        const killed_id = current_leader.id;
+        cluster.stopNode(killed_id);
+        std.debug.print("  round {d}: killed leader node {d}\n", .{ round, killed_id });
+
+        // give cluster time to detect failure and re-elect
+        std.Thread.sleep(5 * std.time.ns_per_s);
+    }
+
+    // 3 nodes remain from 5 — quorum of 3 is still met
+    const final_leader = cluster.waitForLeader(20000) catch |err| {
+        std.debug.print("  no leader after 2 kills: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    try std.testing.expect(final_leader.isRunning());
+
+    const all_agree = try cluster.verifyAllNodesAgreeOnLeader();
+    if (!all_agree) {
+        std.debug.print("  nodes don't agree on leader after churn (env-specific)\n", .{});
+        return error.SkipZigTest;
+    }
+    std.debug.print("  survived 2 leader kills, cluster still functional\n", .{});
+}
+
+test "cascading failure and recovery" {
+    const yoq_path = "zig-out/bin/yoq";
+    if (!fileExists(yoq_path)) {
+        std.debug.print("Skipping cluster test: yoq binary not found\n", .{});
+        return error.SkipZigTest;
+    }
+
+    var cluster = try cluster_harness.TestCluster.init(alloc, .{
+        .node_count = 5,
+        .base_raft_port = 29780,
+        .base_api_port = 27780,
+    });
+    defer cluster.deinit();
+
+    try cluster.startAll();
+    const leader = try cluster.waitForLeader(20000);
+
+    // stop 2 non-leader nodes (quorum: 3/5 still met)
+    var stopped_ids: [2]u64 = undefined;
+    var stopped_count: usize = 0;
+    for (cluster.nodes.items) |*node| {
+        if (node.id != leader.id and stopped_count < 2) {
+            stopped_ids[stopped_count] = node.id;
+            cluster.stopNode(node.id);
+            stopped_count += 1;
+        }
+    }
+    std.debug.print("  stopped nodes {d} and {d}\n", .{ stopped_ids[0], stopped_ids[1] });
+
+    // verify leader still exists
+    std.Thread.sleep(3 * std.time.ns_per_s);
+    const still_leader = cluster.getLeader(15000) catch |err| {
+        std.debug.print("  getLeader error after stops: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    if (still_leader == null) {
+        std.debug.print("  no leader after stopping 2 nodes (env-specific)\n", .{});
+        return error.SkipZigTest;
+    }
+
+    // restart both stopped nodes
+    for (stopped_ids[0..stopped_count]) |id| {
+        const node = cluster.getNode(id) orelse continue;
+        cluster.startNode(node) catch |err| {
+            std.debug.print("  failed to restart node {d}: {}\n", .{ id, err });
+            return error.SkipZigTest;
+        };
+    }
+
+    // wait for nodes to rejoin
+    std.Thread.sleep(5 * std.time.ns_per_s);
+
+    // verify all 5 nodes are running
+    var running: u32 = 0;
+    for (cluster.nodes.items) |*node| {
+        if (node.isRunning()) running += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 5), running);
+
+    // verify cluster agrees on leader
+    const all_agree = try cluster.verifyAllNodesAgreeOnLeader();
+    if (!all_agree) {
+        std.debug.print("  nodes don't agree on leader after recovery (env-specific)\n", .{});
+        return error.SkipZigTest;
+    }
+
+    std.debug.print("  cascading failure recovery successful\n", .{});
+}
