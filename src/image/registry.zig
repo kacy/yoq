@@ -63,6 +63,9 @@ const max_auth_response_size: usize = 64 * 1024;
 /// unbounded response. (streaming download is deferred — see PR 3.)
 const max_blob_size: usize = 512 * 1024 * 1024;
 
+/// max concurrent layer downloads — each thread creates its own HTTP client
+const max_parallel_downloads = 4;
+
 /// bearer token from the registry's auth service
 const Token = struct {
     value: []const u8,
@@ -165,7 +168,9 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
         }
     }
 
-    // step 5: download all layer blobs (stored in blob store)
+    // step 5: download all layer blobs in parallel.
+    // each thread creates its own HTTP client since TLS connections can't be shared.
+    // layers are independent — each writes to a unique blob in the content store.
     var layer_digests: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
         for (layer_digests.items) |d| alloc.free(d);
@@ -173,22 +178,84 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
     }
     var total_size: u64 = 0;
 
-    for (manifest.layers) |l| {
-        downloadLayerBlob(alloc, &client, image_ref.host, repository, l.digest, token) catch |e|
-            return switch (e) {
-                error.BlobNotFound => RegistryError.BlobNotFound,
-                error.NetworkError => RegistryError.NetworkError,
-                error.ResponseTooLarge => RegistryError.ResponseTooLarge,
-                error.DigestMismatch => RegistryError.DigestMismatch,
-            };
+    const layer_count = manifest.layers.len;
+    if (layer_count <= 1) {
+        // single layer — no point spawning a thread
+        for (manifest.layers) |l| {
+            downloadLayerBlob(alloc, &client, image_ref.host, repository, l.digest, token) catch |e|
+                return switch (e) {
+                    error.BlobNotFound => RegistryError.BlobNotFound,
+                    error.NetworkError => RegistryError.NetworkError,
+                    error.ResponseTooLarge => RegistryError.ResponseTooLarge,
+                    error.DigestMismatch => RegistryError.DigestMismatch,
+                };
+            total_size += l.size;
+        }
+    } else {
+        // parallel download in batches of max_parallel_downloads
+        var err_flag = std.atomic.Value(bool).init(false);
+        var batch_start: usize = 0;
 
+        while (batch_start < layer_count) {
+            const batch_end = @min(batch_start + max_parallel_downloads, layer_count);
+            const batch_size = batch_end - batch_start;
+
+            var threads: [max_parallel_downloads]?std.Thread = .{null} ** max_parallel_downloads;
+            var thread_errors: [max_parallel_downloads]?RegistryError = .{null} ** max_parallel_downloads;
+
+            // spawn download threads for this batch
+            for (0..batch_size) |i| {
+                const layer = manifest.layers[batch_start + i];
+                threads[i] = std.Thread.spawn(.{}, downloadLayerWorker, .{
+                    alloc,
+                    image_ref.host,
+                    repository,
+                    layer.digest,
+                    token,
+                    &err_flag,
+                    &thread_errors[i],
+                }) catch null; // fallback to sequential below
+            }
+
+            // join threads and handle spawn failures
+            for (0..batch_size) |i| {
+                if (threads[i]) |t| {
+                    t.join();
+                } else {
+                    // thread spawn failed — download this layer sequentially
+                    const layer = manifest.layers[batch_start + i];
+                    downloadLayerBlob(alloc, &client, image_ref.host, repository, layer.digest, token) catch |e|
+                        return switch (e) {
+                            error.BlobNotFound => RegistryError.BlobNotFound,
+                            error.NetworkError => RegistryError.NetworkError,
+                            error.ResponseTooLarge => RegistryError.ResponseTooLarge,
+                            error.DigestMismatch => RegistryError.DigestMismatch,
+                        };
+                }
+            }
+
+            // check for thread errors (return the first one found)
+            for (thread_errors[0..batch_size]) |maybe_err| {
+                if (maybe_err) |e| return e;
+            }
+
+            batch_start = batch_end;
+        }
+
+        // tally sizes
+        for (manifest.layers) |l| {
+            total_size += l.size;
+        }
+    }
+
+    // build the layer digest list (cheap string copies, no I/O)
+    for (manifest.layers) |l| {
         const digest_copy = alloc.dupe(u8, l.digest) catch
             return RegistryError.NetworkError;
         layer_digests.append(alloc, digest_copy) catch {
             alloc.free(digest_copy);
             return RegistryError.NetworkError;
         };
-        total_size += l.size;
     }
 
     return PullResult{
@@ -1005,6 +1072,34 @@ fn fetchBlobFromUrl(
     const raw_body = aw.writer.buffer[0..aw.writer.end];
     if (raw_body.len > max_blob_size) return error.ResponseTooLarge;
     return alloc.dupe(u8, raw_body) catch return error.NetworkError;
+}
+
+/// worker function for parallel layer downloads.
+/// each thread creates its own HTTP client since TLS connections can't be shared.
+fn downloadLayerWorker(
+    alloc: std.mem.Allocator,
+    host: []const u8,
+    repository: []const u8,
+    digest: []const u8,
+    token: Token,
+    err_flag: *std.atomic.Value(bool),
+    thread_err: *?RegistryError,
+) void {
+    // skip if another thread already failed
+    if (err_flag.load(.acquire)) return;
+
+    var thread_client: std.http.Client = .{ .allocator = alloc };
+    defer thread_client.deinit();
+
+    downloadLayerBlob(alloc, &thread_client, host, repository, digest, token) catch |e| {
+        thread_err.* = switch (e) {
+            error.BlobNotFound => RegistryError.BlobNotFound,
+            error.NetworkError => RegistryError.NetworkError,
+            error.ResponseTooLarge => RegistryError.ResponseTooLarge,
+            error.DigestMismatch => RegistryError.DigestMismatch,
+        };
+        err_flag.store(true, .release);
+    };
 }
 
 /// download a layer blob and store it in the content-addressable blob store.
