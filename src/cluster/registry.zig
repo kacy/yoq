@@ -149,6 +149,36 @@ pub fn markOfflineSql(buf: []u8, id: []const u8) ![]const u8 {
     );
 }
 
+/// generate SQL to mark an offline agent as active (used by gossip member_alive).
+pub fn markActiveSql(buf: []u8, id: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+
+    return std.fmt.bufPrint(
+        buf,
+        "UPDATE agents SET status = 'active' WHERE id = '{s}' AND status = 'offline';",
+        .{id_esc},
+    );
+}
+
+/// find an agent's string ID by its numeric node_id.
+/// returns null if no agent has that node_id.
+pub fn findAgentIdByNodeId(alloc: Allocator, db: *sqlite.Db, node_id: u64) ?[]const u8 {
+    const Row = struct { id: sqlite.Text };
+
+    var stmt = db.prepare(
+        "SELECT id FROM agents WHERE node_id = ? LIMIT 1;",
+    ) catch return null;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(Row, .{@as(i64, @intCast(node_id))}) catch return null;
+
+    if (iter.nextAlloc(alloc, .{}) catch null) |row| {
+        return row.id.data;
+    }
+    return null;
+}
+
 /// generate SQL to remove an agent.
 pub fn removeSql(buf: []u8, id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
@@ -245,20 +275,20 @@ pub fn assignNodeId(db: *sqlite.Db) NodeIdError!u16 {
 
 // -- gossip seeds --
 
-/// return up to `count` active agent addresses as gossip seeds.
-/// seeds are agents with role 'agent' or 'both' that are currently active.
-/// the caller should include these in registration responses so new agents
-/// can bootstrap gossip protocol membership.
+/// return up to `count` active agent seeds as "node_id@address" strings.
+/// seeds are agents with role 'agent' or 'both' that are currently active
+/// and have a node_id assigned. the caller should include these in
+/// registration responses so new agents can bootstrap gossip membership.
 pub fn getGossipSeeds(
     alloc: Allocator,
     db: *sqlite.Db,
     count: u32,
 ) ![][]const u8 {
     _ = count; // fixed at 5 — simple enough for now
-    const Row = struct { address: sqlite.Text };
+    const Row = struct { node_id: i64, address: sqlite.Text };
 
     var stmt = db.prepare(
-        "SELECT address FROM agents WHERE status = 'active' AND (role = 'agent' OR role = 'both' OR role IS NULL) LIMIT 5;",
+        "SELECT node_id, address FROM agents WHERE status = 'active' AND node_id IS NOT NULL AND (role = 'agent' OR role = 'both' OR role IS NULL) LIMIT 5;",
     ) catch return &[_][]const u8{};
     defer stmt.deinit();
 
@@ -271,9 +301,15 @@ pub fn getGossipSeeds(
     var iter = stmt.iterator(Row, .{}) catch return &[_][]const u8{};
 
     while (iter.nextAlloc(alloc, .{}) catch null) |row| {
-        // nextAlloc already allocates the text data, so dupe is needed
-        // to avoid using memory owned by the iterator
-        try results.append(alloc, row.address.data);
+        defer alloc.free(row.address.data);
+        // format as "node_id@address" so agents know the gossip member ID
+        var buf: [256]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}@{s}", .{ row.node_id, row.address.data }) catch continue;
+        const dupe = alloc.dupe(u8, s) catch continue;
+        results.append(alloc, dupe) catch {
+            alloc.free(dupe);
+            continue;
+        };
     }
 
     return results.toOwnedSlice(alloc) catch return &[_][]const u8{};
