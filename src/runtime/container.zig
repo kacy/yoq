@@ -556,8 +556,14 @@ fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
                 };
             }
         } else {
-            // bind mounts with a local rootfs — mount into rootfs before pivot
+            // bind mounts with a local rootfs — mount into rootfs before pivot.
+            // skip if rootfs is empty (shouldn't happen, but guard against it).
+            if (ctx.rootfs.len == 0 and ctx.mounts.len > 0) {
+                log.err("container: bind mounts specified but no rootfs configured", .{});
+                setup_failed = true;
+            }
             for (ctx.mounts) |m| {
+                if (setup_failed) break;
                 if (!m.isSourceAllowed()) return @intFromEnum(ExitCode.permission_denied);
                 if (!isCanonicalBindSource(m.source)) return @intFromEnum(ExitCode.bind_mount_denied);
                 filesystem.bindMount(ctx.rootfs, m.source, m.target, m.read_only) catch |e| {
