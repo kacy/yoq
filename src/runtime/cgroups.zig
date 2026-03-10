@@ -190,7 +190,7 @@ pub const Cgroup = struct {
                 log.err("cgroup: failed to format memory.max for {s}", .{self.path()});
                 return CgroupError.WriteFailed;
             };
-            self.writeFile("memory.max", mem_max_str) catch |e| {
+            self.writeAndVerify("memory.max", mem_max_str) catch |e| {
                 log.err("cgroup: failed to set memory.max for {s}: {s}", .{ self.path(), @errorName(e) });
                 return CgroupError.WriteFailed;
             };
@@ -214,7 +214,7 @@ pub const Cgroup = struct {
                 log.err("cgroup: failed to format pids.max for {s}", .{self.path()});
                 return CgroupError.WriteFailed;
             };
-            self.writeFile("pids.max", pids_str) catch |e| {
+            self.writeAndVerify("pids.max", pids_str) catch |e| {
                 log.err("cgroup: failed to set pids.max for {s}: {s}", .{ self.path(), @errorName(e) });
                 return CgroupError.WriteFailed;
             };
@@ -411,6 +411,21 @@ pub const Cgroup = struct {
     }
 
     // -- internal helpers --
+
+    /// write a value to a cgroup file and verify the kernel accepted it.
+    /// logs a warning if the read-back value differs (e.g., kernel clamped
+    /// to a system maximum). returns the write error if writing fails.
+    fn writeAndVerify(self: *const Cgroup, filename: []const u8, value: []const u8) !void {
+        try self.writeFile(filename, value);
+
+        var verify_buf: [64]u8 = undefined;
+        const actual = self.readFile(filename, &verify_buf) catch return; // read-back failure is non-fatal
+        if (!std.mem.eql(u8, actual, value)) {
+            log.warn("cgroup: {s} for {s}: wrote '{s}', kernel applied '{s}'", .{
+                filename, self.path(), value, actual,
+            });
+        }
+    }
 
     fn writeFile(self: *const Cgroup, filename: []const u8, value: []const u8) !void {
         var path_buf: [512]u8 = undefined;
