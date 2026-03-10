@@ -135,38 +135,39 @@ pub fn deinitTestDb() void {
 }
 
 /// get the shared database connection, opening it on first call.
-/// caller must call releaseDb() when done (via defer).
+/// uses the mutex only for lazy initialization. once initialized,
+/// returns the pointer without holding the lock — SQLite is compiled
+/// with SQLITE_THREADSAFE=1 (serialized mode) and WAL + busy_timeout
+/// handle concurrent access at the database level.
 fn getDb() StoreError!*sqlite.Db {
+    // fast path: db already initialized, no lock needed
+    if (global_db != null) return &global_db.?;
+
+    // slow path: initialize under lock
     db_mutex.lock();
+    defer db_mutex.unlock();
 
-    if (global_db == null) {
-        var path_buf: [paths.max_path]u8 = undefined;
-        const path = schema.defaultDbPath(&path_buf) catch {
-            db_mutex.unlock();
-            return StoreError.DbOpenFailed;
-        };
-        global_db = sqlite.Db.init(.{
-            .mode = .{ .File = path },
-            .open_flags = .{ .write = true, .create = true },
-        }) catch {
-            db_mutex.unlock();
-            return StoreError.DbOpenFailed;
-        };
+    // double-check after acquiring lock
+    if (global_db != null) return &global_db.?;
 
-        schema.init(&global_db.?) catch {
-            global_db.?.deinit();
-            global_db = null;
-            db_mutex.unlock();
-            return StoreError.DbOpenFailed;
-        };
-    }
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = schema.defaultDbPath(&path_buf) catch {
+        return StoreError.DbOpenFailed;
+    };
+    global_db = sqlite.Db.init(.{
+        .mode = .{ .File = path },
+        .open_flags = .{ .write = true, .create = true },
+    }) catch {
+        return StoreError.DbOpenFailed;
+    };
+
+    schema.init(&global_db.?) catch {
+        global_db.?.deinit();
+        global_db = null;
+        return StoreError.DbOpenFailed;
+    };
 
     return &global_db.?;
-}
-
-/// release the database mutex. call this via defer after getDb().
-fn releaseDb() void {
-    db_mutex.unlock();
 }
 
 /// close the shared database connection. call on clean shutdown.
@@ -200,7 +201,7 @@ pub fn openDb() StoreError!sqlite.Db {
 /// save (insert or replace) a container record
 pub fn save(record: ContainerRecord) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     const pid: ?i64 = if (record.pid) |p| @intCast(p) else null;
     const exit_code: ?i64 = if (record.exit_code) |e| @intCast(e) else null;
@@ -229,7 +230,7 @@ pub fn save(record: ContainerRecord) StoreError!void {
 /// caller owns the returned strings (allocated with alloc).
 pub fn load(alloc: std.mem.Allocator, id: []const u8) StoreError!ContainerRecord {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         ContainerRow,
@@ -247,7 +248,7 @@ pub fn load(alloc: std.mem.Allocator, id: []const u8) StoreError!ContainerRecord
 /// caller owns the returned strings.
 pub fn findByHostname(alloc: std.mem.Allocator, hostname: []const u8) StoreError!?ContainerRecord {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         ContainerRow,
@@ -264,7 +265,7 @@ pub fn findByHostname(alloc: std.mem.Allocator, hostname: []const u8) StoreError
 /// delete a container record
 pub fn remove(id: []const u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec("DELETE FROM containers WHERE id = ?;", .{}, .{id}) catch
         return StoreError.WriteFailed;
@@ -273,7 +274,7 @@ pub fn remove(id: []const u8) StoreError!void {
 /// list all container IDs, newest first
 pub fn listIds(alloc: std.mem.Allocator) StoreError!std.ArrayList([]const u8) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var ids: std.ArrayList([]const u8) = .empty;
 
@@ -293,7 +294,7 @@ pub fn listIds(alloc: std.mem.Allocator) StoreError!std.ArrayList([]const u8) {
 /// update status and process info for a container
 pub fn updateStatus(id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     const pid_val: ?i64 = if (pid) |p| @intCast(p) else null;
     const exit_val: ?i64 = if (exit_code) |e| @intCast(e) else null;
@@ -308,7 +309,7 @@ pub fn updateStatus(id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u
 /// update network info for a container
 pub fn updateNetwork(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "UPDATE containers SET ip_address = ?, veth_host = ? WHERE id = ?;",
@@ -323,7 +324,7 @@ pub fn updateNetwork(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]cons
 /// caller owns the returned list and strings.
 pub fn listAppContainerIds(alloc: std.mem.Allocator, app_name: []const u8) StoreError!std.ArrayList([]const u8) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var ids: std.ArrayList([]const u8) = .empty;
 
@@ -343,7 +344,7 @@ pub fn listAppContainerIds(alloc: std.mem.Allocator, app_name: []const u8) Store
 /// returns null if not found. caller owns the returned record.
 pub fn findAppContainer(alloc: std.mem.Allocator, app_name: []const u8, hostname: []const u8) StoreError!?ContainerRecord {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         ContainerRow,
@@ -362,7 +363,7 @@ pub fn findAppContainer(alloc: std.mem.Allocator, app_name: []const u8, hostname
 /// caller owns the returned list and records.
 pub fn listAll(alloc: std.mem.Allocator) StoreError!std.ArrayList(ContainerRecord) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var records: std.ArrayList(ContainerRecord) = .empty;
 
@@ -428,7 +429,7 @@ fn imageRowToRecord(row: ImageRow) ImageRecord {
 /// save an image record
 pub fn saveImage(record: ImageRecord) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "INSERT OR REPLACE INTO images (id, repository, tag, manifest_digest, config_digest, total_size, created_at)" ++
@@ -450,7 +451,7 @@ pub fn saveImage(record: ImageRecord) StoreError!void {
 /// caller owns the returned strings.
 pub fn loadImage(alloc: std.mem.Allocator, id: []const u8) StoreError!ImageRecord {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         ImageRow,
@@ -468,7 +469,7 @@ pub fn loadImage(alloc: std.mem.Allocator, id: []const u8) StoreError!ImageRecor
 /// caller owns the returned strings.
 pub fn findImage(alloc: std.mem.Allocator, repository: []const u8, tag: []const u8) StoreError!ImageRecord {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         ImageRow,
@@ -486,7 +487,7 @@ pub fn findImage(alloc: std.mem.Allocator, repository: []const u8, tag: []const 
 /// caller owns the returned list and records.
 pub fn listImages(alloc: std.mem.Allocator) StoreError!std.ArrayList(ImageRecord) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var images: std.ArrayList(ImageRecord) = .empty;
 
@@ -507,7 +508,7 @@ pub fn listImages(alloc: std.mem.Allocator) StoreError!std.ArrayList(ImageRecord
 /// delete an image record
 pub fn removeImage(id: []const u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     // First check if the image exists (SELECT 1 doesn't need allocator)
     const exists = db.one(
@@ -563,7 +564,7 @@ fn cacheRowToEntry(row: BuildCacheRow) BuildCacheEntry {
 /// returns null if no cached result exists.
 pub fn lookupBuildCache(alloc: std.mem.Allocator, cache_key: []const u8) StoreError!?BuildCacheEntry {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         BuildCacheRow,
@@ -580,7 +581,7 @@ pub fn lookupBuildCache(alloc: std.mem.Allocator, cache_key: []const u8) StoreEr
 /// store a build cache entry. replaces existing entry with the same key.
 pub fn storeBuildCache(entry: BuildCacheEntry) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "INSERT OR REPLACE INTO build_cache (cache_key, layer_digest, diff_id, layer_size, created_at)" ++
@@ -600,7 +601,7 @@ pub fn storeBuildCache(entry: BuildCacheEntry) StoreError!void {
 /// returns layer_digest and diff_id values. caller owns the returned list.
 pub fn listBuildCacheDigests(alloc: std.mem.Allocator) StoreError!std.ArrayList([]const u8) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var digests = std.ArrayList([]const u8).empty;
     errdefer {
@@ -637,7 +638,7 @@ pub fn listBuildCacheDigests(alloc: std.mem.Allocator) StoreError!std.ArrayList(
 /// if the same name+container_id already exists, it is replaced.
 pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_address: []const u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "INSERT OR REPLACE INTO service_names (name, container_id, ip_address, registered_at)" ++
@@ -651,7 +652,7 @@ pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_addres
 /// called on container stop/rm.
 pub fn unregisterServiceName(container_id: []const u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "DELETE FROM service_names WHERE container_id = ?;",
@@ -669,7 +670,7 @@ const ServiceNameRow = struct {
 /// returns all IPs registered under this name (supports multiple containers).
 pub fn lookupServiceNames(alloc: std.mem.Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var ips: std.ArrayList([]const u8) = .empty;
 
@@ -714,7 +715,7 @@ const NetworkPolicyRow = struct {
 /// uses INSERT OR REPLACE to handle the unique (source, target) constraint.
 pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "INSERT OR REPLACE INTO network_policies (source_service, target_service, action, created_at)" ++
@@ -727,7 +728,7 @@ pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const 
 /// remove a network policy rule.
 pub fn removeNetworkPolicy(source: []const u8, target: []const u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "DELETE FROM network_policies WHERE source_service = ? AND target_service = ?;",
@@ -739,7 +740,7 @@ pub fn removeNetworkPolicy(source: []const u8, target: []const u8) StoreError!vo
 /// list all network policy rules.
 pub fn listNetworkPolicies(alloc: std.mem.Allocator) StoreError!std.ArrayList(NetworkPolicyRecord) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
 
@@ -764,7 +765,7 @@ pub fn listNetworkPolicies(alloc: std.mem.Allocator) StoreError!std.ArrayList(Ne
 /// get all policies for a specific source service.
 pub fn getServicePolicies(alloc: std.mem.Allocator, source: []const u8) StoreError!std.ArrayList(NetworkPolicyRecord) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
 
@@ -836,7 +837,7 @@ fn deploymentRowToRecord(row: DeploymentRow) DeploymentRecord {
 /// save a new deployment record.
 pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, message, created_at)" ++
@@ -858,7 +859,7 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 /// caller owns the returned strings.
 pub fn getDeployment(alloc: std.mem.Allocator, id: []const u8) StoreError!DeploymentRecord {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         DeploymentRow,
@@ -876,7 +877,7 @@ pub fn getDeployment(alloc: std.mem.Allocator, id: []const u8) StoreError!Deploy
 /// caller owns the returned list and records.
 pub fn listDeployments(alloc: std.mem.Allocator, service_name: []const u8) StoreError!std.ArrayList(DeploymentRecord) {
     const db = try getDb();
-    defer releaseDb();
+
 
     var deployments: std.ArrayList(DeploymentRecord) = .empty;
 
@@ -897,7 +898,7 @@ pub fn listDeployments(alloc: std.mem.Allocator, service_name: []const u8) Store
 /// update a deployment's status and optional message.
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try getDb();
-    defer releaseDb();
+
 
     db.exec(
         "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
@@ -910,7 +911,7 @@ pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]co
 /// caller owns the returned record.
 pub fn getLatestDeployment(alloc: std.mem.Allocator, service_name: []const u8) StoreError!DeploymentRecord {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         DeploymentRow,
@@ -929,7 +930,7 @@ pub fn getLatestDeployment(alloc: std.mem.Allocator, service_name: []const u8) S
 /// caller owns the returned record.
 pub fn getLastSuccessfulDeployment(alloc: std.mem.Allocator, service_name: []const u8) StoreError!DeploymentRecord {
     const db = try getDb();
-    defer releaseDb();
+
 
     const row = (db.oneAlloc(
         DeploymentRow,
