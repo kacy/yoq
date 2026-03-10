@@ -523,7 +523,17 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     }
 }
 
+/// maximum size for a single file extracted from a tar layer (10 GB).
+/// protects against malicious layers with oversized file headers that
+/// would exhaust disk space.
+const max_file_size: u64 = 10 * 1024 * 1024 * 1024;
+
 fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: std.fs.File) !void {
+    if (entry.size > max_file_size) {
+        log.warn("tar entry exceeds max file size ({d} bytes): skipping", .{entry.size});
+        return error.FileTooBig;
+    }
+
     var remaining = entry.size;
     var buf: [8192]u8 = undefined;
 

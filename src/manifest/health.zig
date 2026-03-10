@@ -42,10 +42,18 @@ pub const ServiceHealth = struct {
 
     /// the service name, container ID, and container IP, used for checks
     /// and DNS registration/unregistration.
-    service_name: []const u8,
+    /// name is copied into a fixed buffer to avoid lifetime dependency
+    /// on the manifest memory — if the manifest is freed/reloaded while
+    /// health checks run, a borrowed pointer would become use-after-free.
+    name_buf: [64]u8 = undefined,
+    name_len: u8 = 0,
     container_id: [12]u8,
     container_ip: [4]u8,
     config: spec.HealthCheck,
+
+    pub fn serviceName(self: *const ServiceHealth) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
 };
 
 // -- health state registry --
@@ -71,21 +79,26 @@ pub fn registerService(
     health_mutex.lock();
     defer health_mutex.unlock();
 
+    // copy service name into the fixed buffer
+    const len = @min(service_name.len, 64);
+
     // find an empty slot
     for (&health_states) |*slot| {
         if (slot.* == null) {
-            slot.* = .{
+            var entry = ServiceHealth{
                 .status = .starting,
                 .consecutive_failures = 0,
                 .consecutive_successes = 0,
                 .last_check = null,
                 .last_error = null,
                 .started_at = std.time.timestamp(),
-                .service_name = service_name,
                 .container_id = container_id,
                 .container_ip = container_ip,
                 .config = config,
+                .name_len = @intCast(len),
             };
+            @memcpy(entry.name_buf[0..len], service_name[0..len]);
+            slot.* = entry;
             return;
         }
     }
@@ -101,7 +114,7 @@ pub fn unregisterService(service_name: []const u8) void {
 
     for (&health_states) |*slot| {
         if (slot.*) |entry| {
-            if (std.mem.eql(u8, entry.service_name, service_name)) {
+            if (std.mem.eql(u8, entry.serviceName(), service_name)) {
                 slot.* = null;
                 return;
             }
@@ -117,7 +130,7 @@ pub fn getStatus(service_name: []const u8) ?HealthStatus {
 
     for (health_states) |slot| {
         if (slot) |entry| {
-            if (std.mem.eql(u8, entry.service_name, service_name)) {
+            if (std.mem.eql(u8, entry.serviceName(), service_name)) {
                 return entry.status;
             }
         }
@@ -133,7 +146,7 @@ pub fn getServiceHealth(service_name: []const u8) ?ServiceHealth {
 
     for (health_states) |slot| {
         if (slot) |entry| {
-            if (std.mem.eql(u8, entry.service_name, service_name)) {
+            if (std.mem.eql(u8, entry.serviceName(), service_name)) {
                 return entry;
             }
         }
@@ -207,7 +220,7 @@ fn checkerLoop() void {
                     .container_ip = entry.container_ip,
                     .container_id = entry.container_id,
                     .config = entry.config,
-                    .service_name = entry.service_name,
+                    .service_name = entry.serviceName(),
                 };
                 check_count += 1;
             }
@@ -260,12 +273,12 @@ fn updateState(entry: *ServiceHealth, success: bool) void {
         switch (entry.status) {
             .starting => {
                 entry.status = .healthy;
-                log.info("health: {s} is now healthy", .{entry.service_name});
+                log.info("health: {s} is now healthy", .{entry.serviceName()});
                 dnsRegister(entry);
             },
             .unhealthy => {
                 entry.status = .healthy;
-                log.info("health: {s} recovered, now healthy", .{entry.service_name});
+                log.info("health: {s} recovered, now healthy", .{entry.serviceName()});
                 dnsRegister(entry);
             },
             .healthy => {},
@@ -279,7 +292,7 @@ fn updateState(entry: *ServiceHealth, success: bool) void {
                 if (entry.consecutive_failures >= entry.config.retries) {
                     entry.status = .unhealthy;
                     log.warn("health: {s} failed to start (after {d} retries)", .{
-                        entry.service_name, entry.config.retries,
+                        entry.serviceName(), entry.config.retries,
                     });
                 }
             },
@@ -287,7 +300,7 @@ fn updateState(entry: *ServiceHealth, success: bool) void {
                 if (entry.consecutive_failures >= entry.config.retries) {
                     entry.status = .unhealthy;
                     log.warn("health: {s} is now unhealthy (after {d} consecutive failures)", .{
-                        entry.service_name, entry.config.retries,
+                        entry.serviceName(), entry.config.retries,
                     });
                     dnsUnregister(entry);
                 }
@@ -300,15 +313,15 @@ fn updateState(entry: *ServiceHealth, success: bool) void {
 /// register a healthy service with DNS for service discovery.
 /// called when a service transitions to healthy status.
 fn dnsRegister(entry: *const ServiceHealth) void {
-    dns.registerService(entry.service_name, &entry.container_id, entry.container_ip);
-    log.info("health: registered {s} in DNS", .{entry.service_name});
+    dns.registerService(entry.serviceName(), &entry.container_id, entry.container_ip);
+    log.info("health: registered {s} in DNS", .{entry.serviceName()});
 }
 
 /// unregister an unhealthy service from DNS.
 /// called when a service transitions to unhealthy status.
 fn dnsUnregister(entry: *const ServiceHealth) void {
     dns.unregisterService(&entry.container_id);
-    log.info("health: unregistered {s} from DNS", .{entry.service_name});
+    log.info("health: unregistered {s} from DNS", .{entry.serviceName()});
 }
 
 // -- check implementations --
@@ -561,21 +574,23 @@ test "getServiceHealth returns full state" {
 // -- test helpers --
 
 fn testEntry(status: HealthStatus) ServiceHealth {
-    return .{
+    var entry = ServiceHealth{
         .status = status,
         .consecutive_failures = 0,
         .consecutive_successes = 0,
         .last_check = null,
         .last_error = null,
         .started_at = null,
-        .service_name = "test-svc",
         .container_id = "abcdef123456".*,
         .container_ip = .{ 10, 42, 0, 1 },
         .config = .{
             .check_type = .{ .tcp = .{ .port = 8080 } },
             .retries = 3,
         },
+        .name_len = 8,
     };
+    @memcpy(entry.name_buf[0..8], "test-svc");
+    return entry;
 }
 
 /// reset health state for test isolation.

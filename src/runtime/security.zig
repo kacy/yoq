@@ -26,6 +26,10 @@ pub const SecurityError = error{
 /// prctl option for setting no_new_privs bit
 const PR_SET_NO_NEW_PRIVS: usize = 38;
 
+/// prctl options for ambient capability management
+const PR_CAP_AMBIENT: usize = 47;
+const PR_CAP_AMBIENT_CLEAR_ALL: usize = 4;
+
 /// Linux capabilities version 3 header magic number.
 /// this is the _LINUX_CAPABILITY_VERSION_3 constant from <linux/capability.h>
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
@@ -78,6 +82,7 @@ pub const default_caps = [_]u8{
 /// but before exec.
 pub fn apply() SecurityError!void {
     try dropCapabilities();
+    try clearAmbientCaps();
     try setNoNewPrivs();
     try installSeccompFilter();
 }
@@ -131,6 +136,14 @@ fn dropCapabilities() SecurityError!void {
             return SecurityError.CapabilityFailed;
         }
     }
+}
+
+/// clear all ambient capabilities. without this, a container process
+/// could use prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE) to elevate
+/// capabilities that were dropped from the effective/permitted sets.
+fn clearAmbientCaps() SecurityError!void {
+    const rc = linux.syscall5(.prctl, PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+    if (syscall_util.isError(rc)) return SecurityError.CapabilityFailed;
 }
 
 /// set PR_SET_NO_NEW_PRIVS so the process can't gain new

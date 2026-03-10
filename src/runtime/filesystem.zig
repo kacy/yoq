@@ -210,13 +210,22 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
         return FilesystemError.MountFailed;
     }
 
-    // TOCTOU-safe validation: open source with O_NOFOLLOW to verify it's not a symlink
-    // this prevents race conditions where the path is replaced between validation and mount
+    // TOCTOU-safe validation: open source with O_NOFOLLOW to verify it's not a symlink,
+    // then use /proc/self/fd/{fd} as the mount source to eliminate the race window
+    // between validation and mount.
     const validation_fd = validatePathNoSymlink(source) catch |e| {
         log.err("bind mount: source path validation failed for {s}: {s}", .{ source, @errorName(e) });
         return e;
     };
-    posix.close(validation_fd);
+    defer posix.close(validation_fd);
+
+    // use /proc/self/fd/{fd} as mount source — this references the exact
+    // file/directory we validated, not the original path which could be
+    // swapped between validation and mount
+    var fd_path_buf: [64]u8 = undefined;
+    const fd_path = std.fmt.bufPrint(&fd_path_buf, "/proc/self/fd/{d}\x00", .{validation_fd}) catch
+        return FilesystemError.PathTooLong;
+    const source_z: [*:0]const u8 = @ptrCast(fd_path.ptr);
 
     // build full target path: target_root + target
     var target_buf: [4096]u8 = undefined;
@@ -241,17 +250,10 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
 
     const full_target: [*:0]const u8 = @ptrCast(&target_buf);
 
-    // null-terminate source path
-    var source_buf: [4096]u8 = undefined;
-    if (source.len >= source_buf.len) return FilesystemError.PathTooLong;
-    @memcpy(source_buf[0..source.len], source);
-    source_buf[source.len] = 0;
-    const source_z: [*:0]const u8 = @ptrCast(&source_buf);
-
     // create target directory if it doesn't exist
     std.fs.cwd().makePath(target_buf[0..target_pos]) catch return FilesystemError.MkdirFailed;
 
-    // bind mount: source -> full_target
+    // bind mount: /proc/self/fd/{fd} -> full_target
     var flags: u32 = linux.MS.BIND | linux.MS.REC;
     const rc = linux.mount(source_z, full_target, null, flags, 0);
     if (syscall_util.isError(rc)) {
