@@ -121,48 +121,19 @@ pub fn upsertAssignment(assignment: CachedAssignment) !void {
 
 /// list all cached assignments.
 pub fn listAssignments(alloc: Allocator) ![]CachedAssignment {
-    const db = try getDb();
-
-    const Row = struct {
-        id: sqlite.Text,
-        image: sqlite.Text,
-        command: sqlite.Text,
-        status: sqlite.Text,
-        cpu_limit: i64,
-        memory_limit_mb: i64,
-        synced_at: i64,
-    };
-
-    var stmt = db.prepare(
+    return queryAssignments(alloc,
         "SELECT id, image, command, status, cpu_limit, memory_limit_mb, synced_at FROM cached_assignments;",
-    ) catch return error.QueryFailed;
-    defer stmt.deinit();
-
-    var iter = stmt.iterator(Row, .{}) catch return error.QueryFailed;
-
-    var results: std.ArrayListUnmanaged(CachedAssignment) = .empty;
-    errdefer {
-        for (results.items) |a| a.deinit(alloc);
-        results.deinit(alloc);
-    }
-
-    while (iter.nextAlloc(alloc, .{}) catch null) |row| {
-        try results.append(alloc, .{
-            .id = row.id.data,
-            .image = row.image.data,
-            .command = row.command.data,
-            .status = row.status.data,
-            .cpu_limit = row.cpu_limit,
-            .memory_limit_mb = row.memory_limit_mb,
-            .synced_at = row.synced_at,
-        });
-    }
-
-    return results.toOwnedSlice(alloc);
+    );
 }
 
 /// list only pending cached assignments.
 pub fn listPendingAssignments(alloc: Allocator) ![]CachedAssignment {
+    return queryAssignments(alloc,
+        "SELECT id, image, command, status, cpu_limit, memory_limit_mb, synced_at FROM cached_assignments WHERE status = 'pending';",
+    );
+}
+
+fn queryAssignments(alloc: Allocator, comptime query: []const u8) ![]CachedAssignment {
     const db = try getDb();
 
     const Row = struct {
@@ -175,9 +146,7 @@ pub fn listPendingAssignments(alloc: Allocator) ![]CachedAssignment {
         synced_at: i64,
     };
 
-    var stmt = db.prepare(
-        "SELECT id, image, command, status, cpu_limit, memory_limit_mb, synced_at FROM cached_assignments WHERE status = 'pending';",
-    ) catch return error.QueryFailed;
+    var stmt = db.prepare(query) catch return error.QueryFailed;
     defer stmt.deinit();
 
     var iter = stmt.iterator(Row, .{}) catch return error.QueryFailed;

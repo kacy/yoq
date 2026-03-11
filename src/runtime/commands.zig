@@ -186,11 +186,11 @@ fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool)
             .status = status_val,
             .health_status = health_status,
             .cpu_pct = extractJsonFloat(obj, "cpu_pct") orelse 0.0,
-            .memory_bytes = @intCast(extractJsonInt(obj, "memory_bytes") orelse 0),
+            .memory_bytes = @intCast(@max(0, extractJsonInt(obj, "memory_bytes") orelse 0)),
             .psi_cpu = psi_cpu,
             .psi_memory = psi_mem,
-            .running_count = @intCast(extractJsonInt(obj, "running") orelse 0),
-            .desired_count = @intCast(extractJsonInt(obj, "desired") orelse 0),
+            .running_count = @intCast(@max(0, extractJsonInt(obj, "running") orelse 0)),
+            .desired_count = @intCast(@max(0, extractJsonInt(obj, "desired") orelse 0)),
             .uptime_secs = extractJsonInt(obj, "uptime_secs") orelse 0,
             .memory_limit = memory_limit,
             .cpu_quota_pct = cpu_quota_pct,
@@ -399,7 +399,7 @@ fn metricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) CommandsE
         }
 
         const ip_str = rec.ip_address orelse continue;
-        const short_id = if (rec.id.len >= 6) rec.id[0..6] else rec.id;
+        const short_id = cli.truncate(rec.id, 6);
 
         var packets: u64 = 0;
         var bytes: u64 = 0;
@@ -473,8 +473,8 @@ fn metricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filte
         const service = extractJsonString(obj, "service") orelse "?";
         const container_id = extractJsonString(obj, "container") orelse "?";
         const ip_str = extractJsonString(obj, "ip") orelse "?";
-        const packets: u64 = @intCast(extractJsonInt(obj, "packets") orelse 0);
-        const bytes: u64 = @intCast(extractJsonInt(obj, "bytes") orelse 0);
+        const packets: u64 = @intCast(@max(0, extractJsonInt(obj, "packets") orelse 0));
+        const bytes: u64 = @intCast(@max(0, extractJsonInt(obj, "bytes") orelse 0));
 
         var bytes_buf: [16]u8 = undefined;
         const bytes_str = monitor.formatBytes(&bytes_buf, bytes);
@@ -576,8 +576,8 @@ fn metricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) Commands
         const to = extractJsonString(obj, "to") orelse "?";
         const obj_port: u64 = @intCast(extractJsonInt(obj, "port") orelse 0);
         const connections: u64 = @intCast(extractJsonInt(obj, "connections") orelse 0);
-        const packets: u64 = @intCast(extractJsonInt(obj, "packets") orelse 0);
-        const bytes: u64 = @intCast(extractJsonInt(obj, "bytes") orelse 0);
+        const packets: u64 = @intCast(@max(0, extractJsonInt(obj, "packets") orelse 0));
+        const bytes: u64 = @intCast(@max(0, extractJsonInt(obj, "bytes") orelse 0));
         const errors: u64 = @intCast(extractJsonInt(obj, "errors") orelse 0);
 
         var conn_buf: [16]u8 = undefined;
@@ -609,7 +609,7 @@ fn metricsLocalJson(records: []const store.ContainerRecord, mc: ?*const ebpf.Met
             if (!std.mem.eql(u8, rec.hostname, svc)) continue;
         }
         const ip_str = rec.ip_address orelse continue;
-        const short_id = if (rec.id.len >= 6) rec.id[0..6] else rec.id;
+        const short_id = cli.truncate(rec.id, 6);
 
         var packets: u64 = 0;
         var bytes: u64 = 0;

@@ -23,6 +23,65 @@ const ImageCommandsError = error{
     PruneFailed,
 };
 
+const ImageBlobs = struct {
+    manifest_bytes: []u8,
+    config_bytes: []u8,
+    manifest_digest: blob_store.Digest,
+    config_digest: blob_store.Digest,
+
+    pub fn deinit(self: ImageBlobs, alloc: std.mem.Allocator) void {
+        alloc.free(self.manifest_bytes);
+        alloc.free(self.config_bytes);
+    }
+};
+
+/// load manifest and config blobs for an image record from the blob store.
+fn loadImageBlobs(alloc: std.mem.Allocator, image: store.ImageRecord) ImageCommandsError!ImageBlobs {
+    const manifest_digest = blob_store.Digest.parse(image.manifest_digest) orelse {
+        writeErr("invalid manifest digest in image record\n", .{});
+        return ImageCommandsError.InvalidDigest;
+    };
+    const manifest_bytes = blob_store.getBlob(alloc, manifest_digest) catch |err| {
+        writeErr("failed to read manifest from blob store: {}\n", .{err});
+        return ImageCommandsError.StoreFailed;
+    };
+    errdefer alloc.free(manifest_bytes);
+
+    const config_digest = blob_store.Digest.parse(image.config_digest) orelse {
+        writeErr("invalid config digest in image record\n", .{});
+        return ImageCommandsError.InvalidDigest;
+    };
+    const config_bytes = blob_store.getBlob(alloc, config_digest) catch |err| {
+        writeErr("failed to read config from blob store: {}\n", .{err});
+        return ImageCommandsError.StoreFailed;
+    };
+
+    return .{
+        .manifest_bytes = manifest_bytes,
+        .config_bytes = config_bytes,
+        .manifest_digest = manifest_digest,
+        .config_digest = config_digest,
+    };
+}
+
+/// compute config digest and save the image record after a pull.
+fn saveImageRecord(ref: spec.ImageRef, pr: registry.PullResult) void {
+    const cfg_computed = blob_store.computeDigest(pr.config_bytes);
+    var cfg_digest_buf: [71]u8 = undefined;
+    const cfg_digest_str = cfg_computed.string(&cfg_digest_buf);
+
+    oci.saveImageFromPull(
+        ref,
+        pr.manifest_digest,
+        pr.manifest_bytes,
+        pr.config_bytes,
+        cfg_digest_str,
+        pr.total_size,
+    ) catch |e| {
+        writeErr("warning: failed to save image record: {}\n", .{e});
+    };
+}
+
 fn writePullError(target: []const u8, err: anyerror) void {
     writeErr("failed to pull image: {s} ({})\n", .{ target, err });
 
@@ -102,23 +161,8 @@ pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageCo
         result.rootfs = result.layer_paths[result.layer_paths.len - 1];
     }
 
-    // compute config digest from config bytes
-    const pr = result.pull_result.?;
-    const cfg_computed = blob_store.computeDigest(pr.config_bytes);
-    var cfg_digest_buf: [71]u8 = undefined;
-    const cfg_digest_str = cfg_computed.string(&cfg_digest_buf);
-
     // save image record (stores manifest/config blobs and metadata)
-    oci.saveImageFromPull(
-        ref,
-        pr.manifest_digest,
-        pr.manifest_bytes,
-        pr.config_bytes,
-        cfg_digest_str,
-        pr.total_size,
-    ) catch |e| {
-        writeErr("warning: failed to save image record: {}\n", .{e});
-    };
+    saveImageRecord(ref, result.pull_result.?);
 
     writeErr("image pulled and extracted\n", .{});
     return result;
@@ -147,23 +191,8 @@ pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         alloc.free(layer_paths);
     }
 
-    // compute config digest from config bytes
-    const config_computed = blob_store.computeDigest(result.config_bytes);
-    var config_digest_buf: [71]u8 = undefined;
-    const config_digest_str = config_computed.string(&config_digest_buf);
-
     // save image record (stores manifest/config blobs and metadata)
-    oci.saveImageFromPull(
-        ref,
-        result.manifest_digest,
-        result.manifest_bytes,
-        result.config_bytes,
-        config_digest_str,
-        result.total_size,
-    ) catch |err| {
-        writeErr("failed to save image record: {}\n", .{err});
-        return ImageCommandsError.StoreFailed;
-    };
+    saveImageRecord(ref, result);
 
     // format size for display
     const size_mb = result.total_size / (1024 * 1024);
@@ -189,32 +218,11 @@ pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
     defer image_record.deinit(alloc);
 
-    // read manifest bytes from the blob store
-    const manifest_parsed_digest = blob_store.Digest.parse(image_record.manifest_digest) orelse {
-        writeErr("invalid manifest digest in image record\n", .{});
-        return ImageCommandsError.InvalidDigest;
-    };
-    const manifest_bytes = blob_store.getBlob(alloc, manifest_parsed_digest) catch |err| {
-        writeErr("failed to read manifest from blob store: {}\n", .{err});
-        writeErr("hint: the image may be corrupted — try pulling again\n", .{});
-        return ImageCommandsError.StoreFailed;
-    };
-    defer alloc.free(manifest_bytes);
-
-    // read config bytes from the blob store
-    const config_parsed_digest = blob_store.Digest.parse(image_record.config_digest) orelse {
-        writeErr("invalid config digest in image record\n", .{});
-        return ImageCommandsError.InvalidDigest;
-    };
-    const config_bytes = blob_store.getBlob(alloc, config_parsed_digest) catch |err| {
-        writeErr("failed to read config from blob store: {}\n", .{err});
-        writeErr("hint: the image may be corrupted — try pulling again\n", .{});
-        return ImageCommandsError.StoreFailed;
-    };
-    defer alloc.free(config_bytes);
+    const blobs = loadImageBlobs(alloc, image_record) catch return ImageCommandsError.StoreFailed;
+    defer blobs.deinit(alloc);
 
     // parse manifest to get layer digests
-    var parsed_manifest = spec.parseManifest(alloc, manifest_bytes) catch |err| {
+    var parsed_manifest = spec.parseManifest(alloc, blobs.manifest_bytes) catch |err| {
         writeErr("failed to parse image manifest: {}\n", .{err});
         return ImageCommandsError.InvalidDigest;
     };
@@ -232,7 +240,7 @@ pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     writeErr("pushing {s}...\n", .{target_str});
 
-    var result = registry.push(alloc, target_ref, manifest_bytes, config_bytes, layer_digest_strs.items) catch |e| {
+    var result = registry.push(alloc, target_ref, blobs.manifest_bytes, blobs.config_bytes, layer_digest_strs.items) catch |e| {
         writeErr("failed to push image: {}\n", .{e});
         return ImageCommandsError.PushFailed;
     };
@@ -366,35 +374,16 @@ pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
     defer image.deinit(alloc);
 
-    // read manifest blob
-    const manifest_digest = blob_store.Digest.parse(image.manifest_digest) orelse {
-        writeErr("invalid manifest digest\n", .{});
-        return ImageCommandsError.InvalidDigest;
-    };
-    const manifest_bytes = blob_store.getBlob(alloc, manifest_digest) catch |err| {
-        writeErr("failed to read manifest blob: {}\n", .{err});
-        return ImageCommandsError.StoreFailed;
-    };
-    defer alloc.free(manifest_bytes);
+    const blobs = loadImageBlobs(alloc, image) catch return ImageCommandsError.StoreFailed;
+    defer blobs.deinit(alloc);
 
-    var parsed_manifest = spec.parseManifest(alloc, manifest_bytes) catch |err| {
+    var parsed_manifest = spec.parseManifest(alloc, blobs.manifest_bytes) catch |err| {
         writeErr("failed to parse manifest: {}\n", .{err});
         return ImageCommandsError.InvalidDigest;
     };
     defer parsed_manifest.deinit();
 
-    // read config blob
-    const config_digest = blob_store.Digest.parse(image.config_digest) orelse {
-        writeErr("invalid config digest\n", .{});
-        return ImageCommandsError.InvalidDigest;
-    };
-    const config_bytes = blob_store.getBlob(alloc, config_digest) catch |err| {
-        writeErr("failed to read config blob: {}\n", .{err});
-        return ImageCommandsError.StoreFailed;
-    };
-    defer alloc.free(config_bytes);
-
-    var parsed_config = spec.parseImageConfig(alloc, config_bytes) catch |err| {
+    var parsed_config = spec.parseImageConfig(alloc, blobs.config_bytes) catch |err| {
         writeErr("failed to parse config: {}\n", .{err});
         return ImageCommandsError.InvalidDigest;
     };
@@ -635,10 +624,7 @@ pub fn prune(alloc: std.mem.Allocator) !void {
         if (referenced.contains(hex)) continue;
 
         // unreferenced blob — delete it
-        const digest_str_buf = std.fmt.allocPrint(alloc, "sha256:{s}", .{hex}) catch continue;
-        defer alloc.free(digest_str_buf);
-
-        if (blob_store.Digest.parse(digest_str_buf)) |digest| {
+        if (blob_store.Digest.fromHex(hex)) |digest| {
             const size = blob_store.getBlobSize(digest) orelse 0;
             blob_store.removeBlob(digest);
             blobs_removed += 1;

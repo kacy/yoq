@@ -294,34 +294,43 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
     };
 }
 
-/// parse a single service from its TOML subtable
-fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Service {
-    // image is required
+/// fields shared by services, workers, and crons.
+const CommonFields = struct {
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    volumes: []const spec.VolumeMount,
+    working_dir: ?[]const u8,
+
+    fn deinit(self: CommonFields, alloc: std.mem.Allocator) void {
+        alloc.free(self.image);
+        for (self.command) |cmd| alloc.free(cmd);
+        alloc.free(self.command);
+        for (self.env) |e| alloc.free(e);
+        alloc.free(self.env);
+        for (self.volumes) |vm| vm.deinit(alloc);
+        alloc.free(self.volumes);
+        if (self.working_dir) |wd| alloc.free(wd);
+    }
+};
+
+/// parse the common fields (image, command, env, volumes, working_dir) from a TOML subtable.
+fn parseCommonFields(alloc: std.mem.Allocator, kind: []const u8, name: []const u8, table: *const toml.Table) LoadError!CommonFields {
     const image_raw = table.getString("image") orelse {
-        log.err("manifest: service '{s}' is missing required field 'image'", .{name});
+        log.err("manifest: {s} '{s}' is missing required field 'image'", .{ kind, name });
         return LoadError.MissingImage;
     };
 
-    // parse optional fields
     const command = try parseStringArray(alloc, table.getArray("command"));
     errdefer {
         for (command) |cmd| alloc.free(cmd);
         alloc.free(command);
     }
 
-    const ports = try parsePortMappings(alloc, table.getArray("ports"));
-    errdefer alloc.free(ports);
-
     const env = try parseEnvVars(alloc, table.getArray("env"));
     errdefer {
         for (env) |e| alloc.free(e);
         alloc.free(env);
-    }
-
-    const depends_on = try parseStringArray(alloc, table.getArray("depends_on"));
-    errdefer {
-        for (depends_on) |dep| alloc.free(dep);
-        alloc.free(depends_on);
     }
 
     const volume_mounts = try parseVolumeMounts(alloc, table.getArray("volumes"));
@@ -334,7 +343,29 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
         alloc.dupe(u8, wd) catch return LoadError.OutOfMemory
     else
         null;
-    errdefer if (working_dir) |wd| alloc.free(wd);
+
+    return .{
+        .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
+        .command = command,
+        .env = env,
+        .volumes = volume_mounts,
+        .working_dir = working_dir,
+    };
+}
+
+/// parse a single service from its TOML subtable
+fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Service {
+    var common = try parseCommonFields(alloc, "service", name, table);
+    errdefer common.deinit(alloc);
+
+    const ports = try parsePortMappings(alloc, table.getArray("ports"));
+    errdefer alloc.free(ports);
+
+    const depends_on = try parseStringArray(alloc, table.getArray("depends_on"));
+    errdefer {
+        for (depends_on) |dep| alloc.free(dep);
+        alloc.free(depends_on);
+    }
 
     const health_check = try parseHealthCheck(alloc, name, table.getTable("health_check"));
     errdefer if (health_check) |hc| hc.deinit(alloc);
@@ -346,13 +377,13 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
 
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
-        .command = command,
+        .image = common.image,
+        .command = common.command,
         .ports = ports,
-        .env = env,
+        .env = common.env,
         .depends_on = depends_on,
-        .working_dir = working_dir,
-        .volumes = volume_mounts,
+        .working_dir = common.working_dir,
+        .volumes = common.volumes,
         .health_check = health_check,
         .restart = restart,
         .tls = tls_config,
@@ -372,22 +403,8 @@ fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
 /// parse a worker definition from its TOML subtable.
 /// workers are like services but without ports, health checks, restart, or TLS.
 fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Worker {
-    const image_raw = table.getString("image") orelse {
-        log.err("manifest: worker '{s}' is missing required field 'image'", .{name});
-        return LoadError.MissingImage;
-    };
-
-    const command = try parseStringArray(alloc, table.getArray("command"));
-    errdefer {
-        for (command) |cmd| alloc.free(cmd);
-        alloc.free(command);
-    }
-
-    const env = try parseEnvVars(alloc, table.getArray("env"));
-    errdefer {
-        for (env) |e| alloc.free(e);
-        alloc.free(env);
-    }
+    var common = try parseCommonFields(alloc, "worker", name, table);
+    errdefer common.deinit(alloc);
 
     const depends_on = try parseStringArray(alloc, table.getArray("depends_on"));
     errdefer {
@@ -395,37 +412,20 @@ fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
         alloc.free(depends_on);
     }
 
-    const volume_mounts = try parseVolumeMounts(alloc, table.getArray("volumes"));
-    errdefer {
-        for (volume_mounts) |vm| vm.deinit(alloc);
-        alloc.free(volume_mounts);
-    }
-
-    const working_dir: ?[]const u8 = if (table.getString("working_dir")) |wd|
-        alloc.dupe(u8, wd) catch return LoadError.OutOfMemory
-    else
-        null;
-    errdefer if (working_dir) |wd| alloc.free(wd);
-
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
-        .command = command,
-        .env = env,
+        .image = common.image,
+        .command = common.command,
+        .env = common.env,
         .depends_on = depends_on,
-        .working_dir = working_dir,
-        .volumes = volume_mounts,
+        .working_dir = common.working_dir,
+        .volumes = common.volumes,
     };
 }
 
 /// parse a cron definition from its TOML subtable.
 /// crons are like workers but with a required `every` interval field.
 fn parseCron(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Cron {
-    const image_raw = table.getString("image") orelse {
-        log.err("manifest: cron '{s}' is missing required field 'image'", .{name});
-        return LoadError.MissingImage;
-    };
-
     const every_str = table.getString("every") orelse {
         log.err("manifest: cron '{s}' is missing required field 'every'", .{name});
         return LoadError.InvalidSchedule;
@@ -436,37 +436,16 @@ fn parseCron(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Tabl
         return LoadError.InvalidSchedule;
     };
 
-    const command = try parseStringArray(alloc, table.getArray("command"));
-    errdefer {
-        for (command) |cmd| alloc.free(cmd);
-        alloc.free(command);
-    }
-
-    const env = try parseEnvVars(alloc, table.getArray("env"));
-    errdefer {
-        for (env) |e| alloc.free(e);
-        alloc.free(env);
-    }
-
-    const volume_mounts = try parseVolumeMounts(alloc, table.getArray("volumes"));
-    errdefer {
-        for (volume_mounts) |vm| vm.deinit(alloc);
-        alloc.free(volume_mounts);
-    }
-
-    const working_dir: ?[]const u8 = if (table.getString("working_dir")) |wd|
-        alloc.dupe(u8, wd) catch return LoadError.OutOfMemory
-    else
-        null;
-    errdefer if (working_dir) |wd| alloc.free(wd);
+    var common = try parseCommonFields(alloc, "cron", name, table);
+    errdefer common.deinit(alloc);
 
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
-        .command = command,
-        .env = env,
-        .working_dir = working_dir,
-        .volumes = volume_mounts,
+        .image = common.image,
+        .command = common.command,
+        .env = common.env,
+        .working_dir = common.working_dir,
+        .volumes = common.volumes,
         .every = every,
     };
 }

@@ -77,25 +77,10 @@ pub const Service = struct {
     tls: ?TlsConfig = null,
 
     pub fn deinit(self: Service, alloc: std.mem.Allocator) void {
-        alloc.free(self.name);
-        alloc.free(self.image);
-
-        for (self.command) |cmd| alloc.free(cmd);
-        alloc.free(self.command);
-
-        alloc.free(self.ports);
-
-        for (self.env) |e| alloc.free(e);
-        alloc.free(self.env);
-
+        freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
         for (self.depends_on) |dep| alloc.free(dep);
         alloc.free(self.depends_on);
-
-        if (self.working_dir) |wd| alloc.free(wd);
-
-        for (self.volumes) |vol| vol.deinit(alloc);
-        alloc.free(self.volumes);
-
+        alloc.free(self.ports);
         if (self.health_check) |hc| hc.deinit(alloc);
         if (self.tls) |tc| tc.deinit(alloc);
     }
@@ -115,22 +100,9 @@ pub const Worker = struct {
     volumes: []const VolumeMount,
 
     pub fn deinit(self: Worker, alloc: std.mem.Allocator) void {
-        alloc.free(self.name);
-        alloc.free(self.image);
-
-        for (self.command) |cmd| alloc.free(cmd);
-        alloc.free(self.command);
-
-        for (self.env) |e| alloc.free(e);
-        alloc.free(self.env);
-
+        freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
         for (self.depends_on) |dep| alloc.free(dep);
         alloc.free(self.depends_on);
-
-        if (self.working_dir) |wd| alloc.free(wd);
-
-        for (self.volumes) |vol| vol.deinit(alloc);
-        alloc.free(self.volumes);
     }
 };
 
@@ -147,19 +119,7 @@ pub const Cron = struct {
     every: u64, // interval in seconds
 
     pub fn deinit(self: Cron, alloc: std.mem.Allocator) void {
-        alloc.free(self.name);
-        alloc.free(self.image);
-
-        for (self.command) |cmd| alloc.free(cmd);
-        alloc.free(self.command);
-
-        for (self.env) |e| alloc.free(e);
-        alloc.free(self.env);
-
-        if (self.working_dir) |wd| alloc.free(wd);
-
-        for (self.volumes) |vol| vol.deinit(alloc);
-        alloc.free(self.volumes);
+        freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
     }
 };
 
@@ -243,6 +203,27 @@ pub const Volume = struct {
         alloc.free(self.driver);
     }
 };
+
+/// free fields shared by Service, Worker, and Cron.
+fn freeCommonFields(
+    alloc: std.mem.Allocator,
+    name: []const u8,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    working_dir: ?[]const u8,
+    volumes: []const VolumeMount,
+) void {
+    alloc.free(name);
+    alloc.free(image);
+    for (command) |cmd| alloc.free(cmd);
+    alloc.free(command);
+    for (env) |e| alloc.free(e);
+    alloc.free(env);
+    if (working_dir) |wd| alloc.free(wd);
+    for (volumes) |vol| vol.deinit(alloc);
+    alloc.free(volumes);
+}
 
 // -- tests --
 

@@ -513,64 +513,37 @@ pub fn getAgent(alloc: Allocator, db: *sqlite.Db, id: []const u8) !?AgentRecord 
 
 /// get all assignments for a specific agent.
 pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![]Assignment {
-    const Row = struct {
-        id: sqlite.Text,
-        agent_id: sqlite.Text,
-        image: sqlite.Text,
-        command: sqlite.Text,
-        status: sqlite.Text,
-        cpu_limit: i64,
-        memory_limit_mb: i64,
-    };
-
-    var stmt = db.prepare(
+    return queryAssignmentRows(alloc, db,
         "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = ?;",
-    ) catch return error.QueryFailed;
-    defer stmt.deinit();
-
-    var iter = stmt.iterator(Row, .{agent_id}) catch return error.QueryFailed;
-
-    var results: std.ArrayListUnmanaged(Assignment) = .empty;
-    errdefer {
-        for (results.items) |a| a.deinit(alloc);
-        results.deinit(alloc);
-    }
-
-    while (iter.nextAlloc(alloc, .{}) catch null) |row| {
-        try results.append(alloc, .{
-            .id = row.id.data,
-            .agent_id = row.agent_id.data,
-            .image = row.image.data,
-            .command = row.command.data,
-            .status = row.status.data,
-            .cpu_limit = row.cpu_limit,
-            .memory_limit_mb = row.memory_limit_mb,
-        });
-    }
-
-    return results.toOwnedSlice(alloc);
+        .{agent_id},
+    );
 }
 
 /// get orphaned assignments (agent_id = '', status = 'pending').
 /// these are assignments that were detached from an offline agent
 /// and are waiting to be rescheduled.
 pub fn getOrphanedAssignments(alloc: Allocator, db: *sqlite.Db) ![]Assignment {
-    const Row = struct {
-        id: sqlite.Text,
-        agent_id: sqlite.Text,
-        image: sqlite.Text,
-        command: sqlite.Text,
-        status: sqlite.Text,
-        cpu_limit: i64,
-        memory_limit_mb: i64,
-    };
-
-    var stmt = db.prepare(
+    return queryAssignmentRows(alloc, db,
         "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = '' AND status = 'pending';",
-    ) catch return error.QueryFailed;
+        .{},
+    );
+}
+
+const AssignmentRow = struct {
+    id: sqlite.Text,
+    agent_id: sqlite.Text,
+    image: sqlite.Text,
+    command: sqlite.Text,
+    status: sqlite.Text,
+    cpu_limit: i64,
+    memory_limit_mb: i64,
+};
+
+fn queryAssignmentRows(alloc: Allocator, db: *sqlite.Db, comptime query: []const u8, args: anytype) ![]Assignment {
+    var stmt = db.prepare(query) catch return error.QueryFailed;
     defer stmt.deinit();
 
-    var iter = stmt.iterator(Row, .{}) catch return error.QueryFailed;
+    var iter = stmt.iterator(AssignmentRow, args) catch return error.QueryFailed;
 
     var results: std.ArrayListUnmanaged(Assignment) = .empty;
     errdefer {

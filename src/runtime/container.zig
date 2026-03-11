@@ -328,15 +328,13 @@ pub const Container = struct {
         // these are hard failures - resource limits must be enforced
         self.runtime.cgroup.?.addProcess(spawn_result.pid) catch |e| {
             log.err("failed to add process to cgroup for {s}: {}. stopping container.", .{ config.id, e });
-            _ = process.kill(spawn_result.pid) catch {};
-            self.runtime.cgroup.?.destroy() catch {};
+            self.cleanupFailedSpawn(&spawn_result);
             return ContainerError.StartFailed;
         };
 
         self.runtime.cgroup.?.setLimits(config.limits) catch |e| {
             log.err("failed to set cgroup limits for {s}: {}. stopping container.", .{ config.id, e });
-            _ = process.kill(spawn_result.pid) catch {};
-            self.runtime.cgroup.?.destroy() catch {};
+            self.cleanupFailedSpawn(&spawn_result);
             return ContainerError.StartFailed;
         };
 
@@ -419,6 +417,24 @@ pub const Container = struct {
         store.updateStatus(config.id, "running", spawn_result.pid, null) catch |e| {
             log.warn("failed to update status for {s}: {}", .{ config.id, e });
         };
+    }
+
+    /// clean up after a failed post-spawn operation (cgroup add/setLimits).
+    /// resets container state, kills the child, closes leaked FDs, and destroys the cgroup.
+    fn cleanupFailedSpawn(self: *Container, spawn_result: *namespaces.SpawnResult) void {
+        process.kill(spawn_result.pid) catch {};
+        self.runtime.cgroup.?.destroy() catch {};
+        // close pipe FDs that would otherwise leak
+        if (spawn_result.ready_fd >= 0) {
+            std.posix.close(spawn_result.ready_fd);
+            spawn_result.ready_fd = -1;
+        }
+        std.posix.close(spawn_result.stdout_fd);
+        std.posix.close(spawn_result.stderr_fd);
+        // reset container state
+        self.pid = null;
+        self.status = .created;
+        active_pid.store(0, .release);
     }
 
     /// wait for the running container to exit, then clean up runtime resources.

@@ -41,42 +41,8 @@ const max_path = paths.max_path;
 /// that hasBlob() would consider valid.
 pub fn putBlob(data: []const u8) BlobError!Digest {
     const digest = computeDigest(data);
-
-    // check if already stored
     if (hasBlob(digest)) return digest;
-
-    var dir_buf: [max_path]u8 = undefined;
-    const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
-    std.fs.cwd().makePath(dir_path) catch {};
-
-    // write to a temp file, then rename for atomicity
-    var tmp_buf: [max_path]u8 = undefined;
-    const tmp_path = paths.uniqueDataTempPath(&tmp_buf, blob_subdir, "blob", ".tmp") catch
-        return BlobError.PathTooLong;
-
-    const file = std.fs.cwd().createFile(tmp_path, .{}) catch
-        return BlobError.WriteFailed;
-
-    file.writeAll(data) catch {
-        file.close();
-        std.fs.cwd().deleteFile(tmp_path) catch {};
-        return BlobError.WriteFailed;
-    };
-    file.sync() catch {};
-    file.close();
-
-    // atomic rename to final path
-    var path_buf: [max_path]u8 = undefined;
-    const final_path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
-    std.fs.cwd().rename(tmp_path, final_path) catch {
-        if (hasBlob(digest)) {
-            std.fs.cwd().deleteFile(tmp_path) catch {};
-            return digest;
-        }
-        std.fs.cwd().deleteFile(tmp_path) catch {};
-        return BlobError.WriteFailed;
-    };
-
+    try writeToStore(data, digest);
     return digest;
 }
 
@@ -136,17 +102,7 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
         return BlobError.HashMismatch;
     }
 
-    // atomic rename to final path
-    var path_buf: [max_path]u8 = undefined;
-    const final_path = blobPath(expected_digest, &path_buf) catch return BlobError.PathTooLong;
-    std.fs.cwd().rename(tmp_path, final_path) catch {
-        if (hasBlob(expected_digest)) {
-            std.fs.cwd().deleteFile(tmp_path) catch {};
-            return;
-        }
-        std.fs.cwd().deleteFile(tmp_path) catch {};
-        return BlobError.WriteFailed;
-    };
+    renameTempToBlob(tmp_path, expected_digest) catch return BlobError.WriteFailed;
 }
 
 /// write a blob with a pre-verified digest, skipping the hash computation.
@@ -154,12 +110,16 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
 /// (e.g. after downloading and checking against the registry's expected digest).
 pub fn putBlobDirect(data: []const u8, digest: Digest) BlobError!void {
     if (hasBlob(digest)) return;
+    try writeToStore(data, digest);
+}
 
+/// write data to a temp file and atomically rename it into the blob store.
+/// handles directory creation, temp file management, and race-condition fallback.
+fn writeToStore(data: []const u8, digest: Digest) BlobError!void {
     var dir_buf: [max_path]u8 = undefined;
     const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
     std.fs.cwd().makePath(dir_path) catch {};
 
-    // write to a temp file, then rename for atomicity
     var tmp_buf: [max_path]u8 = undefined;
     const tmp_path = paths.uniqueDataTempPath(&tmp_buf, blob_subdir, "blob", ".tmp") catch
         return BlobError.PathTooLong;
@@ -175,14 +135,17 @@ pub fn putBlobDirect(data: []const u8, digest: Digest) BlobError!void {
     file.sync() catch {};
     file.close();
 
+    renameTempToBlob(tmp_path, digest) catch return BlobError.WriteFailed;
+}
+
+/// atomically rename a temp file to its final blob path.
+/// if another writer raced and the blob already exists, cleans up the temp file.
+fn renameTempToBlob(tmp_path: []const u8, digest: Digest) BlobError!void {
     var path_buf: [max_path]u8 = undefined;
     const final_path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
     std.fs.cwd().rename(tmp_path, final_path) catch {
-        if (hasBlob(digest)) {
-            std.fs.cwd().deleteFile(tmp_path) catch {};
-            return;
-        }
         std.fs.cwd().deleteFile(tmp_path) catch {};
+        if (hasBlob(digest)) return;
         return BlobError.WriteFailed;
     };
 }
@@ -284,7 +247,11 @@ pub const Digest = struct {
     pub fn parse(s: []const u8) ?Digest {
         const prefix = "sha256:";
         if (!std.mem.startsWith(u8, s, prefix)) return null;
-        const hex_str = s[prefix.len..];
+        return fromHex(s[prefix.len..]);
+    }
+
+    /// parse a 64-char hex string (no "sha256:" prefix) into a Digest
+    pub fn fromHex(hex_str: []const u8) ?Digest {
         if (hex_str.len != 64) return null;
 
         var hash: [32]u8 = undefined;
