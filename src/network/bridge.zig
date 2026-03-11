@@ -105,7 +105,7 @@ pub fn ensureBridgeWithConfig(config: BridgeConfig) BridgeError!void {
     const bridge_idx = nl.getIfIndex(fd, config.name) catch return BridgeError.CreateFailed;
     if (bridge_idx == 0) return BridgeError.CreateFailed;
 
-    addAddress(fd, bridge_idx, &config.gateway_ip, config.prefix_len) catch return BridgeError.AddressFailed;
+    nl.addAddress(fd, bridge_idx, &config.gateway_ip, config.prefix_len) catch return BridgeError.AddressFailed;
 
     // bring bridge up
     nl.setLinkUp(fd, bridge_idx) catch return BridgeError.LinkSetFailed;
@@ -175,7 +175,7 @@ pub fn createVethPair(host_name: []const u8, peer_name: []const u8, bridge_name:
     // peer needs an ifinfomsg struct before its attributes.
     // we write it manually since it's inside a nested attribute.
     const ifinfo_size = @sizeOf(linux.ifinfomsg);
-    const aligned_size = nl.nlmsgAlignPub(ifinfo_size);
+    const aligned_size = nl.nlmsgAlign(ifinfo_size);
     if (mb.pos + aligned_size > nl.buf_size) return BridgeError.VethCreateFailed;
     @memset(mb.buf[mb.pos..][0..aligned_size], 0);
     mb.pos += aligned_size;
@@ -297,17 +297,17 @@ pub fn configurableContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8, plen: u8) B
     const eth0_idx = nl.getIfIndex(fd, "eth0") catch return BridgeError.InterfaceNotFound;
     if (eth0_idx == 0) return BridgeError.InterfaceNotFound;
 
-    addAddress(fd, eth0_idx, &ip, plen) catch return BridgeError.AddressFailed;
+    nl.addAddress(fd, eth0_idx, &ip, plen) catch return BridgeError.AddressFailed;
     nl.setLinkUp(fd, eth0_idx) catch return BridgeError.LinkSetFailed;
 
-    // add default route via gateway
-    addDefaultRoute(fd, &gw) catch return BridgeError.RouteFailed;
+    // add default route via gateway (0.0.0.0/0)
+    nl.addRoute(fd, null, 0, &gw) catch return BridgeError.RouteFailed;
 }
 
 /// enter a network namespace via setns(2)
 fn setns(fd: posix.fd_t) !void {
-    const CLONE_NEWNET: c_int = 0x40000000;
-    const rc = linux.syscall2(.setns, @intCast(@as(u64, @bitCast(@as(i64, fd)))), @intCast(@as(u64, @bitCast(@as(i64, CLONE_NEWNET)))));
+    const CLONE_NEWNET = 0x40000000;
+    const rc = linux.syscall2(.setns, @as(usize, @bitCast(@as(isize, fd))), CLONE_NEWNET);
     if (nl.isError(rc)) return error.SetNsFailed;
 }
 
@@ -318,55 +318,6 @@ fn bringUpLoopback(fd: posix.fd_t) !void {
     nl.setLinkUp(fd, lo_idx) catch |e| {
         log.warn("failed to set loopback up: {}", .{e});
     };
-}
-
-// -- shared netlink helpers --
-
-/// add an IPv4 address to an interface
-fn addAddress(fd: posix.fd_t, if_index: u32, ip: *const [4]u8, plen: u8) BridgeError!void {
-    var buf: [nl.buf_size]u8 align(4) = undefined;
-    var mb = nl.MessageBuilder.init(&buf);
-
-    const hdr = mb.putHeader(
-        .RTM_NEWADDR,
-        nl.NLM_F.REQUEST | nl.NLM_F.ACK | nl.NLM_F.CREATE | nl.NLM_F.EXCL,
-        nl.IfAddrMsg,
-    ) catch return BridgeError.AddressFailed;
-
-    const addr_msg = mb.getPayload(hdr, nl.IfAddrMsg);
-    addr_msg.family = nl.AF.INET;
-    addr_msg.prefixlen = plen;
-    addr_msg.scope = nl.RT_SCOPE.UNIVERSE;
-    addr_msg.index = if_index;
-
-    mb.putAttr(hdr, nl.IFA.LOCAL, ip) catch return BridgeError.AddressFailed;
-    mb.putAttr(hdr, nl.IFA.ADDRESS, ip) catch return BridgeError.AddressFailed;
-
-    nl.sendAndCheck(fd, mb.message()) catch return BridgeError.AddressFailed;
-}
-
-/// add a default route via a gateway
-fn addDefaultRoute(fd: posix.fd_t, gw: *const [4]u8) BridgeError!void {
-    var buf: [nl.buf_size]u8 align(4) = undefined;
-    var mb = nl.MessageBuilder.init(&buf);
-
-    const hdr = mb.putHeader(
-        .RTM_NEWROUTE,
-        nl.NLM_F.REQUEST | nl.NLM_F.ACK | nl.NLM_F.CREATE,
-        nl.RtMsg,
-    ) catch return BridgeError.RouteFailed;
-
-    const rt = mb.getPayload(hdr, nl.RtMsg);
-    rt.family = nl.AF.INET;
-    rt.dst_len = 0; // default route (0.0.0.0/0)
-    rt.table = nl.RT_TABLE.MAIN;
-    rt.protocol = nl.RTPROT.BOOT;
-    rt.scope = nl.RT_SCOPE.UNIVERSE;
-    rt.type = nl.RTN.UNICAST;
-
-    mb.putAttr(hdr, nl.RTA.GATEWAY, gw) catch return BridgeError.RouteFailed;
-
-    nl.sendAndCheck(fd, mb.message()) catch return BridgeError.RouteFailed;
 }
 
 // -- naming helpers --
