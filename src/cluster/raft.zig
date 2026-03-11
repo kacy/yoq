@@ -590,21 +590,21 @@ pub const Raft = struct {
         const current_term = self.log.getCurrentTerm();
         const last = self.log.lastIndex();
 
-        var n = last;
-        while (n > self.commit_index and n > 0) : (n -= 1) {
-            if (self.log.termAt(n) != current_term) continue;
+        var candidate_index = last;
+        while (candidate_index > self.commit_index and candidate_index > 0) : (candidate_index -= 1) {
+            if (self.log.termAt(candidate_index) != current_term) continue;
 
-            // count peers with match_index >= n (including self)
+            // count peers with match_index >= candidate_index (including self)
             var count: usize = 1; // self
             for (self.match_index) |mi| {
-                if (mi >= n) count += 1;
+                if (mi >= candidate_index) count += 1;
             }
 
             const quorum = (self.peers.len + 1) / 2 + 1;
             if (count >= quorum) {
-                self.commit_index = n;
+                self.commit_index = candidate_index;
                 self.actions.append(self.alloc, .{
-                    .commit_entries = .{ .up_to = n },
+                    .commit_entries = .{ .up_to = candidate_index },
                 }) catch |e| {
                     logger.warn("raft: failed to queue commit action: {}", .{e});
                 };

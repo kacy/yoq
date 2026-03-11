@@ -493,17 +493,17 @@ fn dateToTimestamp(year: u16, month: u16, day: u16, hour: u16, minute: u16, seco
 
     // days from epoch (1970-01-01) to start of year
     var days: i64 = 0;
-    var y: u16 = 1970;
-    while (y < year) : (y += 1) {
-        days += if (isLeapYear(y)) @as(i64, 366) else @as(i64, 365);
+    var yr: u16 = 1970;
+    while (yr < year) : (yr += 1) {
+        days += if (isLeapYear(yr)) @as(i64, 366) else @as(i64, 365);
     }
 
     // days from start of year to start of month
     const month_days = [_]u16{ 0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30 };
-    var m: u16 = 1;
-    while (m < month) : (m += 1) {
-        days += month_days[m];
-        if (m == 2 and isLeapYear(year)) days += 1;
+    var mo: u16 = 1;
+    while (mo < month) : (mo += 1) {
+        days += month_days[mo];
+        if (mo == 2 and isLeapYear(year)) days += 1;
     }
 
     days += @as(i64, day) - 1;

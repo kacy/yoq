@@ -160,11 +160,8 @@ pub const StateMachine = struct {
     pub fn takeSnapshot(self: *StateMachine, dest_path: []const u8, meta: SnapshotMeta) SnapshotError!void {
         // open a new sqlite database at a temporary path for the backup
         var tmp_path_buf: [512]u8 = undefined;
-        const tmp_path_slice = std.fmt.bufPrint(&tmp_path_buf, "{s}.tmp", .{dest_path}) catch
+        const tmp_path = bufPrintZ(&tmp_path_buf, "{s}.tmp", .{dest_path}) orelse
             return SnapshotError.IoError;
-        if (tmp_path_slice.len >= tmp_path_buf.len) return SnapshotError.IoError;
-        tmp_path_buf[tmp_path_slice.len] = 0;
-        const tmp_path: [:0]const u8 = tmp_path_buf[0..tmp_path_slice.len :0];
 
         // open destination database
         var dest_db: ?*c.sqlite3 = null;
@@ -198,7 +195,7 @@ pub const StateMachine = struct {
         // with our header prepended
         const tmp_data = std.fs.cwd().readFileAlloc(
             std.heap.page_allocator,
-            tmp_path_slice,
+            tmp_path,
             64 * 1024 * 1024, // 64MB max — plenty for cluster metadata
         ) catch return SnapshotError.IoError;
         defer std.heap.page_allocator.free(tmp_data);
@@ -217,7 +214,7 @@ pub const StateMachine = struct {
         file.writeAll(tmp_data) catch return SnapshotError.IoError;
 
         // clean up the temporary sqlite file
-        std.fs.cwd().deleteFile(tmp_path_slice) catch {};
+        std.fs.cwd().deleteFile(tmp_path) catch {};
     }
 
     /// restore the state machine from a snapshot file.
@@ -260,22 +257,19 @@ pub const StateMachine = struct {
 
         // write sqlite data to a temporary file so we can open it as a database
         var tmp_path_buf: [64]u8 = undefined;
-        const tmp_path_slice = std.fmt.bufPrint(&tmp_path_buf, "/tmp/yoq_snap_restore_{d}.db", .{
+        const tmp_path = bufPrintZ(&tmp_path_buf, "/tmp/yoq_snap_restore_{d}.db", .{
             @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
-        }) catch return SnapshotError.IoError;
-        if (tmp_path_slice.len >= tmp_path_buf.len) return SnapshotError.IoError;
-        tmp_path_buf[tmp_path_slice.len] = 0;
-        const tmp_path: [:0]const u8 = tmp_path_buf[0..tmp_path_slice.len :0];
+        }) orelse return SnapshotError.IoError;
 
         // write the sqlite bytes to the temp file
-        const tmp_file = std.fs.cwd().createFile(tmp_path_slice, .{}) catch
+        const tmp_file = std.fs.cwd().createFile(tmp_path, .{}) catch
             return SnapshotError.IoError;
         tmp_file.writeAll(sqlite_data) catch {
             tmp_file.close();
             return SnapshotError.IoError;
         };
         tmp_file.close();
-        defer std.fs.cwd().deleteFile(tmp_path_slice) catch {};
+        defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
         // open the temp database
         var src_db: ?*c.sqlite3 = null;
@@ -361,14 +355,23 @@ pub fn readSnapshotMeta(path: []const u8) SnapshotError!SnapshotMeta {
     defer file.close();
 
     var header: [snapshot_header_size]u8 = undefined;
-    const n = file.readAll(&header) catch return SnapshotError.IoError;
-    if (n < snapshot_header_size) return SnapshotError.InvalidSnapshot;
+    const bytes_read = file.readAll(&header) catch return SnapshotError.IoError;
+    if (bytes_read < snapshot_header_size) return SnapshotError.InvalidSnapshot;
 
     return SnapshotMeta{
         .last_included_index = std.mem.readInt(u64, header[0..8], .little),
         .last_included_term = std.mem.readInt(u64, header[8..16], .little),
         .data_len = std.mem.readInt(u64, header[16..24], .little),
     };
+}
+
+/// format a string into a buffer and null-terminate it.
+/// returns null if the formatted string doesn't fit (needs room for the NUL).
+fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) ?[:0]const u8 {
+    const slice = std.fmt.bufPrint(buf, fmt, args) catch return null;
+    if (slice.len >= buf.len) return null;
+    buf[slice.len] = 0;
+    return buf[0..slice.len :0];
 }
 
 // -- tests --

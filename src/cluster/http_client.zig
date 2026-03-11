@@ -104,9 +104,9 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
 
     var total: usize = 0;
     while (total < buf.len) {
-        const n = posix.read(fd, buf[total..]) catch break;
-        if (n == 0) break;
-        total += n;
+        const bytes_read = posix.read(fd, buf[total..]) catch break;
+        if (bytes_read == 0) break;
+        total += bytes_read;
     }
 
     if (total == 0) {

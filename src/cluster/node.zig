@@ -109,23 +109,16 @@ pub const Node = struct {
     pub fn init(alloc: std.mem.Allocator, config: NodeConfig) !Node {
         // open persistent log
         var log_path_buf: [512]u8 = undefined;
-        const log_path_slice = std.fmt.bufPrint(&log_path_buf, "{s}/raft.db", .{config.data_dir}) catch
+        const log_path = bufPrintZ(&log_path_buf, "{s}/raft.db", .{config.data_dir}) orelse
             return NodeError.InitFailed;
-        // null-terminate for sqlite
-        if (log_path_slice.len >= log_path_buf.len) return NodeError.InitFailed;
-        log_path_buf[log_path_slice.len] = 0;
-        const log_path: [:0]const u8 = log_path_buf[0..log_path_slice.len :0];
 
         var log = Log.init(log_path) catch return NodeError.InitFailed;
         errdefer log.deinit();
 
         // open state machine database
         var sm_path_buf: [512]u8 = undefined;
-        const sm_path_slice = std.fmt.bufPrint(&sm_path_buf, "{s}/state.db", .{config.data_dir}) catch
+        const sm_path = bufPrintZ(&sm_path_buf, "{s}/state.db", .{config.data_dir}) orelse
             return NodeError.InitFailed;
-        if (sm_path_slice.len >= sm_path_buf.len) return NodeError.InitFailed;
-        sm_path_buf[sm_path_slice.len] = 0;
-        const sm_path: [:0]const u8 = sm_path_buf[0..sm_path_slice.len :0];
 
         var sm = StateMachine.init(sm_path) catch return NodeError.InitFailed;
         errdefer sm.deinit();
@@ -399,8 +392,8 @@ pub const Node = struct {
         // scale timeout with cluster size to match adaptive agent heartbeat
         const base_timeout: i64 = 30;
         const multiplier: i64 = if (self.gossip) |g| blk: {
-            const n = g.members.count() + 1;
-            break :blk @min(@as(i64, gossip_mod.Gossip.ceilLog2(n)), gossip_mod.Gossip.max_interval_multiplier);
+            const member_count = g.members.count() + 1;
+            break :blk @min(@as(i64, gossip_mod.Gossip.ceilLog2(member_count)), gossip_mod.Gossip.max_interval_multiplier);
         } else 1;
         const timeout: i64 = base_timeout * multiplier;
 
@@ -992,6 +985,15 @@ pub const Node = struct {
         };
     }
 };
+
+/// format a string into a buffer and null-terminate it.
+/// returns null if the formatted string doesn't fit (needs room for the NUL).
+fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) ?[:0]const u8 {
+    const slice = std.fmt.bufPrint(buf, fmt, args) catch return null;
+    if (slice.len >= buf.len) return null;
+    buf[slice.len] = 0;
+    return buf[0..slice.len :0];
+}
 
 // -- tests --
 

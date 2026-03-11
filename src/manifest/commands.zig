@@ -228,16 +228,16 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 
     // in dev mode, set up file watcher for bind-mounted volumes
-    var w: ?watcher_mod.Watcher = null;
+    var watcher: ?watcher_mod.Watcher = null;
     var watcher_thread: ?std.Thread = null;
 
     if (dev_mode) {
-        w = watcher_mod.Watcher.init(alloc) catch |e| blk: {
+        watcher = watcher_mod.Watcher.init(alloc) catch |e| blk: {
             writeErr("warning: file watcher unavailable: {}\n", .{e});
             break :blk null;
         };
 
-        if (w != null) {
+        if (watcher != null) {
             // add watches for each service's bind-mounted volumes
             // track if any watches failed
             var any_watch_failed = false;
@@ -253,7 +253,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
                         continue;
                     };
 
-                    w.?.addRecursive(abs_source, i) catch |e| {
+                    watcher.?.addRecursive(abs_source, i) catch |e| {
                         writeErr("warning: failed to watch {s}: {}\n", .{ vol.source, e });
                         any_watch_failed = true;
                     };
@@ -261,10 +261,10 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
             }
 
             // only spawn watcher thread if we successfully added at least one watch
-            if (!any_watch_failed or w.?.watch_count > 0) {
+            if (!any_watch_failed or watcher.?.watch_count > 0) {
                 // spawn watcher thread
                 watcher_thread = std.Thread.spawn(.{}, orchestrator.watcherThread, .{
-                    &orch, &w.?,
+                    &orch, &watcher.?,
                 }) catch |e| blk: {
                     writeErr("warning: failed to start watcher thread: {}\n", .{e});
                     break :blk null;
@@ -285,7 +285,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     writeErr("\nshutting down...\n", .{});
 
     // clean up watcher before stopping services (closes fd, unblocks watcher thread)
-    if (w) |*watcher| watcher.deinit();
+    if (watcher) |*w| w.deinit();
     if (watcher_thread) |t| t.join();
 
     orch.stopAll();
