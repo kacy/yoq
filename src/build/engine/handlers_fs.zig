@@ -21,6 +21,31 @@ const cache = @import("cache.zig");
 const config_inherit = @import("config_inherit.zig");
 const child_exec = @import("child_exec.zig");
 
+const signal_exit_base: u8 = 128;
+
+fn commitLayerResult(
+    state: *types.BuildState,
+    lr: anytype,
+    cache_key: ?[]const u8,
+) types.BuildError!void {
+    var compressed_buf: [71]u8 = undefined;
+    const compressed_str = lr.compressed_digest.string(&compressed_buf);
+    var diff_buf: [71]u8 = undefined;
+    const diff_str = lr.uncompressed_digest.string(&diff_buf);
+    state.addLayer(compressed_str, diff_str, lr.compressed_size) catch return types.BuildError.LayerFailed;
+    if (cache_key) |key| cache.storeCache(key, compressed_str, diff_str, lr.compressed_size);
+}
+
+fn ensureDestParents(layer_dir: []const u8, dest: []const u8) types.BuildError!void {
+    if (dest.len == 0) return;
+    const dest_in_layer = if (dest[0] == '/') dest[1..] else dest;
+    if (std.fs.path.dirname(dest_in_layer)) |parent| {
+        var dir = std.fs.cwd().openDir(layer_dir, .{}) catch return types.BuildError.CopyStepFailed;
+        defer dir.close();
+        dir.makePath(parent) catch return types.BuildError.CopyStepFailed;
+    }
+}
+
 pub fn processFrom(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
     const image_str = if (std.mem.indexOf(u8, args, " AS ") orelse std.mem.indexOf(u8, args, " as ")) |idx|
         args[0..idx]
@@ -212,7 +237,7 @@ pub fn processRun(alloc: std.mem.Allocator, state: *types.BuildState, args: []co
     const wait_result = process.wait(spawn_result.pid, false) catch return types.BuildError.RunStepFailed;
     const exit_code: u8 = switch (wait_result.status) {
         .exited => |code| code,
-        .signaled => 128,
+        .signaled => signal_exit_base,
         .running => 0,
         .stopped => 0,
     };
@@ -220,15 +245,7 @@ pub fn processRun(alloc: std.mem.Allocator, state: *types.BuildState, args: []co
     if (exit_code != 0) return types.BuildError.RunStepFailed;
 
     const layer_result = layer.createLayerFromDir(alloc, dirs.upperPath()) catch return types.BuildError.LayerFailed;
-    if (layer_result) |lr| {
-        var digest_buf: [71]u8 = undefined;
-        const compressed_str = lr.compressed_digest.string(&digest_buf);
-        var diff_buf: [71]u8 = undefined;
-        const diff_str = lr.uncompressed_digest.string(&diff_buf);
-
-        state.addLayer(compressed_str, diff_str, lr.compressed_size) catch return types.BuildError.LayerFailed;
-        cache.storeCache(cache_key, compressed_str, diff_str, lr.compressed_size);
-    }
+    if (layer_result) |lr| try commitLayerResult(state, lr, cache_key);
 }
 
 pub fn parseCopyArgs(args: []const u8) types.CopyArgs {
@@ -279,27 +296,12 @@ pub fn processCopy(alloc: std.mem.Allocator, state: *types.BuildState, args: []c
     var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try resolveDestination(state.workdir, split.dest, &actual_dest_buf);
 
-    if (actual_dest.len > 0) {
-        const dest_in_layer = if (actual_dest[0] == '/') actual_dest[1..] else actual_dest;
-        if (std.fs.path.dirname(dest_in_layer)) |parent| {
-            var full_dir = std.fs.cwd().openDir(layer_dir, .{}) catch return types.BuildError.CopyStepFailed;
-            defer full_dir.close();
-            full_dir.makePath(parent) catch return types.BuildError.CopyStepFailed;
-        }
-    }
+    try ensureDestParents(layer_dir, actual_dest);
 
     context.copyFiles(context_dir, split.src, layer_dir, actual_dest) catch return types.BuildError.CopyStepFailed;
 
     const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch return types.BuildError.LayerFailed;
-    if (layer_result) |lr| {
-        var digest_buf: [71]u8 = undefined;
-        const compressed_str = lr.compressed_digest.string(&digest_buf);
-        var diff_buf: [71]u8 = undefined;
-        const diff_str = lr.uncompressed_digest.string(&diff_buf);
-
-        state.addLayer(compressed_str, diff_str, lr.compressed_size) catch return types.BuildError.LayerFailed;
-        cache.storeCache(cache_key, compressed_str, diff_str, lr.compressed_size);
-    }
+    if (layer_result) |lr| try commitLayerResult(state, lr, cache_key);
 }
 
 pub fn processCopyFromStage(
@@ -365,25 +367,12 @@ pub fn processCopyFromStage(
     var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try resolveDestination(state.workdir, dest, &actual_dest_buf);
 
-    if (actual_dest.len > 0) {
-        const dest_in_layer = if (actual_dest[0] == '/') actual_dest[1..] else actual_dest;
-        if (std.fs.path.dirname(dest_in_layer)) |parent| {
-            var full_dir = std.fs.cwd().openDir(layer_dir, .{}) catch return types.BuildError.CopyStepFailed;
-            defer full_dir.close();
-            full_dir.makePath(parent) catch return types.BuildError.CopyStepFailed;
-        }
-    }
+    try ensureDestParents(layer_dir, actual_dest);
 
     context.copyFiles(merged_dir, src, layer_dir, actual_dest) catch return types.BuildError.CopyStepFailed;
 
     const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch return types.BuildError.LayerFailed;
-    if (layer_result) |lr| {
-        var digest_buf: [71]u8 = undefined;
-        const compressed_str = lr.compressed_digest.string(&digest_buf);
-        var diff_buf: [71]u8 = undefined;
-        const diff_str = lr.uncompressed_digest.string(&diff_buf);
-        state.addLayer(compressed_str, diff_str, lr.compressed_size) catch return types.BuildError.LayerFailed;
-    }
+    if (layer_result) |lr| try commitLayerResult(state, lr, null);
 }
 
 pub fn processCopyMultiStage(
@@ -454,15 +443,7 @@ fn processAddExtract(alloc: std.mem.Allocator, state: *types.BuildState, args: [
     }
 
     const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch return types.BuildError.LayerFailed;
-    if (layer_result) |lr| {
-        var digest_buf: [71]u8 = undefined;
-        const compressed_str = lr.compressed_digest.string(&digest_buf);
-        var diff_buf: [71]u8 = undefined;
-        const diff_str = lr.uncompressed_digest.string(&diff_buf);
-
-        state.addLayer(compressed_str, diff_str, lr.compressed_size) catch return types.BuildError.LayerFailed;
-        cache.storeCache(cache_key, compressed_str, diff_str, lr.compressed_size);
-    }
+    if (layer_result) |lr| try commitLayerResult(state, lr, cache_key);
 }
 
 pub fn processAdd(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8, context_dir: []const u8) types.BuildError!void {

@@ -42,9 +42,9 @@ pub fn inheritConfig(alloc: std.mem.Allocator, state: *types.BuildState, config_
             }
         }
 
-        if (cc.User) |u| {
-            if (u.len > 0) {
-                const owned = alloc.dupe(u8, u) catch return;
+        if (cc.User) |user| {
+            if (user.len > 0) {
+                const owned = alloc.dupe(u8, user) catch return;
                 if (state.user) |old| alloc.free(old);
                 state.user = owned;
             }

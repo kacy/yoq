@@ -56,27 +56,29 @@ pub const BuildState = struct {
     }
 
     pub fn deinit(self: *BuildState) void {
-        for (self.layer_digests.items) |d| self.alloc.free(d);
+        for (self.layer_digests.items) |digest| self.alloc.free(digest);
         self.layer_digests.deinit(self.alloc);
-        for (self.diff_ids.items) |d| self.alloc.free(d);
+        for (self.diff_ids.items) |diff_id| self.alloc.free(diff_id);
         self.diff_ids.deinit(self.alloc);
         self.layer_sizes.deinit(self.alloc);
-        for (self.env.items) |e| self.alloc.free(e);
+        for (self.env.items) |env_var| self.alloc.free(env_var);
         self.env.deinit(self.alloc);
+        for (self.exposed_ports.items) |port| self.alloc.free(port);
         self.exposed_ports.deinit(self.alloc);
+        for (self.labels.items) |label| self.alloc.free(label);
         self.labels.deinit(self.alloc);
-        for (self.volumes.items) |v| self.alloc.free(v);
+        for (self.volumes.items) |vol| self.alloc.free(vol);
         self.volumes.deinit(self.alloc);
-        if (self.cmd) |c| self.alloc.free(c);
-        if (self.entrypoint) |e| self.alloc.free(e);
+        if (self.cmd) |cmd| self.alloc.free(cmd);
+        if (self.entrypoint) |ep| self.alloc.free(ep);
         if (!std.mem.eql(u8, self.workdir, "/")) self.alloc.free(self.workdir);
-        if (self.user) |u| self.alloc.free(u);
-        if (self.shell) |s| self.alloc.free(s);
-        if (self.stop_signal) |s| self.alloc.free(s);
-        if (self.healthcheck) |h| self.alloc.free(h);
-        for (self.onbuild_triggers.items) |t| self.alloc.free(t);
+        if (self.user) |user| self.alloc.free(user);
+        if (self.shell) |sh| self.alloc.free(sh);
+        if (self.stop_signal) |sig| self.alloc.free(sig);
+        if (self.healthcheck) |hc| self.alloc.free(hc);
+        for (self.onbuild_triggers.items) |trigger| self.alloc.free(trigger);
         self.onbuild_triggers.deinit(self.alloc);
-        for (self.pending_onbuild.items) |t| self.alloc.free(t);
+        for (self.pending_onbuild.items) |trigger| self.alloc.free(trigger);
         self.pending_onbuild.deinit(self.alloc);
         var arg_it = self.build_args.iterator();
         while (arg_it.next()) |entry| {
@@ -88,13 +90,13 @@ pub const BuildState = struct {
     }
 
     pub fn addLayer(self: *BuildState, compressed_digest: []const u8, diff_id: []const u8, size: u64) !void {
-        const cd = try self.alloc.dupe(u8, compressed_digest);
-        errdefer self.alloc.free(cd);
-        const di = try self.alloc.dupe(u8, diff_id);
-        errdefer self.alloc.free(di);
+        const owned_digest = try self.alloc.dupe(u8, compressed_digest);
+        errdefer self.alloc.free(owned_digest);
+        const owned_diff_id = try self.alloc.dupe(u8, diff_id);
+        errdefer self.alloc.free(owned_diff_id);
 
-        try self.layer_digests.append(self.alloc, cd);
-        try self.diff_ids.append(self.alloc, di);
+        try self.layer_digests.append(self.alloc, owned_digest);
+        try self.diff_ids.append(self.alloc, owned_diff_id);
         try self.layer_sizes.append(self.alloc, size);
         self.total_size += size;
 

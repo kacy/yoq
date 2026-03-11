@@ -68,11 +68,12 @@ pub fn processArg(alloc: std.mem.Allocator, state: *types.BuildState, args: []co
 }
 
 pub fn processVolume(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
-    if (std.mem.trim(u8, args, " \t").len == 0) return;
+    const trimmed = std.mem.trim(u8, args, " \t");
+    if (trimmed.len == 0) return;
 
-    if (std.mem.startsWith(u8, std.mem.trim(u8, args, " \t"), "[")) {
-        const trimmed = std.mem.trim(u8, args, " \t[]");
-        var iter = std.mem.splitScalar(u8, trimmed, ',');
+    if (std.mem.startsWith(u8, trimmed, "[")) {
+        const inner = std.mem.trim(u8, trimmed, "[]");
+        var iter = std.mem.splitScalar(u8, inner, ',');
         while (iter.next()) |entry| {
             const path = std.mem.trim(u8, entry, " \t\"");
             if (path.len == 0) continue;

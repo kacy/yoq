@@ -189,8 +189,10 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
         write("built {s} ({d} layers, {d} MB)\n", .{ t, result.layer_count, size_mb });
     } else {
         // show short digest
-        const short_id = if (result.manifest_digest.len > 19)
-            result.manifest_digest[7..19]
+        const digest_prefix_len = "sha256:".len;
+        const short_id_len = 12;
+        const short_id = if (result.manifest_digest.len > digest_prefix_len + short_id_len)
+            result.manifest_digest[digest_prefix_len..][0..short_id_len]
         else
             result.manifest_digest;
         write("built {s} ({d} layers, {d} MB)\n", .{ short_id, result.layer_count, size_mb });
