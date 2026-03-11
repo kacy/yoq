@@ -452,14 +452,8 @@ pub fn setLinkUp(fd: posix.fd_t, if_index: u32) NetlinkError!void {
 
 // -- alignment + syscall helpers --
 
-/// align a length to 4-byte boundary (NLMSG_ALIGN).
-/// public so bridge.zig can use it for manual struct padding.
-pub fn nlmsgAlignPub(len: usize) usize {
-    return nlmsgAlign(len);
-}
-
 /// align a value to 4-byte boundary (NLMSG_ALIGN)
-fn nlmsgAlign(len: usize) usize {
+pub fn nlmsgAlign(len: usize) usize {
     return (len + 3) & ~@as(usize, 3);
 }
 
@@ -467,6 +461,85 @@ fn nlmsgAlign(len: usize) usize {
 pub fn isError(rc: usize) bool {
     const signed: isize = @bitCast(rc);
     return signed < 0;
+}
+
+// -- shared network helpers --
+//
+// common netlink operations used by bridge.zig and wireguard.zig.
+// centralized here to avoid duplicating the message construction.
+
+/// add an IPv4 address to an interface via RTM_NEWADDR.
+pub fn addAddress(fd: posix.fd_t, if_index: u32, ip: *const [4]u8, prefix_len: u8) NetlinkError!void {
+    var buf_storage: [buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&buf_storage);
+
+    const hdr = try mb.putHeader(
+        .RTM_NEWADDR,
+        NLM_F.REQUEST | NLM_F.ACK | NLM_F.CREATE | NLM_F.EXCL,
+        IfAddrMsg,
+    );
+
+    const addr_msg = mb.getPayload(hdr, IfAddrMsg);
+    addr_msg.family = AF.INET;
+    addr_msg.prefixlen = prefix_len;
+    addr_msg.scope = RT_SCOPE.UNIVERSE;
+    addr_msg.index = if_index;
+
+    try mb.putAttr(hdr, IFA.LOCAL, ip);
+    try mb.putAttr(hdr, IFA.ADDRESS, ip);
+
+    try sendAndCheck(fd, mb.message());
+}
+
+/// add a route via RTM_NEWROUTE.
+/// dest/dest_len define the destination prefix (0.0.0.0/0 for default).
+/// gw is the gateway address.
+pub fn addRoute(fd: posix.fd_t, dest: ?*const [4]u8, dest_len: u8, gw: *const [4]u8) NetlinkError!void {
+    var buf_storage: [buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&buf_storage);
+
+    const hdr = try mb.putHeader(
+        .RTM_NEWROUTE,
+        NLM_F.REQUEST | NLM_F.ACK | NLM_F.CREATE,
+        RtMsg,
+    );
+
+    const rt = mb.getPayload(hdr, RtMsg);
+    rt.family = AF.INET;
+    rt.dst_len = dest_len;
+    rt.table = RT_TABLE.MAIN;
+    rt.protocol = RTPROT.BOOT;
+    rt.scope = RT_SCOPE.UNIVERSE;
+    rt.type = RTN.UNICAST;
+
+    if (dest) |d| try mb.putAttr(hdr, RTA.DST, d);
+    try mb.putAttr(hdr, RTA.GATEWAY, gw);
+
+    try sendAndCheck(fd, mb.message());
+}
+
+/// remove a route via RTM_DELROUTE.
+pub fn removeRoute(fd: posix.fd_t, dest: *const [4]u8, dest_len: u8) NetlinkError!void {
+    var buf_storage: [buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&buf_storage);
+
+    const hdr = try mb.putHeader(
+        .RTM_DELROUTE,
+        NLM_F.REQUEST | NLM_F.ACK,
+        RtMsg,
+    );
+
+    const rt = mb.getPayload(hdr, RtMsg);
+    rt.family = AF.INET;
+    rt.dst_len = dest_len;
+    rt.table = RT_TABLE.MAIN;
+    rt.protocol = RTPROT.BOOT;
+    rt.scope = RT_SCOPE.UNIVERSE;
+    rt.type = RTN.UNICAST;
+
+    try mb.putAttr(hdr, RTA.DST, dest);
+
+    try sendAndCheck(fd, mb.message());
 }
 
 // -- tests --

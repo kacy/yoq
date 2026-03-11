@@ -44,10 +44,8 @@ pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return PolicyCommandsError.InvalidArgument;
     };
 
-    if (std.mem.eql(u8, cmd, "deny")) {
-        policyDeny(args, alloc) catch |e| return e;
-    } else if (std.mem.eql(u8, cmd, "allow")) {
-        policyAllow(args, alloc) catch |e| return e;
+    if (std.mem.eql(u8, cmd, "deny") or std.mem.eql(u8, cmd, "allow")) {
+        policyAddRule(args, alloc, cmd) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "rm")) {
         policyRm(args, alloc) catch |e| return e;
     } else if (std.mem.eql(u8, cmd, "list")) {
@@ -62,46 +60,24 @@ pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 }
 
-fn policyDeny(args: *std.process.ArgIterator, alloc: std.mem.Allocator) PolicyCommandsError!void {
+fn policyAddRule(args: *std.process.ArgIterator, alloc: std.mem.Allocator, action: []const u8) PolicyCommandsError!void {
     const source = args.next() orelse {
-        writeErr("usage: yoq policy deny <source> <target>\n", .{});
+        writeErr("usage: yoq policy {s} <source> <target>\n", .{action});
         return PolicyCommandsError.InvalidArgument;
     };
     const target = args.next() orelse {
-        writeErr("usage: yoq policy deny <source> <target>\n", .{});
+        writeErr("usage: yoq policy {s} <source> <target>\n", .{action});
         return PolicyCommandsError.InvalidArgument;
     };
 
-    store.addNetworkPolicy(source, target, "deny") catch {
-        writeErr("failed to add deny rule\n", .{});
+    store.addNetworkPolicy(source, target, action) catch {
+        writeErr("failed to add {s} rule\n", .{action});
         return PolicyCommandsError.StoreFailed;
     };
 
-    // sync BPF maps with updated rules
     net_policy.syncPolicies(alloc);
 
-    write("{s} -> {s}: deny\n", .{ source, target });
-}
-
-fn policyAllow(args: *std.process.ArgIterator, alloc: std.mem.Allocator) PolicyCommandsError!void {
-    const source = args.next() orelse {
-        writeErr("usage: yoq policy allow <source> <target>\n", .{});
-        return PolicyCommandsError.InvalidArgument;
-    };
-    const target = args.next() orelse {
-        writeErr("usage: yoq policy allow <source> <target>\n", .{});
-        return PolicyCommandsError.InvalidArgument;
-    };
-
-    store.addNetworkPolicy(source, target, "allow") catch {
-        writeErr("failed to add allow rule\n", .{});
-        return PolicyCommandsError.StoreFailed;
-    };
-
-    // sync BPF maps with updated rules
-    net_policy.syncPolicies(alloc);
-
-    write("{s} -> {s}: allow\n", .{ source, target });
+    write("{s} -> {s}: {s}\n", .{ source, target, action });
 }
 
 fn policyRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) PolicyCommandsError!void {
