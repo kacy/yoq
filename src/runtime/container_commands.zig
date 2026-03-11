@@ -650,6 +650,19 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     std.process.exit(exit_code);
 }
 
+/// check if a "running" container's process is still alive.
+/// if the process is dead, updates the DB to "stopped" and returns the corrected status.
+fn reconcileLiveness(id: []const u8, status: []const u8, pid: ?i32) []const u8 {
+    if (!std.mem.eql(u8, status, "running")) return status;
+    if (pid) |p| {
+        process.sendSignal(p, 0) catch {
+            store.updateStatus(id, "stopped", null, null) catch {};
+            return "stopped";
+        };
+    }
+    return status;
+}
+
 pub fn ps(alloc: std.mem.Allocator) !void {
     var ids = store.listIds(alloc) catch |err| {
         writeErr("failed to list containers: {}\n", .{err});
@@ -678,17 +691,7 @@ pub fn ps(alloc: std.mem.Allocator) !void {
         };
         defer record.deinit(alloc);
 
-        // check liveness: if DB says "running" but process is gone, update to "stopped"
-        var status = record.status;
-        if (std.mem.eql(u8, status, "running")) {
-            if (record.pid) |pid| {
-                process.sendSignal(pid, 0) catch {
-                    // process is dead — update DB
-                    store.updateStatus(id, "stopped", null, null) catch {};
-                    status = "stopped";
-                };
-            }
-        }
+        const status = reconcileLiveness(id, record.status, record.pid);
 
         const ip_display: []const u8 = record.ip_address orelse "-";
         write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, status, ip_display, record.command });
@@ -703,15 +706,7 @@ fn psJson(alloc: std.mem.Allocator, ids: []const []const u8) void {
         const record = store.load(alloc, id) catch continue;
         defer record.deinit(alloc);
 
-        var status = record.status;
-        if (std.mem.eql(u8, status, "running")) {
-            if (record.pid) |pid| {
-                process.sendSignal(pid, 0) catch {
-                    store.updateStatus(id, "stopped", null, null) catch {};
-                    status = "stopped";
-                };
-            }
-        }
+        const status = reconcileLiveness(id, record.status, record.pid);
 
         w.beginObject();
         w.stringField("id", id);

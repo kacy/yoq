@@ -72,23 +72,13 @@ pub const ContainerId = [12]u8;
 pub fn isValidContainerId(id: []const u8) bool {
     if (id.len != 12) return false;
 
-    // check for path traversal attempts
-    if (std.mem.indexOf(u8, id, "..") != null) return false;
-    if (std.mem.indexOf(u8, id, "/") != null) return false;
-    if (std.mem.indexOf(u8, id, "\\") != null) return false;
-    if (std.mem.indexOf(u8, id, ":") != null) return false;
-
-    // verify all characters are lowercase hex
-    const hex_chars = "0123456789abcdef";
+    // verify all characters are lowercase hex — this also rejects
+    // path traversal characters (./, \, :) since they aren't hex
     for (id) |c| {
-        var valid = false;
-        for (hex_chars) |h| {
-            if (c == h) {
-                valid = true;
-                break;
-            }
+        switch (c) {
+            '0'...'9', 'a'...'f' => {},
+            else => return false,
         }
-        if (!valid) return false;
     }
     return true;
 }
@@ -693,11 +683,8 @@ fn setHostname(name: []const u8) void {
 }
 
 fn isCanonicalBindSource(source: []const u8) bool {
-    if (source.len == 0 or source[0] != '/') return false;
-
-    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = std.fs.cwd().realpath(source, &resolved_buf) catch return false;
-    return std.mem.eql(u8, resolved, source);
+    if (source.len == 0) return false;
+    return filesystem.isCanonicalAbsolutePath(source);
 }
 
 /// base directory for per-container overlay storage

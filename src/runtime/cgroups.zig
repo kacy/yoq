@@ -118,8 +118,15 @@ pub const Cgroup = struct {
     /// check if cgroups v2 is available on this system.
     /// looks for the cgroup.controllers file which only exists
     /// when cgroups v2 is mounted at /sys/fs/cgroup.
+    /// result is cached — cgroup version doesn't change at runtime.
+    var v2_cached: enum { unknown, yes, no } = .unknown;
     pub fn isV2Available() bool {
-        std.fs.cwd().access(cgroup_root ++ "/cgroup.controllers", .{}) catch return false;
+        if (v2_cached != .unknown) return v2_cached == .yes;
+        std.fs.cwd().access(cgroup_root ++ "/cgroup.controllers", .{}) catch {
+            v2_cached = .no;
+            return false;
+        };
+        v2_cached = .yes;
         return true;
     }
 
@@ -353,12 +360,11 @@ pub const Cgroup = struct {
         };
 
         // poll until cgroup.procs is empty or timeout (5 seconds)
-        // fixed sleeps are unreliable - processes may take variable time to die
         var attempts: u32 = 0;
         const max_attempts: u32 = 500; // 500 * 10ms = 5 seconds
         while (attempts < max_attempts) : (attempts += 1) {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
             if (self.isEmpty()) break;
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
 
         // check if processes are still running
