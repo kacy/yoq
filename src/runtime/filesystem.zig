@@ -471,7 +471,7 @@ fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
     return fd;
 }
 
-fn isCanonicalAbsolutePath(path: []const u8) bool {
+pub fn isCanonicalAbsolutePath(path: []const u8) bool {
     if (path.len == 0 or path[0] != '/') return false;
 
     var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;

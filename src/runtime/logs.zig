@@ -16,6 +16,7 @@ const paths = @import("../lib/paths.zig");
 const log_mux = @import("../dev/log_mux.zig");
 const syscall = @import("../lib/syscall.zig");
 const container = @import("container.zig");
+const process = @import("process.zig");
 
 pub const LogError = error{
     /// could not create the log file or log directory
@@ -114,22 +115,15 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
     };
     const chunk = buf[0..bytes_read];
 
-    // count newlines from the end to find the start of the last N lines
-    var count: usize = 0;
-    var pos: usize = chunk.len;
-    while (pos > 0) {
-        pos -= 1;
-        if (chunk[pos] == '\n') {
-            count += 1;
-            if (count == n + 1) {
-                const result = alloc.dupe(u8, chunk[pos + 1 ..]) catch {
-                    alloc.free(buf);
-                    return LogError.ReadFailed;
-                };
-                alloc.free(buf);
-                return result;
-            }
-        }
+    const tail = extractLastNLines(chunk, n);
+    if (tail.ptr != chunk.ptr) {
+        // found enough lines in the chunk — dupe the tail and free the buffer
+        const result = alloc.dupe(u8, tail) catch {
+            alloc.free(buf);
+            return LogError.ReadFailed;
+        };
+        alloc.free(buf);
+        return result;
     }
 
     // chunk didn't have enough lines — if we read the whole file, return it
@@ -147,24 +141,35 @@ fn readTailFull(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
 
     const full = try readLogs(alloc, container_id);
 
-    var count: usize = 0;
-    var pos: usize = full.len;
-    while (pos > 0) {
-        pos -= 1;
-        if (full[pos] == '\n') {
-            count += 1;
-            if (count == n + 1) {
-                const result = alloc.dupe(u8, full[pos + 1 ..]) catch {
-                    alloc.free(full);
-                    return LogError.ReadFailed;
-                };
-                alloc.free(full);
-                return result;
-            }
-        }
+    const tail = extractLastNLines(full, n);
+    if (tail.ptr != full.ptr) {
+        const result = alloc.dupe(u8, tail) catch {
+            alloc.free(full);
+            return LogError.ReadFailed;
+        };
+        alloc.free(full);
+        return result;
     }
 
     return full;
+}
+
+/// find the start of the last N lines in a buffer.
+/// returns a slice starting at the Nth-from-last newline.
+/// if there aren't enough lines, returns the original buffer unchanged.
+fn extractLastNLines(data: []const u8, n: usize) []const u8 {
+    var count: usize = 0;
+    var pos: usize = data.len;
+    while (pos > 0) {
+        pos -= 1;
+        if (data[pos] == '\n') {
+            count += 1;
+            if (count == n + 1) {
+                return data[pos + 1 ..];
+            }
+        }
+    }
+    return data;
 }
 
 /// delete the log file for a container
@@ -372,8 +377,8 @@ fn drainNewBytes(file: std.fs.File, buf: []u8) bool {
 
 fn isPidRunning(pid: ?posix.pid_t) bool {
     const proc_pid = pid orelse return false;
-    const rc = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, proc_pid))), 0);
-    return !syscall.isError(rc);
+    process.sendSignal(proc_pid, 0) catch return false;
+    return true;
 }
 
 fn sentinelizePath(buf: *[paths.max_path]u8, path: []const u8) ![:0]const u8 {
