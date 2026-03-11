@@ -310,8 +310,8 @@ pub const Agent = struct {
     /// so large clusters heartbeat less frequently.
     fn agentHeartbeatTicks(self: *Agent) u32 {
         if (self.gossip) |g| {
-            const n = g.members.count() + 1;
-            const multiplier: u32 = @min(gossip_mod.Gossip.ceilLog2(n), gossip_mod.Gossip.max_interval_multiplier);
+            const member_count = g.members.count() + 1;
+            const multiplier: u32 = @min(gossip_mod.Gossip.ceilLog2(member_count), gossip_mod.Gossip.max_interval_multiplier);
             return 50 * multiplier;
         }
         return 50;
@@ -557,27 +557,27 @@ pub const Agent = struct {
         HmacSha256.create(&shared_key, "yoq-raft-transport-key", self.token);
 
         // create transport for UDP gossip (TCP port 0 = OS-assigned, unused)
-        const t = self.alloc.create(transport_mod.Transport) catch return;
-        t.* = transport_mod.Transport.init(self.alloc, 0) catch {
-            self.alloc.destroy(t);
+        const transport = self.alloc.create(transport_mod.Transport) catch return;
+        transport.* = transport_mod.Transport.init(self.alloc, 0) catch {
+            self.alloc.destroy(transport);
             return;
         };
-        t.setLocalNodeId(@as(u64, nid));
-        t.shared_key = shared_key;
-        t.initUdp(default_gossip_port) catch {
+        transport.setLocalNodeId(@as(u64, nid));
+        transport.shared_key = shared_key;
+        transport.initUdp(default_gossip_port) catch {
             log.warn("gossip: failed to bind UDP port {}, running without gossip", .{default_gossip_port});
-            t.deinit();
-            self.alloc.destroy(t);
+            transport.deinit();
+            self.alloc.destroy(transport);
             return;
         };
 
         // create gossip state machine
-        const g = self.alloc.create(gossip_mod.Gossip) catch {
-            t.deinit();
-            self.alloc.destroy(t);
+        const gossip_state = self.alloc.create(gossip_mod.Gossip) catch {
+            transport.deinit();
+            self.alloc.destroy(transport);
             return;
         };
-        g.* = gossip_mod.Gossip.init(self.alloc, @as(u64, nid), .{
+        gossip_state.* = gossip_mod.Gossip.init(self.alloc, @as(u64, nid), .{
             .ip = self.overlay_ip orelse .{ 0, 0, 0, 0 },
             .port = default_gossip_port,
         });
@@ -586,20 +586,20 @@ pub const Agent = struct {
         var added: u32 = 0;
         for (seeds) |seed| {
             const parsed = parseSeedAddr(seed) orelse continue;
-            g.addMember(parsed.id, .{ .ip = parsed.ip, .port = default_gossip_port }) catch continue;
+            gossip_state.addMember(parsed.id, .{ .ip = parsed.ip, .port = default_gossip_port }) catch continue;
             added += 1;
         }
 
         if (added == 0) {
-            g.deinit();
-            self.alloc.destroy(g);
-            t.deinit();
-            self.alloc.destroy(t);
+            gossip_state.deinit();
+            self.alloc.destroy(gossip_state);
+            transport.deinit();
+            self.alloc.destroy(transport);
             return;
         }
 
-        self.gossip = g;
-        self.gossip_transport = t;
+        self.gossip = gossip_state;
+        self.gossip_transport = transport;
         log.info("gossip: initialized with {d} seeds on UDP port {}", .{ added, default_gossip_port });
     }
 

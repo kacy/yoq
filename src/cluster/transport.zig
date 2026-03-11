@@ -355,15 +355,15 @@ pub const Transport = struct {
         // write all bytes, handling partial writes
         var total: usize = 0;
         while (total < data.len) {
-            const n = posix.write(fd, data[total..]) catch {
+            const bytes_written = posix.write(fd, data[total..]) catch {
                 self.pool.removeConn(peer_id);
                 return TransportError.SendFailed;
             };
-            if (n == 0) {
+            if (bytes_written == 0) {
                 self.pool.removeConn(peer_id);
                 return TransportError.SendFailed;
             }
-            total += n;
+            total += bytes_written;
         }
     }
 
@@ -504,18 +504,18 @@ pub const Transport = struct {
         const fd = self.udp_fd orelse return TransportError.ReceiveFailed;
         const key = self.shared_key orelse return TransportError.AuthenticationFailed;
 
-        const n = posix.recvfrom(fd, buf, 0, null, null) catch |err| {
+        const recv_len = posix.recvfrom(fd, buf, 0, null, null) catch |err| {
             return switch (err) {
                 error.WouldBlock => null,
                 else => TransportError.ReceiveFailed,
             };
         };
 
-        if (n < 40) return TransportError.AuthenticationFailed;
+        if (recv_len < 40) return TransportError.AuthenticationFailed;
 
         const sender_bytes = buf[0..8];
         const received_hmac = buf[8..40];
-        const payload = buf[40..n];
+        const payload = buf[40..recv_len];
 
         // verify HMAC over [sender_id + payload]
         var expected: [32]u8 = undefined;

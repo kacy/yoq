@@ -316,8 +316,8 @@ pub fn getGossipSeeds(
         defer alloc.free(row.address.data);
         // format as "node_id@address" so agents know the gossip member ID
         var buf: [256]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}@{s}", .{ row.node_id, row.address.data }) catch continue;
-        const dupe = alloc.dupe(u8, s) catch continue;
+        const seed_str = std.fmt.bufPrint(&buf, "{d}@{s}", .{ row.node_id, row.address.data }) catch continue;
+        const dupe = alloc.dupe(u8, seed_str) catch continue;
         results.append(alloc, dupe) catch {
             alloc.free(dupe);
             continue;

@@ -379,14 +379,14 @@ pub fn sendAndCheck(fd: posix.fd_t, msg: []const u8) NetlinkError!void {
 
     // read the response
     var recv_buf: [buf_size]u8 align(4) = undefined;
-    const n = posix.recv(fd, &recv_buf, 0) catch return NetlinkError.RecvFailed;
-    if (n < @sizeOf(linux.nlmsghdr)) return NetlinkError.InvalidResponse;
+    const recv_len = posix.recv(fd, &recv_buf, 0) catch return NetlinkError.RecvFailed;
+    if (recv_len < @sizeOf(linux.nlmsghdr)) return NetlinkError.InvalidResponse;
 
     // check for NLMSG_ERROR
     const resp_hdr: *const linux.nlmsghdr = @ptrCast(@alignCast(&recv_buf));
     if (resp_hdr.type == .ERROR) {
         // error payload is a 32-bit errno right after the header
-        if (n < @sizeOf(linux.nlmsghdr) + 4) return NetlinkError.InvalidResponse;
+        if (recv_len < @sizeOf(linux.nlmsghdr) + 4) return NetlinkError.InvalidResponse;
         const err_code: *const i32 = @ptrCast(@alignCast(&recv_buf[@sizeOf(linux.nlmsghdr)]));
         if (err_code.* == 0) return; // success (ACK)
 
@@ -423,13 +423,13 @@ pub fn getIfIndex(fd: posix.fd_t, name: []const u8) NetlinkError!u32 {
     sendOnly(fd, mb.message()) catch return 0;
 
     var recv_buf: [buf_size]u8 align(4) = undefined;
-    const n = posix.recv(fd, &recv_buf, 0) catch return 0;
-    if (n < @sizeOf(linux.nlmsghdr)) return 0;
+    const recv_len = posix.recv(fd, &recv_buf, 0) catch return 0;
+    if (recv_len < @sizeOf(linux.nlmsghdr)) return 0;
 
     const resp_hdr: *const linux.nlmsghdr = @ptrCast(@alignCast(&recv_buf));
     if (resp_hdr.type == .ERROR) return 0;
     if (resp_hdr.type != .RTM_NEWLINK) return 0;
-    if (n < @sizeOf(linux.nlmsghdr) + @sizeOf(linux.ifinfomsg)) return 0;
+    if (recv_len < @sizeOf(linux.nlmsghdr) + @sizeOf(linux.ifinfomsg)) return 0;
 
     const resp_info: *const linux.ifinfomsg = @ptrCast(@alignCast(&recv_buf[@sizeOf(linux.nlmsghdr)]));
     return @bitCast(resp_info.index);

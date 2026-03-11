@@ -68,7 +68,7 @@ pub fn syncPolicies(alloc: std.mem.Allocator) void {
             continue;
         };
         defer {
-            for (src_ips.items) |s| alloc.free(s);
+            for (src_ips.items) |src_ip| alloc.free(src_ip);
             src_ips.deinit(alloc);
         }
 
@@ -77,7 +77,7 @@ pub fn syncPolicies(alloc: std.mem.Allocator) void {
             continue;
         };
         defer {
-            for (dst_ips.items) |d| alloc.free(d);
+            for (dst_ips.items) |dst_ip| alloc.free(dst_ip);
             dst_ips.deinit(alloc);
         }
 
@@ -148,7 +148,7 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
                 continue;
             };
             defer {
-                for (dst_ips.items) |d| alloc.free(d);
+                for (dst_ips.items) |dst_ip| alloc.free(dst_ip);
                 dst_ips.deinit(alloc);
             }
 
@@ -174,7 +174,7 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
                 continue;
             };
             defer {
-                for (src_ips.items) |s| alloc.free(s);
+                for (src_ips.items) |src_ip| alloc.free(src_ip);
                 src_ips.deinit(alloc);
             }
 
@@ -225,7 +225,7 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
             continue;
         };
         defer {
-            for (src_ips.items) |s| alloc.free(s);
+            for (src_ips.items) |src_ip| alloc.free(src_ip);
             src_ips.deinit(alloc);
         }
 
@@ -238,7 +238,7 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
                     continue;
                 };
                 defer {
-                    for (dst_ips.items) |d| alloc.free(d);
+                    for (dst_ips.items) |dst_ip| alloc.free(dst_ip);
                     dst_ips.deinit(alloc);
                 }
                 for (dst_ips.items) |dst_str| {
@@ -259,7 +259,7 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
             continue;
         };
         defer {
-            for (dst_ips.items) |d| alloc.free(d);
+            for (dst_ips.items) |dst_ip| alloc.free(dst_ip);
             dst_ips.deinit(alloc);
         }
 

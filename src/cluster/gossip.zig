@@ -216,8 +216,8 @@ pub const Gossip = struct {
     /// uses ceil(log2(N)) where N = total members including self, capped
     /// at max_interval_multiplier to bound worst-case detection time.
     pub fn recalculateIntervals(self: *Gossip) void {
-        const n = self.members.count() + 1; // +1 for self
-        const multiplier = @min(ceilLog2(n), max_interval_multiplier);
+        const member_count = self.members.count() + 1; // +1 for self
+        const multiplier = @min(ceilLog2(member_count), max_interval_multiplier);
         self.probe_interval = base_probe_interval * multiplier;
         self.suspect_timeout = base_suspect_timeout * multiplier;
         self.dead_timeout = base_dead_timeout * multiplier;
@@ -648,10 +648,10 @@ pub const Gossip = struct {
             // find lowest-priority entry: lowest state enum, then lowest remaining
             var worst: usize = 0;
             for (self.pending_updates.items[1..], 1..) |item, idx| {
-                const w = self.pending_updates.items[worst];
-                if (@intFromEnum(item.update.state) < @intFromEnum(w.update.state) or
-                    (@intFromEnum(item.update.state) == @intFromEnum(w.update.state) and
-                        item.remaining < w.remaining))
+                const worst_entry = self.pending_updates.items[worst];
+                if (@intFromEnum(item.update.state) < @intFromEnum(worst_entry.update.state) or
+                    (@intFromEnum(item.update.state) == @intFromEnum(worst_entry.update.state) and
+                        item.remaining < worst_entry.remaining))
                 {
                     worst = idx;
                 }

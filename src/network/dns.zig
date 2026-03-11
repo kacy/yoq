@@ -976,10 +976,10 @@ test "parse valid A record query" {
     try std.testing.expectEqual(@as(u16, 0x1234), header.id);
     try std.testing.expectEqual(@as(u16, 1), header.qdcount);
 
-    const q = parseQuestion(&packet).?;
-    try std.testing.expectEqualStrings("db", q.name[0..q.name_len]);
-    try std.testing.expectEqual(TYPE_A, q.qtype);
-    try std.testing.expectEqual(CLASS_IN, q.qclass);
+    const question = parseQuestion(&packet).?;
+    try std.testing.expectEqualStrings("db", question.name[0..question.name_len]);
+    try std.testing.expectEqual(TYPE_A, question.qtype);
+    try std.testing.expectEqual(CLASS_IN, question.qclass);
 }
 
 test "parse multi-label name" {
@@ -1015,8 +1015,8 @@ test "parse multi-label name" {
     pos += 4;
     @memset(packet[pos..], 0);
 
-    const q = parseQuestion(&packet).?;
-    try std.testing.expectEqualStrings("web.service.local", q.name[0..q.name_len]);
+    const question = parseQuestion(&packet).?;
+    try std.testing.expectEqualStrings("web.service.local", question.name[0..question.name_len]);
 }
 
 test "parse non-A query returns valid question with different qtype" {
@@ -1034,8 +1034,8 @@ test "parse non-A query returns valid question with different qtype" {
     packet[18] = 0x00;
     packet[19] = 0x01;
 
-    const q = parseQuestion(&packet).?;
-    try std.testing.expectEqual(@as(u16, 28), q.qtype);
+    const question = parseQuestion(&packet).?;
+    try std.testing.expectEqual(@as(u16, 28), question.qtype);
 }
 
 test "build response produces valid DNS packet" {
@@ -1133,8 +1133,8 @@ test "malformed packet — zero length name" {
     @memset(packet[17..], 0);
 
     // should parse successfully — empty name is valid in DNS (root)
-    const q = parseQuestion(&packet).?;
-    try std.testing.expectEqual(@as(usize, 0), q.name_len);
+    const question = parseQuestion(&packet).?;
+    try std.testing.expectEqual(@as(usize, 0), question.name_len);
 }
 
 test "nxdomain response" {

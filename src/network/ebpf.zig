@@ -218,66 +218,7 @@ pub fn loadProgram(
     comptime prog: type,
     map_fds: []posix.fd_t,
 ) EbpfError!posix.fd_t {
-    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
-
-    const insns = prog.insns;
-    const relocs = prog.relocs;
-    const maps = prog.maps;
-
-    if (insns.len == 0) return EbpfError.ProgramLoadFailed;
-    if (insns.len > max_insns) return EbpfError.ProgramLoadFailed;
-
-    // copy instructions into a mutable buffer for patching
-    var mutable_insns: [insns.len]BPF.Insn = insns;
-
-    // patch relocations: set map fd in ld_imm64 instructions
-    for (relocs) |reloc| {
-        if (reloc.insn_idx >= insns.len) {
-            log.warn("ebpf: skipping relocation with out-of-bounds insn_idx={d} (max={d})", .{ reloc.insn_idx, insns.len });
-            continue;
-        }
-        if (reloc.map_idx >= maps.len) {
-            log.warn("ebpf: skipping relocation with out-of-bounds map_idx={d} (max={d})", .{ reloc.map_idx, maps.len });
-            continue;
-        }
-
-        const fd = map_fds[reloc.map_idx];
-        patchMapFd(&mutable_insns[reloc.insn_idx], fd);
-    }
-
-    // first attempt: no verbose log (avoids ENOSPC from log buffer overflow)
-    const prog_fd = BPF.prog_load(
-        .sched_cls,
-        &mutable_insns,
-        null,
-        "GPL",
-        0,
-        0,
-    ) catch |e| {
-        // retry with logging to capture the verifier error message
-        var log_buf: [65536]u8 = undefined;
-        var bpf_log = BPF.Log{
-            .level = 1,
-            .buf = &log_buf,
-        };
-        _ = BPF.prog_load(
-            .sched_cls,
-            &mutable_insns,
-            &bpf_log,
-            "GPL",
-            0,
-            0,
-        ) catch {};
-
-        const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
-        if (log_end > 0) {
-            log.warn("ebpf: verifier output: {s}", .{log_buf[0..log_end]});
-        }
-        log.warn("ebpf: prog_load failed: {}", .{e});
-        return EbpfError.ProgramLoadFailed;
-    };
-
-    return prog_fd;
+    return loadBpfProgramInner(prog.insns, prog.relocs, map_fds, .sched_cls, "");
 }
 
 /// load a BPF program with a specific program type.
@@ -289,23 +230,52 @@ pub fn loadProgramWithType(
     map_fds: []posix.fd_t,
     prog_type: BPF.ProgType,
 ) EbpfError!posix.fd_t {
-    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
+    return loadBpfProgramInner(prog.insns, prog.relocs, map_fds, prog_type, "");
+}
 
-    const insns = prog.insns;
-    const relocs = prog.relocs;
-    const maps = prog.maps;
+/// load an egress BPF program from a module with egress_insns/egress_relocs.
+fn loadEgressProgram(
+    comptime prog: type,
+    map_fds: []posix.fd_t,
+) EbpfError!posix.fd_t {
+    return loadBpfProgramInner(prog.egress_insns, prog.egress_relocs, map_fds, .sched_cls, "egress ");
+}
+
+/// shared implementation for loading a BPF program.
+///
+/// copies instructions into a mutable buffer, patches ld_imm64 relocations
+/// with map file descriptors, and calls prog_load. on failure, retries with
+/// verifier logging enabled to capture the error message.
+fn loadBpfProgramInner(
+    insns: anytype,
+    relocs: anytype,
+    map_fds: []posix.fd_t,
+    prog_type: BPF.ProgType,
+    comptime label: []const u8,
+) EbpfError!posix.fd_t {
+    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
 
     if (insns.len == 0) return EbpfError.ProgramLoadFailed;
     if (insns.len > max_insns) return EbpfError.ProgramLoadFailed;
 
+    // copy instructions into a mutable buffer for patching
     var mutable_insns: [insns.len]BPF.Insn = insns;
 
+    // patch relocations: set map fd in ld_imm64 instructions
     for (relocs) |reloc| {
-        if (reloc.insn_idx >= insns.len) continue;
-        if (reloc.map_idx >= maps.len) continue;
+        if (reloc.insn_idx >= insns.len) {
+            log.warn("ebpf: " ++ label ++ "skipping relocation with out-of-bounds insn_idx={d} (max={d})", .{ reloc.insn_idx, insns.len });
+            continue;
+        }
+        if (reloc.map_idx >= map_fds.len) {
+            log.warn("ebpf: " ++ label ++ "skipping relocation with out-of-bounds map_idx={d} (max={d})", .{ reloc.map_idx, map_fds.len });
+            continue;
+        }
+
         patchMapFd(&mutable_insns[reloc.insn_idx], map_fds[reloc.map_idx]);
     }
 
+    // first attempt: no verbose log (avoids ENOSPC from log buffer overflow)
     const prog_fd = BPF.prog_load(
         prog_type,
         &mutable_insns,
@@ -314,7 +284,7 @@ pub fn loadProgramWithType(
         0,
         0,
     ) catch |e| {
-        // retry with logging to capture verifier error
+        // retry with logging to capture the verifier error message
         var log_buf: [65536]u8 = undefined;
         var bpf_log = BPF.Log{
             .level = 1,
@@ -331,9 +301,9 @@ pub fn loadProgramWithType(
 
         const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
         if (log_end > 0) {
-            log.warn("ebpf: verifier output: {s}", .{log_buf[0..log_end]});
+            log.warn("ebpf: " ++ label ++ "verifier output: {s}", .{log_buf[0..log_end]});
         }
-        log.warn("ebpf: prog_load failed: {}", .{e});
+        log.warn("ebpf: " ++ label ++ "prog_load failed: {}", .{e});
         return EbpfError.ProgramLoadFailed;
     };
 
@@ -348,62 +318,6 @@ pub fn loadProgramWithType(
 fn patchMapFd(insn: *BPF.Insn, fd: posix.fd_t) void {
     insn.src = BPF.PSEUDO_MAP_FD;
     insn.imm = @intCast(fd);
-}
-
-/// load an egress BPF program from a module with egress_insns/egress_relocs.
-fn loadEgressProgram(
-    comptime prog: type,
-    map_fds: []posix.fd_t,
-) EbpfError!posix.fd_t {
-    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
-
-    const insns = prog.egress_insns;
-    const relocs_arr = prog.egress_relocs;
-    const maps = prog.maps;
-
-    if (insns.len == 0) return EbpfError.ProgramLoadFailed;
-    if (insns.len > max_insns) return EbpfError.ProgramLoadFailed;
-
-    var mutable_insns: [insns.len]BPF.Insn = insns;
-
-    for (relocs_arr) |reloc| {
-        if (reloc.insn_idx >= insns.len) continue;
-        if (reloc.map_idx >= maps.len) continue;
-        patchMapFd(&mutable_insns[reloc.insn_idx], map_fds[reloc.map_idx]);
-    }
-
-    const prog_fd = BPF.prog_load(
-        .sched_cls,
-        &mutable_insns,
-        null,
-        "GPL",
-        0,
-        0,
-    ) catch |e| {
-        // retry with logging to capture verifier error
-        var log_buf: [65536]u8 = undefined;
-        var bpf_log = BPF.Log{
-            .level = 1,
-            .buf = &log_buf,
-        };
-        _ = BPF.prog_load(
-            .sched_cls,
-            &mutable_insns,
-            &bpf_log,
-            "GPL",
-            0,
-            0,
-        ) catch {};
-
-        const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
-        if (log_end > 0) {
-            log.warn("ebpf: egress verifier: {s}", .{log_buf[0..log_end]});
-        }
-        log.warn("ebpf: egress prog_load failed: {}", .{e});
-        return EbpfError.ProgramLoadFailed;
-    };
-
-    return prog_fd;
 }
 
 // -- TC attachment --
