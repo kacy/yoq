@@ -52,16 +52,7 @@ pub const SecretsStore = struct {
     pub fn init(db: *sqlite.Db, allocator: std.mem.Allocator) SecretsError!SecretsStore {
         // ensure the secrets table exists (schema.init should have been called,
         // but this is a safety net)
-        db.exec(
-            \\CREATE TABLE IF NOT EXISTS secrets (
-            \\    name TEXT PRIMARY KEY,
-            \\    encrypted_value BLOB NOT NULL,
-            \\    nonce BLOB NOT NULL,
-            \\    tag BLOB NOT NULL,
-            \\    created_at INTEGER NOT NULL,
-            \\    updated_at INTEGER NOT NULL
-            \\);
-        , .{}, .{}) catch return SecretsError.WriteFailed;
+        db.exec(schema.secrets_create_table_sql, .{}, .{}) catch return SecretsError.WriteFailed;
 
         const key = loadOrCreateKey() catch |err| return switch (err) {
             error.HomeDirNotFound => SecretsError.HomeDirNotFound,
@@ -80,16 +71,7 @@ pub const SecretsStore = struct {
     /// initialize with an explicit key (for testing).
     /// skips file-based key loading entirely.
     pub fn initWithKey(db: *sqlite.Db, allocator: std.mem.Allocator, key: [key_length]u8) SecretsError!SecretsStore {
-        db.exec(
-            \\CREATE TABLE IF NOT EXISTS secrets (
-            \\    name TEXT PRIMARY KEY,
-            \\    encrypted_value BLOB NOT NULL,
-            \\    nonce BLOB NOT NULL,
-            \\    tag BLOB NOT NULL,
-            \\    created_at INTEGER NOT NULL,
-            \\    updated_at INTEGER NOT NULL
-            \\);
-        , .{}, .{}) catch return SecretsError.WriteFailed;
+        db.exec(schema.secrets_create_table_sql, .{}, .{}) catch return SecretsError.WriteFailed;
 
         return .{
             .db = db,
@@ -194,7 +176,7 @@ pub const SecretsStore = struct {
     /// before calling this, and the old key is securely erased after
     /// a successful rotation.
     pub fn rotateKey(self: *SecretsStore, new_key: [key_length]u8) SecretsError!void {
-        try self.rotateKeyWithWriter(new_key, writeEncryptedValueForRotation);
+        try self.rotateKeyWithWriter(new_key, writeEncryptedValue);
     }
 
     fn rotateKeyWithWriter(
@@ -308,15 +290,6 @@ pub const SecretsStore = struct {
         ) catch return SecretsError.WriteFailed;
     }
 
-    fn writeEncryptedValueForRotation(
-        self: *SecretsStore,
-        name: []const u8,
-        encrypted: EncryptResult,
-        created_at: i64,
-        updated_at: i64,
-    ) SecretsError!void {
-        return self.writeEncryptedValue(name, encrypted, created_at, updated_at);
-    }
 };
 
 // -- encryption primitives --

@@ -65,47 +65,7 @@ pub fn parseTrigger(trigger: []const u8) ?types.TriggerInstruction {
 
     if (args.len == 0) return null;
 
-    var lower_buf: [16]u8 = undefined;
-    if (keyword.len > lower_buf.len) return null;
-    for (keyword, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
-    const lower = lower_buf[0..keyword.len];
-
-    const kind: dockerfile.InstructionKind = if (std.mem.eql(u8, lower, "run"))
-        .run
-    else if (std.mem.eql(u8, lower, "copy"))
-        .copy
-    else if (std.mem.eql(u8, lower, "add"))
-        .add
-    else if (std.mem.eql(u8, lower, "env"))
-        .env
-    else if (std.mem.eql(u8, lower, "expose"))
-        .expose
-    else if (std.mem.eql(u8, lower, "entrypoint"))
-        .entrypoint
-    else if (std.mem.eql(u8, lower, "cmd"))
-        .cmd
-    else if (std.mem.eql(u8, lower, "workdir"))
-        .workdir
-    else if (std.mem.eql(u8, lower, "arg"))
-        .arg
-    else if (std.mem.eql(u8, lower, "user"))
-        .user
-    else if (std.mem.eql(u8, lower, "label"))
-        .label
-    else if (std.mem.eql(u8, lower, "volume"))
-        .volume
-    else if (std.mem.eql(u8, lower, "shell"))
-        .shell
-    else if (std.mem.eql(u8, lower, "healthcheck"))
-        .healthcheck
-    else if (std.mem.eql(u8, lower, "stopsignal"))
-        .stopsignal
-    else if (std.mem.eql(u8, lower, "from"))
-        .from
-    else if (std.mem.eql(u8, lower, "onbuild"))
-        .onbuild
-    else
-        return null;
+    const kind = dockerfile.matchKeyword(keyword) orelse return null;
 
     return .{ .kind = kind, .args = args };
 }
