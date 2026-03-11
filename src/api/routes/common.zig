@@ -61,8 +61,8 @@ pub fn hasValidBearerToken(request: *const http.Request, expected_token: []const
     // constant-time: always compare expected_token.len bytes.
     // length mismatch is folded into the diff, not returned early.
     var diff: u8 = if (provided.len != expected_token.len) 1 else 0;
-    const n = @min(provided.len, expected_token.len);
-    for (provided[0..n], expected_token[0..n]) |a, b| {
+    const compare_len = @min(provided.len, expected_token.len);
+    for (provided[0..compare_len], expected_token[0..compare_len]) |a, b| {
         diff |= a ^ b;
     }
     return diff == 0;

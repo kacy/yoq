@@ -760,13 +760,13 @@ fn resolverLoop(sock: posix.socket_t) void {
         var client_addr: posix.sockaddr.in = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
 
-        const n = posix.recvfrom(sock, &recv_buf, 0, @ptrCast(&client_addr), &addr_len) catch {
+        const recv_len = posix.recvfrom(sock, &recv_buf, 0, @ptrCast(&client_addr), &addr_len) catch {
             // socket closed or error — check if we should stop
             if (!resolver_running.load(.acquire)) break;
             continue;
         };
 
-        if (n < 12) continue; // too short for DNS header
+        if (recv_len < 12) continue; // too short for DNS header
 
         // SECURITY: Rate limit queries to prevent DNS amplification attacks
         const client_ip = std.mem.nativeToBig(u32, client_addr.addr);
@@ -780,7 +780,7 @@ fn resolverLoop(sock: posix.socket_t) void {
             continue;
         }
 
-        handleQuery(sock, recv_buf[0..n], &client_addr, addr_len);
+        handleQuery(sock, recv_buf[0..recv_len], &client_addr, addr_len);
     }
 }
 

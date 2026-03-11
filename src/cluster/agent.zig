@@ -622,20 +622,20 @@ pub const Agent = struct {
 
     /// tick gossip state machine and process outgoing actions.
     fn tickGossipLoop(self: *Agent) void {
-        const g = self.gossip orelse return;
-        const t = self.gossip_transport orelse return;
+        const gossip = self.gossip orelse return;
+        const transport = self.gossip_transport orelse return;
 
-        g.tick() catch return;
+        gossip.tick() catch return;
 
-        const actions = g.drainActions();
-        defer g.freeActions(actions);
+        const actions = gossip.drainActions();
+        defer gossip.freeActions(actions);
 
         for (actions) |action| {
             switch (action) {
                 .send_message => |msg| {
                     var encode_buf: [512]u8 = undefined;
                     const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
-                    t.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
+                    transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
                 },
                 // agents don't act on membership changes — the server leader does
                 .member_dead, .member_alive, .member_suspect => {},
@@ -645,35 +645,35 @@ pub const Agent = struct {
 
     /// receive and dispatch incoming gossip UDP messages.
     fn receiveGossipLoop(self: *Agent) void {
-        const g = self.gossip orelse return;
-        const t = self.gossip_transport orelse return;
+        const gossip = self.gossip orelse return;
+        const transport = self.gossip_transport orelse return;
 
         var buf: [1500]u8 = undefined;
 
         // drain up to 5 messages per call
-        var i: u32 = 0;
-        while (i < 5) : (i += 1) {
-            const result = t.receiveGossip(&buf) catch break;
+        var msg_idx: u32 = 0;
+        while (msg_idx < 5) : (msg_idx += 1) {
+            const result = transport.receiveGossip(&buf) catch break;
             const recv = result orelse break;
 
             const msg = gossip_mod.Gossip.decode(self.alloc, recv.payload) catch continue;
 
             switch (msg) {
-                .ping => |p| g.handlePing(p) catch {},
-                .ping_ack => |p| g.handlePingAck(p) catch {},
-                .ping_req => |p| g.handlePingReq(p) catch {},
+                .ping => |payload| gossip.handlePing(payload) catch {},
+                .ping_ack => |payload| gossip.handlePingAck(payload) catch {},
+                .ping_req => |payload| gossip.handlePingReq(payload) catch {},
             }
 
             // send any response actions immediately
-            const actions = g.drainActions();
-            defer g.freeActions(actions);
+            const actions = gossip.drainActions();
+            defer gossip.freeActions(actions);
 
             for (actions) |action| {
                 switch (action) {
                     .send_message => |send| {
                         var encode_buf: [512]u8 = undefined;
                         const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
-                        t.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
+                        transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
                     },
                     .member_dead, .member_alive, .member_suspect => {},
                 }

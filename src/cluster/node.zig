@@ -155,18 +155,18 @@ pub const Node = struct {
         // initialize gossip for agent failure detection.
         // non-fatal: if UDP binding fails, gossip is null and the node
         // falls back to heartbeat-based health checks (30s timeout).
-        const gp: u16 = if (config.gossip_port != 0) config.gossip_port else config.port +| 100;
+        const gossip_port: u16 = if (config.gossip_port != 0) config.gossip_port else config.port +| 100;
         const gossip_inst: ?*gossip_mod.Gossip = blk: {
-            const g = alloc.create(gossip_mod.Gossip) catch break :blk null;
-            g.* = gossip_mod.Gossip.init(alloc, config.id, .{ .ip = .{ 0, 0, 0, 0 }, .port = gp });
-            transport.initUdp(gp) catch {
-                logger.warn("gossip: failed to bind UDP port {}, running without gossip", .{gp});
-                g.deinit();
-                alloc.destroy(g);
+            const gossip_state = alloc.create(gossip_mod.Gossip) catch break :blk null;
+            gossip_state.* = gossip_mod.Gossip.init(alloc, config.id, .{ .ip = .{ 0, 0, 0, 0 }, .port = gossip_port });
+            transport.initUdp(gossip_port) catch {
+                logger.warn("gossip: failed to bind UDP port {}, running without gossip", .{gossip_port});
+                gossip_state.deinit();
+                alloc.destroy(gossip_state);
                 break :blk null;
             };
-            logger.info("gossip: initialized on UDP port {}", .{gp});
-            break :blk g;
+            logger.info("gossip: initialized on UDP port {}", .{gossip_port});
+            break :blk gossip_state;
         };
 
         // initialize raft — dupes peer_ids internally
@@ -200,7 +200,7 @@ pub const Node = struct {
             .recv_thread = null,
             .last_snapshot_index = initial_snap_index,
             .gossip = gossip_inst,
-            .gossip_port = gp,
+            .gossip_port = gossip_port,
             .heartbeat_batcher = heartbeat_batcher_mod.HeartbeatBatcher.init(alloc),
         };
     }
@@ -673,13 +673,13 @@ pub const Node = struct {
                     const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
                     self.transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
                 },
-                .member_dead => |m| {
+                .member_dead => |member_event| {
                     if (self.raft.role != .leader) continue;
-                    self.handleGossipMemberDead(m.id);
+                    self.handleGossipMemberDead(member_event.id);
                 },
-                .member_alive => |m| {
+                .member_alive => |member_event| {
                     if (self.raft.role != .leader) continue;
-                    self.handleGossipMemberAlive(m.id);
+                    self.handleGossipMemberAlive(member_event.id);
                 },
                 .member_suspect => {},
             }
@@ -722,9 +722,9 @@ pub const Node = struct {
 
         for (msgs[0..msg_count]) |msg| {
             switch (msg) {
-                .ping => |p| g.handlePing(p) catch {},
-                .ping_ack => |p| g.handlePingAck(p) catch {},
-                .ping_req => |p| g.handlePingReq(p) catch {},
+                .ping => |payload| g.handlePing(payload) catch {},
+                .ping_ack => |payload| g.handlePingAck(payload) catch {},
+                .ping_req => |payload| g.handlePingReq(payload) catch {},
             }
         }
 
@@ -739,11 +739,11 @@ pub const Node = struct {
                     const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
                     self.transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
                 },
-                .member_dead => |m| {
-                    if (self.raft.role == .leader) self.handleGossipMemberDead(m.id);
+                .member_dead => |member_event| {
+                    if (self.raft.role == .leader) self.handleGossipMemberDead(member_event.id);
                 },
-                .member_alive => |m| {
-                    if (self.raft.role == .leader) self.handleGossipMemberAlive(m.id);
+                .member_alive => |member_event| {
+                    if (self.raft.role == .leader) self.handleGossipMemberAlive(member_event.id);
                 },
                 .member_suspect => {},
             }
@@ -793,7 +793,7 @@ pub const Node = struct {
 
         const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
         defer {
-            for (agents) |a| a.deinit(self.alloc);
+            for (agents) |agent| agent.deinit(self.alloc);
             self.alloc.free(agents);
         }
 

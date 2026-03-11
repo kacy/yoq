@@ -861,9 +861,9 @@ fn readU32(buf: []const u8) u32 {
 fn readExact(fd: posix.socket_t, buf: []u8) !void {
     var total: usize = 0;
     while (total < buf.len) {
-        const n = posix.read(fd, buf[total..]) catch return error.ReadFailed;
-        if (n == 0) return error.ReadFailed; // connection closed
-        total += n;
+        const bytes_read = posix.read(fd, buf[total..]) catch return error.ReadFailed;
+        if (bytes_read == 0) return error.ReadFailed; // connection closed
+        total += bytes_read;
     }
 }
 

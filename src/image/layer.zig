@@ -192,9 +192,9 @@ fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []cons
     // read source file and feed through compressor
     var read_buf: [8192]u8 = undefined;
     while (true) {
-        const n = try src_file.read(&read_buf);
-        if (n == 0) break;
-        compressor.writer.writeAll(read_buf[0..n]) catch return error.CompressFailed;
+        const bytes_read = try src_file.read(&read_buf);
+        if (bytes_read == 0) break;
+        compressor.writer.writeAll(read_buf[0..bytes_read]) catch return error.CompressFailed;
     }
 
     compressor.end() catch return error.CompressFailed;
@@ -210,9 +210,9 @@ fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []cons
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var hash_buf: [8192]u8 = undefined;
     while (true) {
-        const n = try verify_file.read(&hash_buf);
-        if (n == 0) break;
-        hasher.update(hash_buf[0..n]);
+        const bytes_read = try verify_file.read(&hash_buf);
+        if (bytes_read == 0) break;
+        hasher.update(hash_buf[0..bytes_read]);
     }
 
     return GzipResult{
@@ -290,9 +290,9 @@ fn writeTarFromDir(alloc: std.mem.Allocator, dir_path: []const u8, tar_path: []c
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var hash_buf: [8192]u8 = undefined;
     while (true) {
-        const n = try hash_file.read(&hash_buf);
-        if (n == 0) break;
-        hasher.update(hash_buf[0..n]);
+        const bytes_read = try hash_file.read(&hash_buf);
+        if (bytes_read == 0) break;
+        hasher.update(hash_buf[0..bytes_read]);
     }
 
     return blob_store.Digest{ .hash = hasher.finalResult() };

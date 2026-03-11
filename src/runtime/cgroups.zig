@@ -451,8 +451,8 @@ pub const Cgroup = struct {
         const file = std.fs.cwd().openFile(file_path, .{}) catch return error.ReadFailed;
         defer file.close();
 
-        const n = file.readAll(buf) catch return error.ReadFailed;
-        return std.mem.trimRight(u8, buf[0..n], "\n ");
+        const bytes_read = file.readAll(buf) catch return error.ReadFailed;
+        return std.mem.trimRight(u8, buf[0..bytes_read], "\n ");
     }
 
     fn readU64(self: *const Cgroup, filename: []const u8) CgroupError!u64 {
@@ -485,8 +485,8 @@ fn enableSubtreeControllers(dir_path: []const u8) void {
 fn readFromDir(dir: std.fs.Dir, filename: []const u8, buf: []u8) ?[]const u8 {
     const file = dir.openFile(filename, .{}) catch return null;
     defer file.close();
-    const n = file.readAll(buf) catch return null;
-    return std.mem.trimRight(u8, buf[0..n], "\n ");
+    const bytes_read = file.readAll(buf) catch return null;
+    return std.mem.trimRight(u8, buf[0..bytes_read], "\n ");
 }
 
 /// parse PSI metrics from already-read content (for batch reads)

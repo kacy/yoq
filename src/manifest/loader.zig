@@ -210,8 +210,8 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         for (worker_table.entries.keys(), worker_table.entries.values()) |name, val| {
             switch (val) {
                 .table => |tbl| {
-                    const w = try parseWorker(alloc, name, tbl);
-                    workers.append(alloc, w) catch return LoadError.OutOfMemory;
+                    const worker = try parseWorker(alloc, name, tbl);
+                    workers.append(alloc, worker) catch return LoadError.OutOfMemory;
                 },
                 else => {},
             }
@@ -221,7 +221,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
     // parse crons from [cron.*] subtables
     var crons: std.ArrayListUnmanaged(spec.Cron) = .empty;
     defer {
-        for (crons.items) |c| c.deinit(alloc);
+        for (crons.items) |cron_job| cron_job.deinit(alloc);
         crons.deinit(alloc);
     }
 
@@ -229,8 +229,8 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         for (cron_table.entries.keys(), cron_table.entries.values()) |name, val| {
             switch (val) {
                 .table => |tbl| {
-                    const c = try parseCron(alloc, name, tbl);
-                    crons.append(alloc, c) catch return LoadError.OutOfMemory;
+                    const cron_job = try parseCron(alloc, name, tbl);
+                    crons.append(alloc, cron_job) catch return LoadError.OutOfMemory;
                 },
                 else => {},
             }
@@ -509,7 +509,7 @@ fn validateDependencies(services: []const spec.Service, workers: []const spec.Wo
 /// returns a new slice with services in dependency order (dependencies first).
 /// detects cycles — returns CircularDependency if the graph has one.
 fn sortByDependency(alloc: std.mem.Allocator, services: []const spec.Service) LoadError![]const spec.Service {
-    const n = services.len;
+    const service_count = services.len;
 
     // build name → index mapping
     var name_to_idx: std.StringHashMapUnmanaged(usize) = .empty;
@@ -520,7 +520,7 @@ fn sortByDependency(alloc: std.mem.Allocator, services: []const spec.Service) Lo
     }
 
     // compute in-degrees (number of dependencies for each service)
-    const in_degree = alloc.alloc(usize, n) catch return LoadError.OutOfMemory;
+    const in_degree = alloc.alloc(usize, service_count) catch return LoadError.OutOfMemory;
     defer alloc.free(in_degree);
     @memset(in_degree, 0);
 
@@ -569,7 +569,7 @@ fn sortByDependency(alloc: std.mem.Allocator, services: []const spec.Service) Lo
         }
     }
 
-    if (sorted.items.len != n) {
+    if (sorted.items.len != service_count) {
         log.err("manifest: circular dependency detected among services", .{});
         return LoadError.CircularDependency;
     }

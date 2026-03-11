@@ -993,8 +993,8 @@ test "log conflict: follower truncates on mismatch" {
     try testing.expectEqual(@as(Term, 2), entry.term);
     try testing.expectEqualStrings("new", entry.data);
 
-    const a = follower.drainActions();
-    defer alloc.free(a);
+    const actions = follower.drainActions();
+    defer alloc.free(actions);
 }
 
 test "propose fails when not leader" {

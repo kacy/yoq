@@ -372,9 +372,9 @@ const ReadRequestError = error{
 fn readRequest(fd: posix.fd_t, buf: []u8) ReadRequestError!http.Request {
     var total: usize = 0;
     while (total < buf.len) {
-        const n = posix.read(fd, buf[total..]) catch break;
-        if (n == 0) break;
-        total += n;
+        const bytes_read = posix.read(fd, buf[total..]) catch break;
+        if (bytes_read == 0) break;
+        total += bytes_read;
 
         if (findHeaderEnd(buf[0..total]) == null and total > http.max_header_bytes) {
             return error.HeadersTooLarge;
@@ -411,9 +411,9 @@ fn sendError(fd: posix.fd_t, status: http.StatusCode, message: []const u8) void 
 fn writeAll(fd: posix.fd_t, data: []const u8) void {
     var written: usize = 0;
     while (written < data.len) {
-        const n = posix.write(fd, data[written..]) catch return;
-        if (n == 0) return;
-        written += n;
+        const bytes_written = posix.write(fd, data[written..]) catch return;
+        if (bytes_written == 0) return;
+        written += bytes_written;
     }
 }
 

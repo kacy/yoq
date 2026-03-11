@@ -483,9 +483,9 @@ fn clusterStatus(alloc: std.mem.Allocator) void {
     var buf: [4096]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const n = std.posix.read(fd, buf[total..]) catch break;
-        if (n == 0) break;
-        total += n;
+        const bytes_read = std.posix.read(fd, buf[total..]) catch break;
+        if (bytes_read == 0) break;
+        total += bytes_read;
     }
 
     // find body (after \r\n\r\n)

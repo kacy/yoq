@@ -76,13 +76,13 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: Digest) BlobErr
     var buf: [8192]u8 = undefined;
     var write_ok = true;
     while (true) {
-        const n = src_file.read(&buf) catch {
+        const bytes_read = src_file.read(&buf) catch {
             write_ok = false;
             break;
         };
-        if (n == 0) break;
-        hasher.update(buf[0..n]);
-        dest_file.writeAll(buf[0..n]) catch {
+        if (bytes_read == 0) break;
+        hasher.update(buf[0..bytes_read]);
+        dest_file.writeAll(buf[0..bytes_read]) catch {
             write_ok = false;
             break;
         };
@@ -191,9 +191,9 @@ pub fn verifyBlob(digest: Digest) bool {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [8192]u8 = undefined;
     while (true) {
-        const n = file.read(&buf) catch return false;
-        if (n == 0) break;
-        hasher.update(buf[0..n]);
+        const bytes_read = file.read(&buf) catch return false;
+        if (bytes_read == 0) break;
+        hasher.update(buf[0..bytes_read]);
     }
 
     const actual = hasher.finalResult();

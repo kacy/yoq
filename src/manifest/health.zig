@@ -367,10 +367,10 @@ fn runHttpCheck(container_ip: [4]u8, port: u16, path: []const u8, timeout: u32) 
 
     // read response — we only need the status line
     var response_buf: [256]u8 = undefined;
-    const n = posix.read(sock, &response_buf) catch return false;
-    if (n < 12) return false; // "HTTP/1.x 200" is 12 chars minimum
+    const bytes_read = posix.read(sock, &response_buf) catch return false;
+    if (bytes_read < 12) return false; // "HTTP/1.x 200" is 12 chars minimum
 
-    const response = response_buf[0..n];
+    const response = response_buf[0..bytes_read];
 
     // check for "HTTP/1.x 2xx" pattern
     return isHttp2xx(response);

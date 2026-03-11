@@ -97,21 +97,21 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
 
             // open existing cgroup and read all metrics in one pass
             const cg = cgroups.Cgroup.open(rec.id) catch continue;
-            const m = cg.readAllMetrics();
+            const metrics = cg.readAllMetrics();
 
-            if (m.memory_bytes) |mem| total_memory += mem;
-            if (m.cpu_usec) |cpu_usec| {
+            if (metrics.memory_bytes) |mem| total_memory += mem;
+            if (metrics.cpu_usec) |cpu_usec| {
                 total_cpu_usec += cpu_usec;
                 has_cpu = true;
             }
 
             // use PSI and limits from the first running container (representative)
             if (psi_cpu == null) {
-                psi_cpu = m.psi_cpu;
-                psi_memory = m.psi_memory;
-                memory_limit = m.memory_limit;
-                if (m.cpu_max_usec) |quota| {
-                    if (m.cpu_max_period) |period| {
+                psi_cpu = metrics.psi_cpu;
+                psi_memory = metrics.psi_memory;
+                memory_limit = metrics.memory_limit;
+                if (metrics.cpu_max_usec) |quota| {
+                    if (metrics.cpu_max_period) |period| {
                         if (period > 0) {
                             cpu_quota_pct = @as(f64, @floatFromInt(quota)) / @as(f64, @floatFromInt(period)) * 100.0;
                         }
@@ -201,8 +201,8 @@ pub fn formatBytes(buf: []u8, bytes: u64) []const u8 {
 
 /// format a health status as a display string.
 pub fn formatHealth(status: ?health.HealthStatus) []const u8 {
-    const s = status orelse return "\xe2\x80\x94"; // em dash
-    return switch (s) {
+    const health_status = status orelse return "\xe2\x80\x94"; // em dash
+    return switch (health_status) {
         .healthy => "healthy",
         .unhealthy => "unhealthy",
         .starting => "starting",
