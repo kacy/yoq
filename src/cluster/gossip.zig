@@ -424,9 +424,9 @@ pub const Gossip = struct {
         // shuffle and take first K
         const random = self.prng.random();
         random.shuffle(u64, candidates.items);
-        const k = @min(indirect_probe_count, candidates.items.len);
+        const relay_count = @min(indirect_probe_count, candidates.items.len);
 
-        for (candidates.items[0..k]) |relay_id| {
+        for (candidates.items[0..relay_count]) |relay_id| {
             if (self.members.get(relay_id)) |relay| {
                 const updates = self.collectPiggybackUpdates();
                 try self.actions.append(self.alloc, .{ .send_message = .{
@@ -600,8 +600,8 @@ pub const Gossip = struct {
 
         // sort by priority: dead first (enum value 2), then suspect (1), then alive (0)
         std.sort.insertion(PendingUpdate, self.pending_updates.items, {}, struct {
-            fn lessThan(_: void, a: PendingUpdate, b: PendingUpdate) bool {
-                return @intFromEnum(a.update.state) > @intFromEnum(b.update.state);
+            fn lessThan(_: void, lhs: PendingUpdate, rhs: PendingUpdate) bool {
+                return @intFromEnum(lhs.update.state) > @intFromEnum(rhs.update.state);
             }
         }.lessThan);
 
@@ -629,8 +629,8 @@ pub const Gossip = struct {
 
     fn addPendingUpdate(self: *Gossip, update: StateUpdate) !void {
         // compute gossip count: ceil(log2(N)) + 1
-        const n = self.members.count() + 1; // +1 for self
-        const gossip_count: u8 = @intCast(ceilLog2(n) + 1);
+        const member_count = self.members.count() + 1; // +1 for self
+        const gossip_count: u8 = @intCast(ceilLog2(member_count) + 1);
 
         // replace existing update for same id if present
         for (self.pending_updates.items) |*pending| {
@@ -950,9 +950,9 @@ test "suspect to dead timeout" {
     // tick past suspect timeout
     for (0..6) |_| {
         try g.tick();
-        const a = g.drainActions();
-        defer g.freeActions(a);
-        for (a) |action| {
+        const actions = g.drainActions();
+        defer g.freeActions(actions);
+        for (actions) |action| {
             if (action == .member_dead and action.member_dead.id == 2) {
                 try std.testing.expectEqual(MemberState.dead, g.members.get(2).?.state);
                 return;
@@ -1525,8 +1525,8 @@ test "rapid membership churn stays consistent" {
     // step 2: tick for 5 rounds (single node, just drain actions)
     for (0..5) |_| {
         g1.tick() catch {};
-        const a = g1.drainActions();
-        g1.freeActions(a);
+        const actions = g1.drainActions();
+        g1.freeActions(actions);
     }
 
     // step 3: add 10 new members rapidly
@@ -1543,8 +1543,8 @@ test "rapid membership churn stays consistent" {
     // step 4: tick for 10 more rounds
     for (0..10) |_| {
         g1.tick() catch {};
-        const a = g1.drainActions();
-        g1.freeActions(a);
+        const actions = g1.drainActions();
+        g1.freeActions(actions);
     }
 
     // step 5: probe_order should match live member count

@@ -211,8 +211,8 @@ fn installSeccompFilter() SecurityError!void {
 
     // build the BPF program at comptime from the blocked_syscalls list.
     // layout: arch check (3 insns) + load nr (1) + N deny jumps + allow + deny return
-    const n = blocked_syscalls.len;
-    const filter_len = 4 + n + 2; // 3 arch + 1 load + N checks + 1 allow + 1 deny
+    const syscall_count = blocked_syscalls.len;
+    const filter_len = 4 + syscall_count + 2; // 3 arch + 1 load + N checks + 1 allow + 1 deny
     const filter = comptime blk: {
         var f: [filter_len]SockFilter = undefined;
 
@@ -227,14 +227,14 @@ fn installSeccompFilter() SecurityError!void {
         // each blocked syscall: if match, jump to the deny return.
         // jump offset = remaining checks after this one (to skip) + 1 (allow stmt)
         for (blocked_syscalls, 0..) |sc, i| {
-            const remaining = n - 1 - i; // checks still to come
+            const remaining = syscall_count - 1 - i; // checks still to come
             f[4 + i] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(sc), @intCast(remaining + 1), 0);
         }
 
         // allow everything not blocked
-        f[4 + n] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ALLOW);
+        f[4 + syscall_count] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ALLOW);
         // deny: return EPERM
-        f[4 + n + 1] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ERRNO | 1);
+        f[4 + syscall_count + 1] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ERRNO | 1);
 
         break :blk f;
     };

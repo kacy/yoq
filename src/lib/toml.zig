@@ -299,11 +299,11 @@ fn parseString(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) Parse
 }
 
 fn parseInt(raw: []const u8, line_num: usize) ParseError!Value {
-    const n = std.fmt.parseInt(i64, raw, 10) catch {
+    const value = std.fmt.parseInt(i64, raw, 10) catch {
         log.err("toml: line {d}: invalid integer: {s}", .{ line_num, raw });
         return ParseError.InvalidValue;
     };
-    return Value{ .integer = n };
+    return Value{ .integer = value };
 }
 
 fn parseStringArray(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) ParseError!Value {
@@ -355,10 +355,10 @@ fn parseStringArray(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) 
             const c = inner[pos];
             if (c == '"') {
                 pos += 1; // skip closing quote
-                const s = alloc.dupe(u8, buf.items) catch return ParseError.OutOfMemory;
+                const duped = alloc.dupe(u8, buf.items) catch return ParseError.OutOfMemory;
                 buf.deinit(alloc);
-                items.append(alloc, s) catch {
-                    alloc.free(s);
+                items.append(alloc, duped) catch {
+                    alloc.free(duped);
                     return ParseError.OutOfMemory;
                 };
                 break;

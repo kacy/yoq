@@ -67,8 +67,8 @@ pub const JsonWriter = struct {
         self.putSlice(key);
         self.putSlice("\":");
         var num_buf: [24]u8 = undefined;
-        const s = std.fmt.bufPrint(&num_buf, "{d}", .{value}) catch return;
-        self.putSlice(s);
+        const formatted = std.fmt.bufPrint(&num_buf, "{d}", .{value}) catch return;
+        self.putSlice(formatted);
     }
 
     pub fn uintField(self: *JsonWriter, key: []const u8, value: u64) void {
@@ -77,8 +77,8 @@ pub const JsonWriter = struct {
         self.putSlice(key);
         self.putSlice("\":");
         var num_buf: [24]u8 = undefined;
-        const s = std.fmt.bufPrint(&num_buf, "{d}", .{value}) catch return;
-        self.putSlice(s);
+        const formatted = std.fmt.bufPrint(&num_buf, "{d}", .{value}) catch return;
+        self.putSlice(formatted);
     }
 
     pub fn boolField(self: *JsonWriter, key: []const u8, value: bool) void {
@@ -102,8 +102,8 @@ pub const JsonWriter = struct {
         self.putSlice(key);
         self.putSlice("\":");
         var num_buf: [32]u8 = undefined;
-        const s = std.fmt.bufPrint(&num_buf, "{d:.2}", .{value}) catch return;
-        self.putSlice(s);
+        const formatted = std.fmt.bufPrint(&num_buf, "{d:.2}", .{value}) catch return;
+        self.putSlice(formatted);
     }
 
     // -- nested structure fields --
@@ -210,10 +210,10 @@ pub const JsonWriter = struct {
 
     fn putSlice(self: *JsonWriter, s: []const u8) void {
         const remaining = self.buf.len - self.pos;
-        const n = @min(s.len, remaining);
-        if (n < s.len) self.truncated = true;
-        @memcpy(self.buf[self.pos..][0..n], s[0..n]);
-        self.pos += n;
+        const copy_len = @min(s.len, remaining);
+        if (copy_len < s.len) self.truncated = true;
+        @memcpy(self.buf[self.pos..][0..copy_len], s[0..copy_len]);
+        self.pos += copy_len;
     }
 
     fn putEscaped(self: *JsonWriter, s: []const u8) void {

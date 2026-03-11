@@ -256,8 +256,8 @@ pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
 
     if (!hasOwnerOnlyPermissions(file)) return null;
 
-    const n = file.readAll(buf) catch return null;
-    if (n != 64) return null;
+    const bytes_read = file.readAll(buf) catch return null;
+    if (bytes_read != 64) return null;
 
     // validate it's all hex
     for (buf) |c| {

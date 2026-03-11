@@ -380,10 +380,10 @@ pub const TlsProxy = struct {
 
         // read ClientHello (up to 16KB — typical ClientHello is ~300 bytes)
         var client_hello_buf: [16384]u8 = undefined;
-        const n = readWithTimeout(client_fd, &client_hello_buf, 5000) catch return;
-        if (n == 0) return;
+        const bytes_read = readWithTimeout(client_fd, &client_hello_buf, 5000) catch return;
+        if (bytes_read == 0) return;
 
-        const client_hello = client_hello_buf[0..n];
+        const client_hello = client_hello_buf[0..bytes_read];
 
         // extract SNI to determine which certificate to use
         const server_name = sni.extractSni(client_hello) catch {
@@ -686,10 +686,10 @@ pub const TlsProxy = struct {
         defer posix.close(client_fd);
 
         var buf: [4096]u8 = undefined;
-        const n = readWithTimeout(client_fd, &buf, 5000) catch return;
-        if (n == 0) return;
+        const bytes_read = readWithTimeout(client_fd, &buf, 5000) catch return;
+        if (bytes_read == 0) return;
 
-        const request = buf[0..n];
+        const request = buf[0..bytes_read];
 
         // check for ACME challenge path
         if (std.mem.indexOf(u8, request, "GET /.well-known/acme-challenge/")) |_| {

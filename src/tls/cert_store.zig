@@ -555,8 +555,8 @@ fn readKeyFile(path: []const u8) ?[key_length]u8 {
     defer file.close();
 
     var key: [key_length]u8 = undefined;
-    const n = file.readAll(&key) catch return null;
-    if (n != key_length) return null;
+    const bytes_read = file.readAll(&key) catch return null;
+    if (bytes_read != key_length) return null;
 
     return key;
 }

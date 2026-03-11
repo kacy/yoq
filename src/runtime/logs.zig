@@ -253,13 +253,13 @@ pub fn captureStream(
     var leftover_len: usize = 0;
 
     while (true) {
-        const n = posix.read(pipe_fd, &buf) catch break;
-        if (n == 0) break; // EOF — pipe closed
+        const bytes_read = posix.read(pipe_fd, &buf) catch break;
+        if (bytes_read == 0) break; // EOF — pipe closed
 
         // process complete lines
         var start: usize = 0;
         var i: usize = 0;
-        while (i < n) : (i += 1) {
+        while (i < bytes_read) : (i += 1) {
             if (buf[i] == '\n') {
                 if (leftover_len > 0) {
                     // combine leftover + current chunk into one line.
@@ -296,10 +296,10 @@ pub fn captureStream(
         }
 
         // save any incomplete line for next iteration
-        if (start < n) {
-            const remaining = n - start;
+        if (start < bytes_read) {
+            const remaining = bytes_read - start;
             if (leftover_len + remaining <= leftover.len) {
-                @memcpy(leftover[leftover_len .. leftover_len + remaining], buf[start..n]);
+                @memcpy(leftover[leftover_len .. leftover_len + remaining], buf[start..bytes_read]);
                 leftover_len += remaining;
             }
         }
@@ -367,10 +367,10 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t
 fn drainNewBytes(file: std.fs.File, buf: []u8) bool {
     var saw_bytes = false;
     while (true) {
-        const n = file.read(buf) catch return saw_bytes;
-        if (n == 0) break;
+        const bytes_read = file.read(buf) catch return saw_bytes;
+        if (bytes_read == 0) break;
         saw_bytes = true;
-        std.fs.File.stdout().writeAll(buf[0..n]) catch return saw_bytes;
+        std.fs.File.stdout().writeAll(buf[0..bytes_read]) catch return saw_bytes;
     }
     return saw_bytes;
 }
@@ -402,8 +402,8 @@ test "write and read log line" {
     // read back
     file.seekTo(0) catch unreachable;
     var buf: [1024]u8 = undefined;
-    const n = file.readAll(&buf) catch unreachable;
-    const content = buf[0..n];
+    const bytes_read = file.readAll(&buf) catch unreachable;
+    const content = buf[0..bytes_read];
 
     try std.testing.expect(std.mem.indexOf(u8, content, "stdout | hello world\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "stderr | something broke\n") != null);
@@ -428,8 +428,8 @@ test "log file truncated when exceeding max size" {
     // verify truncation marker is at the start
     file.seekTo(0) catch unreachable;
     var buf: [512]u8 = undefined;
-    const n = file.readAll(&buf) catch unreachable;
-    const content = buf[0..n];
+    const bytes_read = file.readAll(&buf) catch unreachable;
+    const content = buf[0..bytes_read];
     try std.testing.expect(std.mem.startsWith(u8, content, "--- log truncated"));
 }
 
@@ -442,8 +442,8 @@ test "write log line adds newline" {
 
     file.seekTo(0) catch unreachable;
     var buf: [512]u8 = undefined;
-    const n = file.readAll(&buf) catch unreachable;
-    const content = buf[0..n];
+    const bytes_read = file.readAll(&buf) catch unreachable;
+    const content = buf[0..bytes_read];
 
     // should end with exactly one newline
     try std.testing.expect(content[content.len - 1] == '\n');
