@@ -14,6 +14,17 @@ pub const SchemaError = error{
     HomeDirNotFound,
 };
 
+pub const secrets_create_table_sql =
+    \\CREATE TABLE IF NOT EXISTS secrets (
+    \\    name TEXT PRIMARY KEY,
+    \\    encrypted_value BLOB NOT NULL,
+    \\    nonce BLOB NOT NULL,
+    \\    tag BLOB NOT NULL,
+    \\    created_at INTEGER NOT NULL,
+    \\    updated_at INTEGER NOT NULL
+    \\);
+;
+
 /// initialize the database schema. safe to call multiple times
 /// (uses CREATE TABLE IF NOT EXISTS).
 pub fn init(db: *sqlite.Db) SchemaError!void {
@@ -121,16 +132,7 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    ON deployments (service_name, created_at DESC);
     , .{}, .{}) catch return SchemaError.InitFailed;
 
-    db.exec(
-        \\CREATE TABLE IF NOT EXISTS secrets (
-        \\    name TEXT PRIMARY KEY,
-        \\    encrypted_value BLOB NOT NULL,
-        \\    nonce BLOB NOT NULL,
-        \\    tag BLOB NOT NULL,
-        \\    created_at INTEGER NOT NULL,
-        \\    updated_at INTEGER NOT NULL
-        \\);
-    , .{}, .{}) catch return SchemaError.InitFailed;
+    db.exec(secrets_create_table_sql, .{}, .{}) catch return SchemaError.InitFailed;
 
     // migration: add per-node subnet and wireguard columns to agents.
     // these support cluster networking — each agent gets a unique node_id

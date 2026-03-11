@@ -739,43 +739,27 @@ pub fn removeNetworkPolicy(source: []const u8, target: []const u8) StoreError!vo
 
 /// list all network policy rules.
 pub fn listNetworkPolicies(alloc: std.mem.Allocator) StoreError!std.ArrayList(NetworkPolicyRecord) {
-    const db = try getDb();
-
-
-    var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
-
-    var stmt = db.prepare(
+    return queryNetworkPolicies(alloc,
         "SELECT source_service, target_service, action, created_at FROM network_policies ORDER BY created_at;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-
-    var iter = stmt.iterator(NetworkPolicyRow, .{}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        policies.append(alloc, .{
-            .source_service = row.source_service.data,
-            .target_service = row.target_service.data,
-            .action = row.action.data,
-            .created_at = row.created_at,
-        }) catch return StoreError.ReadFailed;
-    }
-
-    return policies;
+        .{},
+    );
 }
 
 /// get all policies for a specific source service.
 pub fn getServicePolicies(alloc: std.mem.Allocator, source: []const u8) StoreError!std.ArrayList(NetworkPolicyRecord) {
-    const db = try getDb();
-
-
-    var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
-
-    var stmt = db.prepare(
+    return queryNetworkPolicies(alloc,
         "SELECT source_service, target_service, action, created_at FROM network_policies" ++
             " WHERE source_service = ? ORDER BY created_at;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
+        .{source},
+    );
+}
 
-    var iter = stmt.iterator(NetworkPolicyRow, .{source}) catch return StoreError.ReadFailed;
+fn queryNetworkPolicies(alloc: std.mem.Allocator, comptime query: []const u8, args: anytype) StoreError!std.ArrayList(NetworkPolicyRecord) {
+    const db = try getDb();
+    var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
+    var stmt = db.prepare(query) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(NetworkPolicyRow, args) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
         policies.append(alloc, .{
             .source_service = row.source_service.data,
@@ -784,7 +768,6 @@ pub fn getServicePolicies(alloc: std.mem.Allocator, source: []const u8) StoreErr
             .created_at = row.created_at,
         }) catch return StoreError.ReadFailed;
     }
-
     return policies;
 }
 
@@ -858,19 +841,11 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 /// load a deployment record by id.
 /// caller owns the returned strings.
 pub fn getDeployment(alloc: std.mem.Allocator, id: []const u8) StoreError!DeploymentRecord {
-    const db = try getDb();
-
-
-    const row = (db.oneAlloc(
-        DeploymentRow,
-        alloc,
+    return queryOneDeployment(alloc,
         "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
             " FROM deployments WHERE id = ?;",
-        .{},
         .{id},
-    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
-
-    return deploymentRowToRecord(row);
+    );
 }
 
 /// list deployments for a service, newest first.
@@ -910,37 +885,27 @@ pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]co
 /// get the most recent deployment for a service.
 /// caller owns the returned record.
 pub fn getLatestDeployment(alloc: std.mem.Allocator, service_name: []const u8) StoreError!DeploymentRecord {
-    const db = try getDb();
-
-
-    const row = (db.oneAlloc(
-        DeploymentRow,
-        alloc,
+    return queryOneDeployment(alloc,
         "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
             " FROM deployments WHERE service_name = ? ORDER BY created_at DESC LIMIT 1;",
-        .{},
         .{service_name},
-    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
-
-    return deploymentRowToRecord(row);
+    );
 }
 
 /// get the most recent successful deployment for a service.
 /// useful for rollback — finds the last known-good config.
 /// caller owns the returned record.
 pub fn getLastSuccessfulDeployment(alloc: std.mem.Allocator, service_name: []const u8) StoreError!DeploymentRecord {
-    const db = try getDb();
-
-
-    const row = (db.oneAlloc(
-        DeploymentRow,
-        alloc,
+    return queryOneDeployment(alloc,
         "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
             " FROM deployments WHERE service_name = ? AND status = 'completed' ORDER BY created_at DESC LIMIT 1;",
-        .{},
         .{service_name},
-    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+    );
+}
 
+fn queryOneDeployment(alloc: std.mem.Allocator, comptime query: []const u8, args: anytype) StoreError!DeploymentRecord {
+    const db = try getDb();
+    const row = (db.oneAlloc(DeploymentRow, alloc, query, .{}, args) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
     return deploymentRowToRecord(row);
 }
 

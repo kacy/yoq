@@ -193,7 +193,7 @@ fn splitFirst(line: []const u8) KeywordSplit {
 }
 
 /// match a keyword string (case-insensitive) to an InstructionKind
-fn matchKeyword(keyword: []const u8) ?InstructionKind {
+pub fn matchKeyword(keyword: []const u8) ?InstructionKind {
     // convert to lowercase for comparison
     var lower_buf: [16]u8 = undefined;
     if (keyword.len > lower_buf.len) return null;
