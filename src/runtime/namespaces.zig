@@ -308,12 +308,13 @@ fn writeUserMapping(child_pid: posix.pid_t, mapping: UserMapping) !void {
 /// write a value to a procfs file
 fn writeProc(path: []const u8, value: []const u8) !void {
     // need a sentinel-terminated path for openat
-    var path_z: [128]u8 = .{0} ** 128;
+    var path_z: [128]u8 = undefined;
     if (path.len >= path_z.len) {
         log.err("namespace: path too long for procfs write: {s}", .{path});
         return error.PathTooLong;
     }
     @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
 
     const file = std.fs.cwd().openFile(path_z[0..path.len :0], .{ .mode = .write_only }) catch |e| {
         log.err("namespace: failed to open {s}: {s}", .{ path, @errorName(e) });

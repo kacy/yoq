@@ -8,9 +8,9 @@
 // for resource monitoring.
 
 const std = @import("std");
-const linux = std.os.linux;
 const log = @import("../lib/log.zig");
 const container = @import("container.zig");
+const process = @import("process.zig");
 
 pub const CgroupError = error{
     /// failed to create the cgroup directory under /sys/fs/cgroup/yoq/
@@ -94,6 +94,7 @@ pub const PsiMetrics = struct {
 
 const cgroup_root = "/sys/fs/cgroup";
 const yoq_prefix = "yoq";
+var subtree_controllers_enabled: bool = false;
 
 /// a handle to a container's cgroup
 pub const Cgroup = struct {
@@ -150,7 +151,11 @@ pub const Cgroup = struct {
         // enable controllers on the yoq parent so child cgroups can use them.
         // without this, writes to cpu.weight/memory.max/pids.max in child
         // cgroups fail because the controllers aren't delegated.
-        enableSubtreeControllers(cgroup_root ++ "/" ++ yoq_prefix);
+        // only needed once — controllers persist until unmount.
+        if (!subtree_controllers_enabled) {
+            enableSubtreeControllers(cgroup_root ++ "/" ++ yoq_prefix);
+            subtree_controllers_enabled = true;
+        }
 
         // create container cgroup dir
         std.fs.cwd().makeDir(cg.path()) catch |e| switch (e) {
@@ -403,11 +408,7 @@ pub const Cgroup = struct {
         while (lines.next()) |line| {
             if (line.len == 0) continue;
             const pid = std.fmt.parseInt(std.posix.pid_t, line, 10) catch continue;
-            _ = std.os.linux.syscall2(
-                .kill,
-                @as(usize, @bitCast(@as(isize, pid))),
-                9, // SIGKILL
-            );
+            process.kill(pid) catch {};
         }
     }
 
@@ -463,19 +464,7 @@ pub const Cgroup = struct {
     fn readPsi(self: *const Cgroup, filename: []const u8) CgroupError!PsiMetrics {
         var buf: [512]u8 = undefined;
         const content = self.readFile(filename, &buf) catch return CgroupError.ReadFailed;
-
-        var metrics: PsiMetrics = .{ .some_avg10 = 0.0, .full_avg10 = 0.0 };
-        var lines = std.mem.splitScalar(u8, content, '\n');
-
-        while (lines.next()) |line| {
-            if (std.mem.startsWith(u8, line, "some ")) {
-                metrics.some_avg10 = parsePsiAvg10(line) catch return CgroupError.ReadFailed;
-            } else if (std.mem.startsWith(u8, line, "full ")) {
-                metrics.full_avg10 = parsePsiAvg10(line) catch return CgroupError.ReadFailed;
-            }
-        }
-
-        return metrics;
+        return parsePsiFromContent(content) orelse CgroupError.ReadFailed;
     }
 };
 

@@ -1,8 +1,8 @@
 // cluster commands — serve, init-server, join, cluster, nodes, drain
 //
 // extracted from main.zig. these are the CLI entry points for cluster
-// management. internal helpers (setupAgentWireguard, parseIpv4Bytes,
-// clusterStatus) stay private.
+// management. internal helpers (setupAgentWireguard, clusterStatus) stay
+// private.
 
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
@@ -410,7 +410,7 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
         };
 
         // also parse the actual overlay IP from the string
-        if (parseIpv4Bytes(overlay_str)) |ip_bytes| {
+        if (ip.parseIp(overlay_str)) |ip_bytes| {
             peers_buf[peer_count].overlay_ip = ip_bytes;
         }
 
@@ -429,26 +429,6 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
     };
 
     writeErr("wireguard mesh active (node_id={d}, {d} peers)\n", .{ node_id, peer_count });
-}
-
-/// parse a dotted-quad IPv4 string into 4 bytes. returns null on failure.
-fn parseIpv4Bytes(str: []const u8) ?[4]u8 {
-    var result: [4]u8 = undefined;
-    var octet_idx: usize = 0;
-    var start: usize = 0;
-
-    for (str, 0..) |c, i| {
-        if (c == '.') {
-            if (octet_idx >= 3) return null;
-            result[octet_idx] = std.fmt.parseInt(u8, str[start..i], 10) catch return null;
-            octet_idx += 1;
-            start = i + 1;
-        }
-    }
-
-    if (octet_idx != 3) return null;
-    result[3] = std.fmt.parseInt(u8, str[start..], 10) catch return null;
-    return result;
 }
 
 pub fn cluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
