@@ -1688,3 +1688,277 @@ test "recalculateIntervals caps at max multiplier" {
     try std.testing.expectEqual(@as(u32, 200), g.suspect_timeout);
     try std.testing.expectEqual(@as(u32, 1000), g.dead_timeout);
 }
+
+test "addPendingUpdate evicts lowest priority when full" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    // need at least 1 member for gossip_count > 0
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // fill with 1000 alive updates (different member ids)
+    for (0..1000) |i| {
+        const id: u64 = @intCast(i + 100); // avoid collisions with member ids
+        try g.addPendingUpdate(.{
+            .id = id,
+            .addr = .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 },
+            .state = .alive,
+            .incarnation = 1,
+        });
+    }
+
+    try std.testing.expectEqual(@as(usize, 1000), g.pending_updates.items.len);
+
+    // add a suspect update — should evict one alive entry
+    try g.addPendingUpdate(.{
+        .id = 9999,
+        .addr = .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 },
+        .state = .suspect,
+        .incarnation = 1,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1000), g.pending_updates.items.len);
+
+    // verify the suspect update is present
+    var found_suspect = false;
+    for (g.pending_updates.items) |pending| {
+        if (pending.update.id == 9999 and pending.update.state == .suspect) {
+            found_suspect = true;
+        }
+    }
+    try std.testing.expect(found_suspect);
+}
+
+test "addPendingUpdate replaces existing update for same member" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // add update for member 2
+    try g.addPendingUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .alive,
+        .incarnation = 1,
+    });
+    try std.testing.expectEqual(@as(usize, 1), g.pending_updates.items.len);
+
+    // add another update for same member with higher incarnation
+    try g.addPendingUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .suspect,
+        .incarnation = 5,
+    });
+
+    // should still be 1 entry, not 2
+    try std.testing.expectEqual(@as(usize, 1), g.pending_updates.items.len);
+    try std.testing.expectEqual(MemberState.suspect, g.pending_updates.items[0].update.state);
+    try std.testing.expectEqual(@as(u64, 5), g.pending_updates.items[0].update.incarnation);
+}
+
+test "collectPiggybackUpdates sorts by state priority" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // add alive, suspect, dead updates (in that order)
+    try g.addPendingUpdate(.{
+        .id = 10,
+        .addr = .{ .ip = .{ 10, 0, 0, 10 }, .port = 7000 },
+        .state = .alive,
+        .incarnation = 1,
+    });
+    try g.addPendingUpdate(.{
+        .id = 11,
+        .addr = .{ .ip = .{ 10, 0, 0, 11 }, .port = 7000 },
+        .state = .suspect,
+        .incarnation = 1,
+    });
+    try g.addPendingUpdate(.{
+        .id = 12,
+        .addr = .{ .ip = .{ 10, 0, 0, 12 }, .port = 7000 },
+        .state = .dead,
+        .incarnation = 1,
+    });
+
+    const updates = g.collectPiggybackUpdates();
+    const slice = updates.slice();
+
+    // should be ordered: dead first, then suspect, then alive
+    try std.testing.expectEqual(@as(usize, 3), slice.len);
+    try std.testing.expectEqual(MemberState.dead, slice[0].state);
+    try std.testing.expectEqual(MemberState.suspect, slice[1].state);
+    try std.testing.expectEqual(MemberState.alive, slice[2].state);
+}
+
+test "collectPiggybackUpdates decrements remaining and expires" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    // manually add a pending update with remaining=1
+    try g.pending_updates.append(g.alloc, .{
+        .update = .{
+            .id = 42,
+            .addr = .{ .ip = .{ 10, 0, 0, 42 }, .port = 7000 },
+            .state = .suspect,
+            .incarnation = 1,
+        },
+        .remaining = 1,
+    });
+
+    // first collect — should return the update
+    const first = g.collectPiggybackUpdates();
+    try std.testing.expectEqual(@as(usize, 1), first.slice().len);
+    try std.testing.expectEqual(@as(u64, 42), first.slice()[0].id);
+
+    // update should have been removed (remaining was 1, decremented to 0)
+    try std.testing.expectEqual(@as(usize, 0), g.pending_updates.items.len);
+
+    // second collect — should return nothing
+    const second = g.collectPiggybackUpdates();
+    try std.testing.expectEqual(@as(usize, 0), second.slice().len);
+}
+
+test "applyStateUpdate ignores lower incarnation" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // set member 2 to incarnation 5 via a higher-incarnation update
+    try g.applyStateUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .alive,
+        .incarnation = 5,
+    });
+    var drain = g.drainActions();
+    g.freeActions(drain);
+
+    // try to apply an update with incarnation 3 — should be ignored
+    try g.applyStateUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .dead,
+        .incarnation = 3,
+    });
+    drain = g.drainActions();
+    g.freeActions(drain);
+
+    // state should still be alive at incarnation 5
+    const member = g.members.get(2).?;
+    try std.testing.expectEqual(MemberState.alive, member.state);
+    try std.testing.expectEqual(@as(u64, 5), member.incarnation);
+}
+
+test "applyStateUpdate same incarnation uses state priority" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // member 2 is alive at incarnation 5
+    try g.applyStateUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .alive,
+        .incarnation = 5,
+    });
+    var drain = g.drainActions();
+    g.freeActions(drain);
+
+    // suspect at same incarnation — should win (suspect > alive)
+    try g.applyStateUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .suspect,
+        .incarnation = 5,
+    });
+    drain = g.drainActions();
+    g.freeActions(drain);
+
+    try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
+
+    // alive at same incarnation — should NOT win (alive < suspect)
+    try g.applyStateUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .alive,
+        .incarnation = 5,
+    });
+    drain = g.drainActions();
+    g.freeActions(drain);
+
+    try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
+}
+
+test "applyStateUpdate unknown member dead is ignored" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    // receive dead update for unknown member — should NOT add to members
+    try g.applyStateUpdate(.{
+        .id = 99,
+        .addr = .{ .ip = .{ 10, 0, 0, 99 }, .port = 7000 },
+        .state = .dead,
+        .incarnation = 1,
+    });
+
+    try std.testing.expect(g.members.get(99) == null);
+    try std.testing.expectEqual(@as(usize, 0), g.members.count());
+
+    const drain = g.drainActions();
+    g.freeActions(drain);
+}
+
+test "handlePing from unknown sender still processes updates" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // send ping from unknown node 99 with an update about member 2
+    const update = StateUpdate{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .suspect,
+        .incarnation = 10,
+    };
+    try g.handlePing(.{
+        .from = 99, // unknown sender
+        .sequence = 1,
+        .updates = BoundedUpdates.fromSlice(&.{update}),
+    });
+
+    // the update about member 2 should still have been applied
+    const member = g.members.get(2).?;
+    try std.testing.expectEqual(MemberState.suspect, member.state);
+    try std.testing.expectEqual(@as(u64, 10), member.incarnation);
+
+    // actions: there should be a member_suspect action (from applyStateUpdate)
+    // but no ping_ack (since sender 99 is unknown, getMemberAddr returns null)
+    const actions = g.drainActions();
+    defer g.freeActions(actions);
+
+    var found_suspect_action = false;
+    var found_ack = false;
+    for (actions) |action| {
+        if (action == .member_suspect and action.member_suspect.id == 2) found_suspect_action = true;
+        if (action == .send_message) {
+            if (action.send_message.message == .ping_ack) found_ack = true;
+        }
+    }
+    try std.testing.expect(found_suspect_action);
+    try std.testing.expect(!found_ack);
+}

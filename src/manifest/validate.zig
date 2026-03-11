@@ -371,3 +371,181 @@ test "bind mounts are skipped by volume reference check" {
 
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
 }
+
+test "multiple port conflicts produce multiple errors" {
+    const alloc = std.testing.allocator;
+
+    // service A: ports 80, 443
+    const ports_a = try alloc.alloc(spec.PortMapping, 2);
+    ports_a[0] = .{ .host_port = 80, .container_port = 8080 };
+    ports_a[1] = .{ .host_port = 443, .container_port = 8443 };
+
+    // service B: port 80 (conflicts with A)
+    const ports_b = try alloc.alloc(spec.PortMapping, 1);
+    ports_b[0] = .{ .host_port = 80, .container_port = 3000 };
+
+    // service C: port 443 (conflicts with A)
+    const ports_c = try alloc.alloc(spec.PortMapping, 1);
+    ports_c[0] = .{ .host_port = 443, .container_port = 4000 };
+
+    const empty_a = try alloc.alloc(spec.VolumeMount, 0);
+    const empty_b = try alloc.alloc(spec.VolumeMount, 0);
+    const empty_c = try alloc.alloc(spec.VolumeMount, 0);
+
+    const services = try alloc.alloc(spec.Service, 3);
+    services[0] = try testService(alloc, "web", ports_a, empty_a, null);
+    services[1] = try testService(alloc, "api", ports_b, empty_b, null);
+    services[2] = try testService(alloc, "proxy", ports_c, empty_c, null);
+
+    const volumes = try alloc.alloc(spec.Volume, 0);
+
+    var manifest = testManifest(alloc, services, volumes);
+    defer manifest.deinit();
+
+    var result = try check(alloc, &manifest);
+    defer result.deinit();
+
+    // should produce 2 error diagnostics (80 conflict + 443 conflict)
+    try std.testing.expectEqual(@as(usize, 2), result.diagnostics.len);
+    try std.testing.expect(result.hasErrors());
+}
+
+test "three-way port conflict" {
+    const alloc = std.testing.allocator;
+
+    const ports_a = try alloc.alloc(spec.PortMapping, 1);
+    ports_a[0] = .{ .host_port = 8080, .container_port = 80 };
+
+    const ports_b = try alloc.alloc(spec.PortMapping, 1);
+    ports_b[0] = .{ .host_port = 8080, .container_port = 3000 };
+
+    const ports_c = try alloc.alloc(spec.PortMapping, 1);
+    ports_c[0] = .{ .host_port = 8080, .container_port = 4000 };
+
+    const empty_a = try alloc.alloc(spec.VolumeMount, 0);
+    const empty_b = try alloc.alloc(spec.VolumeMount, 0);
+    const empty_c = try alloc.alloc(spec.VolumeMount, 0);
+
+    const services = try alloc.alloc(spec.Service, 3);
+    services[0] = try testService(alloc, "svc-a", ports_a, empty_a, null);
+    services[1] = try testService(alloc, "svc-b", ports_b, empty_b, null);
+    services[2] = try testService(alloc, "svc-c", ports_c, empty_c, null);
+
+    const volumes = try alloc.alloc(spec.Volume, 0);
+
+    var manifest = testManifest(alloc, services, volumes);
+    defer manifest.deinit();
+
+    var result = try check(alloc, &manifest);
+    defer result.deinit();
+
+    // 3 pairwise conflicts: A-B, A-C, B-C
+    try std.testing.expectEqual(@as(usize, 3), result.diagnostics.len);
+    for (result.diagnostics) |d| {
+        try std.testing.expectEqual(Severity.@"error", d.severity);
+    }
+}
+
+test "health check timeout less than interval produces no warning" {
+    const alloc = std.testing.allocator;
+
+    const empty_ports = try alloc.alloc(spec.PortMapping, 0);
+    const empty_vols = try alloc.alloc(spec.VolumeMount, 0);
+
+    const services = try alloc.alloc(spec.Service, 1);
+    services[0] = try testService(alloc, "web", empty_ports, empty_vols, .{
+        .check_type = .{ .tcp = .{ .port = 8080 } },
+        .interval = 10,
+        .timeout = 5,
+    });
+
+    const volumes = try alloc.alloc(spec.Volume, 0);
+
+    var manifest = testManifest(alloc, services, volumes);
+    defer manifest.deinit();
+
+    var result = try check(alloc, &manifest);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+}
+
+test "empty manifest produces zero diagnostics" {
+    const alloc = std.testing.allocator;
+
+    const services = try alloc.alloc(spec.Service, 0);
+    const volumes = try alloc.alloc(spec.Volume, 0);
+
+    var manifest = testManifest(alloc, services, volumes);
+    defer manifest.deinit();
+
+    var result = try check(alloc, &manifest);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expect(!result.hasErrors());
+}
+
+test "volume used by worker and cron is validated" {
+    const alloc = std.testing.allocator;
+
+    // worker with an undeclared named volume
+    const worker_vols = try alloc.alloc(spec.VolumeMount, 1);
+    worker_vols[0] = .{
+        .source = try alloc.dupe(u8, "shared-data"),
+        .target = try alloc.dupe(u8, "/data"),
+        .kind = .named,
+    };
+
+    const workers = try alloc.alloc(spec.Worker, 1);
+    workers[0] = .{
+        .name = try alloc.dupe(u8, "processor"),
+        .image = try alloc.dupe(u8, "worker:latest"),
+        .command = try alloc.alloc([]const u8, 0),
+        .env = try alloc.alloc([]const u8, 0),
+        .depends_on = try alloc.alloc([]const u8, 0),
+        .working_dir = null,
+        .volumes = worker_vols,
+    };
+
+    // cron with a different undeclared named volume
+    const cron_vols = try alloc.alloc(spec.VolumeMount, 1);
+    cron_vols[0] = .{
+        .source = try alloc.dupe(u8, "logs"),
+        .target = try alloc.dupe(u8, "/var/log"),
+        .kind = .named,
+    };
+
+    const crons = try alloc.alloc(spec.Cron, 1);
+    crons[0] = .{
+        .name = try alloc.dupe(u8, "cleanup"),
+        .image = try alloc.dupe(u8, "cron:latest"),
+        .command = try alloc.alloc([]const u8, 0),
+        .env = try alloc.alloc([]const u8, 0),
+        .working_dir = null,
+        .volumes = cron_vols,
+        .every = 3600,
+    };
+
+    const services = try alloc.alloc(spec.Service, 0);
+    const volumes = try alloc.alloc(spec.Volume, 0);
+
+    var manifest: spec.Manifest = .{
+        .services = services,
+        .workers = workers,
+        .crons = crons,
+        .volumes = volumes,
+        .alloc = alloc,
+    };
+    defer manifest.deinit();
+
+    var result = try check(alloc, &manifest);
+    defer result.deinit();
+
+    // should produce 2 warnings (one for "shared-data", one for "logs")
+    try std.testing.expectEqual(@as(usize, 2), result.diagnostics.len);
+    for (result.diagnostics) |d| {
+        try std.testing.expectEqual(Severity.warning, d.severity);
+    }
+    try std.testing.expect(!result.hasErrors());
+}

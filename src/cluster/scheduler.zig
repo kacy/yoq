@@ -562,3 +562,68 @@ test "scheduler with registry data: server-only skipped, capacity-based placemen
     try std.testing.expect(results[0] != null);
     try std.testing.expectEqualStrings("worker-large", results[0].?.agent_id);
 }
+
+test "schedule exact capacity boundary" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgent("agent1", "active", 2, 4096, 0, 0), // 2000 millicores free
+    };
+
+    // request exactly 2000 millicores — should succeed
+    const requests = &[_]PlacementRequest{
+        .{ .image = "app", .command = "", .cpu_limit = 2000, .memory_limit_mb = 256 },
+        .{ .image = "app2", .command = "", .cpu_limit = 1, .memory_limit_mb = 1 },
+    };
+
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+
+    // first container takes all CPU
+    try std.testing.expect(results[0] != null);
+    try std.testing.expectEqualStrings("agent1", results[0].?.agent_id);
+
+    // second container has no room — even 1 millicore exceeds capacity
+    try std.testing.expect(results[1] == null);
+}
+
+test "assignmentSql escapes single quotes in image name" {
+    var buf: [1024]u8 = undefined;
+    const sql = try assignmentSql(&buf, "id123", "agent1", .{
+        .image = "nginx'latest",
+        .command = "echo 'hello'",
+        .cpu_limit = 1000,
+        .memory_limit_mb = 256,
+    }, 1000);
+
+    // single quotes in image should be doubled for SQL safety
+    try std.testing.expect(std.mem.indexOf(u8, sql, "nginx''latest") != null);
+    // single quotes in command should also be doubled
+    try std.testing.expect(std.mem.indexOf(u8, sql, "echo ''hello''") != null);
+    // verify it's still valid-looking SQL
+    try std.testing.expect(std.mem.indexOf(u8, sql, "INSERT INTO assignments") != null);
+}
+
+test "schedule more requests than capacity" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgent("agent1", "active", 1, 2048, 0, 0), // 1000 millicores
+    };
+
+    // 10 requests each needing 500 millicores — only 2 fit
+    var requests: [10]PlacementRequest = undefined;
+    for (&requests) |*r| {
+        r.* = .{ .image = "app", .command = "", .cpu_limit = 500, .memory_limit_mb = 128 };
+    }
+
+    const results = try schedule(alloc, &requests, agents);
+    defer alloc.free(results);
+
+    var placed: usize = 0;
+    var unplaced: usize = 0;
+    for (results) |r| {
+        if (r != null) placed += 1 else unplaced += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), placed);
+    try std.testing.expectEqual(@as(usize, 8), unplaced);
+}

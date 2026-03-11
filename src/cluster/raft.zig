@@ -2196,3 +2196,294 @@ test "stale leader cannot commit without quorum" {
     // r1 still stuck at commit_index 1
     try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
 }
+
+test "single node propose succeeds without peers" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{};
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // become leader (single node, immediate)
+    for (0..max_election_ticks + 1) |_| {
+        raft.tick();
+    }
+    try testing.expectEqual(Role.leader, raft.role);
+    const ea = raft.drainActions();
+    defer alloc.free(ea);
+
+    // propose should succeed
+    const idx = try raft.propose("test-cmd");
+    try testing.expectEqual(@as(LogIndex, 1), idx);
+
+    // no append_entries actions since there are no peers
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+    for (actions) |action| {
+        try testing.expect(action != .send_append_entries);
+    }
+}
+
+test "2-node cluster cannot commit without follower ack" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{2};
+    var leader = try setupTestRaft(alloc, 1, peers, &log);
+    defer leader.deinit();
+
+    // become leader via single peer granting vote
+    for (0..max_election_ticks + 1) |_| {
+        leader.tick();
+    }
+    const ea = leader.drainActions();
+    defer alloc.free(ea);
+    leader.handleRequestVoteReply(2, .{
+        .term = leader.currentTerm(),
+        .vote_granted = true,
+    });
+    try testing.expectEqual(Role.leader, leader.role);
+    const la = leader.drainActions();
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+
+    // propose a command
+    _ = try leader.propose("cmd1");
+    const pa = leader.drainActions();
+    defer {
+        freeActionEntries(alloc, pa);
+        alloc.free(pa);
+    }
+
+    // without follower ack, commit_index should NOT advance
+    try testing.expectEqual(@as(LogIndex, 0), leader.commit_index);
+}
+
+test "advanceCommitIndex skips entries from previous term" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    // manually add an entry from term 1 and set current term to 2
+    // so that the election will produce term 3+
+    try log.append(.{ .index = 1, .term = 1, .data = "old-term" });
+    log.setCurrentTerm(2);
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var leader = try setupTestRaft(alloc, 1, peers, &log);
+    defer leader.deinit();
+
+    // force leader — election will bump term from 2 to 3
+    for (0..max_election_ticks + 1) |_| {
+        leader.tick();
+    }
+    const ea = leader.drainActions();
+    defer alloc.free(ea);
+    leader.handleRequestVoteReply(2, .{
+        .term = leader.currentTerm(),
+        .vote_granted = true,
+    });
+    const la = leader.drainActions();
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+
+    // leader is now in term 3, entry at index 1 is from term 1
+    try testing.expect(leader.currentTerm() >= 3);
+
+    // peer 2 says it has index 1
+    leader.handleAppendEntriesReply(2, .{
+        .term = leader.currentTerm(),
+        .success = true,
+        .match_index = 1,
+    });
+
+    // entry 1 is from term 1, not current term — should NOT be committed
+    // (Raft §5.4.2: leader only commits entries from its own term)
+    try testing.expectEqual(@as(LogIndex, 0), leader.commit_index);
+
+    const actions = leader.drainActions();
+    defer alloc.free(actions);
+}
+
+test "follower rejects vote if already voted in same term" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // candidate A (node 2) requests vote at term 3
+    const reply_a = raft.handleRequestVote(.{
+        .term = 3,
+        .candidate_id = 2,
+        .last_log_index = 0,
+        .last_log_term = 0,
+    });
+    try testing.expect(reply_a.vote_granted);
+
+    const a1 = raft.drainActions();
+    defer alloc.free(a1);
+
+    // candidate B (node 3) requests vote at same term 3
+    const reply_b = raft.handleRequestVote(.{
+        .term = 3,
+        .candidate_id = 3,
+        .last_log_index = 0,
+        .last_log_term = 0,
+    });
+
+    // should reject — already voted for node 2 in term 3
+    try testing.expect(!reply_b.vote_granted);
+
+    const a2 = raft.drainActions();
+    defer alloc.free(a2);
+}
+
+test "candidate steps down on append_entries from new leader" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // trigger election — become candidate
+    for (0..max_election_ticks + 1) |_| {
+        raft.tick();
+    }
+    try testing.expectEqual(Role.candidate, raft.role);
+    const candidate_term = raft.currentTerm();
+
+    const ea = raft.drainActions();
+    defer alloc.free(ea);
+
+    // receive append_entries from node 2 who won the election in same term
+    const reply = raft.handleAppendEntries(.{
+        .term = candidate_term, // same term, not higher
+        .leader_id = 2,
+        .prev_log_index = 0,
+        .prev_log_term = 0,
+        .entries = &.{},
+        .leader_commit = 0,
+    });
+
+    try testing.expect(reply.success);
+    try testing.expectEqual(Role.follower, raft.role);
+
+    // should have a become_follower action
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+    var found_become_follower = false;
+    for (actions) |action| {
+        if (action == .become_follower) {
+            try testing.expectEqual(@as(NodeId, 2), action.become_follower.leader_id);
+            found_become_follower = true;
+        }
+    }
+    try testing.expect(found_become_follower);
+}
+
+test "handleAppendEntries rejects stale term" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    // set our term to 5
+    log.setCurrentTerm(5);
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // receive append_entries with term 3 (behind our term 5)
+    const reply = raft.handleAppendEntries(.{
+        .term = 3,
+        .leader_id = 2,
+        .prev_log_index = 0,
+        .prev_log_term = 0,
+        .entries = &.{},
+        .leader_commit = 0,
+    });
+
+    try testing.expect(!reply.success);
+    try testing.expectEqual(@as(Term, 5), reply.term);
+
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+}
+
+test "snapshot boundary: sendAppendEntries triggers install_snapshot" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var leader = try setupTestRaft(alloc, 1, peers, &log);
+    defer leader.deinit();
+
+    // force leader
+    for (0..max_election_ticks + 1) |_| {
+        leader.tick();
+    }
+    const ea = leader.drainActions();
+    defer alloc.free(ea);
+    leader.handleRequestVoteReply(2, .{
+        .term = leader.currentTerm(),
+        .vote_granted = true,
+    });
+    const la = leader.drainActions();
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+
+    // simulate: leader has snapshot at index 100, log truncated before that
+    leader.snapshot_meta = .{
+        .last_included_index = 100,
+        .last_included_term = leader.currentTerm(),
+        .data_len = 2048,
+    };
+    log.setSnapshotMeta(.{
+        .last_included_index = 100,
+        .last_included_term = leader.currentTerm(),
+        .data_len = 2048,
+    });
+
+    // peer 2 needs entry at index 5 (way before snapshot)
+    leader.next_index[0] = 5; // peer 2 = index 0 in peers
+
+    // trigger heartbeat to peer 2
+    leader.heartbeat_ticks = heartbeat_interval;
+    leader.tick();
+
+    const actions = leader.drainActions();
+    defer {
+        freeActionEntries(alloc, actions);
+        alloc.free(actions);
+    }
+
+    // should send install_snapshot to peer 2, not append_entries
+    var found_snapshot = false;
+    var found_append_for_peer2 = false;
+    for (actions) |action| {
+        if (action == .send_install_snapshot and action.send_install_snapshot.target == 2) {
+            found_snapshot = true;
+            try testing.expectEqual(@as(LogIndex, 100), action.send_install_snapshot.args.last_included_index);
+        }
+        if (action == .send_append_entries and action.send_append_entries.target == 2) {
+            found_append_for_peer2 = true;
+        }
+    }
+    try testing.expect(found_snapshot);
+    try testing.expect(!found_append_for_peer2);
+}
