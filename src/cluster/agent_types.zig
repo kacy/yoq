@@ -35,6 +35,8 @@ pub const AgentResources = struct {
     cpu_used: u32 = 0,
     memory_used_mb: u64 = 0,
     containers: u32 = 0,
+    gpu_count: u32 = 0,
+    gpu_used: u32 = 0,
 };
 
 /// an agent record as stored in the replicated state database.
@@ -60,6 +62,9 @@ pub const AgentRecord = struct {
     // role separation fields (null for agents registered before role support)
     role: ?[]const u8 = null,
     region: ?[]const u8 = null,
+    labels: ?[]const u8 = null,
+    gpu_count: i64 = 0,
+    gpu_used: i64 = 0,
 
     pub fn deinit(self: AgentRecord, alloc: Allocator) void {
         alloc.free(self.id);
@@ -69,6 +74,7 @@ pub const AgentRecord = struct {
         if (self.overlay_ip) |o| alloc.free(o);
         if (self.role) |r| alloc.free(r);
         if (self.region) |reg| alloc.free(reg);
+        if (self.labels) |l| alloc.free(l);
     }
 };
 

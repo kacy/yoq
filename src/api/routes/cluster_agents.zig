@@ -31,6 +31,11 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
         const agent_id_end = std.mem.indexOf(u8, rest, "/") orelse rest.len;
         if (!common.validateContainerId(rest[0..agent_id_end])) return common.badRequest("invalid agent id");
 
+        if (common.matchSubpath(rest, "/labels")) |id| {
+            if (request.method != .PUT) return common.methodNotAllowed();
+            return handleUpdateLabels(alloc, request, id, ctx);
+        }
+
         if (common.matchSubpath(rest, "/heartbeat")) |id| {
             if (request.method != .POST) return common.methodNotAllowed();
             return handleAgentHeartbeat(alloc, request, id, ctx);
@@ -168,6 +173,7 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
     // extract optional role and region from registration request
     const role_str = json_helpers.extractJsonString(request.body, "role");
     const region_str = json_helpers.extractJsonString(request.body, "region");
+    const labels_str = json_helpers.extractJsonString(request.body, "labels");
 
     const sql = agent_registry.registerSqlFull(
         &sql_buf,
@@ -180,6 +186,7 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
         overlay_ip_str,
         role_str,
         region_str,
+        labels_str,
     ) catch return common.internalError();
 
     _ = node.propose(sql) catch {
@@ -269,10 +276,9 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
     const containers = extractJsonInt(request.body, "containers") orelse 0;
     const cpu_cores = extractJsonInt(request.body, "cpu_cores") orelse 0;
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse 0;
+    const gpu_used = extractJsonInt(request.body, "gpu_used") orelse 0;
 
-    var sql_buf: [512]u8 = undefined;
-    const sql = agent_registry.heartbeatSql(
-        &sql_buf,
+    node.recordHeartbeat(
         id,
         .{
             .cpu_cores = @intCast(cpu_cores),
@@ -280,13 +286,11 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
             .cpu_used = @intCast(cpu_used),
             .memory_used_mb = @intCast(memory_used_mb),
             .containers = @intCast(containers),
+            .gpu_count = 0,
+            .gpu_used = @intCast(gpu_used),
         },
         std.time.timestamp(),
-    ) catch return common.internalError();
-
-    _ = node.propose(sql) catch {
-        return .{ .status = .internal_server_error, .body = "{\"error\":\"not leader\"}", .allocated = false };
-    };
+    );
 
     const db = node.stateMachineDb();
     const peers_count: i64 = blk: {
@@ -429,6 +433,23 @@ fn handleAgentDrain(id: []const u8, ctx: RouteContext) Response {
     return .{ .status = .ok, .body = "{\"status\":\"draining\"}", .allocated = false };
 }
 
+fn handleUpdateLabels(alloc: std.mem.Allocator, request: http.Request, id: []const u8, ctx: RouteContext) Response {
+    _ = alloc;
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    if (request.body.len == 0) return common.badRequest("missing request body");
+
+    const labels = extractJsonString(request.body, "labels") orelse return common.badRequest("missing labels field");
+
+    var sql_buf: [1024]u8 = undefined;
+    const sql = agent_registry.updateLabelsSql(&sql_buf, id, labels) catch return common.internalError();
+
+    _ = node.propose(sql) catch {
+        return .{ .status = .internal_server_error, .body = "{\"error\":\"not leader\"}", .allocated = false };
+    };
+
+    return .{ .status = .ok, .body = "{\"ok\":true}", .allocated = false };
+}
+
 fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
@@ -449,6 +470,8 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
         const command = extractJsonString(block, "command") orelse "";
         const cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000;
         const memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256;
+        const gpu_limit = extractJsonInt(block, "gpu_limit") orelse 0;
+        const required_labels = extractJsonString(block, "required_labels") orelse "";
 
         if (!common.validateClusterInput(image)) {
             pos = block_end + 1;
@@ -464,6 +487,8 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
             .command = command,
             .cpu_limit = cpu_limit,
             .memory_limit_mb = memory_limit_mb,
+            .gpu_limit = gpu_limit,
+            .required_labels = required_labels,
         }) catch return common.internalError();
 
         pos = block_end + 1;
@@ -568,6 +593,19 @@ fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void {
         try writer.writeAll(",\"region\":\"");
         try json_helpers.writeJsonEscaped(writer, reg);
         try writer.writeByte('"');
+    }
+    if (agent.labels) |labels| {
+        try writer.writeAll(",\"labels\":\"");
+        try json_helpers.writeJsonEscaped(writer, labels);
+        try writer.writeByte('"');
+    }
+    if (agent.gpu_count != 0) {
+        try writer.writeAll(",\"gpu_count\":");
+        try std.fmt.format(writer, "{d}", .{agent.gpu_count});
+    }
+    if (agent.gpu_used != 0) {
+        try writer.writeAll(",\"gpu_used\":");
+        try std.fmt.format(writer, "{d}", .{agent.gpu_used});
     }
 
     try writer.writeByte('}');

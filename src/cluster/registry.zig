@@ -32,7 +32,7 @@ pub fn registerSql(
     resources: AgentResources,
     now: i64,
 ) ![]const u8 {
-    return registerSqlFull(buf, id, address, resources, now, null, null, null, null, null);
+    return registerSqlFull(buf, id, address, resources, now, null, null, null, null, null, null);
 }
 
 /// generate SQL to register a new agent with optional wireguard and role fields.
@@ -47,6 +47,7 @@ pub fn registerSqlFull(
     overlay_ip: ?[]const u8,
     role: ?[]const u8,
     region: ?[]const u8,
+    labels: ?[]const u8,
 ) ![]const u8 {
     // escape user-controlled values to prevent SQL injection.
     // committed SQL is replicated via raft to ALL nodes, so a single
@@ -60,6 +61,8 @@ pub fn registerSqlFull(
     const role_esc = try sql_escape.escapeSqlString(&role_esc_buf, role orelse "both");
     var region_esc_buf: [128]u8 = undefined;
     const region_val = region orelse "";
+    var labels_esc_buf: [512]u8 = undefined;
+    const labels_esc = try sql_escape.escapeSqlString(&labels_esc_buf, labels orelse "");
 
     if (node_id) |nid| {
         var key_esc_buf: [128]u8 = undefined;
@@ -70,28 +73,28 @@ pub fn registerSqlFull(
         if (region_val.len > 0) {
             const reg_esc = try sql_escape.escapeSqlString(&region_esc_buf, region_val);
             return std.fmt.bufPrint(buf,
-                \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region)
-                \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}');
-            , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, reg_esc });
+                \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels, gpu_count, gpu_used)
+                \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}', '{s}', {d}, {d});
+            , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, reg_esc, labels_esc, resources.gpu_count, resources.gpu_used });
         }
         return std.fmt.bufPrint(buf,
-            \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role)
-            \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}');
-        , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc });
+            \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, labels, gpu_count, gpu_used)
+            \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}', {d}, {d});
+        , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, labels_esc, resources.gpu_count, resources.gpu_used });
     }
 
     if (region_val.len > 0) {
         const reg_esc = try sql_escape.escapeSqlString(&region_esc_buf, region_val);
         return std.fmt.bufPrint(buf,
-            \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, region)
-            \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}');
-        , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, reg_esc });
+            \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, region, labels, gpu_count, gpu_used)
+            \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}', '{s}', {d}, {d});
+        , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, reg_esc, labels_esc, resources.gpu_count, resources.gpu_used });
     }
 
     return std.fmt.bufPrint(buf,
-        \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role)
-        \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}');
-    , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc });
+        \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used)
+        \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}', {d}, {d});
+    , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, labels_esc, resources.gpu_count, resources.gpu_used });
 }
 
 /// generate SQL to update an agent's heartbeat and resource usage.
@@ -105,10 +108,10 @@ pub fn heartbeatSql(
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
 
     return std.fmt.bufPrint(buf,
-        \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, last_heartbeat = {d},
+        \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, gpu_used = {d}, last_heartbeat = {d},
         \\ status = CASE WHEN status = 'offline' THEN 'active' ELSE status END
         \\ WHERE id = '{s}';
-    , .{ resources.cpu_used, resources.memory_used_mb, resources.containers, now, id_esc });
+    , .{ resources.cpu_used, resources.memory_used_mb, resources.containers, resources.gpu_used, now, id_esc });
 }
 
 /// generate SQL to mark an agent as draining.
@@ -159,6 +162,15 @@ pub fn markActiveSql(buf: []u8, id: []const u8) ![]const u8 {
         "UPDATE agents SET status = 'active' WHERE id = '{s}' AND status = 'offline';",
         .{id_esc},
     );
+}
+
+/// generate SQL to update an agent's labels.
+pub fn updateLabelsSql(buf: []u8, id: []const u8, labels: []const u8) ![]const u8 {
+    var id_esc_buf: [64]u8 = undefined;
+    const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+    var labels_esc_buf: [512]u8 = undefined;
+    const labels_esc = try sql_escape.escapeSqlString(&labels_esc_buf, labels);
+    return std.fmt.bufPrint(buf, "UPDATE agents SET labels = '{s}' WHERE id = '{s}';", .{ labels_esc, id_esc });
 }
 
 /// find an agent's string ID by its numeric node_id.
@@ -418,90 +430,30 @@ pub fn listWireguardPeers(alloc: Allocator, db: *sqlite.Db) ![]WireguardPeer {
 // -- DB queries --
 // read directly from the state machine database (leader only).
 
-/// list all registered agents.
-pub fn listAgents(alloc: Allocator, db: *sqlite.Db) ![]AgentRecord {
-    const Row = struct {
-        id: sqlite.Text,
-        address: sqlite.Text,
-        status: sqlite.Text,
-        cpu_cores: i64,
-        memory_mb: i64,
-        cpu_used: i64,
-        memory_used_mb: i64,
-        containers: i64,
-        last_heartbeat: i64,
-        registered_at: i64,
-        node_id: ?i64,
-        wg_public_key: ?sqlite.Text,
-        overlay_ip: ?sqlite.Text,
-        role: ?sqlite.Text,
-        region: ?sqlite.Text,
-    };
+const AgentRow = struct {
+    id: sqlite.Text,
+    address: sqlite.Text,
+    status: sqlite.Text,
+    cpu_cores: i64,
+    memory_mb: i64,
+    cpu_used: i64,
+    memory_used_mb: i64,
+    containers: i64,
+    last_heartbeat: i64,
+    registered_at: i64,
+    node_id: ?i64,
+    wg_public_key: ?sqlite.Text,
+    overlay_ip: ?sqlite.Text,
+    role: ?sqlite.Text,
+    region: ?sqlite.Text,
+    labels: ?sqlite.Text,
+    gpu_count: i64,
+    gpu_used: i64,
+};
 
-    var stmt = db.prepare(
-        "SELECT id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region FROM agents ORDER BY registered_at;",
-    ) catch return error.QueryFailed;
-    defer stmt.deinit();
+const agent_select_cols = "id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels, gpu_count, gpu_used";
 
-    var iter = stmt.iterator(Row, .{}) catch return error.QueryFailed;
-
-    var results: std.ArrayListUnmanaged(AgentRecord) = .empty;
-    errdefer {
-        for (results.items) |r| r.deinit(alloc);
-        results.deinit(alloc);
-    }
-
-    while (iter.nextAlloc(alloc, .{}) catch null) |row| {
-        try results.append(alloc, .{
-            .id = row.id.data,
-            .address = row.address.data,
-            .status = row.status.data,
-            .cpu_cores = row.cpu_cores,
-            .memory_mb = row.memory_mb,
-            .cpu_used = row.cpu_used,
-            .memory_used_mb = row.memory_used_mb,
-            .containers = row.containers,
-            .last_heartbeat = row.last_heartbeat,
-            .registered_at = row.registered_at,
-            .node_id = row.node_id,
-            .wg_public_key = if (row.wg_public_key) |k| k.data else null,
-            .overlay_ip = if (row.overlay_ip) |o| o.data else null,
-            .role = if (row.role) |r| r.data else null,
-            .region = if (row.region) |r| r.data else null,
-        });
-    }
-
-    return results.toOwnedSlice(alloc);
-}
-
-/// get a single agent by ID.
-pub fn getAgent(alloc: Allocator, db: *sqlite.Db, id: []const u8) !?AgentRecord {
-    const Row = struct {
-        id: sqlite.Text,
-        address: sqlite.Text,
-        status: sqlite.Text,
-        cpu_cores: i64,
-        memory_mb: i64,
-        cpu_used: i64,
-        memory_used_mb: i64,
-        containers: i64,
-        last_heartbeat: i64,
-        registered_at: i64,
-        node_id: ?i64,
-        wg_public_key: ?sqlite.Text,
-        overlay_ip: ?sqlite.Text,
-        role: ?sqlite.Text,
-        region: ?sqlite.Text,
-    };
-
-    const row = (db.oneAlloc(
-        Row,
-        alloc,
-        "SELECT id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region FROM agents WHERE id = ?;",
-        .{},
-        .{id},
-    ) catch return error.QueryFailed) orelse return null;
-
+fn agentRowToRecord(row: AgentRow) AgentRecord {
     return .{
         .id = row.id.data,
         .address = row.address.data,
@@ -518,7 +470,45 @@ pub fn getAgent(alloc: Allocator, db: *sqlite.Db, id: []const u8) !?AgentRecord 
         .overlay_ip = if (row.overlay_ip) |o| o.data else null,
         .role = if (row.role) |r| r.data else null,
         .region = if (row.region) |r| r.data else null,
+        .labels = if (row.labels) |l| l.data else null,
+        .gpu_count = row.gpu_count,
+        .gpu_used = row.gpu_used,
     };
+}
+
+/// list all registered agents.
+pub fn listAgents(alloc: Allocator, db: *sqlite.Db) ![]AgentRecord {
+    var stmt = db.prepare(
+        "SELECT " ++ agent_select_cols ++ " FROM agents ORDER BY registered_at;",
+    ) catch return error.QueryFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(AgentRow, .{}) catch return error.QueryFailed;
+
+    var results: std.ArrayListUnmanaged(AgentRecord) = .empty;
+    errdefer {
+        for (results.items) |r| r.deinit(alloc);
+        results.deinit(alloc);
+    }
+
+    while (iter.nextAlloc(alloc, .{}) catch null) |row| {
+        try results.append(alloc, agentRowToRecord(row));
+    }
+
+    return results.toOwnedSlice(alloc);
+}
+
+/// get a single agent by ID.
+pub fn getAgent(alloc: Allocator, db: *sqlite.Db, id: []const u8) !?AgentRecord {
+    const row = (db.oneAlloc(
+        AgentRow,
+        alloc,
+        "SELECT " ++ agent_select_cols ++ " FROM agents WHERE id = ?;",
+        .{},
+        .{id},
+    ) catch return error.QueryFailed) orelse return null;
+
+    return agentRowToRecord(row);
 }
 
 /// get all assignments for a specific agent.
@@ -629,6 +619,29 @@ pub fn generateAgentId(buf: *[12]u8) void {
 
 // -- tests --
 
+const test_agents_schema =
+    \\CREATE TABLE agents (
+    \\    id TEXT PRIMARY KEY,
+    \\    address TEXT NOT NULL,
+    \\    status TEXT NOT NULL DEFAULT 'active',
+    \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
+    \\    memory_mb INTEGER NOT NULL DEFAULT 0,
+    \\    cpu_used INTEGER NOT NULL DEFAULT 0,
+    \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
+    \\    containers INTEGER NOT NULL DEFAULT 0,
+    \\    last_heartbeat INTEGER NOT NULL,
+    \\    registered_at INTEGER NOT NULL,
+    \\    node_id INTEGER,
+    \\    wg_public_key TEXT,
+    \\    overlay_ip TEXT,
+    \\    role TEXT DEFAULT 'both',
+    \\    region TEXT,
+    \\    labels TEXT DEFAULT '',
+    \\    gpu_count INTEGER DEFAULT 0,
+    \\    gpu_used INTEGER DEFAULT 0
+    \\);
+;
+
 test "registerSql generates valid SQL" {
     var buf: [1024]u8 = undefined;
     const sql = try registerSql(&buf, "abc123def456", "10.0.0.5:7701", .{
@@ -646,7 +659,7 @@ test "registerSqlFull includes wireguard columns" {
     const sql = try registerSqlFull(&buf, "abc123def456", "10.0.0.5:7701", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
-    }, 1000, 3, "base64pubkey==", "10.40.0.3", null, null);
+    }, 1000, 3, "base64pubkey==", "10.40.0.3", null, null, null);
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "node_id") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "wg_public_key") != null);
@@ -660,7 +673,7 @@ test "registerSqlFull without wireguard falls back to base columns" {
     const sql = try registerSqlFull(&buf, "abc123def456", "10.0.0.5:7701", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
-    }, 1000, null, null, null, null, null);
+    }, 1000, null, null, null, null, null, null);
 
     // should NOT have wireguard columns
     try std.testing.expect(std.mem.indexOf(u8, sql, "node_id") == null);
@@ -707,25 +720,7 @@ test "heartbeatSql restores offline agent to active" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     // insert an offline agent
     db.exec(
@@ -759,25 +754,7 @@ test "heartbeatSql preserves draining status" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     // insert a draining agent
     db.exec(
@@ -868,25 +845,7 @@ test "listAgents with empty table" {
     defer db.deinit();
 
     // create the agents table
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     const alloc = std.testing.allocator;
     const agents = try listAgents(alloc, &db);
@@ -902,25 +861,7 @@ test "listAgents returns inserted agent" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     // insert via the generated SQL
     var sql_buf: [1024]u8 = undefined;
@@ -950,25 +891,7 @@ test "getAgent returns null for missing" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     const alloc = std.testing.allocator;
     const agent = try getAgent(alloc, &db, "nonexistent");
@@ -1102,25 +1025,7 @@ test "assignNodeId returns 1 for empty table" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     const nid = try assignNodeId(&db);
     try std.testing.expectEqual(@as(u8, 1), nid);
@@ -1133,25 +1038,7 @@ test "assignNodeId fills gaps" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     // insert agents with node_id 1 and 3 (gap at 2)
     db.exec("INSERT INTO agents (id, address, node_id, last_heartbeat, registered_at) VALUES ('a1', '10.0.0.1:7701', 1, 1000, 1000);", .{}, .{}) catch return;
@@ -1168,25 +1055,7 @@ test "assignNodeId skips agents without node_id" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     // agent without node_id (legacy)
     db.exec("INSERT INTO agents (id, address, last_heartbeat, registered_at) VALUES ('a0', '10.0.0.1:7701', 1000, 1000);", .{}, .{}) catch return;
@@ -1222,32 +1091,14 @@ test "listAgents returns wireguard fields" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     // insert via registerSqlFull with wireguard fields
     var sql_buf: [2048]u8 = undefined;
     const sql = registerSqlFull(&sql_buf, "wgtest123456", "10.0.0.5:7701", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
-    }, 1000, 3, "base64pubkey==", "10.40.0.3", null, null) catch return;
+    }, 1000, 3, "base64pubkey==", "10.40.0.3", null, null, null) catch return;
     db.execDynamic(sql, .{}, .{}) catch return;
 
     const alloc = std.testing.allocator;
@@ -1270,31 +1121,13 @@ test "getAgent returns wireguard fields" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     var sql_buf: [2048]u8 = undefined;
     const sql = registerSqlFull(&sql_buf, "wgtest123456", "10.0.0.5:7701", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
-    }, 1000, 7, "mypubkey==", "10.40.0.7", null, null) catch return;
+    }, 1000, 7, "mypubkey==", "10.40.0.7", null, null, null) catch return;
     db.execDynamic(sql, .{}, .{}) catch return;
 
     const alloc = std.testing.allocator;
@@ -1313,25 +1146,7 @@ test "getAgent returns null wireguard fields for legacy agent" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(
-        \\CREATE TABLE agents (
-        \\    id TEXT PRIMARY KEY,
-        \\    address TEXT NOT NULL,
-        \\    status TEXT NOT NULL DEFAULT 'active',
-        \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-        \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-        \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-        \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-        \\    containers INTEGER NOT NULL DEFAULT 0,
-        \\    last_heartbeat INTEGER NOT NULL,
-        \\    registered_at INTEGER NOT NULL,
-        \\    node_id INTEGER,
-        \\    wg_public_key TEXT,
-        \\    overlay_ip TEXT,
-        \\    role TEXT DEFAULT 'both',
-        \\    region TEXT
-        \\);
-    , .{}, .{}) catch return;
+    db.exec(test_agents_schema, .{}, .{}) catch return;
 
     // legacy registration without WG fields
     var sql_buf: [1024]u8 = undefined;

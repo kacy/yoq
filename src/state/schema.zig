@@ -146,6 +146,11 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     db.exec("ALTER TABLE agents ADD COLUMN role TEXT DEFAULT 'both';", .{}, .{}) catch {};
     db.exec("ALTER TABLE agents ADD COLUMN region TEXT;", .{}, .{}) catch {};
 
+    // labels and GPU resource tracking for resource-aware scheduling
+    db.exec("ALTER TABLE agents ADD COLUMN labels TEXT DEFAULT '';", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN gpu_count INTEGER DEFAULT 0;", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN gpu_used INTEGER DEFAULT 0;", .{}, .{}) catch {};
+
     db.exec(
         \\CREATE TABLE IF NOT EXISTS network_policies (
         \\    id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -35,6 +35,7 @@ const types = @import("raft_types.zig");
 const agent_registry = @import("registry.zig");
 const scheduler = @import("scheduler.zig");
 const gossip_mod = @import("gossip.zig");
+const heartbeat_batcher_mod = @import("heartbeat_batcher.zig");
 const ip_mod = @import("../network/ip.zig");
 const logger = @import("../lib/log.zig");
 
@@ -103,6 +104,7 @@ pub const Node = struct {
     /// heartbeat-based health checks only).
     gossip: ?*gossip_mod.Gossip,
     gossip_port: u16,
+    heartbeat_batcher: heartbeat_batcher_mod.HeartbeatBatcher,
 
     pub fn init(alloc: std.mem.Allocator, config: NodeConfig) !Node {
         // open persistent log
@@ -206,11 +208,13 @@ pub const Node = struct {
             .last_snapshot_index = initial_snap_index,
             .gossip = gossip_inst,
             .gossip_port = gp,
+            .heartbeat_batcher = heartbeat_batcher_mod.HeartbeatBatcher.init(alloc),
         };
     }
 
     pub fn deinit(self: *Node) void {
         self.stop();
+        self.heartbeat_batcher.deinit();
         if (self.gossip) |g| {
             g.deinit();
             self.alloc.destroy(g);
@@ -266,6 +270,13 @@ pub const Node = struct {
         return self.raft.propose(data) catch return NodeError.NotLeader;
     }
 
+    /// buffer a heartbeat for batch proposal. HTTP threads call this
+    /// instead of propose() — the tick loop flushes accumulated
+    /// heartbeats every ~2s as a single raft entry.
+    pub fn recordHeartbeat(self: *Node, id: []const u8, resources: agent_registry.AgentResources, now: i64) void {
+        self.heartbeat_batcher.record(id, resources, now);
+    }
+
     /// get a pointer to the state machine's replicated database.
     /// used by API routes for read queries on cluster state (agents, assignments).
     /// caller must not hold the lock across long operations.
@@ -302,6 +313,7 @@ pub const Node = struct {
             var reconcile_agents: ?[]agent_registry.AgentRecord = null;
             var reconcile_orphans: ?[]agent_registry.Assignment = null;
             var cleanup_agents: ?[]agent_registry.AgentRecord = null;
+            var heartbeat_batch: ?[]const u8 = null;
 
             {
                 self.mu.lock();
@@ -318,6 +330,8 @@ pub const Node = struct {
                     }
                     if (tick % 3600 == 0)
                         cleanup_agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
+                    if (tick % 20 == 0)
+                        heartbeat_batch = self.heartbeat_batcher.flush(self.alloc) catch null;
                 }
             }
             defer {
@@ -337,6 +351,7 @@ pub const Node = struct {
                     for (agents) |a| a.deinit(self.alloc);
                     self.alloc.free(agents);
                 }
+                if (heartbeat_batch) |batch| self.alloc.free(batch);
             }
 
             {
@@ -352,6 +367,11 @@ pub const Node = struct {
                     if (reconcile_orphans) |orphans|
                         self.reconcileOrphanedAssignments(orphans, reconcile_agents orelse &.{});
                     if (cleanup_agents) |agents| self.cleanupDeadAgents(agents);
+                    if (heartbeat_batch) |batch| {
+                        _ = self.raft.propose(batch) catch |e| {
+                            logger.warn("failed to propose heartbeat batch: {}", .{e});
+                        };
+                    }
                 }
 
                 // gossip tick every 500ms (5 × 100ms raft tick)

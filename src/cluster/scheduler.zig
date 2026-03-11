@@ -21,6 +21,8 @@ pub const PlacementRequest = struct {
     command: []const u8,
     cpu_limit: i64, // millicores (1000 = 1 core)
     memory_limit_mb: i64,
+    gpu_limit: i64 = 0,
+    required_labels: []const u8 = "",
 };
 
 pub const PlacementResult = struct {
@@ -47,10 +49,13 @@ pub fn schedule(
     defer alloc.free(used_cpu);
     var used_mem = try alloc.alloc(i64, agents.len);
     defer alloc.free(used_mem);
+    var used_gpu = try alloc.alloc(i64, agents.len);
+    defer alloc.free(used_gpu);
 
     for (agents, 0..) |a, i| {
         used_cpu[i] = a.cpu_used;
         used_mem[i] = a.memory_used_mb;
+        used_gpu[i] = a.gpu_used;
     }
 
     for (requests, 0..) |req, req_idx| {
@@ -73,8 +78,20 @@ pub fn schedule(
             if (free_cpu < req.cpu_limit) continue;
             if (free_mem < req.memory_limit_mb) continue;
 
+            // check GPU capacity
+            if (req.gpu_limit > 0) {
+                const free_gpu = a.gpu_count - used_gpu[agent_idx];
+                if (free_gpu < req.gpu_limit) continue;
+            }
+
+            // check label constraints
+            if (req.required_labels.len > 0) {
+                if (!matchesLabels(if (a.labels) |l| l else "", req.required_labels)) continue;
+            }
+
             // score: total free resources (higher = more room)
-            const score = free_cpu + free_mem;
+            const gpu_score: i64 = if (req.gpu_limit > 0) (a.gpu_count - used_gpu[agent_idx]) * 1000 else 0;
+            const score = free_cpu + free_mem + gpu_score;
             if (score > best_score) {
                 best_score = score;
                 best_idx = agent_idx;
@@ -89,6 +106,7 @@ pub fn schedule(
             // update tracked usage
             used_cpu[idx] += req.cpu_limit;
             used_mem[idx] += req.memory_limit_mb;
+            used_gpu[idx] += req.gpu_limit;
         }
     }
 
@@ -126,13 +144,40 @@ pub fn generateAssignmentId(buf: *[12]u8) void {
     }
 }
 
+/// check that every required label exists in the agent's label set.
+/// labels are comma-separated key=value pairs (e.g., "zone=us-east,tier=gpu").
+/// empty required_labels matches any agent.
+fn matchesLabels(agent_labels: []const u8, required: []const u8) bool {
+    if (required.len == 0) return true;
+
+    // iterate over required labels
+    var req_iter = std.mem.splitScalar(u8, required, ',');
+    while (req_iter.next()) |req_label| {
+        const trimmed = std.mem.trim(u8, req_label, " ");
+        if (trimmed.len == 0) continue;
+
+        // check if this required label exists in agent_labels
+        var found = false;
+        var agent_iter = std.mem.splitScalar(u8, agent_labels, ',');
+        while (agent_iter.next()) |agent_label| {
+            const agent_trimmed = std.mem.trim(u8, agent_label, " ");
+            if (std.mem.eql(u8, agent_trimmed, trimmed)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
 // -- tests --
 
 fn makeAgent(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64) AgentRecord {
     return makeAgentWithRole(id, status, cores, mem, cpu_used, mem_used, null);
 }
 
-fn makeAgentWithRole(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64, role: ?[]const u8) AgentRecord {
+fn makeAgentFull(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64, role: ?[]const u8, labels: ?[]const u8, gpu_count: i64, gpu_used: i64) AgentRecord {
     return .{
         .id = id,
         .address = "localhost",
@@ -145,7 +190,14 @@ fn makeAgentWithRole(id: []const u8, status: []const u8, cores: i64, mem: i64, c
         .last_heartbeat = 0,
         .registered_at = 0,
         .role = role,
+        .labels = labels,
+        .gpu_count = gpu_count,
+        .gpu_used = gpu_used,
     };
+}
+
+fn makeAgentWithRole(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64, role: ?[]const u8) AgentRecord {
+    return makeAgentFull(id, status, cores, mem, cpu_used, mem_used, role, null, 0, 0);
 }
 
 test "schedule single container on single agent" {
@@ -368,6 +420,79 @@ test "schedule all server-role returns null" {
     defer alloc.free(results);
 
     try std.testing.expect(results[0] == null);
+}
+
+test "schedule GPU capacity" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentFull("gpu1", "active", 4, 8192, 0, 0, null, null, 2, 0),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "ml-model", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256, .gpu_limit = 1 },
+    };
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+    try std.testing.expect(results[0] != null);
+}
+
+test "schedule GPU exceeded" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentFull("gpu1", "active", 4, 8192, 0, 0, null, null, 1, 1),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "ml-model", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256, .gpu_limit = 1 },
+    };
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+    try std.testing.expect(results[0] == null);
+}
+
+test "schedule label match" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentFull("agent1", "active", 4, 8192, 0, 0, null, "zone=us-east,tier=gpu", 0, 0),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256, .required_labels = "zone=us-east" },
+    };
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+    try std.testing.expect(results[0] != null);
+}
+
+test "schedule label mismatch" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentFull("agent1", "active", 4, 8192, 0, 0, null, "zone=us-west", 0, 0),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256, .required_labels = "zone=us-east" },
+    };
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+    try std.testing.expect(results[0] == null);
+}
+
+test "schedule empty labels matches all" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentFull("agent1", "active", 4, 8192, 0, 0, null, "zone=us-east", 0, 0),
+    };
+    const requests = &[_]PlacementRequest{
+        .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
+    };
+    const results = try schedule(alloc, requests, agents);
+    defer alloc.free(results);
+    try std.testing.expect(results[0] != null);
+}
+
+test "matchesLabels" {
+    try std.testing.expect(matchesLabels("zone=us-east,tier=gpu", "zone=us-east"));
+    try std.testing.expect(matchesLabels("zone=us-east,tier=gpu", "zone=us-east,tier=gpu"));
+    try std.testing.expect(!matchesLabels("zone=us-west", "zone=us-east"));
+    try std.testing.expect(matchesLabels("zone=us-east", ""));
+    try std.testing.expect(!matchesLabels("", "zone=us-east"));
 }
 
 test "assignmentSql generates valid SQL" {

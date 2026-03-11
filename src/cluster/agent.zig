@@ -31,9 +31,11 @@ const wireguard = @import("../network/wireguard.zig");
 const ip_mod = @import("../network/ip.zig");
 const setup = @import("../network/setup.zig");
 
+const paths = @import("../lib/paths.zig");
 const cluster_config = @import("config.zig");
 const gossip_mod = @import("gossip.zig");
 const transport_mod = @import("transport.zig");
+const agent_store = @import("agent_store.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentResources = agent_types.AgentResources;
@@ -216,6 +218,9 @@ pub const Agent = struct {
         // initialize gossip if we have seeds and a node_id
         self.initGossip();
 
+        // initialize the local assignment cache for offline resilience
+        self.initCache();
+
         if (self.node_id) |nid| {
             log.info("registered as agent {s} (node_id={d}, role={s})", .{ &self.id, nid, self.role.toString() });
         } else {
@@ -287,6 +292,9 @@ pub const Agent = struct {
             self.alloc.free(seeds);
             self.gossip_seeds = null;
         }
+
+        // close the agent cache database
+        agent_store.closeDb();
     }
 
     /// block until the agent stops (used by cmdJoin).
@@ -332,13 +340,14 @@ pub const Agent = struct {
         var body_buf: [256]u8 = undefined;
         const body = std.fmt.bufPrint(
             &body_buf,
-            "{{\"cpu_cores\":{d},\"memory_mb\":{d},\"cpu_used\":{d},\"memory_used_mb\":{d},\"containers\":{d}}}",
+            "{{\"cpu_cores\":{d},\"memory_mb\":{d},\"cpu_used\":{d},\"memory_used_mb\":{d},\"containers\":{d},\"gpu_used\":{d}}}",
             .{
                 resources.cpu_cores,
                 resources.memory_mb,
                 resources.cpu_used,
                 resources.memory_used_mb,
                 resources.containers,
+                resources.gpu_used,
             },
         ) catch return;
 
@@ -594,6 +603,23 @@ pub const Agent = struct {
         log.info("gossip: initialized with {d} seeds on UDP port {}", .{ added, default_gossip_port });
     }
 
+    /// initialize the local assignment cache database.
+    /// non-fatal — agent continues without cache on failure.
+    fn initCache(_: *Agent) void {
+        paths.ensureDataDir("") catch {
+            log.warn("failed to create data dir for agent cache", .{});
+            return;
+        };
+        var path_buf: [paths.max_path]u8 = undefined;
+        const db_path = paths.dataPath(&path_buf, "agent-cache.db") catch {
+            log.warn("failed to get data path for agent cache", .{});
+            return;
+        };
+        agent_store.initWithPath(db_path) catch |e| {
+            log.warn("failed to init agent cache: {}", .{e});
+        };
+    }
+
     /// tick gossip state machine and process outgoing actions.
     fn tickGossipLoop(self: *Agent) void {
         const g = self.gossip orelse return;
@@ -666,63 +692,106 @@ pub const Agent = struct {
     /// fetch assignments from the server and start containers for any
     /// new pending assignments. this is the core reconciliation loop.
     fn reconcile(self: *Agent) void {
-        var resp = self.fetchAssignments() orelse return;
+        var resp = self.fetchAssignments() orelse {
+            // server unreachable — fall back to cache
+            self.reconcileFromCache();
+            return;
+        };
         defer resp.deinit(self.alloc);
+
+        const now = std.time.timestamp();
 
         var iter = json_helpers.extractJsonObjects(resp.body);
         while (iter.next()) |obj| {
             const assignment_id = extractJsonString(obj, "id") orelse continue;
             const status = extractJsonString(obj, "status") orelse continue;
-
-            // only act on pending assignments
-            if (!std.mem.eql(u8, status, "pending")) continue;
-
-            // skip if we're already tracking this assignment
-            self.container_lock.lock();
-            const already_tracked = self.local_containers.contains(assignment_id);
-            self.container_lock.unlock();
-            if (already_tracked) continue;
-
             const image = extractJsonString(obj, "image") orelse continue;
             const command = extractJsonString(obj, "command") orelse "";
+            const cpu_limit = extractJsonInt(obj, "cpu_limit") orelse 1000;
+            const memory_limit_mb = extractJsonInt(obj, "memory_limit_mb") orelse 256;
 
-            // allocate copies for the thread (the response buffer will be freed)
-            const id_copy = self.alloc.dupe(u8, assignment_id) catch continue;
-            const image_copy = self.alloc.dupe(u8, image) catch {
-                self.alloc.free(id_copy);
+            // skip terminal assignments — just remove from cache
+            if (std.mem.eql(u8, status, "stopped") or std.mem.eql(u8, status, "failed")) {
+                agent_store.removeAssignment(assignment_id) catch {};
                 continue;
-            };
-            const command_copy = self.alloc.dupe(u8, command) catch {
-                self.alloc.free(id_copy);
-                self.alloc.free(image_copy);
-                continue;
-            };
+            }
 
-            // mark as starting before spawning thread
-            self.container_lock.lock();
-            self.local_containers.put(id_copy, .starting) catch {
-                self.container_lock.unlock();
-                self.alloc.free(id_copy);
-                self.alloc.free(image_copy);
-                self.alloc.free(command_copy);
-                continue;
-            };
-            self.container_lock.unlock();
+            // cache assignment state (only non-terminal)
+            agent_store.upsertAssignment(.{
+                .id = assignment_id,
+                .image = image,
+                .command = command,
+                .status = status,
+                .cpu_limit = cpu_limit,
+                .memory_limit_mb = memory_limit_mb,
+                .synced_at = now,
+            }) catch {};
 
-            log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
-
-            _ = std.Thread.spawn(.{}, runAssignment, .{
-                self, id_copy, image_copy, command_copy,
-            }) catch {
-                log.warn("failed to spawn thread for assignment {s}", .{id_copy});
-                self.container_lock.lock();
-                _ = self.local_containers.remove(id_copy);
-                self.container_lock.unlock();
-                self.alloc.free(id_copy);
-                self.alloc.free(image_copy);
-                self.alloc.free(command_copy);
-            };
+            if (std.mem.eql(u8, status, "pending")) {
+                self.startPendingAssignment(assignment_id, image, command);
+            }
         }
+    }
+
+    /// fall back to cached assignments when the server is unreachable.
+    /// reads from the local cache and starts any pending assignments.
+    fn reconcileFromCache(self: *Agent) void {
+        const cached = agent_store.listPendingAssignments(self.alloc) catch return;
+        defer {
+            for (cached) |a| a.deinit(self.alloc);
+            self.alloc.free(cached);
+        }
+
+        if (cached.len == 0) return;
+        log.warn("server unreachable, reconciling from cache ({d} assignments)", .{cached.len});
+
+        for (cached) |assignment| {
+            self.startPendingAssignment(assignment.id, assignment.image, assignment.command);
+        }
+    }
+
+    /// dupe strings, track in local_containers, and spawn runAssignment thread.
+    /// skips silently if the assignment is already tracked or on alloc failure.
+    fn startPendingAssignment(self: *Agent, id: []const u8, image: []const u8, command: []const u8) void {
+        self.container_lock.lock();
+        const already_tracked = self.local_containers.contains(id);
+        self.container_lock.unlock();
+        if (already_tracked) return;
+
+        const id_copy = self.alloc.dupe(u8, id) catch return;
+        const image_copy = self.alloc.dupe(u8, image) catch {
+            self.alloc.free(id_copy);
+            return;
+        };
+        const command_copy = self.alloc.dupe(u8, command) catch {
+            self.alloc.free(id_copy);
+            self.alloc.free(image_copy);
+            return;
+        };
+
+        self.container_lock.lock();
+        self.local_containers.put(id_copy, .starting) catch {
+            self.container_lock.unlock();
+            self.alloc.free(id_copy);
+            self.alloc.free(image_copy);
+            self.alloc.free(command_copy);
+            return;
+        };
+        self.container_lock.unlock();
+
+        log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
+
+        _ = std.Thread.spawn(.{}, runAssignment, .{
+            self, id_copy, image_copy, command_copy,
+        }) catch {
+            log.warn("failed to spawn thread for assignment {s}", .{id_copy});
+            self.container_lock.lock();
+            _ = self.local_containers.remove(id_copy);
+            self.container_lock.unlock();
+            self.alloc.free(id_copy);
+            self.alloc.free(image_copy);
+            self.alloc.free(command_copy);
+        };
     }
 
     /// GET /agents/{id}/assignments from the server.
