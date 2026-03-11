@@ -316,3 +316,62 @@ test "extractJsonString handles normal escapes" {
     const result = extractJsonString(json, "key");
     try std.testing.expectEqualStrings("hello\\nworld", result.?);
 }
+
+test "extractJsonInt negative number returns null" {
+    // extractJsonInt only parses digits — negative numbers are not supported
+    const json = "{\"val\":-42}";
+    try std.testing.expect(extractJsonInt(json, "val") == null);
+}
+
+test "extractJsonFloat negative value" {
+    const json = "{\"val\":-3.14}";
+    const result = extractJsonFloat(json, "val").?;
+    try std.testing.expectApproxEqAbs(@as(f64, -3.14), result, 0.001);
+}
+
+test "extractJsonFloat scientific notation" {
+    const json = "{\"val\":1.5e3}";
+    const result = extractJsonFloat(json, "val").?;
+    try std.testing.expectApproxEqAbs(@as(f64, 1500.0), result, 0.001);
+}
+
+test "extractJsonString multiple consecutive escapes" {
+    // JSON: {"s":"a\\\"b"} — value is a\"b (backslash, quote, b)
+    // In Zig literal: each \ in the JSON needs to be \\ in Zig
+    const json = "{\"s\":\"a\\\\\\\"b\"}";
+    const result = extractJsonString(json, "s").?;
+    // the raw bytes returned include the escape sequences as-is
+    try std.testing.expectEqualStrings("a\\\\\\\"b", result);
+}
+
+test "writeJsonEscaped all control characters" {
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    // write all control chars 0x00-0x1F
+    var input: [32]u8 = undefined;
+    for (0..32) |i| {
+        input[i] = @intCast(i);
+    }
+    try writeJsonEscaped(writer, &input);
+
+    const output = stream.getWritten();
+
+    // \n (0x0A), \r (0x0D), \t (0x09) use shorthand
+    try std.testing.expect(std.mem.indexOf(u8, output, "\\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\\r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\\t") != null);
+
+    // 0x00 should be \u0000
+    try std.testing.expect(std.mem.indexOf(u8, output, "\\u0000") != null);
+    // 0x01 should be \u0001
+    try std.testing.expect(std.mem.indexOf(u8, output, "\\u0001") != null);
+    // 0x1F should be \u001f
+    try std.testing.expect(std.mem.indexOf(u8, output, "\\u001f") != null);
+
+    // no raw control characters should appear in the output
+    for (output) |c| {
+        try std.testing.expect(c >= 0x20);
+    }
+}
