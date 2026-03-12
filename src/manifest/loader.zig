@@ -39,6 +39,8 @@ pub const LoadError = error{
     InvalidRestartPolicy,
     /// a TLS configuration has invalid or missing fields
     InvalidTlsConfig,
+    /// a volume configuration has invalid or missing fields (e.g. host driver without path)
+    InvalidVolumeConfig,
     /// a service declares a dependency on a service name that doesn't exist in the manifest
     UnknownDependency,
     /// the service dependency graph contains a cycle
@@ -390,13 +392,23 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
     };
 }
 
-/// parse a volume definition from its TOML subtable
+/// parse a volume definition from its TOML subtable.
+/// accepts `type` (plan-v2 syntax) or `driver` (backward compat), default "local".
+/// for host driver: requires `path` field.
 fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Volume {
-    const driver = table.getString("driver") orelse "local";
+    const driver_str = table.getString("type") orelse table.getString("driver") orelse "local";
+
+    const driver: spec.VolumeDriver = if (std.mem.eql(u8, driver_str, "host")) blk: {
+        const path = table.getString("path") orelse {
+            log.err("manifest: volume '{s}' with host driver requires 'path' field", .{name});
+            return LoadError.InvalidVolumeConfig;
+        };
+        break :blk .{ .host = .{ .path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory } };
+    } else .{ .local = .{} };
 
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .driver = alloc.dupe(u8, driver) catch return LoadError.OutOfMemory,
+        .driver = driver,
     };
 }
 
@@ -972,7 +984,7 @@ test "volume parsing — driver defaults to local" {
         \\[volume.data]
         \\
         \\[volume.logs]
-        \\driver = "tmpfs"
+        \\driver = "local"
     );
     defer manifest.deinit();
 
@@ -983,16 +995,65 @@ test "volume parsing — driver defaults to local" {
     var found_logs = false;
     for (manifest.volumes) |vol| {
         if (std.mem.eql(u8, vol.name, "data")) {
-            try std.testing.expectEqualStrings("local", vol.driver);
+            try std.testing.expectEqualStrings("local", vol.driver.driverName());
             found_data = true;
         }
         if (std.mem.eql(u8, vol.name, "logs")) {
-            try std.testing.expectEqualStrings("tmpfs", vol.driver);
+            try std.testing.expectEqualStrings("local", vol.driver.driverName());
             found_logs = true;
         }
     }
     try std.testing.expect(found_data);
     try std.testing.expect(found_logs);
+}
+
+test "volume parsing — host driver requires path" {
+    const alloc = std.testing.allocator;
+
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.data]
+        \\type = "host"
+    );
+    try std.testing.expectError(LoadError.InvalidVolumeConfig, result);
+}
+
+test "volume parsing — host driver with path" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.data]
+        \\type = "host"
+        \\path = "/mnt/storage/data"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.volumes.len);
+    try std.testing.expectEqualStrings("data", manifest.volumes[0].name);
+    try std.testing.expectEqualStrings("host", manifest.volumes[0].driver.driverName());
+    try std.testing.expectEqualStrings("/mnt/storage/data", manifest.volumes[0].driver.host.path);
+}
+
+test "volume parsing — type field takes precedence over driver" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.data]
+        \\type = "host"
+        \\driver = "local"
+        \\path = "/mnt/data"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqualStrings("host", manifest.volumes[0].driver.driverName());
 }
 
 test "port parsing — valid formats" {
@@ -1301,12 +1362,12 @@ test "full integration — target manifest format" {
     var found_node_modules = false;
     for (manifest.volumes) |vol| {
         if (std.mem.eql(u8, vol.name, "pgdata")) {
-            try std.testing.expectEqualStrings("local", vol.driver);
+            try std.testing.expectEqualStrings("local", vol.driver.driverName());
             found_pgdata = true;
         }
         if (std.mem.eql(u8, vol.name, "node_modules")) {
             // no driver specified → defaults to "local"
-            try std.testing.expectEqualStrings("local", vol.driver);
+            try std.testing.expectEqualStrings("local", vol.driver.driverName());
             found_node_modules = true;
         }
     }

@@ -247,7 +247,7 @@ test "valid manifest produces zero diagnostics" {
     const declared_vols = try alloc.alloc(spec.Volume, 1);
     declared_vols[0] = .{
         .name = try alloc.dupe(u8, "data"),
-        .driver = try alloc.dupe(u8, "local"),
+        .driver = .{ .local = .{} },
     };
 
     var manifest = testManifest(alloc, services, declared_vols);
