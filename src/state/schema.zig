@@ -181,6 +181,19 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     , .{}, .{}) catch return SchemaError.InitFailed;
 
     db.exec(
+        \\CREATE TABLE IF NOT EXISTS volumes (
+        \\    name TEXT NOT NULL,
+        \\    app_name TEXT NOT NULL,
+        \\    driver TEXT NOT NULL DEFAULT 'local',
+        \\    path TEXT NOT NULL,
+        \\    status TEXT NOT NULL DEFAULT 'created',
+        \\    node_id TEXT,
+        \\    created_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (name, app_name)
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
         \\CREATE TABLE IF NOT EXISTS certificates (
         \\    domain TEXT PRIMARY KEY,
         \\    cert_pem BLOB NOT NULL,
@@ -529,6 +542,20 @@ test "init creates certificates table" {
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{ "example.com", "cert-data", "enc-key", "nonce", "tag", @as(i64, 1735689600), "manual", @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
+test "init creates volumes table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO volumes (name, app_name, driver, path, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "data", "myapp", "local", "/home/user/.local/share/yoq/volumes/myapp/data", @as(i64, 1000) },
     ) catch unreachable;
 }
 

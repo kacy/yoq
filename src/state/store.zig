@@ -139,7 +139,7 @@ pub fn deinitTestDb() void {
 /// returns the pointer without holding the lock — SQLite is compiled
 /// with SQLITE_THREADSAFE=1 (serialized mode) and WAL + busy_timeout
 /// handle concurrent access at the database level.
-fn getDb() StoreError!*sqlite.Db {
+pub fn getDb() StoreError!*sqlite.Db {
     // fast path: db already initialized, no lock needed
     if (global_db != null) return &global_db.?;
 

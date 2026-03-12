@@ -38,6 +38,7 @@ const tls_backend = @import("../tls/backend.zig");
 const cert_store_mod = @import("../tls/cert_store.zig");
 const acme_mod = @import("../tls/acme.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
+const volumes_mod = @import("../state/volumes.zig");
 const sqlite = @import("sqlite");
 
 pub const OrchestratorError = error{
@@ -230,7 +231,7 @@ pub const Orchestrator = struct {
                     // worker dependency — run it once if not already done
                     if (!completed_workers.contains(dep_name)) {
                         writeErr("running worker {s}...\n", .{dep_name});
-                        if (!runOneShot(self.alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, dep_name)) {
+                        if (!runOneShot(self.alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, dep_name, self.manifest.volumes, self.app_name)) {
                             writeErr("worker '{s}' failed\n", .{dep_name});
                             self.stopAll();
                             return OrchestratorError.StartFailed;
@@ -296,7 +297,7 @@ pub const Orchestrator = struct {
                 writeErr("failed to allocate cron scheduler\n", .{});
                 return;
             };
-            cs.* = cron_scheduler.CronScheduler.init(self.alloc, self.manifest.crons) catch {
+            cs.* = cron_scheduler.CronScheduler.init(self.alloc, self.manifest.crons, self.manifest.volumes, self.app_name) catch {
                 self.alloc.destroy(cs);
                 writeErr("failed to init cron scheduler\n", .{});
                 return;
@@ -799,39 +800,95 @@ const ServiceVolumes = struct {
 
 /// resolve bind mounts from manifest volume declarations.
 /// relative source paths are resolved to absolute paths.
-fn resolveServiceVolumes(alloc: std.mem.Allocator, volumes: []const spec.VolumeMount) ServiceVolumes {
+/// named volumes are resolved via the volumes module.
+fn resolveServiceVolumes(
+    alloc: std.mem.Allocator,
+    volumes: []const spec.VolumeMount,
+    manifest_volumes: []const spec.Volume,
+    app_name: []const u8,
+) ServiceVolumes {
     var result = ServiceVolumes{
         .bind_mounts = .empty,
         .resolved_sources = .empty,
     };
 
     for (volumes) |vol| {
-        if (vol.kind != .bind) continue;
+        switch (vol.kind) {
+            .bind => {
+                var resolve_buf: [4096]u8 = undefined;
+                const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch {
+                    log.warn("failed to resolve bind mount source: {s}", .{vol.source});
+                    continue;
+                };
 
-        var resolve_buf: [4096]u8 = undefined;
-        const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch {
-            log.warn("failed to resolve bind mount source: {s}", .{vol.source});
-            continue;
-        };
+                const duped = alloc.dupe(u8, abs_source) catch {
+                    log.warn("orchestrator: failed to allocate bind mount source: {s}", .{vol.source});
+                    continue;
+                };
+                result.resolved_sources.append(alloc, duped) catch {
+                    alloc.free(duped);
+                    continue;
+                };
 
-        const duped = alloc.dupe(u8, abs_source) catch {
-            log.warn("orchestrator: failed to allocate bind mount source: {s}", .{vol.source});
-            continue;
-        };
-        result.resolved_sources.append(alloc, duped) catch {
-            alloc.free(duped);
-            continue;
-        };
+                result.bind_mounts.append(alloc, .{
+                    .source = duped,
+                    .target = vol.target,
+                }) catch |e| {
+                    log.warn("failed to add bind mount for {s}: {}", .{ vol.target, e });
+                };
+            },
+            .named => {
+                const vol_def = findVolumeByName(manifest_volumes, vol.source) orelse {
+                    log.warn("named volume '{s}' not defined in manifest", .{vol.source});
+                    continue;
+                };
 
-        result.bind_mounts.append(alloc, .{
-            .source = duped,
-            .target = vol.target,
-        }) catch |e| {
-            log.warn("failed to add bind mount for {s}: {}", .{ vol.target, e });
-        };
+                // ensure volume directory exists and is registered
+                const db = store.getDb() catch {
+                    log.warn("orchestrator: no database for volume creation", .{});
+                    continue;
+                };
+                const timestamp = std.time.timestamp();
+                volumes_mod.create(db, app_name, vol_def, timestamp) catch |e| {
+                    log.warn("failed to create volume '{s}': {}", .{ vol.source, e });
+                    continue;
+                };
+
+                // resolve path
+                var path_buf: [4096]u8 = undefined;
+                const vol_path = volumes_mod.resolveVolumePath(&path_buf, app_name, vol.source, vol_def.driver) catch |e| {
+                    log.warn("failed to resolve volume path '{s}': {}", .{ vol.source, e });
+                    continue;
+                };
+
+                const duped = alloc.dupe(u8, vol_path) catch {
+                    log.warn("orchestrator: failed to allocate volume path: {s}", .{vol.source});
+                    continue;
+                };
+                result.resolved_sources.append(alloc, duped) catch {
+                    alloc.free(duped);
+                    continue;
+                };
+
+                result.bind_mounts.append(alloc, .{
+                    .source = duped,
+                    .target = vol.target,
+                }) catch |e| {
+                    log.warn("failed to add volume mount for {s}: {}", .{ vol.target, e });
+                };
+            },
+        }
     }
 
     return result;
+}
+
+/// find a volume definition by name in the manifest volumes list.
+fn findVolumeByName(manifest_volumes: []const spec.Volume, name: []const u8) ?spec.Volume {
+    for (manifest_volumes) |vol| {
+        if (std.mem.eql(u8, vol.name, name)) return vol;
+    }
+    return null;
 }
 
 /// run a container to completion and return whether it succeeded (exit code 0).
@@ -845,6 +902,8 @@ pub fn runOneShot(
     volumes: []const spec.VolumeMount,
     working_dir: ?[]const u8,
     hostname: []const u8,
+    manifest_volumes: []const spec.Volume,
+    app_name: []const u8,
 ) bool {
     // resolve image
     var img = resolveServiceImage(alloc, image) orelse {
@@ -869,7 +928,7 @@ pub fn runOneShot(
     if (working_dir) |w| wd = w;
 
     // resolve volumes
-    var vols = resolveServiceVolumes(alloc, volumes);
+    var vols = resolveServiceVolumes(alloc, volumes, manifest_volumes, app_name);
     defer vols.deinit(alloc);
 
     // generate container id
@@ -965,7 +1024,7 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
     if (svc.working_dir) |wd| working_dir = wd;
 
     // resolve volumes
-    var vols = resolveServiceVolumes(alloc, svc.volumes);
+    var vols = resolveServiceVolumes(alloc, svc.volumes, orch.manifest.volumes, orch.app_name);
     defer vols.deinit(alloc);
 
     // port mappings

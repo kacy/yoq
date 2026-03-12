@@ -5,7 +5,7 @@
 // every second while sleeping.
 //
 // usage:
-//   var sched = CronScheduler.init(alloc, manifest.crons);
+//   var sched = CronScheduler.init(alloc, manifest.crons, manifest.volumes, app_name);
 //   sched.start();
 //   // ... later ...
 //   sched.stop();
@@ -21,11 +21,13 @@ const writeErr = cli.writeErr;
 pub const CronScheduler = struct {
     alloc: std.mem.Allocator,
     crons: []const spec.Cron,
+    manifest_volumes: []const spec.Volume,
+    app_name: []const u8,
     next_runs: []i64,
     thread: ?std.Thread,
     running: std.atomic.Value(bool),
 
-    pub fn init(alloc: std.mem.Allocator, crons: []const spec.Cron) !CronScheduler {
+    pub fn init(alloc: std.mem.Allocator, crons: []const spec.Cron, manifest_volumes: []const spec.Volume, app_name: []const u8) !CronScheduler {
         const next_runs = try alloc.alloc(i64, crons.len);
 
         // schedule first run of each cron at now + interval
@@ -37,6 +39,8 @@ pub const CronScheduler = struct {
         return .{
             .alloc = alloc,
             .crons = crons,
+            .manifest_volumes = manifest_volumes,
+            .app_name = app_name,
             .next_runs = next_runs,
             .thread = null,
             .running = std.atomic.Value(bool).init(false),
@@ -113,6 +117,8 @@ pub const CronScheduler = struct {
                 cron.volumes,
                 cron.working_dir,
                 cron.name,
+                self.manifest_volumes,
+                self.app_name,
             );
 
             if (success) {
@@ -153,7 +159,7 @@ test "CronScheduler init sets next_runs" {
         },
     };
 
-    var sched = try CronScheduler.init(alloc, &crons);
+    var sched = try CronScheduler.init(alloc, &crons, &.{}, "test");
     defer sched.deinit();
 
     // next_runs should be set to now + interval
@@ -182,7 +188,7 @@ test "CronScheduler starts and stops" {
         },
     };
 
-    var sched = try CronScheduler.init(alloc, &crons);
+    var sched = try CronScheduler.init(alloc, &crons, &.{}, "test");
     defer sched.deinit();
 
     // set next_run far in the future so the loop just sleeps

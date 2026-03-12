@@ -194,13 +194,32 @@ pub const VolumeMount = struct {
     }
 };
 
+pub const VolumeDriver = union(enum) {
+    local: struct {},
+    host: struct { path: []const u8 },
+
+    pub fn deinit(self: VolumeDriver, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .host => |h| alloc.free(h.path),
+            .local => {},
+        }
+    }
+
+    pub fn driverName(self: VolumeDriver) []const u8 {
+        return switch (self) {
+            .local => "local",
+            .host => "host",
+        };
+    }
+};
+
 pub const Volume = struct {
     name: []const u8,
-    driver: []const u8,
+    driver: VolumeDriver,
 
     pub fn deinit(self: Volume, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
-        alloc.free(self.driver);
+        self.driver.deinit(alloc);
     }
 };
 
@@ -318,7 +337,7 @@ test "deinit frees all memory" {
     const volumes = try alloc.alloc(Volume, 1);
     volumes[0] = .{
         .name = try alloc.dupe(u8, "data"),
-        .driver = try alloc.dupe(u8, "local"),
+        .driver = .{ .local = .{} },
     };
 
     var manifest = Manifest{

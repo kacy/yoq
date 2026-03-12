@@ -333,6 +333,10 @@ pub fn isAllowedStatement(sql: []const u8) bool {
         "INSERT INTO wireguard_peers ",
         "UPDATE wireguard_peers SET ",
         "DELETE FROM wireguard_peers ",
+        // volumes table — volumes.zig: create, destroy
+        "INSERT INTO volumes ",
+        "UPDATE volumes SET ",
+        "DELETE FROM volumes ",
         // schema initialization — schema.zig: CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS
         "CREATE TABLE IF NOT EXISTS ",
         "CREATE INDEX IF NOT EXISTS ",
@@ -524,6 +528,12 @@ test "isAllowedStatement accepts valid wireguard_peers operations" {
     try std.testing.expect(isAllowedStatement("INSERT INTO wireguard_peers (node_id, public_key) VALUES (1, 'key123');"));
     try std.testing.expect(isAllowedStatement("UPDATE wireguard_peers SET endpoint = '10.0.0.1:51820' WHERE node_id = 1;"));
     try std.testing.expect(isAllowedStatement("DELETE FROM wireguard_peers WHERE node_id = 1;"));
+}
+
+test "isAllowedStatement accepts valid volume operations" {
+    try std.testing.expect(isAllowedStatement("INSERT INTO volumes (name, app_name, driver, path, status, created_at) VALUES ('data', 'myapp', 'local', '/path', 'created', 1000);"));
+    try std.testing.expect(isAllowedStatement("UPDATE volumes SET status = 'active' WHERE name = 'data';"));
+    try std.testing.expect(isAllowedStatement("DELETE FROM volumes WHERE name = 'data' AND app_name = 'myapp';"));
 }
 
 test "isAllowedStatement accepts schema init" {
