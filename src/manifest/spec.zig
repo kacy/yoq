@@ -197,10 +197,20 @@ pub const VolumeMount = struct {
 pub const VolumeDriver = union(enum) {
     local: struct {},
     host: struct { path: []const u8 },
+    nfs: struct {
+        server: []const u8,
+        path: []const u8,
+        options: ?[]const u8,
+    },
 
     pub fn deinit(self: VolumeDriver, alloc: std.mem.Allocator) void {
         switch (self) {
             .host => |h| alloc.free(h.path),
+            .nfs => |n| {
+                alloc.free(n.server);
+                alloc.free(n.path);
+                if (n.options) |o| alloc.free(o);
+            },
             .local => {},
         }
     }
@@ -209,6 +219,7 @@ pub const VolumeDriver = union(enum) {
         return switch (self) {
             .local => "local",
             .host => "host",
+            .nfs => "nfs",
         };
     }
 };

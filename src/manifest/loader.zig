@@ -404,6 +404,34 @@ fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
             return LoadError.InvalidVolumeConfig;
         };
         break :blk .{ .host = .{ .path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory } };
+    } else if (std.mem.eql(u8, driver_str, "nfs")) blk: {
+        const server = table.getString("server") orelse {
+            log.err("manifest: volume '{s}' with nfs driver requires 'server' field", .{name});
+            return LoadError.InvalidVolumeConfig;
+        };
+        if (server.len == 0) {
+            log.err("manifest: volume '{s}' nfs server must not be empty", .{name});
+            return LoadError.InvalidVolumeConfig;
+        }
+        const path = table.getString("path") orelse {
+            log.err("manifest: volume '{s}' with nfs driver requires 'path' field", .{name});
+            return LoadError.InvalidVolumeConfig;
+        };
+        if (path.len == 0 or path[0] != '/') {
+            log.err("manifest: volume '{s}' nfs path must be absolute (start with /)", .{name});
+            return LoadError.InvalidVolumeConfig;
+        }
+        const options_str = table.getString("options");
+        const server_dup = alloc.dupe(u8, server) catch return LoadError.OutOfMemory;
+        errdefer alloc.free(server_dup);
+        const path_dup = alloc.dupe(u8, path) catch return LoadError.OutOfMemory;
+        errdefer alloc.free(path_dup);
+        const options_dup = if (options_str) |o| (alloc.dupe(u8, o) catch return LoadError.OutOfMemory) else null;
+        break :blk .{ .nfs = .{
+            .server = server_dup,
+            .path = path_dup,
+            .options = options_dup,
+        } };
     } else .{ .local = .{} };
 
     return .{
@@ -1054,6 +1082,89 @@ test "volume parsing — type field takes precedence over driver" {
     defer manifest.deinit();
 
     try std.testing.expectEqualStrings("host", manifest.volumes[0].driver.driverName());
+}
+
+test "volume parsing — nfs requires server" {
+    const alloc = std.testing.allocator;
+
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.data]
+        \\type = "nfs"
+        \\path = "/exports/data"
+    );
+    try std.testing.expectError(LoadError.InvalidVolumeConfig, result);
+}
+
+test "volume parsing — nfs requires path" {
+    const alloc = std.testing.allocator;
+
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.data]
+        \\type = "nfs"
+        \\server = "10.0.0.1"
+    );
+    try std.testing.expectError(LoadError.InvalidVolumeConfig, result);
+}
+
+test "volume parsing — nfs path must be absolute" {
+    const alloc = std.testing.allocator;
+
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.data]
+        \\type = "nfs"
+        \\server = "10.0.0.1"
+        \\path = "relative/path"
+    );
+    try std.testing.expectError(LoadError.InvalidVolumeConfig, result);
+}
+
+test "volume parsing — nfs with all fields" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.shared_data]
+        \\type = "nfs"
+        \\server = "10.0.0.1"
+        \\path = "/exports/data"
+        \\options = "hard,timeo=600"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.volumes.len);
+    try std.testing.expectEqualStrings("shared_data", manifest.volumes[0].name);
+    try std.testing.expectEqualStrings("nfs", manifest.volumes[0].driver.driverName());
+    try std.testing.expectEqualStrings("10.0.0.1", manifest.volumes[0].driver.nfs.server);
+    try std.testing.expectEqualStrings("/exports/data", manifest.volumes[0].driver.nfs.path);
+    try std.testing.expectEqualStrings("hard,timeo=600", manifest.volumes[0].driver.nfs.options.?);
+}
+
+test "volume parsing — nfs default options is null" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[volume.data]
+        \\type = "nfs"
+        \\server = "10.0.0.1"
+        \\path = "/exports/data"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expect(manifest.volumes[0].driver.nfs.options == null);
 }
 
 test "port parsing — valid formats" {

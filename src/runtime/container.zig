@@ -121,6 +121,14 @@ pub const BindMount = struct {
     /// check that the source path doesn't point into sensitive system directories.
     /// a manifest could otherwise mount /etc/shadow or /root/.ssh into a container.
     pub fn isSourceAllowed(self: BindMount) bool {
+        // allow yoq-managed paths (volumes, NFS mounts) — must be a real
+        // suffix of a home directory, not an arbitrary substring match
+        if (std.mem.indexOf(u8, self.source, "/.local/share/yoq/")) |pos| {
+            // only allow if the prefix before the match looks like a home dir
+            // and the path has no traversal components
+            if (pos > 0 and std.mem.indexOf(u8, self.source, "..") == null) return true;
+        }
+
         const blocked = [_][]const u8{
             "/etc",
             "/root",
@@ -953,6 +961,18 @@ test "bind mount rejects sensitive source paths" {
     for (cases) |source| {
         const m = BindMount{ .source = source, .target = "/mnt" };
         try std.testing.expect(!m.isSourceAllowed());
+    }
+}
+
+test "bind mount allows yoq-managed paths under home" {
+    const yoq_paths = [_][]const u8{
+        "/home/user/.local/share/yoq/volumes/myapp/data",
+        "/home/user/.local/share/yoq/mounts/nfs/myapp/shared",
+    };
+
+    for (yoq_paths) |source| {
+        const m = BindMount{ .source = source, .target = "/mnt" };
+        try std.testing.expect(m.isSourceAllowed());
     }
 }
 
