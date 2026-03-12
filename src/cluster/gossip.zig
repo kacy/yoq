@@ -21,7 +21,7 @@
 // ceil(log2(N))+1 times for reliable dissemination.
 //
 // usage:
-//   var gossip = Gossip.init(alloc, my_id, my_addr);
+//   var gossip = Gossip.init(alloc, my_id, my_addr, .{});
 //   defer gossip.deinit();
 //   gossip.addMember(peer_id, peer_addr);
 //   gossip.tick(); // call every ~500ms
@@ -134,6 +134,11 @@ const max_piggyback_updates = 6;
 /// number of indirect probe targets (K in SWIM paper)
 const indirect_probe_count = 3;
 
+pub const GossipConfig = struct {
+    fanout: ?u32 = null,
+    suspicion_multiplier: ?u32 = null,
+};
+
 pub const Gossip = struct {
     alloc: std.mem.Allocator,
     self_id: u64,
@@ -161,13 +166,18 @@ pub const Gossip = struct {
     suspect_timeout: u32,
     dead_timeout: u32,
 
+    // user-configured overrides (null = use automatic values)
+    configured_fanout: ?u32,
+    configured_suspicion_multiplier: ?u32,
+
     // base intervals — scaled by ceil(log2(N)) for adaptive timing
     const base_probe_interval: u32 = 5;
     const base_suspect_timeout: u32 = 20;
     const base_dead_timeout: u32 = 100;
     pub const max_interval_multiplier: u32 = 10;
 
-    pub fn init(alloc: std.mem.Allocator, self_id: u64, self_addr: MemberAddr) Gossip {
+    pub fn init(alloc: std.mem.Allocator, self_id: u64, self_addr: MemberAddr, config: GossipConfig) Gossip {
+        const susp_mult = config.suspicion_multiplier orelse 1;
         return .{
             .alloc = alloc,
             .self_id = self_id,
@@ -184,9 +194,11 @@ pub const Gossip = struct {
             .tick_count = 0,
             .incarnation = 1,
             .prng = std.Random.DefaultPrng.init(self_id),
-            .probe_interval = 5,
-            .suspect_timeout = 20,
-            .dead_timeout = 100,
+            .probe_interval = base_probe_interval,
+            .suspect_timeout = base_suspect_timeout * susp_mult,
+            .dead_timeout = base_dead_timeout * susp_mult,
+            .configured_fanout = config.fanout,
+            .configured_suspicion_multiplier = config.suspicion_multiplier,
         };
     }
 
@@ -218,9 +230,10 @@ pub const Gossip = struct {
     pub fn recalculateIntervals(self: *Gossip) void {
         const member_count = self.members.count() + 1; // +1 for self
         const multiplier = @min(ceilLog2(member_count), max_interval_multiplier);
+        const susp_mult = self.configured_suspicion_multiplier orelse 1;
         self.probe_interval = base_probe_interval * multiplier;
-        self.suspect_timeout = base_suspect_timeout * multiplier;
-        self.dead_timeout = base_dead_timeout * multiplier;
+        self.suspect_timeout = base_suspect_timeout * multiplier * susp_mult;
+        self.dead_timeout = base_dead_timeout * multiplier * susp_mult;
     }
 
     /// add a member to the membership list. if the member already exists,
@@ -421,10 +434,11 @@ pub const Gossip = struct {
             }
         }
 
-        // shuffle and take first K
+        // shuffle and take first K (configured fanout overrides default)
         const random = self.prng.random();
         random.shuffle(u64, candidates.items);
-        const relay_count = @min(indirect_probe_count, candidates.items.len);
+        const fanout = self.configured_fanout orelse @max(ceilLog2(self.members.count() + 1), indirect_probe_count);
+        const relay_count = @min(fanout, candidates.items.len);
 
         for (candidates.items[0..relay_count]) |relay_id| {
             if (self.members.get(relay_id)) |relay| {
@@ -830,7 +844,7 @@ pub const Gossip = struct {
 
 test "probe cycle sends ping" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -849,7 +863,7 @@ test "probe cycle sends ping" {
 
 test "ack clears probe" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -867,7 +881,7 @@ test "ack clears probe" {
 
 test "missed ack triggers indirect ping" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -899,7 +913,7 @@ test "missed ack triggers indirect ping" {
 
 test "suspect after failed indirect probe" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -935,7 +949,7 @@ test "suspect after failed indirect probe" {
 
 test "suspect to dead timeout" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -965,7 +979,7 @@ test "suspect to dead timeout" {
 
 test "incarnation conflict resolution" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -1011,7 +1025,7 @@ test "incarnation conflict resolution" {
 
 test "self-refutation increments incarnation" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     const original_incarnation = g.incarnation;
@@ -1117,7 +1131,7 @@ test "encode decode round-trip: ping_ack with multiple updates" {
 
 test "dead member not probed" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -1142,7 +1156,7 @@ test "dead member not probed" {
 
 test "piggybacked update lifecycle" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -1186,7 +1200,7 @@ test "decode rejects truncated message" {
 
 test "more than 64 simultaneous suspects all transition to dead" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     // add 100 members and mark them all suspect
@@ -1218,7 +1232,7 @@ test "more than 64 simultaneous suspects all transition to dead" {
 
 test "incarnation at u64 max wraps on refutation" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     // set incarnation to max
@@ -1323,11 +1337,11 @@ fn tickAndRouteAll(gossips: []*Gossip) void {
 test "3-node gossip: membership converges to all alive" {
     const alloc = std.testing.allocator;
 
-    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g1.deinit();
-    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 }, .{});
     defer g2.deinit();
-    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 }, .{});
     defer g3.deinit();
 
     // each node knows about the other two
@@ -1363,11 +1377,11 @@ test "3-node gossip: membership converges to all alive" {
 test "gossip detects unresponsive member" {
     const alloc = std.testing.allocator;
 
-    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g1.deinit();
-    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 }, .{});
     defer g2.deinit();
-    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 }, .{});
     defer g3.deinit();
 
     // short timeouts for fast test
@@ -1435,11 +1449,11 @@ test "gossip detects unresponsive member" {
 test "false positive suspect recovers via self-refutation" {
     const alloc = std.testing.allocator;
 
-    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g1.deinit();
-    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 }, .{});
     defer g2.deinit();
-    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 }, .{});
     defer g3.deinit();
 
     // wire up membership
@@ -1514,7 +1528,7 @@ test "false positive suspect recovers via self-refutation" {
 test "rapid membership churn stays consistent" {
     const alloc = std.testing.allocator;
 
-    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g1.deinit();
 
     // step 1: add 3 initial members
@@ -1556,15 +1570,15 @@ test "rapid membership churn stays consistent" {
 test "dead node doesn't cascade false suspicions" {
     const alloc = std.testing.allocator;
 
-    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g1.deinit();
-    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    var g2 = Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 }, .{});
     defer g2.deinit();
-    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    var g3 = Gossip.init(alloc, 3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 }, .{});
     defer g3.deinit();
-    var g4 = Gossip.init(alloc, 4, .{ .ip = .{ 10, 0, 0, 4 }, .port = 7000 });
+    var g4 = Gossip.init(alloc, 4, .{ .ip = .{ 10, 0, 0, 4 }, .port = 7000 }, .{});
     defer g4.deinit();
-    var g5 = Gossip.init(alloc, 5, .{ .ip = .{ 10, 0, 0, 5 }, .port = 7000 });
+    var g5 = Gossip.init(alloc, 5, .{ .ip = .{ 10, 0, 0, 5 }, .port = 7000 }, .{});
     defer g5.deinit();
 
     var all = [_]*Gossip{ &g1, &g2, &g3, &g4, &g5 };
@@ -1650,7 +1664,7 @@ test "ceilLog2 basic values" {
 
 test "recalculateIntervals scales with member count" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     // 1 node (just self) — multiplier 1
@@ -1676,7 +1690,7 @@ test "recalculateIntervals scales with member count" {
 
 test "recalculateIntervals caps at max multiplier" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     // add 2048 members — should cap at 10x
@@ -1691,7 +1705,7 @@ test "recalculateIntervals caps at max multiplier" {
 
 test "addPendingUpdate evicts lowest priority when full" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     // need at least 1 member for gossip_count > 0
@@ -1732,7 +1746,7 @@ test "addPendingUpdate evicts lowest priority when full" {
 
 test "addPendingUpdate replaces existing update for same member" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -1762,7 +1776,7 @@ test "addPendingUpdate replaces existing update for same member" {
 
 test "collectPiggybackUpdates sorts by state priority" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -1799,7 +1813,7 @@ test "collectPiggybackUpdates sorts by state priority" {
 
 test "collectPiggybackUpdates decrements remaining and expires" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     // manually add a pending update with remaining=1
@@ -1828,7 +1842,7 @@ test "collectPiggybackUpdates decrements remaining and expires" {
 
 test "applyStateUpdate ignores lower incarnation" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -1861,7 +1875,7 @@ test "applyStateUpdate ignores lower incarnation" {
 
 test "applyStateUpdate same incarnation uses state priority" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -1903,7 +1917,7 @@ test "applyStateUpdate same incarnation uses state priority" {
 
 test "applyStateUpdate unknown member dead is ignored" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     // receive dead update for unknown member — should NOT add to members
@@ -1923,7 +1937,7 @@ test "applyStateUpdate unknown member dead is ignored" {
 
 test "handlePing from unknown sender still processes updates" {
     const alloc = std.testing.allocator;
-    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 });
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
 
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
@@ -1961,4 +1975,73 @@ test "handlePing from unknown sender still processes updates" {
     }
     try std.testing.expect(found_suspect_action);
     try std.testing.expect(!found_ack);
+}
+
+test "explicit fanout overrides default in escalateToIndirect" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{ .fanout = 5 });
+    defer g.deinit();
+
+    // add 10 members so there are enough relay candidates
+    for (2..12) |i| {
+        try g.addMember(@intCast(i), .{ .ip = .{ 10, 0, @intCast(i / 256), @intCast(i % 256) }, .port = 7000 });
+    }
+
+    // trigger probe: tick sends ping to a member
+    try g.tick();
+    const drain = g.drainActions();
+    g.freeActions(drain);
+
+    // miss the ack — wait probe_interval ticks
+    for (0..g.probe_interval) |_| {
+        try g.tick();
+    }
+
+    // actions from the last drain should contain ping_reqs
+    const actions = g.drainActions();
+    defer g.freeActions(actions);
+
+    var ping_req_count: u32 = 0;
+    for (actions) |action| {
+        if (action == .send_message and action.send_message.message == .ping_req) {
+            ping_req_count += 1;
+        }
+    }
+
+    // with fanout=5, should send exactly 5 ping_reqs (have 9 candidates)
+    try std.testing.expectEqual(@as(u32, 5), ping_req_count);
+}
+
+test "suspicion_multiplier scales suspect and dead timeouts" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{ .suspicion_multiplier = 3 });
+    defer g.deinit();
+
+    // 1 node (just self) — base multiplier 1, suspicion_multiplier 3
+    try std.testing.expectEqual(@as(u32, 5), g.probe_interval); // probe not affected
+    try std.testing.expectEqual(@as(u32, 60), g.suspect_timeout); // 20 * 1 * 3
+    try std.testing.expectEqual(@as(u32, 300), g.dead_timeout); // 100 * 1 * 3
+
+    // add 3 members (4 total) — ceil(log2(4)) = 2
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    try g.addMember(3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+    try g.addMember(4, .{ .ip = .{ 10, 0, 0, 4 }, .port = 7000 });
+
+    try std.testing.expectEqual(@as(u32, 10), g.probe_interval); // 5 * 2
+    try std.testing.expectEqual(@as(u32, 120), g.suspect_timeout); // 20 * 2 * 3
+    try std.testing.expectEqual(@as(u32, 600), g.dead_timeout); // 100 * 2 * 3
+}
+
+test "null config matches default behavior" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
+    defer g.deinit();
+
+    try std.testing.expect(g.configured_fanout == null);
+    try std.testing.expect(g.configured_suspicion_multiplier == null);
+
+    // defaults: probe=5, suspect=20, dead=100
+    try std.testing.expectEqual(@as(u32, 5), g.probe_interval);
+    try std.testing.expectEqual(@as(u32, 20), g.suspect_timeout);
+    try std.testing.expectEqual(@as(u32, 100), g.dead_timeout);
 }

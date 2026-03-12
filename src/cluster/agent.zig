@@ -487,12 +487,18 @@ pub const Agent = struct {
     }
 
     /// GET /wireguard/peers from the server.
+    /// agents with role=agent request only server peers (hub-and-spoke);
+    /// role=both gets all peers (full-mesh).
     fn fetchPeers(self: *Agent) ?http_client.Response {
+        const path = if (self.role == .agent)
+            "/wireguard/peers?servers_only=1"
+        else
+            "/wireguard/peers";
         return http_client.getWithAuth(
             self.alloc,
             self.server_addr,
             self.server_port,
-            "/wireguard/peers",
+            path,
             self.token,
         ) catch return null;
     }
@@ -580,7 +586,7 @@ pub const Agent = struct {
         gossip_state.* = gossip_mod.Gossip.init(self.alloc, @as(u64, nid), .{
             .ip = self.overlay_ip orelse .{ 0, 0, 0, 0 },
             .port = default_gossip_port,
-        });
+        }, .{});
 
         // add seeds as gossip members. format: "node_id@address"
         var added: u32 = 0;

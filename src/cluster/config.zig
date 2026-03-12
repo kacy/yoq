@@ -52,6 +52,12 @@ pub const ClusterSettings = struct {
 
     /// threshold for auto-activating gossip (agent count)
     gossip_threshold: u32 = 50,
+
+    /// override indirect probe fan-out K. null = auto (ceilLog2(N))
+    gossip_fanout: ?u32 = null,
+
+    /// multiply suspect/dead timeouts. null = default (1x)
+    gossip_suspicion_multiplier: ?u32 = null,
 };
 
 pub const ConfigError = error{
@@ -180,4 +186,6 @@ test "ClusterSettings defaults" {
     try std.testing.expect(settings.region == null);
     try std.testing.expectEqual(@as(u32, 500), settings.gossip_tick_ms);
     try std.testing.expectEqual(@as(u32, 50), settings.gossip_threshold);
+    try std.testing.expect(settings.gossip_fanout == null);
+    try std.testing.expect(settings.gossip_suspicion_multiplier == null);
 }

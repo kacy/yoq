@@ -374,6 +374,7 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
             .listen_port = agent.wg_listen_port,
             .overlay_ip = overlay_ip,
             .peers = &.{},
+            .role = agent.role,
         }) catch |err2| {
             writeErr("warning: failed to set up wireguard interface: {}\n", .{err2});
         };
@@ -407,6 +408,9 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
             else
                 [4]u8{ 10, 40, @intCast(peer_node >> 8), @intCast(peer_node & 0xFF) },
             .container_subnet_node = peer_node,
+            // in hub-and-spoke (role=agent), server peers are hubs —
+            // they get wider AllowedIPs to route inter-agent traffic.
+            .is_hub = agent.role == .agent,
         };
 
         // also parse the actual overlay IP from the string
@@ -423,6 +427,7 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
         .listen_port = agent.wg_listen_port,
         .overlay_ip = overlay_ip,
         .peers = peers_buf[0..peer_count],
+        .role = agent.role,
     }) catch |err| {
         writeErr("warning: failed to set up wireguard interface: {}\n", .{err});
         return;

@@ -14,6 +14,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 const sqlite = @import("sqlite");
+const cluster_config = @import("../cluster/config.zig");
 
 const bridge = @import("bridge.zig");
 const dns = @import("dns.zig");
@@ -97,6 +98,8 @@ pub const ClusterNetworkConfig = struct {
     listen_port: u16,
     overlay_ip: [4]u8,
     peers: []const PeerInfo,
+    /// node role — servers enable IP forwarding for hub-and-spoke routing.
+    role: cluster_config.NodeRole = .both,
 };
 
 /// information about a remote node in the WireGuard mesh.
@@ -109,6 +112,10 @@ pub const PeerInfo = struct {
     /// nodes 1-254: 10.42.{node}.0/24
     /// nodes 255+:  10.{42 + (node >> 8)}.{node & 0xFF}.0/24
     container_subnet_node: u16,
+    /// when true, this peer is a hub (server) in hub-and-spoke topology.
+    /// AllowedIPs will include all container subnets and overlay IPs
+    /// so inter-agent traffic can route through it.
+    is_hub: bool = false,
 };
 
 /// set up the WireGuard mesh interface for cluster networking.
@@ -151,6 +158,19 @@ pub fn setupClusterNetworking(config: ClusterNetworkConfig) !void {
         };
     }
 
+    // servers in hub-and-spoke topology need IP forwarding to route
+    // inter-agent traffic through the WireGuard tunnel.
+    if (config.role == .server) {
+        const fwd_path = "/proc/sys/net/ipv4/conf/wg-yoq/forwarding";
+        if (std.fs.cwd().openFile(fwd_path, .{ .mode = .write_only })) |file| {
+            defer file.close();
+            file.writeAll("1") catch {};
+            log.info("IP forwarding enabled on wg-yoq (server role)", .{});
+        } else |e| {
+            log.warn("failed to enable IP forwarding on wg-yoq: {}", .{e});
+        }
+    }
+
     log.info("cluster networking ready ({d} peers)", .{config.peers.len});
 }
 
@@ -169,14 +189,21 @@ fn addClusterPeerInternal(peer: PeerInfo) !void {
     // derive the container subnet base from the node_id
     const subnet_base = containerSubnetBase(peer.container_subnet_node);
 
-    // build allowed-ips: "overlay_ip/32,container_subnet/24"
-    var allowed_buf: [64]u8 = undefined;
-    const allowed_ips = std.fmt.bufPrint(&allowed_buf, "{d}.{d}.{d}.{d}/32,{d}.{d}.{d}.0/24", .{
-        peer.overlay_ip[0], peer.overlay_ip[1],
-        peer.overlay_ip[2], peer.overlay_ip[3],
-        subnet_base[0],     subnet_base[1],
-        subnet_base[2],
-    }) catch return error.ConfigFailed;
+    // build allowed-ips. hub peers (servers in hub-and-spoke) get all
+    // container subnets + overlay IPs so they can route inter-agent traffic.
+    var allowed_buf: [128]u8 = undefined;
+    const allowed_ips = if (peer.is_hub)
+        std.fmt.bufPrint(&allowed_buf, "{d}.{d}.{d}.{d}/32,10.42.0.0/16,10.40.0.0/24", .{
+            peer.overlay_ip[0], peer.overlay_ip[1],
+            peer.overlay_ip[2], peer.overlay_ip[3],
+        }) catch return error.ConfigFailed
+    else
+        std.fmt.bufPrint(&allowed_buf, "{d}.{d}.{d}.{d}/32,{d}.{d}.{d}.0/24", .{
+            peer.overlay_ip[0], peer.overlay_ip[1],
+            peer.overlay_ip[2], peer.overlay_ip[3],
+            subnet_base[0],     subnet_base[1],
+            subnet_base[2],
+        }) catch return error.ConfigFailed;
 
     wireguard.addPeer(wg_interface, .{
         .public_key = peer.public_key,
