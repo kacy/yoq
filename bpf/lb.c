@@ -1,14 +1,15 @@
-// lb — eBPF round-robin load balancer
+// lb — eBPF consistent-hash load balancer
 //
 // TC program for distributing traffic across multiple backends
 // registered under the same service name. works in tandem with
 // the DNS interceptor — DNS resolves a service name to a virtual
 // IP (the first backend), and this program distributes connections
-// across all backends via DNAT.
+// across all backends via DNAT using FNV-1a consistent hashing
+// on the source IP. same client always maps to the same backend.
 //
 // two hooks:
 //   TC ingress on yoq0: intercept new connections to service IPs,
-//     select a backend via round-robin, DNAT to backend IP.
+//     select a backend via consistent hash, DNAT to backend IP.
 //   TC egress on yoq0: reverse NAT for return traffic (SNAT
 //     backend IP back to service VIP).
 //
@@ -75,15 +76,6 @@ struct bpf_map_def SEC("maps") conntrack_map = {
     .map_flags = 0,
 };
 
-// round-robin counter: single-element array for atomic increment.
-struct bpf_map_def SEC("maps") rr_counter = {
-    .type = BPF_MAP_TYPE_ARRAY,
-    .key_size = 4,
-    .value_size = 4,
-    .max_entries = 1,
-    .map_flags = 0,
-};
-
 // reverse conntrack: maps return-traffic tuples → original VIP.
 // populated on ingress alongside the forward conntrack entry.
 // key: reversed 5-tuple (backend=src, client=dst) matching return traffic.
@@ -98,29 +90,33 @@ struct bpf_map_def SEC("maps") rev_conntrack_map = {
 
 // -- helpers --
 
-// select a backend IP for a service using round-robin.
+// select a backend IP using FNV-1a hash of source IP for consistent
+// backend selection. deterministic: same client IP always maps to
+// same backend, even after conntrack LRU eviction.
 // returns the backend IP in network byte order, or 0 on failure.
 static __attribute__((always_inline)) __u32
-select_backend(struct service_backends *svc)
+select_backend(__u32 src_ip, struct service_backends *svc)
 {
     // SECURITY: Validate backend count
     if (svc->count == 0 || svc->count > 16)
         return 0;
 
-    // if only one backend, skip the counter
     if (svc->count == 1)
         return svc->ips[0];
 
-    // atomic increment of round-robin counter
-    __u32 zero = 0;
-    __u32 *counter = bpf_map_lookup_elem(&rr_counter, &zero);
-    if (!counter)
-        return svc->ips[0]; // fallback to first
+    // FNV-1a hash of source IP
+    __u32 hash = 2166136261U;
+    hash ^= (src_ip & 0xFF);
+    hash *= 16777619U;
+    hash ^= ((src_ip >> 8) & 0xFF);
+    hash *= 16777619U;
+    hash ^= ((src_ip >> 16) & 0xFF);
+    hash *= 16777619U;
+    hash ^= ((src_ip >> 24) & 0xFF);
+    hash *= 16777619U;
 
-    __sync_fetch_and_add(counter, 1);
     // mask with 0xF so the verifier can prove idx < 16 (array bounds).
-    // without this, the verifier sees unbounded offset into map_value.
-    __u32 idx = (*counter % svc->count) & 0xF;
+    __u32 idx = (hash % svc->count) & 0xF;
     return svc->ips[idx];
 }
 
@@ -219,8 +215,8 @@ int lb_ingress(struct __sk_buff *skb)
         // existing connection — use the same backend
         backend_ip = *existing;
     } else {
-        // new connection — select a backend
-        backend_ip = select_backend(svc);
+        // new connection — select a backend via source-IP hash
+        backend_ip = select_backend(ip->saddr, svc);
         if (backend_ip == 0)
             return TC_ACT_OK;
 

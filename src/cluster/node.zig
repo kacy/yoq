@@ -56,6 +56,10 @@ pub const NodeConfig = struct {
     shared_key: ?[32]u8 = null,
     /// UDP port for gossip protocol. 0 means port + 100 (default: 9800 for port 9700).
     gossip_port: u16 = 0,
+    /// override indirect probe fan-out K. null = auto (ceilLog2(N))
+    gossip_fanout: ?u32 = null,
+    /// multiply suspect/dead timeouts. null = default (1x)
+    gossip_suspicion_multiplier: ?u32 = null,
 };
 
 pub const PeerConfig = struct {
@@ -158,7 +162,10 @@ pub const Node = struct {
         const gossip_port: u16 = if (config.gossip_port != 0) config.gossip_port else config.port +| 100;
         const gossip_inst: ?*gossip_mod.Gossip = blk: {
             const gossip_state = alloc.create(gossip_mod.Gossip) catch break :blk null;
-            gossip_state.* = gossip_mod.Gossip.init(alloc, config.id, .{ .ip = .{ 0, 0, 0, 0 }, .port = gossip_port });
+            gossip_state.* = gossip_mod.Gossip.init(alloc, config.id, .{ .ip = .{ 0, 0, 0, 0 }, .port = gossip_port }, .{
+                .fanout = config.gossip_fanout,
+                .suspicion_multiplier = config.gossip_suspicion_multiplier,
+            });
             transport.initUdp(gossip_port) catch {
                 logger.warn("gossip: failed to bind UDP port {}, running without gossip", .{gossip_port});
                 gossip_state.deinit();

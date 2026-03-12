@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("../http.zig");
 const agent_registry = @import("../../cluster/registry.zig");
+const cluster_config = @import("../../cluster/config.zig");
 const scheduler = @import("../../cluster/scheduler.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const common = @import("common.zig");
@@ -17,7 +18,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
     if (request.method == .GET) {
         if (std.mem.eql(u8, path, "/cluster/status")) return handleClusterStatus(alloc, ctx);
         if (std.mem.eql(u8, path, "/agents")) return handleListAgents(alloc, ctx);
-        if (std.mem.eql(u8, path, "/wireguard/peers")) return handleWireguardPeers(alloc, ctx);
+        if (std.mem.eql(u8, path, "/wireguard/peers")) return handleWireguardPeers(alloc, request, ctx);
     }
 
     if (request.method == .POST) {
@@ -217,7 +218,14 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
 
     if (assigned_node_id != null) {
         const db = node.stateMachineDb();
-        const peers = agent_registry.listWireguardPeers(alloc, db) catch {
+        // agents with role=agent get only server/both peers (hub-and-spoke);
+        // role=both or role=server get all peers (full-mesh).
+        const parsed_role = if (role_str) |rs| cluster_config.NodeRole.fromString(rs) else null;
+        const is_agent_role = if (parsed_role) |r| r == .agent else false;
+        const peers = (if (is_agent_role)
+            agent_registry.listWireguardServerPeers(alloc, db)
+        else
+            agent_registry.listWireguardPeers(alloc, db)) catch {
             writer.writeByte('}') catch return common.internalError();
             const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
             return .{ .status = .ok, .body = body, .allocated = true };
@@ -348,11 +356,18 @@ fn handleListAgents(alloc: std.mem.Allocator, ctx: RouteContext) Response {
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
-fn handleWireguardPeers(alloc: std.mem.Allocator, ctx: RouteContext) Response {
+fn handleWireguardPeers(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return .{ .status = .ok, .body = "[]", .allocated = false };
 
     const db = node.stateMachineDb();
-    const peers = agent_registry.listWireguardPeers(alloc, db) catch return common.internalError();
+    // support ?servers_only=1 for hub-and-spoke topology
+    const servers_only = std.mem.eql(u8, request.query, "servers_only=1") or
+        std.mem.startsWith(u8, request.query, "servers_only=1&") or
+        std.mem.indexOf(u8, request.query, "&servers_only=1") != null;
+    const peers = (if (servers_only)
+        agent_registry.listWireguardServerPeers(alloc, db)
+    else
+        agent_registry.listWireguardPeers(alloc, db)) catch return common.internalError();
     defer {
         for (peers) |p| p.deinit(alloc);
         alloc.free(peers);

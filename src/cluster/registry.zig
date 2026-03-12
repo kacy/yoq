@@ -391,6 +391,25 @@ pub const WireguardPeer = struct {
 
 /// list all wireguard peers from the database.
 pub fn listWireguardPeers(alloc: Allocator, db: *sqlite.Db) ![]WireguardPeer {
+    return queryWireguardPeers(alloc, db,
+        "SELECT node_id, agent_id, public_key, endpoint, overlay_ip, container_subnet FROM wireguard_peers ORDER BY node_id;",
+    );
+}
+
+/// list wireguard peers that are servers (role=server or role=both).
+/// agents with role=agent use this to connect only to hub nodes,
+/// enabling hub-and-spoke topology for large clusters.
+pub fn listWireguardServerPeers(alloc: Allocator, db: *sqlite.Db) ![]WireguardPeer {
+    return queryWireguardPeers(alloc, db,
+        \\SELECT wp.node_id, wp.agent_id, wp.public_key, wp.endpoint, wp.overlay_ip, wp.container_subnet
+        \\FROM wireguard_peers wp
+        \\JOIN agents a ON wp.agent_id = a.id
+        \\WHERE a.role IN ('server', 'both') OR a.role IS NULL
+        \\ORDER BY wp.node_id;
+    );
+}
+
+fn queryWireguardPeers(alloc: Allocator, db: *sqlite.Db, sql: []const u8) ![]WireguardPeer {
     const Row = struct {
         node_id: i64,
         agent_id: sqlite.Text,
@@ -400,9 +419,7 @@ pub fn listWireguardPeers(alloc: Allocator, db: *sqlite.Db) ![]WireguardPeer {
         container_subnet: sqlite.Text,
     };
 
-    var stmt = db.prepare(
-        "SELECT node_id, agent_id, public_key, endpoint, overlay_ip, container_subnet FROM wireguard_peers ORDER BY node_id;",
-    ) catch return error.QueryFailed;
+    var stmt = db.prepareDynamic(sql) catch return error.QueryFailed;
     defer stmt.deinit();
 
     var iter = stmt.iterator(Row, .{}) catch return error.QueryFailed;
