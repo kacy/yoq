@@ -329,12 +329,14 @@ pub const Container = struct {
         self.runtime.cgroup.?.addProcess(spawn_result.pid) catch |e| {
             log.err("failed to add process to cgroup for {s}: {}. stopping container.", .{ config.id, e });
             self.cleanupFailedSpawn(&spawn_result);
+            if (has_overlay) cleanupContainerDirs(config.id);
             return ContainerError.StartFailed;
         };
 
         self.runtime.cgroup.?.setLimits(config.limits) catch |e| {
             log.err("failed to set cgroup limits for {s}: {}. stopping container.", .{ config.id, e });
             self.cleanupFailedSpawn(&spawn_result);
+            if (has_overlay) cleanupContainerDirs(config.id);
             return ContainerError.StartFailed;
         };
 

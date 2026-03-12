@@ -108,6 +108,8 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
     const address = extractJsonString(request.body, "address") orelse return common.badRequest("missing address field");
     const cpu_cores = extractJsonInt(request.body, "cpu_cores") orelse return common.badRequest("missing cpu_cores field");
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse return common.badRequest("missing memory_mb field");
+    if (cpu_cores <= 0 or cpu_cores > 10000) return common.badRequest("invalid cpu_cores");
+    if (memory_mb <= 0 or memory_mb > 10_000_000) return common.badRequest("invalid memory_mb");
 
     const wg_public_key = extractJsonString(request.body, "wg_public_key");
     const wg_listen_port = extractJsonInt(request.body, "wg_listen_port");
@@ -151,7 +153,10 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
             subnet_cfg.base[0], subnet_cfg.base[1], subnet_cfg.base[2],
         }) catch null;
 
-        const port: u16 = if (wg_listen_port) |p| @intCast(p) else 51820;
+        const port: u16 = if (wg_listen_port) |p| blk: {
+            if (p <= 0 or p > 65535) return common.badRequest("invalid wg_listen_port");
+            break :blk @intCast(p);
+        } else 51820;
         endpoint = std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;
 
         if (endpoint != null and overlay_ip_str != null and container_subnet != null) {
@@ -281,13 +286,13 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
     node.recordHeartbeat(
         id,
         .{
-            .cpu_cores = @intCast(cpu_cores),
-            .memory_mb = @intCast(memory_mb),
-            .cpu_used = @intCast(cpu_used),
-            .memory_used_mb = @intCast(memory_used_mb),
-            .containers = @intCast(containers),
+            .cpu_cores = @intCast(@max(0, cpu_cores)),
+            .memory_mb = @intCast(@max(0, memory_mb)),
+            .cpu_used = @intCast(@max(0, cpu_used)),
+            .memory_used_mb = @intCast(@max(0, memory_used_mb)),
+            .containers = @intCast(@max(0, containers)),
             .gpu_count = 0,
-            .gpu_used = @intCast(gpu_used),
+            .gpu_used = @intCast(@max(0, gpu_used)),
         },
         std.time.timestamp(),
     );

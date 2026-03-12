@@ -66,8 +66,11 @@ pub fn extractJsonInt(json: []const u8, key: []const u8) ?i64 {
     var pos = value_start;
     while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
 
-    // find end of number
+    // check for optional leading minus sign
     var end = pos;
+    if (end < json.len and json[end] == '-') end += 1;
+
+    // find end of number
     while (end < json.len and (json[end] >= '0' and json[end] <= '9')) : (end += 1) {}
 
     if (end == pos) return null;
@@ -317,10 +320,9 @@ test "extractJsonString handles normal escapes" {
     try std.testing.expectEqualStrings("hello\\nworld", result.?);
 }
 
-test "extractJsonInt negative number returns null" {
-    // extractJsonInt only parses digits — negative numbers are not supported
+test "extractJsonInt negative number" {
     const json = "{\"val\":-42}";
-    try std.testing.expect(extractJsonInt(json, "val") == null);
+    try std.testing.expectEqual(@as(i64, -42), extractJsonInt(json, "val").?);
 }
 
 test "extractJsonFloat negative value" {
