@@ -92,13 +92,15 @@ pub fn registerSqlFull(
 
         if (region_val.len > 0) {
             const reg_esc = try sql_escape.escapeSqlString(&region_esc_buf, region_val);
-            return std.fmt.bufPrint(buf,
+            return std.fmt.bufPrint(
+                buf,
                 "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels{s})" ++
                     " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}', '{s}'{s});",
                 .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, reg_esc, labels_esc, gpu_vals },
             );
         }
-        return std.fmt.bufPrint(buf,
+        return std.fmt.bufPrint(
+            buf,
             "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, labels{s})" ++
                 " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}'{s});",
             .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, labels_esc, gpu_vals },
@@ -107,14 +109,16 @@ pub fn registerSqlFull(
 
     if (region_val.len > 0) {
         const reg_esc = try sql_escape.escapeSqlString(&region_esc_buf, region_val);
-        return std.fmt.bufPrint(buf,
+        return std.fmt.bufPrint(
+            buf,
             "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, region, labels{s})" ++
                 " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}', '{s}'{s});",
             .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, reg_esc, labels_esc, gpu_vals },
         );
     }
 
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels{s})" ++
             " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}'{s});",
         .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, labels_esc, gpu_vals },
@@ -415,7 +419,9 @@ pub const WireguardPeer = struct {
 
 /// list all wireguard peers from the database.
 pub fn listWireguardPeers(alloc: Allocator, db: *sqlite.Db) ![]WireguardPeer {
-    return queryWireguardPeers(alloc, db,
+    return queryWireguardPeers(
+        alloc,
+        db,
         "SELECT node_id, agent_id, public_key, endpoint, overlay_ip, container_subnet FROM wireguard_peers ORDER BY node_id;",
     );
 }
@@ -560,7 +566,9 @@ pub fn getAgent(alloc: Allocator, db: *sqlite.Db, id: []const u8) !?AgentRecord 
 
 /// get all assignments for a specific agent.
 pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![]Assignment {
-    return queryAssignmentRows(alloc, db,
+    return queryAssignmentRows(
+        alloc,
+        db,
         "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = ?;",
         .{agent_id},
     );
@@ -570,7 +578,9 @@ pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![
 /// these are assignments that were detached from an offline agent
 /// and are waiting to be rescheduled.
 pub fn getOrphanedAssignments(alloc: Allocator, db: *sqlite.Db) ![]Assignment {
-    return queryAssignmentRows(alloc, db,
+    return queryAssignmentRows(
+        alloc,
+        db,
         "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = '' AND status = 'pending';",
         .{},
     );
