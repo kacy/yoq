@@ -300,6 +300,9 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse 0;
     const gpu_count = extractJsonInt(request.body, "gpu_count") orelse 0;
     const gpu_used = extractJsonInt(request.body, "gpu_used") orelse 0;
+    const gpu_health_str = extractJsonString(request.body, "gpu_health");
+
+    const agent_types = @import("../../cluster/agent_types.zig");
 
     node.recordHeartbeat(
         id,
@@ -311,6 +314,7 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
             .containers = @intCast(@max(0, containers)),
             .gpu_count = @intCast(@max(0, gpu_count)),
             .gpu_used = @intCast(@max(0, gpu_used)),
+            .gpu_health = if (gpu_health_str) |s| agent_types.AgentResources.GpuHealthBuf.fromSlice(s) else .{},
         },
         std.time.timestamp(),
     );

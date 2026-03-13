@@ -254,13 +254,6 @@ pub const Gossip = struct {
         }
     }
 
-    /// remove a member from the membership list entirely.
-    pub fn removeMember(self: *Gossip, id: u64) void {
-        _ = self.members.remove(id);
-        self.rebuildProbeOrder() catch {};
-        self.recalculateIntervals();
-    }
-
     /// advance the protocol by one tick. call this every ~500ms.
     /// generates Actions for the caller to process.
     pub fn tick(self: *Gossip) !void {
@@ -1525,7 +1518,7 @@ test "false positive suspect recovers via self-refutation" {
     try std.testing.expect(g3.incarnation > initial_incarnation);
 }
 
-test "rapid membership churn stays consistent" {
+test "rapid membership addition stays consistent" {
     const alloc = std.testing.allocator;
 
     var g1 = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
@@ -1549,11 +1542,6 @@ test "rapid membership churn stays consistent" {
         try g1.addMember(id, .{ .ip = .{ 10, 0, 0, @intCast(id) }, .port = 7000 });
     }
 
-    // immediately remove 5
-    for (5..10) |i| {
-        g1.removeMember(@intCast(i));
-    }
-
     // step 4: tick for 10 more rounds
     for (0..10) |_| {
         g1.tick() catch {};
@@ -1562,9 +1550,9 @@ test "rapid membership churn stays consistent" {
     }
 
     // step 5: probe_order should match live member count
-    // live members: 2, 3, 4, 10, 11, 12, 13, 14 = 8 members
-    try std.testing.expectEqual(@as(usize, 8), g1.probe_order.items.len);
-    try std.testing.expectEqual(@as(usize, 8), g1.members.count());
+    // live members: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 = 13 members
+    try std.testing.expectEqual(@as(usize, 13), g1.probe_order.items.len);
+    try std.testing.expectEqual(@as(usize, 13), g1.members.count());
 }
 
 test "dead node doesn't cascade false suspicions" {
@@ -1679,13 +1667,6 @@ test "recalculateIntervals scales with member count" {
     try std.testing.expectEqual(@as(u32, 10), g.probe_interval);
     try std.testing.expectEqual(@as(u32, 40), g.suspect_timeout);
     try std.testing.expectEqual(@as(u32, 200), g.dead_timeout);
-
-    // remove 2 members (2 total) — multiplier 1
-    g.removeMember(3);
-    g.removeMember(4);
-    try std.testing.expectEqual(@as(u32, 5), g.probe_interval);
-    try std.testing.expectEqual(@as(u32, 20), g.suspect_timeout);
-    try std.testing.expectEqual(@as(u32, 100), g.dead_timeout);
 }
 
 test "recalculateIntervals caps at max multiplier" {

@@ -777,6 +777,15 @@ pub const Node = struct {
         _ = self.raft.propose(orphan_sql) catch |e| {
             logger.warn("gossip: failed to orphan assignments for agent {s}: {}", .{ agent_id, e });
         };
+
+        // remove wireguard peer entry so other agents stop routing to the dead node
+        if (member_id >= 1 and member_id <= 65534) {
+            var wg_buf: [256]u8 = undefined;
+            const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(member_id)) catch return;
+            _ = self.raft.propose(wg_sql) catch |e| {
+                logger.warn("gossip: failed to remove wireguard peer for dead member {}: {}", .{ member_id, e });
+            };
+        }
     }
 
     /// mark an agent active when gossip detects it as alive again.
