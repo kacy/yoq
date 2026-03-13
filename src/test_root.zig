@@ -89,4 +89,5 @@ comptime {
     _ = @import("gpu/health.zig");
     _ = @import("gpu/scheduler.zig");
     _ = @import("gpu/mesh.zig");
+    _ = @import("gpu/mig.zig");
 }
