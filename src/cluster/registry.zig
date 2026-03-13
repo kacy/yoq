@@ -135,11 +135,18 @@ pub fn heartbeatSql(
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
 
+    const health_raw = resources.gpu_health.slice();
+    var health_esc_buf: [64]u8 = undefined;
+    const health_esc = if (health_raw.len > 0)
+        try sql_escape.escapeSqlString(&health_esc_buf, health_raw)
+    else
+        "healthy";
+
     return std.fmt.bufPrint(buf,
-        \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, gpu_used = {d}, last_heartbeat = {d},
+        \\UPDATE agents SET cpu_used = {d}, memory_used_mb = {d}, containers = {d}, gpu_used = {d}, gpu_health = '{s}', last_heartbeat = {d},
         \\ status = CASE WHEN status = 'offline' THEN 'active' ELSE status END
         \\ WHERE id = '{s}';
-    , .{ resources.cpu_used, resources.memory_used_mb, resources.containers, resources.gpu_used, now, id_esc });
+    , .{ resources.cpu_used, resources.memory_used_mb, resources.containers, resources.gpu_used, health_esc, now, id_esc });
 }
 
 /// generate SQL to mark an agent as draining.

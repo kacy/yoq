@@ -39,6 +39,25 @@ pub const AgentResources = struct {
     gpu_used: u32 = 0,
     gpu_model: ?[]const u8 = null,
     gpu_vram_mb: u64 = 0,
+    gpu_health: GpuHealthBuf = .{},
+
+    /// fixed-size buffer for gpu_health so it can be copied by value in the heartbeat batcher.
+    pub const GpuHealthBuf = struct {
+        data: [16]u8 = .{0} ** 16,
+        len: u8 = 0,
+
+        pub fn fromSlice(s: []const u8) GpuHealthBuf {
+            var buf = GpuHealthBuf{};
+            const n: u8 = @intCast(@min(s.len, 16));
+            @memcpy(buf.data[0..n], s[0..n]);
+            buf.len = n;
+            return buf;
+        }
+
+        pub fn slice(self: *const GpuHealthBuf) []const u8 {
+            return self.data[0..self.len];
+        }
+    };
 };
 
 /// an agent record as stored in the replicated state database.
