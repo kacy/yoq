@@ -12,9 +12,11 @@
 const std = @import("std");
 const agent_types = @import("agent_types.zig");
 const sql_escape = @import("../lib/sql.zig");
+const volumes_mod = @import("../state/volumes.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentRecord = agent_types.AgentRecord;
+pub const VolumeConstraint = volumes_mod.VolumeConstraint;
 
 pub const PlacementRequest = struct {
     image: []const u8,
@@ -23,6 +25,7 @@ pub const PlacementRequest = struct {
     memory_limit_mb: i64,
     gpu_limit: i64 = 0,
     required_labels: []const u8 = "",
+    volume_constraints: []const VolumeConstraint = &.{},
 };
 
 pub const PlacementResult = struct {
@@ -87,6 +90,12 @@ pub fn schedule(
             // check label constraints
             if (req.required_labels.len > 0) {
                 if (!matchesLabels(if (a.labels) |l| l else "", req.required_labels)) continue;
+            }
+
+            // check volume locality constraints — local/parallel volumes
+            // must be on the node where the volume was created
+            if (req.volume_constraints.len > 0) {
+                if (!matchesVolumeConstraints(a, req.volume_constraints)) continue;
             }
 
             // score: total free resources (higher = more room)
@@ -167,6 +176,26 @@ fn matchesLabels(agent_labels: []const u8, required: []const u8) bool {
             }
         }
         if (!found) return false;
+    }
+    return true;
+}
+
+/// check if an agent satisfies volume locality constraints.
+/// for each constraint with a node_id, the agent must have a matching node_id.
+/// constraints without node_id (nfs, host) are unconstrained — any node works.
+fn matchesVolumeConstraints(agent: AgentRecord, constraints: []const VolumeConstraint) bool {
+    for (constraints) |vc| {
+        const required_node = vc.node_id orelse continue; // unconstrained
+        // agent must have a node_id that matches
+        if (agent.node_id) |agent_node_id| {
+            // compare as strings since node_id in constraints is text
+            var agent_node_buf: [32]u8 = undefined;
+            const agent_node_str = std.fmt.bufPrint(&agent_node_buf, "{d}", .{agent_node_id}) catch return false;
+            if (!std.mem.eql(u8, agent_node_str, required_node)) return false;
+        } else {
+            // agent has no node_id — can't satisfy a node-specific constraint
+            return false;
+        }
     }
     return true;
 }
@@ -626,4 +655,91 @@ test "schedule more requests than capacity" {
 
     try std.testing.expectEqual(@as(usize, 2), placed);
     try std.testing.expectEqual(@as(usize, 8), unplaced);
+}
+
+test "schedule volume constraint pins to correct node" {
+    const alloc = std.testing.allocator;
+    const agents = &[_]AgentRecord{
+        makeAgentFull("node1", "active", 4, 8192, 0, 0, null, null, 0, 0),
+        makeAgentFull("node2", "active", 4, 8192, 0, 0, null, null, 0, 0),
+        makeAgentFull("node3", "active", 4, 8192, 0, 0, null, null, 0, 0),
+    };
+    // set node_ids
+    var agents_mut: [3]AgentRecord = undefined;
+    for (agents, 0..) |a, i| {
+        agents_mut[i] = a;
+    }
+    agents_mut[0].node_id = 1;
+    agents_mut[1].node_id = 2;
+    agents_mut[2].node_id = 3;
+
+    const constraints = [_]VolumeConstraint{
+        .{ .driver = "local", .node_id = "2" },
+    };
+
+    const requests = &[_]PlacementRequest{
+        .{ .image = "app", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256, .volume_constraints = &constraints },
+    };
+
+    const results = try schedule(alloc, requests, &agents_mut);
+    defer alloc.free(results);
+
+    // should land on node2 (node_id=2)
+    try std.testing.expect(results[0] != null);
+    try std.testing.expectEqualStrings("node2", results[0].?.agent_id);
+}
+
+test "schedule volume constraint with no matching node returns null" {
+    const alloc = std.testing.allocator;
+    var agents_mut = [_]AgentRecord{
+        makeAgentFull("node1", "active", 4, 8192, 0, 0, null, null, 0, 0),
+    };
+    agents_mut[0].node_id = 1;
+
+    const constraints = [_]VolumeConstraint{
+        .{ .driver = "local", .node_id = "99" },
+    };
+
+    const requests = &[_]PlacementRequest{
+        .{ .image = "app", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256, .volume_constraints = &constraints },
+    };
+
+    const results = try schedule(alloc, requests, &agents_mut);
+    defer alloc.free(results);
+
+    try std.testing.expect(results[0] == null);
+}
+
+test "schedule unconstrained volume (nfs/host) allows any node" {
+    const alloc = std.testing.allocator;
+    var agents_mut = [_]AgentRecord{
+        makeAgentFull("node1", "active", 4, 8192, 0, 0, null, null, 0, 0),
+    };
+    agents_mut[0].node_id = 1;
+
+    const constraints = [_]VolumeConstraint{
+        .{ .driver = "nfs", .node_id = null }, // unconstrained
+    };
+
+    const requests = &[_]PlacementRequest{
+        .{ .image = "app", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256, .volume_constraints = &constraints },
+    };
+
+    const results = try schedule(alloc, requests, &agents_mut);
+    defer alloc.free(results);
+
+    try std.testing.expect(results[0] != null);
+}
+
+test "matchesVolumeConstraints — no constraints" {
+    const agent = makeAgent("a", "active", 4, 8192, 0, 0);
+    try std.testing.expect(matchesVolumeConstraints(agent, &.{}));
+}
+
+test "matchesVolumeConstraints — agent without node_id fails constrained" {
+    const agent = makeAgent("a", "active", 4, 8192, 0, 0);
+    const constraints = [_]VolumeConstraint{
+        .{ .driver = "local", .node_id = "1" },
+    };
+    try std.testing.expect(!matchesVolumeConstraints(agent, &constraints));
 }

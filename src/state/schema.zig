@@ -207,6 +207,27 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
 
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS s3_multipart_uploads (
+        \\    upload_id TEXT PRIMARY KEY,
+        \\    bucket TEXT NOT NULL,
+        \\    key TEXT NOT NULL,
+        \\    status TEXT NOT NULL DEFAULT 'in_progress',
+        \\    created_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS s3_upload_parts (
+        \\    upload_id TEXT NOT NULL,
+        \\    part_number INTEGER NOT NULL,
+        \\    etag TEXT NOT NULL,
+        \\    size INTEGER NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (upload_id, part_number)
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
     // indexes for frequently queried columns — avoids full table scans
     // on container lookups by app name, status, or hostname
     db.exec(

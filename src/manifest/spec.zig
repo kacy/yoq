@@ -202,6 +202,7 @@ pub const VolumeDriver = union(enum) {
         path: []const u8,
         options: ?[]const u8,
     },
+    parallel: struct { mount_path: []const u8 },
 
     pub fn deinit(self: VolumeDriver, alloc: std.mem.Allocator) void {
         switch (self) {
@@ -211,6 +212,7 @@ pub const VolumeDriver = union(enum) {
                 alloc.free(n.path);
                 if (n.options) |o| alloc.free(o);
             },
+            .parallel => |p| alloc.free(p.mount_path),
             .local => {},
         }
     }
@@ -220,6 +222,7 @@ pub const VolumeDriver = union(enum) {
             .local => "local",
             .host => "host",
             .nfs => "nfs",
+            .parallel => "parallel",
         };
     }
 };

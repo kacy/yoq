@@ -92,6 +92,14 @@ pub const PsiMetrics = struct {
     full_avg10: f64,
 };
 
+/// block I/O statistics from cgroups v2 io.stat
+pub const IoStats = struct {
+    read_bytes: u64 = 0,
+    write_bytes: u64 = 0,
+    read_ios: u64 = 0,
+    write_ios: u64 = 0,
+};
+
 const cgroup_root = "/sys/fs/cgroup";
 const yoq_prefix = "yoq";
 var subtree_controllers_enabled: bool = false;
@@ -288,6 +296,7 @@ pub const Cgroup = struct {
         memory_limit: ?u64 = null, // memory.max (null = "max" / unlimited)
         cpu_max_usec: ?u64 = null, // cpu.max quota (null = "max" / unlimited)
         cpu_max_period: ?u64 = null, // cpu.max period
+        io: ?IoStats = null,
     };
 
     /// read all metrics in a single pass by opening the cgroup directory once.
@@ -335,6 +344,14 @@ pub const Cgroup = struct {
             var buf: [64]u8 = undefined;
             if (readFromDir(dir, "cpu.max", &buf)) |content| {
                 parseCpuMax(content, &metrics);
+            }
+        }
+
+        // io.stat — aggregate across all devices
+        {
+            var buf: [1024]u8 = undefined;
+            if (readFromDir(dir, "io.stat", &buf)) |content| {
+                metrics.io = parseIoStat(content);
             }
         }
 
@@ -477,7 +494,7 @@ fn enableSubtreeControllers(dir_path: []const u8) void {
     const ctrl_path = std.fmt.bufPrint(&buf, "{s}/cgroup.subtree_control", .{dir_path}) catch return;
     const file = std.fs.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch return;
     defer file.close();
-    file.writeAll("+cpu +memory +pids") catch {};
+    file.writeAll("+cpu +memory +pids +io") catch {};
 }
 
 /// read a file from an already-opened directory handle.
@@ -525,6 +542,33 @@ fn parsePsiAvg10(line: []const u8) !f64 {
     const val_start = start + prefix.len;
     const val_end = std.mem.indexOfScalarPos(u8, line, val_start, ' ') orelse line.len;
     return std.fmt.parseFloat(f64, line[val_start..val_end]) catch return error.ParseError;
+}
+
+/// parse io.stat content from cgroups v2.
+/// format: "MAJ:MIN rbytes=N wbytes=N rios=N wios=N dbytes=N dios=N\n"
+/// aggregates across all devices (each line is one device).
+/// returns zeros if content is empty.
+pub fn parseIoStat(content: []const u8) IoStats {
+    var stats = IoStats{};
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        // skip "MAJ:MIN " prefix
+        const after_dev = std.mem.indexOf(u8, line, " ") orelse continue;
+        var pairs = std.mem.splitScalar(u8, line[after_dev + 1..], ' ');
+        while (pairs.next()) |pair| {
+            if (std.mem.startsWith(u8, pair, "rbytes=")) {
+                stats.read_bytes += std.fmt.parseInt(u64, pair["rbytes=".len..], 10) catch continue;
+            } else if (std.mem.startsWith(u8, pair, "wbytes=")) {
+                stats.write_bytes += std.fmt.parseInt(u64, pair["wbytes=".len..], 10) catch continue;
+            } else if (std.mem.startsWith(u8, pair, "rios=")) {
+                stats.read_ios += std.fmt.parseInt(u64, pair["rios=".len..], 10) catch continue;
+            } else if (std.mem.startsWith(u8, pair, "wios=")) {
+                stats.write_ios += std.fmt.parseInt(u64, pair["wios=".len..], 10) catch continue;
+            }
+        }
+    }
+    return stats;
 }
 
 // -- tests --
@@ -695,4 +739,32 @@ test "ResourceLimits default values are reasonable" {
     const defaults = ResourceLimits{};
     try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024), defaults.memory_max.?);
     try std.testing.expectEqual(@as(u32, 4096), defaults.pids_max.?);
+}
+
+test "parseIoStat — single device" {
+    const content = "8:0 rbytes=1024 wbytes=2048 rios=10 wios=20 dbytes=0 dios=0\n";
+    const stats = parseIoStat(content);
+    try std.testing.expectEqual(@as(u64, 1024), stats.read_bytes);
+    try std.testing.expectEqual(@as(u64, 2048), stats.write_bytes);
+    try std.testing.expectEqual(@as(u64, 10), stats.read_ios);
+    try std.testing.expectEqual(@as(u64, 20), stats.write_ios);
+}
+
+test "parseIoStat — multiple devices aggregated" {
+    const content =
+        "8:0 rbytes=1000 wbytes=2000 rios=5 wios=10 dbytes=0 dios=0\n" ++
+        "8:16 rbytes=500 wbytes=300 rios=3 wios=7 dbytes=0 dios=0\n";
+    const stats = parseIoStat(content);
+    try std.testing.expectEqual(@as(u64, 1500), stats.read_bytes);
+    try std.testing.expectEqual(@as(u64, 2300), stats.write_bytes);
+    try std.testing.expectEqual(@as(u64, 8), stats.read_ios);
+    try std.testing.expectEqual(@as(u64, 17), stats.write_ios);
+}
+
+test "parseIoStat — empty content" {
+    const stats = parseIoStat("");
+    try std.testing.expectEqual(@as(u64, 0), stats.read_bytes);
+    try std.testing.expectEqual(@as(u64, 0), stats.write_bytes);
+    try std.testing.expectEqual(@as(u64, 0), stats.read_ios);
+    try std.testing.expectEqual(@as(u64, 0), stats.write_ios);
 }

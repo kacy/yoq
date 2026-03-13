@@ -20,6 +20,7 @@ comptime {
     _ = @import("state/store.zig");
     _ = @import("state/schema.zig");
     _ = @import("state/commands.zig");
+    _ = @import("state/volumes.zig");
     _ = @import("state/secrets.zig");
     _ = @import("lib/cli.zig");
     _ = @import("lib/cmd.zig");
@@ -80,4 +81,7 @@ comptime {
     _ = @import("cluster/scheduler.zig");
     _ = @import("cluster/commands.zig");
     _ = @import("tls/commands.zig");
+    _ = @import("storage/s3.zig");
+    _ = @import("storage/s3_xml.zig");
+    _ = @import("api/routes/s3_gateway.zig");
 }
