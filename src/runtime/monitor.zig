@@ -23,6 +23,8 @@ pub const ServiceSnapshot = struct {
     memory_bytes: u64,
     psi_cpu: ?cgroups.PsiMetrics,
     psi_memory: ?cgroups.PsiMetrics,
+    io_read_bytes: u64 = 0,
+    io_write_bytes: u64 = 0,
     running_count: u32,
     desired_count: u32,
     uptime_secs: i64,
@@ -81,6 +83,8 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
     var total_memory: u64 = 0;
     var earliest_start: i64 = std.math.maxInt(i64);
     var has_cpu = false;
+    var total_io_read: u64 = 0;
+    var total_io_write: u64 = 0;
     var psi_cpu: ?cgroups.PsiMetrics = null;
     var psi_memory: ?cgroups.PsiMetrics = null;
     var memory_limit: ?u64 = null;
@@ -103,6 +107,11 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
             if (metrics.cpu_usec) |cpu_usec| {
                 total_cpu_usec += cpu_usec;
                 has_cpu = true;
+            }
+
+            if (metrics.io) |io| {
+                total_io_read += io.read_bytes;
+                total_io_write += io.write_bytes;
             }
 
             // use PSI and limits from the first running container (representative)
@@ -151,6 +160,8 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
         .memory_bytes = total_memory,
         .psi_cpu = psi_cpu,
         .psi_memory = psi_memory,
+        .io_read_bytes = total_io_read,
+        .io_write_bytes = total_io_write,
         .running_count = running,
         .desired_count = total,
         .uptime_secs = uptime,

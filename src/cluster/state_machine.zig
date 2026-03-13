@@ -337,6 +337,12 @@ pub fn isAllowedStatement(sql: []const u8) bool {
         "INSERT INTO volumes ",
         "UPDATE volumes SET ",
         "DELETE FROM volumes ",
+        // s3_multipart_uploads and s3_upload_parts tables — s3.zig
+        "INSERT INTO s3_multipart_uploads ",
+        "UPDATE s3_multipart_uploads SET ",
+        "DELETE FROM s3_multipart_uploads ",
+        "INSERT INTO s3_upload_parts ",
+        "DELETE FROM s3_upload_parts ",
         // schema initialization — schema.zig: CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS
         "CREATE TABLE IF NOT EXISTS ",
         "CREATE INDEX IF NOT EXISTS ",

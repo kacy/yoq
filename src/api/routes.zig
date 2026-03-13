@@ -10,6 +10,7 @@ const containers_images = @import("routes/containers_images.zig");
 const cluster_agents = @import("routes/cluster_agents.zig");
 const status_metrics = @import("routes/status_metrics.zig");
 const security = @import("routes/security.zig");
+const s3_gateway = @import("routes/s3_gateway.zig");
 
 pub var cluster: ?*cluster_node.Node = null;
 pub var join_token: ?[]const u8 = null;
@@ -36,6 +37,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
         }
     }
 
+    if (s3_gateway.route(request, alloc)) |resp| return resp;
     if (containers_images.route(request, alloc)) |resp| return resp;
 
     const ctx: common.RouteContext = .{

@@ -432,6 +432,12 @@ fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
             .path = path_dup,
             .options = options_dup,
         } };
+    } else if (std.mem.eql(u8, driver_str, "parallel")) blk: {
+        const path = table.getString("path") orelse {
+            log.err("manifest: volume '{s}' with parallel driver requires 'path' field", .{name});
+            return LoadError.InvalidVolumeConfig;
+        };
+        break :blk .{ .parallel = .{ .mount_path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory } };
     } else .{ .local = .{} };
 
     return .{
@@ -2119,4 +2125,36 @@ test "cron — invalid every returns error" {
         \\image = "postgres:15"
         \\every = "5d"
     ));
+}
+
+test "volume parsing — parallel driver" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "app:latest"
+        \\
+        \\[volume.scratch]
+        \\type = "parallel"
+        \\path = "/mnt/lustre/scratch"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.volumes.len);
+    try std.testing.expectEqualStrings("scratch", manifest.volumes[0].name);
+    try std.testing.expectEqualStrings("parallel", manifest.volumes[0].driver.driverName());
+    try std.testing.expectEqualStrings("/mnt/lustre/scratch", manifest.volumes[0].driver.parallel.mount_path);
+}
+
+test "volume parsing — parallel driver requires path" {
+    const alloc = std.testing.allocator;
+
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "app:latest"
+        \\
+        \\[volume.scratch]
+        \\type = "parallel"
+    );
+    try std.testing.expectError(LoadError.InvalidVolumeConfig, result);
 }

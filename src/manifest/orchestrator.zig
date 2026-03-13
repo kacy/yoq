@@ -849,7 +849,7 @@ fn resolveServiceVolumes(
                     continue;
                 };
                 const timestamp = std.time.timestamp();
-                volumes_mod.create(db, app_name, vol_def, timestamp) catch |e| {
+                volumes_mod.create(db, app_name, vol_def, timestamp, null) catch |e| {
                     log.warn("failed to create volume '{s}': {}", .{ vol.source, e });
                     continue;
                 };

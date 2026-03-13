@@ -3,10 +3,11 @@
 // creates, resolves, and destroys managed volumes. volumes are
 // directories on the host that get bind-mounted into containers.
 //
-// three drivers:
-//   local: managed dir under ~/.local/share/yoq/volumes/<app>/<name>/
-//   host:  user-specified host directory (not managed by yoq)
-//   nfs:   kernel NFS v4.1 mount under ~/.local/share/yoq/mounts/nfs/<app>/<name>/
+// four drivers:
+//   local:    managed dir under ~/.local/share/yoq/volumes/<app>/<name>/
+//   host:     user-specified host directory (not managed by yoq)
+//   nfs:      kernel NFS v4.1 mount under ~/.local/share/yoq/mounts/nfs/<app>/<name>/
+//   parallel: passthrough to Lustre/GPFS/BeeGFS mount (validated via statfs)
 
 const std = @import("std");
 const sqlite = @import("sqlite");
@@ -67,15 +68,18 @@ pub fn resolveVolumePath(
             error.PathTooLong => VolumeError.PathTooLong,
         },
         .host => |h| h.path,
+        .parallel => |p| p.mount_path,
     };
 }
 
 /// create a volume: mkdir + INSERT into db. idempotent — skips if already exists.
+/// node_id is populated for local/parallel volumes to enable volume-aware scheduling.
 pub fn create(
     db: *sqlite.Db,
     app_name: []const u8,
     vol: spec.Volume,
     timestamp: i64,
+    node_id: ?[]const u8,
 ) VolumeError!void {
     var buf: [paths.max_path]u8 = undefined;
     const vol_path = try resolveVolumePath(&buf, app_name, vol.name, vol.driver);
@@ -100,18 +104,33 @@ pub fn create(
             };
         },
         .host => {},
+        .parallel => |p| {
+            // validate mount path exists and is a recognized parallel filesystem
+            validateParallelFs(p.mount_path) catch |e| {
+                log.err("volumes: parallel FS validation failed for {s}: {}", .{ p.mount_path, e });
+                return e;
+            };
+        },
     }
+
+    // populate node_id for local/parallel volumes (node-specific)
+    // nfs/host volumes are node-agnostic — leave node_id null
+    const effective_node_id: ?sqlite.Text = switch (vol.driver) {
+        .local, .parallel => if (node_id) |nid| sqlite.Text{ .data = nid } else null,
+        .nfs, .host => null,
+    };
 
     // idempotent insert
     db.exec(
-        "INSERT OR IGNORE INTO volumes (name, app_name, driver, path, status, created_at)" ++
-            " VALUES (?, ?, ?, ?, 'created', ?);",
+        "INSERT OR IGNORE INTO volumes (name, app_name, driver, path, status, node_id, created_at)" ++
+            " VALUES (?, ?, ?, ?, 'created', ?, ?);",
         .{},
         .{
             sqlite.Text{ .data = vol.name },
             sqlite.Text{ .data = app_name },
             sqlite.Text{ .data = vol.driver.driverName() },
             sqlite.Text{ .data = vol_path },
+            effective_node_id,
             timestamp,
         },
     ) catch {
@@ -215,6 +234,40 @@ pub fn list(
 
     return result.toOwnedSlice(alloc) catch return VolumeError.OutOfMemory;
 }
+
+/// get volume records with node_id for building scheduling constraints.
+pub fn getVolumesByApp(
+    alloc: std.mem.Allocator,
+    db: *sqlite.Db,
+    app_name: []const u8,
+) VolumeError![]VolumeConstraint {
+    var result: std.ArrayListUnmanaged(VolumeConstraint) = .empty;
+    errdefer result.deinit(alloc);
+
+    const Row = struct { driver: sqlite.Text, node_id: ?sqlite.Text };
+
+    var stmt = db.prepare(
+        "SELECT driver, node_id FROM volumes WHERE app_name = ?;",
+    ) catch return VolumeError.DbError;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(Row, .{sqlite.Text{ .data = app_name }}) catch return VolumeError.DbError;
+    while (iter.nextAlloc(alloc, .{}) catch return VolumeError.DbError) |row| {
+        result.append(alloc, .{
+            .driver = row.driver.data,
+            .node_id = if (row.node_id) |n| n.data else null,
+        }) catch return VolumeError.OutOfMemory;
+    }
+
+    return result.toOwnedSlice(alloc) catch return VolumeError.OutOfMemory;
+}
+
+/// volume constraint for placement — local/parallel volumes have node_id,
+/// nfs/host volumes are unconstrained (null node_id).
+pub const VolumeConstraint = struct {
+    driver: []const u8,
+    node_id: ?[]const u8,
+};
 
 /// check if a path is currently mounted by reading /proc/mounts.
 fn isMounted(path: []const u8) bool {
@@ -335,6 +388,55 @@ fn unmountNfs(mountpoint: []const u8) VolumeError!void {
     }
 }
 
+// parallel filesystem magic numbers
+const LUSTRE_MAGIC: u32 = 0x0BD00BD0;
+const GPFS_MAGIC: u32 = 0x47504653;
+const BEEGFS_MAGIC: u32 = 0x19830326;
+
+/// statfs result buffer matching the x86_64 Linux ABI.
+/// only the f_type field is used; the rest is padding to ensure
+/// the struct is large enough for the kernel to write into.
+const StatfsBuf = extern struct {
+    f_type: isize,
+    _pad: [120]u8 = undefined,
+};
+
+/// validate that a path points to a recognized parallel filesystem.
+/// uses statfs() to check the filesystem type magic number.
+pub fn validateParallelFs(mount_path: []const u8) VolumeError!void {
+    var path_buf: [paths.max_path]u8 = undefined;
+    if (mount_path.len >= path_buf.len) return VolumeError.PathTooLong;
+    @memcpy(path_buf[0..mount_path.len], mount_path);
+    path_buf[mount_path.len] = 0;
+    const path_z: [*:0]const u8 = @ptrCast(&path_buf);
+
+    var statfs_buf: StatfsBuf = .{ .f_type = 0 };
+    const rc = linux.syscall2(.statfs, @intFromPtr(path_z), @intFromPtr(&statfs_buf));
+
+    if (syscall_util.isError(rc)) {
+        log.err("volumes: statfs failed for parallel FS path {s}: errno={}", .{
+            mount_path, syscall_util.getErrno(rc),
+        });
+        return VolumeError.IoError;
+    }
+
+    if (!isParallelFsMagic(statfs_buf.f_type)) {
+        log.err("volumes: {s} is not a recognized parallel filesystem (f_type=0x{X})", .{
+            mount_path, statfs_buf.f_type,
+        });
+        return VolumeError.MountFailed;
+    }
+}
+
+/// check if a filesystem type magic number matches a known parallel FS.
+pub fn isParallelFsMagic(f_type: anytype) bool {
+    const magic: u32 = if (@TypeOf(f_type) == u32)
+        f_type
+    else
+        @intCast(@as(i64, @intCast(f_type)) & 0xFFFFFFFF);
+    return magic == LUSTRE_MAGIC or magic == GPFS_MAGIC or magic == BEEGFS_MAGIC;
+}
+
 // -- tests --
 
 const schema = @import("schema.zig");
@@ -345,7 +447,7 @@ test "create and get volume path — local driver" {
     try schema.init(&db);
 
     const vol = spec.Volume{ .name = "data", .driver = .{ .local = .{} } };
-    try create(&db, "myapp", vol, 1000);
+    try create(&db, "myapp", vol, 1000, null);
 
     const alloc = std.testing.allocator;
     const path = (try getVolumePath(alloc, &db, "myapp", "data")).?;
@@ -360,8 +462,8 @@ test "create is idempotent" {
     try schema.init(&db);
 
     const vol = spec.Volume{ .name = "data", .driver = .{ .local = .{} } };
-    try create(&db, "myapp", vol, 1000);
-    try create(&db, "myapp", vol, 2000); // should not error
+    try create(&db, "myapp", vol, 1000, null);
+    try create(&db, "myapp", vol, 2000, null); // should not error
 }
 
 test "create host volume stores configured path" {
@@ -370,7 +472,7 @@ test "create host volume stores configured path" {
     try schema.init(&db);
 
     const vol = spec.Volume{ .name = "ext", .driver = .{ .host = .{ .path = "/mnt/storage" } } };
-    try create(&db, "myapp", vol, 1000);
+    try create(&db, "myapp", vol, 1000, null);
 
     const alloc = std.testing.allocator;
     const path = (try getVolumePath(alloc, &db, "myapp", "ext")).?;
@@ -396,7 +498,7 @@ test "destroy removes volume record" {
 
     // create a host volume (no directory to manage)
     const vol = spec.Volume{ .name = "ext", .driver = .{ .host = .{ .path = "/mnt/storage" } } };
-    try create(&db, "myapp", vol, 1000);
+    try create(&db, "myapp", vol, 1000, null);
 
     try destroy(&db, "myapp", "ext");
 
@@ -420,12 +522,12 @@ test "list volumes for app" {
 
     const vol1 = spec.Volume{ .name = "data", .driver = .{ .local = .{} } };
     const vol2 = spec.Volume{ .name = "ext", .driver = .{ .host = .{ .path = "/mnt/storage" } } };
-    try create(&db, "myapp", vol1, 1000);
-    try create(&db, "myapp", vol2, 1000);
+    try create(&db, "myapp", vol1, 1000, null);
+    try create(&db, "myapp", vol2, 1000, null);
 
     // create a volume for a different app to verify filtering
     const vol3 = spec.Volume{ .name = "other", .driver = .{ .local = .{} } };
-    try create(&db, "otherapp", vol3, 1000);
+    try create(&db, "otherapp", vol3, 1000, null);
 
     const alloc = std.testing.allocator;
     const vols = try list(alloc, &db, "myapp");
@@ -500,4 +602,22 @@ test "nfs volume DB round-trip" {
     defer alloc.free(path);
 
     try std.testing.expectEqualStrings("/tmp/test/mounts/nfs/myapp/nfsdata", path);
+}
+
+test "isParallelFsMagic — known types" {
+    try std.testing.expect(isParallelFsMagic(@as(u32, 0x0BD00BD0))); // Lustre
+    try std.testing.expect(isParallelFsMagic(@as(u32, 0x47504653))); // GPFS
+    try std.testing.expect(isParallelFsMagic(@as(u32, 0x19830326))); // BeeGFS
+}
+
+test "isParallelFsMagic — non-parallel types" {
+    try std.testing.expect(!isParallelFsMagic(@as(u32, 0xEF53))); // ext4
+    try std.testing.expect(!isParallelFsMagic(@as(u32, 0x58465342))); // XFS
+    try std.testing.expect(!isParallelFsMagic(@as(u32, 0x01021994))); // tmpfs
+}
+
+test "resolveVolumePath — parallel driver" {
+    var buf: [paths.max_path]u8 = undefined;
+    const path = try resolveVolumePath(&buf, "myapp", "scratch", .{ .parallel = .{ .mount_path = "/mnt/lustre/data" } });
+    try std.testing.expectEqualStrings("/mnt/lustre/data", path);
 }

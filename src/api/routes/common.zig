@@ -117,21 +117,25 @@ pub fn matchSubpath(rest: []const u8, suffix: []const u8) ?[]const u8 {
 
 pub fn extractQueryParam(path: []const u8, param: []const u8) ?[]const u8 {
     const query_start = std.mem.indexOf(u8, path, "?") orelse return null;
-    var rest = path[query_start + 1 ..];
+    return extractQueryValue(path[query_start + 1 ..], param);
+}
 
-    while (rest.len > 0) {
-        const amp = std.mem.indexOf(u8, rest, "&") orelse rest.len;
-        const pair = rest[0..amp];
+/// parse a query parameter value from a bare query string (no leading '?').
+/// returns "" for valueless params (e.g., "uploads" in "uploads&prefix=foo").
+/// returns null if the parameter is not found.
+pub fn extractQueryValue(query: []const u8, param: []const u8) ?[]const u8 {
+    if (query.len == 0) return null;
 
-        if (std.mem.indexOf(u8, pair, "=")) |eq| {
-            const key = pair[0..eq];
-            const value = pair[eq + 1 ..];
-            if (std.mem.eql(u8, key, param) and value.len > 0) {
-                return value;
+    var iter = std.mem.splitScalar(u8, query, '&');
+    while (iter.next()) |pair| {
+        if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
+            if (std.mem.eql(u8, pair[0..eq], param)) {
+                const value = pair[eq + 1 ..];
+                if (value.len > 0) return value;
             }
+        } else {
+            if (std.mem.eql(u8, pair, param)) return "";
         }
-
-        rest = if (amp < rest.len) rest[amp + 1 ..] else &.{};
     }
 
     return null;
