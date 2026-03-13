@@ -32,6 +32,7 @@ const ip_mod = @import("../network/ip.zig");
 const setup = @import("../network/setup.zig");
 
 const paths = @import("../lib/paths.zig");
+const gpu_detect = @import("../gpu/detect.zig");
 const cluster_config = @import("config.zig");
 const gossip_mod = @import("gossip.zig");
 const transport_mod = @import("transport.zig");
@@ -985,10 +986,27 @@ pub fn getSystemResources() AgentResources {
         }
     }
 
+    // detect GPUs (cached — detection involves dlopen/sysfs scans)
+    const gpu_count = cachedGpuCount();
+
     return .{
         .cpu_cores = cpu_cores,
         .memory_mb = memory_mb,
+        .gpu_count = gpu_count,
     };
+}
+
+/// cached GPU count — avoids repeated dlopen/sysfs scans on every heartbeat.
+/// detection runs once on first call; result is stored in a global.
+var cached_gpu_count: ?u32 = null;
+
+fn cachedGpuCount() u32 {
+    if (cached_gpu_count) |count| return count;
+    var result = gpu_detect.detect();
+    const count = @as(u32, result.count);
+    result.deinit();
+    cached_gpu_count = count;
+    return count;
 }
 
 // use shared JSON extraction helpers

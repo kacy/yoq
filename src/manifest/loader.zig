@@ -377,6 +377,11 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
     const tls_config = try parseTlsConfig(alloc, name, table.getTable("tls"));
     errdefer if (tls_config) |tc| tc.deinit(alloc);
 
+    const gpu_spec = try parseGpuSpec(alloc, table.getTable("gpu"));
+    errdefer if (gpu_spec) |g| g.deinit(alloc);
+
+    const gpu_mesh_spec = try parseGpuMeshSpec(table.getTable("gpu_mesh"));
+
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
         .image = common.image,
@@ -389,6 +394,8 @@ fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.T
         .health_check = health_check,
         .restart = restart,
         .tls = tls_config,
+        .gpu = gpu_spec,
+        .gpu_mesh = gpu_mesh_spec,
     };
 }
 
@@ -458,6 +465,11 @@ fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
         alloc.free(depends_on);
     }
 
+    const gpu_spec = try parseGpuSpec(alloc, table.getTable("gpu"));
+    errdefer if (gpu_spec) |g| g.deinit(alloc);
+
+    const gpu_mesh_spec = try parseGpuMeshSpec(table.getTable("gpu_mesh"));
+
     return .{
         .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
         .image = common.image,
@@ -466,6 +478,8 @@ fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Ta
         .depends_on = depends_on,
         .working_dir = common.working_dir,
         .volumes = common.volumes,
+        .gpu = gpu_spec,
+        .gpu_mesh = gpu_mesh_spec,
     };
 }
 
@@ -824,6 +838,56 @@ fn parseTlsConfig(
         .domain = alloc.dupe(u8, domain) catch return LoadError.OutOfMemory,
         .acme = acme,
         .email = email,
+    };
+}
+
+// -- GPU spec parsing --
+
+/// parse an optional [service.*.gpu] sub-table into a GpuSpec.
+fn parseGpuSpec(
+    alloc: std.mem.Allocator,
+    table: ?*const toml.Table,
+) LoadError!?spec.GpuSpec {
+    const gpu_table = table orelse return null;
+
+    const count_raw = gpu_table.getInt("count") orelse return null;
+    if (count_raw < 1) return null;
+
+    const model_raw = gpu_table.getString("model");
+    const model: ?[]const u8 = if (model_raw) |m|
+        alloc.dupe(u8, m) catch return LoadError.OutOfMemory
+    else
+        null;
+
+    const vram_raw = gpu_table.getInt("vram_min_mb");
+    const vram_min_mb: ?u64 = if (vram_raw) |v| @intCast(@max(0, v)) else null;
+
+    return .{
+        .count = @intCast(count_raw),
+        .model = model,
+        .vram_min_mb = vram_min_mb,
+    };
+}
+
+/// parse an optional [service.*.gpu_mesh] sub-table into a GpuMeshSpec.
+fn parseGpuMeshSpec(
+    table: ?*const toml.Table,
+) LoadError!?spec.GpuMeshSpec {
+    const mesh_table = table orelse return null;
+
+    const world_size_raw = mesh_table.getInt("world_size") orelse return null;
+    if (world_size_raw < 1) return null;
+
+    const gpus_per_rank_raw = mesh_table.getInt("gpus_per_rank");
+    const gpus_per_rank: u32 = if (gpus_per_rank_raw) |g| @intCast(@max(1, g)) else 1;
+
+    const master_port_raw = mesh_table.getInt("master_port");
+    const master_port: u16 = if (master_port_raw) |p| @intCast(@min(65535, @max(1, p))) else 29500;
+
+    return .{
+        .world_size = @intCast(world_size_raw),
+        .gpus_per_rank = gpus_per_rank,
+        .master_port = master_port,
     };
 }
 

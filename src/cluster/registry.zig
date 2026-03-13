@@ -466,9 +466,12 @@ const AgentRow = struct {
     labels: ?sqlite.Text,
     gpu_count: i64,
     gpu_used: i64,
+    gpu_model: ?sqlite.Text,
+    gpu_vram_mb: ?i64,
+    rdma_capable: ?i64,
 };
 
-const agent_select_cols = "id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels, gpu_count, gpu_used";
+const agent_select_cols = "id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb, rdma_capable";
 
 fn agentRowToRecord(row: AgentRow) AgentRecord {
     return .{
@@ -490,6 +493,9 @@ fn agentRowToRecord(row: AgentRow) AgentRecord {
         .labels = if (row.labels) |l| l.data else null,
         .gpu_count = row.gpu_count,
         .gpu_used = row.gpu_used,
+        .gpu_model = if (row.gpu_model) |m| m.data else null,
+        .gpu_vram_mb = row.gpu_vram_mb,
+        .rdma_capable = if (row.rdma_capable) |r| r != 0 else false,
     };
 }
 
@@ -628,7 +634,10 @@ const test_agents_schema =
     \\    region TEXT,
     \\    labels TEXT DEFAULT '',
     \\    gpu_count INTEGER DEFAULT 0,
-    \\    gpu_used INTEGER DEFAULT 0
+    \\    gpu_used INTEGER DEFAULT 0,
+    \\    gpu_model TEXT,
+    \\    gpu_vram_mb INTEGER,
+    \\    rdma_capable INTEGER DEFAULT 0
     \\);
 ;
 
