@@ -743,6 +743,15 @@ pub const Agent = struct {
     }
 
     /// fetch assignments from the server and start containers for any
+    /// gang scheduling info for a container assignment.
+    /// when present, the agent injects NCCL mesh environment variables.
+    pub const GangInfo = struct {
+        rank: u32,
+        world_size: u32,
+        master_addr: []const u8,
+        master_port: u16,
+    };
+
     /// new pending assignments. this is the core reconciliation loop.
     fn reconcile(self: *Agent) void {
         var resp = self.fetchAssignments() orelse {
@@ -763,6 +772,12 @@ pub const Agent = struct {
             const cpu_limit = extractJsonInt(obj, "cpu_limit") orelse 1000;
             const memory_limit_mb = extractJsonInt(obj, "memory_limit_mb") orelse 256;
 
+            // parse optional gang scheduling fields
+            const gang_rank = extractJsonInt(obj, "gang_rank");
+            const gang_world_size = extractJsonInt(obj, "gang_world_size");
+            const gang_master_addr = extractJsonString(obj, "gang_master_addr");
+            const gang_master_port = extractJsonInt(obj, "gang_master_port");
+
             // skip terminal assignments — just remove from cache
             if (std.mem.eql(u8, status, "stopped") or std.mem.eql(u8, status, "failed")) {
                 agent_store.removeAssignment(assignment_id) catch {};
@@ -781,7 +796,13 @@ pub const Agent = struct {
             }) catch {};
 
             if (std.mem.eql(u8, status, "pending")) {
-                self.startPendingAssignment(assignment_id, image, command);
+                const gang_info: ?GangInfo = if (gang_rank != null and gang_world_size != null and gang_master_addr != null) .{
+                    .rank = @intCast(@max(0, gang_rank.?)),
+                    .world_size = @intCast(@max(0, gang_world_size.?)),
+                    .master_addr = gang_master_addr.?,
+                    .master_port = if (gang_master_port) |p| @intCast(@max(0, p)) else 29500,
+                } else null;
+                self.startPendingAssignment(assignment_id, image, command, gang_info);
             }
         }
     }
@@ -799,13 +820,13 @@ pub const Agent = struct {
         log.warn("server unreachable, reconciling from cache ({d} assignments)", .{cached.len});
 
         for (cached) |assignment| {
-            self.startPendingAssignment(assignment.id, assignment.image, assignment.command);
+            self.startPendingAssignment(assignment.id, assignment.image, assignment.command, null);
         }
     }
 
     /// dupe strings, track in local_containers, and spawn runAssignment thread.
     /// skips silently if the assignment is already tracked or on alloc failure.
-    fn startPendingAssignment(self: *Agent, id: []const u8, image: []const u8, command: []const u8) void {
+    fn startPendingAssignment(self: *Agent, id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo) void {
         self.container_lock.lock();
         const already_tracked = self.local_containers.contains(id);
         self.container_lock.unlock();
@@ -821,6 +842,21 @@ pub const Agent = struct {
             self.alloc.free(image_copy);
             return;
         };
+        // dupe gang master_addr if present (other fields are value types)
+        const gang_copy: ?GangInfo = if (gang_info) |gi| blk: {
+            const addr_copy = self.alloc.dupe(u8, gi.master_addr) catch {
+                self.alloc.free(id_copy);
+                self.alloc.free(image_copy);
+                self.alloc.free(command_copy);
+                return;
+            };
+            break :blk .{
+                .rank = gi.rank,
+                .world_size = gi.world_size,
+                .master_addr = addr_copy,
+                .master_port = gi.master_port,
+            };
+        } else null;
 
         self.container_lock.lock();
         self.local_containers.put(id_copy, .starting) catch {
@@ -828,14 +864,19 @@ pub const Agent = struct {
             self.alloc.free(id_copy);
             self.alloc.free(image_copy);
             self.alloc.free(command_copy);
+            if (gang_copy) |gc| self.alloc.free(gc.master_addr);
             return;
         };
         self.container_lock.unlock();
 
-        log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
+        if (gang_copy) |gc| {
+            log.info("starting gang assignment {s} (image: {s}, rank {d}/{d})", .{ id_copy, image_copy, gc.rank, gc.world_size });
+        } else {
+            log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
+        }
 
         _ = std.Thread.spawn(.{}, runAssignment, .{
-            self, id_copy, image_copy, command_copy,
+            self, id_copy, image_copy, command_copy, gang_copy,
         }) catch {
             log.warn("failed to spawn thread for assignment {s}", .{id_copy});
             self.container_lock.lock();
@@ -844,6 +885,7 @@ pub const Agent = struct {
             self.alloc.free(id_copy);
             self.alloc.free(image_copy);
             self.alloc.free(command_copy);
+            if (gang_copy) |gc| self.alloc.free(gc.master_addr);
         };
     }
 
@@ -864,10 +906,11 @@ pub const Agent = struct {
     /// run a single assignment in its own thread.
     /// pulls the image, starts the container, and blocks until it exits.
     /// reports status back to the server at each stage.
-    fn runAssignment(self: *Agent, assignment_id: []const u8, image: []const u8, command: []const u8) void {
+    fn runAssignment(self: *Agent, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo) void {
         defer {
             self.alloc.free(image);
             self.alloc.free(command);
+            if (gang_info) |gi| self.alloc.free(gi.master_addr);
             // note: assignment_id stays in local_containers map (key is owned by the map)
         }
 
@@ -932,6 +975,40 @@ pub const Agent = struct {
             return;
         };
 
+        // generate mesh environment variables for gang assignments
+        const gpu_mesh = @import("../gpu/mesh.zig");
+        var mesh_env: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (mesh_env.items) |e| self.alloc.free(e);
+            mesh_env.deinit(self.alloc);
+        }
+        if (gang_info) |gi| {
+            const ib_result = gpu_mesh.detectInfiniband();
+            var mesh_env_buf: [1024]u8 = undefined;
+            if (gpu_mesh.generateMeshEnv(
+                &mesh_env_buf,
+                ib_result,
+                gi.master_addr,
+                gi.master_port,
+                gi.world_size,
+                gi.rank,
+                gi.rank, // local_rank = rank for single-GPU-per-container
+                null,
+            )) |env_data| {
+                // parse null-separated env vars
+                var env_pos: usize = 0;
+                while (env_pos < env_data.len) {
+                    const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
+                    if (end > env_pos) {
+                        if (self.alloc.dupe(u8, env_data[env_pos..end])) |duped| {
+                            mesh_env.append(self.alloc, duped) catch {};
+                        } else |_| {}
+                    }
+                    env_pos = end + 1;
+                }
+            } else |_| {}
+        }
+
         // create and start the container
         var c = container.Container{
             .config = .{
@@ -939,6 +1016,7 @@ pub const Agent = struct {
                 .rootfs = rootfs,
                 .command = if (command.len > 0) command else "/bin/sh",
                 .lower_dirs = layer_paths,
+                .env = mesh_env.items,
             },
             .status = .created,
             .pid = null,
