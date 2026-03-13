@@ -41,25 +41,6 @@ pub const NodeRole = enum {
     }
 };
 
-/// cluster-wide settings for scaling behavior.
-/// auto mode: ≤50 agents = all 'both', no gossip. >50 = gossip active.
-pub const ClusterSettings = struct {
-    role: NodeRole = .both,
-    region: ?[]const u8 = null,
-
-    /// gossip tick interval in milliseconds (default 500ms)
-    gossip_tick_ms: u32 = 500,
-
-    /// threshold for auto-activating gossip (agent count)
-    gossip_threshold: u32 = 50,
-
-    /// override indirect probe fan-out K. null = auto (ceilLog2(N))
-    gossip_fanout: ?u32 = null,
-
-    /// multiply suspect/dead timeouts. null = default (1x)
-    gossip_suspicion_multiplier: ?u32 = null,
-};
-
 pub const ConfigError = error{
     /// peer string does not match the expected id@host:port format
     InvalidPeerFormat,
@@ -180,12 +161,3 @@ test "NodeRole unknown returns null" {
     try std.testing.expect(NodeRole.fromString("leader") == null);
 }
 
-test "ClusterSettings defaults" {
-    const settings = ClusterSettings{};
-    try std.testing.expectEqual(NodeRole.both, settings.role);
-    try std.testing.expect(settings.region == null);
-    try std.testing.expectEqual(@as(u32, 500), settings.gossip_tick_ms);
-    try std.testing.expectEqual(@as(u32, 50), settings.gossip_threshold);
-    try std.testing.expect(settings.gossip_fanout == null);
-    try std.testing.expect(settings.gossip_suspicion_multiplier == null);
-}

@@ -393,6 +393,7 @@ pub const Agent = struct {
                 resources.containers,
                 resources.gpu_count,
                 resources.gpu_used,
+                // gpu health reported via heartbeat only; gossip-based propagation deferred
                 @tagName(gpu_health_worst),
             },
         ) catch return;
