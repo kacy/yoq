@@ -1076,7 +1076,33 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
     // inject NCCL mesh environment for multi-GPU distributed training
     if (svc.gpu_mesh) |mesh_spec| {
         const gpu_mesh = @import("../gpu/mesh.zig");
+        const gpu_detect = @import("../gpu/detect.zig");
         const ib_result = gpu_mesh.detectInfiniband();
+
+        // generate NCCL topology XML and write to a temp file
+        var topo_file_path: ?[]const u8 = null;
+        const gpu_result = gpu_detect.detect();
+        if (gpu_result.count > 0) {
+            if (gpu_mesh.generateNcclTopology(
+                alloc,
+                gpu_result.gpus[0..gpu_result.count],
+                &ib_result.devices,
+                ib_result.count,
+            )) |topo_xml| {
+                defer alloc.free(topo_xml);
+                var topo_path_buf: [256]u8 = undefined;
+                const topo_path = std.fmt.bufPrint(&topo_path_buf, "/tmp/nccl_topo_{s}.xml", .{svc.name}) catch null;
+                if (topo_path) |tp| {
+                    if (std.fs.cwd().createFile(tp, .{})) |file| {
+                        file.writeAll(topo_xml) catch {};
+                        file.close();
+                        topo_file_path = alloc.dupe(u8, tp) catch null;
+                    } else |_| {}
+                }
+            } else |_| {}
+        }
+        defer if (topo_file_path) |p| alloc.free(p);
+
         var mesh_env_buf: [1024]u8 = undefined;
         // for local orchestrator, rank 0 is always this node at 127.0.0.1
         if (gpu_mesh.generateMeshEnv(
@@ -1087,7 +1113,7 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
             mesh_spec.world_size,
             0, // rank (local orchestrator = single node, rank 0)
             0, // local_rank
-            null, // topo_file
+            topo_file_path, // topology file path (null if generation failed)
         )) |env_data| {
             // parse null-separated env vars and add to merged_env
             var env_pos: usize = 0;
@@ -1101,6 +1127,8 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
                 env_pos = end + 1;
             }
         } else |_| {}
+        // NOTE: topo file at /tmp/nccl_topo_{name}.xml persists after container exit.
+        // cleanup could be added to Orchestrator.stopAll() if needed.
     }
 
     // if the service has a health check, skip DNS registration on startup.

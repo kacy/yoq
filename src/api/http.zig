@@ -11,6 +11,7 @@ const std = @import("std");
 
 pub const Method = enum {
     GET,
+    HEAD,
     POST,
     PUT,
     DELETE,
@@ -223,6 +224,7 @@ pub fn findHeaderValue(headers: []const u8, name: []const u8) ?[]const u8 {
 
 fn parseMethod(str: []const u8) ?Method {
     if (std.mem.eql(u8, str, "GET")) return .GET;
+    if (std.mem.eql(u8, str, "HEAD")) return .HEAD;
     if (std.mem.eql(u8, str, "POST")) return .POST;
     if (std.mem.eql(u8, str, "PUT")) return .PUT;
     if (std.mem.eql(u8, str, "DELETE")) return .DELETE;
