@@ -155,6 +155,7 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     db.exec("ALTER TABLE agents ADD COLUMN gpu_model TEXT;", .{}, .{}) catch {};
     db.exec("ALTER TABLE agents ADD COLUMN gpu_vram_mb INTEGER;", .{}, .{}) catch {};
     db.exec("ALTER TABLE agents ADD COLUMN rdma_capable INTEGER DEFAULT 0;", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN gpu_health TEXT DEFAULT 'healthy';", .{}, .{}) catch {};
 
     db.exec(
         \\CREATE TABLE IF NOT EXISTS gpu_allocations (

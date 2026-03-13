@@ -1052,6 +1052,8 @@ const CachedGpuInfo = struct {
     model: ?[]const u8,
     vram_mb: u64,
     detect_result: ?*gpu_detect.DetectResult,
+    mig_inventories: [gpu_detect.max_gpus]gpu_mig.MigInventory = .{gpu_mig.MigInventory{}} ** gpu_detect.max_gpus,
+    mig_gpu_count: u32 = 0,
 };
 
 var cached_gpu_info: ?CachedGpuInfo = null;
@@ -1073,12 +1075,16 @@ fn cachedGpuDetect() CachedGpuInfo {
     }
 
     // run MIG discovery if NVML is available and GPU is MIG-capable
+    var mig_inventories: [gpu_detect.max_gpus]gpu_mig.MigInventory = .{gpu_mig.MigInventory{}} ** gpu_detect.max_gpus;
+    var mig_gpu_count: u32 = 0;
     if (cached_detect_storage.nvml) |*nvml| {
         for (0..count) |i| {
             const gpu = &cached_detect_storage.gpus[i];
             if (gpu.mig_capable) {
                 const inventory = gpu_mig.discoverInstances(nvml, @intCast(i));
+                mig_inventories[i] = inventory;
                 if (inventory.count > 0) {
+                    mig_gpu_count += 1;
                     log.info("GPU {d}: MIG mode active, {d} instance(s)", .{ i, inventory.count });
                 }
             }
@@ -1090,6 +1096,8 @@ fn cachedGpuDetect() CachedGpuInfo {
         .model = model,
         .vram_mb = vram_mb,
         .detect_result = if (count > 0) &cached_detect_storage else null,
+        .mig_inventories = mig_inventories,
+        .mig_gpu_count = mig_gpu_count,
     };
     cached_gpu_info = info;
     return info;
