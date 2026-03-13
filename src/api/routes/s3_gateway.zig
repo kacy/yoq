@@ -142,16 +142,23 @@ fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
 
             return .{ .status = .ok, .body = data, .allocated = true };
         },
+        .HEAD => {
+            // HeadObject — return metadata without body
+            const meta = s3.headObject(bucket, key) catch |e| return switch (e) {
+                s3.S3Error.ObjectNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchKey", "object not found"),
+                s3.S3Error.InvalidBucketName => s3Error(alloc, "InvalidBucketName", "invalid bucket name"),
+                s3.S3Error.InvalidKey => s3Error(alloc, "InvalidKey", "invalid object key"),
+                else => s3Error(alloc, "InternalError", "failed to head object"),
+            };
+
+            return headResponse(alloc, meta);
+        },
         .DELETE => {
             // DeleteObject — S3 returns 204 even if object doesn't exist
             s3.deleteObject(bucket, key) catch {};
             return .{ .status = .no_content, .body = "", .allocated = false };
         },
-        .POST => {
-            // HEAD is not in our Method enum, but S3 SDKs use GET for HeadObject
-            // with specific handling. For now, treat POST as unsupported.
-            return common.methodNotAllowed();
-        },
+        .POST => common.methodNotAllowed(),
     };
 }
 
@@ -226,6 +233,18 @@ fn s3ErrorStatus(alloc: std.mem.Allocator, status: http.StatusCode, code: []cons
         return .{ .status = status, .body = "<Error><Code>InternalError</Code></Error>", .allocated = false };
 
     return .{ .status = status, .body = owned, .allocated = true };
+}
+
+fn headResponse(alloc: std.mem.Allocator, meta: s3.ObjectMeta) Response {
+    var buf: [256]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf, "{{\"content_length\":{d},\"etag\":\"{s}\",\"last_modified\":{d}}}", .{
+        meta.size,
+        meta.etag[0..meta.etag_len],
+        meta.last_modified,
+    }) catch return common.internalError();
+
+    const owned = alloc.dupe(u8, json) catch return common.internalError();
+    return .{ .status = .ok, .body = owned, .allocated = true };
 }
 
 fn etagJsonResponse(alloc: std.mem.Allocator, etag: []const u8) Response {
