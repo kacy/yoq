@@ -29,12 +29,36 @@ pub const PlacementRequest = struct {
     gpu_vram_min_mb: ?u64 = null,
     required_labels: []const u8 = "",
     volume_constraints: []const VolumeConstraint = &.{},
+    gang_world_size: u32 = 0, // 0 = no gang scheduling
+    gpus_per_rank: u32 = 1,
+    gang_master_port: u16 = 29500,
 };
 
 pub const PlacementResult = struct {
     agent_id: []const u8,
     request_idx: usize,
 };
+
+pub const GangPlacementResult = struct {
+    placements: []const gpu_scheduler.GangPlacement,
+    request: PlacementRequest,
+};
+
+/// schedule a gang of ranks across agents.
+/// wraps gpu_scheduler.scheduleGang() for use from the deploy API.
+/// returns placements for all ranks, or null if the gang can't be fully placed.
+pub fn scheduleGang(
+    alloc: Allocator,
+    request: PlacementRequest,
+    agents: []const AgentRecord,
+) !?[]gpu_scheduler.GangPlacement {
+    const gang = gpu_scheduler.GangSpec{
+        .world_size = request.gang_world_size,
+        .gpus_per_rank = request.gpus_per_rank,
+        .master_port = request.gang_master_port,
+    };
+    return gpu_scheduler.scheduleGang(alloc, gang, agents);
+}
 
 /// schedule containers onto agents using best-fit bin-packing.
 ///
@@ -138,16 +162,37 @@ pub fn assignmentSql(
     request: PlacementRequest,
     now: i64,
 ) ![]const u8 {
+    return assignmentSqlGang(buf, id, agent_id, request, now, null);
+}
+
+/// generate SQL INSERT for a gang assignment with rank/mesh info.
+pub fn assignmentSqlGang(
+    buf: []u8,
+    id: []const u8,
+    agent_id: []const u8,
+    request: PlacementRequest,
+    now: i64,
+    gang: ?gpu_scheduler.GangPlacement,
+) ![]const u8 {
     // escape user-controlled values (image and command come from API requests)
     var img_esc_buf: [512]u8 = undefined;
     const img_esc = try sql_escape.escapeSqlString(&img_esc_buf, request.image);
     var cmd_esc_buf: [512]u8 = undefined;
     const cmd_esc = try sql_escape.escapeSqlString(&cmd_esc_buf, request.command);
 
-    return std.fmt.bufPrint(buf,
-        \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at)
-        \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d});
-    , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, now });
+    if (gang) |g| {
+        var master_esc_buf: [256]u8 = undefined;
+        const master_esc = try sql_escape.escapeSqlString(&master_esc_buf, g.master_addr);
+        return std.fmt.bufPrint(buf,
+            \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port, created_at)
+            \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d}, {d}, '{s}', {d}, {d});
+        , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, g.rank, g.world_size, master_esc, g.master_port, now });
+    } else {
+        return std.fmt.bufPrint(buf,
+            \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at)
+            \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d});
+        , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, now });
+    }
 }
 
 /// generate a random hex assignment ID.

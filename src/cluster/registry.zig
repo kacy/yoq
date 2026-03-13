@@ -576,7 +576,7 @@ pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![
     return queryAssignmentRows(
         alloc,
         db,
-        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = ?;",
+        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = ?;",
         .{agent_id},
     );
 }
@@ -588,7 +588,7 @@ pub fn getOrphanedAssignments(alloc: Allocator, db: *sqlite.Db) ![]Assignment {
     return queryAssignmentRows(
         alloc,
         db,
-        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = '' AND status = 'pending';",
+        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = '' AND status = 'pending';",
         .{},
     );
 }
@@ -601,6 +601,10 @@ const AssignmentRow = struct {
     status: sqlite.Text,
     cpu_limit: i64,
     memory_limit_mb: i64,
+    gang_rank: ?i64,
+    gang_world_size: ?i64,
+    gang_master_addr: ?sqlite.Text,
+    gang_master_port: ?i64,
 };
 
 fn queryAssignmentRows(alloc: Allocator, db: *sqlite.Db, comptime query: []const u8, args: anytype) ![]Assignment {
@@ -624,6 +628,10 @@ fn queryAssignmentRows(alloc: Allocator, db: *sqlite.Db, comptime query: []const
             .status = row.status.data,
             .cpu_limit = row.cpu_limit,
             .memory_limit_mb = row.memory_limit_mb,
+            .gang_rank = row.gang_rank,
+            .gang_world_size = row.gang_world_size,
+            .gang_master_addr = if (row.gang_master_addr) |a| a.data else null,
+            .gang_master_port = row.gang_master_port,
         });
     }
 
@@ -965,6 +973,10 @@ test "orphanAssignmentsSql only affects non-terminal assignments" {
         \\    status TEXT NOT NULL DEFAULT 'pending',
         \\    cpu_limit INTEGER NOT NULL DEFAULT 0,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 0,
+        \\    gang_rank INTEGER,
+        \\    gang_world_size INTEGER,
+        \\    gang_master_addr TEXT,
+        \\    gang_master_port INTEGER,
         \\    created_at INTEGER NOT NULL DEFAULT 0
         \\);
     , .{}, .{}) catch return;
@@ -1026,6 +1038,10 @@ test "getOrphanedAssignments returns only orphaned pending" {
         \\    status TEXT NOT NULL DEFAULT 'pending',
         \\    cpu_limit INTEGER NOT NULL DEFAULT 0,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 0,
+        \\    gang_rank INTEGER,
+        \\    gang_world_size INTEGER,
+        \\    gang_master_addr TEXT,
+        \\    gang_master_port INTEGER,
         \\    created_at INTEGER NOT NULL DEFAULT 0
         \\);
     , .{}, .{}) catch return;

@@ -3,7 +3,9 @@ const http = @import("../http.zig");
 const agent_registry = @import("../../cluster/registry.zig");
 const cluster_config = @import("../../cluster/config.zig");
 const scheduler = @import("../../cluster/scheduler.zig");
+const gpu_scheduler = @import("../../gpu/scheduler.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
+const volumes_mod = @import("../../state/volumes.zig");
 const common = @import("common.zig");
 const testing = std.testing;
 
@@ -491,6 +493,9 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
     var requests: std.ArrayListUnmanaged(scheduler.PlacementRequest) = .empty;
     defer requests.deinit(alloc);
 
+    // extract optional volume_app for volume constraint lookup
+    const volume_app = extractJsonString(request.body, "volume_app");
+
     var pos: usize = 0;
     while (pos < request.body.len) {
         const block_start = std.mem.indexOfPos(u8, request.body, pos, "{\"image\":\"") orelse break;
@@ -508,6 +513,8 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
         const gpu_model = json_helpers.extractJsonString(block, "gpu_model");
         const gpu_vram_min = extractJsonInt(block, "gpu_vram_min_mb");
         const required_labels = extractJsonString(block, "required_labels") orelse "";
+        const gang_world_size_val = extractJsonInt(block, "gang_world_size");
+        const gpus_per_rank_val = extractJsonInt(block, "gpus_per_rank");
 
         if (!common.validateClusterInput(image)) {
             pos = block_end + 1;
@@ -527,6 +534,8 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
             .gpu_model = gpu_model,
             .gpu_vram_min_mb = if (gpu_vram_min) |v| @as(u64, @intCast(@max(0, v))) else null,
             .required_labels = required_labels,
+            .gang_world_size = if (gang_world_size_val) |v| @intCast(@max(0, v)) else 0,
+            .gpus_per_rank = if (gpus_per_rank_val) |v| @intCast(@max(1, v)) else 1,
         }) catch return common.internalError();
 
         pos = block_end + 1;
@@ -535,6 +544,21 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
     if (requests.items.len == 0) return common.badRequest("no services to deploy");
 
     const db = node.stateMachineDb();
+
+    // look up volume constraints if an app name is provided
+    const vol_constraints = if (volume_app) |app_name|
+        volumes_mod.getVolumesByApp(alloc, db, app_name) catch &[_]volumes_mod.VolumeConstraint{}
+    else
+        &[_]volumes_mod.VolumeConstraint{};
+    defer if (volume_app != null) alloc.free(vol_constraints);
+
+    // apply volume constraints to all requests
+    if (vol_constraints.len > 0) {
+        for (requests.items) |*req| {
+            req.volume_constraints = vol_constraints;
+        }
+    }
+
     const agents = agent_registry.listAgents(alloc, db) catch return common.internalError();
     defer {
         for (agents) |a| a.deinit(alloc);
@@ -545,36 +569,98 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
         return .{ .status = .bad_request, .body = "{\"error\":\"no agents available\"}", .allocated = false };
     }
 
-    const placements = scheduler.schedule(alloc, requests.items, agents) catch return common.internalError();
-    defer alloc.free(placements);
-
     var placed: usize = 0;
     var failed: usize = 0;
 
-    for (placements) |maybe_placement| {
-        if (maybe_placement) |placement| {
-            var id_buf: [12]u8 = undefined;
-            scheduler.generateAssignmentId(&id_buf);
-
-            var sql_buf: [1024]u8 = undefined;
-            const sql = scheduler.assignmentSql(
-                &sql_buf,
-                &id_buf,
-                placement.agent_id,
-                requests.items[placement.request_idx],
-                std.time.timestamp(),
-            ) catch {
+    // check if any request uses gang scheduling
+    for (requests.items) |req| {
+        if (req.gang_world_size > 0) {
+            // gang scheduling path — all-or-nothing placement
+            const gang_placements = scheduler.scheduleGang(alloc, req, agents) catch {
                 failed += 1;
                 continue;
             };
 
-            _ = node.propose(sql) catch {
+            if (gang_placements) |gps| {
+                defer alloc.free(gps);
+
+                var gang_ok = true;
+                for (gps) |gp| {
+                    var id_buf: [12]u8 = undefined;
+                    scheduler.generateAssignmentId(&id_buf);
+
+                    var sql_buf: [2048]u8 = undefined;
+                    const sql = scheduler.assignmentSqlGang(
+                        &sql_buf,
+                        &id_buf,
+                        gp.agent_id,
+                        req,
+                        std.time.timestamp(),
+                        gp,
+                    ) catch {
+                        gang_ok = false;
+                        break;
+                    };
+
+                    _ = node.propose(sql) catch {
+                        gang_ok = false;
+                        break;
+                    };
+                }
+
+                if (gang_ok) {
+                    placed += gps.len;
+                } else {
+                    failed += req.gang_world_size;
+                }
+            } else {
+                failed += req.gang_world_size;
+            }
+            continue;
+        }
+    }
+
+    // non-gang requests: collect them and schedule normally
+    var normal_requests: std.ArrayListUnmanaged(scheduler.PlacementRequest) = .empty;
+    defer normal_requests.deinit(alloc);
+    for (requests.items) |req| {
+        if (req.gang_world_size == 0) {
+            normal_requests.append(alloc, req) catch {
                 failed += 1;
                 continue;
             };
-            placed += 1;
-        } else {
-            failed += 1;
+        }
+    }
+
+    if (normal_requests.items.len > 0) {
+        const placements = scheduler.schedule(alloc, normal_requests.items, agents) catch return common.internalError();
+        defer alloc.free(placements);
+
+        for (placements) |maybe_placement| {
+            if (maybe_placement) |placement| {
+                var id_buf: [12]u8 = undefined;
+                scheduler.generateAssignmentId(&id_buf);
+
+                var sql_buf: [1024]u8 = undefined;
+                const sql = scheduler.assignmentSql(
+                    &sql_buf,
+                    &id_buf,
+                    placement.agent_id,
+                    normal_requests.items[placement.request_idx],
+                    std.time.timestamp(),
+                ) catch {
+                    failed += 1;
+                    continue;
+                };
+
+                _ = node.propose(sql) catch {
+                    failed += 1;
+                    continue;
+                };
+                placed += 1;
+            } else {
+                failed += 1;
+            }
         }
     }
 
@@ -676,6 +762,23 @@ fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignment) !
     try std.fmt.format(writer, "{d}", .{assignment.cpu_limit});
     try writer.writeAll(",\"memory_limit_mb\":");
     try std.fmt.format(writer, "{d}", .{assignment.memory_limit_mb});
+    if (assignment.gang_rank) |rank| {
+        try writer.writeAll(",\"gang_rank\":");
+        try std.fmt.format(writer, "{d}", .{rank});
+    }
+    if (assignment.gang_world_size) |ws| {
+        try writer.writeAll(",\"gang_world_size\":");
+        try std.fmt.format(writer, "{d}", .{ws});
+    }
+    if (assignment.gang_master_addr) |addr| {
+        try writer.writeAll(",\"gang_master_addr\":\"");
+        try json_helpers.writeJsonEscaped(writer, addr);
+        try writer.writeByte('"');
+    }
+    if (assignment.gang_master_port) |port| {
+        try writer.writeAll(",\"gang_master_port\":");
+        try std.fmt.format(writer, "{d}", .{port});
+    }
     try writer.writeByte('}');
 }
 

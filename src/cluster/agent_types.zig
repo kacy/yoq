@@ -113,6 +113,10 @@ pub const Assignment = struct {
     status: []const u8,
     cpu_limit: i64,
     memory_limit_mb: i64,
+    gang_rank: ?i64 = null,
+    gang_world_size: ?i64 = null,
+    gang_master_addr: ?[]const u8 = null,
+    gang_master_port: ?i64 = null,
 
     pub fn deinit(self: Assignment, alloc: Allocator) void {
         alloc.free(self.id);
@@ -120,6 +124,7 @@ pub const Assignment = struct {
         alloc.free(self.image);
         alloc.free(self.command);
         alloc.free(self.status);
+        if (self.gang_master_addr) |addr| alloc.free(addr);
     }
 };
 

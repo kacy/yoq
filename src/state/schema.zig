@@ -111,6 +111,10 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    status TEXT NOT NULL DEFAULT 'pending',
         \\    cpu_limit INTEGER NOT NULL DEFAULT 1000,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 256,
+        \\    gang_rank INTEGER,
+        \\    gang_world_size INTEGER,
+        \\    gang_master_addr TEXT,
+        \\    gang_master_port INTEGER,
         \\    created_at INTEGER NOT NULL
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
