@@ -33,6 +33,8 @@ const setup = @import("../network/setup.zig");
 
 const paths = @import("../lib/paths.zig");
 const gpu_detect = @import("../gpu/detect.zig");
+const gpu_health = @import("../gpu/health.zig");
+const gpu_mig = @import("../gpu/mig.zig");
 const cluster_config = @import("config.zig");
 const gossip_mod = @import("gossip.zig");
 const transport_mod = @import("transport.zig");
@@ -140,8 +142,8 @@ pub const Agent = struct {
         var local_ip_buf: [16]u8 = undefined;
         const local_ip = detectLocalIp(self.server_addr, &local_ip_buf);
 
-        // build registration JSON with wireguard and role info
-        var body_buf: [1024]u8 = undefined;
+        // build registration JSON with wireguard, role, and GPU info
+        var body_buf: [2048]u8 = undefined;
         var body_len: usize = 0;
 
         // base fields
@@ -160,6 +162,25 @@ pub const Agent = struct {
                 .{reg},
             ) catch return AgentError.RegisterFailed;
             body_len += suffix.len;
+        }
+
+        // GPU info
+        if (resources.gpu_count > 0) {
+            const gpu_suffix = std.fmt.bufPrint(
+                body_buf[body_len..],
+                ",\"gpu_count\":{d},\"gpu_vram_mb\":{d}",
+                .{ resources.gpu_count, resources.gpu_vram_mb },
+            ) catch return AgentError.RegisterFailed;
+            body_len += gpu_suffix.len;
+
+            if (resources.gpu_model) |model| {
+                const model_suffix = std.fmt.bufPrint(
+                    body_buf[body_len..],
+                    ",\"gpu_model\":\"{s}\"",
+                    .{model},
+                ) catch return AgentError.RegisterFailed;
+                body_len += model_suffix.len;
+            }
         }
 
         // close object
@@ -338,17 +359,41 @@ pub const Agent = struct {
     fn doHeartbeat(self: *Agent) void {
         const resources = getSystemResources();
 
-        var body_buf: [256]u8 = undefined;
+        // poll GPU health if NVML is available
+        var gpu_health_worst: gpu_health.GpuHealth = .healthy;
+        if (cached_gpu_info) |info| {
+            if (info.detect_result) |dr| {
+                if (dr.nvml) |*nvml| {
+                    const metrics = gpu_health.pollAllMetrics(nvml, @intCast(info.count));
+                    // report worst-case health across all GPUs
+                    for (0..@min(info.count, gpu_detect.max_gpus)) |i| {
+                        if (metrics[i]) |m| {
+                            const h = m.health();
+                            if (h == .unhealthy) {
+                                gpu_health_worst = .unhealthy;
+                                break;
+                            } else if (h == .warning) {
+                                gpu_health_worst = .warning;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        var body_buf: [512]u8 = undefined;
         const body = std.fmt.bufPrint(
             &body_buf,
-            "{{\"cpu_cores\":{d},\"memory_mb\":{d},\"cpu_used\":{d},\"memory_used_mb\":{d},\"containers\":{d},\"gpu_used\":{d}}}",
+            "{{\"cpu_cores\":{d},\"memory_mb\":{d},\"cpu_used\":{d},\"memory_used_mb\":{d},\"containers\":{d},\"gpu_count\":{d},\"gpu_used\":{d},\"gpu_health\":\"{s}\"}}",
             .{
                 resources.cpu_cores,
                 resources.memory_mb,
                 resources.cpu_used,
                 resources.memory_used_mb,
                 resources.containers,
+                resources.gpu_count,
                 resources.gpu_used,
+                @tagName(gpu_health_worst),
             },
         ) catch return;
 
@@ -987,26 +1032,67 @@ pub fn getSystemResources() AgentResources {
     }
 
     // detect GPUs (cached — detection involves dlopen/sysfs scans)
-    const gpu_count = cachedGpuCount();
+    const gpu_info = cachedGpuDetect();
 
     return .{
         .cpu_cores = cpu_cores,
         .memory_mb = memory_mb,
-        .gpu_count = gpu_count,
+        .gpu_count = gpu_info.count,
+        .gpu_model = gpu_info.model,
+        .gpu_vram_mb = gpu_info.vram_mb,
     };
 }
 
-/// cached GPU count — avoids repeated dlopen/sysfs scans on every heartbeat.
+/// cached GPU detection — avoids repeated dlopen/sysfs scans on every heartbeat.
 /// detection runs once on first call; result is stored in a global.
-var cached_gpu_count: ?u32 = null;
+/// we keep the full DetectResult alive so the NvmlHandle stays open for
+/// health polling and MIG discovery.
+const CachedGpuInfo = struct {
+    count: u32,
+    model: ?[]const u8,
+    vram_mb: u64,
+    detect_result: ?*gpu_detect.DetectResult,
+};
 
-fn cachedGpuCount() u32 {
-    if (cached_gpu_count) |count| return count;
-    var result = gpu_detect.detect();
-    const count = @as(u32, result.count);
-    result.deinit();
-    cached_gpu_count = count;
-    return count;
+var cached_gpu_info: ?CachedGpuInfo = null;
+var cached_detect_storage: gpu_detect.DetectResult = undefined;
+
+fn cachedGpuDetect() CachedGpuInfo {
+    if (cached_gpu_info) |info| return info;
+    cached_detect_storage = gpu_detect.detect();
+    const count = @as(u32, cached_detect_storage.count);
+
+    // extract model and VRAM from first GPU (representative for the node)
+    var model: ?[]const u8 = null;
+    var vram_mb: u64 = 0;
+    if (count > 0) {
+        const gpu = &cached_detect_storage.gpus[0];
+        const name = gpu.getName();
+        if (name.len > 0) model = name;
+        vram_mb = gpu.vram_mb;
+    }
+
+    // run MIG discovery if NVML is available and GPU is MIG-capable
+    if (cached_detect_storage.nvml) |*nvml| {
+        for (0..count) |i| {
+            const gpu = &cached_detect_storage.gpus[i];
+            if (gpu.mig_capable) {
+                const inventory = gpu_mig.discoverInstances(nvml, @intCast(i));
+                if (inventory.count > 0) {
+                    log.info("GPU {d}: MIG mode active, {d} instance(s)", .{ i, inventory.count });
+                }
+            }
+        }
+    }
+
+    const info = CachedGpuInfo{
+        .count = count,
+        .model = model,
+        .vram_mb = vram_mb,
+        .detect_result = if (count > 0) &cached_detect_storage else null,
+    };
+    cached_gpu_info = info;
+    return info;
 }
 
 // use shared JSON extraction helpers

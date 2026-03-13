@@ -37,6 +37,8 @@ pub const AgentResources = struct {
     containers: u32 = 0,
     gpu_count: u32 = 0,
     gpu_used: u32 = 0,
+    gpu_model: ?[]const u8 = null,
+    gpu_vram_mb: u64 = 0,
 };
 
 /// an agent record as stored in the replicated state database.

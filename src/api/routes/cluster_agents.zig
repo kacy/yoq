@@ -176,16 +176,25 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
     }
 
     var sql_buf: [2048]u8 = undefined;
-    // extract optional role and region from registration request
+    // extract optional role, region, and GPU info from registration request
     const role_str = json_helpers.extractJsonString(request.body, "role");
     const region_str = json_helpers.extractJsonString(request.body, "region");
     const labels_str = json_helpers.extractJsonString(request.body, "labels");
+    const gpu_count_val = extractJsonInt(request.body, "gpu_count");
+    const gpu_model_str = json_helpers.extractJsonString(request.body, "gpu_model");
+    const gpu_vram_val = extractJsonInt(request.body, "gpu_vram_mb");
 
     const sql = agent_registry.registerSqlFull(
         &sql_buf,
         &id_buf,
         address,
-        .{ .cpu_cores = @intCast(cpu_cores), .memory_mb = @intCast(memory_mb) },
+        .{
+            .cpu_cores = @intCast(cpu_cores),
+            .memory_mb = @intCast(memory_mb),
+            .gpu_count = if (gpu_count_val) |g| @intCast(@max(0, g)) else 0,
+            .gpu_model = gpu_model_str,
+            .gpu_vram_mb = if (gpu_vram_val) |v| @intCast(@max(0, v)) else 0,
+        },
         std.time.timestamp(),
         assigned_node_id,
         wg_public_key,
@@ -289,6 +298,7 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
     const containers = extractJsonInt(request.body, "containers") orelse 0;
     const cpu_cores = extractJsonInt(request.body, "cpu_cores") orelse 0;
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse 0;
+    const gpu_count = extractJsonInt(request.body, "gpu_count") orelse 0;
     const gpu_used = extractJsonInt(request.body, "gpu_used") orelse 0;
 
     node.recordHeartbeat(
@@ -299,7 +309,7 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
             .cpu_used = @intCast(@max(0, cpu_used)),
             .memory_used_mb = @intCast(@max(0, memory_used_mb)),
             .containers = @intCast(@max(0, containers)),
-            .gpu_count = 0,
+            .gpu_count = @intCast(@max(0, gpu_count)),
             .gpu_used = @intCast(@max(0, gpu_used)),
         },
         std.time.timestamp(),
@@ -491,6 +501,8 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
         const cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000;
         const memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256;
         const gpu_limit = extractJsonInt(block, "gpu_limit") orelse 0;
+        const gpu_model = json_helpers.extractJsonString(block, "gpu_model");
+        const gpu_vram_min = extractJsonInt(block, "gpu_vram_min_mb");
         const required_labels = extractJsonString(block, "required_labels") orelse "";
 
         if (!common.validateClusterInput(image)) {
@@ -508,6 +520,8 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
             .cpu_limit = cpu_limit,
             .memory_limit_mb = memory_limit_mb,
             .gpu_limit = gpu_limit,
+            .gpu_model = gpu_model,
+            .gpu_vram_min_mb = if (gpu_vram_min) |v| @as(u64, @intCast(@max(0, v))) else null,
             .required_labels = required_labels,
         }) catch return common.internalError();
 

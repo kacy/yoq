@@ -64,6 +64,26 @@ pub fn registerSqlFull(
     var labels_esc_buf: [512]u8 = undefined;
     const labels_esc = try sql_escape.escapeSqlString(&labels_esc_buf, labels orelse "");
 
+    // escape GPU model (user-controlled via agent registration)
+    var model_esc_buf: [128]u8 = undefined;
+    const model_esc = if (resources.gpu_model) |m|
+        try sql_escape.escapeSqlString(&model_esc_buf, m)
+    else
+        "";
+    const vram_mb: u64 = resources.gpu_vram_mb;
+
+    // build the GPU suffix that's appended to all INSERT variants
+    var gpu_cols_buf: [128]u8 = undefined;
+    var gpu_vals_buf: [256]u8 = undefined;
+    const gpu_cols = if (resources.gpu_model != null)
+        std.fmt.bufPrint(&gpu_cols_buf, ", gpu_count, gpu_used, gpu_model, gpu_vram_mb", .{}) catch ""
+    else
+        std.fmt.bufPrint(&gpu_cols_buf, ", gpu_count, gpu_used", .{}) catch "";
+    const gpu_vals = if (resources.gpu_model != null)
+        std.fmt.bufPrint(&gpu_vals_buf, ", {d}, {d}, '{s}', {d}", .{ resources.gpu_count, resources.gpu_used, model_esc, vram_mb }) catch ""
+    else
+        std.fmt.bufPrint(&gpu_vals_buf, ", {d}, {d}", .{ resources.gpu_count, resources.gpu_used }) catch "";
+
     if (node_id) |nid| {
         var key_esc_buf: [128]u8 = undefined;
         const key_esc = try sql_escape.escapeSqlString(&key_esc_buf, wg_public_key orelse "");
@@ -72,29 +92,37 @@ pub fn registerSqlFull(
 
         if (region_val.len > 0) {
             const reg_esc = try sql_escape.escapeSqlString(&region_esc_buf, region_val);
-            return std.fmt.bufPrint(buf,
-                \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels, gpu_count, gpu_used)
-                \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}', '{s}', {d}, {d});
-            , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, reg_esc, labels_esc, resources.gpu_count, resources.gpu_used });
+            return std.fmt.bufPrint(
+                buf,
+                "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels{s})" ++
+                    " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}', '{s}'{s});",
+                .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, reg_esc, labels_esc, gpu_vals },
+            );
         }
-        return std.fmt.bufPrint(buf,
-            \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, labels, gpu_count, gpu_used)
-            \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}', {d}, {d});
-        , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, labels_esc, resources.gpu_count, resources.gpu_used });
+        return std.fmt.bufPrint(
+            buf,
+            "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, labels{s})" ++
+                " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}'{s});",
+            .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, labels_esc, gpu_vals },
+        );
     }
 
     if (region_val.len > 0) {
         const reg_esc = try sql_escape.escapeSqlString(&region_esc_buf, region_val);
-        return std.fmt.bufPrint(buf,
-            \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, region, labels, gpu_count, gpu_used)
-            \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}', '{s}', {d}, {d});
-        , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, reg_esc, labels_esc, resources.gpu_count, resources.gpu_used });
+        return std.fmt.bufPrint(
+            buf,
+            "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, region, labels{s})" ++
+                " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}', '{s}'{s});",
+            .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, reg_esc, labels_esc, gpu_vals },
+        );
     }
 
-    return std.fmt.bufPrint(buf,
-        \\INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used)
-        \\ VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}', {d}, {d});
-    , .{ id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, labels_esc, resources.gpu_count, resources.gpu_used });
+    return std.fmt.bufPrint(
+        buf,
+        "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels{s})" ++
+            " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}'{s});",
+        .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, labels_esc, gpu_vals },
+    );
 }
 
 /// generate SQL to update an agent's heartbeat and resource usage.
@@ -391,7 +419,9 @@ pub const WireguardPeer = struct {
 
 /// list all wireguard peers from the database.
 pub fn listWireguardPeers(alloc: Allocator, db: *sqlite.Db) ![]WireguardPeer {
-    return queryWireguardPeers(alloc, db,
+    return queryWireguardPeers(
+        alloc,
+        db,
         "SELECT node_id, agent_id, public_key, endpoint, overlay_ip, container_subnet FROM wireguard_peers ORDER BY node_id;",
     );
 }
@@ -536,7 +566,9 @@ pub fn getAgent(alloc: Allocator, db: *sqlite.Db, id: []const u8) !?AgentRecord 
 
 /// get all assignments for a specific agent.
 pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![]Assignment {
-    return queryAssignmentRows(alloc, db,
+    return queryAssignmentRows(
+        alloc,
+        db,
         "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = ?;",
         .{agent_id},
     );
@@ -546,7 +578,9 @@ pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![
 /// these are assignments that were detached from an offline agent
 /// and are waiting to be rescheduled.
 pub fn getOrphanedAssignments(alloc: Allocator, db: *sqlite.Db) ![]Assignment {
-    return queryAssignmentRows(alloc, db,
+    return queryAssignmentRows(
+        alloc,
+        db,
         "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb FROM assignments WHERE agent_id = '' AND status = 'pending';",
         .{},
     );
