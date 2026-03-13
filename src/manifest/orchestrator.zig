@@ -806,7 +806,7 @@ fn resolveServiceVolumes(
     volumes: []const spec.VolumeMount,
     manifest_volumes: []const spec.Volume,
     app_name: []const u8,
-) ServiceVolumes {
+) error{VolumeFailed}!ServiceVolumes {
     var result = ServiceVolumes{
         .bind_mounts = .empty,
         .resolved_sources = .empty,
@@ -839,26 +839,26 @@ fn resolveServiceVolumes(
             },
             .named => {
                 const vol_def = findVolumeByName(manifest_volumes, vol.source) orelse {
-                    log.warn("named volume '{s}' not defined in manifest", .{vol.source});
-                    continue;
+                    log.err("named volume '{s}' not defined in manifest", .{vol.source});
+                    return error.VolumeFailed;
                 };
 
                 // ensure volume directory exists and is registered
                 const db = store.getDb() catch {
-                    log.warn("orchestrator: no database for volume creation", .{});
-                    continue;
+                    log.err("orchestrator: no database for volume creation", .{});
+                    return error.VolumeFailed;
                 };
                 const timestamp = std.time.timestamp();
                 volumes_mod.create(db, app_name, vol_def, timestamp, null) catch |e| {
-                    log.warn("failed to create volume '{s}': {}", .{ vol.source, e });
-                    continue;
+                    log.err("failed to create volume '{s}': {}", .{ vol.source, e });
+                    return error.VolumeFailed;
                 };
 
                 // resolve path
                 var path_buf: [4096]u8 = undefined;
                 const vol_path = volumes_mod.resolveVolumePath(&path_buf, app_name, vol.source, vol_def.driver) catch |e| {
-                    log.warn("failed to resolve volume path '{s}': {}", .{ vol.source, e });
-                    continue;
+                    log.err("failed to resolve volume path '{s}': {}", .{ vol.source, e });
+                    return error.VolumeFailed;
                 };
 
                 const duped = alloc.dupe(u8, vol_path) catch {
@@ -928,7 +928,10 @@ pub fn runOneShot(
     if (working_dir) |w| wd = w;
 
     // resolve volumes
-    var vols = resolveServiceVolumes(alloc, volumes, manifest_volumes, app_name);
+    var vols = resolveServiceVolumes(alloc, volumes, manifest_volumes, app_name) catch {
+        writeErr("failed to resolve volumes for worker {s}\n", .{hostname});
+        return false;
+    };
     defer vols.deinit(alloc);
 
     // generate container id
@@ -1024,7 +1027,10 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
     if (svc.working_dir) |wd| working_dir = wd;
 
     // resolve volumes
-    var vols = resolveServiceVolumes(alloc, svc.volumes, orch.manifest.volumes, orch.app_name);
+    var vols = resolveServiceVolumes(alloc, svc.volumes, orch.manifest.volumes, orch.app_name) catch {
+        orch.states[idx].status = .failed;
+        return;
+    };
     defer vols.deinit(alloc);
 
     // port mappings
