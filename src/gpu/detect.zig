@@ -50,11 +50,11 @@ const NvmlReturn = enum(c_int) {
     success = 0,
     _,
 };
-const NvmlDevice = *opaque {};
+pub const NvmlDevice = *opaque {};
 pub const NvmlGpuInstance = *opaque {};
 pub const NvmlComputeInstance = *opaque {};
 
-const NvmlMemory = extern struct {
+pub const NvmlMemory = extern struct {
     total: u64,
     free: u64,
     used: u64,

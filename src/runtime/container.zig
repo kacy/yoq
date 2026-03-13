@@ -20,6 +20,7 @@ const paths = @import("../lib/paths.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
 const exec_helpers = @import("../lib/exec_helpers.zig");
+const gpu_passthrough = @import("../gpu/passthrough.zig");
 
 /// PID of the currently running container process.
 /// set after spawn, cleared on exit. used by the signal handler
@@ -184,6 +185,9 @@ pub const ContainerConfig = struct {
     dev_service_name: ?[]const u8 = null,
     /// dev mode: color index for this service
     dev_color_idx: usize = 0,
+    /// GPU indices to expose inside the container (e.g., [0, 1])
+    /// when non-empty, setupGpuPassthrough creates /dev/nvidia* and injects env vars
+    gpu_indices: []const u32 = &.{},
     /// when true, runs in host mode with reduced filesystem isolation
     /// auto-enabled when mount operations fail due to capability restrictions
     host_mode: bool = false,
@@ -375,6 +379,20 @@ pub const Container = struct {
                 } else |e| {
                     log.warn("container: network setup failed, continuing without network: {}", .{e});
                 }
+            }
+        }
+
+        // set up GPU passthrough if GPUs are assigned
+        if (config.gpu_indices.len > 0) {
+            if (dirs) |*overlay_dirs| {
+                var gpu_env_buf: [4096]u8 = undefined;
+                _ = gpu_passthrough.setupGpuPassthrough(
+                    overlay_dirs.mergedPath(),
+                    config.gpu_indices,
+                    &gpu_env_buf,
+                ) catch |e| {
+                    log.warn("GPU passthrough setup failed for {s}: {}", .{ config.id, e });
+                };
             }
         }
 

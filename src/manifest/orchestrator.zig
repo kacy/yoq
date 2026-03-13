@@ -1040,6 +1040,63 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         };
     }
 
+    // build GPU indices from manifest gpu spec
+    var gpu_indices_buf: [8]u32 = undefined;
+    var gpu_indices_len: usize = 0;
+    if (svc.gpu) |gpu_spec| {
+        const count = @min(gpu_spec.count, 8);
+        for (0..count) |i| {
+            gpu_indices_buf[i] = @intCast(i);
+        }
+        gpu_indices_len = count;
+
+        // generate GPU env vars (CUDA_VISIBLE_DEVICES, etc.) for the container
+        const gpu_passthrough = @import("../gpu/passthrough.zig");
+        var gpu_env_buf: [4096]u8 = undefined;
+        if (gpu_passthrough.generateGpuEnv(gpu_indices_buf[0..count], &gpu_env_buf)) |env_data| {
+            var env_pos: usize = 0;
+            while (env_pos < env_data.len) {
+                const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
+                if (end > env_pos) {
+                    if (alloc.dupe(u8, env_data[env_pos..end])) |duped| {
+                        merged_env.append(alloc, duped) catch {};
+                    } else |_| {}
+                }
+                env_pos = end + 1;
+            }
+        } else |_| {}
+    }
+
+    // inject NCCL mesh environment for multi-GPU distributed training
+    if (svc.gpu_mesh) |mesh_spec| {
+        const gpu_mesh = @import("../gpu/mesh.zig");
+        const ib_result = gpu_mesh.detectInfiniband();
+        var mesh_env_buf: [1024]u8 = undefined;
+        // for local orchestrator, rank 0 is always this node at 127.0.0.1
+        if (gpu_mesh.generateMeshEnv(
+            &mesh_env_buf,
+            ib_result,
+            "127.0.0.1",
+            mesh_spec.master_port,
+            mesh_spec.world_size,
+            0, // rank (local orchestrator = single node, rank 0)
+            0, // local_rank
+            null, // topo_file
+        )) |env_data| {
+            // parse null-separated env vars and add to merged_env
+            var env_pos: usize = 0;
+            while (env_pos < env_data.len) {
+                const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
+                if (end > env_pos) {
+                    if (alloc.dupe(u8, env_data[env_pos..end])) |duped| {
+                        merged_env.append(alloc, duped) catch {};
+                    } else |_| {}
+                }
+                env_pos = end + 1;
+            }
+        } else |_| {}
+    }
+
     // if the service has a health check, skip DNS registration on startup.
     // the health checker will register it after the first successful check.
     const has_health_check = svc.health_check != null;
@@ -1099,6 +1156,7 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
                 .mounts = vols.bind_mounts.items,
                 .dev_service_name = if (orch.dev_mode) svc.name else null,
                 .dev_color_idx = idx,
+                .gpu_indices = gpu_indices_buf[0..gpu_indices_len],
             },
             .status = .created,
             .pid = null,
