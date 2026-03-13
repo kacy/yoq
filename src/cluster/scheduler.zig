@@ -13,6 +13,7 @@ const std = @import("std");
 const agent_types = @import("agent_types.zig");
 const sql_escape = @import("../lib/sql.zig");
 const volumes_mod = @import("../state/volumes.zig");
+const gpu_scheduler = @import("../gpu/scheduler.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentRecord = agent_types.AgentRecord;
@@ -24,6 +25,8 @@ pub const PlacementRequest = struct {
     cpu_limit: i64, // millicores (1000 = 1 core)
     memory_limit_mb: i64,
     gpu_limit: i64 = 0,
+    gpu_model: ?[]const u8 = null,
+    gpu_vram_min_mb: ?u64 = null,
     required_labels: []const u8 = "",
     volume_constraints: []const VolumeConstraint = &.{},
 };
@@ -85,6 +88,11 @@ pub fn schedule(
             if (req.gpu_limit > 0) {
                 const free_gpu = a.gpu_count - used_gpu[agent_idx];
                 if (free_gpu < req.gpu_limit) continue;
+
+                // check GPU model and VRAM requirements
+                if (req.gpu_model != null or req.gpu_vram_min_mb != null) {
+                    if (!gpu_scheduler.matchesGpuRequirements(a, req.gpu_model, req.gpu_vram_min_mb)) continue;
+                }
             }
 
             // check label constraints

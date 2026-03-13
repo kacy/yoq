@@ -627,6 +627,18 @@ fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void {
         try writer.writeAll(",\"gpu_used\":");
         try std.fmt.format(writer, "{d}", .{agent.gpu_used});
     }
+    if (agent.gpu_model) |model| {
+        try writer.writeAll(",\"gpu_model\":\"");
+        try json_helpers.writeJsonEscaped(writer, model);
+        try writer.writeByte('"');
+    }
+    if (agent.gpu_vram_mb) |vram| {
+        try writer.writeAll(",\"gpu_vram_mb\":");
+        try std.fmt.format(writer, "{d}", .{vram});
+    }
+    if (agent.rdma_capable) {
+        try writer.writeAll(",\"rdma_capable\":true");
+    }
 
     try writer.writeByte('}');
 }

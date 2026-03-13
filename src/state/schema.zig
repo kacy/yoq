@@ -152,6 +152,19 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     db.exec("ALTER TABLE agents ADD COLUMN labels TEXT DEFAULT '';", .{}, .{}) catch {};
     db.exec("ALTER TABLE agents ADD COLUMN gpu_count INTEGER DEFAULT 0;", .{}, .{}) catch {};
     db.exec("ALTER TABLE agents ADD COLUMN gpu_used INTEGER DEFAULT 0;", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN gpu_model TEXT;", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN gpu_vram_mb INTEGER;", .{}, .{}) catch {};
+    db.exec("ALTER TABLE agents ADD COLUMN rdma_capable INTEGER DEFAULT 0;", .{}, .{}) catch {};
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS gpu_allocations (
+        \\    assignment_id TEXT NOT NULL,
+        \\    agent_id TEXT NOT NULL,
+        \\    gpu_index INTEGER NOT NULL,
+        \\    allocated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (agent_id, gpu_index)
+        \\);
+    , .{}, .{}) catch {};
 
     db.exec(
         \\CREATE TABLE IF NOT EXISTS network_policies (

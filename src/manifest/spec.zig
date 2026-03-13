@@ -57,6 +57,22 @@ pub const Manifest = struct {
 ///   none:       don't restart (default)
 ///   always:     restart unconditionally
 ///   on_failure: restart only on non-zero exit code
+pub const GpuSpec = struct {
+    count: u32 = 0,
+    model: ?[]const u8 = null,
+    vram_min_mb: ?u64 = null,
+
+    pub fn deinit(self: GpuSpec, alloc: std.mem.Allocator) void {
+        if (self.model) |m| alloc.free(m);
+    }
+};
+
+pub const GpuMeshSpec = struct {
+    world_size: u32,
+    gpus_per_rank: u32 = 1,
+    master_port: u16 = 29500,
+};
+
 pub const RestartPolicy = enum {
     none,
     always,
@@ -75,6 +91,8 @@ pub const Service = struct {
     health_check: ?HealthCheck = null,
     restart: RestartPolicy = .none,
     tls: ?TlsConfig = null,
+    gpu: ?GpuSpec = null,
+    gpu_mesh: ?GpuMeshSpec = null,
 
     pub fn deinit(self: Service, alloc: std.mem.Allocator) void {
         freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
@@ -83,6 +101,8 @@ pub const Service = struct {
         alloc.free(self.ports);
         if (self.health_check) |hc| hc.deinit(alloc);
         if (self.tls) |tc| tc.deinit(alloc);
+        if (self.gpu) |g| g.deinit(alloc);
+
     }
 };
 
@@ -98,11 +118,15 @@ pub const Worker = struct {
     depends_on: []const []const u8,
     working_dir: ?[]const u8,
     volumes: []const VolumeMount,
+    gpu: ?GpuSpec = null,
+    gpu_mesh: ?GpuMeshSpec = null,
 
     pub fn deinit(self: Worker, alloc: std.mem.Allocator) void {
         freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
         for (self.depends_on) |dep| alloc.free(dep);
         alloc.free(self.depends_on);
+        if (self.gpu) |g| g.deinit(alloc);
+
     }
 };
 
