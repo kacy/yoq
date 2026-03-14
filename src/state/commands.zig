@@ -3,6 +3,9 @@ const cli = @import("../lib/cli.zig");
 const json_out = @import("../lib/json_output.zig");
 const secrets = @import("secrets.zig");
 const store = @import("store.zig");
+const backup_mod = @import("backup.zig");
+const schema = @import("schema.zig");
+const paths = @import("../lib/paths.zig");
 const sqlite = @import("sqlite");
 
 const write = cli.write;
@@ -236,4 +239,98 @@ fn openSecretsStore(alloc: std.mem.Allocator) secrets.SecretsStore {
 fn closeSecretsStore(alloc: std.mem.Allocator, sec: *secrets.SecretsStore) void {
     sec.db.deinit();
     alloc.destroy(sec.db);
+}
+
+// -- backup/restore commands --
+
+const BackupCommandsError = error{
+    InvalidArgument,
+    BackupFailed,
+    RestoreFailed,
+};
+
+pub fn backupCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    var output_path: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--output")) {
+            output_path = args.next() orelse {
+                writeErr("--output requires a file path\n", .{});
+                return BackupCommandsError.InvalidArgument;
+            };
+        }
+    }
+
+    // default output path with timestamp
+    var default_buf: [256]u8 = undefined;
+    const ts = std.time.timestamp();
+    const path = output_path orelse std.fmt.bufPrint(&default_buf, "yoq-backup-{d}.db", .{ts}) catch {
+        writeErr("failed to generate backup filename\n", .{});
+        return BackupCommandsError.BackupFailed;
+    };
+
+    // null-terminate path for sqlite
+    var path_z_buf: [paths.max_path]u8 = undefined;
+    if (path.len >= path_z_buf.len) {
+        writeErr("output path too long\n", .{});
+        return BackupCommandsError.InvalidArgument;
+    }
+    @memcpy(path_z_buf[0..path.len], path);
+    path_z_buf[path.len] = 0;
+    const path_z: [:0]const u8 = path_z_buf[0..path.len :0];
+
+    backup_mod.backup(path_z) catch |err| {
+        writeErr("backup failed: {}\n", .{err});
+        return BackupCommandsError.BackupFailed;
+    };
+
+    write("backup saved to {s}\n", .{path});
+}
+
+pub fn restoreCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    var input_path: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--input")) {
+            input_path = args.next() orelse {
+                writeErr("--input requires a file path\n", .{});
+                return BackupCommandsError.InvalidArgument;
+            };
+        } else if (input_path == null) {
+            input_path = arg;
+        }
+    }
+
+    const path = input_path orelse {
+        writeErr("usage: yoq restore <path> or yoq restore --input <path>\n", .{});
+        return BackupCommandsError.InvalidArgument;
+    };
+
+    // null-terminate path for sqlite
+    var path_z_buf: [paths.max_path]u8 = undefined;
+    if (path.len >= path_z_buf.len) {
+        writeErr("input path too long\n", .{});
+        return BackupCommandsError.InvalidArgument;
+    }
+    @memcpy(path_z_buf[0..path.len], path);
+    path_z_buf[path.len] = 0;
+    const path_z: [:0]const u8 = path_z_buf[0..path.len :0];
+
+    // check if the input file exists
+    std.fs.cwd().access(path, .{}) catch {
+        writeErr("backup file not found: {s}\n", .{path});
+        return BackupCommandsError.RestoreFailed;
+    };
+
+    backup_mod.restore(path_z) catch |err| {
+        switch (err) {
+            backup_mod.BackupError.SchemaValidationFailed => writeErr("restore failed: backup has invalid schema\n", .{}),
+            else => writeErr("restore failed: {}\n", .{err}),
+        }
+        return BackupCommandsError.RestoreFailed;
+    };
+
+    write("database restored from {s}\n", .{path});
 }
