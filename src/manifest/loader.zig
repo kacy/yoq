@@ -49,6 +49,8 @@ pub const LoadError = error{
     NoServices,
     /// a cron schedule interval is missing or malformed (expected "30s", "5m", "1h")
     InvalidSchedule,
+    /// a training job configuration has invalid or missing fields
+    InvalidTrainingConfig,
     /// memory allocation failed during parsing
     OutOfMemory,
 };
@@ -196,8 +198,27 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
-    if (services.items.len == 0) {
-        log.err("manifest: no services defined", .{});
+    // parse training jobs from [training.*] subtables
+    var training_jobs: std.ArrayListUnmanaged(spec.TrainingJob) = .empty;
+    defer {
+        for (training_jobs.items) |tj| tj.deinit(alloc);
+        training_jobs.deinit(alloc);
+    }
+
+    if (root.getTable("training")) |training_table| {
+        for (training_table.entries.keys(), training_table.entries.values()) |name, val| {
+            switch (val) {
+                .table => |tbl| {
+                    const tj = try parseTrainingJob(alloc, name, tbl);
+                    training_jobs.append(alloc, tj) catch return LoadError.OutOfMemory;
+                },
+                else => {},
+            }
+        }
+    }
+
+    if (services.items.len == 0 and training_jobs.items.len == 0) {
+        log.err("manifest: no services or training jobs defined", .{});
         return LoadError.NoServices;
     }
 
@@ -281,6 +302,12 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         alloc.free(owned_crons);
     }
 
+    const owned_training_jobs = training_jobs.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+    errdefer {
+        for (owned_training_jobs) |tj| tj.deinit(alloc);
+        alloc.free(owned_training_jobs);
+    }
+
     const owned_volumes = volumes.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
     errdefer {
         for (owned_volumes) |vol| vol.deinit(alloc);
@@ -291,6 +318,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         .services = sorted,
         .workers = owned_workers,
         .crons = owned_crons,
+        .training_jobs = owned_training_jobs,
         .volumes = owned_volumes,
         .alloc = alloc,
     };
@@ -507,6 +535,142 @@ fn parseCron(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Tabl
         .working_dir = common.working_dir,
         .volumes = common.volumes,
         .every = every,
+    };
+}
+
+/// parse a training job definition from its TOML subtable.
+/// training jobs define multi-rank GPU workloads with checkpoint, data, and fault tolerance config.
+fn parseTrainingJob(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.TrainingJob {
+    var common = try parseCommonFields(alloc, "training", name, table);
+    errdefer common.deinit(alloc);
+
+    const gpus_raw = table.getInt("gpus") orelse {
+        log.err("manifest: training '{s}' is missing required field 'gpus'", .{name});
+        return LoadError.InvalidTrainingConfig;
+    };
+    if (gpus_raw < 1) {
+        log.err("manifest: training '{s}' gpus must be >= 1", .{name});
+        return LoadError.InvalidTrainingConfig;
+    }
+
+    const gpu_type_raw = table.getString("gpu_type");
+    const gpu_type: ?[]const u8 = if (gpu_type_raw) |gt|
+        alloc.dupe(u8, gt) catch return LoadError.OutOfMemory
+    else
+        null;
+    errdefer if (gpu_type) |gt| alloc.free(gt);
+
+    const data = try parseDataSpec(alloc, name, table.getTable("data"));
+    errdefer if (data) |d| d.deinit(alloc);
+
+    const checkpoint = try parseCheckpointSpec(alloc, name, table.getTable("checkpoint"));
+    errdefer if (checkpoint) |c| c.deinit(alloc);
+
+    const resources = parseTrainingResourceSpec(table.getTable("resources"));
+    const fault_tolerance = parseFaultToleranceSpec(table.getTable("fault_tolerance"));
+
+    return .{
+        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
+        .image = common.image,
+        .command = common.command,
+        .env = common.env,
+        .working_dir = common.working_dir,
+        .volumes = common.volumes,
+        .gpus = @intCast(gpus_raw),
+        .gpu_type = gpu_type,
+        .data = data,
+        .checkpoint = checkpoint,
+        .resources = resources,
+        .fault_tolerance = fault_tolerance,
+    };
+}
+
+fn parseDataSpec(alloc: std.mem.Allocator, name: []const u8, table: ?*const toml.Table) LoadError!?spec.DataSpec {
+    const data_table = table orelse return null;
+
+    const dataset_raw = data_table.getString("dataset") orelse {
+        log.err("manifest: training '{s}' data section is missing required field 'dataset'", .{name});
+        return LoadError.InvalidTrainingConfig;
+    };
+
+    const sharding_raw = data_table.getString("sharding") orelse "file";
+
+    const preprocessing_raw = data_table.getString("preprocessing");
+    const preprocessing: ?[]const u8 = if (preprocessing_raw) |p|
+        alloc.dupe(u8, p) catch return LoadError.OutOfMemory
+    else
+        null;
+    errdefer if (preprocessing) |p| alloc.free(p);
+
+    const dataset = alloc.dupe(u8, dataset_raw) catch return LoadError.OutOfMemory;
+    errdefer alloc.free(dataset);
+
+    return .{
+        .dataset = dataset,
+        .sharding = alloc.dupe(u8, sharding_raw) catch return LoadError.OutOfMemory,
+        .preprocessing = preprocessing,
+    };
+}
+
+fn parseCheckpointSpec(alloc: std.mem.Allocator, name: []const u8, table: ?*const toml.Table) LoadError!?spec.CheckpointSpec {
+    const ckpt_table = table orelse return null;
+
+    const path_raw = ckpt_table.getString("path") orelse {
+        log.err("manifest: training '{s}' checkpoint section is missing required field 'path'", .{name});
+        return LoadError.InvalidTrainingConfig;
+    };
+
+    var interval_secs: u64 = 1800;
+    if (ckpt_table.getString("interval")) |interval_str| {
+        interval_secs = parseDuration(interval_str) orelse {
+            log.err("manifest: training '{s}' has invalid checkpoint interval '{s}' (expected e.g. '30m', '1h')", .{ name, interval_str });
+            return LoadError.InvalidSchedule;
+        };
+    }
+
+    const keep_raw = ckpt_table.getInt("keep");
+    const keep: u32 = if (keep_raw) |k| @intCast(@max(1, k)) else 5;
+
+    return .{
+        .path = alloc.dupe(u8, path_raw) catch return LoadError.OutOfMemory,
+        .interval_secs = interval_secs,
+        .keep = keep,
+    };
+}
+
+fn parseTrainingResourceSpec(table: ?*const toml.Table) spec.TrainingResourceSpec {
+    const res_table = table orelse return .{};
+
+    const cpu_raw = res_table.getInt("cpu");
+    const cpu: u32 = if (cpu_raw) |c| @intCast(@max(100, c)) else 1000;
+
+    const memory_mb_raw = res_table.getInt("memory_mb");
+    const memory_mb: u64 = if (memory_mb_raw) |m| @intCast(@max(256, m)) else 65536;
+
+    const ib_required = res_table.getBool("ib_required") orelse false;
+
+    return .{
+        .cpu = cpu,
+        .memory_mb = memory_mb,
+        .ib_required = ib_required,
+    };
+}
+
+fn parseFaultToleranceSpec(table: ?*const toml.Table) spec.FaultToleranceSpec {
+    const ft_table = table orelse return .{};
+
+    const spare_ranks_raw = ft_table.getInt("spare_ranks");
+    const spare_ranks: u32 = if (spare_ranks_raw) |s| @intCast(@max(0, s)) else 0;
+
+    const auto_restart = ft_table.getBool("auto_restart") orelse true;
+
+    const max_restarts_raw = ft_table.getInt("max_restarts");
+    const max_restarts: u32 = if (max_restarts_raw) |m| @intCast(@max(0, m)) else 10;
+
+    return .{
+        .spare_ranks = spare_ranks,
+        .auto_restart = auto_restart,
+        .max_restarts = max_restarts,
     };
 }
 
@@ -2221,4 +2385,160 @@ test "volume parsing — parallel driver requires path" {
         \\type = "parallel"
     );
     try std.testing.expectError(LoadError.InvalidVolumeConfig, result);
+}
+
+test "training job — minimal parse" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[training.my-llm]
+        \\image = "trainer:v1"
+        \\gpus = 8
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), manifest.services.len);
+    try std.testing.expectEqual(@as(usize, 1), manifest.training_jobs.len);
+
+    const tj = manifest.training_jobs[0];
+    try std.testing.expectEqualStrings("my-llm", tj.name);
+    try std.testing.expectEqualStrings("trainer:v1", tj.image);
+    try std.testing.expectEqual(@as(u32, 8), tj.gpus);
+    try std.testing.expect(tj.gpu_type == null);
+    try std.testing.expect(tj.data == null);
+    try std.testing.expect(tj.checkpoint == null);
+    try std.testing.expectEqual(@as(u32, 1000), tj.resources.cpu);
+    try std.testing.expectEqual(@as(u64, 65536), tj.resources.memory_mb);
+}
+
+test "training job — full parse with all sub-tables" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[training.big-model]
+        \\image = "trainer:v2"
+        \\command = ["torchrun", "train.py"]
+        \\gpus = 100
+        \\gpu_type = "H100"
+        \\env = ["EPOCHS=10"]
+        \\
+        \\[training.big-model.data]
+        \\dataset = "/mnt/lustre/pile"
+        \\sharding = "file"
+        \\preprocessing = "tokenize"
+        \\
+        \\[training.big-model.checkpoint]
+        \\path = "/mnt/checkpoints"
+        \\interval = "15m"
+        \\keep = 3
+        \\
+        \\[training.big-model.resources]
+        \\cpu = 16000
+        \\memory_mb = 131072
+        \\ib_required = true
+        \\
+        \\[training.big-model.fault_tolerance]
+        \\spare_ranks = 5
+        \\auto_restart = true
+        \\max_restarts = 20
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.training_jobs.len);
+    const tj = manifest.training_jobs[0];
+
+    try std.testing.expectEqualStrings("big-model", tj.name);
+    try std.testing.expectEqual(@as(u32, 100), tj.gpus);
+    try std.testing.expectEqualStrings("H100", tj.gpu_type.?);
+    try std.testing.expectEqual(@as(usize, 2), tj.command.len);
+
+    // data
+    try std.testing.expect(tj.data != null);
+    try std.testing.expectEqualStrings("/mnt/lustre/pile", tj.data.?.dataset);
+    try std.testing.expectEqualStrings("file", tj.data.?.sharding);
+    try std.testing.expectEqualStrings("tokenize", tj.data.?.preprocessing.?);
+
+    // checkpoint
+    try std.testing.expect(tj.checkpoint != null);
+    try std.testing.expectEqualStrings("/mnt/checkpoints", tj.checkpoint.?.path);
+    try std.testing.expectEqual(@as(u64, 900), tj.checkpoint.?.interval_secs);
+    try std.testing.expectEqual(@as(u32, 3), tj.checkpoint.?.keep);
+
+    // resources
+    try std.testing.expectEqual(@as(u32, 16000), tj.resources.cpu);
+    try std.testing.expectEqual(@as(u64, 131072), tj.resources.memory_mb);
+    try std.testing.expect(tj.resources.ib_required);
+
+    // fault tolerance
+    try std.testing.expectEqual(@as(u32, 5), tj.fault_tolerance.spare_ranks);
+    try std.testing.expect(tj.fault_tolerance.auto_restart);
+    try std.testing.expectEqual(@as(u32, 20), tj.fault_tolerance.max_restarts);
+}
+
+test "training job — missing gpus returns error" {
+    const alloc = std.testing.allocator;
+
+    const result = loadFromString(alloc,
+        \\[training.bad]
+        \\image = "trainer:v1"
+    );
+    try std.testing.expectError(LoadError.InvalidTrainingConfig, result);
+}
+
+test "training job — missing image returns error" {
+    const alloc = std.testing.allocator;
+
+    const result = loadFromString(alloc,
+        \\[training.bad]
+        \\gpus = 4
+    );
+    try std.testing.expectError(LoadError.MissingImage, result);
+}
+
+test "training job — manifest with only training jobs is valid" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[training.test]
+        \\image = "scratch"
+        \\gpus = 1
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), manifest.services.len);
+    try std.testing.expectEqual(@as(usize, 1), manifest.training_jobs.len);
+}
+
+test "training job — checkpoint interval default" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[training.test]
+        \\image = "scratch"
+        \\gpus = 1
+        \\
+        \\[training.test.checkpoint]
+        \\path = "/mnt/ckpt"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(u64, 1800), manifest.training_jobs[0].checkpoint.?.interval_secs);
+    try std.testing.expectEqual(@as(u32, 5), manifest.training_jobs[0].checkpoint.?.keep);
+}
+
+test "training job — data sharding default" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[training.test]
+        \\image = "scratch"
+        \\gpus = 1
+        \\
+        \\[training.test.data]
+        \\dataset = "/data/pile"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqualStrings("file", manifest.training_jobs[0].data.?.sharding);
+    try std.testing.expect(manifest.training_jobs[0].data.?.preprocessing == null);
 }
