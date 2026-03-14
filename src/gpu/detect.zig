@@ -194,7 +194,7 @@ fn detectNvml() ?DetectResult {
 
     // optional MIG management functions
     const set_mig_mode_fn = lib.lookup(*const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceSetMigMode");
-    const create_gi_fn2 = lib.lookup(*const fn (NvmlDevice, u32, *NvmlGpuInstance) callconv(.c) NvmlReturn, "nvmlDeviceCreateGpuInstance");
+    const create_gi_fn = lib.lookup(*const fn (NvmlDevice, u32, *NvmlGpuInstance) callconv(.c) NvmlReturn, "nvmlDeviceCreateGpuInstance");
     const gi_create_ci_fn = lib.lookup(*const fn (NvmlGpuInstance, u32, *NvmlComputeInstance) callconv(.c) NvmlReturn, "nvmlGpuInstanceCreateComputeInstance");
     const destroy_gi_fn = lib.lookup(*const fn (NvmlGpuInstance) callconv(.c) NvmlReturn, "nvmlDeviceDestroyGpuInstance");
 
@@ -227,7 +227,7 @@ fn detectNvml() ?DetectResult {
         .gpu_instance_get_compute_instances_fn = get_ci_fn,
         .compute_instance_get_info_fn = ci_info_fn,
         .device_set_mig_mode_fn = set_mig_mode_fn,
-        .device_create_gpu_instance_fn = create_gi_fn2,
+        .device_create_gpu_instance_fn = create_gi_fn,
         .gpu_instance_create_compute_instance_fn = gi_create_ci_fn,
         .device_destroy_gpu_instance_fn = destroy_gi_fn,
         .initialized = true,
