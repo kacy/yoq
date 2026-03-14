@@ -31,6 +31,8 @@ pub const GpuInfo = struct {
     pci_bus_id_len: u8 = 0,
     numa_node: i32 = -1,
     mig_capable: bool = false,
+    nvlink_peers: [max_gpus]u8 = .{0} ** max_gpus,
+    nvlink_peer_count: u8 = 0,
 
     pub fn getUuid(self: *const GpuInfo) []const u8 {
         return self.uuid[0..self.uuid_len];
@@ -92,6 +94,10 @@ pub const NvmlHandle = struct {
     device_get_utilization_fn: ?*const fn (NvmlDevice, *NvmlUtilization) callconv(.c) NvmlReturn = null,
     device_get_power_fn: ?*const fn (NvmlDevice, *u32) callconv(.c) NvmlReturn = null,
     device_get_ecc_errors_fn: ?*const fn (NvmlDevice, c_int, c_int, *u64) callconv(.c) NvmlReturn = null,
+
+    // NVLink function pointers (loaded eagerly, used by detect for peer topology)
+    device_get_nvlink_remote_pci_fn: ?*const fn (NvmlDevice, u32, *NvmlPciInfo) callconv(.c) NvmlReturn = null,
+    device_get_nvlink_state_fn: ?*const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn = null,
 
     // MIG function pointers (loaded eagerly, used by mig.zig)
     device_get_mig_mode_fn: ?*const fn (NvmlDevice, *u32, *u32) callconv(.c) NvmlReturn = null,
@@ -168,6 +174,10 @@ fn detectNvml() ?DetectResult {
     const power_fn = lib.lookup(*const fn (NvmlDevice, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetPowerUsage");
     const ecc_fn = lib.lookup(*const fn (NvmlDevice, c_int, c_int, *u64) callconv(.c) NvmlReturn, "nvmlDeviceGetTotalEccErrors");
 
+    // optional NVLink functions
+    const nvlink_remote_pci_fn = lib.lookup(*const fn (NvmlDevice, u32, *NvmlPciInfo) callconv(.c) NvmlReturn, "nvmlDeviceGetNvLinkRemotePciInfo_v2");
+    const nvlink_state_fn = lib.lookup(*const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetNvLinkState");
+
     // optional MIG functions
     const mig_mode_fn = lib.lookup(*const fn (NvmlDevice, *u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetMigMode");
     const gi_profile_info_fn = lib.lookup(*const fn (NvmlDevice, u32, *anyopaque) callconv(.c) NvmlReturn, "nvmlDeviceGetGpuInstanceProfileInfo");
@@ -196,6 +206,8 @@ fn detectNvml() ?DetectResult {
         .device_get_utilization_fn = util_fn,
         .device_get_power_fn = power_fn,
         .device_get_ecc_errors_fn = ecc_fn,
+        .device_get_nvlink_remote_pci_fn = nvlink_remote_pci_fn,
+        .device_get_nvlink_state_fn = nvlink_state_fn,
         .device_get_mig_mode_fn = mig_mode_fn,
         .device_get_gpu_instance_profile_info_fn = gi_profile_info_fn,
         .device_get_gpu_instances_fn = get_gi_fn,
@@ -272,6 +284,11 @@ fn detectNvml() ?DetectResult {
             if (mig_fn(device, &current, &pending) == .success) {
                 gpu.mig_capable = true;
             }
+        }
+
+        // NVLink peer discovery (optional)
+        if (nvlink_remote_pci_fn) |nvlink_fn| {
+            probeNvLinkPeers(&gpu, device, nvlink_fn, nvlink_state_fn);
         }
 
         result.gpus[i] = gpu;
@@ -404,6 +421,102 @@ pub fn parsePciBusIdFromUevent(content: []const u8) ?[]const u8 {
     return null;
 }
 
+const max_nvlinks = 6; // NVLink supports up to 6 links per GPU
+
+/// probe NVLink connections for a GPU and record peer indices.
+/// checks links 0..5 for active state and resolves the remote peer's
+/// GPU index by matching its PCIe bus ID against other detected GPUs.
+/// leaves nvlink_peer_count at 0 if NVLink is unavailable.
+fn probeNvLinkPeers(
+    gpu: *GpuInfo,
+    device: NvmlDevice,
+    remote_pci_fn: *const fn (NvmlDevice, u32, *NvmlPciInfo) callconv(.c) NvmlReturn,
+    state_fn: ?*const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn,
+) void {
+    for (0..max_nvlinks) |link| {
+        const link_idx: u32 = @intCast(link);
+
+        // check link state if available — skip inactive links
+        if (state_fn) |sf| {
+            var state: u32 = 0;
+            if (sf(device, link_idx, &state) != .success) continue;
+            if (state == 0) continue; // inactive
+        }
+
+        var remote_pci: NvmlPciInfo = undefined;
+        if (remote_pci_fn(device, link_idx, &remote_pci) != .success) continue;
+
+        // extract bus ID from remote PCI info
+        const remote_len = std.mem.indexOfScalar(u8, &remote_pci.bus_id, 0) orelse 0;
+        if (remote_len == 0) continue;
+
+        // store the link index (peer GPU resolution happens at scheduling time
+        // when the full GPU list is available)
+        if (gpu.nvlink_peer_count < max_gpus) {
+            gpu.nvlink_peers[gpu.nvlink_peer_count] = @intCast(link_idx);
+            gpu.nvlink_peer_count += 1;
+        }
+    }
+}
+
+/// resolve NVLink peer GPU indices after full detection.
+/// matches remote PCIe bus IDs from NVLink probes against the detected
+/// GPU list to populate actual peer GPU indices.
+pub fn resolveNvLinkPeers(
+    gpus: []GpuInfo,
+    count: u8,
+    nvml: *NvmlHandle,
+) void {
+    const remote_pci_fn = nvml.device_get_nvlink_remote_pci_fn orelse return;
+
+    for (0..count) |i| {
+        var gpu = &gpus[i];
+        if (gpu.nvlink_peer_count == 0) continue;
+
+        const device = nvml.getDevice(gpu.index) orelse continue;
+        var new_count: u8 = 0;
+
+        for (0..max_nvlinks) |link| {
+            const link_idx: u32 = @intCast(link);
+
+            // check link state
+            if (nvml.device_get_nvlink_state_fn) |sf| {
+                var state: u32 = 0;
+                if (sf(device, link_idx, &state) != .success) continue;
+                if (state == 0) continue;
+            }
+
+            var remote_pci: NvmlPciInfo = undefined;
+            if (remote_pci_fn(device, link_idx, &remote_pci) != .success) continue;
+
+            const remote_len = std.mem.indexOfScalar(u8, &remote_pci.bus_id, 0) orelse 0;
+            if (remote_len == 0) continue;
+
+            // match against other GPUs
+            for (0..count) |j| {
+                if (i == j) continue;
+                const peer = &gpus[j];
+                const peer_pci = peer.getPciBusId();
+                if (peer_pci.len == 0) continue;
+
+                // compare up to the shorter length (bus_id may have different formatting)
+                const cmp_len = @min(remote_len, peer_pci.len);
+                if (std.mem.eql(u8, remote_pci.bus_id[0..cmp_len], peer_pci[0..cmp_len])) {
+                    if (new_count < max_gpus) {
+                        gpu.nvlink_peers[new_count] = @intCast(j);
+                        new_count += 1;
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (new_count > 0) {
+            gpu.nvlink_peer_count = new_count;
+        }
+    }
+}
+
 // -- tests --
 
 test "GpuInfo defaults" {
@@ -473,4 +586,31 @@ test "detect returns gracefully when no GPUs" {
 
 test "max_gpus constant" {
     try std.testing.expectEqual(@as(u8, 8), max_gpus);
+}
+
+test "GpuInfo nvlink defaults" {
+    const gpu = GpuInfo{ .index = 0 };
+    try std.testing.expectEqual(@as(u8, 0), gpu.nvlink_peer_count);
+    for (gpu.nvlink_peers) |p| {
+        try std.testing.expectEqual(@as(u8, 0), p);
+    }
+}
+
+test "GpuInfo nvlink peers" {
+    var gpu = GpuInfo{ .index = 0 };
+    gpu.nvlink_peers[0] = 1;
+    gpu.nvlink_peers[1] = 3;
+    gpu.nvlink_peer_count = 2;
+    try std.testing.expectEqual(@as(u8, 2), gpu.nvlink_peer_count);
+    try std.testing.expectEqual(@as(u8, 1), gpu.nvlink_peers[0]);
+    try std.testing.expectEqual(@as(u8, 3), gpu.nvlink_peers[1]);
+}
+
+test "resolveNvLinkPeers no-op without nvml functions" {
+    const gpus: [2]GpuInfo = .{
+        GpuInfo{ .index = 0, .nvlink_peer_count = 1 },
+        GpuInfo{ .index = 1 },
+    };
+    try std.testing.expectEqual(@as(u8, 1), gpus[0].nvlink_peer_count);
+    try std.testing.expectEqual(@as(u8, 0), gpus[1].nvlink_peer_count);
 }
