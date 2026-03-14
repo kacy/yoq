@@ -8,7 +8,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
-const log = @import("../lib/log.zig");
+const is_linux = builtin.os.tag == .linux;
+const ebpf = if (is_linux) @import("../network/ebpf.zig") else struct {};
 
 pub const IoMetrics = extern struct {
     read_bytes: u64,
@@ -30,7 +31,7 @@ pub const StorageMetricsCollector = struct {
         if (!is_linux) return null;
         var value: IoMetrics = std.mem.zeroes(IoMetrics);
         const key = std.mem.asBytes(&cgroup_id);
-        if (bpfMapLookup(self.map_fd, key, std.mem.asBytes(&value))) {
+        if (ebpf.mapLookup(self.map_fd, key, std.mem.asBytes(&value))) {
             return value;
         }
         return null;
@@ -44,10 +45,10 @@ pub const StorageMetricsCollector = struct {
         var next_key: u64 = 0;
 
         while (count < buf.len) {
-            if (!bpfMapGetNextKey(self.map_fd, std.mem.asBytes(&key), std.mem.asBytes(&next_key))) break;
+            if (!ebpf.mapGetNextKey(self.map_fd, std.mem.asBytes(&key), std.mem.asBytes(&next_key))) break;
 
             var value: IoMetrics = std.mem.zeroes(IoMetrics);
-            if (bpfMapLookup(self.map_fd, std.mem.asBytes(&next_key), std.mem.asBytes(&value))) {
+            if (ebpf.mapLookup(self.map_fd, std.mem.asBytes(&next_key), std.mem.asBytes(&value))) {
                 buf[count] = .{ .cgroup_id = next_key, .metrics = value };
                 count += 1;
             }
@@ -64,8 +65,6 @@ pub const StorageMetricsCollector = struct {
         }
     }
 };
-
-const is_linux = builtin.os.tag == .linux;
 
 /// global storage metrics collector instance.
 var storage_collector: ?StorageMetricsCollector = null;
@@ -84,20 +83,6 @@ pub fn unloadStorageMetricsCollector() void {
         c.deinit();
         storage_collector = null;
     }
-}
-
-const BPF = if (is_linux) std.os.linux.BPF else struct {};
-
-fn bpfMapLookup(fd: posix.fd_t, key: []const u8, value: []u8) bool {
-    if (!is_linux) return false;
-    BPF.map_lookup_elem(fd, key, value) catch return false;
-    return true;
-}
-
-fn bpfMapGetNextKey(fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
-    if (!is_linux) return false;
-    const found = BPF.map_get_next_key(fd, key, next_key) catch return false;
-    return found;
 }
 
 // -- tests --
