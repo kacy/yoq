@@ -100,6 +100,19 @@ yoq is probably not the right fit if you already depend on the full Kubernetes e
 - policy controls between services
 - status and resource reporting
 
+### GPU & training
+
+- GPU detection and passthrough into containers
+- gang scheduling for distributed training workloads
+- NCCL mesh configuration and InfiniBand/RDMA support
+- MIG partitioning for GPU sharing
+- `yoq train` for distributed training jobs
+
+### storage
+
+- S3-compatible object storage gateway
+- volume drivers: local, host, NFS, parallel filesystem
+
 ### clustering
 
 - raft-based server nodes with SQLite-backed state replication
@@ -236,6 +249,14 @@ yoq nodes [--server host:port]       list agent nodes
 yoq drain <id> [--server host:port]  drain an agent node
 ```
 
+### training
+
+```text
+yoq train start <name>           start a training job
+yoq train status <name>          show training job config
+yoq train logs <name> [--rank N] show logs for a training rank
+```
+
 ### meta
 
 ```text
@@ -252,7 +273,7 @@ Notes:
 
 ## current status
 
-yoq is substantially implemented today: roughly 51k lines of Zig, around 1019 tests, and coverage across runtime, images, networking, build, manifests, clustering, secrets, TLS, and metrics.
+yoq is substantially implemented today: roughly 69k lines of Zig, around 1388 tests, and coverage across runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, and metrics.
 
 Implemented areas include:
 
@@ -262,6 +283,9 @@ Implemented areas include:
 - build engine with Dockerfile parsing, multi-stage builds, caching, and TOML manifests
 - manifest-driven service orchestration, health checks, workers, cron scheduling, dev mode, rollouts, and rollback
 - raft-backed clustering with agent management and scheduling
+- GPU detection, passthrough, health monitoring, MIG partitioning, gang scheduling, and NCCL mesh
+- distributed training job orchestration with `yoq train`
+- S3-compatible object storage gateway and volume drivers (local, host, NFS, parallel filesystem)
 - secrets, TLS termination, ACME, network policy, and observability features
 
 ## architecture snapshot
@@ -273,6 +297,8 @@ yoq is organized as a small set of integrated subsystems:
 - `network/` handles bridge networking, DNS, NAT, WireGuard, eBPF integration, and policy enforcement
 - `build/` and `manifest/` handle image builds, application manifests, orchestration, health, updates, and dev workflows
 - `cluster/`, `api/`, and `state/` handle replication, scheduling, remote control, and persistent state
+- `gpu/` handles GPU detection, passthrough, health monitoring, scheduling, and InfiniBand/NCCL mesh
+- `storage/` handles S3-compatible object storage and volume management
 - `tls/` and `lib/` provide certificate management, proxying, shared utilities, CLI helpers, and logging
 
 The design goal is straightforward: keep the control plane close to the runtime, avoid unnecessary layers, and rely on Linux kernel primitives directly when they provide a simpler and more coherent implementation.
@@ -292,11 +318,11 @@ yoq up -f examples/redis/manifest.toml
 
 ## what's next
 
-- web UI remains intentionally deferred; the CLI is the primary interface
-- adaptive heartbeat intervals
-- hub-and-spoke WireGuard topology
-- GPU scheduling
+- checkpoint management for training jobs
+- fault tolerance for long training runs
+- GPU monitoring and observability
 - multi-region federation
 - advanced L7 routing
 - plugin system
+- web UI remains intentionally deferred; the CLI is the primary interface
 - image signing is not built in today; use cosign externally

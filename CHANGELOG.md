@@ -8,6 +8,13 @@ format is based on [keep a changelog](https://keepachangelog.com/).
 
 ### added
 
+- **volumes:** volume abstraction with local, host, NFS, and parallel filesystem drivers
+- **GPU mesh (phases 1-3):** GPU detection, passthrough, health monitoring, MIG management
+- **gang scheduling:** distributed training workload scheduling across GPU nodes
+- **InfiniBand:** RDMA detection with NCCL topology generation
+- **S3:** S3-compatible object storage gateway with HEAD/GET/PUT routes
+- **training:** training job orchestration — `[training.*]` manifest type, `yoq train` CLI
+- **storage:** phase 2 storage layer
 - **gossip:** SWIM failure detection protocol for scalable membership and health monitoring
 - **cluster auth:** HMAC-SHA256 authentication on all cluster messages (raft and gossip), derived from join token
 - **agent API:** role and region fields in agent API JSON responses
@@ -15,10 +22,17 @@ format is based on [keep a changelog](https://keepachangelog.com/).
 
 ### fixed
 
+- **gossip:** WireGuard peer cleanup on gossip death
+- **volumes:** service startup failure on volume creation error
+- **runtime:** integer overflow panics, overlay dir leak, negative int parsing
 - **security:** token comparison timing side-channel — constant-time comparison regardless of token length
 - **state machine:** SQL statement redacted from state machine error logs
 - **network hardening:** message size limits and connection validation in registry and cluster transport
 - **robustness:** cgroup resource limit verification and safe integer casts for edge cases
+
+### removed
+
+- dead code: secureZero, batchMapUpdate, getMigMode, ClusterSettings, gossip.removeMember
 
 ### added
 
