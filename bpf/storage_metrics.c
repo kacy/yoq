@@ -15,7 +15,6 @@
 // -- BPF helpers not in common.h --
 
 static __u64 (*bpf_get_current_cgroup_id)(void) = (void *)80;
-static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)14;
 
 // -- per-cgroup I/O metrics --
 
