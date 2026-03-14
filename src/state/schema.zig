@@ -246,6 +246,45 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\);
     , .{}, .{}) catch return SchemaError.InitFailed;
 
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS training_jobs (
+        \\    id TEXT PRIMARY KEY,
+        \\    name TEXT NOT NULL,
+        \\    app_name TEXT NOT NULL,
+        \\    state TEXT NOT NULL DEFAULT 'pending',
+        \\    image TEXT NOT NULL,
+        \\    gpus INTEGER NOT NULL,
+        \\    checkpoint_path TEXT,
+        \\    checkpoint_interval INTEGER,
+        \\    checkpoint_keep INTEGER,
+        \\    restart_count INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE TABLE IF NOT EXISTS training_checkpoints (
+        \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
+        \\    job_id TEXT NOT NULL,
+        \\    step INTEGER NOT NULL,
+        \\    path TEXT NOT NULL,
+        \\    size_bytes INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    FOREIGN KEY (job_id) REFERENCES training_jobs(id)
+        \\);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE INDEX IF NOT EXISTS idx_training_checkpoints_job
+        \\    ON training_checkpoints (job_id, created_at DESC);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
+    db.exec(
+        \\CREATE INDEX IF NOT EXISTS idx_training_jobs_app
+        \\    ON training_jobs (app_name, name);
+    , .{}, .{}) catch return SchemaError.InitFailed;
+
     // indexes for frequently queried columns — avoids full table scans
     // on container lookups by app name, status, or hostname
     db.exec(
