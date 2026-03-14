@@ -160,4 +160,3 @@ test "NodeRole round-trip" {
 test "NodeRole unknown returns null" {
     try std.testing.expect(NodeRole.fromString("leader") == null);
 }
-

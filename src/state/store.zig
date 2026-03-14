@@ -202,7 +202,6 @@ pub fn openDb() StoreError!sqlite.Db {
 pub fn save(record: ContainerRecord) StoreError!void {
     const db = try getDb();
 
-
     const pid: ?i64 = if (record.pid) |p| @intCast(p) else null;
     const exit_code: ?i64 = if (record.exit_code) |e| @intCast(e) else null;
 
@@ -231,7 +230,6 @@ pub fn save(record: ContainerRecord) StoreError!void {
 pub fn load(alloc: std.mem.Allocator, id: []const u8) StoreError!ContainerRecord {
     const db = try getDb();
 
-
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
@@ -249,7 +247,6 @@ pub fn load(alloc: std.mem.Allocator, id: []const u8) StoreError!ContainerRecord
 pub fn findByHostname(alloc: std.mem.Allocator, hostname: []const u8) StoreError!?ContainerRecord {
     const db = try getDb();
 
-
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
@@ -266,7 +263,6 @@ pub fn findByHostname(alloc: std.mem.Allocator, hostname: []const u8) StoreError
 pub fn remove(id: []const u8) StoreError!void {
     const db = try getDb();
 
-
     db.exec("DELETE FROM containers WHERE id = ?;", .{}, .{id}) catch
         return StoreError.WriteFailed;
 }
@@ -274,7 +270,6 @@ pub fn remove(id: []const u8) StoreError!void {
 /// list all container IDs, newest first
 pub fn listIds(alloc: std.mem.Allocator) StoreError!std.ArrayList([]const u8) {
     const db = try getDb();
-
 
     var ids: std.ArrayList([]const u8) = .empty;
 
@@ -295,7 +290,6 @@ pub fn listIds(alloc: std.mem.Allocator) StoreError!std.ArrayList([]const u8) {
 pub fn updateStatus(id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u8) StoreError!void {
     const db = try getDb();
 
-
     const pid_val: ?i64 = if (pid) |p| @intCast(p) else null;
     const exit_val: ?i64 = if (exit_code) |e| @intCast(e) else null;
 
@@ -310,7 +304,6 @@ pub fn updateStatus(id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u
 pub fn updateNetwork(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) StoreError!void {
     const db = try getDb();
 
-
     db.exec(
         "UPDATE containers SET ip_address = ?, veth_host = ? WHERE id = ?;",
         .{},
@@ -324,7 +317,6 @@ pub fn updateNetwork(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]cons
 /// caller owns the returned list and strings.
 pub fn listAppContainerIds(alloc: std.mem.Allocator, app_name: []const u8) StoreError!std.ArrayList([]const u8) {
     const db = try getDb();
-
 
     var ids: std.ArrayList([]const u8) = .empty;
 
@@ -345,7 +337,6 @@ pub fn listAppContainerIds(alloc: std.mem.Allocator, app_name: []const u8) Store
 pub fn findAppContainer(alloc: std.mem.Allocator, app_name: []const u8, hostname: []const u8) StoreError!?ContainerRecord {
     const db = try getDb();
 
-
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
@@ -363,7 +354,6 @@ pub fn findAppContainer(alloc: std.mem.Allocator, app_name: []const u8, hostname
 /// caller owns the returned list and records.
 pub fn listAll(alloc: std.mem.Allocator) StoreError!std.ArrayList(ContainerRecord) {
     const db = try getDb();
-
 
     var records: std.ArrayList(ContainerRecord) = .empty;
 
@@ -430,7 +420,6 @@ fn imageRowToRecord(row: ImageRow) ImageRecord {
 pub fn saveImage(record: ImageRecord) StoreError!void {
     const db = try getDb();
 
-
     db.exec(
         "INSERT OR REPLACE INTO images (id, repository, tag, manifest_digest, config_digest, total_size, created_at)" ++
             " VALUES (?, ?, ?, ?, ?, ?, ?);",
@@ -452,7 +441,6 @@ pub fn saveImage(record: ImageRecord) StoreError!void {
 pub fn loadImage(alloc: std.mem.Allocator, id: []const u8) StoreError!ImageRecord {
     const db = try getDb();
 
-
     const row = (db.oneAlloc(
         ImageRow,
         alloc,
@@ -470,7 +458,6 @@ pub fn loadImage(alloc: std.mem.Allocator, id: []const u8) StoreError!ImageRecor
 pub fn findImage(alloc: std.mem.Allocator, repository: []const u8, tag: []const u8) StoreError!ImageRecord {
     const db = try getDb();
 
-
     const row = (db.oneAlloc(
         ImageRow,
         alloc,
@@ -487,7 +474,6 @@ pub fn findImage(alloc: std.mem.Allocator, repository: []const u8, tag: []const 
 /// caller owns the returned list and records.
 pub fn listImages(alloc: std.mem.Allocator) StoreError!std.ArrayList(ImageRecord) {
     const db = try getDb();
-
 
     var images: std.ArrayList(ImageRecord) = .empty;
 
@@ -508,7 +494,6 @@ pub fn listImages(alloc: std.mem.Allocator) StoreError!std.ArrayList(ImageRecord
 /// delete an image record
 pub fn removeImage(id: []const u8) StoreError!void {
     const db = try getDb();
-
 
     // First check if the image exists (SELECT 1 doesn't need allocator)
     const exists = db.one(
@@ -565,7 +550,6 @@ fn cacheRowToEntry(row: BuildCacheRow) BuildCacheEntry {
 pub fn lookupBuildCache(alloc: std.mem.Allocator, cache_key: []const u8) StoreError!?BuildCacheEntry {
     const db = try getDb();
 
-
     const row = (db.oneAlloc(
         BuildCacheRow,
         alloc,
@@ -581,7 +565,6 @@ pub fn lookupBuildCache(alloc: std.mem.Allocator, cache_key: []const u8) StoreEr
 /// store a build cache entry. replaces existing entry with the same key.
 pub fn storeBuildCache(entry: BuildCacheEntry) StoreError!void {
     const db = try getDb();
-
 
     db.exec(
         "INSERT OR REPLACE INTO build_cache (cache_key, layer_digest, diff_id, layer_size, created_at)" ++
@@ -601,7 +584,6 @@ pub fn storeBuildCache(entry: BuildCacheEntry) StoreError!void {
 /// returns layer_digest and diff_id values. caller owns the returned list.
 pub fn listBuildCacheDigests(alloc: std.mem.Allocator) StoreError!std.ArrayList([]const u8) {
     const db = try getDb();
-
 
     var digests = std.ArrayList([]const u8).empty;
     errdefer {
@@ -639,7 +621,6 @@ pub fn listBuildCacheDigests(alloc: std.mem.Allocator) StoreError!std.ArrayList(
 pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_address: []const u8) StoreError!void {
     const db = try getDb();
 
-
     db.exec(
         "INSERT OR REPLACE INTO service_names (name, container_id, ip_address, registered_at)" ++
             " VALUES (?, ?, ?, ?);",
@@ -652,7 +633,6 @@ pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_addres
 /// called on container stop/rm.
 pub fn unregisterServiceName(container_id: []const u8) StoreError!void {
     const db = try getDb();
-
 
     db.exec(
         "DELETE FROM service_names WHERE container_id = ?;",
@@ -670,7 +650,6 @@ const ServiceNameRow = struct {
 /// returns all IPs registered under this name (supports multiple containers).
 pub fn lookupServiceNames(alloc: std.mem.Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
     const db = try getDb();
-
 
     var ips: std.ArrayList([]const u8) = .empty;
 
@@ -716,7 +695,6 @@ const NetworkPolicyRow = struct {
 pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const u8) StoreError!void {
     const db = try getDb();
 
-
     db.exec(
         "INSERT OR REPLACE INTO network_policies (source_service, target_service, action, created_at)" ++
             " VALUES (?, ?, ?, ?);",
@@ -729,7 +707,6 @@ pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const 
 pub fn removeNetworkPolicy(source: []const u8, target: []const u8) StoreError!void {
     const db = try getDb();
 
-
     db.exec(
         "DELETE FROM network_policies WHERE source_service = ? AND target_service = ?;",
         .{},
@@ -739,7 +716,8 @@ pub fn removeNetworkPolicy(source: []const u8, target: []const u8) StoreError!vo
 
 /// list all network policy rules.
 pub fn listNetworkPolicies(alloc: std.mem.Allocator) StoreError!std.ArrayList(NetworkPolicyRecord) {
-    return queryNetworkPolicies(alloc,
+    return queryNetworkPolicies(
+        alloc,
         "SELECT source_service, target_service, action, created_at FROM network_policies ORDER BY created_at;",
         .{},
     );
@@ -747,7 +725,8 @@ pub fn listNetworkPolicies(alloc: std.mem.Allocator) StoreError!std.ArrayList(Ne
 
 /// get all policies for a specific source service.
 pub fn getServicePolicies(alloc: std.mem.Allocator, source: []const u8) StoreError!std.ArrayList(NetworkPolicyRecord) {
-    return queryNetworkPolicies(alloc,
+    return queryNetworkPolicies(
+        alloc,
         "SELECT source_service, target_service, action, created_at FROM network_policies" ++
             " WHERE source_service = ? ORDER BY created_at;",
         .{source},
@@ -821,7 +800,6 @@ fn deploymentRowToRecord(row: DeploymentRow) DeploymentRecord {
 pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
     const db = try getDb();
 
-
     db.exec(
         "INSERT INTO deployments (id, service_name, manifest_hash, config_snapshot, status, message, created_at)" ++
             " VALUES (?, ?, ?, ?, ?, ?, ?);",
@@ -841,7 +819,8 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 /// load a deployment record by id.
 /// caller owns the returned strings.
 pub fn getDeployment(alloc: std.mem.Allocator, id: []const u8) StoreError!DeploymentRecord {
-    return queryOneDeployment(alloc,
+    return queryOneDeployment(
+        alloc,
         "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
             " FROM deployments WHERE id = ?;",
         .{id},
@@ -852,7 +831,6 @@ pub fn getDeployment(alloc: std.mem.Allocator, id: []const u8) StoreError!Deploy
 /// caller owns the returned list and records.
 pub fn listDeployments(alloc: std.mem.Allocator, service_name: []const u8) StoreError!std.ArrayList(DeploymentRecord) {
     const db = try getDb();
-
 
     var deployments: std.ArrayList(DeploymentRecord) = .empty;
 
@@ -874,7 +852,6 @@ pub fn listDeployments(alloc: std.mem.Allocator, service_name: []const u8) Store
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try getDb();
 
-
     db.exec(
         "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
         .{},
@@ -885,7 +862,8 @@ pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]co
 /// get the most recent deployment for a service.
 /// caller owns the returned record.
 pub fn getLatestDeployment(alloc: std.mem.Allocator, service_name: []const u8) StoreError!DeploymentRecord {
-    return queryOneDeployment(alloc,
+    return queryOneDeployment(
+        alloc,
         "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
             " FROM deployments WHERE service_name = ? ORDER BY created_at DESC LIMIT 1;",
         .{service_name},
@@ -896,7 +874,8 @@ pub fn getLatestDeployment(alloc: std.mem.Allocator, service_name: []const u8) S
 /// useful for rollback — finds the last known-good config.
 /// caller owns the returned record.
 pub fn getLastSuccessfulDeployment(alloc: std.mem.Allocator, service_name: []const u8) StoreError!DeploymentRecord {
-    return queryOneDeployment(alloc,
+    return queryOneDeployment(
+        alloc,
         "SELECT id, service_name, manifest_hash, config_snapshot, status, message, created_at" ++
             " FROM deployments WHERE service_name = ? AND status = 'completed' ORDER BY created_at DESC LIMIT 1;",
         .{service_name},

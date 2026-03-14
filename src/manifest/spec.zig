@@ -170,7 +170,6 @@ pub const Service = struct {
         if (self.health_check) |hc| hc.deinit(alloc);
         if (self.tls) |tc| tc.deinit(alloc);
         if (self.gpu) |g| g.deinit(alloc);
-
     }
 };
 
@@ -194,7 +193,6 @@ pub const Worker = struct {
         for (self.depends_on) |dep| alloc.free(dep);
         alloc.free(self.depends_on);
         if (self.gpu) |g| g.deinit(alloc);
-
     }
 };
 

@@ -174,22 +174,34 @@ fn collectAllMounts(manifest: *const spec.Manifest) MountCollection {
     var truncated = false;
 
     for (manifest.services) |svc| {
-        if (count >= max_entries) { truncated = true; break; }
+        if (count >= max_entries) {
+            truncated = true;
+            break;
+        }
         S.buf[count] = .{ .name = svc.name, .volumes = svc.volumes };
         count += 1;
     }
     for (manifest.workers) |w| {
-        if (count >= max_entries) { truncated = true; break; }
+        if (count >= max_entries) {
+            truncated = true;
+            break;
+        }
         S.buf[count] = .{ .name = w.name, .volumes = w.volumes };
         count += 1;
     }
     for (manifest.crons) |c| {
-        if (count >= max_entries) { truncated = true; break; }
+        if (count >= max_entries) {
+            truncated = true;
+            break;
+        }
         S.buf[count] = .{ .name = c.name, .volumes = c.volumes };
         count += 1;
     }
     for (manifest.training_jobs) |tj| {
-        if (count >= max_entries) { truncated = true; break; }
+        if (count >= max_entries) {
+            truncated = true;
+            break;
+        }
         S.buf[count] = .{ .name = tj.name, .volumes = tj.volumes };
         count += 1;
     }

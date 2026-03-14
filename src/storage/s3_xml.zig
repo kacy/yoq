@@ -110,8 +110,7 @@ pub fn listObjectsV2Xml(buf: []u8, bucket: []const u8, prefix: []const u8, objec
         var ts_buf: [20]u8 = undefined;
         const ts = formatTimestamp(&ts_buf, obj.last_modified);
 
-        const entry = std.fmt.bufPrint(buf[pos..],
-            "<Contents><Key>{s}</Key><Size>{d}</Size><LastModified>{s}</LastModified><ETag>\"{s}\"</ETag></Contents>", .{ esc_key, obj.size, ts, esc_etag }) catch return null;
+        const entry = std.fmt.bufPrint(buf[pos..], "<Contents><Key>{s}</Key><Size>{d}</Size><LastModified>{s}</LastModified><ETag>\"{s}\"</ETag></Contents>", .{ esc_key, obj.size, ts, esc_etag }) catch return null;
         pos += entry.len;
     }
 

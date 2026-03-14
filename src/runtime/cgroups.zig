@@ -555,7 +555,7 @@ pub fn parseIoStat(content: []const u8) IoStats {
         if (line.len == 0) continue;
         // skip "MAJ:MIN " prefix
         const after_dev = std.mem.indexOf(u8, line, " ") orelse continue;
-        var pairs = std.mem.splitScalar(u8, line[after_dev + 1..], ' ');
+        var pairs = std.mem.splitScalar(u8, line[after_dev + 1 ..], ' ');
         while (pairs.next()) |pair| {
             if (std.mem.startsWith(u8, pair, "rbytes=")) {
                 stats.read_bytes += std.fmt.parseInt(u64, pair["rbytes=".len..], 10) catch continue;

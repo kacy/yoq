@@ -42,7 +42,6 @@ const encoded_key_len = 44;
 pub const KeyPair = struct {
     private_key: [encoded_key_len]u8,
     public_key: [encoded_key_len]u8,
-
 };
 
 /// configuration for a WireGuard peer (remote node).

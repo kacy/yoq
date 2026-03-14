@@ -79,7 +79,6 @@ pub fn profileById(id: u32) ?MigProfile {
     return null;
 }
 
-
 const NvmlGpuInstanceProfileInfo = extern struct {
     id: u32,
     is_p2p_supported: u32,

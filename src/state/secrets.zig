@@ -289,7 +289,6 @@ pub const SecretsStore = struct {
             },
         ) catch return SecretsError.WriteFailed;
     }
-
 };
 
 // -- encryption primitives --

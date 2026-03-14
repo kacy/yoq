@@ -121,14 +121,16 @@ pub fn upsertAssignment(assignment: CachedAssignment) !void {
 
 /// list all cached assignments.
 pub fn listAssignments(alloc: Allocator) ![]CachedAssignment {
-    return queryAssignments(alloc,
+    return queryAssignments(
+        alloc,
         "SELECT id, image, command, status, cpu_limit, memory_limit_mb, synced_at FROM cached_assignments;",
     );
 }
 
 /// list only pending cached assignments.
 pub fn listPendingAssignments(alloc: Allocator) ![]CachedAssignment {
-    return queryAssignments(alloc,
+    return queryAssignments(
+        alloc,
         "SELECT id, image, command, status, cpu_limit, memory_limit_mb, synced_at FROM cached_assignments WHERE status = 'pending';",
     );
 }
