@@ -84,6 +84,7 @@ comptime {
     _ = @import("tls/commands.zig");
     _ = @import("storage/s3.zig");
     _ = @import("storage/s3_xml.zig");
+    _ = @import("storage/metrics.zig");
     _ = @import("api/routes/s3_gateway.zig");
     _ = @import("gpu/detect.zig");
     _ = @import("gpu/passthrough.zig");
