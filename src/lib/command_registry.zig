@@ -9,6 +9,8 @@ const tls_cmds = @import("../tls/commands.zig");
 const container_cmds = @import("../runtime/container_commands.zig");
 const build_cmds = @import("../build/commands.zig");
 const manifest_cmds = @import("../manifest/commands.zig");
+const gpu_cmds = @import("../gpu/commands.zig");
+const doctor_cmds = @import("doctor_commands.zig");
 const completion = @import("completion.zig");
 
 const write = cli.write;
@@ -43,6 +45,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "exec", .group = .runtime, .usage = "exec <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
     .{ .name = "status", .group = .runtime, .usage = "status [--verbose] [--server h:p]", .description = "show service status and resources", .handler = runtime_cmds.status },
     .{ .name = "metrics", .group = .runtime, .usage = "metrics [service] [--server h:p]", .description = "show per-service network metrics", .handler = runtime_cmds.metrics },
+    .{ .name = "gpu", .group = .runtime, .usage = "gpu <topo> [--json]", .description = "GPU topology and diagnostics", .handler = gpu_cmds.gpu },
 
     .{ .name = "pull", .group = .image, .usage = "pull <image>", .description = "pull an image from a registry", .handler = image_cmds.pull },
     .{ .name = "push", .group = .image, .usage = "push <source> [target]", .description = "push an image to a registry", .handler = image_cmds.push },
@@ -71,7 +74,10 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "secret", .group = .state_security, .usage = "secret <set|get|rm|list|rotate> ...", .description = "manage encrypted secrets", .handler = state_cmds.secret },
     .{ .name = "policy", .group = .state_security, .usage = "policy <deny|allow|rm|list> ...", .description = "manage network policy rules", .handler = net_cmds.policy },
     .{ .name = "cert", .group = .state_security, .usage = "cert <install|list|rm|provision|renew> ...", .description = "manage TLS certificates", .handler = tls_cmds.cert },
+    .{ .name = "backup", .group = .state_security, .usage = "backup [--output path]", .description = "backup database state", .handler = state_cmds.backupCmd },
+    .{ .name = "restore", .group = .state_security, .usage = "restore <path>", .description = "restore database from backup", .handler = state_cmds.restoreCmd },
 
+    .{ .name = "doctor", .group = .misc, .usage = "doctor [--json]", .description = "check system readiness", .handler = doctor_cmds.doctorCmd },
     .{ .name = "version", .group = .misc, .usage = "version", .description = "print version", .handler = versionHandler },
     .{ .name = "help", .group = .misc, .usage = "help", .description = "show this help", .handler = helpHandler },
     .{ .name = "completion", .group = .misc, .usage = "completion <bash|zsh|fish>", .description = "output shell completion script", .handler = completion.handler },
