@@ -43,6 +43,9 @@ const command_meta = [_]CommandMeta{
     .{ .name = "exec" },
     .{ .name = "status", .flags = &.{ "--verbose", "-v", "--server" } },
     .{ .name = "metrics", .flags = &.{ "--server", "--pairs" } },
+    .{ .name = "gpu", .subcommands = &.{
+        .{ .name = "topo", .flags = &.{"--json"} },
+    } },
 
     // image
     .{ .name = "pull" },
@@ -71,8 +74,8 @@ const command_meta = [_]CommandMeta{
     } },
 
     // cluster
-    .{ .name = "serve", .flags = &.{"--port"} },
-    .{ .name = "init-server", .flags = &.{ "--id", "--port", "--api-port", "--peers", "--token" } },
+    .{ .name = "serve", .flags = &.{ "--port", "--log-format" } },
+    .{ .name = "init-server", .flags = &.{ "--id", "--port", "--api-port", "--peers", "--token", "--log-format" } },
     .{ .name = "join", .flags = &.{ "--token", "--port" } },
     .{ .name = "cluster", .subcommands = &.{
         .{ .name = "status" },
@@ -101,8 +104,11 @@ const command_meta = [_]CommandMeta{
         .{ .name = "list" },
         .{ .name = "rm" },
     } },
+    .{ .name = "backup", .flags = &.{"--output"} },
+    .{ .name = "restore", .flags = &.{"--input"} },
 
     // misc
+    .{ .name = "doctor", .flags = &.{"--json"} },
     .{ .name = "version" },
     .{ .name = "help" },
     .{ .name = "completion" },
