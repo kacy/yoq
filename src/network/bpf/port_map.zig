@@ -26,7 +26,8 @@ pub const Reloc = struct {
 /// BPF program section: "xdp"
 pub const prog_name = "xdp";
 
-pub const relocs = [_]Reloc{};
+pub const relocs = [_]Reloc{
+};
 
 pub const insns = [_]BPF.Insn{
     .{ .code = 0x61, .dst = 2, .src = 1, .off = 4, .imm = 0 },
@@ -63,3 +64,4 @@ pub const insns = [_]BPF.Insn{
     .{ .code = 0xb7, .dst = 0, .src = 0, .off = 0, .imm = 2 },
     .{ .code = 0x95, .dst = 0, .src = 0, .off = 0, .imm = 0 },
 };
+

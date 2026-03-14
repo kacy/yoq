@@ -1,6 +1,8 @@
 FROM alpine:3.20 AS builder
 
-RUN apk add --no-cache zig=0.15.2-r0
+RUN apk add --no-cache curl tar xz
+RUN curl -fsSL https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz \
+    | tar -xJ -C /usr/local --strip-components=1
 
 WORKDIR /src
 COPY build.zig build.zig.zon ./
