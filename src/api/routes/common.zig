@@ -8,6 +8,8 @@ pub const Response = struct {
     body: []const u8,
     // if true, caller must free body
     allocated: bool,
+    // override content type (null = application/json)
+    content_type: ?[]const u8 = null,
 };
 
 pub const RouteContext = struct {

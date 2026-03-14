@@ -43,6 +43,8 @@ const ebpf = if (builtin.os.tag == .linux) @import("../../network/ebpf.zig") els
     }
 };
 const storage_metrics = @import("../../storage/metrics.zig");
+const gpu_health = @import("../../gpu/health.zig");
+const gpu_detect = @import("../../gpu/detect.zig");
 const ip_mod = @import("../../network/ip.zig");
 const common = @import("common.zig");
 const testing = std.testing;
@@ -122,10 +124,16 @@ fn writeSnapshotJson(writer: anytype, snap: monitor.ServiceSnapshot) !void {
 }
 
 fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
+    const format = common.extractQueryParam(request.path, "format");
+    if (format) |f| {
+        if (std.mem.eql(u8, f, "prometheus")) return handleMetricsPrometheus(alloc);
+    }
+
     const mode = common.extractQueryParam(request.path, "mode");
     if (mode) |m| {
         if (std.mem.eql(u8, m, "pairs")) return handleMetricsPairs(alloc);
         if (std.mem.eql(u8, m, "storage_io")) return handleStorageIoMetrics(alloc);
+        if (std.mem.eql(u8, m, "gpu")) return handleGpuMetrics(alloc);
     }
 
     const service_filter = common.extractQueryParam(request.path, "service");
@@ -246,6 +254,83 @@ fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
     }
 
     writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    var writer = buf.writer(alloc);
+
+    // network metrics
+    if (ebpf.getMetricsCollector()) |mc| {
+        var entries: [1024]ebpf.PairEntry = undefined;
+        const count = mc.readPairMetrics(&entries);
+
+        writer.writeAll("# HELP yoq_network_bytes_total Network bytes transferred\n") catch return common.internalError();
+        writer.writeAll("# TYPE yoq_network_bytes_total counter\n") catch return common.internalError();
+        for (entries[0..count]) |entry| {
+            const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
+            writer.print("yoq_network_bytes_total{{port=\"{d}\"}} {d}\n", .{ port, entry.value.bytes }) catch return common.internalError();
+        }
+
+        writer.writeAll("# HELP yoq_network_packets_total Network packets transferred\n") catch return common.internalError();
+        writer.writeAll("# TYPE yoq_network_packets_total counter\n") catch return common.internalError();
+        for (entries[0..count]) |entry| {
+            const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
+            writer.print("yoq_network_packets_total{{port=\"{d}\"}} {d}\n", .{ port, entry.value.packets }) catch return common.internalError();
+        }
+    }
+
+    // storage I/O metrics
+    if (storage_metrics.getStorageMetricsCollector()) |sc| {
+        var entries: [1024]storage_metrics.IoEntry = undefined;
+        const count = sc.listAllIoMetrics(&entries);
+
+        writer.writeAll("# HELP yoq_storage_read_bytes_total Storage read bytes\n") catch return common.internalError();
+        writer.writeAll("# TYPE yoq_storage_read_bytes_total counter\n") catch return common.internalError();
+        for (entries[0..count]) |entry| {
+            writer.print("yoq_storage_read_bytes_total{{cgroup_id=\"{d}\"}} {d}\n", .{ entry.cgroup_id, entry.metrics.read_bytes }) catch return common.internalError();
+        }
+
+        writer.writeAll("# HELP yoq_storage_write_bytes_total Storage write bytes\n") catch return common.internalError();
+        writer.writeAll("# TYPE yoq_storage_write_bytes_total counter\n") catch return common.internalError();
+        for (entries[0..count]) |entry| {
+            writer.print("yoq_storage_write_bytes_total{{cgroup_id=\"{d}\"}} {d}\n", .{ entry.cgroup_id, entry.metrics.write_bytes }) catch return common.internalError();
+        }
+    }
+
+    // GPU metrics
+    var gpu_result = gpu_detect.detect();
+    defer gpu_result.deinit();
+    if (gpu_result.nvml) |*nvml| {
+        const gpu_metrics = gpu_health.pollAllMetrics(nvml, gpu_result.count);
+        gpu_health.writePrometheus(writer, gpu_metrics, gpu_result.count) catch return common.internalError();
+    }
+
+    const body = buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true, .content_type = "text/plain; version=0.0.4; charset=utf-8" };
+}
+
+fn handleGpuMetrics(alloc: std.mem.Allocator) Response {
+    var gpu_result = gpu_detect.detect();
+    defer gpu_result.deinit();
+
+    var nvml = gpu_result.nvml orelse {
+        return common.jsonOkOwned(alloc, "{\"gpu_metrics\":[]}");
+    };
+
+    const metrics = gpu_health.pollAllMetrics(&nvml, gpu_result.count);
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    var writer = json_buf.writer(alloc);
+
+    writer.writeByte('{') catch return common.internalError();
+    gpu_health.writeMetricsJson(writer, metrics, gpu_result.count) catch return common.internalError();
+    writer.writeByte('}') catch return common.internalError();
 
     const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
@@ -470,4 +555,62 @@ test "route handles service filter in metrics" {
 test "extractQueryParam from full path with multiple params" {
     try testing.expectEqualStrings("myapp", common.extractQueryParam("/v1/metrics?service=myapp&mode=details", "service").?);
     try testing.expectEqualStrings("details", common.extractQueryParam("/v1/metrics?service=myapp&mode=details", "mode").?);
+}
+
+test "handleMetricsPrometheus returns text content type" {
+    const resp = handleMetricsPrometheus(testing.allocator);
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+
+    try testing.expectEqual(http.StatusCode.ok, resp.status);
+    try testing.expect(resp.content_type != null);
+    try testing.expectEqualStrings("text/plain; version=0.0.4; charset=utf-8", resp.content_type.?);
+}
+
+test "handleGpuMetrics returns valid JSON" {
+    const resp = handleGpuMetrics(testing.allocator);
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+
+    try testing.expectEqual(http.StatusCode.ok, resp.status);
+    // without NVML available, should return empty gpu_metrics
+    try testing.expect(std.mem.indexOf(u8, resp.body, "gpu_metrics") != null);
+}
+
+test "route dispatches format=prometheus" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/metrics?format=prometheus",
+        .path_only = "/v1/metrics",
+        .query = "format=prometheus",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    try testing.expect(response != null);
+    const resp = response.?;
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+
+    try testing.expectEqual(http.StatusCode.ok, resp.status);
+    try testing.expect(resp.content_type != null);
+}
+
+test "route dispatches mode=gpu" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/metrics?mode=gpu",
+        .path_only = "/v1/metrics",
+        .query = "mode=gpu",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator);
+    try testing.expect(response != null);
+    const resp = response.?;
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+
+    try testing.expectEqual(http.StatusCode.ok, resp.status);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "gpu_metrics") != null);
 }
