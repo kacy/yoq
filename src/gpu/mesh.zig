@@ -161,7 +161,25 @@ pub fn generateNcclTopology(
         try std.fmt.format(buf.writer(alloc), "{d}", .{gpu.index});
         try buf.appendSlice(alloc, "\" sm=\"80\" mem=\"");
         try std.fmt.format(buf.writer(alloc), "{d}", .{gpu.vram_mb});
-        try buf.appendSlice(alloc, "\" />\n");
+        try buf.appendSlice(alloc, "\"");
+        // NVLink topology: emit link elements for peer GPUs
+        if (gpu.nvlink_peer_count > 0) {
+            try buf.appendSlice(alloc, ">\n");
+            for (0..gpu.nvlink_peer_count) |li| {
+                const peer_idx = gpu.nvlink_peers[li];
+                if (peer_idx < gpus.len) {
+                    const peer_pci = gpus[peer_idx].getPciBusId();
+                    if (peer_pci.len > 0) {
+                        try buf.appendSlice(alloc, "        <nvlink target=\"");
+                        try buf.appendSlice(alloc, peer_pci);
+                        try buf.appendSlice(alloc, "\" count=\"1\" />\n");
+                    }
+                }
+            }
+            try buf.appendSlice(alloc, "      </gpu>\n");
+        } else {
+            try buf.appendSlice(alloc, " />\n");
+        }
         try buf.appendSlice(alloc, "    </pci>\n");
     }
 
@@ -340,6 +358,33 @@ test "generateNcclTopology with IB device" {
     try std.testing.expect(std.mem.indexOf(u8, xml, "mlx5_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "0000:81:00.0") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "gdr=\"1\"") != null);
+}
+
+test "generateNcclTopology with NVLink peers" {
+    const alloc = std.testing.allocator;
+
+    var gpu0 = GpuInfo{ .index = 0, .vram_mb = 81920 };
+    const pci0 = "0000:01:00.0";
+    @memcpy(gpu0.pci_bus_id[0..pci0.len], pci0);
+    gpu0.pci_bus_id_len = pci0.len;
+    gpu0.nvlink_peers[0] = 1;
+    gpu0.nvlink_peer_count = 1;
+
+    var gpu1 = GpuInfo{ .index = 1, .vram_mb = 81920 };
+    const pci1 = "0000:41:00.0";
+    @memcpy(gpu1.pci_bus_id[0..pci1.len], pci1);
+    gpu1.pci_bus_id_len = pci1.len;
+    gpu1.nvlink_peers[0] = 0;
+    gpu1.nvlink_peer_count = 1;
+
+    const gpus = &[_]GpuInfo{ gpu0, gpu1 };
+    const xml = try generateNcclTopology(alloc, gpus, &.{}, 0);
+    defer alloc.free(xml);
+
+    // verify NVLink elements are present
+    try std.testing.expect(std.mem.indexOf(u8, xml, "nvlink target=\"0000:41:00.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "nvlink target=\"0000:01:00.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "count=\"1\"") != null);
 }
 
 test "generateMeshEnv basic" {
