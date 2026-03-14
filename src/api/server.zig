@@ -353,11 +353,18 @@ fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
         },
     };
 
+    // generate trace ID for this request
+    var trace_id: [16]u8 = undefined;
+    log.generateTraceId(&trace_id);
+    log.setTraceId(&trace_id);
+    defer log.clearTraceId();
+
     const response = routes.dispatch(request, alloc);
     defer if (response.allocated) alloc.free(response.body);
 
     var resp_buf: [4096]u8 = undefined;
-    const resp = http.formatResponse(&resp_buf, response.status, response.body);
+    const content_type = response.content_type orelse "application/json";
+    const resp = http.formatResponseWithType(&resp_buf, response.status, content_type, response.body);
     writeAll(client_fd, resp);
 }
 
