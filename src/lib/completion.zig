@@ -61,6 +61,14 @@ const command_meta = [_]CommandMeta{
     .{ .name = "run-worker", .flags = &.{"-f"} },
     .{ .name = "rollback" },
     .{ .name = "history" },
+    .{ .name = "train", .flags = &.{ "-f", "--server", "--rank" }, .subcommands = &.{
+        .{ .name = "start", .flags = &.{ "-f", "--server" } },
+        .{ .name = "status", .flags = &.{"-f"} },
+        .{ .name = "stop" },
+        .{ .name = "pause" },
+        .{ .name = "resume" },
+        .{ .name = "logs", .flags = &.{"--rank"} },
+    } },
 
     // cluster
     .{ .name = "serve", .flags = &.{"--port"} },

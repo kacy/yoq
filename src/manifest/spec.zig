@@ -18,6 +18,7 @@ pub const Manifest = struct {
     services: []const Service,
     workers: []const Worker,
     crons: []const Cron,
+    training_jobs: []const TrainingJob,
     volumes: []const Volume,
     alloc: std.mem.Allocator,
 
@@ -30,6 +31,9 @@ pub const Manifest = struct {
 
         for (self.crons) |c| c.deinit(self.alloc);
         self.alloc.free(self.crons);
+
+        for (self.training_jobs) |tj| tj.deinit(self.alloc);
+        self.alloc.free(self.training_jobs);
 
         for (self.volumes) |vol| vol.deinit(self.alloc);
         self.alloc.free(self.volumes);
@@ -47,6 +51,14 @@ pub const Manifest = struct {
     pub fn workerByName(self: *const Manifest, name: []const u8) ?*const Worker {
         for (self.workers) |*w| {
             if (std.mem.eql(u8, w.name, name)) return w;
+        }
+        return null;
+    }
+
+    /// find a training job by name. returns null if not found.
+    pub fn trainingJobByName(self: *const Manifest, name: []const u8) ?*const TrainingJob {
+        for (self.training_jobs) |*tj| {
+            if (std.mem.eql(u8, tj.name, name)) return tj;
         }
         return null;
     }
@@ -71,6 +83,62 @@ pub const GpuMeshSpec = struct {
     world_size: u32,
     gpus_per_rank: u32 = 1,
     master_port: u16 = 29500,
+};
+
+pub const CheckpointSpec = struct {
+    path: []const u8,
+    interval_secs: u64 = 1800,
+    keep: u32 = 5,
+
+    pub fn deinit(self: CheckpointSpec, alloc: std.mem.Allocator) void {
+        alloc.free(self.path);
+    }
+};
+
+pub const DataSpec = struct {
+    dataset: []const u8,
+    sharding: []const u8,
+    preprocessing: ?[]const u8 = null,
+
+    pub fn deinit(self: DataSpec, alloc: std.mem.Allocator) void {
+        alloc.free(self.dataset);
+        alloc.free(self.sharding);
+        if (self.preprocessing) |p| alloc.free(p);
+    }
+};
+
+pub const FaultToleranceSpec = struct {
+    spare_ranks: u32 = 0,
+    auto_restart: bool = true,
+    max_restarts: u32 = 10,
+};
+
+pub const TrainingResourceSpec = struct {
+    cpu: u32 = 1000,
+    memory_mb: u64 = 65536,
+    ib_required: bool = false,
+};
+
+pub const TrainingJob = struct {
+    name: []const u8,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    working_dir: ?[]const u8,
+    volumes: []const VolumeMount,
+    gpus: u32,
+    gpu_type: ?[]const u8 = null,
+    data: ?DataSpec = null,
+    checkpoint: ?CheckpointSpec = null,
+    resources: TrainingResourceSpec = .{},
+    fault_tolerance: FaultToleranceSpec = .{},
+
+    pub fn deinit(self: TrainingJob, alloc: std.mem.Allocator) void {
+        freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
+        if (self.gpu_type) |gt| alloc.free(gt);
+        if (self.data) |d| d.deinit(alloc);
+        if (self.checkpoint) |c| c.deinit(alloc);
+    }
 };
 
 pub const RestartPolicy = enum {
@@ -297,6 +365,7 @@ test "serviceByName finds existing service" {
         .services = services,
         .workers = &.{},
         .crons = &.{},
+        .training_jobs = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };
@@ -319,6 +388,7 @@ test "serviceByName returns null for missing service" {
         .services = services,
         .workers = &.{},
         .crons = &.{},
+        .training_jobs = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };
@@ -382,6 +452,7 @@ test "deinit frees all memory" {
         .services = services,
         .workers = &.{},
         .crons = &.{},
+        .training_jobs = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };
@@ -447,6 +518,100 @@ test "restart policy defaults to none" {
         .volumes = &.{},
     };
     try std.testing.expectEqual(RestartPolicy.none, svc.restart);
+}
+
+test "trainingJobByName finds existing job" {
+    const alloc = std.testing.allocator;
+
+    const tjs = try alloc.alloc(TrainingJob, 1);
+    tjs[0] = try testTrainingJob(alloc, "my-llm");
+
+    var manifest = Manifest{
+        .services = &.{},
+        .workers = &.{},
+        .crons = &.{},
+        .training_jobs = tjs,
+        .volumes = &.{},
+        .alloc = alloc,
+    };
+    defer manifest.deinit();
+
+    const found = manifest.trainingJobByName("my-llm");
+    try std.testing.expect(found != null);
+    try std.testing.expectEqualStrings("my-llm", found.?.name);
+    try std.testing.expect(manifest.trainingJobByName("missing") == null);
+}
+
+test "training job deinit frees all memory" {
+    const alloc = std.testing.allocator;
+
+    const cmd = try alloc.alloc([]const u8, 1);
+    cmd[0] = try alloc.dupe(u8, "torchrun train.py");
+
+    const env = try alloc.alloc([]const u8, 1);
+    env[0] = try alloc.dupe(u8, "EPOCHS=10");
+
+    const vol_mounts = try alloc.alloc(VolumeMount, 1);
+    vol_mounts[0] = .{
+        .source = try alloc.dupe(u8, "/mnt/data"),
+        .target = try alloc.dupe(u8, "/data"),
+        .kind = .bind,
+    };
+
+    var tj = TrainingJob{
+        .name = try alloc.dupe(u8, "test-train"),
+        .image = try alloc.dupe(u8, "trainer:v1"),
+        .command = cmd,
+        .env = env,
+        .working_dir = try alloc.dupe(u8, "/workspace"),
+        .volumes = vol_mounts,
+        .gpus = 8,
+        .gpu_type = try alloc.dupe(u8, "H100"),
+        .data = .{
+            .dataset = try alloc.dupe(u8, "/mnt/lustre/pile"),
+            .sharding = try alloc.dupe(u8, "file"),
+            .preprocessing = try alloc.dupe(u8, "tokenize"),
+        },
+        .checkpoint = .{
+            .path = try alloc.dupe(u8, "/mnt/checkpoints"),
+            .interval_secs = 900,
+            .keep = 3,
+        },
+    };
+    tj.deinit(alloc);
+}
+
+test "training job defaults" {
+    const tj = TrainingJob{
+        .name = "test",
+        .image = "scratch",
+        .command = &.{},
+        .env = &.{},
+        .working_dir = null,
+        .volumes = &.{},
+        .gpus = 4,
+    };
+    try std.testing.expectEqual(@as(u32, 1000), tj.resources.cpu);
+    try std.testing.expectEqual(@as(u64, 65536), tj.resources.memory_mb);
+    try std.testing.expect(!tj.resources.ib_required);
+    try std.testing.expectEqual(@as(u32, 0), tj.fault_tolerance.spare_ranks);
+    try std.testing.expect(tj.fault_tolerance.auto_restart);
+    try std.testing.expectEqual(@as(u32, 10), tj.fault_tolerance.max_restarts);
+    try std.testing.expect(tj.data == null);
+    try std.testing.expect(tj.checkpoint == null);
+    try std.testing.expect(tj.gpu_type == null);
+}
+
+fn testTrainingJob(alloc: std.mem.Allocator, name: []const u8) !TrainingJob {
+    return .{
+        .name = try alloc.dupe(u8, name),
+        .image = try alloc.dupe(u8, "scratch"),
+        .command = try alloc.alloc([]const u8, 0),
+        .env = try alloc.alloc([]const u8, 0),
+        .working_dir = null,
+        .volumes = try alloc.alloc(VolumeMount, 0),
+        .gpus = 1,
+    };
 }
 
 /// helper for tests — creates a minimal service with an allocated name

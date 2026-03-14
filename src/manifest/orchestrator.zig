@@ -1520,6 +1520,7 @@ test "computeStartSet: single target with no deps" {
         .services = &services,
         .workers = &.{},
         .crons = &.{},
+        .training_jobs = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };
@@ -1568,6 +1569,7 @@ test "computeStartSet: transitive dependencies" {
         .services = &services,
         .workers = &.{},
         .crons = &.{},
+        .training_jobs = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };
@@ -1613,6 +1615,7 @@ test "computeStartSet: no filter starts everything" {
         .services = &services,
         .workers = &.{},
         .crons = &.{},
+        .training_jobs = &.{},
         .volumes = &.{},
         .alloc = alloc,
     };

@@ -47,6 +47,7 @@ pub fn check(alloc: std.mem.Allocator, manifest: *const spec.Manifest) !Result {
     try checkHostPortConflicts(alloc, manifest, &diagnostics);
     try checkVolumeReferences(alloc, manifest, &diagnostics);
     try checkHealthCheckTiming(alloc, manifest, &diagnostics);
+    try checkTrainingJobs(alloc, manifest, &diagnostics);
 
     return .{
         .diagnostics = diagnostics.toOwnedSlice(alloc) catch return error.OutOfMemory,
@@ -187,8 +188,35 @@ fn collectAllMounts(manifest: *const spec.Manifest) MountCollection {
         S.buf[count] = .{ .name = c.name, .volumes = c.volumes };
         count += 1;
     }
+    for (manifest.training_jobs) |tj| {
+        if (count >= max_entries) { truncated = true; break; }
+        S.buf[count] = .{ .name = tj.name, .volumes = tj.volumes };
+        count += 1;
+    }
 
     return .{ .entries = S.buf[0..count], .truncated = truncated };
+}
+
+/// validate training job configurations.
+/// checks that checkpoint paths are absolute when specified.
+fn checkTrainingJobs(
+    alloc: std.mem.Allocator,
+    manifest: *const spec.Manifest,
+    diagnostics: *std.ArrayList(Diagnostic),
+) !void {
+    for (manifest.training_jobs) |tj| {
+        if (tj.checkpoint) |ckpt| {
+            if (ckpt.path.len == 0 or ckpt.path[0] != '/') {
+                const msg = std.fmt.allocPrint(alloc, "training '{s}' checkpoint path must be absolute (start with /)", .{
+                    tj.name,
+                }) catch return error.OutOfMemory;
+                diagnostics.append(alloc, .{ .severity = .@"error", .message = msg }) catch {
+                    alloc.free(msg);
+                    return error.OutOfMemory;
+                };
+            }
+        }
+    }
 }
 
 // -- tests --
@@ -213,6 +241,7 @@ fn testManifest(alloc: std.mem.Allocator, services: []const spec.Service, volume
         .services = services,
         .workers = &.{},
         .crons = &.{},
+        .training_jobs = &.{},
         .volumes = volumes,
         .alloc = std.testing.allocator,
     };
@@ -534,6 +563,7 @@ test "volume used by worker and cron is validated" {
         .services = services,
         .workers = workers,
         .crons = crons,
+        .training_jobs = &.{},
         .volumes = volumes,
         .alloc = alloc,
     };

@@ -131,6 +131,11 @@ pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
             write(" {d} cron{s}", .{ manifest.crons.len, if (manifest.crons.len != 1) "s" else "" });
             has_count = true;
         }
+        if (manifest.training_jobs.len > 0) {
+            if (has_count) write(",", .{}) else write(" (", .{});
+            write(" {d} training job{s}", .{ manifest.training_jobs.len, if (manifest.training_jobs.len != 1) "s" else "" });
+            has_count = true;
+        }
         if (has_count) write(")", .{});
         write("\n", .{});
     }
@@ -590,4 +595,221 @@ pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
         writeErr("worker {s} failed\n", .{name});
         return ManifestCommandsError.DeploymentFailed;
     }
+}
+
+pub fn train(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    const action = args.next() orelse {
+        writeErr("usage: yoq train <start|status|stop|pause|resume|logs> <name>\n", .{});
+        return ManifestCommandsError.InvalidArgument;
+    };
+
+    if (std.mem.eql(u8, action, "start")) return trainStart(args, alloc);
+    if (std.mem.eql(u8, action, "status")) return trainStatus(args, alloc);
+    if (std.mem.eql(u8, action, "stop")) return trainStop(args, alloc);
+    if (std.mem.eql(u8, action, "pause")) return trainPause(args, alloc);
+    if (std.mem.eql(u8, action, "resume")) return trainResume(args, alloc);
+    if (std.mem.eql(u8, action, "logs")) return trainLogs(args, alloc);
+
+    writeErr("unknown train action: {s}\n", .{action});
+    writeErr("usage: yoq train <start|status|stop|pause|resume|logs> <name>\n", .{});
+    return ManifestCommandsError.InvalidArgument;
+}
+
+fn trainStart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    var manifest_path: []const u8 = manifest_loader.default_filename;
+    var job_name: ?[]const u8 = null;
+    var server_addr: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f")) {
+            manifest_path = args.next() orelse {
+                writeErr("-f requires a manifest path\n", .{});
+                return ManifestCommandsError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                return ManifestCommandsError.InvalidArgument;
+            };
+        } else {
+            job_name = arg;
+        }
+    }
+
+    const name = job_name orelse {
+        writeErr("usage: yoq train start [-f manifest.toml] [--server host:port] <name>\n", .{});
+        return ManifestCommandsError.InvalidArgument;
+    };
+
+    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
+        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+        return ManifestCommandsError.ManifestLoadFailed;
+    };
+    defer manifest.deinit();
+
+    const job = manifest.trainingJobByName(name) orelse {
+        writeErr("unknown training job: {s}\n", .{name});
+        return ManifestCommandsError.UnknownService;
+    };
+
+    const training = @import("training.zig");
+
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const app_name = std.fs.path.basename(cwd);
+
+    var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
+        writeErr("failed to initialize training controller: {}\n", .{err});
+        return ManifestCommandsError.DeploymentFailed;
+    };
+    defer ctrl.deinit();
+
+    writeErr("starting training job {s} ({d} gpus)...\n", .{ name, job.gpus });
+
+    if (server_addr) |addr| {
+        const server = cli.parseServerAddr(addr);
+        ctrl.startCluster(server.ip, server.port) catch {
+            return ManifestCommandsError.DeploymentFailed;
+        };
+    } else {
+        ctrl.startLocal() catch {
+            return ManifestCommandsError.DeploymentFailed;
+        };
+    }
+
+    if (ctrl.state == .completed) {
+        writeErr("training job {s} completed successfully\n", .{name});
+    } else if (ctrl.state == .running) {
+        writeErr("training job {s} scheduled on cluster\n", .{name});
+    } else {
+        writeErr("training job {s} finished with state: {s}\n", .{ name, ctrl.state.label() });
+    }
+}
+
+fn trainStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    var manifest_path: []const u8 = manifest_loader.default_filename;
+    var job_name: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-f")) {
+            manifest_path = args.next() orelse {
+                writeErr("-f requires a manifest path\n", .{});
+                return ManifestCommandsError.InvalidArgument;
+            };
+        } else {
+            job_name = arg;
+        }
+    }
+
+    const name = job_name orelse {
+        writeErr("usage: yoq train status [-f manifest.toml] <name>\n", .{});
+        return ManifestCommandsError.InvalidArgument;
+    };
+
+    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
+        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+        return ManifestCommandsError.ManifestLoadFailed;
+    };
+    defer manifest.deinit();
+
+    const job = manifest.trainingJobByName(name) orelse {
+        writeErr("unknown training job: {s}\n", .{name});
+        return ManifestCommandsError.UnknownService;
+    };
+
+    write("training job: {s}\n", .{name});
+    write("image:        {s}\n", .{job.image});
+    write("gpus:         {d}\n", .{job.gpus});
+    if (job.gpu_type) |gt| {
+        write("gpu_type:     {s}\n", .{gt});
+    }
+    if (job.checkpoint) |ckpt| {
+        write("checkpoint:   {s} (every {d}s, keep {d})\n", .{ ckpt.path, ckpt.interval_secs, ckpt.keep });
+    }
+    if (job.data) |d| {
+        write("dataset:      {s}\n", .{d.dataset});
+        write("sharding:     {s}\n", .{d.sharding});
+    }
+    write("cpu/rank:     {d}m\n", .{job.resources.cpu});
+    write("memory/rank:  {d}MB\n", .{job.resources.memory_mb});
+}
+
+fn trainStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    _ = args;
+    writeErr("train stop is not yet implemented (requires persistent job state)\n", .{});
+    return ManifestCommandsError.DeploymentFailed;
+}
+
+fn trainPause(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    _ = args;
+    writeErr("train pause is not yet implemented (requires checkpoint support)\n", .{});
+    return ManifestCommandsError.DeploymentFailed;
+}
+
+fn trainResume(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    _ = alloc;
+    _ = args;
+    writeErr("train resume is not yet implemented (requires checkpoint support)\n", .{});
+    return ManifestCommandsError.DeploymentFailed;
+}
+
+fn trainLogs(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    var job_name: ?[]const u8 = null;
+    var rank: u32 = 0;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--rank")) {
+            const rank_str = args.next() orelse {
+                writeErr("--rank requires a number\n", .{});
+                return ManifestCommandsError.InvalidArgument;
+            };
+            rank = std.fmt.parseInt(u32, rank_str, 10) catch {
+                writeErr("invalid rank number: {s}\n", .{rank_str});
+                return ManifestCommandsError.InvalidArgument;
+            };
+        } else {
+            job_name = arg;
+        }
+    }
+
+    const name = job_name orelse {
+        writeErr("usage: yoq train logs [--rank N] <name>\n", .{});
+        return ManifestCommandsError.InvalidArgument;
+    };
+
+    // look up the container by hostname pattern: {job_name}-rank-{rank}
+    var hostname_buf: [128]u8 = undefined;
+    const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ name, rank }) catch {
+        writeErr("failed to build hostname\n", .{});
+        return ManifestCommandsError.InvalidArgument;
+    };
+
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const app_name = std.fs.path.basename(cwd);
+
+    const record = store.findAppContainer(alloc, app_name, hostname) catch |err| {
+        writeErr("failed to query container: {}\n", .{err});
+        return ManifestCommandsError.StoreError;
+    };
+    const rec = record orelse {
+        writeErr("no container found for {s} rank {d}\n", .{ name, rank });
+        return ManifestCommandsError.UnknownService;
+    };
+    defer rec.deinit(alloc);
+
+    const logs = @import("../runtime/logs.zig");
+    const data = logs.readLogs(alloc, rec.id) catch |err| {
+        writeErr("no logs found for rank {d}: {}\n", .{ rank, err });
+        return ManifestCommandsError.StoreError;
+    };
+    defer alloc.free(data);
+
+    if (data.len == 0) {
+        write("(no output)\n", .{});
+        return;
+    }
+    write("{s}", .{data});
 }
