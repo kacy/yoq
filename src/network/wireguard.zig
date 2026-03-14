@@ -43,11 +43,6 @@ pub const KeyPair = struct {
     private_key: [encoded_key_len]u8,
     public_key: [encoded_key_len]u8,
 
-    /// zero the private key material. call this after the key has been
-    /// passed to createInterface() and is no longer needed.
-    pub fn secureZero(self: *KeyPair) void {
-        std.crypto.secureZero(u8, &self.private_key);
-    }
 };
 
 /// configuration for a WireGuard peer (remote node).

@@ -666,41 +666,6 @@ const CircuitBreaker = struct {
 var map_op_circuit_breaker = CircuitBreaker.init(5, 30000); // 5 failures, 30s timeout
 
 /// MapUpdate represents a single map update operation for batch processing
-pub const MapUpdateEntry = struct {
-    map_fd: posix.fd_t,
-    key: []const u8,
-    value: []const u8,
-};
-
-/// batch update multiple map entries.
-/// attempts to update all entries. if any update fails, attempts to rollback
-/// previously successful updates (best effort).
-/// returns the number of successful updates, or error on first failure.
-pub fn batchMapUpdate(entries: []const MapUpdateEntry) EbpfError!usize {
-    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
-
-    var successful: usize = 0;
-    var i: usize = 0;
-
-    // First pass: attempt all updates
-    while (i < entries.len) : (i += 1) {
-        mapUpdate(entries[i].map_fd, entries[i].key, entries[i].value) catch |e| {
-            log.err("ebpf: batch update failed at entry {d}/{d}: {}", .{ i, entries.len, e });
-
-            // Rollback: try to delete all successfully updated keys
-            for (0..successful) |j| {
-                _ = mapDelete(entries[j].map_fd, entries[j].key);
-            }
-
-            return e;
-        };
-        successful += 1;
-    }
-
-    log.info("ebpf: batch updated {d} map entries successfully", .{successful});
-    return successful;
-}
-
 /// global DNS interceptor instance. set after loadDnsInterceptor() succeeds.
 var dns_interceptor: ?DnsInterceptor = null;
 

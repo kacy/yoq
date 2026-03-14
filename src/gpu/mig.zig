@@ -21,11 +21,6 @@ pub const MigProfile = struct {
     }
 };
 
-pub const MigMode = enum {
-    disabled,
-    enabled,
-};
-
 pub const MigInstance = struct {
     gpu_index: u32 = 0,
     gi_id: u32 = 0,
@@ -84,17 +79,6 @@ pub fn profileById(id: u32) ?MigProfile {
     return null;
 }
 
-/// query NVML for the current MIG mode of a GPU
-pub fn getMigMode(nvml: *detect.NvmlHandle, index: u32) ?MigMode {
-    const mig_fn = nvml.device_get_mig_mode_fn orelse return null;
-    const device = nvml.getDevice(index) orelse return null;
-
-    var current: u32 = 0;
-    var pending: u32 = 0;
-    if (mig_fn(device, &current, &pending) != .success) return null;
-
-    return if (current != 0) .enabled else .disabled;
-}
 
 const NvmlGpuInstanceProfileInfo = extern struct {
     id: u32,
@@ -240,11 +224,6 @@ test "profileById finds known profiles" {
 
 test "profileById returns null for unknown" {
     try std.testing.expect(profileById(99) == null);
-}
-
-test "MigMode enum values" {
-    try std.testing.expect(@intFromEnum(MigMode.disabled) == 0);
-    try std.testing.expect(@intFromEnum(MigMode.enabled) == 1);
 }
 
 test "MigInstance defaults" {
