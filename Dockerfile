@@ -1,7 +1,7 @@
 FROM alpine:3.20 AS builder
 
 RUN apk add --no-cache curl tar xz
-RUN curl -fsSL https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz \
+RUN curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz \
     | tar -xJ -C /usr/local --strip-components=1
 
 WORKDIR /src
