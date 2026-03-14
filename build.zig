@@ -274,6 +274,7 @@ pub fn build(b: *std.Build) void {
         "policy",
         "metrics",
         "port_map",
+        "storage_metrics",
     };
 
     for (bpf_programs) |prog| {

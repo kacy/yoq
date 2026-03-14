@@ -42,6 +42,7 @@ const ebpf = if (builtin.os.tag == .linux) @import("../../network/ebpf.zig") els
         return 0;
     }
 };
+const storage_metrics = @import("../../storage/metrics.zig");
 const ip_mod = @import("../../network/ip.zig");
 const common = @import("common.zig");
 const testing = std.testing;
@@ -124,6 +125,7 @@ fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
     const mode = common.extractQueryParam(request.path, "mode");
     if (mode) |m| {
         if (std.mem.eql(u8, m, "pairs")) return handleMetricsPairs(alloc);
+        if (std.mem.eql(u8, m, "storage_io")) return handleStorageIoMetrics(alloc);
     }
 
     const service_filter = common.extractQueryParam(request.path, "service");
@@ -209,6 +211,37 @@ fn handleMetricsPairs(alloc: std.mem.Allocator) Response {
         writer.print(
             "{{\"from\":\"{s}\",\"to\":\"{s}\",\"port\":{d},\"connections\":{d},\"packets\":{d},\"bytes\":{d},\"errors\":{d}}}",
             .{ src_name, dst_name, port, entry.value.connections, entry.value.packets, entry.value.bytes, entry.value.errors },
+        ) catch return common.internalError();
+    }
+
+    writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
+    const sc = storage_metrics.getStorageMetricsCollector() orelse return common.jsonOkOwned(alloc, "[]");
+
+    var entries: [1024]storage_metrics.IoEntry = undefined;
+    const count = sc.listAllIoMetrics(&entries);
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    var writer = json_buf.writer(alloc);
+    writer.writeByte('[') catch return common.internalError();
+
+    for (entries[0..count], 0..) |entry, idx| {
+        if (idx > 0) writer.writeByte(',') catch return common.internalError();
+        writer.print(
+            "{{\"cgroup_id\":{d},\"read_bytes\":{d},\"write_bytes\":{d},\"read_ops\":{d},\"write_ops\":{d}}}",
+            .{
+                entry.cgroup_id,
+                entry.metrics.read_bytes,
+                entry.metrics.write_bytes,
+                entry.metrics.read_ops,
+                entry.metrics.write_ops,
+            },
         ) catch return common.internalError();
     }
 
