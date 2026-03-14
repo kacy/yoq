@@ -118,40 +118,31 @@ const NvmlComputeInstanceInfo = extern struct {
 /// requires a GPU reset to take effect — the pending mode is set.
 /// idempotent: calling on an already-enabled GPU is a no-op.
 pub fn enableMig(nvml: *detect.NvmlHandle, gpu_index: u32) bool {
-    const set_fn = nvml.device_set_mig_mode_fn orelse return false;
-    const device = nvml.getDevice(gpu_index) orelse return false;
-
-    // check if already enabled
-    if (nvml.device_get_mig_mode_fn) |get_fn| {
-        var current: u32 = 0;
-        var pending: u32 = 0;
-        if (get_fn(device, &current, &pending) == .success) {
-            if (current == 1) return true; // already enabled
-        }
-    }
-
-    var activation_status: u32 = 0;
-    return set_fn(device, 1, &activation_status) == .success;
+    return setMigMode(nvml, gpu_index, true);
 }
 
 /// disable MIG mode on a GPU. returns true if MIG was disabled (or already disabled).
 /// requires a GPU reset to take effect.
 /// idempotent: calling on an already-disabled GPU is a no-op.
 pub fn disableMig(nvml: *detect.NvmlHandle, gpu_index: u32) bool {
+    return setMigMode(nvml, gpu_index, false);
+}
+
+fn setMigMode(nvml: *detect.NvmlHandle, gpu_index: u32, enable: bool) bool {
     const set_fn = nvml.device_set_mig_mode_fn orelse return false;
     const device = nvml.getDevice(gpu_index) orelse return false;
+    const desired: u32 = @intFromBool(enable);
 
-    // check if already disabled
     if (nvml.device_get_mig_mode_fn) |get_fn| {
         var current: u32 = 0;
         var pending: u32 = 0;
         if (get_fn(device, &current, &pending) == .success) {
-            if (current == 0) return true; // already disabled
+            if (current == desired) return true;
         }
     }
 
     var activation_status: u32 = 0;
-    return set_fn(device, 0, &activation_status) == .success;
+    return set_fn(device, desired, &activation_status) == .success;
 }
 
 /// create a GPU instance + compute instance pair for a given profile.
@@ -207,6 +198,7 @@ pub fn createInstance(nvml: *detect.NvmlHandle, gpu_index: u32, profile_id: u32)
 pub fn destroyInstance(nvml: *detect.NvmlHandle, gpu_index: u32, gi_id: u32) bool {
     const get_instances_fn = nvml.device_get_gpu_instances_fn orelse return false;
     const destroy_fn = nvml.device_destroy_gpu_instance_fn orelse return false;
+    const gi_info_fn = nvml.gpu_instance_get_info_fn orelse return false;
     const device = nvml.getDevice(gpu_index) orelse return false;
 
     // find the GPU instance handle by iterating all profiles
@@ -216,7 +208,6 @@ pub fn destroyInstance(nvml: *detect.NvmlHandle, gpu_index: u32, gi_id: u32) boo
         var gi_count: u32 = 0;
         if (get_instances_fn(device, pid, &gi_buf, &gi_count) != .success) continue;
 
-        const gi_info_fn = nvml.gpu_instance_get_info_fn orelse continue;
         const actual: u32 = @min(gi_count, max_instances);
         for (0..actual) |gi_idx| {
             var info: NvmlGpuInstanceInfo = undefined;
