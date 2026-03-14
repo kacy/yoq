@@ -10,6 +10,8 @@ const std = @import("std");
 const spec = @import("spec.zig");
 const orchestrator = @import("orchestrator.zig");
 const cli = @import("../lib/cli.zig");
+const checkpoint_mgr = @import("checkpoint.zig");
+const store = @import("../state/store.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -34,6 +36,10 @@ pub const TrainingJobState = enum {
             .stopped => "stopped",
         };
     }
+
+    pub fn fromLabel(s: []const u8) ?TrainingJobState {
+        return std.meta.stringToEnum(TrainingJobState, s);
+    }
 };
 
 pub const RankStatus = enum {
@@ -49,6 +55,9 @@ pub const TrainingController = struct {
     state: TrainingJobState,
     app_name: []const u8,
     rank_status: []RankStatus,
+    job_id: ?[]const u8 = null,
+    resume_path: ?[]const u8 = null,
+    restart_count: u32 = 0,
 
     pub fn init(alloc: std.mem.Allocator, job: *const spec.TrainingJob, app_name: []const u8) !TrainingController {
         const rank_status = try alloc.alloc(RankStatus, job.gpus);
@@ -65,6 +74,53 @@ pub const TrainingController = struct {
 
     pub fn deinit(self: *TrainingController) void {
         self.alloc.free(self.rank_status);
+        if (self.resume_path) |rp| self.alloc.free(rp);
+        if (self.job_id) |jid| self.alloc.free(jid);
+    }
+
+    /// generate a job ID from app name and job name.
+    fn generateJobId(self: *TrainingController) !void {
+        var id_buf: [256]u8 = undefined;
+        const ts = std.time.timestamp();
+        const id_str = std.fmt.bufPrint(&id_buf, "{s}-{s}-{d}", .{ self.app_name, self.job.name, ts }) catch return error.OutOfMemory;
+        self.job_id = try self.alloc.dupe(u8, id_str);
+    }
+
+    /// persist job state to database.
+    fn persistState(self: *TrainingController) void {
+        const jid = self.job_id orelse return;
+        const now = std.time.timestamp();
+        store.updateTrainingJobState(jid, self.state.label(), now) catch {};
+    }
+
+    /// create initial persistent record for this training job.
+    fn createPersistentRecord(self: *TrainingController) void {
+        const jid = self.job_id orelse return;
+        const now = std.time.timestamp();
+
+        const ckpt = self.job.checkpoint;
+        store.saveTrainingJob(.{
+            .id = jid,
+            .name = self.job.name,
+            .app_name = self.app_name,
+            .state = self.state.label(),
+            .image = self.job.image,
+            .gpus = @intCast(self.job.gpus),
+            .checkpoint_path = if (ckpt) |c| c.path else null,
+            .checkpoint_interval = if (ckpt) |c| @as(?i64, @intCast(c.interval_secs)) else null,
+            .checkpoint_keep = if (ckpt) |c| @as(?i64, @intCast(c.keep)) else null,
+            .restart_count = 0,
+            .created_at = now,
+            .updated_at = now,
+        }) catch {};
+    }
+
+    /// load resume path from the latest checkpoint if one exists.
+    fn loadResumeCheckpoint(self: *TrainingController) void {
+        const jid = self.job_id orelse return;
+        if (checkpoint_mgr.getLatestCheckpointPath(self.alloc, jid)) |path| {
+            self.resume_path = path;
+        }
     }
 
     /// start training job locally by launching one container per rank.
@@ -79,14 +135,20 @@ pub const TrainingController = struct {
     pub fn startLocal(self: *TrainingController) !void {
         self.state = .scheduling;
 
+        // create persistent record
+        if (self.job_id == null) self.generateJobId() catch {};
+        self.createPersistentRecord();
+
         // pull image
         writeErr("pulling {s}...\n", .{self.job.image});
         if (!orchestrator.ensureImageAvailable(self.alloc, self.job.image)) {
             self.state = .failed;
+            self.persistState();
             return error.ImagePullFailed;
         }
 
         self.state = .running;
+        self.persistState();
 
         // detect IB and GPUs for NCCL mesh env
         const gpu_mesh = @import("../gpu/mesh.zig");
@@ -165,6 +227,11 @@ pub const TrainingController = struct {
                 }
             } else |_| {}
 
+            // add checkpoint env vars if configured
+            if (self.job.checkpoint) |ckpt| {
+                checkpoint_mgr.buildCheckpointEnv(self.alloc, &rank_env, ckpt, self.resume_path) catch {};
+            }
+
             // generate hostname for this rank
             var hostname_buf: [128]u8 = undefined;
             const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ self.job.name, rank }) catch self.job.name;
@@ -192,11 +259,39 @@ pub const TrainingController = struct {
             }
         }
 
+        // sync checkpoints from filesystem after training completes
+        if (self.job.checkpoint) |ckpt| {
+            if (self.job_id) |jid| {
+                const new_ckpts = checkpoint_mgr.syncCheckpoints(self.alloc, jid, ckpt.path, ckpt.keep) catch 0;
+                if (new_ckpts > 0) {
+                    writeErr("recorded {d} checkpoint(s)\n", .{new_ckpts});
+                }
+            }
+        }
+
         if (failed_ranks > 0) {
+            // fault tolerance: auto-restart failed ranks if configured
+            if (self.job.fault_tolerance.auto_restart and self.restart_count < self.job.fault_tolerance.max_restarts) {
+                self.restart_count += 1;
+                if (self.job_id) |jid| {
+                    store.incrementTrainingJobRestarts(jid, std.time.timestamp()) catch {};
+                }
+                writeErr("{d}/{d} ranks failed, restarting (attempt {d}/{d})...\n", .{
+                    failed_ranks, self.job.gpus, self.restart_count, self.job.fault_tolerance.max_restarts,
+                });
+                // reload latest checkpoint for resume
+                self.loadResumeCheckpoint();
+                self.state = .running;
+                self.persistState();
+                return;
+            }
+
             self.state = .failed;
+            self.persistState();
             writeErr("{d}/{d} ranks failed\n", .{ failed_ranks, self.job.gpus });
         } else {
             self.state = .completed;
+            self.persistState();
         }
     }
 
@@ -259,23 +354,45 @@ pub const TrainingController = struct {
     }
 
     pub fn stop(self: *TrainingController) void {
+        // sync any final checkpoints
+        if (self.job.checkpoint) |ckpt| {
+            if (self.job_id) |jid| {
+                _ = checkpoint_mgr.syncCheckpoints(self.alloc, jid, ckpt.path, ckpt.keep) catch 0;
+            }
+        }
+
         for (self.rank_status) |*rs| {
             if (rs.* == .running) rs.* = .stopped;
         }
         self.state = .stopped;
+        self.persistState();
     }
 
     pub fn pause(self: *TrainingController) void {
         if (self.state != .running) return;
+
+        // sync checkpoints before pausing so we capture the latest
+        if (self.job.checkpoint) |ckpt| {
+            if (self.job_id) |jid| {
+                _ = checkpoint_mgr.syncCheckpoints(self.alloc, jid, ckpt.path, ckpt.keep) catch 0;
+            }
+        }
+
         for (self.rank_status) |*rs| {
             if (rs.* == .running) rs.* = .stopped;
         }
         self.state = .paused;
+        self.persistState();
     }
 
     pub fn resume_(self: *TrainingController) void {
         if (self.state != .paused) return;
+
+        // load latest checkpoint for resume
+        self.loadResumeCheckpoint();
+
         self.state = .pending;
+        self.persistState();
     }
 
     pub fn printStatus(self: *const TrainingController) void {
@@ -283,6 +400,7 @@ pub const TrainingController = struct {
         write("state:        {s}\n", .{self.state.label()});
         write("image:        {s}\n", .{self.job.image});
         write("gpus:         {d}\n", .{self.job.gpus});
+        write("restarts:     {d}/{d}\n", .{ self.restart_count, self.job.fault_tolerance.max_restarts });
 
         if (self.job.gpu_type) |gt| {
             write("gpu_type:     {s}\n", .{gt});
@@ -290,6 +408,37 @@ pub const TrainingController = struct {
         if (self.job.checkpoint) |ckpt| {
             write("checkpoint:   {s} (every {d}s, keep {d})\n", .{ ckpt.path, ckpt.interval_secs, ckpt.keep });
         }
+        if (self.resume_path) |rp| {
+            write("resume_from:  {s}\n", .{rp});
+        }
+
+        // show latest checkpoint from database
+        if (self.job_id) |jid| {
+            if (store.getLatestCheckpoint(self.alloc, jid) catch null) |ckpt_rec| {
+                defer ckpt_rec.deinit(self.alloc);
+                write("last_ckpt:    step {d} ({s})\n", .{ ckpt_rec.step, ckpt_rec.path });
+            }
+        }
+    }
+
+    /// load persistent state from a previously saved training job record.
+    /// used by pause/resume/stop commands to operate on existing jobs.
+    pub fn loadFromStore(self: *TrainingController) bool {
+        const rec = store.findTrainingJob(self.alloc, self.app_name, self.job.name) catch return false;
+        const r = rec orelse return false;
+
+        // take ownership of the id, free everything else
+        self.job_id = r.id;
+        self.restart_count = @intCast(r.restart_count);
+        self.state = TrainingJobState.fromLabel(r.state) orelse .pending;
+
+        self.alloc.free(r.name);
+        self.alloc.free(r.app_name);
+        self.alloc.free(r.state);
+        self.alloc.free(r.image);
+        if (r.checkpoint_path) |p| self.alloc.free(p);
+
+        return true;
     }
 };
 
@@ -392,6 +541,15 @@ test "training controller resume ignored when not paused" {
 
     ctrl.resume_();
     try std.testing.expectEqual(TrainingJobState.pending, ctrl.state);
+}
+
+test "training job state fromLabel round-trips with label" {
+    const states = [_]TrainingJobState{ .pending, .scheduling, .running, .paused, .completed, .failed, .stopped };
+    for (states) |s| {
+        try std.testing.expectEqual(s, TrainingJobState.fromLabel(s.label()).?);
+    }
+    try std.testing.expect(TrainingJobState.fromLabel("unknown") == null);
+    try std.testing.expect(TrainingJobState.fromLabel("") == null);
 }
 
 test "training controller rank_status matches gpus" {

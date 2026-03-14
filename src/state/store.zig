@@ -888,6 +888,228 @@ fn queryOneDeployment(alloc: std.mem.Allocator, comptime query: []const u8, args
     return deploymentRowToRecord(row);
 }
 
+// -- training job records --
+
+pub const TrainingJobRecord = struct {
+    id: []const u8,
+    name: []const u8,
+    app_name: []const u8,
+    state: []const u8,
+    image: []const u8,
+    gpus: i64,
+    checkpoint_path: ?[]const u8,
+    checkpoint_interval: ?i64,
+    checkpoint_keep: ?i64,
+    restart_count: i64,
+    created_at: i64,
+    updated_at: i64,
+
+    pub fn deinit(self: TrainingJobRecord, alloc: std.mem.Allocator) void {
+        alloc.free(self.id);
+        alloc.free(self.name);
+        alloc.free(self.app_name);
+        alloc.free(self.state);
+        alloc.free(self.image);
+        if (self.checkpoint_path) |p| alloc.free(p);
+    }
+};
+
+const TrainingJobRow = struct {
+    id: sqlite.Text,
+    name: sqlite.Text,
+    app_name: sqlite.Text,
+    state: sqlite.Text,
+    image: sqlite.Text,
+    gpus: i64,
+    checkpoint_path: ?sqlite.Text,
+    checkpoint_interval: ?i64,
+    checkpoint_keep: ?i64,
+    restart_count: i64,
+    created_at: i64,
+    updated_at: i64,
+};
+
+fn trainingJobRowToRecord(row: TrainingJobRow) TrainingJobRecord {
+    return .{
+        .id = row.id.data,
+        .name = row.name.data,
+        .app_name = row.app_name.data,
+        .state = row.state.data,
+        .image = row.image.data,
+        .gpus = row.gpus,
+        .checkpoint_path = if (row.checkpoint_path) |p| p.data else null,
+        .checkpoint_interval = row.checkpoint_interval,
+        .checkpoint_keep = row.checkpoint_keep,
+        .restart_count = row.restart_count,
+        .created_at = row.created_at,
+        .updated_at = row.updated_at,
+    };
+}
+
+const training_job_columns =
+    "id, name, app_name, state, image, gpus, checkpoint_path, checkpoint_interval, checkpoint_keep, restart_count, created_at, updated_at";
+
+pub fn saveTrainingJob(record: TrainingJobRecord) StoreError!void {
+    const db = try getDb();
+
+    db.exec(
+        "INSERT OR REPLACE INTO training_jobs (" ++ training_job_columns ++ ")" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{
+            record.id,
+            record.name,
+            record.app_name,
+            record.state,
+            record.image,
+            record.gpus,
+            record.checkpoint_path,
+            record.checkpoint_interval,
+            record.checkpoint_keep,
+            record.restart_count,
+            record.created_at,
+            record.updated_at,
+        },
+    ) catch return StoreError.WriteFailed;
+}
+
+pub fn updateTrainingJobState(id: []const u8, state: []const u8, now: i64) StoreError!void {
+    const db = try getDb();
+
+    db.exec(
+        "UPDATE training_jobs SET state = ?, updated_at = ? WHERE id = ?;",
+        .{},
+        .{ state, now, id },
+    ) catch return StoreError.WriteFailed;
+}
+
+pub fn incrementTrainingJobRestarts(id: []const u8, now: i64) StoreError!void {
+    const db = try getDb();
+
+    db.exec(
+        "UPDATE training_jobs SET restart_count = restart_count + 1, updated_at = ? WHERE id = ?;",
+        .{},
+        .{ now, id },
+    ) catch return StoreError.WriteFailed;
+}
+
+pub fn findTrainingJob(alloc: std.mem.Allocator, app_name: []const u8, name: []const u8) StoreError!?TrainingJobRecord {
+    const db = try getDb();
+
+    const row = (db.oneAlloc(
+        TrainingJobRow,
+        alloc,
+        "SELECT " ++ training_job_columns ++ " FROM training_jobs WHERE app_name = ? AND name = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{ app_name, name },
+    ) catch return StoreError.ReadFailed) orelse return null;
+
+    return trainingJobRowToRecord(row);
+}
+
+pub fn getTrainingJob(alloc: std.mem.Allocator, id: []const u8) StoreError!TrainingJobRecord {
+    const db = try getDb();
+
+    const row = (db.oneAlloc(
+        TrainingJobRow,
+        alloc,
+        "SELECT " ++ training_job_columns ++ " FROM training_jobs WHERE id = ?;",
+        .{},
+        .{id},
+    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+
+    return trainingJobRowToRecord(row);
+}
+
+pub const CheckpointRecord = struct {
+    id: i64,
+    job_id: []const u8,
+    step: i64,
+    path: []const u8,
+    size_bytes: i64,
+    created_at: i64,
+
+    pub fn deinit(self: CheckpointRecord, alloc: std.mem.Allocator) void {
+        alloc.free(self.job_id);
+        alloc.free(self.path);
+    }
+};
+
+const CheckpointRow = struct {
+    id: i64,
+    job_id: sqlite.Text,
+    step: i64,
+    path: sqlite.Text,
+    size_bytes: i64,
+    created_at: i64,
+};
+
+fn checkpointRowToRecord(row: CheckpointRow) CheckpointRecord {
+    return .{
+        .id = row.id,
+        .job_id = row.job_id.data,
+        .step = row.step,
+        .path = row.path.data,
+        .size_bytes = row.size_bytes,
+        .created_at = row.created_at,
+    };
+}
+
+pub fn saveCheckpoint(job_id: []const u8, step: i64, path: []const u8, size_bytes: i64, now: i64) StoreError!void {
+    const db = try getDb();
+
+    db.exec(
+        "INSERT INTO training_checkpoints (job_id, step, path, size_bytes, created_at)" ++
+            " VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ job_id, step, path, size_bytes, now },
+    ) catch return StoreError.WriteFailed;
+}
+
+pub fn getLatestCheckpoint(alloc: std.mem.Allocator, job_id: []const u8) StoreError!?CheckpointRecord {
+    const db = try getDb();
+
+    const row = (db.oneAlloc(
+        CheckpointRow,
+        alloc,
+        "SELECT id, job_id, step, path, size_bytes, created_at" ++
+            " FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{job_id},
+    ) catch return StoreError.ReadFailed) orelse return null;
+
+    return checkpointRowToRecord(row);
+}
+
+pub fn listCheckpoints(alloc: std.mem.Allocator, job_id: []const u8) StoreError!std.ArrayList(CheckpointRecord) {
+    const db = try getDb();
+
+    var records: std.ArrayList(CheckpointRecord) = .empty;
+
+    var stmt = db.prepare(
+        "SELECT id, job_id, step, path, size_bytes, created_at" ++
+            " FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(CheckpointRow, .{job_id}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        records.append(alloc, checkpointRowToRecord(row)) catch return StoreError.ReadFailed;
+    }
+
+    return records;
+}
+
+pub fn deleteCheckpoint(id: i64) StoreError!void {
+    const db = try getDb();
+
+    db.exec(
+        "DELETE FROM training_checkpoints WHERE id = ?;",
+        .{},
+        .{id},
+    ) catch return StoreError.WriteFailed;
+}
+
 // -- tests --
 
 test "container record defaults" {
