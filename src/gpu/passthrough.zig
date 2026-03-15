@@ -13,6 +13,10 @@ const log = @import("../lib/log.zig");
 const syscall_util = @import("../lib/syscall.zig");
 const posix = std.posix;
 const linux = std.os.linux;
+const detect_mod = @import("detect.zig");
+const SysfsContent = detect_mod.SysfsContent;
+const readSmallFile = detect_mod.readSysfsFile;
+pub const mps = @import("mps.zig");
 
 /// NVIDIA device major number
 const nvidia_major: u32 = 195;
@@ -221,6 +225,46 @@ fn appendGpuList(buf: *[4096]u8, start: usize, indices: []const u32) !usize {
     return pos;
 }
 
+/// apply NUMA affinity to a container cgroup by writing cpuset.mems and cpuset.cpus.
+///
+/// - cgroup_path: path to the container's cgroup directory
+/// - numa_node: NUMA node index from GpuInfo.numa_node; if < 0, no-op
+///
+/// both sysfs reads and cgroup writes are best-effort — failures are silently ignored
+/// so this works on systems without NUMA or without cgroup write access.
+pub fn applyNumaAffinity(cgroup_path: []const u8, numa_node: i32) void {
+    if (numa_node < 0) return;
+    const node: u32 = @intCast(numa_node);
+
+    // write cpuset.mems = numa_node number
+    var mems_buf: [16]u8 = undefined;
+    const mems_str = std.fmt.bufPrint(&mems_buf, "{d}", .{node}) catch return;
+    writeCgroupFile(cgroup_path, "cpuset.mems", mems_str);
+
+    // read the CPU list for this NUMA node from sysfs
+    var cpulist_path_buf: [128]u8 = undefined;
+    const cpulist_path = std.fmt.bufPrint(
+        &cpulist_path_buf,
+        "/sys/devices/system/node/node{d}/cpulist",
+        .{node},
+    ) catch return;
+
+    const content = readSmallFile(cpulist_path) orelse return;
+    const cpus = std.mem.trim(u8, content.slice(), " \t\n\r");
+    if (cpus.len == 0) return;
+
+    writeCgroupFile(cgroup_path, "cpuset.cpus", cpus);
+}
+
+/// write a value to a file inside a cgroup directory. best-effort; silent on failure.
+fn writeCgroupFile(cgroup_path: []const u8, filename: []const u8, value: []const u8) void {
+    var path_buf: [512]u8 = undefined;
+    const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cgroup_path, filename }) catch return;
+    const file = std.fs.cwd().openFile(file_path, .{ .mode = .write_only }) catch return;
+    defer file.close();
+    file.writeAll(value) catch {};
+}
+
 // -- tests --
 
 test "generateGpuEnv single GPU" {
@@ -265,4 +309,19 @@ test "setupGpuPassthrough no-op with empty indices" {
     var buf: [4096]u8 = undefined;
     const result = try setupGpuPassthrough("/nonexistent/path", &[_]u32{}, &buf);
     try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "applyNumaAffinity returns immediately for negative numa_node" {
+    // must not crash; cgroup_path is irrelevant because we return before touching it
+    applyNumaAffinity("/nonexistent/cgroup", -1);
+}
+
+test "applyNumaAffinity with valid node but nonexistent paths does not crash" {
+    // sysfs read will return null (no such node on CI), so we return before cgroup writes
+    applyNumaAffinity("/nonexistent/cgroup", 0);
+}
+
+test "writeCgroupFile on invalid path does not crash" {
+    // should silently fail on openFile without panicking
+    writeCgroupFile("/nonexistent/cgroup", "cpuset.mems", "0");
 }

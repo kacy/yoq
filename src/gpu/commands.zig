@@ -55,11 +55,11 @@ fn topo() void {
     if (gpu_result.count == 0) {
         write("no GPUs detected\n", .{});
     } else {
-        write("{s:<6} {s:<24} {s:<10} {s:<16} {s:<8} {s}\n", .{
-            "INDEX", "NAME", "VRAM", "PCI BDF", "NUMA", "NVLINK PEERS",
+        write("{s:<6} {s:<24} {s:<10} {s:<16} {s:<8} {s:<6} {s}\n", .{
+            "INDEX", "NAME", "VRAM", "PCI BDF", "NUMA", "SM", "NVLINK PEERS",
         });
-        write("{s:->6} {s:->24} {s:->10} {s:->16} {s:->8} {s:->12}\n", .{
-            "", "", "", "", "", "",
+        write("{s:->6} {s:->24} {s:->10} {s:->16} {s:->8} {s:->6} {s:->12}\n", .{
+            "", "", "", "", "", "", "",
         });
 
         for (0..gpu_result.count) |i| {
@@ -71,6 +71,12 @@ fn topo() void {
             var numa_buf: [8]u8 = undefined;
             const numa_str = if (g.numa_node >= 0)
                 std.fmt.bufPrint(&numa_buf, "{d}", .{g.numa_node}) catch "?"
+            else
+                "-";
+
+            var sm_buf: [8]u8 = undefined;
+            const sm_str = if (g.compute_capability != 0)
+                std.fmt.bufPrint(&sm_buf, "{d}", .{g.compute_capability}) catch "?"
             else
                 "-";
 
@@ -88,12 +94,13 @@ fn topo() void {
             }
             const peers_str = if (peers_len > 0) peers_buf[0..peers_len] else "-";
 
-            write("{d:<6} {s:<24} {s:<10} {s:<16} {s:<8} {s}\n", .{
+            write("{d:<6} {s:<24} {s:<10} {s:<16} {s:<8} {s:<6} {s}\n", .{
                 g.index,
                 g.getName(),
                 vram_str,
                 g.getPciBusId(),
                 numa_str,
+                sm_str,
                 peers_str,
             });
         }
@@ -131,6 +138,7 @@ fn topoJson(gpu_result: *detect.DetectResult, ib_result: *const mesh.IbDetectRes
         w.uintField("vram_mb", g.vram_mb);
         w.stringField("pci_bus_id", g.getPciBusId());
         w.intField("numa_node", g.numa_node);
+        w.uintField("compute_capability", g.compute_capability);
         w.uintField("nvlink_peers", g.nvlink_peer_count);
         w.endObject();
     }
