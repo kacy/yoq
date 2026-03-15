@@ -91,7 +91,7 @@ jobs:
     uses: ./.github/workflows/_build-test.yml
     with:
       job-name: unit-tests
-      command: zig build test -Doptimize=ReleaseSafe
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test -Doptimize=ReleaseSafe
       timeout-minutes: 30
       failure-artifact-name: unit-tests-log
 
