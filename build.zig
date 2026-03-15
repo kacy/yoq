@@ -146,6 +146,7 @@ pub fn build(b: *std.Build) void {
         "tests/privileged/test_cluster.zig",
         "tests/privileged/test_chaos.zig",
         "tests/privileged/test_security.zig",
+        "tests/privileged/test_security_audit.zig",
         "tests/privileged/test_stress.zig",
     };
 
@@ -313,6 +314,22 @@ pub fn build(b: *std.Build) void {
             addSqlite(mod, b, target, optimize);
             const comp = b.addTest(.{ .root_module = mod });
             const run = std.Build.Step.Run.create(b, "run fuzz-dns");
+            run.producer = comp;
+            run.addArtifactArg(comp);
+            run.has_side_effects = true;
+            step.dependOn(&run.step);
+        }
+
+        // fuzz-wireguard: lives in src/ so wireguard.zig's relative imports resolve
+        {
+            const step = b.step("fuzz-wireguard", "Fuzz WireGuard handshake");
+            const mod = b.createModule(.{
+                .root_source_file = b.path("src/test_fuzz_wireguard.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            const comp = b.addTest(.{ .root_module = mod });
+            const run = std.Build.Step.Run.create(b, "run fuzz-wireguard");
             run.producer = comp;
             run.addArtifactArg(comp);
             run.has_side_effects = true;
