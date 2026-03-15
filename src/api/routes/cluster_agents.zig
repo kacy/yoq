@@ -25,8 +25,13 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
 
     if (request.method == .POST) {
         if (std.mem.eql(u8, path, "/cluster/propose")) return handleClusterPropose(request, ctx);
+        if (std.mem.eql(u8, path, "/cluster/step-down")) return handleLeaderStepDown(ctx);
         if (std.mem.eql(u8, path, "/agents/register")) return handleAgentRegister(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/deploy")) return handleDeploy(alloc, request, ctx);
+    }
+
+    if (request.method == .GET) {
+        if (std.mem.eql(u8, path, "/cluster/version")) return handleClusterVersion();
     }
 
     if (path.len > "/agents/".len and std.mem.startsWith(u8, path, "/agents/")) {
@@ -61,6 +66,23 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
     }
 
     return null;
+}
+
+fn handleLeaderStepDown(ctx: RouteContext) Response {
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+
+    if (node.transferLeadership()) {
+        return .{ .status = .ok, .body = "{\"transferred\":true}", .allocated = false };
+    } else {
+        return .{ .status = .bad_request, .body = "{\"transferred\":false,\"error\":\"not leader\"}", .allocated = false };
+    }
+}
+
+fn handleClusterVersion() Response {
+    const cluster_node = @import("../../cluster/node.zig");
+    const version = cluster_node.Node.protocolVersion();
+    _ = version;
+    return .{ .status = .ok, .body = "{\"protocol_version\":1,\"software_version\":\"0.1.0\"}", .allocated = false };
 }
 
 fn handleClusterStatus(alloc: std.mem.Allocator, ctx: RouteContext) Response {

@@ -437,6 +437,45 @@ pub const Raft = struct {
         self.log.setSnapshotMeta(meta);
     }
 
+    /// graceful leader step-down for rolling upgrades.
+    ///
+    /// the leader voluntarily relinquishes leadership by:
+    /// 1. incrementing its term (forces a new election)
+    /// 2. transitioning to follower role
+    /// 3. clearing its vote (allows it to vote in the next election)
+    ///
+    /// this avoids the election timeout delay that would occur if the
+    /// leader were simply killed. the remaining nodes will start a new
+    /// election immediately when they receive the higher term.
+    ///
+    /// returns true if the node was leader and stepped down,
+    /// false if the node was not leader.
+    pub fn transferLeadership(self: *Raft) bool {
+        if (self.role != .leader) return false;
+
+        const new_term = self.log.getCurrentTerm() + 1;
+        logger.info("raft: leader {d} stepping down, advancing to term {d}", .{ self.id, new_term });
+
+        // send a final heartbeat with the new term so followers
+        // immediately know to start an election
+        self.stepDown(new_term);
+
+        self.actions.append(self.alloc, .{
+            .become_follower = .{ .leader_id = 0 },
+        }) catch |e| {
+            logger.warn("raft: failed to queue become_follower action during transfer: {}", .{e});
+        };
+
+        return true;
+    }
+
+    /// returns the protocol version for version negotiation during
+    /// rolling upgrades. nodes can check peer versions before
+    /// proceeding with an upgrade.
+    pub fn protocolVersion() u32 {
+        return 1;
+    }
+
     // -- internal --
 
     fn startElection(self: *Raft) void {
@@ -2489,4 +2528,66 @@ test "snapshot boundary: sendAppendEntries triggers install_snapshot" {
     }
     try testing.expect(found_snapshot);
     try testing.expect(!found_append_for_peer2);
+}
+
+test "transferLeadership steps down leader and advances term" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // become leader first
+    for (0..max_election_ticks + 1) |_| {
+        raft.tick();
+    }
+    const ea = raft.drainActions();
+    defer alloc.free(ea);
+    raft.handleRequestVoteReply(2, .{
+        .term = raft.currentTerm(),
+        .vote_granted = true,
+    });
+    const la = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+    try testing.expectEqual(Role.leader, raft.role);
+
+    const term_before = raft.currentTerm();
+
+    // transfer leadership
+    const transferred = raft.transferLeadership();
+    try testing.expect(transferred);
+    try testing.expectEqual(Role.follower, raft.role);
+    try testing.expect(raft.currentTerm() > term_before);
+
+    // should have a become_follower action
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+    var found_follower = false;
+    for (actions) |action| {
+        if (action == .become_follower) found_follower = true;
+    }
+    try testing.expect(found_follower);
+}
+
+test "transferLeadership returns false when not leader" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{2};
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // not leader — should return false
+    try testing.expectEqual(Role.follower, raft.role);
+    try testing.expect(!raft.transferLeadership());
+}
+
+test "protocolVersion returns 1" {
+    try testing.expectEqual(@as(u32, 1), Raft.protocolVersion());
 }

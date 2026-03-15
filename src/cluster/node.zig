@@ -295,6 +295,20 @@ pub const Node = struct {
         return self.raft.role == .leader;
     }
 
+    /// gracefully transfer leadership to another node.
+    /// used during rolling upgrades to avoid election timeout delays.
+    /// returns true if leadership was transferred, false if not leader.
+    pub fn transferLeadership(self: *Node) bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+        return self.raft.transferLeadership();
+    }
+
+    /// returns the raft protocol version for version negotiation.
+    pub fn protocolVersion() u32 {
+        return Raft.protocolVersion();
+    }
+
     pub fn currentTerm(self: *Node) types.Term {
         self.mu.lock();
         defer self.mu.unlock();
