@@ -45,7 +45,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "exec", .group = .runtime, .usage = "exec <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
     .{ .name = "status", .group = .runtime, .usage = "status [--verbose] [--server h:p]", .description = "show service status and resources", .handler = runtime_cmds.status },
     .{ .name = "metrics", .group = .runtime, .usage = "metrics [service] [--server h:p]", .description = "show per-service network metrics", .handler = runtime_cmds.metrics },
-    .{ .name = "gpu", .group = .runtime, .usage = "gpu <topo> [--json]", .description = "GPU topology and diagnostics", .handler = gpu_cmds.gpu },
+    .{ .name = "gpu", .group = .runtime, .usage = "gpu <topo|bench> [--json]", .description = "GPU topology, diagnostics, and benchmarking", .handler = gpu_cmds.gpu },
 
     .{ .name = "pull", .group = .image, .usage = "pull <image>", .description = "pull an image from a registry", .handler = image_cmds.pull },
     .{ .name = "push", .group = .image, .usage = "push <source> [target]", .description = "push an image to a registry", .handler = image_cmds.push },
