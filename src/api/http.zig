@@ -90,6 +90,8 @@ pub fn parseRequest(buf: []const u8) HttpError!?Request {
     const line = try parseRequestLine(buf);
     const uri_parts = splitUri(line.uri);
 
+    // request line must end before the header terminator
+    if (line.headers_start > header_end) return HttpError.BadRequest;
     const headers_raw = buf[line.headers_start..header_end];
     const content_length = findContentLength(headers_raw);
     if (content_length > max_body_bytes) return HttpError.BodyTooLarge;

@@ -723,7 +723,7 @@ fn encodeSnapshot(alloc: std.mem.Allocator, args: InstallSnapshotArgs) ![]u8 {
     return buf;
 }
 
-fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
+pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
     if (buf.len < 1) return error.InvalidMessage;
 
     const msg_type = buf[0];
