@@ -993,6 +993,16 @@ pub fn incrementTrainingJobRestarts(id: []const u8, now: i64) StoreError!void {
     ) catch return StoreError.WriteFailed;
 }
 
+pub fn updateTrainingJobGpus(id: []const u8, gpus: u32, now: i64) StoreError!void {
+    const db = try getDb();
+
+    db.exec(
+        "UPDATE training_jobs SET gpus = ?, updated_at = ? WHERE id = ?;",
+        .{},
+        .{ @as(i64, @intCast(gpus)), now, id },
+    ) catch return StoreError.WriteFailed;
+}
+
 pub fn findTrainingJob(alloc: std.mem.Allocator, app_name: []const u8, name: []const u8) StoreError!?TrainingJobRecord {
     const db = try getDb();
 
