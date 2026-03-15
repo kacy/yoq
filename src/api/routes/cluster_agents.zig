@@ -198,12 +198,14 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
             .gpu_vram_mb = if (gpu_vram_val) |v| @intCast(@max(0, v)) else 0,
         },
         std.time.timestamp(),
-        assigned_node_id,
-        wg_public_key,
-        overlay_ip_str,
-        role_str,
-        region_str,
-        labels_str,
+        .{
+            .node_id = assigned_node_id,
+            .wg_public_key = wg_public_key,
+            .overlay_ip = overlay_ip_str,
+            .role = role_str,
+            .region = region_str,
+            .labels = labels_str,
+        },
     ) catch return common.internalError();
 
     _ = node.propose(sql) catch {

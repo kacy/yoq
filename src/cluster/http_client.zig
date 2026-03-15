@@ -83,10 +83,11 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
         return HttpClientError.ConnectFailed;
     defer posix.close(fd);
 
-    // set timeouts
+    // set timeouts — send timeout must be set before connect() because
+    // Linux uses SO_SNDTIMEO as the connect timeout
     const timeout = posix.timeval{ .sec = 5, .usec = 0 };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     // connect
     const sock_addr = std.net.Address.initIp4(addr, port);
