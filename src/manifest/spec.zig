@@ -85,6 +85,26 @@ pub const GpuMeshSpec = struct {
     master_port: u16 = 29500,
 };
 
+/// alert thresholds for a service. when a metric exceeds its threshold
+/// for consecutive checks, a webhook notification is fired.
+///
+///   [service.web.alerts]
+///   cpu_percent = 90
+///   memory_percent = 85
+///   webhook = "https://hooks.slack.com/..."
+pub const AlertSpec = struct {
+    cpu_percent: ?f64 = null,
+    memory_percent: ?f64 = null,
+    restart_count: ?u32 = null,
+    latency_p99_ms: ?f64 = null,
+    error_rate_percent: ?f64 = null,
+    webhook: ?[]const u8 = null,
+
+    pub fn deinit(self: AlertSpec, alloc: std.mem.Allocator) void {
+        if (self.webhook) |w| alloc.free(w);
+    }
+};
+
 pub const CheckpointSpec = struct {
     path: []const u8,
     interval_secs: u64 = 1800,
@@ -161,6 +181,7 @@ pub const Service = struct {
     tls: ?TlsConfig = null,
     gpu: ?GpuSpec = null,
     gpu_mesh: ?GpuMeshSpec = null,
+    alerts: ?AlertSpec = null,
 
     pub fn deinit(self: Service, alloc: std.mem.Allocator) void {
         freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
@@ -170,6 +191,7 @@ pub const Service = struct {
         if (self.health_check) |hc| hc.deinit(alloc);
         if (self.tls) |tc| tc.deinit(alloc);
         if (self.gpu) |g| g.deinit(alloc);
+        if (self.alerts) |a| a.deinit(alloc);
     }
 };
 

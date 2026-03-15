@@ -60,6 +60,7 @@ comptime {
     _ = @import("manifest/validate.zig");
     _ = @import("manifest/cron_scheduler.zig");
     _ = @import("manifest/training.zig");
+    _ = @import("manifest/alerting.zig");
     _ = @import("dev/log_mux.zig");
     _ = @import("dev/watcher.zig");
     _ = @import("api/http.zig");
