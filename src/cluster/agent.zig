@@ -197,12 +197,32 @@ pub const Agent = struct {
             body,
             self.token,
         ) catch return AgentError.RegisterFailed;
-        defer resp.deinit(self.alloc);
 
+        // follow leader hint on not-leader error and retry once
         if (resp.status_code != 200) {
-            writeErr("registration failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
-            return AgentError.RegisterFailed;
+            if (extractJsonString(resp.body, "leader")) |leader_str| {
+                if (parseHostPort(leader_str)) |hp| {
+                    log.info("registration redirected to leader at {s}", .{leader_str});
+                    self.server_addr = hp.addr;
+                    self.server_port = hp.port;
+                    resp.deinit(self.alloc);
+                    resp = http_client.postWithAuth(
+                        self.alloc,
+                        self.server_addr,
+                        self.server_port,
+                        "/agents/register",
+                        body,
+                        self.token,
+                    ) catch return AgentError.RegisterFailed;
+                }
+            }
+            if (resp.status_code != 200) {
+                writeErr("registration failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+                resp.deinit(self.alloc);
+                return AgentError.RegisterFailed;
+            }
         }
+        defer resp.deinit(self.alloc);
 
         // parse agent ID from response: {"id":"xxxxxxxxxxxx","node_id":N,"overlay_ip":"10.40.0.N"}
         const id_str = extractJsonString(resp.body, "id") orelse {
@@ -411,33 +431,54 @@ pub const Agent = struct {
         ) catch return;
         defer resp.deinit(self.alloc);
 
-        // check if server says we're being drained
-        if (resp.status_code == 200) {
-            const status = extractJsonString(resp.body, "status");
-            if (status) |s| {
-                if (std.mem.eql(u8, s, "draining")) {
-                    writeErr("agent is being drained, stopping...\n", .{});
-                    self.running.store(false, .release);
+        // follow leader hint on error responses
+        if (resp.status_code != 200) {
+            if (extractJsonString(resp.body, "leader")) |leader_str| {
+                if (parseHostPort(leader_str)) |hp| {
+                    log.info("redirected to leader at {s}", .{leader_str});
+                    self.server_addr = hp.addr;
+                    self.server_port = hp.port;
                 }
             }
+            return;
+        }
 
-            // check if the peer list has changed. the server includes
-            // peers_count in the heartbeat response so the agent can
-            // detect membership changes without polling the full list
-            // every cycle.
-            if (self.node_id != null) {
-                if (extractJsonInt(resp.body, "peers_count")) |count| {
-                    const server_count: u32 = if (count >= 0 and count <= max_peers)
-                        @intCast(count)
-                    else
-                        0;
+        // check if server says we're being drained
+        const status = extractJsonString(resp.body, "status");
+        if (status) |s| {
+            if (std.mem.eql(u8, s, "draining")) {
+                writeErr("agent is being drained, stopping...\n", .{});
+                self.running.store(false, .release);
+            }
+        }
 
-                    if (server_count != self.known_peers_count) {
-                        log.info("peer count changed ({d} -> {d}), reconciling", .{
-                            self.known_peers_count, server_count,
-                        });
-                        self.reconcilePeers();
-                    }
+        // follow leader hint from successful heartbeat responses
+        if (extractJsonString(resp.body, "leader")) |leader_str| {
+            if (parseHostPort(leader_str)) |hp| {
+                if (!std.mem.eql(u8, &self.server_addr, &hp.addr) or self.server_port != hp.port) {
+                    log.info("leader moved to {s}, following", .{leader_str});
+                    self.server_addr = hp.addr;
+                    self.server_port = hp.port;
+                }
+            }
+        }
+
+        // check if the peer list has changed. the server includes
+        // peers_count in the heartbeat response so the agent can
+        // detect membership changes without polling the full list
+        // every cycle.
+        if (self.node_id != null) {
+            if (extractJsonInt(resp.body, "peers_count")) |count| {
+                const server_count: u32 = if (count >= 0 and count <= max_peers)
+                    @intCast(count)
+                else
+                    0;
+
+                if (server_count != self.known_peers_count) {
+                    log.info("peer count changed ({d} -> {d}), reconciling", .{
+                        self.known_peers_count, server_count,
+                    });
+                    self.reconcilePeers();
                 }
             }
         }
@@ -1083,6 +1124,14 @@ pub const Agent = struct {
         container.cleanupContainerDirs(container_id);
         store.remove(container_id) catch {};
     }
+
+    /// parse "host:port" into an IP address and port number.
+    fn parseHostPort(s: []const u8) ?struct { addr: [4]u8, port: u16 } {
+        const colon = std.mem.lastIndexOfScalar(u8, s, ':') orelse return null;
+        const addr = ip_mod.parseIp(s[0..colon]) orelse return null;
+        const port = std.fmt.parseInt(u16, s[colon + 1 ..], 10) catch return null;
+        return .{ .addr = addr, .port = port };
+    }
 };
 
 /// read system resources from /proc/meminfo and cpu count.
@@ -1391,4 +1440,19 @@ test "Agent gossip fields default to null" {
 
     try std.testing.expect(agent.gossip == null);
     try std.testing.expect(agent.gossip_transport == null);
+}
+
+test "parseHostPort parses valid address" {
+    const result = Agent.parseHostPort("10.0.0.1:7700");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, result.?.addr);
+    try std.testing.expectEqual(@as(u16, 7700), result.?.port);
+}
+
+test "parseHostPort returns null for invalid input" {
+    try std.testing.expect(Agent.parseHostPort("") == null);
+    try std.testing.expect(Agent.parseHostPort("no-colon") == null);
+    try std.testing.expect(Agent.parseHostPort("not-ip:7700") == null);
+    try std.testing.expect(Agent.parseHostPort("10.0.0.1:") == null);
+    try std.testing.expect(Agent.parseHostPort("10.0.0.1:99999") == null);
 }

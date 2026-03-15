@@ -56,6 +56,9 @@ fn freeEntries(alloc: std.mem.Allocator, entries: []const types.LogEntry) void {
 pub const NodeConfig = struct {
     id: NodeId,
     port: u16,
+    /// API port for the HTTP server. used to construct leader addresses.
+    /// convention: same port cluster-wide.
+    api_port: u16 = 7700,
     peers: []const PeerConfig,
     data_dir: []const u8,
     shared_key: ?[32]u8 = null,
@@ -101,6 +104,7 @@ pub const Node = struct {
     mu: std.Thread.Mutex,
     running: std.atomic.Value(bool),
     tick_count: u32,
+    leader_id: ?NodeId = null,
     tick_thread: ?std.Thread,
     recv_thread: ?std.Thread,
 
@@ -319,6 +323,29 @@ pub const Node = struct {
         self.mu.lock();
         defer self.mu.unlock();
         return self.raft.role;
+    }
+
+    pub fn leaderId(self: *Node) ?NodeId {
+        self.mu.lock();
+        defer self.mu.unlock();
+        return self.leader_id;
+    }
+
+    /// returns the leader's API address as "ip:port", or null if unknown.
+    /// writes into a caller-provided buffer to avoid allocation.
+    pub fn leaderAddrBuf(self: *Node, buf: []u8) ?[]const u8 {
+        self.mu.lock();
+        defer self.mu.unlock();
+        const lid = self.leader_id orelse return null;
+        if (lid == self.config.id) return null; // caller is the leader
+        for (self.config.peers) |p| {
+            if (p.id == lid) {
+                return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
+                    p.addr[0], p.addr[1], p.addr[2], p.addr[3], self.config.api_port,
+                }) catch null;
+            }
+        }
+        return null;
     }
 
     // -- internal threads --
@@ -865,8 +892,12 @@ pub const Node = struct {
                 .commit_entries => |commit| {
                     self.state_machine.applyUpTo(&self.log, self.alloc, commit.up_to);
                 },
-                .become_leader => {},
-                .become_follower => {},
+                .become_leader => {
+                    self.leader_id = self.config.id;
+                },
+                .become_follower => |f| {
+                    self.leader_id = f.leader_id;
+                },
                 .apply_snapshot => |snap| {
                     // restore the state machine from the received snapshot bytes.
                     // ownership: the data was heap-allocated by transport decode
@@ -1158,4 +1189,148 @@ test "handleMessage accepts append_entries only from authenticated leader" {
         } },
     });
     try std.testing.expectEqual(@as(types.Term, 1), node.currentTerm());
+}
+
+test "leader_id defaults to null" {
+    const alloc = std.testing.allocator;
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    try std.testing.expect(node.leaderId() == null);
+}
+
+test "become_leader sets leader_id to self" {
+    const alloc = std.testing.allocator;
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    // simulate become_leader
+    node.leader_id = node.config.id;
+    try std.testing.expectEqual(@as(?NodeId, 1), node.leaderId());
+}
+
+test "become_follower sets leader_id to provided id" {
+    const alloc = std.testing.allocator;
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    // simulate become_follower with leader_id = 2
+    node.leader_id = 2;
+    try std.testing.expectEqual(@as(?NodeId, 2), node.leaderId());
+}
+
+test "leaderAddrBuf returns null when leader is self" {
+    const alloc = std.testing.allocator;
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    node.leader_id = 1; // self
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(node.leaderAddrBuf(&buf) == null);
+}
+
+test "leaderAddrBuf returns null when no leader known" {
+    const alloc = std.testing.allocator;
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(node.leaderAddrBuf(&buf) == null);
+}
+
+test "leaderAddrBuf returns peer address when leader is a peer" {
+    const alloc = std.testing.allocator;
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var node = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .api_port = 7700,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer node.deinit();
+
+    node.leader_id = 2;
+    var buf: [64]u8 = undefined;
+    const addr = node.leaderAddrBuf(&buf);
+    try std.testing.expect(addr != null);
+    try std.testing.expectEqualStrings("10.0.0.2:7700", addr.?);
 }

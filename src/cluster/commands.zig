@@ -225,6 +225,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     var node = cluster_node.Node.init(alloc, .{
         .id = node_id,
         .port = raft_port,
+        .api_port = api_port,
         .peers = peers,
         .data_dir = data_dir,
         .shared_key = shared_key,
