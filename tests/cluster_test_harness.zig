@@ -400,6 +400,69 @@ pub const TestCluster = struct {
 
         return leader_id != null;
     }
+
+    /// kill a node with SIGKILL (not graceful). simulates a crash.
+    pub fn killNode(self: *TestCluster, node_id: u64) void {
+        const node = self.getNode(node_id) orelse return;
+        if (node.process) |*proc| {
+            // SIGKILL — no chance to clean up, simulates hard crash
+            _ = std.posix.kill(proc.id, 9) catch {};
+            _ = proc.wait() catch {};
+            node.process = null;
+        }
+    }
+
+    /// restart a killed node — kill (if running) then start with same config.
+    pub fn restartNode(self: *TestCluster, node_id: u64) !void {
+        const node = self.getNode(node_id) orelse return;
+        self.killNode(node_id);
+        try self.startNode(node);
+    }
+
+    /// wait until all running nodes agree on the same leader.
+    /// returns the agreed-upon leader node, or error on timeout.
+    pub fn waitForConvergence(self: *TestCluster, timeout_ms: u64) !*ClusterNode {
+        const start_time = std.time.milliTimestamp();
+
+        while (std.time.milliTimestamp() - start_time < timeout_ms) {
+            var leader_id: ?u64 = null;
+            var all_agree = true;
+            var checked: u32 = 0;
+
+            for (self.nodes.items) |*node| {
+                if (!node.isRunning()) continue;
+
+                const status = self.getNodeStatus(node) catch {
+                    all_agree = false;
+                    continue;
+                };
+                defer self.alloc.free(status);
+
+                checked += 1;
+
+                // extract leader_id from JSON — look for "leader_id":N
+                if (std.mem.indexOf(u8, status, "\"role\":\"leader\"")) |_| {
+                    if (leader_id == null) {
+                        leader_id = node.id;
+                    } else if (leader_id != node.id) {
+                        all_agree = false; // multiple leaders
+                    }
+                } else if (std.mem.indexOf(u8, status, "\"role\":\"follower\"")) |_| {
+                    // follower is fine — just make sure it knows about a leader
+                } else {
+                    all_agree = false; // candidate or unknown
+                }
+            }
+
+            if (all_agree and leader_id != null and checked > 0) {
+                return self.getNode(leader_id.?).?;
+            }
+
+            std.Thread.sleep(200 * std.time.ns_per_ms);
+        }
+
+        return error.ConvergenceTimeout;
+    }
 };
 
 fn tryConnect(port: u16) bool {
