@@ -89,6 +89,7 @@ pub const AgentRecord = struct {
     gpu_model: ?[]const u8 = null,
     gpu_vram_mb: ?i64 = null,
     rdma_capable: bool = false,
+    topology_zone: ?[]const u8 = null,
 
     pub fn deinit(self: AgentRecord, alloc: Allocator) void {
         alloc.free(self.id);
@@ -100,6 +101,7 @@ pub const AgentRecord = struct {
         if (self.region) |reg| alloc.free(reg);
         if (self.labels) |l| alloc.free(l);
         if (self.gpu_model) |m| alloc.free(m);
+        if (self.topology_zone) |tz| alloc.free(tz);
     }
 };
 

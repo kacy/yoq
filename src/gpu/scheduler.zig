@@ -77,11 +77,14 @@ pub fn scheduleGang(
 
     var rank: u32 = 0;
     var master_addr: []const u8 = "";
+    var preferred_zone: ?[]const u8 = null;
 
-    // greedily assign ranks to agents with the most free GPUs
+    // greedily assign ranks to agents with the most free GPUs,
+    // preferring agents in the same topology_zone as rank 0
     while (rank < gang.world_size) {
         var best_idx: ?usize = null;
         var best_free: i64 = -1;
+        var best_same_zone: bool = false;
 
         for (agents, 0..) |a, agent_idx| {
             if (!std.mem.eql(u8, a.status, "active")) continue;
@@ -94,9 +97,22 @@ pub fn scheduleGang(
             const free_gpu = a.gpu_count - gpu_alloc[agent_idx];
             if (free_gpu < gang.gpus_per_rank) continue;
 
-            if (free_gpu > best_free) {
+            const same_zone = if (preferred_zone) |pz|
+                if (a.topology_zone) |tz| std.mem.eql(u8, tz, pz) else false
+            else
+                false;
+
+            // prefer same-zone agents; among equal locality, prefer more free GPUs
+            const dominated = if (best_idx) |_|
+                (!best_same_zone and same_zone) or
+                    (same_zone == best_same_zone and free_gpu > best_free)
+            else
+                true;
+
+            if (dominated) {
                 best_free = free_gpu;
                 best_idx = agent_idx;
+                best_same_zone = same_zone;
             }
         }
 
@@ -108,6 +124,7 @@ pub fn scheduleGang(
 
         if (rank == 0) {
             master_addr = agents[idx].address;
+            preferred_zone = agents[idx].topology_zone;
         }
 
         const gpu_start: u32 = @intCast(gpu_alloc[idx]);
@@ -182,6 +199,12 @@ fn makeGpuAgent(id: []const u8, addr: []const u8, gpu_count: i64, gpu_used: i64)
         .gpu_count = gpu_count,
         .gpu_used = gpu_used,
     };
+}
+
+fn makeGpuAgentWithZone(id: []const u8, addr: []const u8, gpu_count: i64, gpu_used: i64, zone: ?[]const u8) AgentRecord {
+    var agent = makeGpuAgent(id, addr, gpu_count, gpu_used);
+    agent.topology_zone = zone;
+    return agent;
 }
 
 test "scheduleGang places all ranks" {
@@ -309,4 +332,58 @@ test "containsIgnoreCase" {
     try std.testing.expect(!containsIgnoreCase("NVIDIA V100", "A100"));
     try std.testing.expect(containsIgnoreCase("any", ""));
     try std.testing.expect(!containsIgnoreCase("", "abc"));
+}
+
+test "scheduleGang prefers same topology zone" {
+    const alloc = std.testing.allocator;
+
+    const agents = &[_]AgentRecord{
+        makeGpuAgentWithZone("node1", "10.0.0.1:9090", 4, 0, "rack-a"),
+        makeGpuAgentWithZone("node2", "10.0.0.2:9090", 4, 0, "rack-b"),
+        makeGpuAgentWithZone("node3", "10.0.0.3:9090", 4, 0, "rack-a"),
+    };
+
+    const gang = GangSpec{ .world_size = 8, .gpus_per_rank = 1 };
+    const placements = (try scheduleGang(alloc, gang, agents)) orelse return error.TestUnexpectedResult;
+    defer alloc.free(placements);
+
+    // rank 0 goes to node1 (rack-a, most free). rack-a nodes should be preferred.
+    // node1 has 4 GPUs, node3 has 4 GPUs (both rack-a = 8 total), node2 has 4 (rack-b)
+    // so all 8 ranks should fit on rack-a nodes (node1 + node3)
+    for (placements) |p| {
+        try std.testing.expect(
+            std.mem.eql(u8, p.agent_id, "node1") or std.mem.eql(u8, p.agent_id, "node3"),
+        );
+    }
+}
+
+test "scheduleGang works without topology zones" {
+    const alloc = std.testing.allocator;
+
+    const agents = &[_]AgentRecord{
+        makeGpuAgentWithZone("node1", "10.0.0.1:9090", 4, 0, null),
+        makeGpuAgentWithZone("node2", "10.0.0.2:9090", 4, 0, null),
+    };
+
+    const gang = GangSpec{ .world_size = 8, .gpus_per_rank = 1 };
+    const placements = (try scheduleGang(alloc, gang, agents)) orelse return error.TestUnexpectedResult;
+    defer alloc.free(placements);
+
+    try std.testing.expectEqual(@as(usize, 8), placements.len);
+}
+
+test "scheduleGang falls back to other zones when needed" {
+    const alloc = std.testing.allocator;
+
+    const agents = &[_]AgentRecord{
+        makeGpuAgentWithZone("node1", "10.0.0.1:9090", 2, 0, "rack-a"),
+        makeGpuAgentWithZone("node2", "10.0.0.2:9090", 4, 0, "rack-b"),
+    };
+
+    // need 6 GPUs: 2 from rack-a + 4 from rack-b
+    const gang = GangSpec{ .world_size = 6, .gpus_per_rank = 1 };
+    const placements = (try scheduleGang(alloc, gang, agents)) orelse return error.TestUnexpectedResult;
+    defer alloc.free(placements);
+
+    try std.testing.expectEqual(@as(usize, 6), placements.len);
 }
