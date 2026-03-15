@@ -1,4 +1,4 @@
-.PHONY: build run test test-integration test-privileged clean clean-all bpf install fmt loc cache-sqlite
+.PHONY: build run test test-integration test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor
 
 build:
 	zig build -Doptimize=ReleaseSafe
@@ -35,3 +35,29 @@ fmt:
 
 loc:
 	@find src -name '*.zig' | xargs wc -l | tail -1
+
+# --- release helpers ---
+
+CURRENT_VERSION := $(shell sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
+MAJOR := $(word 1,$(subst ., ,$(CURRENT_VERSION)))
+MINOR := $(word 2,$(subst ., ,$(CURRENT_VERSION)))
+PATCH := $(word 3,$(subst ., ,$(CURRENT_VERSION)))
+
+define do_release
+	@echo "releasing v$(1) (was $(CURRENT_VERSION))"
+	sed -i 's/\.version = "$(CURRENT_VERSION)"/.version = "$(1)"/' build.zig.zon
+	sed -i 's/"version":"$(CURRENT_VERSION)"/"version":"$(1)"/g' src/api/routes.zig
+	sed -i 's/"version", "$(CURRENT_VERSION)"/"version", "$(1)"/' src/lib/command_registry.zig
+	sed -i 's/yoq $(CURRENT_VERSION)/yoq $(1)/' src/lib/command_registry.zig
+	sed -i 's/^## unreleased/## unreleased\n\n### added\n\n### fixed\n\n### removed\n\n## $(1)/' CHANGELOG.md
+	git add build.zig.zon src/api/routes.zig src/lib/command_registry.zig CHANGELOG.md
+	git commit -m "chore: release v$(1)"
+	git tag "v$(1)"
+	git push origin main "v$(1)"
+endef
+
+release-patch:
+	$(call do_release,$(MAJOR).$(MINOR).$(shell echo $$(($(PATCH)+1))))
+
+release-minor:
+	$(call do_release,$(MAJOR).$(shell echo $$(($(MINOR)+1))).0)

@@ -33,7 +33,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
             return .{ .status = .ok, .body = "{\"status\":\"ok\"}", .allocated = false };
         }
         if (std.mem.eql(u8, request.path_only, "/version")) {
-            return .{ .status = .ok, .body = "{\"version\":\"0.0.1\"}", .allocated = false };
+            return .{ .status = .ok, .body = "{\"version\":\"0.1.0\"}", .allocated = false };
         }
     }
 
@@ -69,7 +69,7 @@ test "dispatch version" {
     const resp = dispatch(req, std.testing.allocator);
 
     try std.testing.expectEqual(http.StatusCode.ok, resp.status);
-    try std.testing.expectEqualStrings("{\"version\":\"0.0.1\"}", resp.body);
+    try std.testing.expectEqualStrings("{\"version\":\"0.1.0\"}", resp.body);
 }
 
 test "dispatch not found" {
