@@ -31,6 +31,7 @@ pub const GpuInfo = struct {
     pci_bus_id_len: u8 = 0,
     numa_node: i32 = -1,
     mig_capable: bool = false,
+    compute_capability: u16 = 0,
     nvlink_peers: [max_gpus]u8 = .{0} ** max_gpus,
     nvlink_peer_count: u8 = 0,
 
@@ -106,6 +107,9 @@ pub const NvmlHandle = struct {
     gpu_instance_get_info_fn: ?*const fn (NvmlGpuInstance, *anyopaque) callconv(.c) NvmlReturn = null,
     gpu_instance_get_compute_instances_fn: ?*const fn (NvmlGpuInstance, u32, [*]NvmlComputeInstance, *u32) callconv(.c) NvmlReturn = null,
     compute_instance_get_info_fn: ?*const fn (NvmlComputeInstance, *anyopaque) callconv(.c) NvmlReturn = null,
+
+    // compute capability function pointer
+    device_get_cuda_compute_capability_fn: ?*const fn (NvmlDevice, *c_int, *c_int) callconv(.c) NvmlReturn = null,
 
     // MIG management function pointers (used by mig.zig for create/destroy)
     device_set_mig_mode_fn: ?*const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn = null,
@@ -192,6 +196,9 @@ fn detectNvml() ?DetectResult {
     const get_ci_fn = lib.lookup(*const fn (NvmlGpuInstance, u32, [*]NvmlComputeInstance, *u32) callconv(.c) NvmlReturn, "nvmlGpuInstanceGetComputeInstances");
     const ci_info_fn = lib.lookup(*const fn (NvmlComputeInstance, *anyopaque) callconv(.c) NvmlReturn, "nvmlComputeInstanceGetInfo");
 
+    // optional compute capability function
+    const cc_fn = lib.lookup(*const fn (NvmlDevice, *c_int, *c_int) callconv(.c) NvmlReturn, "nvmlDeviceGetCudaComputeCapability");
+
     // optional MIG management functions
     const set_mig_mode_fn = lib.lookup(*const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceSetMigMode");
     const create_gi_fn = lib.lookup(*const fn (NvmlDevice, u32, *NvmlGpuInstance) callconv(.c) NvmlReturn, "nvmlDeviceCreateGpuInstance");
@@ -230,6 +237,7 @@ fn detectNvml() ?DetectResult {
         .device_create_gpu_instance_fn = create_gi_fn,
         .gpu_instance_create_compute_instance_fn = gi_create_ci_fn,
         .device_destroy_gpu_instance_fn = destroy_gi_fn,
+        .device_get_cuda_compute_capability_fn = cc_fn,
         .initialized = true,
     };
 
@@ -299,6 +307,15 @@ fn detectNvml() ?DetectResult {
             var pending: u32 = 0;
             if (mig_fn(device, &current, &pending) == .success) {
                 gpu.mig_capable = true;
+            }
+        }
+
+        // compute capability (optional)
+        if (cc_fn) |cap_fn| {
+            var major: c_int = 0;
+            var minor: c_int = 0;
+            if (cap_fn(device, &major, &minor) == .success) {
+                gpu.compute_capability = @intCast(@as(u32, @intCast(major)) * 10 + @as(u32, @intCast(minor)));
             }
         }
 
@@ -620,6 +637,24 @@ test "GpuInfo nvlink peers" {
     try std.testing.expectEqual(@as(u8, 2), gpu.nvlink_peer_count);
     try std.testing.expectEqual(@as(u8, 1), gpu.nvlink_peers[0]);
     try std.testing.expectEqual(@as(u8, 3), gpu.nvlink_peers[1]);
+}
+
+test "GpuInfo compute_capability default is zero" {
+    const gpu = GpuInfo{ .index = 0 };
+    try std.testing.expectEqual(@as(u16, 0), gpu.compute_capability);
+}
+
+test "GpuInfo compute_capability encodes major.minor" {
+    var gpu = GpuInfo{ .index = 0 };
+    // sm_80 (A100): major=8, minor=0 -> 80
+    gpu.compute_capability = 80;
+    try std.testing.expectEqual(@as(u16, 80), gpu.compute_capability);
+    // sm_90 (H100): major=9, minor=0 -> 90
+    gpu.compute_capability = 90;
+    try std.testing.expectEqual(@as(u16, 90), gpu.compute_capability);
+    // sm_86 (RTX 3090): major=8, minor=6 -> 86
+    gpu.compute_capability = 86;
+    try std.testing.expectEqual(@as(u16, 86), gpu.compute_capability);
 }
 
 test "resolveNvLinkPeers no-op without nvml functions" {

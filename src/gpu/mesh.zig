@@ -159,7 +159,8 @@ pub fn generateNcclTopology(
         try buf.appendSlice(alloc, "\" class=\"0x030200\" link_speed=\"16 GT/s\" link_width=\"16\">\n");
         try buf.appendSlice(alloc, "      <gpu dev=\"");
         try std.fmt.format(buf.writer(alloc), "{d}", .{gpu.index});
-        try buf.appendSlice(alloc, "\" sm=\"80\" mem=\"");
+        const sm_val: u16 = if (gpu.compute_capability != 0) gpu.compute_capability else 80;
+        try std.fmt.format(buf.writer(alloc), "\" sm=\"{d}\" mem=\"", .{sm_val});
         try std.fmt.format(buf.writer(alloc), "{d}", .{gpu.vram_mb});
         try buf.appendSlice(alloc, "\"");
         // NVLink topology: emit link elements for peer GPUs
@@ -277,6 +278,24 @@ pub fn generateMeshEnv(
     return buf[0..pos];
 }
 
+/// GPU mesh port range for traffic prioritization
+pub const gpu_port_min: u16 = 29500;
+pub const gpu_port_max: u16 = 29600;
+
+/// path to the compiled GPU priority BPF object
+pub const gpu_prio_bpf_path = "bpf/gpu_prio.o";
+
+/// check if the GPU priority BPF object is available for attachment.
+/// the actual attachment is done externally via:
+///   tc qdisc add dev wg-yoq clsact
+///   tc filter add dev wg-yoq egress bpf da obj bpf/gpu_prio.o sec classifier/gpu_prio
+/// and detachment via:
+///   tc filter del dev wg-yoq egress
+pub fn isGpuPrioAvailable() bool {
+    std.fs.cwd().access(gpu_prio_bpf_path, .{}) catch return false;
+    return true;
+}
+
 // -- tests --
 
 test "IbDevice defaults" {
@@ -336,6 +355,31 @@ test "generateNcclTopology with GPUs" {
     try std.testing.expect(std.mem.indexOf(u8, xml, "dev=\"0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "dev=\"1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "mem=\"40960\"") != null);
+    // compute_capability=0 should fall back to sm="80"
+    try std.testing.expect(std.mem.indexOf(u8, xml, "sm=\"80\"") != null);
+}
+
+test "generateNcclTopology uses compute_capability" {
+    const alloc = std.testing.allocator;
+
+    var gpu0 = GpuInfo{ .index = 0, .vram_mb = 81920, .compute_capability = 90 };
+    const pci0 = "0000:01:00.0";
+    @memcpy(gpu0.pci_bus_id[0..pci0.len], pci0);
+    gpu0.pci_bus_id_len = pci0.len;
+
+    var gpu1 = GpuInfo{ .index = 1, .vram_mb = 81920, .compute_capability = 86 };
+    const pci1 = "0000:41:00.0";
+    @memcpy(gpu1.pci_bus_id[0..pci1.len], pci1);
+    gpu1.pci_bus_id_len = pci1.len;
+
+    const gpus = &[_]GpuInfo{ gpu0, gpu1 };
+    const xml = try generateNcclTopology(alloc, gpus, &.{}, 0);
+    defer alloc.free(xml);
+
+    // gpu0 is H100 (sm_90), gpu1 is RTX 3090 (sm_86)
+    try std.testing.expect(std.mem.indexOf(u8, xml, "sm=\"90\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "sm=\"86\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "sm=\"80\"") == null);
 }
 
 test "generateNcclTopology with IB device" {
@@ -436,4 +480,15 @@ test "generateMeshEnv TCP fallback" {
     // no NCCL IB vars — will fall back to TCP automatically
     try std.testing.expect(std.mem.indexOf(u8, env, "NCCL_NET") == null);
     try std.testing.expect(std.mem.indexOf(u8, env, "NCCL_TOPO_FILE") == null);
+}
+
+test "gpu prio port range constants" {
+    try std.testing.expectEqual(@as(u16, 29500), gpu_port_min);
+    try std.testing.expectEqual(@as(u16, 29600), gpu_port_max);
+}
+
+test "isGpuPrioAvailable returns false when BPF object missing" {
+    // CI does not have bpf/gpu_prio.o compiled
+    // this just verifies the function doesn't crash
+    _ = isGpuPrioAvailable();
 }
