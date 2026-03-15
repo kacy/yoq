@@ -599,7 +599,7 @@ pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
 
 pub fn train(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const action = args.next() orelse {
-        writeErr("usage: yoq train <start|status|stop|pause|resume|logs> <name>\n", .{});
+        writeErr("usage: yoq train <start|status|stop|pause|resume|scale|logs> <name>\n", .{});
         return ManifestCommandsError.InvalidArgument;
     };
 
@@ -609,9 +609,10 @@ pub fn train(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     if (std.mem.eql(u8, action, "pause")) return trainPause(args, alloc);
     if (std.mem.eql(u8, action, "resume")) return trainResume(args, alloc);
     if (std.mem.eql(u8, action, "logs")) return trainLogs(args, alloc);
+    if (std.mem.eql(u8, action, "scale")) return trainScale(args, alloc);
 
     writeErr("unknown train action: {s}\n", .{action});
-    writeErr("usage: yoq train <start|status|stop|pause|resume|logs> <name>\n", .{});
+    writeErr("usage: yoq train <start|status|stop|pause|resume|scale|logs> <name>\n", .{});
     return ManifestCommandsError.InvalidArgument;
 }
 
@@ -921,6 +922,122 @@ fn trainResume(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         writeErr("training job {s} scheduled on cluster\n", .{ctx.name});
     } else {
         writeErr("training job {s} finished with state: {s}\n", .{ ctx.name, ctx.ctrl.state.label() });
+    }
+}
+
+fn trainScale(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    var job_name: ?[]const u8 = null;
+    var new_gpus: ?u32 = null;
+    var server_addr: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--gpus")) {
+            const gpu_str = args.next() orelse {
+                writeErr("--gpus requires a number\n", .{});
+                return ManifestCommandsError.InvalidArgument;
+            };
+            new_gpus = std.fmt.parseInt(u32, gpu_str, 10) catch {
+                writeErr("invalid GPU count: {s}\n", .{gpu_str});
+                return ManifestCommandsError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                return ManifestCommandsError.InvalidArgument;
+            };
+        } else {
+            job_name = arg;
+        }
+    }
+
+    const name = job_name orelse {
+        writeErr("usage: yoq train scale <name> --gpus <count> [--server host:port]\n", .{});
+        return ManifestCommandsError.InvalidArgument;
+    };
+
+    const gpus = new_gpus orelse {
+        writeErr("--gpus is required for scale\n", .{});
+        writeErr("usage: yoq train scale {s} --gpus <count>\n", .{name});
+        return ManifestCommandsError.InvalidArgument;
+    };
+
+    if (gpus == 0) {
+        writeErr("GPU count must be > 0\n", .{});
+        return ManifestCommandsError.InvalidArgument;
+    }
+
+    const training = @import("training.zig");
+    const store_mod = @import("../state/store.zig");
+
+    // load manifest to find job
+    var manifest = manifest_loader.load(alloc, manifest_loader.default_filename) catch |err| {
+        writeErr("failed to load manifest ({})\n", .{err});
+        return ManifestCommandsError.ManifestLoadFailed;
+    };
+    defer manifest.deinit();
+
+    const job = manifest.trainingJobByName(name) orelse {
+        writeErr("unknown training job: {s}\n", .{name});
+        return ManifestCommandsError.UnknownService;
+    };
+
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const app_name = std.fs.path.basename(cwd);
+
+    var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
+        writeErr("failed to initialize training controller: {}\n", .{err});
+        return ManifestCommandsError.DeploymentFailed;
+    };
+    defer ctrl.deinit();
+
+    if (!ctrl.loadFromStore()) {
+        writeErr("no active training job found for {s} (start it first)\n", .{name});
+        return ManifestCommandsError.DeploymentFailed;
+    }
+
+    if (ctrl.state != .running and ctrl.state != .paused) {
+        writeErr("training job {s} is {s}, cannot scale (must be running or paused)\n", .{ name, ctrl.state.label() });
+        return ManifestCommandsError.DeploymentFailed;
+    }
+
+    // pause the job (checkpoint + stop ranks)
+    if (ctrl.state == .running) {
+        writeErr("pausing {s} for rescaling...\n", .{name});
+        ctrl.pause();
+    }
+
+    // update GPU count in the store
+    if (ctrl.job_id) |jid| {
+        store_mod.updateTrainingJobGpus(jid, gpus, std.time.timestamp()) catch {
+            writeErr("failed to update GPU count in store\n", .{});
+            return ManifestCommandsError.StoreError;
+        };
+    }
+
+    writeErr("scaled {s} from {d} to {d} GPUs\n", .{ name, job.gpus, gpus });
+
+    // resume with new configuration
+    ctrl.resume_();
+    writeErr("resuming {s} with {d} GPUs...\n", .{ name, gpus });
+
+    if (server_addr) |addr| {
+        const server = cli.parseServerAddr(addr);
+        ctrl.startCluster(server.ip, server.port) catch {
+            return ManifestCommandsError.DeploymentFailed;
+        };
+    } else {
+        ctrl.startLocal() catch {
+            return ManifestCommandsError.DeploymentFailed;
+        };
+    }
+
+    if (ctrl.state == .completed) {
+        writeErr("training job {s} completed successfully\n", .{name});
+    } else if (ctrl.state == .running) {
+        writeErr("training job {s} rescheduled on cluster\n", .{name});
+    } else {
+        writeErr("training job {s} finished with state: {s}\n", .{ name, ctrl.state.label() });
     }
 }
 

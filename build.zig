@@ -257,11 +257,13 @@ pub fn build(b: *std.Build) void {
     //   zig build fuzz-manifest     — run manifest parser fuzz target
     //   zig build fuzz-dns          — run DNS parser fuzz target
     //   zig build fuzz-cluster-msg  — run cluster message fuzz target
+    //   zig build fuzz-gossip-msg   — run gossip message fuzz target
 
     {
         const fuzz_simple = [_]struct { name: []const u8, file: []const u8, mod_name: []const u8, mod_path: []const u8 }{
             .{ .name = "fuzz-http", .file = "tests/fuzz/fuzz_http.zig", .mod_name = "http", .mod_path = "src/api/http.zig" },
             .{ .name = "fuzz-cluster-msg", .file = "tests/fuzz/fuzz_cluster_msg.zig", .mod_name = "transport", .mod_path = "src/cluster/transport.zig" },
+            .{ .name = "fuzz-gossip-msg", .file = "tests/fuzz/fuzz_gossip_msg.zig", .mod_name = "gossip", .mod_path = "src/cluster/gossip.zig" },
         };
 
         for (fuzz_simple) |ft| {

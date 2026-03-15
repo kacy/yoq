@@ -8,6 +8,14 @@ format is based on [keep a changelog](https://keepachangelog.com/).
 
 ### added
 
+### fixed
+
+### removed
+
+## 0.1.0
+
+### added
+
 - **volumes:** volume abstraction with local, host, NFS, and parallel filesystem drivers
 - **GPU mesh (phases 1-3):** GPU detection, passthrough, health monitoring, MIG management
 - **gang scheduling:** distributed training workload scheduling across GPU nodes

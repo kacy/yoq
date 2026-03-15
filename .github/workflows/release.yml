@@ -202,9 +202,9 @@ jobs:
             echo
             echo "## changelog"
             if [ -f CHANGELOG.md ]; then
-              awk '
-                BEGIN { printing = 0; seen = 0 }
-                tolower($0) == "## unreleased" { printing = 1; seen = 1 }
+              awk -v ver="${VERSION}" '
+                $0 == "## " ver { printing = 1; next }
+                printing && /^## / { exit }
                 printing { print }
               ' CHANGELOG.md
             else

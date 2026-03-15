@@ -62,7 +62,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "run-worker", .group = .build_manifest, .usage = "run-worker [-f manifest.toml] <name>", .description = "run a one-shot worker task", .handler = manifest_cmds.runWorker },
     .{ .name = "rollback", .group = .build_manifest, .usage = "rollback <service>", .description = "rollback to previous deployment", .handler = manifest_cmds.rollback },
     .{ .name = "history", .group = .build_manifest, .usage = "history <service>", .description = "show deployment history", .handler = manifest_cmds.history },
-    .{ .name = "train", .group = .build_manifest, .usage = "train <start|status|stop|pause|resume|logs> <name>", .description = "manage training jobs", .handler = manifest_cmds.train },
+    .{ .name = "train", .group = .build_manifest, .usage = "train <start|status|stop|pause|resume|scale|logs> <name>", .description = "manage training jobs", .handler = manifest_cmds.train },
 
     .{ .name = "serve", .group = .cluster, .usage = "serve [--port PORT]", .description = "start the API server (default: 7700)", .handler = cluster_cmds.serve },
     .{ .name = "init-server", .group = .cluster, .usage = "init-server [opts]", .description = "start a cluster server node", .handler = cluster_cmds.initServer },
@@ -174,11 +174,11 @@ fn versionHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
         const json_out = @import("json_output.zig");
         var w = json_out.JsonWriter{};
         w.beginObject();
-        w.stringField("version", "0.0.1");
+        w.stringField("version", "0.1.0");
         w.endObject();
         w.flush();
     } else {
-        write("yoq 0.0.1\n", .{});
+        write("yoq 0.1.0\n", .{});
     }
 }
 

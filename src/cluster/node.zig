@@ -48,6 +48,11 @@ const NodeId = types.NodeId;
 const LogIndex = types.LogIndex;
 const SnapshotMeta = types.SnapshotMeta;
 
+fn freeEntries(alloc: std.mem.Allocator, entries: []const types.LogEntry) void {
+    for (entries) |e| alloc.free(e.data);
+    if (entries.len > 0) alloc.free(entries);
+}
+
 pub const NodeConfig = struct {
     id: NodeId,
     port: u16,
@@ -309,11 +314,12 @@ pub const Node = struct {
             // query DB state outside the lock for leader maintenance tasks.
             // the snapshots may be slightly stale by the time we acquire the
             // lock, but all proposals are idempotent so staleness is safe.
-            var health_agents: ?[]agent_registry.AgentRecord = null;
-            var reconcile_agents: ?[]agent_registry.AgentRecord = null;
+            var agents: ?[]agent_registry.AgentRecord = null;
             var reconcile_orphans: ?[]agent_registry.Assignment = null;
-            var cleanup_agents: ?[]agent_registry.AgentRecord = null;
             var heartbeat_batch: ?[]const u8 = null;
+            var do_health = false;
+            var do_reconcile = false;
+            var do_cleanup = false;
 
             {
                 self.mu.lock();
@@ -322,34 +328,25 @@ pub const Node = struct {
                 self.mu.unlock();
 
                 if (is_leader) {
-                    if (tick % 300 == 0)
-                        health_agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
-                    if (tick % 100 == 0) {
+                    do_health = tick % 300 == 0;
+                    do_reconcile = tick % 100 == 0;
+                    do_cleanup = tick % 3600 == 0;
+                    if (do_health or do_reconcile or do_cleanup)
+                        agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
+                    if (do_reconcile)
                         reconcile_orphans = agent_registry.getOrphanedAssignments(self.alloc, &self.state_machine.db) catch null;
-                        reconcile_agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
-                    }
-                    if (tick % 3600 == 0)
-                        cleanup_agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
                     if (tick % 20 == 0)
                         heartbeat_batch = self.heartbeat_batcher.flush(self.alloc) catch null;
                 }
             }
             defer {
-                if (health_agents) |agents| {
-                    for (agents) |a| a.deinit(self.alloc);
-                    self.alloc.free(agents);
-                }
-                if (reconcile_agents) |agents| {
-                    for (agents) |a| a.deinit(self.alloc);
-                    self.alloc.free(agents);
+                if (agents) |a| {
+                    for (a) |rec| rec.deinit(self.alloc);
+                    self.alloc.free(a);
                 }
                 if (reconcile_orphans) |orphans| {
                     for (orphans) |a| a.deinit(self.alloc);
                     self.alloc.free(orphans);
-                }
-                if (cleanup_agents) |agents| {
-                    for (agents) |a| a.deinit(self.alloc);
-                    self.alloc.free(agents);
                 }
                 if (heartbeat_batch) |batch| self.alloc.free(batch);
             }
@@ -363,10 +360,12 @@ pub const Node = struct {
 
                 self.tick_count +%= 1;
                 if (self.raft.role == .leader) {
-                    if (health_agents) |agents| self.checkAgentHealth(agents);
-                    if (reconcile_orphans) |orphans|
-                        self.reconcileOrphanedAssignments(orphans, reconcile_agents orelse &.{});
-                    if (cleanup_agents) |agents| self.cleanupDeadAgents(agents);
+                    if (agents) |a| {
+                        if (do_health) self.checkAgentHealth(a);
+                        if (do_reconcile)
+                            self.reconcileOrphanedAssignments(reconcile_orphans orelse &.{}, a);
+                        if (do_cleanup) self.cleanupDeadAgents(a);
+                    }
                     if (heartbeat_batch) |batch| {
                         _ = self.raft.propose(batch) catch |e| {
                             logger.warn("failed to propose heartbeat batch: {}", .{e});
@@ -593,16 +592,13 @@ pub const Node = struct {
                 }
             },
             .append_entries => |args| {
+                defer freeEntries(self.alloc, args.entries);
                 const peer_id = sender_id orelse {
                     logger.warn("append_entries from unknown address, dropping", .{});
-                    for (args.entries) |e| self.alloc.free(e.data);
-                    if (args.entries.len > 0) self.alloc.free(args.entries);
                     return;
                 };
                 if (args.leader_id != peer_id) {
                     logger.warn("append_entries claimed leader {} from authenticated peer {}, dropping", .{ args.leader_id, peer_id });
-                    for (args.entries) |e| self.alloc.free(e.data);
-                    if (args.entries.len > 0) self.alloc.free(args.entries);
                     return;
                 }
 
@@ -612,9 +608,6 @@ pub const Node = struct {
                 }) catch |e| {
                     logger.warn("failed to send append entries reply to node {}: {}", .{ peer_id, e });
                 };
-                // free entries data — guard against &.{} (comptime empty slice)
-                for (args.entries) |e| self.alloc.free(e.data);
-                if (args.entries.len > 0) self.alloc.free(args.entries);
             },
             .append_entries_reply => |reply| {
                 if (sender_id) |id| {
@@ -626,12 +619,12 @@ pub const Node = struct {
             .install_snapshot => |args| {
                 const peer_id = sender_id orelse {
                     logger.warn("install_snapshot from unknown address, dropping", .{});
-                    self.alloc.free(@constCast(args.data));
+                    self.alloc.free(args.data);
                     return;
                 };
                 if (args.leader_id != peer_id) {
                     logger.warn("install_snapshot claimed leader {} from authenticated peer {}, dropping", .{ args.leader_id, peer_id });
-                    self.alloc.free(@constCast(args.data));
+                    self.alloc.free(args.data);
                     return;
                 }
 
@@ -648,7 +641,7 @@ pub const Node = struct {
                 // apply_snapshot action will free it during processActions().
                 // if rejected (stale term, old snapshot), free it here.
                 if (self.raft.commit_index == commit_before) {
-                    self.alloc.free(@constCast(args.data));
+                    self.alloc.free(args.data);
                 }
             },
             .install_snapshot_reply => |reply| {
@@ -672,25 +665,7 @@ pub const Node = struct {
 
         const actions = g.drainActions();
         defer g.freeActions(actions);
-
-        for (actions) |action| {
-            switch (action) {
-                .send_message => |msg| {
-                    var encode_buf: [512]u8 = undefined;
-                    const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
-                    self.transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
-                },
-                .member_dead => |member_event| {
-                    if (self.raft.role != .leader) continue;
-                    self.handleGossipMemberDead(member_event.id);
-                },
-                .member_alive => |member_event| {
-                    if (self.raft.role != .leader) continue;
-                    self.handleGossipMemberAlive(member_event.id);
-                },
-                .member_suspect => {},
-            }
-        }
+        self.processGossipActions(actions);
 
         // sync gossip membership from agents table every ~10s (100ms × 100 ticks ÷ 5 = 20 gossip ticks)
         if (self.tick_count % 100 == 0 and self.raft.role == .leader) {
@@ -729,22 +704,33 @@ pub const Node = struct {
 
         for (msgs[0..msg_count]) |msg| {
             switch (msg) {
-                .ping => |payload| g.handlePing(payload) catch {},
-                .ping_ack => |payload| g.handlePingAck(payload) catch {},
-                .ping_req => |payload| g.handlePingReq(payload) catch {},
+                .ping => |payload| g.handlePing(payload) catch |e| {
+                    logger.warn("gossip: handlePing failed: {}", .{e});
+                },
+                .ping_ack => |payload| g.handlePingAck(payload) catch |e| {
+                    logger.warn("gossip: handlePingAck failed: {}", .{e});
+                },
+                .ping_req => |payload| g.handlePingReq(payload) catch |e| {
+                    logger.warn("gossip: handlePingReq failed: {}", .{e});
+                },
             }
         }
 
         // process all actions generated by the batch
         const actions = g.drainActions();
         defer g.freeActions(actions);
+        self.processGossipActions(actions);
+    }
 
+    /// dispatch gossip actions: encode and send messages, handle membership events.
+    /// shared by tickGossip and receiveGossipMessages to avoid duplication.
+    fn processGossipActions(self: *Node, actions: []gossip_mod.Action) void {
         for (actions) |action| {
             switch (action) {
-                .send_message => |send| {
+                .send_message => |msg| {
                     var encode_buf: [512]u8 = undefined;
-                    const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
-                    self.transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
+                    const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
+                    self.transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
                 },
                 .member_dead => |member_event| {
                     if (self.raft.role == .leader) self.handleGossipMemberDead(member_event.id);
@@ -873,7 +859,7 @@ pub const Node = struct {
                     // (via alloc.dupe in the install_snapshot decode path) and
                     // passed through raft's handleInstallSnapshot into this action.
                     // we free it here after restoring.
-                    defer self.alloc.free(@constCast(snap.data));
+                    defer self.alloc.free(snap.data);
 
                     const meta = self.state_machine.restoreFromBytes(snap.data) catch |e| {
                         logger.warn("snapshot: failed to restore from bytes: {}", .{e});
@@ -935,9 +921,7 @@ pub const Node = struct {
                     self.transport.send(ae.target, .{ .append_entries = ae.args }) catch |e| {
                         logger.warn("failed to send append entries to node {}: {}", .{ ae.target, e });
                     };
-                    // free duplicated entries
-                    for (ae.args.entries) |e| self.alloc.free(e.data);
-                    if (ae.args.entries.len > 0) self.alloc.free(ae.args.entries);
+                    freeEntries(self.alloc, ae.args.entries);
                 },
                 .send_request_vote_reply => |rv| {
                     self.transport.send(rv.target, .{ .request_vote_reply = rv.reply }) catch |e| {

@@ -1061,13 +1061,13 @@ test "encode buffer too small returns error" {
 
 test "encode/decode round-trip: install snapshot" {
     const alloc = std.testing.allocator;
-    const snapshot_data = "this is a fake snapshot payload with some data in it";
+    var snapshot_data = "this is a fake snapshot payload with some data in it".*;
     const args = InstallSnapshotArgs{
         .term = 7,
         .leader_id = 1,
         .last_included_index = 100,
         .last_included_term = 5,
-        .data = snapshot_data,
+        .data = &snapshot_data,
     };
 
     // use encodeSnapshot since install_snapshot needs dynamic allocation
@@ -1082,7 +1082,7 @@ test "encode/decode round-trip: install snapshot" {
     try std.testing.expectEqual(args.leader_id, decoded.install_snapshot.leader_id);
     try std.testing.expectEqual(args.last_included_index, decoded.install_snapshot.last_included_index);
     try std.testing.expectEqual(args.last_included_term, decoded.install_snapshot.last_included_term);
-    try std.testing.expectEqualStrings(snapshot_data, decoded.install_snapshot.data);
+    try std.testing.expectEqualStrings(&snapshot_data, decoded.install_snapshot.data);
 }
 
 test "encode/decode round-trip: install snapshot reply" {
@@ -1103,7 +1103,7 @@ test "encode/decode round-trip: install snapshot with empty data" {
         .leader_id = 2,
         .last_included_index = 50,
         .last_included_term = 2,
-        .data = "",
+        .data = @constCast(""),
     };
 
     const encoded = try encodeSnapshot(alloc, args);

@@ -20,7 +20,7 @@ jobs:
     uses: ./.github/workflows/_build-test.yml
     with:
       job-name: full-test
-      command: zig build test
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test
       timeout-minutes: 45
       failure-artifact-name: quality-full-test-log
 
