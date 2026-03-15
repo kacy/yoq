@@ -241,6 +241,41 @@ pub fn build(b: *std.Build) void {
 
     cache_sqlite_step.dependOn(&write_hash.step);
 
+    // -- fuzz tests --
+    //
+    // fuzz targets for attack-surface-exposed parsers. each target uses
+    // std.testing.fuzz() which runs corpus inputs in normal test mode
+    // and continuous fuzzing with `zig build fuzz-<name> -- --fuzz`.
+    //
+    // usage:
+    //   zig build fuzz-gossip-msg   — run gossip message fuzz target
+
+    {
+        const fuzz_simple = [_]struct { name: []const u8, file: []const u8, mod_name: []const u8, mod_path: []const u8 }{
+            .{ .name = "fuzz-gossip-msg", .file = "tests/fuzz/fuzz_gossip_msg.zig", .mod_name = "gossip", .mod_path = "src/cluster/gossip.zig" },
+        };
+
+        for (fuzz_simple) |ft| {
+            const step = b.step(ft.name, b.fmt("Fuzz {s}", .{ft.name}));
+            const mod = b.createModule(.{
+                .root_source_file = b.path(ft.file),
+                .target = target,
+                .optimize = optimize,
+            });
+            mod.addImport(ft.mod_name, b.createModule(.{
+                .root_source_file = b.path(ft.mod_path),
+                .target = target,
+                .optimize = optimize,
+            }));
+            const comp = b.addTest(.{ .root_module = mod });
+            const run = std.Build.Step.Run.create(b, b.fmt("run {s}", .{ft.name}));
+            run.producer = comp;
+            run.addArtifactArg(comp);
+            run.has_side_effects = true;
+            step.dependOn(&run.step);
+        }
+    }
+
     // -- BPF compilation (optional) --
     //
     // compiles BPF C programs in bpf/ and generates Zig bytecode arrays
