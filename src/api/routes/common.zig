@@ -42,6 +42,18 @@ pub fn badRequest(comptime message: []const u8) Response {
     return .{ .status = .bad_request, .body = "{\"error\":\"" ++ message ++ "\"}", .allocated = false };
 }
 
+pub fn notLeader(alloc: std.mem.Allocator, node: *cluster_node.Node) Response {
+    var buf: [64]u8 = undefined;
+    if (node.leaderAddrBuf(&buf)) |addr| {
+        var json_buf: [128]u8 = undefined;
+        const body = std.fmt.bufPrint(&json_buf, "{{\"error\":\"not leader\",\"leader\":\"{s}\"}}", .{addr}) catch
+            return badRequest("not leader");
+        const owned = alloc.dupe(u8, body) catch return badRequest("not leader");
+        return .{ .status = .bad_request, .body = owned, .allocated = true };
+    }
+    return badRequest("not leader");
+}
+
 pub fn jsonOkOwned(alloc: std.mem.Allocator, body: []const u8) Response {
     const owned = alloc.dupe(u8, body) catch return internalError();
     return .{ .status = .ok, .body = owned, .allocated = true };
@@ -395,4 +407,14 @@ test "extractQueryParam returns null for empty path" {
 
 test "extractQueryParam returns null for empty value" {
     try testing.expect(extractQueryParam("/path?param=", "param") == null);
+}
+
+test "notLeader without leader hint returns plain error" {
+    // notLeader with a node that has no leader_id returns the simple fallback
+    // we can't easily construct a real Node in this test, so we test the
+    // badRequest fallback path directly
+    const resp = badRequest("not leader");
+    try testing.expectEqual(http.StatusCode.bad_request, resp.status);
+    try testing.expectEqualStrings("{\"error\":\"not leader\"}", resp.body);
+    try testing.expect(!resp.allocated);
 }

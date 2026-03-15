@@ -24,8 +24,8 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
     }
 
     if (request.method == .POST) {
-        if (std.mem.eql(u8, path, "/cluster/propose")) return handleClusterPropose(request, ctx);
-        if (std.mem.eql(u8, path, "/cluster/step-down")) return handleLeaderStepDown(ctx);
+        if (std.mem.eql(u8, path, "/cluster/propose")) return handleClusterPropose(alloc, request, ctx);
+        if (std.mem.eql(u8, path, "/cluster/step-down")) return handleLeaderStepDown(alloc, ctx);
         if (std.mem.eql(u8, path, "/agents/register")) return handleAgentRegister(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/deploy")) return handleDeploy(alloc, request, ctx);
     }
@@ -56,7 +56,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
 
         if (common.matchSubpath(rest, "/drain")) |id| {
             if (request.method != .POST) return common.methodNotAllowed();
-            return handleAgentDrain(id, ctx);
+            return handleAgentDrain(alloc, id, ctx);
         }
 
         if (common.matchAssignmentStatusPath(rest)) |ids| {
@@ -68,12 +68,21 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
     return null;
 }
 
-fn handleLeaderStepDown(ctx: RouteContext) Response {
+fn handleLeaderStepDown(alloc: std.mem.Allocator, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
 
     if (node.transferLeadership()) {
         return .{ .status = .ok, .body = "{\"transferred\":true}", .allocated = false };
     } else {
+        var buf: [64]u8 = undefined;
+        if (node.leaderAddrBuf(&buf)) |addr| {
+            var json_buf: [128]u8 = undefined;
+            const body = std.fmt.bufPrint(&json_buf, "{{\"transferred\":false,\"error\":\"not leader\",\"leader\":\"{s}\"}}", .{addr}) catch
+                return .{ .status = .bad_request, .body = "{\"transferred\":false,\"error\":\"not leader\"}", .allocated = false };
+            const owned = alloc.dupe(u8, body) catch
+                return .{ .status = .bad_request, .body = "{\"transferred\":false,\"error\":\"not leader\"}", .allocated = false };
+            return .{ .status = .bad_request, .body = owned, .allocated = true };
+        }
         return .{ .status = .bad_request, .body = "{\"transferred\":false,\"error\":\"not leader\"}", .allocated = false };
     }
 }
@@ -107,18 +116,29 @@ fn handleClusterStatus(alloc: std.mem.Allocator, ctx: RouteContext) Response {
     writer.writeByte('"') catch return common.internalError();
     std.fmt.format(writer, ",\"term\":{d}", .{node.currentTerm()}) catch return common.internalError();
     std.fmt.format(writer, ",\"peers\":{d}", .{node.config.peers.len}) catch return common.internalError();
+
+    if (node.leaderId()) |lid| {
+        std.fmt.format(writer, ",\"leader_id\":{d}", .{lid}) catch return common.internalError();
+        var addr_buf: [64]u8 = undefined;
+        if (node.leaderAddrBuf(&addr_buf)) |addr| {
+            writer.writeAll(",\"leader\":\"") catch return common.internalError();
+            writer.writeAll(addr) catch return common.internalError();
+            writer.writeByte('"') catch return common.internalError();
+        }
+    }
+
     writer.writeByte('}') catch return common.internalError();
 
     const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
-fn handleClusterPropose(request: http.Request, ctx: RouteContext) Response {
+fn handleClusterPropose(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
     _ = node.propose(request.body) catch {
-        return .{ .status = .bad_request, .body = "{\"error\":\"not leader\"}", .allocated = false };
+        return common.notLeader(alloc, node);
     };
 
     return .{ .status = .ok, .body = "{\"status\":\"proposed\"}", .allocated = false };
@@ -231,7 +251,7 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
     ) catch return common.internalError();
 
     _ = node.propose(sql) catch {
-        return .{ .status = .internal_server_error, .body = "{\"error\":\"not leader\"}", .allocated = false };
+        return common.notLeader(alloc, node);
     };
 
     var json_buf: std.ArrayList(u8) = .empty;
@@ -363,7 +383,15 @@ fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []c
         const writer = json_buf.writer(alloc);
         writer.writeAll("{\"status\":\"") catch return common.internalError();
         writer.writeAll(a.status) catch return common.internalError();
-        writer.print("\",\"peers_count\":{d}}}", .{peers_count}) catch return common.internalError();
+        writer.print("\",\"peers_count\":{d}", .{peers_count}) catch return common.internalError();
+        // append leader hint so agents can follow leadership changes
+        var addr_buf: [64]u8 = undefined;
+        if (node.leaderAddrBuf(&addr_buf)) |addr| {
+            writer.writeAll(",\"leader\":\"") catch return common.internalError();
+            writer.writeAll(addr) catch return common.internalError();
+            writer.writeByte('"') catch return common.internalError();
+        }
+        writer.writeByte('}') catch return common.internalError();
         const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
         return .{ .status = .ok, .body = body, .allocated = true };
     }
@@ -473,28 +501,27 @@ fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Request,
     const sql = agent_registry.updateAssignmentStatusSql(&sql_buf, assignment_id, status) catch return common.internalError();
 
     _ = node.propose(sql) catch {
-        return .{ .status = .internal_server_error, .body = "{\"error\":\"not leader\"}", .allocated = false };
+        return common.notLeader(alloc, node);
     };
 
     const body = std.fmt.allocPrint(alloc, "{{\"ok\":true,\"status\":\"{s}\"}}", .{status}) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
-fn handleAgentDrain(id: []const u8, ctx: RouteContext) Response {
+fn handleAgentDrain(alloc: std.mem.Allocator, id: []const u8, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
 
     var sql_buf: [256]u8 = undefined;
     const sql = agent_registry.drainSql(&sql_buf, id) catch return common.internalError();
 
     _ = node.propose(sql) catch {
-        return .{ .status = .internal_server_error, .body = "{\"error\":\"not leader\"}", .allocated = false };
+        return common.notLeader(alloc, node);
     };
 
     return .{ .status = .ok, .body = "{\"status\":\"draining\"}", .allocated = false };
 }
 
 fn handleUpdateLabels(alloc: std.mem.Allocator, request: http.Request, id: []const u8, ctx: RouteContext) Response {
-    _ = alloc;
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
@@ -504,7 +531,7 @@ fn handleUpdateLabels(alloc: std.mem.Allocator, request: http.Request, id: []con
     const sql = agent_registry.updateLabelsSql(&sql_buf, id, labels) catch return common.internalError();
 
     _ = node.propose(sql) catch {
-        return .{ .status = .internal_server_error, .body = "{\"error\":\"not leader\"}", .allocated = false };
+        return common.notLeader(alloc, node);
     };
 
     return .{ .status = .ok, .body = "{\"ok\":true}", .allocated = false };
@@ -627,8 +654,7 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
                     };
 
                     _ = node.propose(sql) catch {
-                        gang_ok = false;
-                        break;
+                        return common.notLeader(alloc, node);
                     };
                 }
 
@@ -678,8 +704,7 @@ fn handleDeploy(alloc: std.mem.Allocator, request: http.Request, ctx: RouteConte
                 };
 
                 _ = node.propose(sql) catch {
-                    failed += 1;
-                    continue;
+                    return common.notLeader(alloc, node);
                 };
                 placed += 1;
             } else {

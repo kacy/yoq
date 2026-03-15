@@ -95,11 +95,14 @@ agents are worker nodes that run containers. they don't participate in consensus
 yoq join 10.0.0.1 --token $TOKEN
 ```
 
+the agent can point at any server — it doesn't have to be the leader. if the agent hits a non-leader server, the server responds with the current leader's address and the agent automatically redirects. this means you can use a load balancer or any server IP for `yoq join`.
+
 this does several things:
 1. registers the agent with the cluster via `POST /agents/register`
-2. generates a WireGuard keypair and exchanges it with the server
-3. creates a `wg-yoq` interface for the overlay network
-4. starts heartbeating every 5 seconds
+2. if the server is not the leader, follows the `"leader"` hint in the error response and retries
+3. generates a WireGuard keypair and exchanges it with the server
+4. creates a `wg-yoq` interface for the overlay network
+5. starts heartbeating every 5 seconds
 
 each agent gets an IP from the `10.40.0.0/16` overlay and a `/24` subnet for its containers (`10.42.{node_id}.0/24`). WireGuard encrypts all cross-node traffic automatically.
 
@@ -167,7 +170,7 @@ yoq init-server \
 - `--gossip-fanout 5` — each gossip round, each node forwards to 5 peers (default auto-scales with log2(N), but explicit values give you control)
 - `--gossip-suspicion-multiplier 6` — wait longer before declaring a node dead (reduces false positives in larger clusters)
 
-for deploying agents at this scale, use a script:
+for deploying agents at this scale, use a script. agents auto-discover the leader, so you can point them at any server:
 
 ```bash
 #!/bin/bash
@@ -299,6 +302,31 @@ yoq nodes
 
 shows all servers and agents, their status (online, offline, draining), resource usage, and which node is the Raft leader.
 
+you can also query any server's API directly:
+
+```
+curl http://10.0.0.1:7700/cluster/status \
+  -H "Authorization: Bearer $API_TOKEN"
+```
+
+the response includes `leader_id` and, on non-leader nodes, a `leader` field with the leader's API address:
+
+```json
+{"cluster":true,"id":2,"role":"follower","term":3,"peers":2,"leader_id":1,"leader":"10.0.0.1:7700"}
+```
+
+### leader discovery and write forwarding
+
+only the Raft leader can accept write operations (deploy, register, drain, etc.). when a write request hits a non-leader server, the API returns a `400` with the leader's address:
+
+```json
+{"error":"not leader","leader":"10.0.0.1:7700"}
+```
+
+clients can use the `leader` field to redirect their request. agents do this automatically — both during registration and on every heartbeat, agents check for leader hints and update their target server address. this means agents tolerate leadership changes without manual reconfiguration.
+
+for the CLI, point `--server` at any cluster member. if you get a `"not leader"` error, the response tells you where to send writes.
+
 ### draining a node
 
 before taking a node offline for maintenance:
@@ -333,7 +361,7 @@ curl -X POST http://10.0.0.1:7700/cluster/step-down \
   -H "Authorization: Bearer $API_TOKEN"
 ```
 
-this gracefully transfers leadership to another server. the old leader can then be drained and upgraded.
+this gracefully transfers leadership to another server. if the node is not the leader, the response includes a `"leader"` field pointing to the current leader. the old leader can then be drained and upgraded. agents automatically follow the new leader via heartbeat responses.
 
 ---
 
@@ -354,6 +382,7 @@ this gracefully transfers leadership to another server. the old leader can then 
 - check that the agent process is still running
 - verify WireGuard interface `wg-yoq` is up: `ip link show wg-yoq`
 - check server logs for heartbeat timeouts
+- if the leader changed, the agent should follow automatically — check agent logs for "leader moved to" or "redirected to leader" messages
 
 **containers not getting scheduled**
 - run `yoq nodes` to check agent capacity (CPU, memory)
