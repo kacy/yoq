@@ -75,7 +75,7 @@ pub const InstallSnapshotArgs = struct {
     leader_id: NodeId,
     last_included_index: LogIndex,
     last_included_term: Term,
-    data: []const u8,
+    data: []u8,
 };
 
 pub const InstallSnapshotReply = struct {
@@ -135,12 +135,13 @@ test "snapshot meta creation" {
 }
 
 test "install snapshot args" {
+    var snap_data = "snapshot bytes".*;
     const args = InstallSnapshotArgs{
         .term = 7,
         .leader_id = 1,
         .last_included_index = 50,
         .last_included_term = 4,
-        .data = "snapshot bytes",
+        .data = &snap_data,
     };
     try std.testing.expectEqual(@as(Term, 7), args.term);
     try std.testing.expectEqual(@as(NodeId, 1), args.leader_id);

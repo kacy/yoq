@@ -815,7 +815,7 @@ pub const Gossip = struct {
                     .ip = data[pos + 8 ..][0..4].*,
                     .port = @as(u16, data[pos + 12]) | (@as(u16, data[pos + 13]) << 8),
                 },
-                .state = @enumFromInt(data[pos + 14]),
+                .state = std.meta.intToEnum(MemberState, data[pos + 14]) catch return .{},
                 .incarnation = readU64(data[pos + 15 ..]),
             };
             pos += 23;
@@ -2025,4 +2025,23 @@ test "null config matches default behavior" {
     try std.testing.expectEqual(@as(u32, 5), g.probe_interval);
     try std.testing.expectEqual(@as(u32, 20), g.suspect_timeout);
     try std.testing.expectEqual(@as(u32, 100), g.dead_timeout);
+}
+
+test "decodeUpdates rejects invalid MemberState byte" {
+    // build a ping message with 1 update that has an invalid state byte (0xFF)
+    var buf: [512]u8 = undefined;
+    buf[0] = 0x10; // ping
+    @memset(buf[1..9], 0); // from = 0
+    @memset(buf[9..17], 0); // sequence = 0
+    buf[17] = 1; // count = 1
+    @memset(buf[18..32], 0); // id + addr fields
+    buf[32] = 0xFF; // invalid state byte (valid: 0, 1, 2)
+    @memset(buf[33..41], 0); // incarnation
+
+    const msg = Gossip.decode(std.testing.allocator, buf[0..41]) catch return;
+    // if decode succeeds, the update should have been rejected (empty updates)
+    switch (msg) {
+        .ping => |p| try std.testing.expectEqual(@as(u8, 0), p.updates.len),
+        else => unreachable,
+    }
 }
