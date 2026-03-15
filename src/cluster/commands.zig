@@ -19,6 +19,8 @@ const dns = @import("../network/dns.zig");
 const orchestrator = @import("../manifest/orchestrator.zig");
 const paths = @import("../lib/paths.zig");
 
+const log = @import("../lib/log.zig");
+
 const write = cli.write;
 const writeErr = cli.writeErr;
 const readApiToken = cli.readApiToken;
@@ -40,6 +42,7 @@ const ClusterCommandsError = error{
 
 pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var port: u16 = 7700;
+    var log_fmt: log.LogFormat = .json;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -51,8 +54,23 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
                 writeErr("invalid port: {s}\n", .{port_str});
                 return ClusterCommandsError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--log-format")) {
+            const fmt_str = args.next() orelse {
+                writeErr("--log-format requires text or json\n", .{});
+                return ClusterCommandsError.InvalidArgument;
+            };
+            if (std.mem.eql(u8, fmt_str, "text")) {
+                log_fmt = .text;
+            } else if (std.mem.eql(u8, fmt_str, "json")) {
+                log_fmt = .json;
+            } else {
+                writeErr("invalid log format: {s} (expected text or json)\n", .{fmt_str});
+                return ClusterCommandsError.InvalidArgument;
+            }
         }
     }
+
+    log.setFormat(log_fmt);
 
     // generate or load API token for authentication.
     // even in single-node mode (localhost-only), require auth so that
@@ -89,6 +107,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     var peers_str: []const u8 = "";
     var join_token: ?[]const u8 = null;
     var api_token_arg: ?[]const u8 = null;
+    var log_fmt: log.LogFormat = .json;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--id")) {
@@ -133,8 +152,23 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
                 writeErr("--api-token requires a 64-character hex token\n", .{});
                 return ClusterCommandsError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--log-format")) {
+            const fmt_str = args.next() orelse {
+                writeErr("--log-format requires text or json\n", .{});
+                return ClusterCommandsError.InvalidArgument;
+            };
+            if (std.mem.eql(u8, fmt_str, "text")) {
+                log_fmt = .text;
+            } else if (std.mem.eql(u8, fmt_str, "json")) {
+                log_fmt = .json;
+            } else {
+                writeErr("invalid log format: {s} (expected text or json)\n", .{fmt_str});
+                return ClusterCommandsError.InvalidArgument;
+            }
         }
     }
+
+    log.setFormat(log_fmt);
 
     // resolve data directory
     var data_dir_buf: [paths.max_path]u8 = undefined;
