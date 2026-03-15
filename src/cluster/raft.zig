@@ -47,7 +47,7 @@ pub const Action = union(enum) {
     // snapshot actions — the caller (node.zig) handles actual I/O
     send_install_snapshot: struct { target: NodeId, args: InstallSnapshotArgs },
     send_install_snapshot_reply: struct { target: NodeId, reply: InstallSnapshotReply },
-    apply_snapshot: struct { data: []const u8, meta: SnapshotMeta },
+    apply_snapshot: struct { data: []u8, meta: SnapshotMeta },
     take_snapshot: struct { up_to_index: LogIndex, term: Term },
 };
 
@@ -576,7 +576,7 @@ pub const Raft = struct {
                     .leader_id = self.id,
                     .last_included_index = meta.last_included_index,
                     .last_included_term = meta.last_included_term,
-                    .data = &.{}, // filled by node.zig
+                    .data = @constCast(&.{}), // filled by node.zig
                 },
             },
         }) catch |e| {
@@ -1021,12 +1021,13 @@ test "handleInstallSnapshot updates state and queues apply" {
     var follower = try setupTestRaft(alloc, 2, peers, &log);
     defer follower.deinit();
 
+    var snap_data = "snapshot data".*;
     const reply = follower.handleInstallSnapshot(.{
         .term = 3,
         .leader_id = 1,
         .last_included_index = 100,
         .last_included_term = 2,
-        .data = "snapshot data",
+        .data = &snap_data,
     });
 
     // should accept (term >= ours)
@@ -1063,12 +1064,13 @@ test "handleInstallSnapshot rejects stale term" {
     var follower = try setupTestRaft(alloc, 2, peers, &log);
     defer follower.deinit();
 
+    var snap_data2 = "snapshot data".*;
     const reply = follower.handleInstallSnapshot(.{
         .term = 3, // behind our term of 5
         .leader_id = 1,
         .last_included_index = 100,
         .last_included_term = 2,
-        .data = "snapshot data",
+        .data = &snap_data2,
     });
 
     try testing.expectEqual(@as(Term, 5), reply.term);
@@ -1096,12 +1098,13 @@ test "handleInstallSnapshot ignores old snapshot" {
     // pretend we already committed up to 100
     follower.commit_index = 100;
 
+    var snap_data3 = "old snapshot".*;
     const reply = follower.handleInstallSnapshot(.{
         .term = 3,
         .leader_id = 1,
         .last_included_index = 50, // behind our commit_index
         .last_included_term = 2,
-        .data = "old snapshot",
+        .data = &snap_data3,
     });
 
     // should accept the RPC (no term issue) but not apply it

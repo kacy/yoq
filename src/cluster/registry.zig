@@ -22,9 +22,18 @@ pub const Assignment = agent_types.Assignment;
 // these produce SQL strings that the caller proposes through raft.
 // using fixed-size buffers avoids allocation in the hot path.
 
+pub const RegisterOpts = struct {
+    node_id: ?u16 = null,
+    wg_public_key: ?[]const u8 = null,
+    overlay_ip: ?[]const u8 = null,
+    role: ?[]const u8 = null,
+    region: ?[]const u8 = null,
+    labels: ?[]const u8 = null,
+};
+
 /// generate SQL to register a new agent.
-/// when node_id/wg_public_key/overlay_ip are provided, the agent is registered
-/// with wireguard networking support. otherwise falls back to the base columns.
+/// when opts.node_id/wg_public_key/overlay_ip are provided, the agent is
+/// registered with wireguard networking support. otherwise falls back to base columns.
 pub fn registerSql(
     buf: []u8,
     id: []const u8,
@@ -32,7 +41,7 @@ pub fn registerSql(
     resources: AgentResources,
     now: i64,
 ) ![]const u8 {
-    return registerSqlFull(buf, id, address, resources, now, null, null, null, null, null, null);
+    return registerSqlFull(buf, id, address, resources, now, .{});
 }
 
 /// generate SQL to register a new agent with optional wireguard and role fields.
@@ -42,13 +51,14 @@ pub fn registerSqlFull(
     address: []const u8,
     resources: AgentResources,
     now: i64,
-    node_id: ?u16,
-    wg_public_key: ?[]const u8,
-    overlay_ip: ?[]const u8,
-    role: ?[]const u8,
-    region: ?[]const u8,
-    labels: ?[]const u8,
+    opts: RegisterOpts,
 ) ![]const u8 {
+    const node_id = opts.node_id;
+    const wg_public_key = opts.wg_public_key;
+    const overlay_ip = opts.overlay_ip;
+    const role = opts.role;
+    const region = opts.region;
+    const labels = opts.labels;
     // escape user-controlled values to prevent SQL injection.
     // committed SQL is replicated via raft to ALL nodes, so a single
     // injection would corrupt the entire cluster.
@@ -76,13 +86,13 @@ pub fn registerSqlFull(
     var gpu_cols_buf: [128]u8 = undefined;
     var gpu_vals_buf: [256]u8 = undefined;
     const gpu_cols = if (resources.gpu_model != null)
-        std.fmt.bufPrint(&gpu_cols_buf, ", gpu_count, gpu_used, gpu_model, gpu_vram_mb", .{}) catch ""
+        try std.fmt.bufPrint(&gpu_cols_buf, ", gpu_count, gpu_used, gpu_model, gpu_vram_mb", .{})
     else
-        std.fmt.bufPrint(&gpu_cols_buf, ", gpu_count, gpu_used", .{}) catch "";
+        try std.fmt.bufPrint(&gpu_cols_buf, ", gpu_count, gpu_used", .{});
     const gpu_vals = if (resources.gpu_model != null)
-        std.fmt.bufPrint(&gpu_vals_buf, ", {d}, {d}, '{s}', {d}", .{ resources.gpu_count, resources.gpu_used, model_esc, vram_mb }) catch ""
+        try std.fmt.bufPrint(&gpu_vals_buf, ", {d}, {d}, '{s}', {d}", .{ resources.gpu_count, resources.gpu_used, model_esc, vram_mb })
     else
-        std.fmt.bufPrint(&gpu_vals_buf, ", {d}, {d}", .{ resources.gpu_count, resources.gpu_used }) catch "";
+        try std.fmt.bufPrint(&gpu_vals_buf, ", {d}, {d}", .{ resources.gpu_count, resources.gpu_used });
 
     if (node_id) |nid| {
         var key_esc_buf: [128]u8 = undefined;
@@ -707,7 +717,7 @@ test "registerSqlFull includes wireguard columns" {
     const sql = try registerSqlFull(&buf, "abc123def456", "10.0.0.5:7701", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
-    }, 1000, 3, "base64pubkey==", "10.40.0.3", null, null, null);
+    }, 1000, .{ .node_id = 3, .wg_public_key = "base64pubkey==", .overlay_ip = "10.40.0.3" });
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "node_id") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "wg_public_key") != null);
@@ -721,7 +731,7 @@ test "registerSqlFull without wireguard falls back to base columns" {
     const sql = try registerSqlFull(&buf, "abc123def456", "10.0.0.5:7701", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
-    }, 1000, null, null, null, null, null, null);
+    }, 1000, .{});
 
     // should NOT have wireguard columns
     try std.testing.expect(std.mem.indexOf(u8, sql, "node_id") == null);
@@ -1154,7 +1164,7 @@ test "listAgents returns wireguard fields" {
     const sql = registerSqlFull(&sql_buf, "wgtest123456", "10.0.0.5:7701", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
-    }, 1000, 3, "base64pubkey==", "10.40.0.3", null, null, null) catch return;
+    }, 1000, .{ .node_id = 3, .wg_public_key = "base64pubkey==", .overlay_ip = "10.40.0.3" }) catch return;
     db.execDynamic(sql, .{}, .{}) catch return;
 
     const alloc = std.testing.allocator;
@@ -1183,7 +1193,7 @@ test "getAgent returns wireguard fields" {
     const sql = registerSqlFull(&sql_buf, "wgtest123456", "10.0.0.5:7701", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
-    }, 1000, 7, "mypubkey==", "10.40.0.7", null, null, null) catch return;
+    }, 1000, .{ .node_id = 7, .wg_public_key = "mypubkey==", .overlay_ip = "10.40.0.7" }) catch return;
     db.execDynamic(sql, .{}, .{}) catch return;
 
     const alloc = std.testing.allocator;
