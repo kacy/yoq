@@ -12,6 +12,14 @@ format is based on [keep a changelog](https://keepachangelog.com/).
 
 ### removed
 
+## 0.1.2
+
+### added
+
+### fixed
+
+### removed
+
 ## 0.1.1
 
 ### added
