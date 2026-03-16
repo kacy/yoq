@@ -22,8 +22,13 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     if (api_token) |expected_token| {
         const is_public = std.mem.eql(u8, request.path_only, "/health") or
             std.mem.eql(u8, request.path_only, "/version");
+        const has_api_auth = common.hasValidBearerToken(&request, expected_token);
+        const has_join_auth = if (join_token) |expected_join_token|
+            isJoinTokenRoute(&request) and common.hasValidBearerToken(&request, expected_join_token)
+        else
+            false;
 
-        if (!is_public and !common.hasValidBearerToken(&request, expected_token)) {
+        if (!is_public and !has_api_auth and !has_join_auth) {
             return common.unauthorized();
         }
     }
@@ -50,6 +55,34 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     if (security.route(request, alloc)) |resp| return resp;
 
     return common.notFound();
+}
+
+fn isJoinTokenRoute(request: *const http.Request) bool {
+    if (request.method == .GET and std.mem.eql(u8, request.path_only, "/wireguard/peers")) {
+        return true;
+    }
+
+    if (request.method == .POST and std.mem.eql(u8, request.path_only, "/agents/register")) {
+        return true;
+    }
+
+    if (request.path_only.len <= "/agents/".len or !std.mem.startsWith(u8, request.path_only, "/agents/")) {
+        return false;
+    }
+
+    const rest = request.path_only["/agents/".len..];
+
+    if (common.matchSubpath(rest, "/heartbeat") != null) {
+        return request.method == .POST;
+    }
+    if (common.matchSubpath(rest, "/assignments") != null) {
+        return request.method == .GET;
+    }
+    if (common.matchAssignmentStatusPath(rest) != null) {
+        return request.method == .POST;
+    }
+
+    return false;
 }
 
 // -- tests --
@@ -324,4 +357,41 @@ test "dispatch allows unauthenticated /version when api_token is set" {
     const resp = dispatch(req, std.testing.allocator);
 
     try std.testing.expectEqual(http.StatusCode.ok, resp.status);
+}
+
+test "dispatch allows join token on agent heartbeat route" {
+    const saved_api = api_token;
+    const saved_join = join_token;
+    defer {
+        api_token = saved_api;
+        join_token = saved_join;
+    }
+    api_token = "api-secret";
+    join_token = "join-secret";
+
+    const req = (try http.parseRequest(
+        "POST /agents/abc123def456/heartbeat HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer join-secret\r\nContent-Length: 2\r\n\r\n{}",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "dispatch rejects join token on operator-only agent list route" {
+    const saved_api = api_token;
+    const saved_join = join_token;
+    defer {
+        api_token = saved_api;
+        join_token = saved_join;
+    }
+    api_token = "api-secret";
+    join_token = "join-secret";
+
+    const req = (try http.parseRequest(
+        "GET /agents HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer join-secret\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+
+    try std.testing.expectEqual(http.StatusCode.unauthorized, resp.status);
 }

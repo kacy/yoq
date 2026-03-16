@@ -142,52 +142,9 @@ pub const Agent = struct {
         var local_ip_buf: [16]u8 = undefined;
         const local_ip = detectLocalIp(self.server_addr, &local_ip_buf);
 
-        // build registration JSON with wireguard, role, and GPU info
-        var body_buf: [2048]u8 = undefined;
-        var body_len: usize = 0;
-
-        // base fields
-        const base = std.fmt.bufPrint(
-            &body_buf,
-            "{{\"token\":\"{s}\",\"address\":\"{s}\",\"cpu_cores\":{d},\"memory_mb\":{d},\"wg_public_key\":\"{s}\",\"wg_listen_port\":{d},\"role\":\"{s}\"",
-            .{ self.token, local_ip, resources.cpu_cores, resources.memory_mb, pub_key, self.wg_listen_port, self.role.toString() },
-        ) catch return AgentError.RegisterFailed;
-        body_len = base.len;
-
-        // optional region
-        if (self.region) |reg| {
-            const suffix = std.fmt.bufPrint(
-                body_buf[body_len..],
-                ",\"region\":\"{s}\"",
-                .{reg},
-            ) catch return AgentError.RegisterFailed;
-            body_len += suffix.len;
-        }
-
-        // GPU info
-        if (resources.gpu_count > 0) {
-            const gpu_suffix = std.fmt.bufPrint(
-                body_buf[body_len..],
-                ",\"gpu_count\":{d},\"gpu_vram_mb\":{d}",
-                .{ resources.gpu_count, resources.gpu_vram_mb },
-            ) catch return AgentError.RegisterFailed;
-            body_len += gpu_suffix.len;
-
-            if (resources.gpu_model) |model| {
-                const model_suffix = std.fmt.bufPrint(
-                    body_buf[body_len..],
-                    ",\"gpu_model\":\"{s}\"",
-                    .{model},
-                ) catch return AgentError.RegisterFailed;
-                body_len += model_suffix.len;
-            }
-        }
-
-        // close object
-        if (body_len >= body_buf.len) return AgentError.RegisterFailed;
-        body_buf[body_len] = '}';
-        body_len += 1;
-        const body = body_buf[0..body_len];
+        const body = buildRegisterBody(self.alloc, self.token, local_ip, resources, pub_key, self.wg_listen_port, self.role, self.region) catch
+            return AgentError.RegisterFailed;
+        defer self.alloc.free(body);
 
         var resp = http_client.postWithAuth(
             self.alloc,
@@ -401,22 +358,8 @@ pub const Agent = struct {
             }
         }
 
-        var body_buf: [512]u8 = undefined;
-        const body = std.fmt.bufPrint(
-            &body_buf,
-            "{{\"cpu_cores\":{d},\"memory_mb\":{d},\"cpu_used\":{d},\"memory_used_mb\":{d},\"containers\":{d},\"gpu_count\":{d},\"gpu_used\":{d},\"gpu_health\":\"{s}\"}}",
-            .{
-                resources.cpu_cores,
-                resources.memory_mb,
-                resources.cpu_used,
-                resources.memory_used_mb,
-                resources.containers,
-                resources.gpu_count,
-                resources.gpu_used,
-                // gpu health reported via heartbeat only; gossip-based propagation deferred
-                @tagName(gpu_health_worst),
-            },
-        ) catch return;
+        const body = buildHeartbeatBody(self.alloc, resources, @tagName(gpu_health_worst)) catch return;
+        defer self.alloc.free(body);
 
         var path_buf: [64]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/heartbeat", .{self.id}) catch return;
@@ -1134,6 +1077,85 @@ pub const Agent = struct {
     }
 };
 
+fn buildRegisterBody(
+    alloc: Allocator,
+    token: []const u8,
+    address: []const u8,
+    resources: AgentResources,
+    pub_key: []const u8,
+    wg_listen_port: u16,
+    role: cluster_config.NodeRole,
+    region: ?[]const u8,
+) ![]u8 {
+    var json_buf: std.ArrayList(u8) = .empty;
+    errdefer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    try writer.writeAll("{\"token\":\"");
+    try json_helpers.writeJsonEscaped(writer, token);
+    try writer.writeAll("\",\"address\":\"");
+    try json_helpers.writeJsonEscaped(writer, address);
+    try writer.writeAll("\",\"cpu_cores\":");
+    try writer.print("{d}", .{resources.cpu_cores});
+    try writer.writeAll(",\"memory_mb\":");
+    try writer.print("{d}", .{resources.memory_mb});
+    try writer.writeAll(",\"wg_public_key\":\"");
+    try json_helpers.writeJsonEscaped(writer, pub_key);
+    try writer.writeAll("\",\"wg_listen_port\":");
+    try writer.print("{d}", .{wg_listen_port});
+    try writer.writeAll(",\"role\":\"");
+    try json_helpers.writeJsonEscaped(writer, role.toString());
+    try writer.writeByte('"');
+
+    if (region) |reg| {
+        try writer.writeAll(",\"region\":\"");
+        try json_helpers.writeJsonEscaped(writer, reg);
+        try writer.writeByte('"');
+    }
+
+    if (resources.gpu_count > 0) {
+        try writer.writeAll(",\"gpu_count\":");
+        try writer.print("{d}", .{resources.gpu_count});
+        try writer.writeAll(",\"gpu_vram_mb\":");
+        try writer.print("{d}", .{resources.gpu_vram_mb});
+
+        if (resources.gpu_model) |model| {
+            try writer.writeAll(",\"gpu_model\":\"");
+            try json_helpers.writeJsonEscaped(writer, model);
+            try writer.writeByte('"');
+        }
+    }
+
+    try writer.writeByte('}');
+    return try json_buf.toOwnedSlice(alloc);
+}
+
+fn buildHeartbeatBody(alloc: Allocator, resources: AgentResources, gpu_health_label: []const u8) ![]u8 {
+    var json_buf: std.ArrayList(u8) = .empty;
+    errdefer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    try writer.writeAll("{\"cpu_cores\":");
+    try writer.print("{d}", .{resources.cpu_cores});
+    try writer.writeAll(",\"memory_mb\":");
+    try writer.print("{d}", .{resources.memory_mb});
+    try writer.writeAll(",\"cpu_used\":");
+    try writer.print("{d}", .{resources.cpu_used});
+    try writer.writeAll(",\"memory_used_mb\":");
+    try writer.print("{d}", .{resources.memory_used_mb});
+    try writer.writeAll(",\"containers\":");
+    try writer.print("{d}", .{resources.containers});
+    try writer.writeAll(",\"gpu_count\":");
+    try writer.print("{d}", .{resources.gpu_count});
+    try writer.writeAll(",\"gpu_used\":");
+    try writer.print("{d}", .{resources.gpu_used});
+    try writer.writeAll(",\"gpu_health\":\"");
+    try json_helpers.writeJsonEscaped(writer, gpu_health_label);
+    try writer.writeAll("\"}");
+
+    return try json_buf.toOwnedSlice(alloc);
+}
+
 /// read system resources from /proc/meminfo and cpu count.
 pub fn getSystemResources() AgentResources {
     const cpu_cores: u32 = @intCast(std.Thread.getCpuCount() catch 1);
@@ -1455,4 +1477,44 @@ test "parseHostPort returns null for invalid input" {
     try std.testing.expect(Agent.parseHostPort("not-ip:7700") == null);
     try std.testing.expect(Agent.parseHostPort("10.0.0.1:") == null);
     try std.testing.expect(Agent.parseHostPort("10.0.0.1:99999") == null);
+}
+
+test "buildRegisterBody escapes quoted string fields" {
+    const alloc = std.testing.allocator;
+    const body = try buildRegisterBody(
+        alloc,
+        "tok\"en",
+        "10.0.0.1",
+        .{
+            .cpu_cores = 4,
+            .memory_mb = 8192,
+            .gpu_count = 1,
+            .gpu_model = "A\"100",
+            .gpu_vram_mb = 40960,
+        },
+        "pub\"key",
+        51820,
+        .agent,
+        "us-\"east",
+    );
+    defer alloc.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"role\":\"agent\"") != null);
+}
+
+test "buildHeartbeatBody escapes gpu health string" {
+    const alloc = std.testing.allocator;
+    const body = try buildHeartbeatBody(alloc, .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+        .cpu_used = 1,
+        .memory_used_mb = 2,
+        .containers = 3,
+        .gpu_count = 1,
+        .gpu_used = 1,
+    }, "warn\"ing");
+    defer alloc.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "warn\\\"ing") != null);
 }

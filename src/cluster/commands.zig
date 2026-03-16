@@ -496,47 +496,22 @@ pub fn cluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 }
 
 fn clusterStatus(alloc: std.mem.Allocator) void {
-    // query the local API server for cluster status
-    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch |err| {
-        writeErr("failed to create socket: {}\n", .{err});
-        return;
-    };
-    defer std.posix.close(fd);
+    var token_buf: [64]u8 = undefined;
+    const token = readApiToken(&token_buf);
 
-    const timeout = std.posix.timeval{ .sec = 2, .usec = 0 };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
-
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 7700);
-    std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| {
+    var resp = http_client.getWithAuth(alloc, .{ 127, 0, 0, 1 }, 7700, "/cluster/status", token) catch |err| {
         writeErr("cannot connect to API server at localhost:7700: {}\n", .{err});
         writeErr("hint: start the server with 'yoq serve' or 'yoq init-server'\n", .{});
         return;
     };
+    defer resp.deinit(alloc);
 
-    const request = "GET /cluster/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    _ = std.posix.write(fd, request) catch |err| {
-        writeErr("failed to send request: {}\n", .{err});
+    if (resp.status_code != 200) {
+        writeErr("cluster status failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
         return;
-    };
-
-    var buf: [4096]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const bytes_read = std.posix.read(fd, buf[total..]) catch break;
-        if (bytes_read == 0) break;
-        total += bytes_read;
     }
 
-    // find body (after \r\n\r\n)
-    const response = buf[0..total];
-    if (std.mem.indexOf(u8, response, "\r\n\r\n")) |body_start| {
-        write("{s}\n", .{response[body_start + 4 ..]});
-    } else {
-        writeErr("invalid response from server\n", .{});
-    }
-
-    _ = alloc;
+    write("{s}\n", .{resp.body});
 }
 
 pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {

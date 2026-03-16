@@ -95,8 +95,7 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
         return HttpClientError.ConnectFailed;
 
     // send
-    _ = posix.write(fd, request) catch
-        return HttpClientError.SendFailed;
+    writeAll(fd, request) catch return HttpClientError.SendFailed;
 
     // read response
     const max_size: usize = 64 * 1024;
@@ -110,6 +109,15 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
         total += bytes_read;
     }
 
+    if (total == buf.len) {
+        var overflow_buf: [1]u8 = undefined;
+        const extra = posix.read(fd, &overflow_buf) catch 0;
+        if (extra > 0) {
+            alloc.free(buf);
+            return HttpClientError.ResponseTooLarge;
+        }
+    }
+
     if (total == 0) {
         alloc.free(buf);
         return HttpClientError.ReceiveFailed;
@@ -120,23 +128,19 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
         buf = buf[0..total];
     }
 
-    // parse status code from first line: "HTTP/1.1 200 OK\r\n"
-    const status_code = parseStatusCode(buf[0..total]) catch {
+    return parseResponse(buf[0..total], buf) catch {
         alloc.free(buf);
         return HttpClientError.InvalidResponse;
     };
+}
 
-    // find body (after \r\n\r\n)
-    const body = if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |pos|
-        buf[pos + 4 .. total]
-    else
-        buf[total..total]; // empty body
-
-    return .{
-        .status_code = status_code,
-        .body = body,
-        .raw = buf,
-    };
+fn writeAll(fd: posix.socket_t, data: []const u8) !void {
+    var total: usize = 0;
+    while (total < data.len) {
+        const written = posix.write(fd, data[total..]) catch return error.WriteFailed;
+        if (written == 0) return error.WriteFailed;
+        total += written;
+    }
 }
 
 fn parseStatusCode(response: []const u8) !u16 {
@@ -151,6 +155,20 @@ fn parseStatusCode(response: []const u8) !u16 {
 
     return std.fmt.parseInt(u16, response[status_start .. status_start + 3], 10) catch
         return error.InvalidResponse;
+}
+
+fn parseResponse(response: []const u8, raw: []const u8) !Response {
+    const status_code = try parseStatusCode(response);
+    const body = if (std.mem.indexOf(u8, response, "\r\n\r\n")) |pos|
+        raw[pos + 4 .. response.len]
+    else
+        raw[response.len..response.len];
+
+    return .{
+        .status_code = status_code,
+        .body = body,
+        .raw = raw,
+    };
 }
 
 // -- tests --
@@ -181,4 +199,23 @@ test "parseStatusCode extracts 100" {
 test "parseStatusCode extracts 500" {
     const code = try parseStatusCode("HTTP/1.1 500 Internal Server Error\r\n");
     try std.testing.expectEqual(@as(u16, 500), code);
+}
+
+test "parseResponse extracts body after headers" {
+    var raw = "HTTP/1.1 201 Created\r\nContent-Length: 4\r\n\r\ntest".*;
+    const resp = try parseResponse(raw[0..], raw[0..]);
+    try std.testing.expectEqual(@as(u16, 201), resp.status_code);
+    try std.testing.expectEqualStrings("test", resp.body);
+}
+
+test "parseResponse allows empty body when separator is missing" {
+    var raw = "HTTP/1.1 204 No Content\r\n".*;
+    const resp = try parseResponse(raw[0..], raw[0..]);
+    try std.testing.expectEqual(@as(u16, 204), resp.status_code);
+    try std.testing.expectEqual(@as(usize, 0), resp.body.len);
+}
+
+test "parseResponse rejects invalid status line" {
+    var raw = "not http".*;
+    try std.testing.expectError(error.InvalidResponse, parseResponse(raw[0..], raw[0..]));
 }
