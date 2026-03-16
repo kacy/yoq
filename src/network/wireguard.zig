@@ -12,9 +12,11 @@
 // the existing netlink.zig module.
 
 const std = @import("std");
+const mem = std.mem;
 const posix = std.posix;
 const linux = std.os.linux;
 const nl = @import("netlink.zig");
+const ip_mod = @import("ip.zig");
 const log = std.log;
 
 pub const WireguardError = error{
@@ -65,39 +67,15 @@ fn decodeKey(encoded: []const u8) ?[32]u8 {
 
 /// parse an "ip:port" endpoint string into a sockaddr_in (16 bytes).
 fn parseEndpoint(endpoint: []const u8) ?[16]u8 {
-    // find the last ':' to split host and port
-    var colon_pos: ?usize = null;
-    for (endpoint, 0..) |c, i| {
-        if (c == ':') colon_pos = i;
-    }
-    const colon = colon_pos orelse return null;
+    const colon = mem.lastIndexOfScalar(u8, endpoint, ':') orelse return null;
     if (colon == 0 or colon + 1 >= endpoint.len) return null;
 
-    const host = endpoint[0..colon];
-    const port_str = endpoint[colon + 1 ..];
+    const addr = ip_mod.parseIp(endpoint[0..colon]) orelse return null;
+    const port = std.fmt.parseInt(u16, endpoint[colon + 1 ..], 10) catch return null;
 
-    const port = std.fmt.parseInt(u16, port_str, 10) catch return null;
-
-    // parse IPv4
-    var addr: [4]u8 = undefined;
-    var octet_idx: usize = 0;
-    var start: usize = 0;
-    for (host, 0..) |c, i| {
-        if (c == '.' or i == host.len - 1) {
-            const end = if (c == '.') i else i + 1;
-            if (octet_idx >= 4) return null;
-            addr[octet_idx] = std.fmt.parseInt(u8, host[start..end], 10) catch return null;
-            octet_idx += 1;
-            start = i + 1;
-        }
-    }
-    if (octet_idx != 4) return null;
-
-    // build sockaddr_in: family(2) + port(2, big-endian) + addr(4) + pad(8)
+    // sockaddr_in: family(2) + port(2, big-endian) + addr(4) + pad(8)
     var sa: [16]u8 = .{0} ** 16;
-    sa[0] = nl.AF.INET; // AF_INET low byte
-    sa[1] = 0;
-    // port in network byte order (big-endian)
+    sa[0] = nl.AF.INET;
     sa[2] = @intCast(port >> 8);
     sa[3] = @intCast(port & 0xff);
     sa[4] = addr[0];
@@ -109,35 +87,13 @@ fn parseEndpoint(endpoint: []const u8) ?[16]u8 {
 
 /// parse a single CIDR entry like "10.42.1.0/24" into (ip, prefix_len).
 fn parseCidr(cidr: []const u8) ?struct { addr: [4]u8, prefix: u8 } {
-    // find '/'
-    var slash_pos: ?usize = null;
-    for (cidr, 0..) |c, i| {
-        if (c == '/') {
-            slash_pos = i;
-            break;
-        }
-    }
-    const slash = slash_pos orelse return null;
+    const slash = mem.indexOfScalar(u8, cidr, '/') orelse return null;
     if (slash == 0 or slash + 1 >= cidr.len) return null;
 
     const prefix = std.fmt.parseInt(u8, cidr[slash + 1 ..], 10) catch return null;
     if (prefix > 32) return null;
 
-    const ip_str = cidr[0..slash];
-    var addr: [4]u8 = undefined;
-    var octet_idx: usize = 0;
-    var start: usize = 0;
-    for (ip_str, 0..) |c, i| {
-        if (c == '.' or i == ip_str.len - 1) {
-            const end = if (c == '.') i else i + 1;
-            if (octet_idx >= 4) return null;
-            addr[octet_idx] = std.fmt.parseInt(u8, ip_str[start..end], 10) catch return null;
-            octet_idx += 1;
-            start = i + 1;
-        }
-    }
-    if (octet_idx != 4) return null;
-
+    const addr = ip_mod.parseIp(cidr[0..slash]) orelse return null;
     return .{ .addr = addr, .prefix = prefix };
 }
 
@@ -174,67 +130,46 @@ pub fn createInterface(name: []const u8, private_key: []const u8, listen_port: u
         };
     }
 
+    // from here on, clean up the interface on any error
+    errdefer cleanupInterface(rt_fd, name);
+
     // step 2: configure WireGuard via generic netlink (private key + listen port)
     const raw_key = decodeKey(private_key) orelse {
         log.err("wireguard: invalid base64 private key", .{});
-        cleanupInterface(rt_fd, name);
         return WireguardError.DeviceCreateFailed;
     };
 
     {
-        const genl_fd = nl.openGenericSocket() catch {
-            cleanupInterface(rt_fd, name);
-            return WireguardError.DeviceCreateFailed;
-        };
+        const genl_fd = nl.openGenericSocket() catch return WireguardError.DeviceCreateFailed;
         defer posix.close(genl_fd);
 
         const wg_family = nl.resolveFamily(genl_fd, "wireguard") catch {
             log.err("wireguard: failed to resolve genetlink family", .{});
-            cleanupInterface(rt_fd, name);
             return WireguardError.DeviceCreateFailed;
         };
 
         var buf: [nl.buf_size]u8 align(4) = undefined;
         var mb = nl.MessageBuilder.init(&buf);
 
-        const hdr = mb.putHeaderGenl(wg_family, nl.NLM_F.REQUEST | nl.NLM_F.ACK, nl.WG_CMD.SET_DEVICE) catch {
-            cleanupInterface(rt_fd, name);
+        const hdr = mb.putHeaderGenl(wg_family, nl.NLM_F.REQUEST | nl.NLM_F.ACK, nl.WG_CMD.SET_DEVICE) catch
             return WireguardError.DeviceCreateFailed;
-        };
 
-        mb.putAttrStr(hdr, nl.WGDEVICE_A.IFNAME, name) catch {
-            cleanupInterface(rt_fd, name);
-            return WireguardError.DeviceCreateFailed;
-        };
-        mb.putAttr(hdr, nl.WGDEVICE_A.PRIVATE_KEY, &raw_key) catch {
-            cleanupInterface(rt_fd, name);
-            return WireguardError.DeviceCreateFailed;
-        };
-        mb.putAttrU16(hdr, nl.WGDEVICE_A.LISTEN_PORT, listen_port) catch {
-            cleanupInterface(rt_fd, name);
-            return WireguardError.DeviceCreateFailed;
-        };
+        mb.putAttrStr(hdr, nl.WGDEVICE_A.IFNAME, name) catch return WireguardError.DeviceCreateFailed;
+        mb.putAttr(hdr, nl.WGDEVICE_A.PRIVATE_KEY, &raw_key) catch return WireguardError.DeviceCreateFailed;
+        mb.putAttrU16(hdr, nl.WGDEVICE_A.LISTEN_PORT, listen_port) catch return WireguardError.DeviceCreateFailed;
 
         nl.sendAndCheck(genl_fd, mb.message()) catch |e| {
             log.err("wireguard: failed to configure interface: {}", .{e});
-            cleanupInterface(rt_fd, name);
             return WireguardError.DeviceCreateFailed;
         };
     }
 
     // step 3: bring the interface up
-    const if_index = nl.getIfIndex(rt_fd, name) catch {
-        cleanupInterface(rt_fd, name);
-        return WireguardError.DeviceCreateFailed;
-    };
-    if (if_index == 0) {
-        cleanupInterface(rt_fd, name);
-        return WireguardError.DeviceCreateFailed;
-    }
+    const if_index = nl.getIfIndex(rt_fd, name) catch return WireguardError.DeviceCreateFailed;
+    if (if_index == 0) return WireguardError.DeviceCreateFailed;
 
     nl.setLinkUp(rt_fd, if_index) catch |e| {
         log.err("wireguard: failed to bring interface up: {}", .{e});
-        cleanupInterface(rt_fd, name);
         return WireguardError.DeviceCreateFailed;
     };
 }
@@ -291,21 +226,15 @@ pub fn addPeer(name: []const u8, peer: PeerConfig) WireguardError!void {
     const aips_nest = mb.startNested(hdr, nl.WGPEER_A.ALLOWED_IPS) catch return WireguardError.PeerAddFailed;
 
     // parse comma-separated CIDRs
-    var start: usize = 0;
-    for (peer.allowed_ips, 0..) |c, i| {
-        if (c == ',' or i == peer.allowed_ips.len - 1) {
-            const end = if (c == ',') i else i + 1;
-            const cidr_str = peer.allowed_ips[start..end];
-            const cidr = parseCidr(cidr_str) orelse return WireguardError.PeerAddFailed;
+    var it = mem.splitScalar(u8, peer.allowed_ips, ',');
+    while (it.next()) |cidr_str| {
+        const cidr = parseCidr(cidr_str) orelse return WireguardError.PeerAddFailed;
 
-            const aip_nest = mb.startNested(hdr, 0) catch return WireguardError.PeerAddFailed;
-            mb.putAttrU16(hdr, nl.WGALLOWEDIP_A.FAMILY, nl.AF.INET) catch return WireguardError.PeerAddFailed;
-            mb.putAttr(hdr, nl.WGALLOWEDIP_A.IPADDR, &cidr.addr) catch return WireguardError.PeerAddFailed;
-            mb.putAttrU8(hdr, nl.WGALLOWEDIP_A.CIDR_MASK, cidr.prefix) catch return WireguardError.PeerAddFailed;
-            mb.endNested(aip_nest);
-
-            start = end + 1;
-        }
+        const aip_nest = mb.startNested(hdr, 0) catch return WireguardError.PeerAddFailed;
+        mb.putAttrU8(hdr, nl.WGALLOWEDIP_A.FAMILY, nl.AF.INET) catch return WireguardError.PeerAddFailed;
+        mb.putAttr(hdr, nl.WGALLOWEDIP_A.IPADDR, &cidr.addr) catch return WireguardError.PeerAddFailed;
+        mb.putAttrU8(hdr, nl.WGALLOWEDIP_A.CIDR_MASK, cidr.prefix) catch return WireguardError.PeerAddFailed;
+        mb.endNested(aip_nest);
     }
 
     mb.endNested(aips_nest);
@@ -556,7 +485,7 @@ test "addPeer builds correct genetlink message" {
     // allowed IPs
     const aips_nest = try mb.startNested(hdr, nl.WGPEER_A.ALLOWED_IPS);
     const aip_nest = try mb.startNested(hdr, 0);
-    try mb.putAttrU16(hdr, nl.WGALLOWEDIP_A.FAMILY, nl.AF.INET);
+    try mb.putAttrU8(hdr, nl.WGALLOWEDIP_A.FAMILY, nl.AF.INET);
     try mb.putAttr(hdr, nl.WGALLOWEDIP_A.IPADDR, &[4]u8{ 10, 42, 1, 0 });
     try mb.putAttrU8(hdr, nl.WGALLOWEDIP_A.CIDR_MASK, 24);
     mb.endNested(aip_nest);

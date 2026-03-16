@@ -470,8 +470,9 @@ pub fn resolveFamily(fd: posix.fd_t, name: []const u8) NetlinkError!u16 {
     const hdr = try mb.putHeaderGenl(GENL_ID_CTRL, NLM_F.REQUEST, CTRL_CMD_GETFAMILY);
     try mb.putAttrStr(hdr, CTRL_ATTR_FAMILY_NAME, name);
 
-    const sent = posix.send(fd, mb.message(), 0) catch return NetlinkError.SendFailed;
-    if (sent != mb.message().len) return NetlinkError.SendFailed;
+    const msg = mb.message();
+    const sent = posix.send(fd, msg, 0) catch return NetlinkError.SendFailed;
+    if (sent != msg.len) return NetlinkError.SendFailed;
 
     var recv_buf: [buf_size]u8 align(4) = undefined;
     const recv_len = posix.recv(fd, &recv_buf, 0) catch return NetlinkError.RecvFailed;
@@ -594,9 +595,6 @@ pub fn deleteLink(fd: posix.fd_t, name: []const u8) NetlinkError!void {
         NLM_F.REQUEST | NLM_F.ACK,
         linux.ifinfomsg,
     );
-
-    const info = mb.getPayload(hdr, linux.ifinfomsg);
-    info.family = 0;
 
     try mb.putAttrStr(hdr, IFLA.IFNAME, name);
     try sendAndCheck(fd, mb.message());
