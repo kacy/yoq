@@ -121,6 +121,7 @@ jobs:
       - docker-build
       - examples-validate
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64

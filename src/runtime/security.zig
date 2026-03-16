@@ -273,6 +273,7 @@ fn archValue() u32 {
         .aarch64 => 0xC00000B7,
         .x86 => 0x40000003,
         .arm => 0x40000028,
+        .riscv64 => 0xC00000F3,
         else => @compileError("unsupported architecture for seccomp"),
     };
 }
