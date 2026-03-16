@@ -136,7 +136,7 @@ port = 3000
 yoq up --server
 ```
 
-the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard mesh and eBPF.
+the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard overlay and eBPF.
 
 ---
 
@@ -198,7 +198,7 @@ same architecture as 500, but pay attention to:
 
 ## multi-region clusters
 
-yoq can run across regions using labels and the WireGuard mesh.
+yoq can run across regions using labels and the WireGuard overlay.
 
 ### architecture
 
@@ -243,7 +243,7 @@ the scheduler checks that all required labels are present on the agent before pl
 
 ### cross-region networking
 
-WireGuard handles cross-region connectivity automatically. peers have endpoints with real public IPs and persistent keepalive handles NAT traversal. no extra configuration needed — the mesh is set up during `yoq join`.
+WireGuard handles cross-region connectivity automatically. peers have endpoints with real public IPs and persistent keepalive handles NAT traversal. no extra configuration needed — the overlay is set up during `yoq join`.
 
 keep in mind:
 - cross-region latency affects service-to-service calls — design for it (timeouts, retries)
@@ -395,7 +395,7 @@ this gracefully transfers leadership to another server. if the node is not the l
 - consider placing all servers in a single region and using agents everywhere else
 - for read-heavy workloads, the API can be queried from any server (reads don't require consensus)
 
-**WireGuard mesh not forming**
+**WireGuard overlay not forming**
 - verify UDP 51820 is open between all nodes
 - check that the `wg-yoq` interface was created: `ip link show wg-yoq`
 - on the agent, check that the join handshake completed (look for WireGuard key exchange in logs)

@@ -18,12 +18,19 @@ written in Zig, targeting Linux kernel 6.1+.
         │ orchestrator│ │container│ │  raft/agent │
         └─────┬─────┘ └────┬────┘ └──────┬──────┘
               │             │             │
-    ┌─────────┼─────────────┼─────────────┼─────────┐
-    │         │             │             │         │
-┌───┴───┐ ┌──┴──┐   ┌──────┴──────┐ ┌────┴────┐ ┌─┴──┐
-│ build │ │image│   │  networking │ │  state  │ │tls │
-│engine │ │store│   │ ebpf/bridge │ │ sqlite  │ │acme│
-└───────┘ └─────┘   └─────────────┘ └─────────┘ └────┘
+    ┌─────────┼─────────────┼─────────────┼──────────────┐
+    │         │             │             │              │
+┌───┴───┐ ┌──┴──┐   ┌──────┴──────┐ ┌────┴────┐ ┌──────┴──────┐
+│ build │ │image│   │  networking │ │  state  │ │     gpu     │
+│engine │ │store│   │ ebpf/bridge │ │ sqlite  │ │  training   │
+└───────┘ └─────┘   └─────────────┘ └────┬────┘ └─────────────┘
+                                         │
+                              ┌──────────┼──────────┐
+                              │          │          │
+                           ┌──┴──┐  ┌────┴────┐ ┌──┴───┐
+                           │ tls │  │ storage │ │alerts│
+                           │acme │  │s3/volume│ │      │
+                           └─────┘  └─────────┘ └──────┘
 ```
 
 data flows top-down: CLI commands dispatch to subsystems, which use shared state (SQLite) and networking primitives (eBPF, netlink). the cluster layer replicates state across nodes via Raft.
@@ -76,23 +83,27 @@ container networking with eBPF for service discovery and load balancing.
 
 **DNS:** a userspace DNS resolver listens on `10.42.0.1:53`. it answers A record queries for service names from an in-memory registry (256 entries, no heap allocation). unknown names are forwarded to the upstream resolver. an eBPF TC program intercepts DNS queries on the bridge for fast-path resolution — cache hits are answered entirely in kernel space, misses fall through to userspace.
 
-**load balancing:** an eBPF program on the bridge implements round-robin load balancing with connection affinity. a conntrack map (5-tuple → selected backend) ensures existing connections stick to the same backend. reverse SNAT on egress handles return traffic.
+**load balancing:** an eBPF program on the bridge implements FNV-1a consistent hashing for load balancing with connection affinity. a conntrack map (5-tuple → selected backend) ensures existing connections stick to the same backend. reverse SNAT on egress handles return traffic.
 
 **network policy:** eBPF-based allow/deny rules between services. policies are stored in SQLite and loaded into BPF maps.
 
-**cross-node:** WireGuard mesh tunnels are set up automatically when nodes join a cluster. key exchange happens during the join handshake. service discovery works transparently across nodes.
+**cross-node:** WireGuard hub-and-spoke tunnels are set up automatically when nodes join a cluster. server nodes act as hubs — they enable IP forwarding and include all container subnets in their WireGuard allowed-ips. agent nodes are spokes — they connect only to servers, not to each other. this avoids O(n²) peer configurations: agent join/leave is a single-peer operation on the server side. key exchange happens during the join handshake. the overlay uses `10.40.0.0/24`, with each node's containers in `10.42.{node_id}.0/24`. service discovery works transparently across nodes.
+
+**eBPF programs:** 7 BPF programs in `bpf/`:
+- `lb.c` — load balancing with FNV-1a consistent hashing and conntrack
+- `dns_intercept.c` — kernel-space DNS resolution
+- `policy.c` — network policy enforcement
+- `metrics.c` — per-service packet counting
+- `port_map.c` — XDP port mapping
+- `gpu_prio.c` — GPU traffic prioritization
+- `storage_metrics.c` — storage I/O metrics
 
 key files:
 - `bridge.zig` — bridge/veth management via netlink
 - `dns.zig` — userspace DNS resolver + service registry
 - `ebpf.zig` — BPF program loading (no libbpf dependency)
 - `nat.zig` — iptables NAT and port mapping
-- `wireguard.zig` — WireGuard mesh setup
-- `bpf/dns_intercept.c` — kernel-space DNS resolution
-- `bpf/lb.c` — load balancing with conntrack
-- `bpf/policy.c` — network policy enforcement
-- `bpf/port_map.c` — XDP port mapping
-- `bpf/metrics.c` — per-service packet counting
+- `wireguard.zig` — WireGuard hub-and-spoke setup
 
 ### build (`src/build/`)
 
@@ -115,7 +126,7 @@ key files:
 
 multi-service application management — the docker-compose replacement.
 
-**format:** TOML manifests define `[service.*]`, `[worker.*]`, `[cron.*]`, and `[volume.*]` sections. the loader validates dependencies, expands environment variables (`${VAR:-default}`), and returns services in topological (dependency) order.
+**format:** TOML manifests define `[service.*]`, `[worker.*]`, `[cron.*]`, `[volume.*]`, and `[training.*]` sections. the loader validates dependencies, expands environment variables (`${VAR:-default}`), and returns services in topological (dependency) order.
 
 **orchestrator:** starts and stops services respecting dependency order. reconciles running state against desired state. handles restart policies (none, always, on_failure).
 
@@ -127,14 +138,17 @@ multi-service application management — the docker-compose replacement.
 
 **cron scheduling:** periodic tasks run at configurable intervals (e.g., `every = "1h"`).
 
+**alerting:** services can define alert thresholds (CPU, memory, restart count, p99 latency, error rate) with webhook notifications. when a metric exceeds its threshold for consecutive checks, the configured webhook is fired.
+
 key files:
-- `spec.zig` — Service, Worker, Cron, Volume types
+- `spec.zig` — Service, Worker, Cron, Volume, TrainingJob, AlertSpec types
 - `loader.zig` — TOML parser, dependency validation, topo sort
 - `orchestrator.zig` — start/stop/reconcile
 - `health.zig` — health check engine
 - `update.zig` — rolling updates, rollback
 - `cron_scheduler.zig` — periodic task execution
-- `commands.zig` — up, down, rollback, history
+- `training.zig` — training job lifecycle controller
+- `commands.zig` — up, down, rollback, history, train
 
 ### cluster (`src/cluster/`)
 
@@ -176,10 +190,81 @@ persistent storage for all yoq state.
 
 **secrets:** encrypted at rest with XChaCha20-Poly1305. can be mounted as files or injected as environment variables. rotation doesn't require container restart.
 
+**backup/restore:** uses the SQLite Online Backup API (`sqlite3_backup_init`/`step`/`finish`), which is safe to run while the server is running. restores validate the schema version before replacing the active database. volume data is not included in backups — only the SQLite state.
+
 key files:
 - `store.zig` — container/image CRUD operations
 - `schema.zig` — database schema and migrations
 - `secrets.zig` — encrypted secret storage
+- `backup.zig` — online backup and restore
+- `commands.zig` — secret, backup, restore CLI
+
+### GPU (`src/gpu/`)
+
+GPU detection, passthrough, scheduling, and distributed training support.
+
+**detection:** discovers NVIDIA GPUs via `/dev/nvidia*` device nodes, NVML shared library (`dlopen`), and procfs/sysfs fallback. reports GPU count, model, VRAM, driver version.
+
+**passthrough:** bind-mounts GPU device nodes and NVIDIA libraries into containers. sets cgroup device rules to allow access. the container sees the GPU as if it were on the host.
+
+**gang scheduling:** all-or-nothing scheduling for distributed training — either all requested ranks get placed, or none do. topology-aware: prefers placing ranks on nodes with direct GPU interconnects.
+
+**MIG/MPS:** supports NVIDIA Multi-Instance GPU (MIG) partitioning for sharing a single GPU across containers, and Multi-Process Service (MPS) for concurrent GPU access.
+
+**InfiniBand/NCCL:** detects InfiniBand HCAs, generates NCCL topology XML for optimal GPU-NIC affinity, and injects NCCL environment variables into training containers.
+
+**health monitoring:** periodic checks of GPU temperature, ECC errors, and utilization via NVML. feeds into the alerting system.
+
+**CLI:** `yoq gpu topo` shows GPU topology (PCIe, NVLink, InfiniBand). `yoq gpu bench` runs GPU-to-GPU bandwidth benchmarks.
+
+key files:
+- `detect.zig` — GPU discovery
+- `passthrough.zig` — device bind-mount and cgroup rules
+- `scheduler.zig` — gang scheduling
+- `mig.zig` — MIG partitioning
+- `mps.zig` — MPS sharing
+- `mesh.zig` — InfiniBand/NCCL topology
+- `health.zig` — temperature, ECC, utilization monitoring
+- `commands.zig` — gpu topo, gpu bench CLI
+
+### training (`src/manifest/training.zig`)
+
+distributed training job orchestration.
+
+**lifecycle:** TrainingJobState machine: pending → scheduling → running → paused → completed/failed/stopped. the TrainingController manages transitions and tracks per-rank status.
+
+**multi-rank:** each training job spawns one container per GPU (rank). NCCL environment variables (`MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK`, `LOCAL_RANK`) are injected automatically. gang scheduling ensures all ranks start together.
+
+**checkpoints:** configurable checkpoint interval and retention. the controller persists checkpoint metadata to SQLite for resume-after-failure.
+
+**fault tolerance:** spare ranks can be held in reserve. failed ranks auto-restart up to a configurable limit. the job resumes from the latest checkpoint.
+
+### storage (`src/storage/`)
+
+S3-compatible object storage and volume management.
+
+**S3 gateway:** a filesystem-backed S3-compatible API. supports bucket CRUD, object HEAD/GET/PUT/DELETE, and multipart uploads. objects are stored under `~/.local/share/yoq/s3/`.
+
+**volume drivers:** four drivers (local, host, NFS, parallel) provide storage backends for container volumes. see the [manifest spec](manifest-spec.md#volumes) for configuration.
+
+key files:
+- `s3.zig` — S3 API routes and bucket/object operations
+- `s3_xml.zig` — S3 XML response generation
+- `metrics.zig` — storage I/O metrics
+
+### doctor (`src/lib/doctor.zig`)
+
+pre-flight system readiness checks. `yoq doctor` runs 7 checks and reports pass/warn/fail for each:
+
+1. **kernel** — Linux kernel ≥ 6.1
+2. **cgroup-v2** — cgroups v2 mounted and writable
+3. **ebpf** — BPF program loading support
+4. **gpu** — NVIDIA GPU and driver availability
+5. **wireguard** — WireGuard kernel module
+6. **infiniband** — InfiniBand HCA detection
+7. **disk-space** — sufficient free disk space
+
+GPU, WireGuard, and InfiniBand checks return `warn` (not `fail`) when hardware is absent, since these are optional features.
 
 ### API (`src/api/`)
 
@@ -222,6 +307,7 @@ key files:
 - `crypto.zig` — hashing, key generation
 - `syscall.zig` — low-level syscall wrappers
 - `sql.zig` — SQL escaping for raft proposals
+- `doctor.zig` — system readiness checks
 
 ## design decisions
 
@@ -233,13 +319,15 @@ key files:
 
 **pure Raft.** the Raft state machine has no I/O. it takes inputs (ticks, RPCs) and returns actions (send messages, commit entries). the caller handles all networking and persistence. this makes the core algorithm fully testable without mocks.
 
-**eBPF for dataplane.** DNS resolution, load balancing, port mapping, metrics collection, and network policy enforcement all run as eBPF programs in kernel space. this replaces kube-proxy, CNI plugins, and service mesh sidecars with a handful of C programs totaling ~500 lines.
+**eBPF for dataplane.** DNS resolution, load balancing, port mapping, metrics collection, network policy enforcement, and GPU traffic prioritization all run as eBPF programs in kernel space. this replaces kube-proxy, CNI plugins, and service mesh sidecars with a handful of C programs totaling ~500 lines.
 
 **fixed-size registries.** the DNS service registry (256 entries), health check registry (64 services), and BPF maps use fixed-size data structures. no heap allocation on the hot path — just array indexing.
 
 **content-hash build cache.** build layer caching is keyed by content hash, not by instruction order. reordering Dockerfile instructions doesn't invalidate the cache (unlike Docker).
 
 **SQLite for everything.** container state, image metadata, service names, secrets, network policies, deployment history, and Raft log all live in SQLite. in cluster mode, the database is replicated via Raft. no etcd, no separate state store.
+
+**hub-and-spoke WireGuard.** server nodes are WireGuard hubs that forward inter-agent traffic. agents connect only to servers, avoiding O(n²) peer configurations. agent join/leave is a single-peer operation on the server side.
 
 ## security model
 

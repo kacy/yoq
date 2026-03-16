@@ -25,7 +25,6 @@ make install      # copies to /usr/local/bin/yoq
 ## code style
 
 - **clear over clever.** if something feels too smart, simplify it or add comments explaining why.
-- **lowercase everything.** commit messages, PR titles, variable names — keep it casual and readable.
 - **no panics.** yoq is built to be production-grade. handle errors explicitly. use `return error.*` instead of `@panic` or `unreachable` wherever possible.
 - **explicit allocators.** follow Zig conventions — pass allocators through, use arenas where appropriate.
 - **readable code.** this codebase will be read by many people. optimize for understanding, not brevity.
