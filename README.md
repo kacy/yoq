@@ -8,53 +8,7 @@ That is the point of yoq. It collapses the usual stack into one operational mode
 
 Linux kernel 6.1+ is required.
 
-## why this exists
-
-The standard container stack grew by accretion:
-
-- one tool to build images
-- one tool to run containers
-- one file format for local development
-- another system for production scheduling
-- extra layers for ingress, service discovery, mesh, secrets, TLS, and observability
-
-That stack can be the right answer for very large organizations. For most teams, it creates more moving parts than the application actually needs. The operational burden becomes the platform.
-
-yoq takes the opposite approach: keep the system integrated, keep the surface area small, and ship the production features people usually bolt on later.
-
-## why yoq is better for most teams
-
-- Fewer moving parts: one binary instead of a runtime, orchestrator, ingress layer, mesh, and templating stack.
-- One mental model: local containers, multi-service apps, and clustered deployments all use the same CLI and same resource model.
-- Less operational glue: service discovery, TLS, rollouts, secrets, metrics, and network policy are built in.
-- Less translation work: you do not need to move from Dockerfiles to Compose to Helm charts to controller-specific CRDs just to keep shipping.
-- Easier debugging: there is one codebase, one state store, and one place to reason about failures.
-
-This is not a claim that yoq is the right answer for every environment. It is a claim that the usual stack is often overbuilt for what small and mid-sized teams actually need.
-
-## why not the usual stack
-
-For many teams, the default path looks like this:
-
-- Docker for images and local containers
-- Compose for local multi-service development
-- Kubernetes for scheduling
-- Helm for packaging
-- ingress controllers and cert tooling for edge traffic
-- service mesh or extra controllers for traffic policy and observability
-
-yoq keeps those responsibilities in one system:
-
-- OCI image build and registry operations
-- container runtime and process supervision
-- service orchestration from a manifest
-- built-in service discovery and networking
-- TLS, secrets, health checks, rollouts, and metrics
-- optional multi-node clustering
-
-The result is a smaller stack to install, upgrade, debug, and teach.
-
-## best fit
+## who this is for
 
 yoq is a strong fit for:
 
@@ -63,7 +17,9 @@ yoq is a strong fit for:
 - operators who prefer direct, inspectable systems over layered abstractions
 - Linux environments where shipping one binary is operationally attractive
 
-yoq is probably not the right fit if you already depend on the full Kubernetes ecosystem surface, deep CRD-driven workflows, or broad vendor tooling built specifically around Kubernetes APIs.
+yoq takes a different approach from the standard stack. instead of composing separate tools for images, runtime, orchestration, ingress, mesh, secrets, and observability, it keeps everything integrated with a small surface area. the tradeoff is a narrower ecosystem — you get one coherent system instead of a platform you can extend in every direction.
+
+Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't try to replace that. if you already depend on the full Kubernetes ecosystem surface, deep CRD-driven workflows, or broad vendor tooling built specifically around Kubernetes APIs, yoq is probably not the right fit.
 
 ## what you get
 
@@ -105,8 +61,8 @@ yoq is probably not the right fit if you already depend on the full Kubernetes e
 - GPU detection and passthrough into containers
 - gang scheduling for distributed training workloads
 - NCCL mesh configuration and InfiniBand/RDMA support
-- MIG partitioning for GPU sharing
-- `yoq train` for distributed training jobs
+- MIG partitioning and MPS sharing
+- training job orchestration with checkpoints, fault tolerance, and data sharding
 
 ### storage
 
@@ -120,7 +76,17 @@ yoq is probably not the right fit if you already depend on the full Kubernetes e
 - role separation: server nodes (raft + API + scheduler) vs agent nodes (gossip + workloads)
 - HMAC-SHA256 authenticated cluster transport
 - agent registration, heartbeats, placement, drain, and cluster status
+- rolling upgrades with leader step-down
 - remote operations via `--server host:port`
+
+### diagnostics
+
+- `yoq doctor` pre-flight system checks (kernel, cgroups, eBPF, GPU, WireGuard, InfiniBand, disk)
+- `yoq backup` / `yoq restore` for SQLite state
+
+### alerting
+
+- threshold-based alerts (CPU, memory, restart count, p99 latency, error rate) with webhook notifications
 
 ## quickstart
 
@@ -249,12 +215,32 @@ yoq nodes [--server host:port]       list agent nodes
 yoq drain <id> [--server host:port]  drain an agent node
 ```
 
+### GPU
+
+```text
+yoq gpu topo [--json]                show GPU topology
+yoq gpu bench [--gpus N]             GPU-to-GPU bandwidth benchmark
+    [--size BYTES] [--iterations N]
+```
+
 ### training
 
 ```text
-yoq train start <name>           start a training job
-yoq train status <name>          show training job config
-yoq train logs <name> [--rank N] show logs for a training rank
+yoq train start <name>              start a training job
+yoq train status <name>             show training job status
+yoq train stop <name>               stop a training job
+yoq train pause <name>              pause a training job
+yoq train resume <name>             resume a paused job
+yoq train scale <name>              scale training ranks
+yoq train logs <name> [--rank N]    show logs for a training rank
+```
+
+### diagnostics
+
+```text
+yoq doctor [--json]                  check system readiness
+yoq backup [--output path]           backup database state
+yoq restore <path>                   restore database from backup
 ```
 
 ### meta
@@ -267,41 +253,30 @@ yoq completion <bash|zsh|fish>       output shell completion
 
 Notes:
 
-- `--json` is currently available on `ps`, `images`, `prune`, and `version`.
+- `--json` is available on `ps`, `images`, `prune`, `version`, `gpu topo`, and `doctor`.
 - crons defined in the manifest start automatically with `yoq up`.
 - deployment, metrics, and certificate commands also support `--server host:port`.
 
 ## current status
 
-yoq is substantially implemented today: roughly 69k lines of Zig, around 1388 tests, and coverage across runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, and metrics.
+~77K lines of Zig, ~1474 tests, v0.1.1. coverage across runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, metrics, and alerting.
 
-Implemented areas include:
-
-- container runtime with namespaces, cgroups v2, overlayfs, seccomp, supervision, logs, and exec
-- OCI image pull, push, inspect, extraction, caching, and pruning
-- networking with bridge setup, DNS discovery, port mapping, eBPF hooks, and WireGuard mesh support
-- build engine with Dockerfile parsing, multi-stage builds, caching, and TOML manifests
-- manifest-driven service orchestration, health checks, workers, cron scheduling, dev mode, rollouts, and rollback
-- raft-backed clustering with agent management and scheduling
-- GPU detection, passthrough, health monitoring, MIG partitioning, gang scheduling, and NCCL mesh
-- distributed training job orchestration with `yoq train`
-- S3-compatible object storage gateway and volume drivers (local, host, NFS, parallel filesystem)
-- secrets, TLS termination, ACME, network policy, and observability features
+see [docs/architecture.md](docs/architecture.md) for subsystem details and [docs/users-guide.md](docs/users-guide.md) for a guide to the internals.
 
 ## architecture snapshot
 
-yoq is organized as a small set of integrated subsystems:
+yoq is organized as a set of integrated subsystems:
 
-- `runtime/` handles container lifecycle, namespaces, cgroups, filesystem setup, security, logs, and exec
-- `image/` handles OCI registry interactions, blob storage, layer extraction, and image metadata
-- `network/` handles bridge networking, DNS, NAT, WireGuard, eBPF integration, and policy enforcement
-- `build/` and `manifest/` handle image builds, application manifests, orchestration, health, updates, and dev workflows
-- `cluster/`, `api/`, and `state/` handle replication, scheduling, remote control, and persistent state
-- `gpu/` handles GPU detection, passthrough, health monitoring, scheduling, and InfiniBand/NCCL mesh
-- `storage/` handles S3-compatible object storage and volume management
-- `tls/` and `lib/` provide certificate management, proxying, shared utilities, CLI helpers, and logging
+- `runtime/` — container lifecycle, namespaces, cgroups, filesystem, security, logs, exec
+- `image/` — OCI registry, blob storage, layer extraction, metadata
+- `network/` — bridge networking, DNS, NAT, WireGuard, eBPF, policy
+- `build/` and `manifest/` — image builds, manifests, orchestration, health, updates, training, alerting
+- `cluster/`, `api/`, and `state/` — replication, scheduling, remote control, persistent state, backup/restore
+- `gpu/` — detection, passthrough, health, scheduling, InfiniBand/NCCL mesh
+- `storage/` — S3-compatible object storage, volume management
+- `tls/` and `lib/` — certificates, proxying, utilities, CLI, logging, doctor
 
-The design goal is straightforward: keep the control plane close to the runtime, avoid unnecessary layers, and rely on Linux kernel primitives directly when they provide a simpler and more coherent implementation.
+see [docs/architecture.md](docs/architecture.md) for the full breakdown.
 
 ## examples
 
@@ -318,11 +293,7 @@ yoq up -f examples/redis/manifest.toml
 
 ## what's next
 
-- checkpoint management for training jobs
-- fault tolerance for long training runs
-- GPU monitoring and observability
-- multi-region federation
-- advanced L7 routing
-- plugin system
+- L7 routing — HTTP-level routing and request-based load balancing (currently DNS-level only)
+- hardening — continued stability, edge-case testing, and operational polish
 - web UI remains intentionally deferred; the CLI is the primary interface
-- image signing is not built in today; use cosign externally
+- image signing is not built in; use cosign externally

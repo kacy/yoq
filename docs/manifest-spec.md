@@ -47,6 +47,9 @@ services are long-running processes. defined under `[service.<name>]`.
 | `health_check` | table | no | none | health probe configuration |
 | `restart` | string | no | `"none"` | restart policy |
 | `tls` | table | no | none | TLS termination configuration |
+| `gpu` | table | no | none | GPU passthrough configuration |
+| `gpu_mesh` | table | no | none | distributed GPU mesh configuration |
+| `alerts` | table | no | none | alert threshold configuration |
 
 ### ports
 
@@ -175,6 +178,68 @@ domain = "example.com"
 
 ---
 
+## GPU configuration
+
+defined under `[service.<name>.gpu]`. requests GPU passthrough for the container.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `count` | integer | no | `0` | number of GPUs to allocate |
+| `model` | string | no | none | GPU model filter (e.g. `"A100"`, `"H100"`) |
+| `vram_min_mb` | integer | no | none | minimum VRAM per GPU in MB |
+
+```toml
+[service.inference.gpu]
+count = 2
+model = "A100"
+vram_min_mb = 40000
+```
+
+---
+
+## GPU mesh configuration
+
+defined under `[service.<name>.gpu_mesh]`. configures distributed GPU communication (NCCL) for multi-rank workloads.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `world_size` | integer | yes | — | total number of ranks |
+| `gpus_per_rank` | integer | no | `1` | GPUs assigned to each rank |
+| `master_port` | integer | no | `29500` | NCCL master coordination port |
+
+```toml
+[service.trainer.gpu_mesh]
+world_size = 8
+gpus_per_rank = 4
+master_port = 29500
+```
+
+---
+
+## alerts
+
+defined under `[service.<name>.alerts]`. threshold-based monitoring with webhook notifications. when a metric exceeds its threshold for consecutive checks, the webhook is fired.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `cpu_percent` | float | no | none | CPU usage threshold (0-100) |
+| `memory_percent` | float | no | none | memory usage threshold (0-100) |
+| `restart_count` | integer | no | none | restart count threshold |
+| `latency_p99_ms` | float | no | none | p99 latency threshold in ms |
+| `error_rate_percent` | float | no | none | error rate threshold (0-100) |
+| `webhook` | string | no | none | webhook URL for notifications |
+
+```toml
+[service.web.alerts]
+cpu_percent = 90
+memory_percent = 85
+restart_count = 5
+latency_p99_ms = 500
+webhook = "https://hooks.slack.com/services/T.../B.../xxx"
+```
+
+---
+
 ## workers
 
 workers are one-shot tasks that run to completion. defined under `[worker.<name>]`.
@@ -187,6 +252,8 @@ workers are one-shot tasks that run to completion. defined under `[worker.<name>
 | `depends_on` | array of strings | no | `[]` | services/workers to run first |
 | `working_dir` | string | no | image default | working directory |
 | `volumes` | array of strings | no | `[]` | volume mounts |
+| `gpu` | table | no | none | GPU passthrough (same fields as service GPU) |
+| `gpu_mesh` | table | no | none | GPU mesh (same fields as service GPU mesh) |
 
 ```toml
 [worker.migrate]
@@ -232,6 +299,103 @@ examples: `"30s"`, `"5m"`, `"1h"`, `"24h"`.
 
 ---
 
+## training jobs
+
+training jobs orchestrate distributed GPU training runs. defined under `[training.<name>]`.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `image` | string | yes | — | OCI image reference |
+| `command` | array of strings | no | image default | command to execute |
+| `env` | array of strings | no | `[]` | environment variables |
+| `working_dir` | string | no | image default | working directory |
+| `volumes` | array of strings | no | `[]` | volume mounts |
+| `gpus` | integer | yes | — | total number of GPUs (= number of ranks) |
+| `gpu_type` | string | no | none | GPU model filter (e.g. `"H100"`) |
+| `data` | table | no | none | dataset configuration |
+| `checkpoint` | table | no | none | checkpoint configuration |
+| `resources` | table | no | see below | resource limits per rank |
+| `fault_tolerance` | table | no | see below | fault tolerance settings |
+
+```toml
+[training.llm-finetune]
+image = "trainer:v2"
+command = ["torchrun", "train.py"]
+gpus = 8
+gpu_type = "H100"
+env = ["EPOCHS=10", "BATCH_SIZE=32"]
+```
+
+### data configuration
+
+defined under `[training.<name>.data]`.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `dataset` | string | yes | — | dataset path or identifier |
+| `sharding` | string | yes | — | sharding strategy (e.g. `"file"`) |
+| `preprocessing` | string | no | none | preprocessing pipeline (e.g. `"tokenize"`) |
+
+```toml
+[training.llm-finetune.data]
+dataset = "/mnt/lustre/pile"
+sharding = "file"
+preprocessing = "tokenize"
+```
+
+### checkpoint configuration
+
+defined under `[training.<name>.checkpoint]`.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `path` | string | yes | — | checkpoint storage path |
+| `interval_secs` | integer | no | `1800` | seconds between checkpoints |
+| `keep` | integer | no | `5` | number of checkpoints to retain |
+
+```toml
+[training.llm-finetune.checkpoint]
+path = "/mnt/checkpoints/llm"
+interval_secs = 900
+keep = 3
+```
+
+### resource configuration
+
+defined under `[training.<name>.resources]`.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `cpu` | integer | no | `1000` | CPU millicores per rank |
+| `memory_mb` | integer | no | `65536` | memory limit per rank in MB |
+| `ib_required` | boolean | no | `false` | require InfiniBand connectivity |
+
+```toml
+[training.llm-finetune.resources]
+cpu = 4000
+memory_mb = 131072
+ib_required = true
+```
+
+### fault tolerance configuration
+
+defined under `[training.<name>.fault_tolerance]`.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `spare_ranks` | integer | no | `0` | spare ranks for failover |
+| `auto_restart` | boolean | no | `true` | restart failed ranks automatically |
+| `max_restarts` | integer | no | `10` | maximum restart attempts per rank |
+
+```toml
+[training.llm-finetune.fault_tolerance]
+spare_ranks = 1
+auto_restart = true
+max_restarts = 5
+```
+
+---
+
 ## volumes
 
 named volumes are defined under `[volume.<name>]`.
@@ -240,12 +404,64 @@ named volumes are defined under `[volume.<name>]`.
 |-------|------|----------|---------|-------------|
 | `driver` | string | no | `"local"` | storage driver |
 
+four volume drivers are available:
+
+### local (default)
+
+managed by yoq. no extra configuration.
+
 ```toml
 [volume.pgdata]
 driver = "local"
 ```
 
-volumes referenced in service/worker/cron `volumes` arrays that aren't explicitly defined use the default driver.
+### host
+
+bind-mount a host directory.
+
+| field | type | required | description |
+|-------|------|----------|-------------|
+| `path` | string | yes | absolute path on the host |
+
+```toml
+[volume.data]
+driver = "host"
+path = "/srv/data"
+```
+
+### nfs
+
+mount an NFS share.
+
+| field | type | required | description |
+|-------|------|----------|-------------|
+| `server` | string | yes | NFS server hostname or IP |
+| `path` | string | yes | export path on the server |
+| `options` | string | no | mount options (e.g. `"nolock,hard"`) |
+
+```toml
+[volume.shared]
+driver = "nfs"
+server = "nfs.internal"
+path = "/exports/shared"
+options = "nolock,hard"
+```
+
+### parallel
+
+mount a parallel filesystem (Lustre, GPFS).
+
+| field | type | required | description |
+|-------|------|----------|-------------|
+| `mount_path` | string | yes | path to the parallel filesystem mount |
+
+```toml
+[volume.training-data]
+driver = "parallel"
+mount_path = "/mnt/lustre/datasets"
+```
+
+volumes referenced in service/worker/cron `volumes` arrays that aren't explicitly defined use the default local driver.
 
 ---
 
