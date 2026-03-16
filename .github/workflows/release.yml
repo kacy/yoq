@@ -113,21 +113,43 @@ jobs:
           done
 
   release-build:
-    name: release-build
+    name: release-build-${{ matrix.arch }}
     needs:
       - validate-tag
       - fmt-check
       - build-debug
       - docker-build
       - examples-validate
-    uses: ./.github/workflows/_build-test.yml
-    with:
-      job-name: release-build
-      command: zig build -Doptimize=ReleaseSafe
-      timeout-minutes: 30
-      failure-artifact-name: release-build-log
-      upload-path: zig-out/bin/yoq
-      upload-artifact-name: yoq-release-linux-amd64-raw
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-linux
+          - arch: arm64
+            target: aarch64-linux
+          - arch: riscv64
+            target: riscv64-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-release-${{ matrix.arch }}
+
+      - name: build release binary
+        shell: bash
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+
+      - name: upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: yoq-release-linux-${{ matrix.arch }}-raw
+          path: zig-out/bin/yoq
+          retention-days: 7
 
   package:
     name: package
@@ -135,14 +157,11 @@ jobs:
       - validate-tag
       - release-build
     runs-on: ubuntu-latest
-    outputs:
-      archive_name: ${{ steps.package.outputs.archive_name }}
-      checksum_name: ${{ steps.package.outputs.checksum_name }}
     steps:
-      - name: download release binary
+      - name: download all release binaries
         uses: actions/download-artifact@v4
         with:
-          name: yoq-release-linux-amd64-raw
+          pattern: yoq-release-linux-*-raw
           path: dist/raw
 
       - name: package release artifacts
@@ -151,21 +170,22 @@ jobs:
         env:
           TAG: ${{ needs.validate-tag.outputs.tag }}
         run: |
-          archive_name="yoq-linux-amd64-${TAG}.tar.gz"
-          checksum_name="yoq-linux-amd64-${TAG}.sha256"
+          mkdir -p dist/out
+          for dir in dist/raw/yoq-release-linux-*-raw; do
+            arch=$(echo "$dir" | sed 's/.*linux-\(.*\)-raw/\1/')
+            archive_name="yoq-linux-${arch}-${TAG}.tar.gz"
+            checksum_name="yoq-linux-${arch}-${TAG}.sha256"
 
-          chmod +x dist/raw/yoq
-          tar -C dist/raw -czf "dist/${archive_name}" yoq
-          sha256sum "dist/${archive_name}" > "dist/${checksum_name}"
-
-          echo "archive_name=$archive_name" >> "$GITHUB_OUTPUT"
-          echo "checksum_name=$checksum_name" >> "$GITHUB_OUTPUT"
+            chmod +x "${dir}/yoq"
+            tar -C "${dir}" -czf "dist/out/${archive_name}" yoq
+            (cd dist/out && sha256sum "${archive_name}" > "${checksum_name}")
+          done
 
       - name: upload packaged artifacts
         uses: actions/upload-artifact@v4
         with:
           name: yoq-release-bundle
-          path: dist/*
+          path: dist/out/*
           retention-days: 14
 
   publish-release:
@@ -197,8 +217,11 @@ jobs:
             echo "release tag: ${TAG}"
             echo
             echo "artifacts:"
-            echo "- linux amd64 tarball"
-            echo "- sha256 checksum"
+            for f in dist/yoq-linux-*.tar.gz; do
+              echo "- $(basename "$f")"
+            done
+            echo
+            echo "install: \`curl -fsSL https://raw.githubusercontent.com/kacy/yoq/main/scripts/install.sh | sh\`"
             echo
             echo "## changelog"
             if [ -f CHANGELOG.md ]; then
@@ -219,5 +242,5 @@ jobs:
           name: yoq ${{ needs.validate-tag.outputs.tag }}
           body_path: dist/release-notes.md
           files: |
-            dist/${{ needs.package.outputs.archive_name }}
-            dist/${{ needs.package.outputs.checksum_name }}
+            dist/*.tar.gz
+            dist/*.sha256

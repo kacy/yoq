@@ -1,4 +1,4 @@
-.PHONY: build run test test-integration test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor
+.PHONY: build run test test-integration test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
 
 build:
 	zig build -Doptimize=ReleaseSafe
@@ -55,6 +55,18 @@ define do_release
 	git tag "v$(1)"
 	git push origin main "v$(1)"
 endef
+
+CROSS_TARGETS := x86_64-linux aarch64-linux riscv64-linux
+
+release-cross:
+	@for target in $(CROSS_TARGETS); do \
+		echo "building $$target..."; \
+		zig build -Doptimize=ReleaseSafe -Dtarget=$$target; \
+		arch=$$(echo $$target | sed 's/-linux//'); \
+		mkdir -p dist; \
+		cp zig-out/bin/yoq dist/yoq-linux-$$arch; \
+	done
+	@echo "binaries in dist/"
 
 release-patch:
 	$(call do_release,$(MAJOR).$(MINOR).$(shell echo $$(($(PATCH)+1))))
