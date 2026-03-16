@@ -73,6 +73,11 @@ fn persistStoppedState(record: *const store.ContainerRecord, exit_code: ?u8) voi
     store.updateStatus(record.id, "stopped", null, exit_code) catch {};
 }
 
+fn isOwnedContainerPid(id: []const u8, pid: i32) bool {
+    const cg = cgroups.Cgroup.open(id) catch return false;
+    return cg.containsProcess(pid);
+}
+
 fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
@@ -469,8 +474,9 @@ fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) ContainerError!void
 
     // check if process is still running (signal 0 is no-op check)
     if (process.sendSignal(child.id, 0)) |_| {
-        // process exists, detach from it so it continues running
-        _ = child.wait() catch {};
+        // process exists; return without waiting so detached mode does not
+        // block on the supervisor's full lifetime.
+        return;
     } else |_| {
         // process already exited - something went wrong
         writeErr("supervisor process exited immediately\n", .{});
@@ -655,6 +661,10 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 fn reconcileLiveness(id: []const u8, status: []const u8, pid: ?i32) []const u8 {
     if (!std.mem.eql(u8, status, "running")) return status;
     if (pid) |p| {
+        if (!isOwnedContainerPid(id, p)) {
+            store.updateStatus(id, "stopped", null, null) catch {};
+            return "stopped";
+        }
         process.sendSignal(p, 0) catch {
             store.updateStatus(id, "stopped", null, null) catch {};
             return "stopped";
@@ -745,6 +755,12 @@ pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         writeErr("container {s} has no pid\n", .{id});
         return ContainerError.ProcessNotFound;
     };
+
+    if (!isOwnedContainerPid(record.id, pid)) {
+        persistStoppedState(&record, null);
+        write("{s} (already stopped)\n", .{id});
+        return;
+    }
 
     // check if the process is actually still alive before sending SIGTERM
     process.sendSignal(pid, 0) catch {
@@ -911,4 +927,27 @@ test "filesystem target detection matches supported rootfs shapes" {
     try std.testing.expect(isFilesystemTarget(".."));
     try std.testing.expect(!isFilesystemTarget("nginx:latest"));
     try std.testing.expect(!isFilesystemTarget("library/nginx"));
+}
+
+test "reconcileLiveness stops stale running record when pid is not in container cgroup" {
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "deadbeefcafe",
+        .hostname = "test",
+        .rootfs = "/tmp/rootfs",
+        .status = "running",
+        .command = "sleep 1",
+        .created_at = 1,
+        .pid = 999999,
+        .exit_code = null,
+    });
+
+    try std.testing.expectEqualStrings("stopped", reconcileLiveness("deadbeefcafe", "running", 999999));
+
+    const record = try store.load(std.testing.allocator, "deadbeefcafe");
+    defer record.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("stopped", record.status);
+    try std.testing.expect(record.pid == null);
 }

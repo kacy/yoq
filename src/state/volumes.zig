@@ -84,41 +84,9 @@ pub fn create(
     var buf: [paths.max_path]u8 = undefined;
     const vol_path = try resolveVolumePath(&buf, app_name, vol.name, vol.driver);
 
-    // ensure the directory exists and mount if needed
-    switch (vol.driver) {
-        .local => {
-            std.fs.cwd().makePath(vol_path) catch |e| {
-                log.err("volumes: failed to create directory {s}: {}", .{ vol_path, e });
-                return VolumeError.IoError;
-            };
-        },
-        .nfs => |n| {
-            std.fs.cwd().makePath(vol_path) catch |e| {
-                log.err("volumes: failed to create NFS mountpoint {s}: {}", .{ vol_path, e });
-                return VolumeError.IoError;
-            };
-            mountNfs(vol_path, n.server, n.path, n.options) catch |e| {
-                log.err("volumes: NFS mount failed for {s}: {}", .{ vol_path, e });
-                std.fs.cwd().deleteTree(vol_path) catch {};
-                return e;
-            };
-        },
-        .host => {},
-        .parallel => |p| {
-            // validate mount path exists and is a recognized parallel filesystem
-            validateParallelFs(p.mount_path) catch |e| {
-                log.err("volumes: parallel FS validation failed for {s}: {}", .{ p.mount_path, e });
-                return e;
-            };
-        },
-    }
-
-    // populate node_id for local/parallel volumes (node-specific)
-    // nfs/host volumes are node-agnostic — leave node_id null
-    const effective_node_id: ?sqlite.Text = switch (vol.driver) {
-        .local, .parallel => if (node_id) |nid| sqlite.Text{ .data = nid } else null,
-        .nfs, .host => null,
-    };
+    const prepared = try prepareVolumePath(vol_path, vol.driver);
+    errdefer rollbackPreparedVolume(vol_path, vol.driver, prepared);
+    const effective_node_id = driverNodeId(vol.driver, node_id);
 
     // idempotent insert
     db.exec(
@@ -166,40 +134,25 @@ pub fn destroy(
     app_name: []const u8,
     vol_name: []const u8,
 ) VolumeError!void {
-    // look up driver and path before deleting
-    const alloc = std.heap.page_allocator;
-    const Row = struct { driver: sqlite.Text, path: sqlite.Text };
-    const row = (db.oneAlloc(
-        Row,
-        alloc,
-        "SELECT driver, path FROM volumes WHERE name = ? AND app_name = ?;",
-        .{},
-        .{ sqlite.Text{ .data = vol_name }, sqlite.Text{ .data = app_name } },
-    ) catch return VolumeError.DbError) orelse return;
+    const row = (try lookupVolumeDriverAndPath(db, app_name, vol_name)) orelse return;
     defer {
-        alloc.free(row.driver.data);
-        alloc.free(row.path.data);
+        std.heap.page_allocator.free(row.driver.data);
+        std.heap.page_allocator.free(row.path.data);
     }
 
-    // unmount NFS before removing directory
-    if (std.mem.eql(u8, row.driver.data, "nfs")) {
-        unmountNfs(row.path.data) catch |e| {
-            log.warn("volumes: NFS unmount failed for {s}: {}", .{ row.path.data, e });
-        };
-    }
-
-    // remove managed directories (local and nfs — not host)
-    if (std.mem.eql(u8, row.driver.data, "local") or std.mem.eql(u8, row.driver.data, "nfs")) {
-        std.fs.cwd().deleteTree(row.path.data) catch |e| {
-            log.warn("volumes: failed to remove directory {s}: {}", .{ row.path.data, e });
-        };
-    }
+    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return VolumeError.DbError;
+    var transaction_open = true;
+    errdefer if (transaction_open) db.exec("ROLLBACK;", .{}, .{}) catch {};
 
     db.exec(
         "DELETE FROM volumes WHERE name = ? AND app_name = ?;",
         .{},
         .{ sqlite.Text{ .data = vol_name }, sqlite.Text{ .data = app_name } },
     ) catch return VolumeError.DbError;
+
+    try cleanupManagedVolume(row.driver.data, row.path.data);
+    db.exec("COMMIT;", .{}, .{}) catch return VolumeError.DbError;
+    transaction_open = false;
 }
 
 /// list all volumes for an app.
@@ -268,6 +221,106 @@ pub const VolumeConstraint = struct {
     driver: []const u8,
     node_id: ?[]const u8,
 };
+
+const VolumeLookupRow = struct {
+    driver: sqlite.Text,
+    path: sqlite.Text,
+};
+
+const PreparedVolume = struct {
+    path_created: bool = false,
+    nfs_mounted: bool = false,
+};
+
+fn prepareVolumePath(vol_path: []const u8, driver: spec.VolumeDriver) VolumeError!PreparedVolume {
+    var prepared: PreparedVolume = .{};
+    switch (driver) {
+        .local => prepared.path_created = try ensurePath(vol_path, "directory"),
+        .nfs => |nfs| {
+            prepared.path_created = try ensurePath(vol_path, "NFS mountpoint");
+            const was_mounted = isMounted(vol_path);
+            mountNfs(vol_path, nfs.server, nfs.path, nfs.options) catch |err| {
+                log.err("volumes: NFS mount failed for {s}: {}", .{ vol_path, err });
+                if (prepared.path_created) std.fs.cwd().deleteTree(vol_path) catch {};
+                return err;
+            };
+            prepared.nfs_mounted = !was_mounted;
+        },
+        .host => {},
+        .parallel => |parallel| {
+            validateParallelFs(parallel.mount_path) catch |err| {
+                log.err("volumes: parallel FS validation failed for {s}: {}", .{ parallel.mount_path, err });
+                return err;
+            };
+        },
+    }
+    return prepared;
+}
+
+fn ensurePath(path: []const u8, label: []const u8) VolumeError!bool {
+    const existed = pathExists(path);
+    std.fs.cwd().makePath(path) catch |err| {
+        log.err("volumes: failed to create {s} {s}: {}", .{ label, path, err });
+        return VolumeError.IoError;
+    };
+    return !existed;
+}
+
+fn driverNodeId(driver: spec.VolumeDriver, node_id: ?[]const u8) ?sqlite.Text {
+    return switch (driver) {
+        .local, .parallel => if (node_id) |nid| sqlite.Text{ .data = nid } else null,
+        .nfs, .host => null,
+    };
+}
+
+fn lookupVolumeDriverAndPath(
+    db: *sqlite.Db,
+    app_name: []const u8,
+    vol_name: []const u8,
+) VolumeError!?VolumeLookupRow {
+    const alloc = std.heap.page_allocator;
+    return (db.oneAlloc(
+        VolumeLookupRow,
+        alloc,
+        "SELECT driver, path FROM volumes WHERE name = ? AND app_name = ?;",
+        .{},
+        .{ sqlite.Text{ .data = vol_name }, sqlite.Text{ .data = app_name } },
+    ) catch return VolumeError.DbError);
+}
+
+fn rollbackPreparedVolume(path: []const u8, driver: spec.VolumeDriver, prepared: PreparedVolume) void {
+    switch (driver) {
+        .local => {
+            if (prepared.path_created) std.fs.cwd().deleteTree(path) catch {};
+        },
+        .nfs => {
+            if (prepared.nfs_mounted) unmountNfs(path) catch {};
+            if (prepared.path_created) std.fs.cwd().deleteTree(path) catch {};
+        },
+        .host, .parallel => {},
+    }
+}
+
+fn cleanupManagedVolume(driver: []const u8, path: []const u8) VolumeError!void {
+    if (std.mem.eql(u8, driver, "nfs")) {
+        unmountNfs(path) catch |err| {
+            log.err("volumes: NFS unmount failed for {s}: {}", .{ path, err });
+            return err;
+        };
+    }
+
+    if (std.mem.eql(u8, driver, "local") or std.mem.eql(u8, driver, "nfs")) {
+        std.fs.cwd().deleteTree(path) catch |err| {
+            log.err("volumes: failed to remove directory {s}: {}", .{ path, err });
+            return VolumeError.IoError;
+        };
+    }
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
 
 /// check if a path is currently mounted by reading /proc/mounts.
 fn isMounted(path: []const u8) bool {

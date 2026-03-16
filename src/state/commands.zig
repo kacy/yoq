@@ -3,10 +3,10 @@ const cli = @import("../lib/cli.zig");
 const json_out = @import("../lib/json_output.zig");
 const secrets = @import("secrets.zig");
 const store = @import("store.zig");
+const secrets_cli = @import("secrets_cli.zig");
 const backup_mod = @import("backup.zig");
 const schema = @import("schema.zig");
 const paths = @import("../lib/paths.zig");
-const sqlite = @import("sqlite");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -71,6 +71,11 @@ pub fn secret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     var name: ?[]const u8 = null;
     var value_flag: ?[]const u8 = null;
+    var stdin_data_owned: ?[]u8 = null;
+    defer if (stdin_data_owned) |buf| {
+        std.crypto.secureZero(u8, buf);
+        alloc.free(buf);
+    };
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--value")) {
@@ -98,12 +103,13 @@ fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsE
             writeErr("failed to read from stdin\n", .{});
             return SecretCommandsError.StoreFailed;
         };
+        stdin_data_owned = stdin_data;
         // trim trailing newline — users typically pipe from echo or here-string
         break :blk std.mem.trimRight(u8, stdin_data, "\n\r");
     };
 
-    var sec_store = openSecretsStore(alloc);
-    defer closeSecretsStore(alloc, &sec_store);
+    var sec_store = secrets_cli.open(alloc);
+    defer secrets_cli.close(alloc, &sec_store);
 
     sec_store.set(secret_name, value) catch {
         writeErr("failed to store secret\n", .{});
@@ -116,8 +122,8 @@ fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsE
 fn get(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret get <name>\n");
 
-    var sec_store = openSecretsStore(alloc);
-    defer closeSecretsStore(alloc, &sec_store);
+    var sec_store = secrets_cli.open(alloc);
+    defer secrets_cli.close(alloc, &sec_store);
 
     const value = sec_store.get(name) catch |err| {
         if (err == secrets.SecretsError.NotFound) {
@@ -140,8 +146,8 @@ fn get(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsE
 fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret rm <name>\n");
 
-    var sec_store = openSecretsStore(alloc);
-    defer closeSecretsStore(alloc, &sec_store);
+    var sec_store = secrets_cli.open(alloc);
+    defer secrets_cli.close(alloc, &sec_store);
 
     sec_store.remove(name) catch |err| {
         if (err == secrets.SecretsError.NotFound) {
@@ -157,8 +163,8 @@ fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsEr
 }
 
 fn list(alloc: std.mem.Allocator) SecretCommandsError!void {
-    var sec_store = openSecretsStore(alloc);
-    defer closeSecretsStore(alloc, &sec_store);
+    var sec_store = secrets_cli.open(alloc);
+    defer secrets_cli.close(alloc, &sec_store);
 
     var names = sec_store.list() catch {
         writeErr("failed to list secrets\n", .{});
@@ -193,8 +199,8 @@ fn list(alloc: std.mem.Allocator) SecretCommandsError!void {
 fn rotate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret rotate <name>\n");
 
-    var sec_store = openSecretsStore(alloc);
-    defer closeSecretsStore(alloc, &sec_store);
+    var sec_store = secrets_cli.open(alloc);
+    defer secrets_cli.close(alloc, &sec_store);
 
     sec_store.rotate(name) catch |err| {
         if (err == secrets.SecretsError.NotFound) {
@@ -207,38 +213,6 @@ fn rotate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretComman
     };
 
     write("{s}\n", .{name});
-}
-
-/// open a SecretsStore with a heap-allocated database connection.
-/// exits on failure — used by CLI commands where there's nothing to recover from.
-/// caller must call closeSecretsStore() when done.
-fn openSecretsStore(alloc: std.mem.Allocator) secrets.SecretsStore {
-    const db_ptr = alloc.create(sqlite.Db) catch {
-        writeErr("failed to allocate database\n", .{});
-        std.process.exit(1);
-    };
-    db_ptr.* = store.openDb() catch {
-        alloc.destroy(db_ptr);
-        writeErr("failed to open database\n", .{});
-        std.process.exit(1);
-    };
-
-    return secrets.SecretsStore.init(db_ptr, alloc) catch |err| {
-        db_ptr.deinit();
-        alloc.destroy(db_ptr);
-        if (err == secrets.SecretsError.HomeDirNotFound) {
-            writeErr("HOME directory not found\n", .{});
-        } else {
-            writeErr("failed to initialize secrets store\n", .{});
-        }
-        std.process.exit(1);
-    };
-}
-
-/// close a secrets store opened with openSecretsStore.
-fn closeSecretsStore(alloc: std.mem.Allocator, sec: *secrets.SecretsStore) void {
-    sec.db.deinit();
-    alloc.destroy(sec.db);
 }
 
 // -- backup/restore commands --

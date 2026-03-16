@@ -61,49 +61,28 @@ pub fn backup(output_path: [:0]const u8) BackupError!void {
 /// validates that the backup contains a valid schema before replacing.
 /// warns if the server appears to be running (lockfile check).
 pub fn restore(input_path: [:0]const u8) BackupError!void {
-    // check if server might be running by trying to open the db with exclusive lock
     var dest_path_buf: [paths.max_path]u8 = undefined;
     const dest_path = schema.defaultDbPath(&dest_path_buf) catch return BackupError.PathError;
 
-    // validate the backup file has the expected schema
-    {
-        var check_db: ?*c.sqlite3 = null;
-        if (c.sqlite3_open_v2(input_path.ptr, &check_db, c.SQLITE_OPEN_READONLY, null) != c.SQLITE_OK or check_db == null) {
-            if (check_db) |db| _ = c.sqlite3_close(db);
-            return BackupError.RestoreFailed;
-        }
-        defer _ = c.sqlite3_close(check_db);
-
-        // verify the containers table exists (core schema)
-        var stmt: ?*c.sqlite3_stmt = null;
-        const sql = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='containers'";
-        if (c.sqlite3_prepare_v2(check_db, sql, @intCast(sql.len), &stmt, null) != c.SQLITE_OK) {
-            return BackupError.SchemaValidationFailed;
-        }
-        defer _ = c.sqlite3_finalize(stmt);
-
-        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) {
-            return BackupError.SchemaValidationFailed;
-        }
-
-        const count = c.sqlite3_column_int(stmt, 0);
-        if (count != 1) return BackupError.SchemaValidationFailed;
-    }
-
-    // open the backup as source and copy to destination
     var src_db: ?*c.sqlite3 = null;
     if (c.sqlite3_open_v2(input_path.ptr, &src_db, c.SQLITE_OPEN_READONLY, null) != c.SQLITE_OK or src_db == null) {
         if (src_db) |db| _ = c.sqlite3_close(db);
         return BackupError.RestoreFailed;
     }
     defer _ = c.sqlite3_close(src_db);
+    try validateBackupSchema(src_db.?);
 
     var dest_db: ?*c.sqlite3 = null;
-    if (c.sqlite3_open(dest_path.ptr, &dest_db) != c.SQLITE_OK or dest_db == null) {
+    if (c.sqlite3_open_v2(dest_path.ptr, &dest_db, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE, null) != c.SQLITE_OK or dest_db == null) {
         if (dest_db) |db| _ = c.sqlite3_close(db);
         return BackupError.RestoreFailed;
     }
     defer _ = c.sqlite3_close(dest_db);
+    try beginExclusiveRestore(dest_db.?);
+    var transaction_open = true;
+    defer {
+        if (transaction_open) _ = c.sqlite3_exec(dest_db, "ROLLBACK;", null, null, null);
+    }
 
     const bk = c.sqlite3_backup_init(dest_db, "main", src_db, "main");
     if (bk == null) return BackupError.RestoreFailed;
@@ -113,6 +92,50 @@ pub fn restore(input_path: [:0]const u8) BackupError!void {
 
     if (step_rc != c.SQLITE_DONE) return BackupError.RestoreFailed;
     if (finish_rc != c.SQLITE_OK) return BackupError.RestoreFailed;
+    if (c.sqlite3_exec(dest_db, "COMMIT;", null, null, null) != c.SQLITE_OK) {
+        return BackupError.RestoreFailed;
+    }
+    transaction_open = false;
+}
+
+fn beginExclusiveRestore(db: *c.sqlite3) BackupError!void {
+    _ = c.sqlite3_busy_timeout(db, 0);
+    if (c.sqlite3_exec(db, "PRAGMA locking_mode=EXCLUSIVE;", null, null, null) != c.SQLITE_OK) {
+        return BackupError.RestoreFailed;
+    }
+    const rc = c.sqlite3_exec(db, "BEGIN IMMEDIATE;", null, null, null);
+    if (rc == c.SQLITE_BUSY or rc == c.SQLITE_LOCKED) return BackupError.ServerRunning;
+    if (rc != c.SQLITE_OK) return BackupError.RestoreFailed;
+}
+
+fn validateBackupSchema(db: *c.sqlite3) BackupError!void {
+    const required_tables_sql =
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN (" ++
+        "'containers','images','ip_allocations','build_cache','service_names'," ++
+        "'agents','assignments','deployments','secrets','network_policies'," ++
+        "'wireguard_peers','volumes','certificates','s3_multipart_uploads'," ++
+        "'s3_upload_parts','training_jobs','training_checkpoints'" ++
+        ");";
+    const required_table_count = 17;
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(db, required_tables_sql, @intCast(required_tables_sql.len), &stmt, null) != c.SQLITE_OK) {
+        return BackupError.SchemaValidationFailed;
+    }
+    defer _ = c.sqlite3_finalize(stmt);
+    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return BackupError.SchemaValidationFailed;
+    if (c.sqlite3_column_int(stmt, 0) != required_table_count) return BackupError.SchemaValidationFailed;
+
+    var integrity_stmt: ?*c.sqlite3_stmt = null;
+    const integrity_sql = "PRAGMA integrity_check;";
+    if (c.sqlite3_prepare_v2(db, integrity_sql, @intCast(integrity_sql.len), &integrity_stmt, null) != c.SQLITE_OK) {
+        return BackupError.SchemaValidationFailed;
+    }
+    defer _ = c.sqlite3_finalize(integrity_stmt);
+    if (c.sqlite3_step(integrity_stmt) != c.SQLITE_ROW) return BackupError.SchemaValidationFailed;
+    const result = c.sqlite3_column_text(integrity_stmt, 0) orelse return BackupError.SchemaValidationFailed;
+    const text = std.mem.span(@as([*:0]const u8, @ptrCast(result)));
+    if (!std.mem.eql(u8, text, "ok")) return BackupError.SchemaValidationFailed;
 }
 
 // -- tests --
@@ -121,4 +144,22 @@ test "backup error types compile" {
     // verify the module compiles and function signatures are correct
     try std.testing.expect(@TypeOf(backup) == fn ([:0]const u8) BackupError!void);
     try std.testing.expect(@TypeOf(restore) == fn ([:0]const u8) BackupError!void);
+}
+
+test "validateBackupSchema rejects incomplete database" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(path);
+
+    var path_buf: [paths.max_path]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buf, "{s}/bad.db", .{path});
+
+    var db: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_open(db_path.ptr, &db));
+    defer _ = c.sqlite3_close(db);
+    _ = c.sqlite3_exec(db, "CREATE TABLE containers (id TEXT);", null, null, null);
+
+    try std.testing.expectError(BackupError.SchemaValidationFailed, validateBackupSchema(db.?));
 }
