@@ -59,6 +59,8 @@ curl -fsSL "${BASE_URL}/${TARBALL}" -o "${TMPDIR}/${TARBALL}"
 curl -fsSL "${BASE_URL}/${CHECKSUM}" -o "${TMPDIR}/${CHECKSUM}"
 
 # --- verify checksum ---
+# strip any directory prefix from the checksum file (older releases used dist/ prefix)
+sed -i "s|[^ ]*/||" "${TMPDIR}/${CHECKSUM}"
 (cd "$TMPDIR" && sha256sum -c "${CHECKSUM}")
 
 # --- install ---
