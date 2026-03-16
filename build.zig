@@ -15,22 +15,61 @@ fn hasCachedSqlite(b: *std.Build) bool {
 }
 
 fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    // note: for now we always use zig-sqlite to compile
-    // the cache-sqlite step creates a prebuilt library but integrating it
-    // with zig-sqlite's build system requires more work
     _ = target;
     _ = optimize;
 
-    const sqlite = b.dependency("sqlite", .{
-        .target = module.resolved_target.?,
-        .optimize = module.optimize.?,
-    });
-    module.addImport("sqlite", sqlite.module("sqlite"));
+    const mod_target = module.resolved_target.?;
+    const mod_optimize = module.optimize.?;
 
-    // log cache status for debugging
-    if (hasCachedSqlite(b)) {
-        std.log.info("sqlite cache exists at vendor/prebuilt/ (zig-sqlite manages compilation)", .{});
-    }
+    // get zig-sqlite for its Zig wrapper (sqlite.zig) and C headers
+    const sqlite_dep = b.dependency("sqlite", .{
+        .target = mod_target,
+        .optimize = mod_optimize,
+    });
+
+    // get upstream sqlite amalgamation for sqlite3.c
+    const sqlite_upstream = b.dependency("sqlite_amalgamation", .{});
+
+    // compile sqlite3.c as a static library (zig-sqlite defaults to dynamic)
+    const sqlite_lib = b.addLibrary(.{
+        .name = "sqlite-static",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = mod_target,
+            .optimize = mod_optimize,
+            .link_libc = true,
+        }),
+    });
+    const c_flags: []const []const u8 = &.{
+        "-std=c99",
+        "-DSQLITE_THREADSAFE=1",
+        "-DSQLITE_ENABLE_FTS5",
+        "-DSQLITE_ENABLE_JSON1",
+    };
+    sqlite_lib.addCSourceFile(.{
+        .file = sqlite_upstream.path("sqlite3.c"),
+        .flags = c_flags,
+    });
+    // zig-sqlite's workaround.c provides sqliteTransientAsDestructor
+    sqlite_lib.addCSourceFile(.{
+        .file = sqlite_dep.path("c/workaround.c"),
+        .flags = c_flags,
+    });
+    sqlite_lib.addIncludePath(sqlite_upstream.path("."));
+    sqlite_lib.addIncludePath(sqlite_dep.path("c"));
+
+    // create the sqlite module using zig-sqlite's Zig wrapper but our static lib
+    const sqlite_mod = b.addModule("sqlite-import", .{
+        .root_source_file = sqlite_dep.path("sqlite.zig"),
+        .target = mod_target,
+        .optimize = mod_optimize,
+        .link_libc = true,
+    });
+    sqlite_mod.addIncludePath(sqlite_dep.path("c"));
+    sqlite_mod.addIncludePath(sqlite_upstream.path("."));
+    sqlite_mod.linkLibrary(sqlite_lib);
+
+    module.addImport("sqlite", sqlite_mod);
 }
 
 pub fn build(b: *std.Build) void {
