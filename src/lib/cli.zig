@@ -319,6 +319,48 @@ fn tokenFileExistsWithWeakPermissions(path: []const u8) bool {
 
 // -- tests --
 
+const TokenTestBackup = struct {
+    moved: bool,
+    token_path_buf: [paths.max_path]u8,
+    token_path_len: usize,
+    backup_path_buf: [paths.max_path]u8,
+    backup_path_len: usize,
+
+    fn tokenPath(self: *const TokenTestBackup) []const u8 {
+        return self.token_path_buf[0..self.token_path_len];
+    }
+
+    fn backupPath(self: *const TokenTestBackup) []const u8 {
+        return self.backup_path_buf[0..self.backup_path_len];
+    }
+
+    fn restore(self: TokenTestBackup) void {
+        if (!self.moved) return;
+        std.fs.cwd().rename(self.backupPath(), self.tokenPath()) catch |e| {
+            log.warn("test cleanup: failed to restore token file: {}", .{e});
+        };
+    }
+};
+
+fn backupExistingToken() ?TokenTestBackup {
+    var backup: TokenTestBackup = .{
+        .moved = false,
+        .token_path_buf = undefined,
+        .token_path_len = 0,
+        .backup_path_buf = undefined,
+        .backup_path_len = 0,
+    };
+    const token_path = paths.dataPath(&backup.token_path_buf, "api_token") catch return null;
+    backup.token_path_len = token_path.len;
+
+    const backup_path = paths.dataPath(&backup.backup_path_buf, "api_token.test_backup") catch return null;
+    backup.backup_path_len = backup_path.len;
+
+    const moved = if (std.fs.cwd().rename(token_path, backup_path)) |_| true else |_| false;
+    backup.moved = moved;
+    return backup;
+}
+
 test "parse port map" {
     const pm = parsePortMap("8080:80").?;
     try std.testing.expectEqual(@as(u16, 8080), pm.host_port);
@@ -386,6 +428,9 @@ test "invalid container names" {
 }
 
 test "generateAndSaveToken produces valid 64-char hex string" {
+    const backup = backupExistingToken() orelse return;
+    defer backup.restore();
+
     var buf: [64]u8 = undefined;
     const token = generateAndSaveToken(&buf);
     try std.testing.expect(token != null);
@@ -393,9 +438,16 @@ test "generateAndSaveToken produces valid 64-char hex string" {
     for (token.?) |c| {
         try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
     }
+
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return;
+    std.fs.cwd().deleteFile(token_path) catch {};
 }
 
 test "readApiToken round-trip with generateAndSaveToken" {
+    const backup = backupExistingToken() orelse return;
+    defer backup.restore();
+
     // generate a token
     var gen_buf: [64]u8 = undefined;
     const generated = generateAndSaveToken(&gen_buf).?;
@@ -404,6 +456,10 @@ test "readApiToken round-trip with generateAndSaveToken" {
     var read_buf: [64]u8 = undefined;
     const read_back = readApiToken(&read_buf).?;
     try std.testing.expectEqualSlices(u8, generated, read_back);
+
+    var path_buf: [paths.max_path]u8 = undefined;
+    const token_path = paths.dataPath(&path_buf, "api_token") catch return;
+    std.fs.cwd().deleteFile(token_path) catch {};
 }
 
 test "readApiToken returns null for missing file" {

@@ -69,6 +69,10 @@ pub const RunStateError = error{
 
 const configs_subdir = "run_configs";
 const format_version: u32 = 1;
+const max_serialized_string_bytes: u32 = 64 * 1024;
+const max_serialized_list_items: u32 = 1024;
+const max_serialized_mounts: u32 = 256;
+const max_serialized_port_maps: u32 = 256;
 
 fn configPath(buf: *[paths.max_path]u8, id: []const u8) RunStateError![]const u8 {
     return paths.dataPathFmt(buf, "{s}/{s}.bin", .{ configs_subdir, id }) catch
@@ -127,21 +131,21 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     const version = readInt(input, u32) catch return RunStateError.ReadFailed;
     if (version != format_version) return RunStateError.InvalidFormat;
 
-    const rootfs = readString(alloc, input) catch return RunStateError.ReadFailed;
+    const rootfs = readString(alloc, input) catch |err| return mapReadError(err);
     errdefer alloc.free(rootfs);
-    const command = readString(alloc, input) catch return RunStateError.ReadFailed;
+    const command = readString(alloc, input) catch |err| return mapReadError(err);
     errdefer alloc.free(command);
-    const hostname = readString(alloc, input) catch return RunStateError.ReadFailed;
+    const hostname = readString(alloc, input) catch |err| return mapReadError(err);
     errdefer alloc.free(hostname);
-    const working_dir = readString(alloc, input) catch return RunStateError.ReadFailed;
+    const working_dir = readString(alloc, input) catch |err| return mapReadError(err);
     errdefer alloc.free(working_dir);
-    const args = readStringList(alloc, input) catch return RunStateError.ReadFailed;
+    const args = readStringList(alloc, input) catch |err| return mapReadError(err);
     errdefer freeStringList(alloc, args);
-    const env = readStringList(alloc, input) catch return RunStateError.ReadFailed;
+    const env = readStringList(alloc, input) catch |err| return mapReadError(err);
     errdefer freeStringList(alloc, env);
-    const lower_dirs = readStringList(alloc, input) catch return RunStateError.ReadFailed;
+    const lower_dirs = readStringList(alloc, input) catch |err| return mapReadError(err);
     errdefer freeStringList(alloc, lower_dirs);
-    const mounts = readMounts(alloc, input) catch return RunStateError.ReadFailed;
+    const mounts = readMounts(alloc, input) catch |err| return mapReadError(err);
     errdefer {
         for (mounts) |mount| {
             alloc.free(mount.source);
@@ -150,9 +154,9 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
         alloc.free(mounts);
     }
     const network_enabled = (readByte(input) catch return RunStateError.ReadFailed) != 0;
-    const port_maps = readPortMaps(alloc, input) catch return RunStateError.ReadFailed;
+    const port_maps = readPortMaps(alloc, input) catch |err| return mapReadError(err);
     errdefer alloc.free(port_maps);
-    const limits = readLimits(input) catch return RunStateError.ReadFailed;
+    const limits = readLimits(input) catch |err| return mapReadError(err);
     const restart_raw = readByte(input) catch return RunStateError.ReadFailed;
     const restart_policy: RestartPolicy = std.meta.intToEnum(RestartPolicy, restart_raw) catch
         return RunStateError.InvalidFormat;
@@ -173,6 +177,13 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     };
 }
 
+fn mapReadError(err: anyerror) RunStateError {
+    return switch (err) {
+        error.InvalidFormat => RunStateError.InvalidFormat,
+        else => RunStateError.ReadFailed,
+    };
+}
+
 pub fn removeConfig(id: []const u8) void {
     // validate container ID to prevent accidental deletion of wrong files
     if (!container.isValidContainerId(id)) return;
@@ -189,6 +200,7 @@ fn writeString(writer: anytype, value: []const u8) !void {
 
 fn readString(alloc: std.mem.Allocator, reader: anytype) ![]const u8 {
     const len = try readInt(reader, u32);
+    if (len > max_serialized_string_bytes) return error.InvalidFormat;
     const buf = try alloc.alloc(u8, len);
     errdefer alloc.free(buf);
     try reader.readSliceAll(buf);
@@ -202,6 +214,7 @@ fn writeStringList(writer: anytype, values: []const []const u8) !void {
 
 fn readStringList(alloc: std.mem.Allocator, reader: anytype) ![][]const u8 {
     const count = try readInt(reader, u32);
+    if (count > max_serialized_list_items) return error.InvalidFormat;
     const items = try alloc.alloc([]const u8, count);
     errdefer alloc.free(items);
 
@@ -232,6 +245,7 @@ fn writeMounts(writer: anytype, mounts: []const container.BindMount) !void {
 
 fn readMounts(alloc: std.mem.Allocator, reader: anytype) ![]container.BindMount {
     const count = try readInt(reader, u32);
+    if (count > max_serialized_mounts) return error.InvalidFormat;
     const mounts = try alloc.alloc(container.BindMount, count);
     errdefer alloc.free(mounts);
 
@@ -264,6 +278,7 @@ fn writePortMaps(writer: anytype, port_maps: []const net_setup.PortMap) !void {
 
 fn readPortMaps(alloc: std.mem.Allocator, reader: anytype) ![]net_setup.PortMap {
     const count = try readInt(reader, u32);
+    if (count > max_serialized_port_maps) return error.InvalidFormat;
     const port_maps = try alloc.alloc(net_setup.PortMap, count);
     errdefer alloc.free(port_maps);
 
@@ -469,4 +484,26 @@ test "RestartPolicy labels" {
     try std.testing.expectEqualStrings("no", RestartPolicy.no.label());
     try std.testing.expectEqualStrings("always", RestartPolicy.always.label());
     try std.testing.expectEqualStrings("on-failure", RestartPolicy.on_failure.label());
+}
+
+test "loadConfig rejects oversized serialized string length" {
+    if (!container.isValidContainerId("deadbeefcafe")) return error.SkipZigTest;
+
+    paths.ensureDataDir(configs_subdir) catch return error.SkipZigTest;
+
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = try configPath(&path_buf, "deadbeefcafe");
+
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    defer removeConfig("deadbeefcafe");
+
+    var buf: [16]u8 = undefined;
+    var writer = file.writer(&buf);
+    const out = &writer.interface;
+    try writeInt(out, u32, format_version);
+    try writeInt(out, u32, max_serialized_string_bytes + 1);
+    try out.flush();
+
+    try std.testing.expectError(RunStateError.InvalidFormat, loadConfig(std.testing.allocator, "deadbeefcafe"));
 }

@@ -4,12 +4,15 @@ const store = @import("../../state/store.zig");
 const process = @import("../../runtime/process.zig");
 const logs = @import("../../runtime/logs.zig");
 const container = @import("../../runtime/container.zig");
+const cgroups = @import("../../runtime/cgroups.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const log = @import("../../lib/log.zig");
 const health = @import("../../manifest/health.zig");
 const common = @import("common.zig");
 
 const Response = common.Response;
+const stop_poll_attempts: usize = 10;
+const stop_poll_interval_ms: u64 = 50;
 
 pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
     const path = request.path_only;
@@ -138,12 +141,36 @@ fn handleStopContainer(alloc: std.mem.Allocator, id: []const u8) Response {
 
     const pid = record.pid orelse return common.badRequest("container has no pid");
 
-    process.terminate(pid) catch return common.internalError();
-    store.updateStatus(id, "stopped", null, null) catch |e| {
-        log.warn("failed to update status after stopping {s}: {}", .{ id, e });
+    const cg = cgroups.Cgroup.open(id) catch {
+        store.updateStatus(id, "stopped", null, null) catch {};
+        return common.badRequest("container is not running");
     };
+    if (!cg.containsProcess(pid)) {
+        store.updateStatus(id, "stopped", null, null) catch {};
+        return common.badRequest("container is not running");
+    }
 
-    return .{ .status = .ok, .body = "{\"status\":\"stopped\"}", .allocated = false };
+    process.terminate(pid) catch return common.internalError();
+
+    if (waitForProcessExit(id, pid)) {
+        store.updateStatus(id, "stopped", null, null) catch |e| {
+            log.warn("failed to update status after stopping {s}: {}", .{ id, e });
+        };
+        return .{ .status = .ok, .body = "{\"status\":\"stopped\"}", .allocated = false };
+    }
+
+    return .{ .status = .ok, .body = "{\"status\":\"stopping\"}", .allocated = false };
+}
+
+fn waitForProcessExit(id: []const u8, pid: i32) bool {
+    var attempts: usize = 0;
+    while (attempts < stop_poll_attempts) : (attempts += 1) {
+        const cg = cgroups.Cgroup.open(id) catch return true;
+        if (!cg.containsProcess(pid)) return true;
+        process.sendSignal(pid, 0) catch return true;
+        std.Thread.sleep(stop_poll_interval_ms * std.time.ns_per_ms);
+    }
+    return false;
 }
 
 fn handleRemoveContainer(alloc: std.mem.Allocator, id: []const u8) Response {
@@ -266,6 +293,34 @@ test "route returns null for unknown path" {
 
     const response = route(req, testing.allocator);
     try testing.expect(response == null);
+}
+
+test "stop container refuses stale pid not owned by container cgroup" {
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "deadbeefcafe",
+        .hostname = "test",
+        .rootfs = "/tmp/rootfs",
+        .status = "running",
+        .command = "sleep 10",
+        .created_at = 1,
+        .pid = 999999,
+        .exit_code = null,
+    });
+
+    const resp = handleStopContainer(testing.allocator, "deadbeefcafe");
+    try testing.expectEqual(http.StatusCode.bad_request, resp.status);
+
+    const record = try store.load(testing.allocator, "deadbeefcafe");
+    defer record.deinit(testing.allocator);
+    try testing.expectEqualStrings("stopped", record.status);
+    try testing.expect(record.pid == null);
+}
+
+test "waitForProcessExit returns true when cgroup is missing" {
+    try testing.expect(waitForProcessExit("deadbeefcafe", 12345));
 }
 
 // Test that validateContainerId works correctly

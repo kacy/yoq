@@ -259,6 +259,13 @@ pub const Cgroup = struct {
         return self.readU64("memory.current");
     }
 
+    /// check whether a PID is currently listed in this cgroup.
+    pub fn containsProcess(self: *const Cgroup, pid: std.posix.pid_t) bool {
+        var buf: [4096]u8 = undefined;
+        const content = self.readFile("cgroup.procs", &buf) catch return false;
+        return procsContainsPid(content, pid);
+    }
+
     /// read cpu usage in microseconds
     pub fn cpuUsage(self: *const Cgroup) CgroupError!u64 {
         // cpu.stat contains "usage_usec <value>\n..."
@@ -506,6 +513,16 @@ fn readFromDir(dir: std.fs.Dir, filename: []const u8, buf: []u8) ?[]const u8 {
     return std.mem.trimRight(u8, buf[0..bytes_read], "\n ");
 }
 
+fn procsContainsPid(content: []const u8, pid: std.posix.pid_t) bool {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const current = std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, line, " \t\r"), 10) catch continue;
+        if (current == pid) return true;
+    }
+    return false;
+}
+
 /// parse PSI metrics from already-read content (for batch reads)
 fn parsePsiFromContent(content: []const u8) ?PsiMetrics {
     var metrics: PsiMetrics = .{ .some_avg10 = 0.0, .full_avg10 = 0.0 };
@@ -709,6 +726,13 @@ test "isEmpty returns false for non-whitespace cgroup.procs content" {
         }
         try std.testing.expect(has_non_whitespace);
     }
+}
+
+test "procsContainsPid matches exact pid lines" {
+    try std.testing.expect(procsContainsPid("123\n456\n", 123));
+    try std.testing.expect(procsContainsPid("123\n456\n", 456));
+    try std.testing.expect(!procsContainsPid("123\n456\n", 45));
+    try std.testing.expect(!procsContainsPid("", 123));
 }
 
 test "ResourceLimits.validate rejects memory below minimum" {
