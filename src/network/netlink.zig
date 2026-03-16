@@ -36,6 +36,50 @@ pub const NetlinkError = error{
     InvalidResponse,
 };
 
+// -- generic netlink --
+
+pub const NETLINK_GENERIC: u32 = 16;
+pub const GENL_ID_CTRL: u16 = 0x10;
+
+pub const GenlMsgHdr = extern struct {
+    cmd: u8,
+    version: u8,
+    reserved: u16,
+};
+
+// generic netlink controller commands/attributes (for family resolution)
+pub const CTRL_CMD_GETFAMILY: u8 = 3;
+pub const CTRL_ATTR_FAMILY_NAME: u16 = 2;
+pub const CTRL_ATTR_FAMILY_ID: u16 = 1;
+
+// WireGuard generic netlink constants (from uapi/linux/wireguard.h)
+pub const WG_CMD = struct {
+    pub const SET_DEVICE: u8 = 1;
+};
+
+pub const WGDEVICE_A = struct {
+    pub const IFNAME: u16 = 1;
+    pub const PRIVATE_KEY: u16 = 3;
+    pub const LISTEN_PORT: u16 = 6;
+    pub const PEERS: u16 = 8;
+};
+
+pub const WGPEER_A = struct {
+    pub const PUBLIC_KEY: u16 = 1;
+    pub const FLAGS: u16 = 3;
+    pub const ENDPOINT: u16 = 4;
+    pub const PERSISTENT_KEEPALIVE: u16 = 5;
+    pub const ALLOWED_IPS: u16 = 7;
+};
+
+pub const WGALLOWEDIP_A = struct {
+    pub const FAMILY: u16 = 1;
+    pub const IPADDR: u16 = 2;
+    pub const CIDR_MASK: u16 = 3;
+};
+
+pub const WGPEER_F_REMOVE_ME: u32 = 1;
+
 // -- kernel structs --
 // we define our own rtattr because the zig stdlib version uses
 // an extern union for the type field, which only covers IFLA and IFA.
@@ -232,6 +276,32 @@ pub const MessageBuilder = struct {
         return hdr;
     }
 
+    /// write a nlmsghdr with a raw u16 message type (for generic netlink).
+    /// the payload is a GenlMsgHdr instead of ifinfomsg/etc.
+    pub fn putHeaderGenl(self: *MessageBuilder, family_id: u16, flags: u16, cmd: u8) NetlinkError!*linux.nlmsghdr {
+        const hdr_size = @sizeOf(linux.nlmsghdr);
+        const genl_size = @sizeOf(GenlMsgHdr);
+        const total = nlmsgAlign(@as(usize, hdr_size + genl_size));
+
+        if (self.pos + total > self.buf.len) return NetlinkError.BufferFull;
+
+        const hdr: *linux.nlmsghdr = @ptrCast(@alignCast(&self.buf[self.pos]));
+        hdr.len = @intCast(total);
+        hdr.type = @enumFromInt(family_id);
+        hdr.flags = flags;
+        hdr.seq = 1;
+        hdr.pid = 0;
+
+        // write genl header
+        const genl: *GenlMsgHdr = @ptrCast(@alignCast(&self.buf[self.pos + hdr_size]));
+        genl.cmd = cmd;
+        genl.version = 1;
+        genl.reserved = 0;
+
+        self.pos = self.pos + total;
+        return hdr;
+    }
+
     /// get a typed pointer to the payload area right after the nlmsghdr
     pub fn getPayload(_: *MessageBuilder, hdr: *linux.nlmsghdr, comptime PayloadT: type) *PayloadT {
         const hdr_ptr: [*]u8 = @ptrCast(hdr);
@@ -276,6 +346,16 @@ pub const MessageBuilder = struct {
 
     /// add a rtattr with a u32 value
     pub fn putAttrU32(self: *MessageBuilder, hdr: *linux.nlmsghdr, attr_type: u16, value: u32) NetlinkError!void {
+        try self.putAttr(hdr, attr_type, std.mem.asBytes(&value));
+    }
+
+    /// add a rtattr with a u16 value
+    pub fn putAttrU16(self: *MessageBuilder, hdr: *linux.nlmsghdr, attr_type: u16, value: u16) NetlinkError!void {
+        try self.putAttr(hdr, attr_type, std.mem.asBytes(&value));
+    }
+
+    /// add a rtattr with a u8 value
+    pub fn putAttrU8(self: *MessageBuilder, hdr: *linux.nlmsghdr, attr_type: u16, value: u8) NetlinkError!void {
         try self.putAttr(hdr, attr_type, std.mem.asBytes(&value));
     }
 
@@ -371,6 +451,61 @@ pub fn openSocket() NetlinkError!posix.fd_t {
     return fd;
 }
 
+/// open a generic netlink socket (for WireGuard, etc.)
+pub fn openGenericSocket() NetlinkError!posix.fd_t {
+    const fd = posix.socket(
+        linux.AF.NETLINK,
+        posix.SOCK.RAW | posix.SOCK.CLOEXEC,
+        NETLINK_GENERIC,
+    ) catch return NetlinkError.SocketFailed;
+    return fd;
+}
+
+/// resolve a generic netlink family name to its dynamic ID.
+/// e.g. resolveFamily(fd, "wireguard") -> family_id
+pub fn resolveFamily(fd: posix.fd_t, name: []const u8) NetlinkError!u16 {
+    var msg_buf: [buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&msg_buf);
+
+    const hdr = try mb.putHeaderGenl(GENL_ID_CTRL, NLM_F.REQUEST, CTRL_CMD_GETFAMILY);
+    try mb.putAttrStr(hdr, CTRL_ATTR_FAMILY_NAME, name);
+
+    const msg = mb.message();
+    const sent = posix.send(fd, msg, 0) catch return NetlinkError.SendFailed;
+    if (sent != msg.len) return NetlinkError.SendFailed;
+
+    var recv_buf: [buf_size]u8 align(4) = undefined;
+    const recv_len = posix.recv(fd, &recv_buf, 0) catch return NetlinkError.RecvFailed;
+
+    const min_resp = @sizeOf(linux.nlmsghdr) + @sizeOf(GenlMsgHdr);
+    if (recv_len < min_resp) return NetlinkError.InvalidResponse;
+
+    const resp_hdr: *const linux.nlmsghdr = @ptrCast(@alignCast(&recv_buf));
+    if (resp_hdr.type == .ERROR) {
+        if (recv_len < @sizeOf(linux.nlmsghdr) + 4) return NetlinkError.InvalidResponse;
+        const err_code: *const i32 = @ptrCast(@alignCast(&recv_buf[@sizeOf(linux.nlmsghdr)]));
+        if (err_code.* != 0) return NetlinkError.NotFound;
+    }
+
+    // parse attributes after nlmsghdr + genlmsghdr
+    var offset: usize = min_resp;
+    while (offset + @sizeOf(RtAttr) <= recv_len) {
+        const rta: *const RtAttr = @ptrCast(@alignCast(&recv_buf[offset]));
+        if (rta.len < @sizeOf(RtAttr)) break;
+
+        if (rta.type == CTRL_ATTR_FAMILY_ID) {
+            if (rta.len >= @sizeOf(RtAttr) + 2) {
+                const id: *const u16 = @ptrCast(@alignCast(&recv_buf[offset + @sizeOf(RtAttr)]));
+                return id.*;
+            }
+        }
+
+        offset += nlmsgAlign(@as(usize, rta.len));
+    }
+
+    return NetlinkError.InvalidResponse;
+}
+
 /// send a netlink message and check for errors in the ACK response
 pub fn sendAndCheck(fd: posix.fd_t, msg: []const u8) NetlinkError!void {
     // send the message
@@ -447,6 +582,21 @@ pub fn setLinkUp(fd: posix.fd_t, if_index: u32) NetlinkError!void {
     info.flags = IFF.UP;
     info.change = IFF.UP;
 
+    try sendAndCheck(fd, mb.message());
+}
+
+/// delete an interface by name via RTM_DELLINK.
+pub fn deleteLink(fd: posix.fd_t, name: []const u8) NetlinkError!void {
+    var buf_storage: [buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&buf_storage);
+
+    const hdr = try mb.putHeader(
+        .RTM_DELLINK,
+        NLM_F.REQUEST | NLM_F.ACK,
+        linux.ifinfomsg,
+    );
+
+    try mb.putAttrStr(hdr, IFLA.IFNAME, name);
     try sendAndCheck(fd, mb.message());
 }
 
@@ -648,4 +798,45 @@ test "tc message builder" {
 
     // header (16) + TcMsg (20) = 36, plus "clsact\0" attr (4 + 7 = 11, aligned 12) = 48
     try std.testing.expectEqual(@as(u32, 48), hdr.len);
+}
+
+test "genl header size" {
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(GenlMsgHdr));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(GenlMsgHdr, "cmd"));
+    try std.testing.expectEqual(@as(usize, 1), @offsetOf(GenlMsgHdr, "version"));
+    try std.testing.expectEqual(@as(usize, 2), @offsetOf(GenlMsgHdr, "reserved"));
+}
+
+test "putHeaderGenl builds correct message" {
+    var buf: [buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&buf);
+
+    const family_id: u16 = 0x1b; // example WireGuard family ID
+    const hdr = try mb.putHeaderGenl(family_id, NLM_F.REQUEST | NLM_F.ACK, WG_CMD.SET_DEVICE);
+
+    // nlmsghdr (16) + genlmsghdr (4) = 20 bytes
+    try std.testing.expectEqual(@as(u32, 20), hdr.len);
+    try std.testing.expectEqual(@as(usize, 20), mb.pos);
+
+    // verify genl header fields
+    const genl: *const GenlMsgHdr = @ptrCast(@alignCast(&buf[@sizeOf(linux.nlmsghdr)]));
+    try std.testing.expectEqual(WG_CMD.SET_DEVICE, genl.cmd);
+    try std.testing.expectEqual(@as(u8, 1), genl.version);
+    try std.testing.expectEqual(@as(u16, 0), genl.reserved);
+}
+
+test "putAttrU16 and putAttrU8" {
+    var buf: [buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&buf);
+
+    const hdr = try mb.putHeaderGenl(0x1b, NLM_F.REQUEST, WG_CMD.SET_DEVICE);
+    const base_len = hdr.len;
+
+    try mb.putAttrU16(hdr, WGDEVICE_A.LISTEN_PORT, 51820);
+    // rtattr (4) + u16 (2) = 6, aligned to 8
+    try std.testing.expectEqual(@as(u32, base_len + 8), hdr.len);
+
+    try mb.putAttrU8(hdr, WGALLOWEDIP_A.CIDR_MASK, 24);
+    // rtattr (4) + u8 (1) = 5, aligned to 8
+    try std.testing.expectEqual(@as(u32, base_len + 16), hdr.len);
 }
