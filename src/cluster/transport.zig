@@ -411,7 +411,7 @@ pub const Transport = struct {
         const verified = if (self.shared_key) |key|
             // When using authentication, verify HMAC and that sender is a known peer.
             // Don't check source port since TCP ephemeral ports vary.
-            try verifyAuthenticatedBody(body, key, &self.peers)
+            try verifyAuthenticatedBody(body, key, from_addr, &self.peers)
         else
             VerifiedBody{ .sender_id = null, .payload = body };
 
@@ -553,7 +553,7 @@ const VerifiedBody = struct {
     payload: []const u8,
 };
 
-fn verifyAuthenticatedBody(body: []const u8, key: [32]u8, peers: *const std.AutoHashMap(NodeId, PeerAddr)) TransportError!VerifiedBody {
+fn verifyAuthenticatedBody(body: []const u8, key: [32]u8, from_addr: std.net.Address, peers: *const std.AutoHashMap(NodeId, PeerAddr)) TransportError!VerifiedBody {
     if (body.len < 41) return TransportError.AuthenticationFailed;
 
     const sender_bytes = body[0..8];
@@ -571,22 +571,18 @@ fn verifyAuthenticatedBody(body: []const u8, key: [32]u8, peers: *const std.Auto
     }
 
     const sender_id = readU64(sender_bytes);
-
-    // Verify sender is a known peer (only check IP, not port since TCP ephemeral ports vary)
-    var is_known_peer = false;
-    var iter = peers.iterator();
-    while (iter.next()) |entry| {
-        if (entry.key_ptr.* == sender_id) {
-            is_known_peer = true;
-            break;
-        }
-    }
-    if (!is_known_peer) return TransportError.AuthenticationFailed;
+    const peer = peers.get(sender_id) orelse return TransportError.AuthenticationFailed;
+    if (!samePeerIp(peer.addr, from_addr)) return TransportError.AuthenticationFailed;
 
     return .{
         .sender_id = sender_id,
         .payload = signed_data,
     };
+}
+
+fn samePeerIp(expected: std.net.Address, actual: std.net.Address) bool {
+    if (expected.any.family != actual.any.family) return false;
+    return std.mem.eql(u8, std.mem.asBytes(&expected.in.sa.addr), std.mem.asBytes(&actual.in.sa.addr));
 }
 
 // -- encoding --
@@ -1301,7 +1297,35 @@ test "verifyAuthenticatedBody rejects mismatched sender id" {
 
     try std.testing.expectError(
         TransportError.AuthenticationFailed,
-        verifyAuthenticatedBody(&body, key, &peers),
+        verifyAuthenticatedBody(&body, key, std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9000), &peers),
+    );
+}
+
+test "verifyAuthenticatedBody rejects sender from wrong ip" {
+    const alloc = std.testing.allocator;
+    const key: [32]u8 = "test-key-32-bytes-exactly-here!!".*;
+    var sender_buf: [8]u8 = undefined;
+    writeU64(&sender_buf, 2);
+    const payload = [_]u8{ msg_request_vote_reply, 0, 0, 0, 0, 0 };
+
+    var tag: [32]u8 = undefined;
+    var hmac = HmacSha256.init(&key);
+    hmac.update(&sender_buf);
+    hmac.update(&payload);
+    hmac.final(&tag);
+
+    var body: [8 + 32 + payload.len]u8 = undefined;
+    @memcpy(body[0..8], &sender_buf);
+    @memcpy(body[8..40], &tag);
+    @memcpy(body[40..], &payload);
+
+    var peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc);
+    defer peers.deinit();
+    try peers.put(2, .{ .addr = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700) });
+
+    try std.testing.expectError(
+        TransportError.AuthenticationFailed,
+        verifyAuthenticatedBody(&body, key, std.net.Address.initIp4(.{ 10, 0, 0, 99 }, 40000), &peers),
     );
 }
 

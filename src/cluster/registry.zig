@@ -341,11 +341,10 @@ pub fn getGossipSeeds(
     db: *sqlite.Db,
     count: u32,
 ) ![][]const u8 {
-    _ = count; // fixed at 5 — simple enough for now
     const Row = struct { node_id: i64, address: sqlite.Text };
 
     var stmt = db.prepare(
-        "SELECT node_id, address FROM agents WHERE status = 'active' AND node_id IS NOT NULL AND (role = 'agent' OR role = 'both' OR role IS NULL) LIMIT 5;",
+        "SELECT node_id, address FROM agents WHERE status = 'active' AND node_id IS NOT NULL AND (role = 'agent' OR role = 'both' OR role IS NULL) LIMIT ?;",
     ) catch return &[_][]const u8{};
     defer stmt.deinit();
 
@@ -355,7 +354,8 @@ pub fn getGossipSeeds(
         results.deinit(alloc);
     }
 
-    var iter = stmt.iterator(Row, .{}) catch return &[_][]const u8{};
+    const limit: i64 = @max(@as(i64, 0), @as(i64, @intCast(count)));
+    var iter = stmt.iterator(Row, .{limit}) catch return &[_][]const u8{};
 
     while (iter.nextAlloc(alloc, .{}) catch null) |row| {
         defer alloc.free(row.address.data);
@@ -1128,6 +1128,25 @@ test "assignNodeId skips agents without node_id" {
 
     const nid = try assignNodeId(&db);
     try std.testing.expectEqual(@as(u8, 1), nid);
+}
+
+test "getGossipSeeds respects requested count" {
+    var db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    }) catch return;
+    defer db.deinit();
+
+    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec("INSERT INTO agents (id, address, status, node_id, role, last_heartbeat, registered_at) VALUES ('a1', '10.0.0.1', 'active', 1, 'agent', 1000, 1000);", .{}, .{}) catch return;
+    db.exec("INSERT INTO agents (id, address, status, node_id, role, last_heartbeat, registered_at) VALUES ('a2', '10.0.0.2', 'active', 2, 'agent', 1000, 1000);", .{}, .{}) catch return;
+    db.exec("INSERT INTO agents (id, address, status, node_id, role, last_heartbeat, registered_at) VALUES ('a3', '10.0.0.3', 'active', 3, 'agent', 1000, 1000);", .{}, .{}) catch return;
+
+    const alloc = std.testing.allocator;
+    const seeds = try getGossipSeeds(alloc, &db, 2);
+    defer freeGossipSeeds(alloc, seeds);
+
+    try std.testing.expectEqual(@as(usize, 2), seeds.len);
 }
 
 test "wireguardPeerSql generates valid SQL" {

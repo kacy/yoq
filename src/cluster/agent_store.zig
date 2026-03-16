@@ -103,6 +103,9 @@ fn getDb() !*sqlite.Db {
 
 /// insert or update a cached assignment.
 pub fn upsertAssignment(assignment: CachedAssignment) !void {
+    db_mutex.lock();
+    defer db_mutex.unlock();
+
     const db = try getDb();
     db.exec(
         "INSERT OR REPLACE INTO cached_assignments (id, image, command, status, cpu_limit, memory_limit_mb, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?);",
@@ -136,6 +139,9 @@ pub fn listPendingAssignments(alloc: Allocator) ![]CachedAssignment {
 }
 
 fn queryAssignments(alloc: Allocator, comptime query: []const u8) ![]CachedAssignment {
+    db_mutex.lock();
+    defer db_mutex.unlock();
+
     const db = try getDb();
 
     const Row = struct {
@@ -176,6 +182,9 @@ fn queryAssignments(alloc: Allocator, comptime query: []const u8) ![]CachedAssig
 
 /// remove a cached assignment by ID.
 pub fn removeAssignment(id: []const u8) !void {
+    db_mutex.lock();
+    defer db_mutex.unlock();
+
     const db = try getDb();
     db.exec(
         "DELETE FROM cached_assignments WHERE id = ?;",
@@ -186,6 +195,9 @@ pub fn removeAssignment(id: []const u8) !void {
 
 /// update the status of a cached assignment.
 pub fn updateStatus(id: []const u8, status: []const u8) !void {
+    db_mutex.lock();
+    defer db_mutex.unlock();
+
     const db = try getDb();
     db.exec(
         "UPDATE cached_assignments SET status = ? WHERE id = ?;",

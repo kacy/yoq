@@ -174,6 +174,8 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
     var container_subnet: ?[]const u8 = null;
     var endpoint_buf: [64]u8 = undefined;
     var endpoint: ?[]const u8 = null;
+    var peer_sql: ?[]const u8 = null;
+    var peer_sql_buf: [1024]u8 = undefined;
 
     if (wg_public_key) |pub_key| {
         if (!common.validateClusterInput(pub_key)) return common.badRequest("invalid wg_public_key");
@@ -205,8 +207,7 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
         endpoint = std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;
 
         if (endpoint != null and overlay_ip_str != null and container_subnet != null) {
-            var peer_sql_buf: [1024]u8 = undefined;
-            const peer_sql = agent_registry.wireguardPeerSql(
+            peer_sql = agent_registry.wireguardPeerSql(
                 &peer_sql_buf,
                 nid,
                 &id_buf,
@@ -215,7 +216,6 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
                 overlay_ip_str.?,
                 container_subnet.?,
             ) catch return common.internalError();
-            _ = node.propose(peer_sql) catch {};
         }
     }
 
@@ -250,9 +250,18 @@ fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: Rou
         },
     ) catch return common.internalError();
 
-    _ = node.propose(sql) catch {
-        return common.notLeader(alloc, node);
-    };
+    if (peer_sql) |wg_sql| {
+        var combined_buf: [4096]u8 = undefined;
+        const combined = std.fmt.bufPrint(&combined_buf, "{s} {s}", .{ wg_sql, sql }) catch
+            return common.internalError();
+        _ = node.propose(combined) catch {
+            return common.notLeader(alloc, node);
+        };
+    } else {
+        _ = node.propose(sql) catch {
+            return common.notLeader(alloc, node);
+        };
+    }
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);

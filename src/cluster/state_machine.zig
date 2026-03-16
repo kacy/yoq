@@ -319,6 +319,18 @@ pub const StateMachine = struct {
 ///   - INSERT/UPDATE/DELETE on agents, assignments, and wireguard_peers tables
 ///   - CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS for schema init
 pub fn isAllowedStatement(sql: []const u8) bool {
+    var scanner = SqlStatementScanner{ .sql = sql };
+    var saw_statement = false;
+
+    while (scanner.next()) |statement| {
+        saw_statement = true;
+        if (!isAllowedSingleStatement(statement)) return false;
+    }
+
+    return saw_statement and scanner.isValid();
+}
+
+fn isAllowedSingleStatement(sql: []const u8) bool {
     const allowed_prefixes = [_][]const u8{
         // agents table — registry.zig: registerSql, heartbeatSql, drainSql, markOfflineSql
         "INSERT INTO agents ",
@@ -356,6 +368,53 @@ pub fn isAllowedStatement(sql: []const u8) bool {
 
     return false;
 }
+
+const SqlStatementScanner = struct {
+    sql: []const u8,
+    pos: usize = 0,
+    valid: bool = true,
+
+    fn next(self: *SqlStatementScanner) ?[]const u8 {
+        while (self.pos < self.sql.len and std.ascii.isWhitespace(self.sql[self.pos])) {
+            self.pos += 1;
+        }
+        if (self.pos >= self.sql.len or !self.valid) return null;
+
+        const start = self.pos;
+        var in_quote = false;
+
+        while (self.pos < self.sql.len) : (self.pos += 1) {
+            const ch = self.sql[self.pos];
+
+            if (ch == '\'') {
+                if (in_quote and self.pos + 1 < self.sql.len and self.sql[self.pos + 1] == '\'') {
+                    self.pos += 1;
+                    continue;
+                }
+                in_quote = !in_quote;
+                continue;
+            }
+
+            if (!in_quote and ch == ';') {
+                const statement = std.mem.trim(u8, self.sql[start..self.pos], " \t\r\n");
+                self.pos += 1;
+                return if (statement.len == 0) self.next() else statement;
+            }
+        }
+
+        if (in_quote) {
+            self.valid = false;
+            return null;
+        }
+
+        const statement = std.mem.trim(u8, self.sql[start..self.pos], " \t\r\n");
+        return if (statement.len == 0) null else statement;
+    }
+
+    fn isValid(self: *const SqlStatementScanner) bool {
+        return self.valid;
+    }
+};
 
 /// read snapshot metadata from a snapshot file without loading the full database.
 /// useful for checking what a snapshot contains before deciding to restore it.
@@ -536,6 +595,12 @@ test "isAllowedStatement accepts valid wireguard_peers operations" {
     try std.testing.expect(isAllowedStatement("DELETE FROM wireguard_peers WHERE node_id = 1;"));
 }
 
+test "isAllowedStatement accepts heartbeat batch with multiple updates" {
+    try std.testing.expect(isAllowedStatement(
+        "UPDATE agents SET cpu_used = 1 WHERE id = 'a'; UPDATE agents SET cpu_used = 2 WHERE id = 'b';",
+    ));
+}
+
 test "isAllowedStatement accepts valid volume operations" {
     try std.testing.expect(isAllowedStatement("INSERT INTO volumes (name, app_name, driver, path, status, created_at) VALUES ('data', 'myapp', 'local', '/path', 'created', 1000);"));
     try std.testing.expect(isAllowedStatement("UPDATE volumes SET status = 'active' WHERE name = 'data';"));
@@ -558,6 +623,18 @@ test "isAllowedStatement rejects dangerous SQL" {
     try std.testing.expect(!isAllowedStatement("INSERT INTO secrets (name) VALUES ('stolen');"));
     try std.testing.expect(!isAllowedStatement("DELETE FROM containers WHERE 1=1;"));
     try std.testing.expect(!isAllowedStatement("UPDATE containers SET status = 'pwned';"));
+}
+
+test "isAllowedStatement rejects unsafe statement after safe prefix" {
+    try std.testing.expect(!isAllowedStatement(
+        "UPDATE agents SET status = 'active' WHERE id = 'x'; DROP TABLE agents;",
+    ));
+}
+
+test "isAllowedStatement handles semicolons inside quoted values" {
+    try std.testing.expect(isAllowedStatement(
+        "INSERT INTO agents (id, address, status) VALUES ('a', '10.0.0.1;not-a-statement', 'active');",
+    ));
 }
 
 test "apply with disallowed statement advances last_applied but does not execute" {
