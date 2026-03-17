@@ -33,6 +33,15 @@ const blob_subdir = "blobs/sha256";
 
 const max_path = paths.max_path;
 
+pub const BlobHandle = struct {
+    file: std.fs.File,
+    size: u64,
+
+    pub fn close(self: *BlobHandle) void {
+        self.file.close();
+    }
+};
+
 /// write a blob to the store. returns the sha256 digest.
 /// if a blob with the same digest already exists, this is a no-op.
 ///
@@ -163,6 +172,20 @@ pub fn getBlob(alloc: std.mem.Allocator, digest: Digest) BlobError![]u8 {
     return file.readToEndAlloc(alloc, alloc_size) catch return BlobError.NotFound;
 }
 
+/// open a blob file for streaming reads.
+pub fn openBlob(digest: Digest) BlobError!BlobHandle {
+    var path_buf: [max_path]u8 = undefined;
+    const path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
+    const file = std.fs.cwd().openFile(path, .{}) catch return BlobError.NotFound;
+    errdefer file.close();
+
+    const stat = file.stat() catch return BlobError.NotFound;
+    return .{
+        .file = file,
+        .size = stat.size,
+    };
+}
+
 /// check if a blob exists without reading it
 pub fn hasBlob(digest: Digest) bool {
     var path_buf: [max_path]u8 = undefined;
@@ -215,6 +238,20 @@ pub fn removeBlob(digest: Digest) void {
             log.warn("failed to remove blob {s}: {}", .{ path, err });
         }
     };
+}
+
+/// create a unique temp path inside the blob store directory.
+pub fn tempBlobPath(buf: *[max_path]u8) BlobError![]const u8 {
+    var dir_buf: [max_path]u8 = undefined;
+    const dir_path = blobDir(&dir_buf) catch return BlobError.PathTooLong;
+    std.fs.cwd().makePath(dir_path) catch {};
+    return paths.uniqueDataTempPath(buf, blob_subdir, "blob", ".tmp") catch
+        return BlobError.PathTooLong;
+}
+
+/// commit a verified temp blob into the content-addressable store.
+pub fn commitTempBlob(tmp_path: []const u8, digest: Digest) BlobError!void {
+    return renameTempToBlob(tmp_path, digest);
 }
 
 /// get the filesystem path for a blob
@@ -484,4 +521,24 @@ test "getBlobSize returns null for missing blob" {
 test "blobAllocSize accepts blobs larger than 256 MiB" {
     const size = try blobAllocSize(300 * 1024 * 1024);
     try std.testing.expectEqual(@as(usize, 300 * 1024 * 1024), size);
+}
+
+test "openBlob returns size and readable handle" {
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+
+    const data = "blob handle test content";
+    const digest = putBlob(data) catch |err| switch (err) {
+        error.WriteFailed, error.HomeDirNotFound => return,
+        else => return err,
+    };
+    defer deleteBlob(digest) catch {};
+
+    var blob = try openBlob(digest);
+    defer blob.close();
+
+    try std.testing.expectEqual(@as(u64, data.len), blob.size);
+    var read_buf: [64]u8 = undefined;
+    const n = try blob.file.readAll(&read_buf);
+    try std.testing.expectEqualStrings(data, read_buf[0..n]);
 }
