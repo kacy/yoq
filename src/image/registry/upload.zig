@@ -82,7 +82,7 @@ pub fn uploadBlob(
     }) catch return common.RegistryError.UploadFailed;
     defer req.deinit();
 
-    req.sendBodyComplete(data) catch return common.RegistryError.UploadFailed;
+    req.sendBodyComplete(@constCast(data)) catch return common.RegistryError.UploadFailed;
 
     var redirect_buf: [8192]u8 = undefined;
     const response = req.receiveHead(&redirect_buf) catch return common.RegistryError.UploadFailed;
@@ -125,8 +125,8 @@ pub fn uploadBlobFile(
     var body_writer = req.sendBody(&body_buf) catch return common.RegistryError.UploadFailed;
 
     var file_reader_buf: [8192]u8 = undefined;
-    var file_reader = blob.file.readerStreaming(&file_reader_buf);
-    const sent = body_writer.writer.sendFileAll(&file_reader.interface, .limited64(blob.size)) catch
+    var file_reader = blob.file.reader(&file_reader_buf);
+    const sent = body_writer.writer.sendFileAll(&file_reader, .limited64(blob.size)) catch
         return common.RegistryError.UploadFailed;
     if (sent != blob.size) return common.RegistryError.UploadFailed;
 

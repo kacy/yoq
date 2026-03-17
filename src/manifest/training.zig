@@ -9,6 +9,7 @@
 const std = @import("std");
 const spec = @import("spec.zig");
 const orchestrator = @import("orchestrator.zig");
+const gpu_runtime = @import("gpu_runtime.zig");
 const cli = @import("../lib/cli.zig");
 const checkpoint_mgr = @import("checkpoint.zig");
 const store = @import("../state/store.zig");
@@ -118,9 +119,9 @@ pub const TrainingController = struct {
     /// load resume path from the latest checkpoint if one exists.
     fn loadResumeCheckpoint(self: *TrainingController) void {
         const jid = self.job_id orelse return;
-        if (checkpoint_mgr.getLatestCheckpointPath(self.alloc, jid)) |path| {
-            self.resume_path = path;
-        }
+        const path = checkpoint_mgr.getLatestCheckpointPath(self.alloc, jid) orelse return;
+        if (self.resume_path) |existing| self.alloc.free(existing);
+        self.resume_path = path;
     }
 
     /// start training job locally by launching one container per rank.
@@ -150,34 +151,8 @@ pub const TrainingController = struct {
         self.state = .running;
         self.persistState();
 
-        // detect IB and GPUs for NCCL mesh env
-        const gpu_mesh = @import("../gpu/mesh.zig");
-        const gpu_detect = @import("../gpu/detect.zig");
-        const ib_result = gpu_mesh.detectInfiniband();
-
-        // generate NCCL topology XML
-        var topo_file_path: ?[]const u8 = null;
-        const gpu_result = gpu_detect.detect();
-        if (gpu_result.count > 0) {
-            if (gpu_mesh.generateNcclTopology(
-                self.alloc,
-                gpu_result.gpus[0..gpu_result.count],
-                &ib_result.devices,
-                ib_result.count,
-            )) |topo_xml| {
-                defer self.alloc.free(topo_xml);
-                var topo_path_buf: [256]u8 = undefined;
-                const topo_path = std.fmt.bufPrint(&topo_path_buf, "/tmp/nccl_topo_{s}.xml", .{self.job.name}) catch null;
-                if (topo_path) |tp| {
-                    if (std.fs.cwd().createFile(tp, .{})) |file| {
-                        file.writeAll(topo_xml) catch {};
-                        file.close();
-                        topo_file_path = self.alloc.dupe(u8, tp) catch null;
-                    } else |_| {}
-                }
-            } else |_| {}
-        }
-        defer if (topo_file_path) |p| self.alloc.free(p);
+        var mesh_support = gpu_runtime.MeshSupport.init(self.alloc);
+        defer mesh_support.deinit();
 
         var failed_ranks: u32 = 0;
         var succeeded_ranks: u32 = 0;
@@ -202,30 +177,15 @@ pub const TrainingController = struct {
             }
 
             // add mesh env vars
-            var mesh_env_buf: [1024]u8 = undefined;
-            if (gpu_mesh.generateMeshEnv(
-                &mesh_env_buf,
-                ib_result,
+            mesh_support.appendEnv(
+                self.alloc,
+                &rank_env,
                 "127.0.0.1",
                 29500,
                 self.job.gpus,
                 @intCast(rank),
                 @intCast(rank),
-                topo_file_path,
-            )) |env_data| {
-                var env_pos: usize = 0;
-                while (env_pos < env_data.len) {
-                    const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
-                    if (end > env_pos) {
-                        if (self.alloc.dupe(u8, env_data[env_pos..end])) |duped| {
-                            rank_env.append(self.alloc, duped) catch {
-                                self.alloc.free(duped);
-                            };
-                        } else |_| {}
-                    }
-                    env_pos = end + 1;
-                }
-            } else |_| {}
+            );
 
             // add checkpoint env vars if configured
             if (self.job.checkpoint) |ckpt| {

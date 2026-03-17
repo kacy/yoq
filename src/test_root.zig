@@ -53,6 +53,7 @@ comptime {
     _ = @import("manifest/spec.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
+    _ = @import("manifest/gpu_runtime.zig");
     _ = @import("manifest/health.zig");
     _ = @import("manifest/update.zig");
     _ = @import("manifest/commands.zig");
