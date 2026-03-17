@@ -11,6 +11,7 @@
 const std = @import("std");
 const log = @import("../lib/log.zig");
 const syscall_util = @import("../lib/syscall.zig");
+const env_buffer = @import("env_buffer.zig");
 const posix = std.posix;
 const linux = std.os.linux;
 const detect_mod = @import("detect.zig");
@@ -72,29 +73,15 @@ pub fn setupGpuPassthrough(
 
 /// create /dev/nvidia{N} device nodes plus control devices in the container rootfs.
 fn createGpuDeviceNodes(merged_dir: []const u8, gpu_indices: []const u32) !void {
-    // ensure /dev exists in the merged dir
-    var dev_path_buf: [512]u8 = undefined;
-    const dev_path = std.fmt.bufPrint(&dev_path_buf, "{s}/dev", .{merged_dir}) catch return error.PathTooLong;
-    std.fs.cwd().makeDir(dev_path) catch |e| switch (e) {
-        error.PathAlreadyExists => {},
-        else => return error.MkdirFailed,
-    };
+    try ensureContainerDevDir(merged_dir);
 
-    // create per-GPU device nodes: /dev/nvidia0, /dev/nvidia1, ...
     for (gpu_indices) |idx| {
         var name_buf: [32]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "nvidia{d}", .{idx}) catch continue;
         createDevNode(merged_dir, name, nvidia_major, idx);
     }
 
-    // create control devices
-    createDevNode(merged_dir, "nvidiactl", nvidia_major, 255);
-
-    // UVM devices use a different major (usually loaded as a separate module).
-    // major 511 is commonly used for nvidia-uvm but it varies.
-    // we use major 195 + high minors as a reasonable default.
-    createDevNode(merged_dir, "nvidia-uvm", nvidia_major, 252);
-    createDevNode(merged_dir, "nvidia-uvm-tools", nvidia_major, 253);
+    createCommonDeviceNodes(merged_dir);
 }
 
 /// create a single character device node in the container rootfs.
@@ -122,27 +109,10 @@ fn createDevNode(merged_dir: []const u8, name: []const u8, major: u32, minor: u3
 
 /// discover NVIDIA libraries on the host and bind-mount them into the container.
 fn discoverAndMountLibs(merged_dir: []const u8) void {
-    // ensure container /usr/lib exists
-    var lib_dir_buf: [512]u8 = undefined;
-    const lib_dir = std.fmt.bufPrint(&lib_dir_buf, "{s}/usr/lib", .{merged_dir}) catch return;
-    std.fs.cwd().makePath(lib_dir) catch return;
+    ensureContainerLibDir(merged_dir) catch return;
 
     for (nvidia_libs) |lib_name| {
-        for (lib_search_paths) |search_path| {
-            var src_buf: [512]u8 = undefined;
-            const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ search_path, lib_name }) catch continue;
-
-            var dst_buf: [512]u8 = undefined;
-            const dst = std.fmt.bufPrint(&dst_buf, "{s}/usr/lib/{s}", .{ merged_dir, lib_name }) catch continue;
-
-            // create empty file as mount target
-            const f = std.fs.cwd().createFile(dst, .{}) catch continue;
-            f.close();
-
-            // bind mount — if source doesn't exist, this fails gracefully
-            bindMount(src, dst);
-            break; // found this lib, move to next
-        }
+        mountFirstAvailableLib(merged_dir, lib_name);
     }
 }
 
@@ -176,53 +146,26 @@ fn bindMount(source: []const u8, target: []const u8) void {
 /// generate GPU environment variables.
 /// returns a slice like "NVIDIA_VISIBLE_DEVICES=0,1\nCUDA_VISIBLE_DEVICES=0,1\n..."
 pub fn generateGpuEnv(gpu_indices: []const u32, buf: *[4096]u8) ![]const u8 {
-    var pos: usize = 0;
+    var writer = env_buffer.NullEnvWriter.init(buf);
 
-    // NVIDIA_VISIBLE_DEVICES=0,1,...
-    const nvd_prefix = "NVIDIA_VISIBLE_DEVICES=";
-    @memcpy(buf[pos..][0..nvd_prefix.len], nvd_prefix);
-    pos += nvd_prefix.len;
-    pos = try appendGpuList(buf, pos, gpu_indices);
-    buf[pos] = 0;
-    pos += 1;
+    var list_buf: [128]u8 = undefined;
+    const gpu_list = try formatGpuList(&list_buf, gpu_indices);
 
-    // CUDA_VISIBLE_DEVICES=0,1,...
-    const cuda_prefix = "CUDA_VISIBLE_DEVICES=";
-    @memcpy(buf[pos..][0..cuda_prefix.len], cuda_prefix);
-    pos += cuda_prefix.len;
-    pos = try appendGpuList(buf, pos, gpu_indices);
-    buf[pos] = 0;
-    pos += 1;
+    try writer.writeEntry("NVIDIA_VISIBLE_DEVICES", gpu_list);
+    try writer.writeEntry("CUDA_VISIBLE_DEVICES", gpu_list);
+    try writer.writeLiteralEntry("NVIDIA_DRIVER_CAPABILITIES=compute,utility");
+    try writer.writeLiteralEntry("LD_LIBRARY_PATH=/usr/lib");
 
-    // NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    const caps = "NVIDIA_DRIVER_CAPABILITIES=compute,utility";
-    @memcpy(buf[pos..][0..caps.len], caps);
-    pos += caps.len;
-    buf[pos] = 0;
-    pos += 1;
-
-    // LD_LIBRARY_PATH=/usr/lib
-    const ld_path = "LD_LIBRARY_PATH=/usr/lib";
-    @memcpy(buf[pos..][0..ld_path.len], ld_path);
-    pos += ld_path.len;
-    buf[pos] = 0;
-    pos += 1;
-
-    return buf[0..pos];
+    return writer.finish();
 }
 
-/// append comma-separated GPU indices to buffer.
-fn appendGpuList(buf: *[4096]u8, start: usize, indices: []const u32) !usize {
-    var pos = start;
+fn formatGpuList(buf: []u8, indices: []const u32) ![]const u8 {
+    var fixed = std.io.fixedBufferStream(buf);
     for (indices, 0..) |idx, i| {
-        if (i > 0) {
-            buf[pos] = ',';
-            pos += 1;
-        }
-        const written = std.fmt.bufPrint(buf[pos..], "{d}", .{idx}) catch return error.BufferTooSmall;
-        pos += written.len;
+        if (i > 0) try fixed.writer().writeByte(',');
+        try std.fmt.format(fixed.writer(), "{d}", .{idx});
     }
-    return pos;
+    return fixed.getWritten();
 }
 
 /// apply NUMA affinity to a container cgroup by writing cpuset.mems and cpuset.cpus.
@@ -265,6 +208,57 @@ fn writeCgroupFile(cgroup_path: []const u8, filename: []const u8, value: []const
     file.writeAll(value) catch {};
 }
 
+fn ensureContainerDevDir(merged_dir: []const u8) !void {
+    var dev_path_buf: [512]u8 = undefined;
+    const dev_path = std.fmt.bufPrint(&dev_path_buf, "{s}/dev", .{merged_dir}) catch return error.PathTooLong;
+    std.fs.cwd().makeDir(dev_path) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => return error.MkdirFailed,
+    };
+}
+
+fn createCommonDeviceNodes(merged_dir: []const u8) void {
+    createDevNode(merged_dir, "nvidiactl", nvidia_major, 255);
+    createDevNode(merged_dir, "nvidia-uvm", nvidia_major, 252);
+    createDevNode(merged_dir, "nvidia-uvm-tools", nvidia_major, 253);
+}
+
+fn ensureContainerLibDir(merged_dir: []const u8) !void {
+    var lib_dir_buf: [512]u8 = undefined;
+    const lib_dir = std.fmt.bufPrint(&lib_dir_buf, "{s}/usr/lib", .{merged_dir}) catch return error.PathTooLong;
+    try std.fs.cwd().makePath(lib_dir);
+}
+
+fn mountFirstAvailableLib(merged_dir: []const u8, lib_name: []const u8) void {
+    var source_buf: [512]u8 = undefined;
+    const source = findHostLibrary(&source_buf, lib_name) orelse return;
+
+    var target_buf: [512]u8 = undefined;
+    const target = std.fmt.bufPrint(&target_buf, "{s}/usr/lib/{s}", .{ merged_dir, lib_name }) catch return;
+
+    ensureMountTargetExists(target) catch return;
+    bindMount(source, target);
+}
+
+fn findHostLibrary(buf: []u8, lib_name: []const u8) ?[]const u8 {
+    for (lib_search_paths) |search_path| {
+        const src = std.fmt.bufPrint(buf, "{s}/{s}", .{ search_path, lib_name }) catch continue;
+        if (!pathExists(src)) continue;
+        return src;
+    }
+    return null;
+}
+
+fn ensureMountTargetExists(target: []const u8) !void {
+    const file = try std.fs.cwd().createFile(target, .{});
+    file.close();
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
 // -- tests --
 
 test "generateGpuEnv single GPU" {
@@ -293,16 +287,16 @@ test "generateGpuEnv empty returns empty" {
     try std.testing.expect(std.mem.indexOf(u8, env, "NVIDIA_VISIBLE_DEVICES=") != null);
 }
 
-test "appendGpuList single" {
-    var buf: [4096]u8 = undefined;
-    const end = try appendGpuList(&buf, 0, &[_]u32{7});
-    try std.testing.expectEqualStrings("7", buf[0..end]);
+test "formatGpuList single" {
+    var buf: [32]u8 = undefined;
+    const list = try formatGpuList(&buf, &[_]u32{7});
+    try std.testing.expectEqualStrings("7", list);
 }
 
-test "appendGpuList multiple" {
-    var buf: [4096]u8 = undefined;
-    const end = try appendGpuList(&buf, 0, &[_]u32{ 0, 2, 5 });
-    try std.testing.expectEqualStrings("0,2,5", buf[0..end]);
+test "formatGpuList multiple" {
+    var buf: [32]u8 = undefined;
+    const list = try formatGpuList(&buf, &[_]u32{ 0, 2, 5 });
+    try std.testing.expectEqualStrings("0,2,5", list);
 }
 
 test "setupGpuPassthrough no-op with empty indices" {

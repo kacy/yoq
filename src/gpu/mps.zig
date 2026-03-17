@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const log = @import("../lib/log.zig");
+const env_buffer = @import("env_buffer.zig");
 
 /// per-GPU MPS state
 pub const MpsInstance = struct {
@@ -102,29 +103,10 @@ pub fn stop(inst: *MpsInstance) void {
 /// returns a null-separated env string with CUDA_MPS_PIPE_DIRECTORY and
 /// CUDA_MPS_LOG_DIRECTORY for injection into container environments.
 pub fn writeEnv(inst: *const MpsInstance, buf: *[512]u8) ![]const u8 {
-    var pos: usize = 0;
-
-    // CUDA_MPS_PIPE_DIRECTORY
-    const pipe_prefix = "CUDA_MPS_PIPE_DIRECTORY=";
-    @memcpy(buf[pos..][0..pipe_prefix.len], pipe_prefix);
-    pos += pipe_prefix.len;
-    const pipe_dir = inst.getPipeDir();
-    @memcpy(buf[pos..][0..pipe_dir.len], pipe_dir);
-    pos += pipe_dir.len;
-    buf[pos] = 0;
-    pos += 1;
-
-    // CUDA_MPS_LOG_DIRECTORY
-    const log_prefix = "CUDA_MPS_LOG_DIRECTORY=";
-    @memcpy(buf[pos..][0..log_prefix.len], log_prefix);
-    pos += log_prefix.len;
-    const log_dir = inst.getLogDir();
-    @memcpy(buf[pos..][0..log_dir.len], log_dir);
-    pos += log_dir.len;
-    buf[pos] = 0;
-    pos += 1;
-
-    return buf[0..pos];
+    var writer = env_buffer.NullEnvWriter.init(buf);
+    try writer.writeEntry("CUDA_MPS_PIPE_DIRECTORY", inst.getPipeDir());
+    try writer.writeEntry("CUDA_MPS_LOG_DIRECTORY", inst.getLogDir());
+    return writer.finish();
 }
 
 /// check if the nvidia-cuda-mps-control binary is available on the system.

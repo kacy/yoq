@@ -11,6 +11,7 @@
 const std = @import("std");
 const detect = @import("detect.zig");
 const log = @import("../lib/log.zig");
+const env_buffer = @import("env_buffer.zig");
 
 const Allocator = std.mem.Allocator;
 const GpuInfo = detect.GpuInfo;
@@ -149,58 +150,8 @@ pub fn generateNcclTopology(
 
     try buf.appendSlice(alloc, "<?xml version=\"1.0\"?>\n<system version=\"1\">\n");
     try buf.appendSlice(alloc, "  <cpu numaid=\"0\">\n");
-
-    // GPUs
-    for (gpus) |gpu| {
-        const pci = gpu.getPciBusId();
-        if (pci.len == 0) continue;
-        try buf.appendSlice(alloc, "    <pci busid=\"");
-        try buf.appendSlice(alloc, pci);
-        try buf.appendSlice(alloc, "\" class=\"0x030200\" link_speed=\"16 GT/s\" link_width=\"16\">\n");
-        try buf.appendSlice(alloc, "      <gpu dev=\"");
-        try std.fmt.format(buf.writer(alloc), "{d}", .{gpu.index});
-        const sm_val: u16 = if (gpu.compute_capability != 0) gpu.compute_capability else 80;
-        try std.fmt.format(buf.writer(alloc), "\" sm=\"{d}\" mem=\"", .{sm_val});
-        try std.fmt.format(buf.writer(alloc), "{d}", .{gpu.vram_mb});
-        try buf.appendSlice(alloc, "\"");
-        // NVLink topology: emit link elements for peer GPUs
-        if (gpu.nvlink_peer_count > 0) {
-            try buf.appendSlice(alloc, ">\n");
-            for (0..gpu.nvlink_peer_count) |li| {
-                const peer_idx = gpu.nvlink_peers[li];
-                if (peer_idx < gpus.len) {
-                    const peer_pci = gpus[peer_idx].getPciBusId();
-                    if (peer_pci.len > 0) {
-                        try buf.appendSlice(alloc, "        <nvlink target=\"");
-                        try buf.appendSlice(alloc, peer_pci);
-                        try buf.appendSlice(alloc, "\" count=\"1\" />\n");
-                    }
-                }
-            }
-            try buf.appendSlice(alloc, "      </gpu>\n");
-        } else {
-            try buf.appendSlice(alloc, " />\n");
-        }
-        try buf.appendSlice(alloc, "    </pci>\n");
-    }
-
-    // NICs
-    for (0..@min(ib_count, max_ib_devices)) |i| {
-        const nic = ib_devices[i];
-        const pci = nic.getPciBusId();
-        if (pci.len == 0) continue;
-        try buf.appendSlice(alloc, "    <pci busid=\"");
-        try buf.appendSlice(alloc, pci);
-        try buf.appendSlice(alloc, "\" class=\"0x020700\" link_speed=\"16 GT/s\" link_width=\"16\">\n");
-        try buf.appendSlice(alloc, "      <nic name=\"");
-        try buf.appendSlice(alloc, nic.getName());
-        try buf.appendSlice(alloc, "\" speed=\"");
-        try std.fmt.format(buf.writer(alloc), "{d}", .{nic.rate_gbps});
-        try buf.appendSlice(alloc, "\" gdr=\"");
-        try buf.appendSlice(alloc, if (nic.gdr_supported) "1" else "0");
-        try buf.appendSlice(alloc, "\" />\n");
-        try buf.appendSlice(alloc, "    </pci>\n");
-    }
+    try appendGpuTopology(alloc, &buf, gpus);
+    try appendIbTopology(alloc, &buf, ib_devices, ib_count);
 
     try buf.appendSlice(alloc, "  </cpu>\n</system>\n");
 
@@ -219,63 +170,129 @@ pub fn generateMeshEnv(
     local_rank: u32,
     topo_file: ?[]const u8,
 ) ![]const u8 {
-    var pos: usize = 0;
+    var writer = env_buffer.NullEnvWriter.init(buf);
+    try writer.writeEntry("MASTER_ADDR", master_addr);
+    try writer.writeEntryValueFmt("MASTER_PORT", "{d}", .{master_port});
+    try writer.writeEntryValueFmt("WORLD_SIZE", "{d}", .{world_size});
+    try writer.writeEntryValueFmt("RANK", "{d}", .{rank});
+    try writer.writeEntryValueFmt("LOCAL_RANK", "{d}", .{local_rank});
 
-    // core distributed training vars
-    pos += (std.fmt.bufPrint(buf[pos..], "MASTER_ADDR={s}", .{master_addr}) catch return error.BufferTooSmall).len;
-    buf[pos] = 0;
-    pos += 1;
-
-    pos += (std.fmt.bufPrint(buf[pos..], "MASTER_PORT={d}", .{master_port}) catch return error.BufferTooSmall).len;
-    buf[pos] = 0;
-    pos += 1;
-
-    pos += (std.fmt.bufPrint(buf[pos..], "WORLD_SIZE={d}", .{world_size}) catch return error.BufferTooSmall).len;
-    buf[pos] = 0;
-    pos += 1;
-
-    pos += (std.fmt.bufPrint(buf[pos..], "RANK={d}", .{rank}) catch return error.BufferTooSmall).len;
-    buf[pos] = 0;
-    pos += 1;
-
-    pos += (std.fmt.bufPrint(buf[pos..], "LOCAL_RANK={d}", .{local_rank}) catch return error.BufferTooSmall).len;
-    buf[pos] = 0;
-    pos += 1;
-
-    // NCCL IB configuration
     if (ib_result.count > 0) {
-        // set IB HCA name
         const ib_name = ib_result.devices[0].getName();
         if (ib_name.len > 0) {
-            pos += (std.fmt.bufPrint(buf[pos..], "NCCL_IB_HCA={s}", .{ib_name}) catch return error.BufferTooSmall).len;
-            buf[pos] = 0;
-            pos += 1;
+            try writer.writeEntry("NCCL_IB_HCA", ib_name);
         }
-
-        // enable GPUDirect RDMA if available
         if (ib_result.gdr_available) {
-            const gdr = "NCCL_NET_GDR_LEVEL=5";
-            @memcpy(buf[pos..][0..gdr.len], gdr);
-            pos += gdr.len;
-            buf[pos] = 0;
-            pos += 1;
+            try writer.writeLiteralEntry("NCCL_NET_GDR_LEVEL=5");
+        }
+        try writer.writeLiteralEntry("NCCL_NET=IB");
+    }
+
+    if (topo_file) |tf| {
+        try writer.writeEntry("NCCL_TOPO_FILE", tf);
+    }
+
+    return writer.finish();
+}
+
+fn appendGpuTopology(alloc: Allocator, buf: *std.ArrayListUnmanaged(u8), gpus: []const GpuInfo) !void {
+    for (gpus) |gpu| {
+        if (gpu.getPciBusId().len == 0) continue;
+        try appendGpuNode(alloc, buf, gpus, gpu);
+    }
+}
+
+fn appendGpuNode(
+    alloc: Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    gpus: []const GpuInfo,
+    gpu: GpuInfo,
+) !void {
+    try appendPciOpen(alloc, buf, gpu.getPciBusId(), "0x030200");
+    try appendGpuHeader(alloc, buf, gpu);
+
+    const has_nvlink = try appendNvLinkEntries(alloc, buf, gpus, gpu);
+    if (has_nvlink) {
+        try buf.appendSlice(alloc, "      </gpu>\n");
+    } else {
+        try buf.appendSlice(alloc, " />\n");
+    }
+
+    try buf.appendSlice(alloc, "    </pci>\n");
+}
+
+fn appendGpuHeader(alloc: Allocator, buf: *std.ArrayListUnmanaged(u8), gpu: GpuInfo) !void {
+    try buf.appendSlice(alloc, "      <gpu dev=\"");
+    try std.fmt.format(buf.writer(alloc), "{d}", .{gpu.index});
+    try std.fmt.format(buf.writer(alloc), "\" sm=\"{d}\" mem=\"{d}\"", .{
+        gpuSmValue(gpu),
+        gpu.vram_mb,
+    });
+}
+
+fn appendNvLinkEntries(
+    alloc: Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    gpus: []const GpuInfo,
+    gpu: GpuInfo,
+) !bool {
+    var wrote_entry = false;
+
+    for (0..gpu.nvlink_peer_count) |li| {
+        const peer_idx = gpu.nvlink_peers[li];
+        if (peer_idx >= gpus.len) continue;
+
+        const peer_pci = gpus[peer_idx].getPciBusId();
+        if (peer_pci.len == 0) continue;
+
+        if (!wrote_entry) {
+            wrote_entry = true;
+            try buf.appendSlice(alloc, ">\n");
         }
 
-        const net = "NCCL_NET=IB";
-        @memcpy(buf[pos..][0..net.len], net);
-        pos += net.len;
-        buf[pos] = 0;
-        pos += 1;
+        try std.fmt.format(buf.writer(alloc), "        <nvlink target=\"{s}\" count=\"1\" />\n", .{peer_pci});
     }
 
-    // topology file
-    if (topo_file) |tf| {
-        pos += (std.fmt.bufPrint(buf[pos..], "NCCL_TOPO_FILE={s}", .{tf}) catch return error.BufferTooSmall).len;
-        buf[pos] = 0;
-        pos += 1;
-    }
+    return wrote_entry;
+}
 
-    return buf[0..pos];
+fn appendIbTopology(
+    alloc: Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    ib_devices: []const IbDevice,
+    ib_count: u8,
+) !void {
+    for (0..@min(ib_count, max_ib_devices)) |i| {
+        const nic = ib_devices[i];
+        if (nic.getPciBusId().len == 0) continue;
+        try appendIbNode(alloc, buf, nic);
+    }
+}
+
+fn appendIbNode(alloc: Allocator, buf: *std.ArrayListUnmanaged(u8), nic: IbDevice) !void {
+    try appendPciOpen(alloc, buf, nic.getPciBusId(), "0x020700");
+    try std.fmt.format(buf.writer(alloc), "      <nic name=\"{s}\" speed=\"{d}\" gdr=\"{s}\" />\n", .{
+        nic.getName(),
+        nic.rate_gbps,
+        if (nic.gdr_supported) "1" else "0",
+    });
+    try buf.appendSlice(alloc, "    </pci>\n");
+}
+
+fn appendPciOpen(
+    alloc: Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    pci_bus_id: []const u8,
+    class: []const u8,
+) !void {
+    try std.fmt.format(buf.writer(alloc), "    <pci busid=\"{s}\" class=\"{s}\" link_speed=\"16 GT/s\" link_width=\"16\">\n", .{
+        pci_bus_id,
+        class,
+    });
+}
+
+fn gpuSmValue(gpu: GpuInfo) u16 {
+    return if (gpu.compute_capability != 0) gpu.compute_capability else 80;
 }
 
 /// GPU mesh port range for traffic prioritization

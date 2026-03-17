@@ -147,184 +147,29 @@ pub const DetectResult = struct {
 
 /// detect GPUs using the best available method.
 pub fn detect() DetectResult {
-    // tier 1: NVML
     if (detectNvml()) |result| return result;
-
-    // tier 2: procfs
     if (detectProcfs()) |result| return result;
-
-    // tier 3: sysfs
     if (detectSysfs()) |result| return result;
-
-    return .{
-        .gpus = undefined,
-        .count = 0,
-        .source = .none,
-        .nvml = null,
-    };
+    return emptyDetectResult(.none, null);
 }
 
 fn detectNvml() ?DetectResult {
-    var lib = std.DynLib.open("libnvidia-ml.so.1") catch return null;
-    errdefer lib.close();
-
-    const init_fn = lib.lookup(*const fn () callconv(.c) NvmlReturn, "nvmlInit_v2") orelse return null;
-    const shutdown_fn = lib.lookup(*const fn () callconv(.c) NvmlReturn, "nvmlShutdown") orelse return null;
-    const count_fn = lib.lookup(*const fn (*u32) callconv(.c) NvmlReturn, "nvmlDeviceGetCount_v2") orelse return null;
-    const handle_fn = lib.lookup(*const fn (u32, *NvmlDevice) callconv(.c) NvmlReturn, "nvmlDeviceGetHandleByIndex_v2") orelse return null;
-    const name_fn = lib.lookup(*const fn (NvmlDevice, [*]u8, u32) callconv(.c) NvmlReturn, "nvmlDeviceGetName") orelse return null;
-    const mem_fn = lib.lookup(*const fn (NvmlDevice, *NvmlMemory) callconv(.c) NvmlReturn, "nvmlDeviceGetMemoryInfo") orelse return null;
-    const uuid_fn = lib.lookup(*const fn (NvmlDevice, [*]u8, u32) callconv(.c) NvmlReturn, "nvmlDeviceGetUUID") orelse return null;
-    const pci_fn = lib.lookup(*const fn (NvmlDevice, *NvmlPciInfo) callconv(.c) NvmlReturn, "nvmlDeviceGetPciInfo_v3") orelse return null;
-    const numa_fn = lib.lookup(*const fn (NvmlDevice, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetNumaNode");
-
-    // optional health functions
-    const temp_fn = lib.lookup(*const fn (NvmlDevice, c_int, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetTemperature");
-    const util_fn = lib.lookup(*const fn (NvmlDevice, *NvmlUtilization) callconv(.c) NvmlReturn, "nvmlDeviceGetUtilizationRates");
-    const power_fn = lib.lookup(*const fn (NvmlDevice, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetPowerUsage");
-    const ecc_fn = lib.lookup(*const fn (NvmlDevice, c_int, c_int, *u64) callconv(.c) NvmlReturn, "nvmlDeviceGetTotalEccErrors");
-
-    // optional NVLink functions
-    const nvlink_remote_pci_fn = lib.lookup(*const fn (NvmlDevice, u32, *NvmlPciInfo) callconv(.c) NvmlReturn, "nvmlDeviceGetNvLinkRemotePciInfo_v2");
-    const nvlink_state_fn = lib.lookup(*const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetNvLinkState");
-
-    // optional MIG functions
-    const mig_mode_fn = lib.lookup(*const fn (NvmlDevice, *u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetMigMode");
-    const gi_profile_info_fn = lib.lookup(*const fn (NvmlDevice, u32, *anyopaque) callconv(.c) NvmlReturn, "nvmlDeviceGetGpuInstanceProfileInfo");
-    const get_gi_fn = lib.lookup(*const fn (NvmlDevice, u32, [*]NvmlGpuInstance, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetGpuInstances");
-    const gi_info_fn = lib.lookup(*const fn (NvmlGpuInstance, *anyopaque) callconv(.c) NvmlReturn, "nvmlGpuInstanceGetInfo");
-    const get_ci_fn = lib.lookup(*const fn (NvmlGpuInstance, u32, [*]NvmlComputeInstance, *u32) callconv(.c) NvmlReturn, "nvmlGpuInstanceGetComputeInstances");
-    const ci_info_fn = lib.lookup(*const fn (NvmlComputeInstance, *anyopaque) callconv(.c) NvmlReturn, "nvmlComputeInstanceGetInfo");
-
-    // optional compute capability function
-    const cc_fn = lib.lookup(*const fn (NvmlDevice, *c_int, *c_int) callconv(.c) NvmlReturn, "nvmlDeviceGetCudaComputeCapability");
-
-    // optional MIG management functions
-    const set_mig_mode_fn = lib.lookup(*const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceSetMigMode");
-    const create_gi_fn = lib.lookup(*const fn (NvmlDevice, u32, *NvmlGpuInstance) callconv(.c) NvmlReturn, "nvmlDeviceCreateGpuInstance");
-    const gi_create_ci_fn = lib.lookup(*const fn (NvmlGpuInstance, u32, *NvmlComputeInstance) callconv(.c) NvmlReturn, "nvmlGpuInstanceCreateComputeInstance");
-    const destroy_gi_fn = lib.lookup(*const fn (NvmlGpuInstance) callconv(.c) NvmlReturn, "nvmlDeviceDestroyGpuInstance");
-
-    const ret = init_fn();
-    if (ret != .success) {
-        lib.close();
-        return null;
-    }
-
-    var nvml = NvmlHandle{
-        .lib = lib,
-        .shutdown_fn = shutdown_fn,
-        .device_get_count_fn = count_fn,
-        .device_get_handle_fn = handle_fn,
-        .device_get_name_fn = name_fn,
-        .device_get_memory_fn = mem_fn,
-        .device_get_uuid_fn = uuid_fn,
-        .device_get_pci_fn = pci_fn,
-        .device_get_numa_fn = numa_fn,
-        .device_get_temperature_fn = temp_fn,
-        .device_get_utilization_fn = util_fn,
-        .device_get_power_fn = power_fn,
-        .device_get_ecc_errors_fn = ecc_fn,
-        .device_get_nvlink_remote_pci_fn = nvlink_remote_pci_fn,
-        .device_get_nvlink_state_fn = nvlink_state_fn,
-        .device_get_mig_mode_fn = mig_mode_fn,
-        .device_get_gpu_instance_profile_info_fn = gi_profile_info_fn,
-        .device_get_gpu_instances_fn = get_gi_fn,
-        .gpu_instance_get_info_fn = gi_info_fn,
-        .gpu_instance_get_compute_instances_fn = get_ci_fn,
-        .compute_instance_get_info_fn = ci_info_fn,
-        .device_set_mig_mode_fn = set_mig_mode_fn,
-        .device_create_gpu_instance_fn = create_gi_fn,
-        .gpu_instance_create_compute_instance_fn = gi_create_ci_fn,
-        .device_destroy_gpu_instance_fn = destroy_gi_fn,
-        .device_get_cuda_compute_capability_fn = cc_fn,
-        .initialized = true,
-    };
+    var nvml = loadNvmlHandle() orelse return null;
+    errdefer nvml.deinit();
 
     var gpu_count: u32 = 0;
-    const count_ret = count_fn(&gpu_count);
-    if (count_ret != .success) {
-        nvml.deinit();
-        return null;
-    }
+    if (nvml.device_get_count_fn(&gpu_count) != .success) return null;
 
     const actual_count: u8 = @intCast(@min(gpu_count, max_gpus));
-    var result = DetectResult{
-        .gpus = undefined,
-        .count = actual_count,
-        .source = .nvml,
-        .nvml = nvml,
-    };
+    var result = emptyDetectResult(.nvml, nvml);
+    result.count = actual_count;
 
     for (0..actual_count) |i| {
-        const idx: u32 = @intCast(i);
-        var gpu = GpuInfo{ .index = idx };
+        result.gpus[i] = populateNvmlGpuInfo(&nvml, @intCast(i)) orelse GpuInfo{ .index = @intCast(i) };
+    }
 
-        var device: NvmlDevice = undefined;
-        if (handle_fn(idx, &device) != .success) continue;
-
-        // name
-        var name_buf: [64]u8 = .{0} ** 64;
-        if (name_fn(device, &name_buf, 64) == .success) {
-            const len = std.mem.indexOfScalar(u8, &name_buf, 0) orelse 64;
-            gpu.name_len = @intCast(@min(len, 64));
-            @memcpy(gpu.name[0..gpu.name_len], name_buf[0..gpu.name_len]);
-        }
-
-        // memory
-        var mem_info: NvmlMemory = undefined;
-        if (mem_fn(device, &mem_info) == .success) {
-            gpu.vram_mb = mem_info.total / (1024 * 1024);
-        }
-
-        // uuid
-        var uuid_buf: [96]u8 = .{0} ** 96;
-        if (uuid_fn(device, &uuid_buf, 96) == .success) {
-            const len = std.mem.indexOfScalar(u8, &uuid_buf, 0) orelse 96;
-            gpu.uuid_len = @intCast(@min(len, 96));
-            @memcpy(gpu.uuid[0..gpu.uuid_len], uuid_buf[0..gpu.uuid_len]);
-        }
-
-        // PCI info
-        var pci_info: NvmlPciInfo = undefined;
-        if (pci_fn(device, &pci_info) == .success) {
-            const len = std.mem.indexOfScalar(u8, &pci_info.bus_id, 0) orelse 16;
-            gpu.pci_bus_id_len = @intCast(@min(len, 16));
-            @memcpy(gpu.pci_bus_id[0..gpu.pci_bus_id_len], pci_info.bus_id[0..gpu.pci_bus_id_len]);
-        }
-
-        // NUMA node (optional)
-        if (numa_fn) |f| {
-            var numa: u32 = 0;
-            if (f(device, &numa) == .success) {
-                gpu.numa_node = @intCast(numa);
-            }
-        }
-
-        // MIG capability (optional)
-        if (mig_mode_fn) |mig_fn| {
-            var current: u32 = 0;
-            var pending: u32 = 0;
-            if (mig_fn(device, &current, &pending) == .success) {
-                gpu.mig_capable = true;
-            }
-        }
-
-        // compute capability (optional)
-        if (cc_fn) |cap_fn| {
-            var major: c_int = 0;
-            var minor: c_int = 0;
-            if (cap_fn(device, &major, &minor) == .success) {
-                gpu.compute_capability = @intCast(@as(u32, @intCast(major)) * 10 + @as(u32, @intCast(minor)));
-            }
-        }
-
-        // NVLink peer discovery (optional)
-        if (nvlink_remote_pci_fn) |nvlink_fn| {
-            probeNvLinkPeers(&gpu, device, nvlink_fn, nvlink_state_fn);
-        }
-
-        result.gpus[i] = gpu;
+    if (result.nvml) |*handle| {
+        resolveNvLinkPeers(result.gpus[0..result.count], result.count, handle);
     }
 
     log.info("GPU: detected {d} GPU(s) via NVML", .{actual_count});
@@ -335,12 +180,7 @@ fn detectProcfs() ?DetectResult {
     var dir = std.fs.openDirAbsolute("/proc/driver/nvidia/gpus", .{ .iterate = true }) catch return null;
     defer dir.close();
 
-    var result = DetectResult{
-        .gpus = undefined,
-        .count = 0,
-        .source = .procfs,
-        .nvml = null,
-    };
+    var result = emptyDetectResult(.procfs, null);
 
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
@@ -367,12 +207,7 @@ fn detectProcfs() ?DetectResult {
 }
 
 fn detectSysfs() ?DetectResult {
-    var result = DetectResult{
-        .gpus = undefined,
-        .count = 0,
-        .source = .sysfs,
-        .nvml = null,
-    };
+    var result = emptyDetectResult(.sysfs, null);
 
     // scan /sys/class/drm/card* for NVIDIA vendor ID
     var drm_dir = std.fs.openDirAbsolute("/sys/class/drm", .{ .iterate = true }) catch return null;
@@ -424,6 +259,147 @@ fn detectSysfs() ?DetectResult {
         return result;
     }
     return null;
+}
+
+fn emptyDetectResult(source: DetectSource, nvml: ?NvmlHandle) DetectResult {
+    return .{
+        .gpus = undefined,
+        .count = 0,
+        .source = source,
+        .nvml = nvml,
+    };
+}
+
+fn loadNvmlHandle() ?NvmlHandle {
+    var lib = std.DynLib.open("libnvidia-ml.so.1") catch return null;
+    errdefer lib.close();
+
+    const init_fn = lookupRequired(&lib, *const fn () callconv(.c) NvmlReturn, "nvmlInit_v2") orelse return null;
+    const shutdown_fn = lookupRequired(&lib, *const fn () callconv(.c) NvmlReturn, "nvmlShutdown") orelse return null;
+    const count_fn = lookupRequired(&lib, *const fn (*u32) callconv(.c) NvmlReturn, "nvmlDeviceGetCount_v2") orelse return null;
+    const handle_fn = lookupRequired(&lib, *const fn (u32, *NvmlDevice) callconv(.c) NvmlReturn, "nvmlDeviceGetHandleByIndex_v2") orelse return null;
+    const name_fn = lookupRequired(&lib, *const fn (NvmlDevice, [*]u8, u32) callconv(.c) NvmlReturn, "nvmlDeviceGetName") orelse return null;
+    const mem_fn = lookupRequired(&lib, *const fn (NvmlDevice, *NvmlMemory) callconv(.c) NvmlReturn, "nvmlDeviceGetMemoryInfo") orelse return null;
+    const uuid_fn = lookupRequired(&lib, *const fn (NvmlDevice, [*]u8, u32) callconv(.c) NvmlReturn, "nvmlDeviceGetUUID") orelse return null;
+    const pci_fn = lookupRequired(&lib, *const fn (NvmlDevice, *NvmlPciInfo) callconv(.c) NvmlReturn, "nvmlDeviceGetPciInfo_v3") orelse return null;
+
+    if (init_fn() != .success) return null;
+
+    return .{
+        .lib = lib,
+        .shutdown_fn = shutdown_fn,
+        .device_get_count_fn = count_fn,
+        .device_get_handle_fn = handle_fn,
+        .device_get_name_fn = name_fn,
+        .device_get_memory_fn = mem_fn,
+        .device_get_uuid_fn = uuid_fn,
+        .device_get_pci_fn = pci_fn,
+        .device_get_numa_fn = lookupOptional(&lib, *const fn (NvmlDevice, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetNumaNode"),
+        .device_get_temperature_fn = lookupOptional(&lib, *const fn (NvmlDevice, c_int, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetTemperature"),
+        .device_get_utilization_fn = lookupOptional(&lib, *const fn (NvmlDevice, *NvmlUtilization) callconv(.c) NvmlReturn, "nvmlDeviceGetUtilizationRates"),
+        .device_get_power_fn = lookupOptional(&lib, *const fn (NvmlDevice, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetPowerUsage"),
+        .device_get_ecc_errors_fn = lookupOptional(&lib, *const fn (NvmlDevice, c_int, c_int, *u64) callconv(.c) NvmlReturn, "nvmlDeviceGetTotalEccErrors"),
+        .device_get_nvlink_remote_pci_fn = lookupOptional(&lib, *const fn (NvmlDevice, u32, *NvmlPciInfo) callconv(.c) NvmlReturn, "nvmlDeviceGetNvLinkRemotePciInfo_v2"),
+        .device_get_nvlink_state_fn = lookupOptional(&lib, *const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetNvLinkState"),
+        .device_get_mig_mode_fn = lookupOptional(&lib, *const fn (NvmlDevice, *u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetMigMode"),
+        .device_get_gpu_instance_profile_info_fn = lookupOptional(&lib, *const fn (NvmlDevice, u32, *anyopaque) callconv(.c) NvmlReturn, "nvmlDeviceGetGpuInstanceProfileInfo"),
+        .device_get_gpu_instances_fn = lookupOptional(&lib, *const fn (NvmlDevice, u32, [*]NvmlGpuInstance, *u32) callconv(.c) NvmlReturn, "nvmlDeviceGetGpuInstances"),
+        .gpu_instance_get_info_fn = lookupOptional(&lib, *const fn (NvmlGpuInstance, *anyopaque) callconv(.c) NvmlReturn, "nvmlGpuInstanceGetInfo"),
+        .gpu_instance_get_compute_instances_fn = lookupOptional(&lib, *const fn (NvmlGpuInstance, u32, [*]NvmlComputeInstance, *u32) callconv(.c) NvmlReturn, "nvmlGpuInstanceGetComputeInstances"),
+        .compute_instance_get_info_fn = lookupOptional(&lib, *const fn (NvmlComputeInstance, *anyopaque) callconv(.c) NvmlReturn, "nvmlComputeInstanceGetInfo"),
+        .device_get_cuda_compute_capability_fn = lookupOptional(&lib, *const fn (NvmlDevice, *c_int, *c_int) callconv(.c) NvmlReturn, "nvmlDeviceGetCudaComputeCapability"),
+        .device_set_mig_mode_fn = lookupOptional(&lib, *const fn (NvmlDevice, u32, *u32) callconv(.c) NvmlReturn, "nvmlDeviceSetMigMode"),
+        .device_create_gpu_instance_fn = lookupOptional(&lib, *const fn (NvmlDevice, u32, *NvmlGpuInstance) callconv(.c) NvmlReturn, "nvmlDeviceCreateGpuInstance"),
+        .gpu_instance_create_compute_instance_fn = lookupOptional(&lib, *const fn (NvmlGpuInstance, u32, *NvmlComputeInstance) callconv(.c) NvmlReturn, "nvmlGpuInstanceCreateComputeInstance"),
+        .device_destroy_gpu_instance_fn = lookupOptional(&lib, *const fn (NvmlGpuInstance) callconv(.c) NvmlReturn, "nvmlDeviceDestroyGpuInstance"),
+        .initialized = true,
+    };
+}
+
+fn populateNvmlGpuInfo(nvml: *NvmlHandle, index: u32) ?GpuInfo {
+    const device = nvml.getDevice(index) orelse return null;
+    var gpu = GpuInfo{ .index = index };
+
+    populateGpuName(nvml, device, &gpu);
+    populateGpuMemory(nvml, device, &gpu);
+    populateGpuUuid(nvml, device, &gpu);
+    populateGpuPciBusId(nvml, device, &gpu);
+    populateGpuNumaNode(nvml, device, &gpu);
+    populateMigCapability(nvml, device, &gpu);
+    populateComputeCapability(nvml, device, &gpu);
+    populateNvLinkInfo(nvml, device, &gpu);
+
+    return gpu;
+}
+
+fn populateGpuName(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
+    var buf: [64]u8 = .{0} ** 64;
+    if (nvml.device_get_name_fn(device, &buf, buf.len) != .success) return;
+    gpu.name_len = copyNullTerminated(&gpu.name, &buf);
+}
+
+fn populateGpuMemory(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
+    var mem_info: NvmlMemory = undefined;
+    if (nvml.device_get_memory_fn(device, &mem_info) != .success) return;
+    gpu.vram_mb = mem_info.total / (1024 * 1024);
+}
+
+fn populateGpuUuid(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
+    var buf: [96]u8 = .{0} ** 96;
+    if (nvml.device_get_uuid_fn(device, &buf, buf.len) != .success) return;
+    gpu.uuid_len = copyNullTerminated(&gpu.uuid, &buf);
+}
+
+fn populateGpuPciBusId(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
+    var pci_info: NvmlPciInfo = undefined;
+    if (nvml.device_get_pci_fn(device, &pci_info) != .success) return;
+    gpu.pci_bus_id_len = copyNullTerminated(&gpu.pci_bus_id, &pci_info.bus_id);
+}
+
+fn populateGpuNumaNode(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
+    const numa_fn = nvml.device_get_numa_fn orelse return;
+    var numa: u32 = 0;
+    if (numa_fn(device, &numa) != .success) return;
+    gpu.numa_node = @intCast(numa);
+}
+
+fn populateMigCapability(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
+    const mig_fn = nvml.device_get_mig_mode_fn orelse return;
+    var current: u32 = 0;
+    var pending: u32 = 0;
+    gpu.mig_capable = mig_fn(device, &current, &pending) == .success;
+}
+
+fn populateComputeCapability(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
+    const cap_fn = nvml.device_get_cuda_compute_capability_fn orelse return;
+    var major: c_int = 0;
+    var minor: c_int = 0;
+    if (cap_fn(device, &major, &minor) != .success) return;
+    gpu.compute_capability = @intCast(@as(u32, @intCast(major)) * 10 + @as(u32, @intCast(minor)));
+}
+
+fn populateNvLinkInfo(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
+    const remote_pci_fn = nvml.device_get_nvlink_remote_pci_fn orelse return;
+    probeNvLinkPeers(gpu, device, remote_pci_fn, nvml.device_get_nvlink_state_fn);
+}
+
+fn copyNullTerminated(dest: anytype, source: []const u8) u8 {
+    const len = std.mem.indexOfScalar(u8, source, 0) orelse source.len;
+    return copyTruncated(dest, source[0..len]);
+}
+
+fn copyTruncated(dest: anytype, source: []const u8) u8 {
+    const len: u8 = @intCast(@min(dest.len, source.len));
+    @memcpy(dest[0..len], source[0..len]);
+    return len;
+}
+
+fn lookupRequired(lib: *std.DynLib, comptime T: type, symbol_name: [:0]const u8) ?T {
+    return lib.lookup(T, symbol_name);
+}
+
+fn lookupOptional(lib: *std.DynLib, comptime T: type, symbol_name: [:0]const u8) ?T {
+    return lib.lookup(T, symbol_name);
 }
 
 pub const SysfsContent = struct {
