@@ -1,233 +1,31 @@
-// context — build context file operations
-//
-// handles hashing and copying source files for COPY instructions
-// during image builds. the content hash of source files is used
-// as part of the build cache key, so identical files always produce
-// the same cache entry.
-//
-// no glob patterns in v1 — just file or directory paths.
-
 const std = @import("std");
-const blob_store = @import("../image/store.zig");
-const log = @import("../lib/log.zig");
+const hash_impl = @import("context/hash.zig");
+const copy_impl = @import("context/copy.zig");
+const path_policy = @import("context/path_policy.zig");
+const types = @import("context/types.zig");
 
-pub const ContextError = error{
-    /// content hashing failed (file read error or directory walk error)
-    HashFailed,
-    /// file copy from build context to layer directory failed
-    CopyFailed,
-    /// source path does not exist in the build context
-    NotFound,
-    /// source path attempts to escape the build context via ".."
-    PathTraversal,
-};
+pub const ContextError = types.ContextError;
 
-/// compute a content hash of files at src_path (relative to context_dir).
-/// for a file: hash its content. for a directory: recursively hash all
-/// files (sorted by path for determinism).
-pub fn hashFiles(alloc: std.mem.Allocator, context_dir: []const u8, src_path: []const u8) ContextError!blob_store.Digest {
-    // validate source path to prevent path traversal attacks
-    if (containsPathTraversal(src_path)) {
-        log.err("build: path traversal attempt in hashFiles: {s}", .{src_path});
-        return ContextError.PathTraversal;
-    }
-
-    var dir = std.fs.cwd().openDir(context_dir, .{}) catch return ContextError.NotFound;
-    defer dir.close();
-
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-
-    // check if src_path is a file or directory
-    const stat = dir.statFile(src_path) catch {
-        // try as directory
-        return hashDirectory(alloc, dir, src_path, &hasher);
-    };
-
-    if (stat.kind == .directory) {
-        return hashDirectory(alloc, dir, src_path, &hasher);
-    }
-
-    // it's a file — hash its path and content
-    hasher.update(src_path);
-    hasher.update("\x00");
-
-    // stream file content instead of loading entire file into memory
-    var file = dir.openFile(src_path, .{}) catch return ContextError.HashFailed;
-    defer file.close();
-
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = file.read(&buf) catch return ContextError.HashFailed;
-        if (n == 0) break;
-        hasher.update(buf[0..n]);
-    }
-
-    return blob_store.Digest{ .hash = hasher.finalResult() };
-}
-
-/// hash all files in a directory recursively.
-/// feeds relative paths + file contents into the hasher, sorted by path.
-fn hashDirectory(
+pub fn hashFiles(
     alloc: std.mem.Allocator,
-    base_dir: std.fs.Dir,
-    sub_path: []const u8,
-    hasher: *std.crypto.hash.sha2.Sha256,
-) ContextError!blob_store.Digest {
-    var sub_dir = base_dir.openDir(sub_path, .{ .iterate = true }) catch
-        return ContextError.NotFound;
-    defer sub_dir.close();
-
-    // collect all file paths for sorted hashing
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (paths.items) |p| alloc.free(p);
-        paths.deinit(alloc);
-    }
-
-    var walker = sub_dir.walk(alloc) catch return ContextError.HashFailed;
-    defer walker.deinit();
-
-    while (walker.next() catch return ContextError.HashFailed) |entry| {
-        if (entry.kind == .file) {
-            const path = alloc.dupe(u8, entry.path) catch return ContextError.HashFailed;
-            paths.append(alloc, path) catch {
-                alloc.free(path);
-                return ContextError.HashFailed;
-            };
-        }
-    }
-
-    // sort paths for deterministic hashing
-    std.mem.sort([]const u8, paths.items, {}, struct {
-        pub fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
-        }
-    }.lessThan);
-
-    // hash each file: path + null separator + content
-    for (paths.items) |path| {
-        hasher.update(path);
-        hasher.update("\x00");
-
-        const content = sub_dir.readFileAlloc(alloc, path, 256 * 1024 * 1024) catch
-            return ContextError.HashFailed;
-        defer alloc.free(content);
-        hasher.update(content);
-    }
-
-    return blob_store.Digest{ .hash = hasher.finalResult() };
+    context_dir: []const u8,
+    src_path: []const u8,
+) ContextError!@import("../image/store.zig").Digest {
+    return hash_impl.hashFiles(alloc, context_dir, src_path);
 }
 
-/// copy files from the build context into a layer directory.
-/// src is relative to context_dir, dest is the target path within layer_dir.
 pub fn copyFiles(
+    alloc: std.mem.Allocator,
     context_dir: []const u8,
     src: []const u8,
     layer_dir: []const u8,
     dest: []const u8,
 ) ContextError!void {
-    // validate source path to prevent path traversal
-    if (containsPathTraversal(src)) {
-        log.err("build: path traversal attempt in copyFiles source: {s}", .{src});
-        return ContextError.PathTraversal;
-    }
-
-    var ctx_dir = std.fs.cwd().openDir(context_dir, .{}) catch
-        return ContextError.NotFound;
-    defer ctx_dir.close();
-
-    var dst_dir = std.fs.cwd().openDir(layer_dir, .{}) catch
-        return ContextError.CopyFailed;
-    defer dst_dir.close();
-
-    // determine the destination path (strip leading /)
-    const dest_clean = if (dest.len > 0 and dest[0] == '/') dest[1..] else dest;
-
-    // reject paths that could escape the layer directory
-    if (containsPathTraversal(dest_clean)) return ContextError.PathTraversal;
-
-    // check if source is a file or directory
-    const stat = ctx_dir.statFile(src) catch {
-        // try as directory
-        return copyDirectory(ctx_dir, src, dst_dir, dest_clean);
-    };
-
-    if (stat.kind == .directory) {
-        return copyDirectory(ctx_dir, src, dst_dir, dest_clean);
-    }
-
-    // single file copy
-    // ensure parent directory exists
-    if (std.fs.path.dirname(dest_clean)) |parent| {
-        dst_dir.makePath(parent) catch return ContextError.CopyFailed;
-    }
-
-    // determine target filename: if dest ends with '/', use source filename
-    const target_path = if (dest.len > 0 and dest[dest.len - 1] == '/') blk: {
-        const basename = std.fs.path.basename(src);
-        // combine dest_clean + basename
-        var buf: [1024]u8 = undefined;
-        const combined = std.fmt.bufPrint(&buf, "{s}{s}", .{ dest_clean, basename }) catch
-            return ContextError.CopyFailed;
-        break :blk combined;
-    } else dest_clean;
-
-    ctx_dir.copyFile(src, dst_dir, target_path, .{}) catch return ContextError.CopyFailed;
+    return copy_impl.copyFiles(alloc, context_dir, src, layer_dir, dest);
 }
 
-/// recursively copy a directory
-fn copyDirectory(
-    src_dir: std.fs.Dir,
-    src_sub: []const u8,
-    dst_dir: std.fs.Dir,
-    dst_sub: []const u8,
-) ContextError!void {
-    var source = src_dir.openDir(src_sub, .{ .iterate = true }) catch
-        return ContextError.NotFound;
-    defer source.close();
-
-    // ensure dest directory exists
-    if (dst_sub.len > 0) {
-        dst_dir.makePath(dst_sub) catch return ContextError.CopyFailed;
-    }
-
-    var target = if (dst_sub.len > 0)
-        dst_dir.openDir(dst_sub, .{}) catch return ContextError.CopyFailed
-    else
-        dst_dir.openDir(".", .{}) catch return ContextError.CopyFailed;
-    defer target.close();
-
-    // use a page allocator for the walker since this runs during builds
-    var walker = source.walk(std.heap.page_allocator) catch return ContextError.CopyFailed;
-    defer walker.deinit();
-
-    while (walker.next() catch return ContextError.CopyFailed) |entry| {
-        switch (entry.kind) {
-            .directory => {
-                target.makePath(entry.path) catch return ContextError.CopyFailed;
-            },
-            .file => {
-                // ensure parent exists
-                if (std.fs.path.dirname(entry.path)) |parent| {
-                    target.makePath(parent) catch return ContextError.CopyFailed;
-                }
-                source.copyFile(entry.path, target, entry.path, .{}) catch
-                    return ContextError.CopyFailed;
-            },
-            else => continue,
-        }
-    }
-}
-
-/// check if a path contains ".." components that could escape a directory.
-/// only matches exact ".." path segments, not filenames containing ".."
-/// (e.g. "some..file" is fine, "../escape" is not).
 fn containsPathTraversal(path: []const u8) bool {
-    var it = std.mem.splitScalar(u8, path, '/');
-    while (it.next()) |component| {
-        if (std.mem.eql(u8, component, "..")) return true;
-    }
-    return false;
+    return path_policy.containsPathTraversal(path);
 }
 
 // -- tests --
@@ -333,7 +131,7 @@ test "copy single file" {
     const src_path = try src.dir.realpath(".", &src_buf);
     const dst_path = try dst.dir.realpath(".", &dst_buf);
 
-    try copyFiles(src_path, "hello.txt", dst_path, "hello.txt");
+    try copyFiles(std.testing.allocator, src_path, "hello.txt", dst_path, "hello.txt");
 
     // verify the file was copied
     const content = try dst.dir.readFileAlloc(std.testing.allocator, "hello.txt", 1024);
@@ -355,7 +153,7 @@ test "copy directory" {
     const src_path = try src.dir.realpath(".", &src_buf);
     const dst_path = try dst.dir.realpath(".", &dst_buf);
 
-    try copyFiles(src_path, "subdir", dst_path, "target");
+    try copyFiles(std.testing.allocator, src_path, "subdir", dst_path, "target");
 
     // verify nested file was copied
     const content = try dst.dir.readFileAlloc(std.testing.allocator, "target/nested.txt", 1024);
@@ -411,7 +209,7 @@ test "copy file to directory destination" {
     const dst_path = try dst.dir.realpath(".", &dst_buf);
 
     // trailing slash means "copy into this directory"
-    try copyFiles(src_path, "app.js", dst_path, "/app/");
+    try copyFiles(std.testing.allocator, src_path, "app.js", dst_path, "/app/");
 
     // file should end up as app/app.js (basename preserved)
     const content = try dst.dir.readFileAlloc(std.testing.allocator, "app/app.js", 1024);
@@ -433,7 +231,7 @@ test "copy to nested destination creates parents" {
     const dst_path = try dst.dir.realpath(".", &dst_buf);
 
     // deep nested path — parent dirs must be created
-    try copyFiles(src_path, "config.toml", dst_path, "/deep/nested/config.toml");
+    try copyFiles(std.testing.allocator, src_path, "config.toml", dst_path, "/deep/nested/config.toml");
 
     const content = try dst.dir.readFileAlloc(std.testing.allocator, "deep/nested/config.toml", 1024);
     defer std.testing.allocator.free(content);
@@ -458,7 +256,7 @@ test "copy directory skips symlinks" {
     const src_path = try src.dir.realpath(".", &src_buf);
     const dst_path = try dst.dir.realpath(".", &dst_buf);
 
-    try copyFiles(src_path, ".", dst_path, "out");
+    try copyFiles(std.testing.allocator, src_path, ".", dst_path, "out");
 
     // real file should be copied
     const content = try dst.dir.readFileAlloc(std.testing.allocator, "out/real.txt", 1024);
@@ -473,4 +271,68 @@ test "copy directory skips symlinks" {
     } else |_| {
         // expected — symlink was skipped
     }
+}
+
+test "hash rejects symlink escape from context" {
+    const alloc = std.testing.allocator;
+
+    var outside = std.testing.tmpDir(.{});
+    defer outside.cleanup();
+    try outside.dir.writeFile(.{ .sub_path = "secret.txt", .data = "secret" });
+    var outside_buf: [4096]u8 = undefined;
+    const outside_target = try outside.dir.realpath("secret.txt", &outside_buf);
+
+    var ctx = std.testing.tmpDir(.{});
+    defer ctx.cleanup();
+    ctx.dir.symLink(outside_target, "escape.txt", .{}) catch {
+        return;
+    };
+
+    var ctx_buf: [4096]u8 = undefined;
+    const ctx_path = try ctx.dir.realpath(".", &ctx_buf);
+
+    const result = hashFiles(alloc, ctx_path, "escape.txt");
+    try std.testing.expectError(ContextError.PathTraversal, result);
+}
+
+test "copy rejects symlink escape from context" {
+    var outside = std.testing.tmpDir(.{});
+    defer outside.cleanup();
+    try outside.dir.writeFile(.{ .sub_path = "secret.txt", .data = "secret" });
+    var outside_buf: [4096]u8 = undefined;
+    const outside_target = try outside.dir.realpath("secret.txt", &outside_buf);
+
+    var ctx = std.testing.tmpDir(.{});
+    defer ctx.cleanup();
+    ctx.dir.symLink(outside_target, "escape.txt", .{}) catch {
+        return;
+    };
+
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+
+    var ctx_buf: [4096]u8 = undefined;
+    var dst_buf: [4096]u8 = undefined;
+    const ctx_path = try ctx.dir.realpath(".", &ctx_buf);
+    const dst_path = try dst.dir.realpath(".", &dst_buf);
+
+    const result = copyFiles(std.testing.allocator, ctx_path, "escape.txt", dst_path, "secret.txt");
+    try std.testing.expectError(ContextError.PathTraversal, result);
+}
+
+test "copy rejects destination traversal" {
+    var src = std.testing.tmpDir(.{});
+    defer src.cleanup();
+    try src.dir.writeFile(.{ .sub_path = "hello.txt", .data = "hello" });
+
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+
+    var src_buf: [4096]u8 = undefined;
+    var dst_buf: [4096]u8 = undefined;
+    const src_path = try src.dir.realpath(".", &src_buf);
+    const dst_path = try dst.dir.realpath(".", &dst_buf);
+
+    const result = copyFiles(std.testing.allocator, src_path, "hello.txt", dst_path, "../escape.txt");
+    try std.testing.expectError(ContextError.PathTraversal, result);
 }

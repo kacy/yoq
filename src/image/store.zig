@@ -155,9 +155,12 @@ fn renameTempToBlob(tmp_path: []const u8, digest: Digest) BlobError!void {
 pub fn getBlob(alloc: std.mem.Allocator, digest: Digest) BlobError![]u8 {
     var path_buf: [max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return BlobError.PathTooLong;
+    const file = std.fs.cwd().openFile(path, .{}) catch return BlobError.NotFound;
+    defer file.close();
 
-    return std.fs.cwd().readFileAlloc(alloc, path, 256 * 1024 * 1024) catch
-        return BlobError.NotFound;
+    const stat = file.stat() catch return BlobError.NotFound;
+    const alloc_size = blobAllocSize(stat.size) catch return BlobError.ReadFailed;
+    return file.readToEndAlloc(alloc, alloc_size) catch return BlobError.NotFound;
 }
 
 /// check if a blob exists without reading it
@@ -318,6 +321,10 @@ pub fn getBlobSize(digest: Digest) ?u64 {
     return stat.size;
 }
 
+fn blobAllocSize(size: u64) BlobError!usize {
+    return std.math.cast(usize, size) orelse BlobError.ReadFailed;
+}
+
 // -- tests --
 
 test "compute digest" {
@@ -472,4 +479,9 @@ test "getBlobSize returns correct size" {
 test "getBlobSize returns null for missing blob" {
     const digest = computeDigest("never stored blob for size test");
     try std.testing.expect(getBlobSize(digest) == null);
+}
+
+test "blobAllocSize accepts blobs larger than 256 MiB" {
+    const size = try blobAllocSize(300 * 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 300 * 1024 * 1024), size);
 }
