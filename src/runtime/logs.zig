@@ -357,7 +357,7 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t
     var read_buf: [4096]u8 = undefined;
 
     while (true) {
-        if (drainNewBytes(file, &read_buf) == false and !isPidRunning(pid)) break;
+        if (drainNewBytes(file, &read_buf) == false and !isContainerPidRunning(container_id, pid)) break;
         _ = posix.read(fd, &event_buf) catch break;
     }
 
@@ -375,10 +375,38 @@ fn drainNewBytes(file: std.fs.File, buf: []u8) bool {
     return saw_bytes;
 }
 
-fn isPidRunning(pid: ?posix.pid_t) bool {
+fn isContainerPidRunning(container_id: []const u8, pid: ?posix.pid_t) bool {
     const proc_pid = pid orelse return false;
+    if (!procCgroupMatchesContainer(proc_pid, container_id)) return false;
     process.sendSignal(proc_pid, 0) catch return false;
     return true;
+}
+
+fn procCgroupMatchesContainer(pid: posix.pid_t, container_id: []const u8) bool {
+    if (!container.isValidContainerId(container_id)) return false;
+
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cgroup", .{pid}) catch return false;
+
+    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    defer file.close();
+
+    var buf: [4096]u8 = undefined;
+    const bytes_read = file.readAll(&buf) catch return false;
+    return procCgroupContentMatchesContainer(buf[0..bytes_read], container_id);
+}
+
+fn procCgroupContentMatchesContainer(content: []const u8, container_id: []const u8) bool {
+    var needle_buf: [32]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "/yoq/{s}", .{container_id}) catch return false;
+
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, content, start, needle)) |idx| {
+        const end = idx + needle.len;
+        if (end == content.len or content[end] == '\n' or content[end] == '/') return true;
+        start = idx + 1;
+    }
+    return false;
 }
 
 fn sentinelizePath(buf: *[paths.max_path]u8, path: []const u8) ![:0]const u8 {
@@ -407,6 +435,13 @@ test "write and read log line" {
 
     try std.testing.expect(std.mem.indexOf(u8, content, "stdout | hello world\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "stderr | something broke\n") != null);
+}
+
+test "procCgroupContentMatchesContainer matches exact yoq cgroup path" {
+    try std.testing.expect(procCgroupContentMatchesContainer("0::/yoq/deadbeefcafe\n", "deadbeefcafe"));
+    try std.testing.expect(procCgroupContentMatchesContainer("0::/system.slice/yoq/deadbeefcafe/inner\n", "deadbeefcafe"));
+    try std.testing.expect(!procCgroupContentMatchesContainer("0::/yoq/deadbeefcafe123\n", "deadbeefcafe"));
+    try std.testing.expect(!procCgroupContentMatchesContainer("0::/user.slice\n", "deadbeefcafe"));
 }
 
 test "log file truncated when exceeding max size" {

@@ -78,6 +78,19 @@ fn isOwnedContainerPid(id: []const u8, pid: i32) bool {
     return cg.containsProcess(pid);
 }
 
+fn currentOwnedRunningPid(record: *const store.ContainerRecord) ?i32 {
+    const pid = record.pid orelse return null;
+    if (!isOwnedContainerPid(record.id, pid)) {
+        persistStoppedState(record, null);
+        return null;
+    }
+    process.sendSignal(pid, 0) catch {
+        persistStoppedState(record, null);
+        return null;
+    };
+    return pid;
+}
+
 fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
@@ -250,6 +263,19 @@ fn dupStringList(alloc: std.mem.Allocator, values: []const []const u8) Container
     return result;
 }
 
+fn freeOwnedStringList(alloc: std.mem.Allocator, values: []const []const u8) void {
+    for (values) |value| alloc.free(value);
+    alloc.free(values);
+}
+
+fn freeOwnedMounts(alloc: std.mem.Allocator, mounts: []const container.BindMount) void {
+    for (mounts) |mount| {
+        alloc.free(mount.source);
+        alloc.free(mount.target);
+    }
+    alloc.free(mounts);
+}
+
 fn mergeEnv(alloc: std.mem.Allocator, base_env: []const []const u8, override_env: []const []const u8) ContainerError![][]const u8 {
     var merged: std.ArrayList([]const u8) = .empty;
     defer merged.deinit(alloc);
@@ -299,7 +325,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
         alloc.free(mounts);
     }
 
-    for (volume_specs, 0..) |spec, i| {
+    for (volume_specs) |spec| {
         const is_host_path = std.mem.startsWith(u8, spec.source, "/") or
             std.mem.startsWith(u8, spec.source, "./") or
             std.mem.startsWith(u8, spec.source, "../");
@@ -322,16 +348,22 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
             writeErr("volume source must exist and be canonicalizable: {s}\n", .{spec.source});
             return ContainerError.InvalidArgument;
         };
+        errdefer alloc.free(source);
 
-        mounts[i] = .{
+        const target = alloc.dupe(u8, spec.target) catch return error.OutOfMemory;
+        errdefer alloc.free(target);
+
+        const mount: container.BindMount = .{
             .source = source,
-            .target = alloc.dupe(u8, spec.target) catch return error.OutOfMemory,
+            .target = target,
             .read_only = spec.read_only,
         };
-        if (!mounts[i].isSourceAllowed()) {
-            writeErr("volume source is not allowed: {s}\n", .{mounts[i].source});
+        if (!mount.isSourceAllowed()) {
+            writeErr("volume source is not allowed: {s}\n", .{mount.source});
             return ContainerError.InvalidArgument;
         }
+
+        mounts[idx] = mount;
         idx += 1;
     }
 
@@ -345,22 +377,43 @@ fn buildSavedRunConfig(
     resolved: *const oci.ResolvedCommand,
 ) ContainerError!run_state.SavedRunConfig {
     const merged_env = mergeEnv(alloc, img.image_env, flags.env.items) catch |e| return e;
-    errdefer {
-        for (merged_env) |value| alloc.free(value);
-        alloc.free(merged_env);
-    }
+    errdefer freeOwnedStringList(alloc, merged_env);
+
+    const rootfs = alloc.dupe(u8, img.rootfs) catch return ContainerError.OutOfMemory;
+    errdefer alloc.free(rootfs);
+
+    const command = alloc.dupe(u8, resolved.command) catch return ContainerError.OutOfMemory;
+    errdefer alloc.free(command);
+
+    const hostname = alloc.dupe(u8, flags.container_name orelse "container") catch return ContainerError.OutOfMemory;
+    errdefer alloc.free(hostname);
+
+    const working_dir = alloc.dupe(u8, img.working_dir) catch return ContainerError.OutOfMemory;
+    errdefer alloc.free(working_dir);
+
+    const args = dupStringList(alloc, resolved.args.items) catch |e| return e;
+    errdefer freeOwnedStringList(alloc, args);
+
+    const lower_dirs = dupStringList(alloc, img.layer_paths) catch |e| return e;
+    errdefer freeOwnedStringList(alloc, lower_dirs);
+
+    const mounts = buildMounts(alloc, flags.volume_specs.items) catch |e| return e;
+    errdefer freeOwnedMounts(alloc, mounts);
+
+    const port_maps = alloc.dupe(net_setup.PortMap, flags.port_maps.items) catch return ContainerError.OutOfMemory;
+    errdefer alloc.free(port_maps);
 
     return .{
-        .rootfs = alloc.dupe(u8, img.rootfs) catch return ContainerError.OutOfMemory,
-        .command = alloc.dupe(u8, resolved.command) catch return ContainerError.OutOfMemory,
-        .hostname = alloc.dupe(u8, flags.container_name orelse "container") catch return ContainerError.OutOfMemory,
-        .working_dir = alloc.dupe(u8, img.working_dir) catch return ContainerError.OutOfMemory,
-        .args = dupStringList(alloc, resolved.args.items) catch |e| return e,
+        .rootfs = rootfs,
+        .command = command,
+        .hostname = hostname,
+        .working_dir = working_dir,
+        .args = args,
         .env = merged_env,
-        .lower_dirs = dupStringList(alloc, img.layer_paths) catch |e| return e,
-        .mounts = buildMounts(alloc, flags.volume_specs.items) catch |e| return e,
+        .lower_dirs = lower_dirs,
+        .mounts = mounts,
         .network_enabled = flags.networking_enabled,
-        .port_maps = alloc.dupe(net_setup.PortMap, flags.port_maps.items) catch return ContainerError.OutOfMemory,
+        .port_maps = port_maps,
         .limits = flags.limits,
         .restart_policy = flags.restart_policy,
     };
@@ -751,23 +804,9 @@ pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return ContainerError.InvalidStatus;
     }
 
-    const pid = record.pid orelse {
+    const pid = currentOwnedRunningPid(&record) orelse {
         writeErr("container {s} has no pid\n", .{id});
         return ContainerError.ProcessNotFound;
-    };
-
-    if (!isOwnedContainerPid(record.id, pid)) {
-        persistStoppedState(&record, null);
-        write("{s} (already stopped)\n", .{id});
-        return;
-    }
-
-    // check if the process is actually still alive before sending SIGTERM
-    process.sendSignal(pid, 0) catch {
-        // already dead — just update the record
-        persistStoppedState(&record, null);
-        write("{s} (already stopped)\n", .{id});
-        return;
     };
 
     stopProcess(pid) catch |e| return e;
@@ -791,8 +830,8 @@ pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
         return ContainerError.InvalidStatus;
     }
 
-    const pid = record.pid orelse {
-        writeErr("container {s} has no pid\n", .{id});
+    const pid = currentOwnedRunningPid(&record) orelse {
+        writeErr("container {s} is not running (status: stopped)\n", .{id});
         return ContainerError.ProcessNotFound;
     };
 
@@ -894,11 +933,9 @@ pub fn restart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     defer record.deinit(alloc);
 
     if (std.mem.eql(u8, record.status, "running")) {
-        const pid = record.pid orelse {
-            writeErr("container {s} has no pid\n", .{record.id});
-            return ContainerError.ProcessNotFound;
-        };
-        stopProcess(pid) catch |e| return e;
+        if (currentOwnedRunningPid(&record)) |pid| {
+            stopProcess(pid) catch |e| return e;
+        }
     }
 
     store.updateStatus(record.id, "created", null, null) catch {};
@@ -950,4 +987,39 @@ test "reconcileLiveness stops stale running record when pid is not in container 
     defer record.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("stopped", record.status);
     try std.testing.expect(record.pid == null);
+}
+
+test "currentOwnedRunningPid clears stale pid state" {
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "cafebabefeed",
+        .hostname = "test",
+        .rootfs = "/tmp/rootfs",
+        .status = "running",
+        .command = "sleep 1",
+        .created_at = 1,
+        .pid = 999999,
+        .exit_code = null,
+    });
+
+    const record = try store.load(std.testing.allocator, "cafebabefeed");
+    defer record.deinit(std.testing.allocator);
+
+    try std.testing.expect(currentOwnedRunningPid(&record) == null);
+
+    const updated = try store.load(std.testing.allocator, "cafebabefeed");
+    defer updated.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("stopped", updated.status);
+    try std.testing.expect(updated.pid == null);
+}
+
+test "buildMounts rejects disallowed canonical source without leaking" {
+    const alloc = std.testing.allocator;
+    const specs = [_]cli.VolumeMountSpec{
+        .{ .source = "/etc", .target = "/data", .read_only = true },
+    };
+
+    try std.testing.expectError(ContainerError.InvalidArgument, buildMounts(alloc, &specs));
 }

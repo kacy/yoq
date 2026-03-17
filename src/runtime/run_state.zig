@@ -87,8 +87,12 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const path = try configPath(&path_buf, id);
+    var tmp_buf: [paths.max_path]u8 = undefined;
+    const tmp_path = paths.uniqueDataTempPath(&tmp_buf, configs_subdir, id, ".bin.tmp") catch
+        return RunStateError.CreateFailed;
 
-    var file = std.fs.cwd().createFile(path, .{}) catch return RunStateError.CreateFailed;
+    var file = std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch return RunStateError.CreateFailed;
+    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
     defer file.close();
 
     var buf: [4096]u8 = undefined;
@@ -109,6 +113,8 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     writeLimits(out, cfg.limits) catch return RunStateError.WriteFailed;
     out.writeByte(@intFromEnum(cfg.restart_policy)) catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
+    file.sync() catch return RunStateError.WriteFailed;
+    std.fs.cwd().rename(tmp_path, path) catch return RunStateError.WriteFailed;
 }
 
 pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedRunConfig {
