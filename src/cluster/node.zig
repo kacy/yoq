@@ -25,7 +25,6 @@
 //   node.stop();
 
 const std = @import("std");
-const posix = std.posix;
 const sqlite = @import("sqlite");
 const raft_mod = @import("raft.zig");
 const transport_mod = @import("transport.zig");
@@ -33,25 +32,19 @@ const log_mod = @import("log.zig");
 const state_machine_mod = @import("state_machine.zig");
 const types = @import("raft_types.zig");
 const agent_registry = @import("registry.zig");
-const scheduler = @import("scheduler.zig");
 const gossip_mod = @import("gossip.zig");
 const heartbeat_batcher_mod = @import("heartbeat_batcher.zig");
-const ip_mod = @import("../network/ip.zig");
-const logger = @import("../lib/log.zig");
+const bootstrap = @import("node/bootstrap.zig");
+const action_loop = @import("node/action_loop.zig");
+const membership_sync = @import("node/membership_sync.zig");
+const snapshot_support = @import("node/snapshot_support.zig");
 
 const Raft = raft_mod.Raft;
-const Action = raft_mod.Action;
 const Transport = transport_mod.Transport;
 const Log = log_mod.Log;
 const StateMachine = state_machine_mod.StateMachine;
 const NodeId = types.NodeId;
 const LogIndex = types.LogIndex;
-const SnapshotMeta = types.SnapshotMeta;
-
-fn freeEntries(alloc: std.mem.Allocator, entries: []const types.LogEntry) void {
-    for (entries) |e| alloc.free(e.data);
-    if (entries.len > 0) alloc.free(entries);
-}
 
 pub const NodeConfig = struct {
     id: NodeId,
@@ -85,15 +78,6 @@ pub const NodeError = error{
     NotLeader,
 };
 
-// how many committed entries between automatic snapshots.
-// 1000 entries keeps the raft log bounded while avoiding
-// too-frequent snapshot I/O. at ~1 entry/sec this is ~16 min.
-const snapshot_threshold: u64 = 1000;
-
-/// default gossip port for agents. used when syncing agent membership
-/// into the gossip state machine — agents are expected to bind this port.
-const agent_gossip_port: u16 = 9800;
-
 pub const Node = struct {
     alloc: std.mem.Allocator,
     config: NodeConfig,
@@ -122,7 +106,7 @@ pub const Node = struct {
     pub fn init(alloc: std.mem.Allocator, config: NodeConfig) !Node {
         // open persistent log
         var log_path_buf: [512]u8 = undefined;
-        const log_path = bufPrintZ(&log_path_buf, "{s}/raft.db", .{config.data_dir}) orelse
+        const log_path = bootstrap.raftDbPath(&log_path_buf, config.data_dir) orelse
             return NodeError.InitFailed;
 
         var log = Log.init(log_path) catch return NodeError.InitFailed;
@@ -130,7 +114,7 @@ pub const Node = struct {
 
         // open state machine database
         var sm_path_buf: [512]u8 = undefined;
-        const sm_path = bufPrintZ(&sm_path_buf, "{s}/state.db", .{config.data_dir}) orelse
+        const sm_path = bootstrap.stateDbPath(&sm_path_buf, config.data_dir) orelse
             return NodeError.InitFailed;
 
         var sm = StateMachine.init(sm_path) catch return NodeError.InitFailed;
@@ -169,21 +153,7 @@ pub const Node = struct {
         // non-fatal: if UDP binding fails, gossip is null and the node
         // falls back to heartbeat-based health checks (30s timeout).
         const gossip_port: u16 = if (config.gossip_port != 0) config.gossip_port else config.port +| 100;
-        const gossip_inst: ?*gossip_mod.Gossip = blk: {
-            const gossip_state = alloc.create(gossip_mod.Gossip) catch break :blk null;
-            gossip_state.* = gossip_mod.Gossip.init(alloc, config.id, .{ .ip = .{ 0, 0, 0, 0 }, .port = gossip_port }, .{
-                .fanout = config.gossip_fanout,
-                .suspicion_multiplier = config.gossip_suspicion_multiplier,
-            });
-            transport.initUdp(gossip_port) catch {
-                logger.warn("gossip: failed to bind UDP port {}, running without gossip", .{gossip_port});
-                gossip_state.deinit();
-                alloc.destroy(gossip_state);
-                break :blk null;
-            };
-            logger.info("gossip: initialized on UDP port {}", .{gossip_port});
-            break :blk gossip_state;
-        };
+        const gossip_inst = bootstrap.initGossip(alloc, config, &transport);
 
         // initialize raft — dupes peer_ids internally
         var raft = Raft.init(alloc, config.id, peer_ids, &log) catch {
@@ -243,18 +213,7 @@ pub const Node = struct {
     }
 
     pub fn start(self: *Node) !void {
-        if (self.running.load(.acquire)) return NodeError.AlreadyStarted;
-        self.running.store(true, .release);
-
-        // fix up the raft log pointer now that self is in its final location
-        self.raft.log = &self.log;
-
-        self.tick_thread = std.Thread.spawn(.{}, tickLoop, .{self}) catch
-            return NodeError.InitFailed;
-        self.recv_thread = std.Thread.spawn(.{}, recvLoop, .{self}) catch {
-            self.running.store(false, .release);
-            return NodeError.InitFailed;
-        };
+        return bootstrap.start(self);
     }
 
     pub fn stop(self: *Node) void {
@@ -350,82 +309,8 @@ pub const Node = struct {
 
     // -- internal threads --
 
-    fn tickLoop(self: *Node) void {
-        while (self.running.load(.acquire)) {
-            // query DB state outside the lock for leader maintenance tasks.
-            // the snapshots may be slightly stale by the time we acquire the
-            // lock, but all proposals are idempotent so staleness is safe.
-            var agents: ?[]agent_registry.AgentRecord = null;
-            var reconcile_orphans: ?[]agent_registry.Assignment = null;
-            var heartbeat_batch: ?[]const u8 = null;
-            var do_health = false;
-            var do_reconcile = false;
-            var do_cleanup = false;
-
-            {
-                self.mu.lock();
-                const is_leader = self.raft.role == .leader;
-                const tick = self.tick_count +% 1;
-                self.mu.unlock();
-
-                if (is_leader) {
-                    do_health = tick % 300 == 0;
-                    do_reconcile = tick % 100 == 0;
-                    do_cleanup = tick % 3600 == 0;
-                    if (do_health or do_reconcile or do_cleanup)
-                        agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch null;
-                    if (do_reconcile)
-                        reconcile_orphans = agent_registry.getOrphanedAssignments(self.alloc, &self.state_machine.db) catch null;
-                    if (tick % 20 == 0)
-                        heartbeat_batch = self.heartbeat_batcher.flush(self.alloc) catch null;
-                }
-            }
-            defer {
-                if (agents) |a| {
-                    for (a) |rec| rec.deinit(self.alloc);
-                    self.alloc.free(a);
-                }
-                if (reconcile_orphans) |orphans| {
-                    for (orphans) |a| a.deinit(self.alloc);
-                    self.alloc.free(orphans);
-                }
-                if (heartbeat_batch) |batch| self.alloc.free(batch);
-            }
-
-            {
-                self.mu.lock();
-                defer self.mu.unlock();
-
-                self.raft.tick();
-                self.processActions();
-
-                self.tick_count +%= 1;
-                if (self.raft.role == .leader) {
-                    if (agents) |a| {
-                        if (do_health) self.checkAgentHealth(a);
-                        if (do_reconcile)
-                            self.reconcileOrphanedAssignments(reconcile_orphans orelse &.{}, a);
-                        if (do_cleanup) self.cleanupDeadAgents(a);
-                    }
-                    if (heartbeat_batch) |batch| {
-                        _ = self.raft.propose(batch) catch |e| {
-                            logger.warn("failed to propose heartbeat batch: {}", .{e});
-                        };
-                    }
-                }
-
-                // gossip tick every 500ms (5 × 100ms raft tick)
-                if (self.gossip != null and self.tick_count % 5 == 0) {
-                    self.tickGossip();
-                }
-
-                // check if we should take a snapshot. this applies to all
-                // roles — followers snapshot their own state too, which
-                // keeps the log bounded on every node.
-                self.maybeSnapshot();
-            }
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-        }
+    pub fn tickLoop(self: *Node) void {
+        action_loop.tickLoop(self);
     }
 
     /// mark agents as offline if they haven't sent a heartbeat in 30 seconds.
@@ -435,35 +320,7 @@ pub const Node = struct {
     /// passes the pre-fetched agent list. proposals are idempotent, so
     /// staleness from the unlocked read is safe.
     fn checkAgentHealth(self: *Node, agents: []const agent_registry.AgentRecord) void {
-        const now = std.time.timestamp();
-        // scale timeout with cluster size to match adaptive agent heartbeat
-        const base_timeout: i64 = 30;
-        const multiplier: i64 = if (self.gossip) |g| blk: {
-            const member_count = g.members.count() + 1;
-            break :blk @min(@as(i64, gossip_mod.Gossip.ceilLog2(member_count)), gossip_mod.Gossip.max_interval_multiplier);
-        } else 1;
-        const timeout: i64 = base_timeout * multiplier;
-
-        for (agents) |agent| {
-            // only check active agents — already drained/offline agents are fine
-            if (!std.mem.eql(u8, agent.status, "active")) continue;
-
-            if (now - agent.last_heartbeat > timeout) {
-                var sql_buf: [256]u8 = undefined;
-                const sql = agent_registry.markOfflineSql(&sql_buf, agent.id) catch continue;
-                _ = self.raft.propose(sql) catch |e| {
-                    logger.warn("failed to propose agent offline status: {}", .{e});
-                    continue;
-                };
-
-                // orphan the agent's active assignments so they can be rescheduled
-                var orphan_buf: [256]u8 = undefined;
-                const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent.id) catch continue;
-                _ = self.raft.propose(orphan_sql) catch |e| {
-                    logger.warn("failed to propose assignment orphaning for agent {s}: {}", .{ agent.id, e });
-                };
-            }
-        }
+        membership_sync.checkAgentHealth(self, agents);
     }
 
     /// reschedule orphaned assignments onto active agents.
@@ -476,33 +333,7 @@ pub const Node = struct {
         orphans: []const agent_registry.Assignment,
         agents: []const agent_registry.AgentRecord,
     ) void {
-        if (orphans.len == 0) return;
-
-        // build placement requests from orphaned assignments
-        var requests = self.alloc.alloc(scheduler.PlacementRequest, orphans.len) catch return;
-        defer self.alloc.free(requests);
-
-        for (orphans, 0..) |orphan, i| {
-            requests[i] = .{
-                .image = orphan.image,
-                .command = orphan.command,
-                .cpu_limit = orphan.cpu_limit,
-                .memory_limit_mb = orphan.memory_limit_mb,
-            };
-        }
-
-        const placements = scheduler.schedule(self.alloc, requests, agents) catch return;
-        defer self.alloc.free(placements);
-
-        for (placements, 0..) |placement, i| {
-            if (placement) |p| {
-                var sql_buf: [256]u8 = undefined;
-                const sql = agent_registry.reassignSql(&sql_buf, orphans[i].id, p.agent_id) catch continue;
-                _ = self.raft.propose(sql) catch |e| {
-                    logger.warn("failed to propose reassignment for {s}: {}", .{ orphans[i].id, e });
-                };
-            }
-        }
+        membership_sync.reconcileOrphanedAssignments(self, orphans, agents);
     }
 
     /// remove agents that have been offline for more than 1 hour.
@@ -511,188 +342,21 @@ pub const Node = struct {
     ///
     /// DB queries happen before this call (outside the lock).
     fn cleanupDeadAgents(self: *Node, agents: []const agent_registry.AgentRecord) void {
-        const now = std.time.timestamp();
-        const dead_timeout: i64 = 3600; // 1 hour
-
-        for (agents) |agent| {
-            if (!std.mem.eql(u8, agent.status, "offline")) continue;
-            if (now - agent.last_heartbeat <= dead_timeout) continue;
-
-            // delete remaining terminal assignments
-            var assign_buf: [256]u8 = undefined;
-            const assign_sql = agent_registry.deleteAgentAssignmentsSql(&assign_buf, agent.id) catch continue;
-            _ = self.raft.propose(assign_sql) catch |e| {
-                logger.warn("failed to propose assignment cleanup for dead agent {s}: {}", .{ agent.id, e });
-                continue;
-            };
-
-            // remove wireguard peer entry if the agent had a node_id.
-            // this cleans up the wireguard_peers table so other agents
-            // won't try to route traffic to a dead node.
-            if (agent.node_id) |nid| {
-                if (nid >= 1 and nid <= 65534) {
-                    var wg_buf: [256]u8 = undefined;
-                    const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(nid)) catch continue;
-                    _ = self.raft.propose(wg_sql) catch |e| {
-                        logger.warn("failed to remove wireguard peer for dead agent {s}: {}", .{ agent.id, e });
-                    };
-                }
-            }
-
-            // remove the agent record
-            var remove_buf: [256]u8 = undefined;
-            const remove_sql = agent_registry.removeSql(&remove_buf, agent.id) catch continue;
-            _ = self.raft.propose(remove_sql) catch |e| {
-                logger.warn("failed to propose removal of dead agent {s}: {}", .{ agent.id, e });
-            };
-        }
+        membership_sync.cleanupDeadAgents(self, agents);
     }
 
     /// check if enough entries have been committed since the last snapshot
     /// to warrant taking a new one. called with self.mu held.
     fn maybeSnapshot(self: *Node) void {
-        const commit_index = self.raft.commit_index;
-        if (commit_index <= self.last_snapshot_index) return;
-        if (commit_index - self.last_snapshot_index < snapshot_threshold) return;
-
-        const term = self.log.termAt(commit_index);
-        if (term == 0) return; // shouldn't happen, but be safe
-
-        // build snapshot file path: <data_dir>/snapshot.dat
-        var snap_path_buf: [512]u8 = undefined;
-        const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/snapshot.dat", .{self.config.data_dir}) catch return;
-
-        const meta = SnapshotMeta{
-            .last_included_index = commit_index,
-            .last_included_term = term,
-            .data_len = 0, // filled by takeSnapshot
-        };
-
-        self.state_machine.takeSnapshot(snap_path, meta) catch |e| {
-            logger.warn("snapshot: failed to take snapshot at index {}: {}", .{ commit_index, e });
-            return;
-        };
-
-        // tell raft about the snapshot so it can send it to lagging followers
-        self.raft.onSnapshotComplete(meta);
-
-        // truncate log entries that are now covered by the snapshot
-        self.log.truncateUpTo(commit_index);
-
-        self.last_snapshot_index = commit_index;
-        logger.info("snapshot: completed at index {}, term {}", .{ commit_index, term });
+        snapshot_support.maybeSnapshot(self);
     }
 
-    fn recvLoop(self: *Node) void {
-        while (self.running.load(.acquire)) {
-            const msg = self.transport.receive(self.alloc) catch {
-                std.Thread.sleep(10 * std.time.ns_per_ms);
-                continue;
-            };
-
-            if (msg) |received| {
-                self.mu.lock();
-                defer self.mu.unlock();
-
-                self.handleMessage(received);
-                self.processActions();
-            } else {
-                // no raft connection pending — check for gossip messages
-                self.receiveGossipMessages();
-                std.Thread.sleep(10 * std.time.ns_per_ms);
-            }
-        }
+    pub fn recvLoop(self: *Node) void {
+        action_loop.recvLoop(self);
     }
 
     fn handleMessage(self: *Node, received: transport_mod.ReceivedMessage) void {
-        const sender_id = received.sender_id orelse self.resolveNodeId(received.from_addr);
-
-        switch (received.message) {
-            .request_vote => |args| {
-                const peer_id = sender_id orelse {
-                    logger.warn("request_vote from unknown address, dropping", .{});
-                    return;
-                };
-                if (args.candidate_id != peer_id) {
-                    logger.warn("request_vote claimed node {} from authenticated peer {}, dropping", .{ args.candidate_id, peer_id });
-                    return;
-                }
-
-                const reply = self.raft.handleRequestVote(args);
-                self.transport.send(peer_id, .{
-                    .request_vote_reply = reply,
-                }) catch |e| {
-                    logger.warn("failed to send vote reply to node {}: {}", .{ peer_id, e });
-                };
-            },
-            .request_vote_reply => |reply| {
-                if (sender_id) |peer_id| {
-                    self.raft.handleRequestVoteReply(peer_id, reply);
-                } else {
-                    logger.warn("request_vote_reply from unknown address, dropping", .{});
-                }
-            },
-            .append_entries => |args| {
-                defer freeEntries(self.alloc, args.entries);
-                const peer_id = sender_id orelse {
-                    logger.warn("append_entries from unknown address, dropping", .{});
-                    return;
-                };
-                if (args.leader_id != peer_id) {
-                    logger.warn("append_entries claimed leader {} from authenticated peer {}, dropping", .{ args.leader_id, peer_id });
-                    return;
-                }
-
-                const reply = self.raft.handleAppendEntries(args);
-                self.transport.send(peer_id, .{
-                    .append_entries_reply = reply,
-                }) catch |e| {
-                    logger.warn("failed to send append entries reply to node {}: {}", .{ peer_id, e });
-                };
-            },
-            .append_entries_reply => |reply| {
-                if (sender_id) |id| {
-                    self.raft.handleAppendEntriesReply(id, reply);
-                } else {
-                    logger.warn("append_entries_reply from unknown address, dropping", .{});
-                }
-            },
-            .install_snapshot => |args| {
-                const peer_id = sender_id orelse {
-                    logger.warn("install_snapshot from unknown address, dropping", .{});
-                    self.alloc.free(args.data);
-                    return;
-                };
-                if (args.leader_id != peer_id) {
-                    logger.warn("install_snapshot claimed leader {} from authenticated peer {}, dropping", .{ args.leader_id, peer_id });
-                    self.alloc.free(args.data);
-                    return;
-                }
-
-                const commit_before = self.raft.commit_index;
-                const reply = self.raft.handleInstallSnapshot(args);
-                self.transport.send(peer_id, .{
-                    .install_snapshot_reply = reply,
-                }) catch |e| {
-                    logger.warn("failed to send snapshot reply to node {}: {}", .{ peer_id, e });
-                };
-
-                // ownership: args.data was heap-allocated by transport decode.
-                // if the snapshot was accepted (commit_index advanced), the
-                // apply_snapshot action will free it during processActions().
-                // if rejected (stale term, old snapshot), free it here.
-                if (self.raft.commit_index == commit_before) {
-                    self.alloc.free(args.data);
-                }
-            },
-            .install_snapshot_reply => |reply| {
-                if (sender_id) |id| {
-                    self.raft.handleInstallSnapshotReply(id, reply);
-                } else {
-                    logger.warn("install_snapshot_reply from unknown address, dropping", .{});
-                }
-            },
-        }
+        action_loop.handleMessage(self, received);
     }
 
     // -- gossip integration --
@@ -700,18 +364,7 @@ pub const Node = struct {
     /// advance gossip state machine, process actions, and sync membership.
     /// called every 5th tick (~500ms) with self.mu held.
     fn tickGossip(self: *Node) void {
-        const g = self.gossip orelse return;
-
-        g.tick() catch return;
-
-        const actions = g.drainActions();
-        defer g.freeActions(actions);
-        self.processGossipActions(actions);
-
-        // sync gossip membership from agents table every ~10s (100ms × 100 ticks ÷ 5 = 20 gossip ticks)
-        if (self.tick_count % 100 == 0 and self.raft.role == .leader) {
-            self.syncGossipMembership();
-        }
+        membership_sync.tickGossip(self);
     }
 
     /// receive and dispatch incoming gossip UDP messages.
@@ -720,134 +373,32 @@ pub const Node = struct {
     /// drains all available messages into a local buffer first, then
     /// acquires the lock once to process the entire batch.
     fn receiveGossipMessages(self: *Node) void {
-        const g = self.gossip orelse return;
-
-        const GossipMsg = gossip_mod.GossipMessage;
-        var msgs: [10]GossipMsg = undefined;
-        var msg_count: u32 = 0;
-        var buf: [1500]u8 = undefined;
-
-        // drain up to 10 messages without holding the lock
-        while (msg_count < 10) {
-            const result = self.transport.receiveGossip(&buf) catch break;
-            const recv = result orelse break;
-
-            const msg = gossip_mod.Gossip.decode(self.alloc, recv.payload) catch continue;
-            msgs[msg_count] = msg;
-            msg_count += 1;
-        }
-
-        if (msg_count == 0) return;
-
-        // acquire lock once for the entire batch
-        self.mu.lock();
-        defer self.mu.unlock();
-
-        for (msgs[0..msg_count]) |msg| {
-            switch (msg) {
-                .ping => |payload| g.handlePing(payload) catch |e| {
-                    logger.warn("gossip: handlePing failed: {}", .{e});
-                },
-                .ping_ack => |payload| g.handlePingAck(payload) catch |e| {
-                    logger.warn("gossip: handlePingAck failed: {}", .{e});
-                },
-                .ping_req => |payload| g.handlePingReq(payload) catch |e| {
-                    logger.warn("gossip: handlePingReq failed: {}", .{e});
-                },
-            }
-        }
-
-        // process all actions generated by the batch
-        const actions = g.drainActions();
-        defer g.freeActions(actions);
-        self.processGossipActions(actions);
+        membership_sync.receiveGossipMessages(self);
     }
 
     /// dispatch gossip actions: encode and send messages, handle membership events.
     /// shared by tickGossip and receiveGossipMessages to avoid duplication.
     fn processGossipActions(self: *Node, actions: []gossip_mod.Action) void {
-        for (actions) |action| {
-            switch (action) {
-                .send_message => |msg| {
-                    var encode_buf: [512]u8 = undefined;
-                    const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
-                    self.transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
-                },
-                .member_dead => |member_event| {
-                    if (self.raft.role == .leader) self.handleGossipMemberDead(member_event.id);
-                },
-                .member_alive => |member_event| {
-                    if (self.raft.role == .leader) self.handleGossipMemberAlive(member_event.id);
-                },
-                .member_suspect => {},
-            }
-        }
+        membership_sync.processGossipActions(self, actions);
     }
 
     /// mark an agent offline when gossip detects it as dead.
     /// called with self.mu held, leader only.
     fn handleGossipMemberDead(self: *Node, member_id: u64) void {
-        const agent_id = agent_registry.findAgentIdByNodeId(self.alloc, &self.state_machine.db, member_id) orelse return;
-        defer self.alloc.free(agent_id);
-
-        logger.info("gossip: member {} dead, marking agent {s} offline", .{ member_id, agent_id });
-
-        var sql_buf: [256]u8 = undefined;
-        const sql = agent_registry.markOfflineSql(&sql_buf, agent_id) catch return;
-        _ = self.raft.propose(sql) catch |e| {
-            logger.warn("gossip: failed to propose offline for agent {s}: {}", .{ agent_id, e });
-            return;
-        };
-
-        var orphan_buf: [256]u8 = undefined;
-        const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent_id) catch return;
-        _ = self.raft.propose(orphan_sql) catch |e| {
-            logger.warn("gossip: failed to orphan assignments for agent {s}: {}", .{ agent_id, e });
-        };
-
-        // remove wireguard peer entry so other agents stop routing to the dead node
-        if (member_id >= 1 and member_id <= 65534) {
-            var wg_buf: [256]u8 = undefined;
-            const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(member_id)) catch return;
-            _ = self.raft.propose(wg_sql) catch |e| {
-                logger.warn("gossip: failed to remove wireguard peer for dead member {}: {}", .{ member_id, e });
-            };
-        }
+        membership_sync.handleGossipMemberDead(self, member_id);
     }
 
     /// mark an agent active when gossip detects it as alive again.
     /// called with self.mu held, leader only.
     fn handleGossipMemberAlive(self: *Node, member_id: u64) void {
-        const agent_id = agent_registry.findAgentIdByNodeId(self.alloc, &self.state_machine.db, member_id) orelse return;
-        defer self.alloc.free(agent_id);
-
-        var sql_buf: [256]u8 = undefined;
-        const sql = agent_registry.markActiveSql(&sql_buf, agent_id) catch return;
-        _ = self.raft.propose(sql) catch |e| {
-            logger.warn("gossip: failed to propose active for agent {s}: {}", .{ agent_id, e });
-        };
+        membership_sync.handleGossipMemberAlive(self, member_id);
     }
 
     /// sync gossip membership from the agents table. adds active agents
     /// that have a node_id and removes agents no longer in the table.
     /// called periodically (~10s) on the leader with self.mu held.
     fn syncGossipMembership(self: *Node) void {
-        const g = self.gossip orelse return;
-
-        const agents = agent_registry.listAgents(self.alloc, &self.state_machine.db) catch return;
-        defer {
-            for (agents) |agent| agent.deinit(self.alloc);
-            self.alloc.free(agents);
-        }
-
-        for (agents) |agent| {
-            if (!std.mem.eql(u8, agent.status, "active")) continue;
-            const nid = agent.node_id orelse continue;
-            if (nid < 1) continue;
-
-            const ip = ip_mod.parseIp(agent.address) orelse continue;
-            g.addMember(@intCast(nid), .{ .ip = ip, .port = agent_gossip_port }) catch {};
-        }
+        membership_sync.syncGossipMembership(self);
     }
 
     /// return the number of members tracked by gossip (for status endpoints).
@@ -862,15 +413,7 @@ pub const Node = struct {
     /// the configured peer list. returns null if the address doesn't
     /// match any known peer (e.g. a stale connection from a removed node).
     fn resolveNodeId(self: *const Node, addr: std.net.Address) ?NodeId {
-        const from_ip: [4]u8 = @bitCast(addr.in.sa.addr);
-        const from_port = std.mem.bigToNative(u16, addr.in.sa.port);
-
-        for (self.config.peers) |peer| {
-            if (std.mem.eql(u8, &peer.addr, &from_ip) and peer.port == from_port) {
-                return peer.id;
-            }
-        }
-        return null;
+        return action_loop.resolveNodeId(self, addr);
     }
 
     /// process raft actions in two phases:
@@ -882,152 +425,14 @@ pub const Node = struct {
     /// callers (tickLoop, recvLoop) hold self.mu when calling this function.
     /// the unlock/re-lock in phase 2 is transparent to them.
     fn processActions(self: *Node) void {
-        const actions = self.raft.drainActions();
-        defer self.alloc.free(actions);
-
-        // phase 1: process state actions under the lock
-        var has_sends = false;
-        for (actions) |action| {
-            switch (action) {
-                .commit_entries => |commit| {
-                    self.state_machine.applyUpTo(&self.log, self.alloc, commit.up_to);
-                },
-                .become_leader => {
-                    self.leader_id = self.config.id;
-                },
-                .become_follower => |f| {
-                    self.leader_id = f.leader_id;
-                },
-                .apply_snapshot => |snap| {
-                    // restore the state machine from the received snapshot bytes.
-                    // ownership: the data was heap-allocated by transport decode
-                    // (via alloc.dupe in the install_snapshot decode path) and
-                    // passed through raft's handleInstallSnapshot into this action.
-                    // we free it here after restoring.
-                    defer self.alloc.free(snap.data);
-
-                    const meta = self.state_machine.restoreFromBytes(snap.data) catch |e| {
-                        logger.warn("snapshot: failed to restore from bytes: {}", .{e});
-                        continue;
-                    };
-
-                    // update the raft log to reflect the snapshot
-                    self.log.setSnapshotMeta(meta);
-                    self.log.truncateUpTo(meta.last_included_index);
-                    self.last_snapshot_index = meta.last_included_index;
-
-                    logger.info("snapshot: restored state machine to index {}", .{meta.last_included_index});
-                },
-                .take_snapshot => |snap| {
-                    // build snapshot path
-                    var snap_path_buf: [512]u8 = undefined;
-                    const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/snapshot.dat", .{self.config.data_dir}) catch continue;
-
-                    const meta = SnapshotMeta{
-                        .last_included_index = snap.up_to_index,
-                        .last_included_term = snap.term,
-                        .data_len = 0,
-                    };
-
-                    self.state_machine.takeSnapshot(snap_path, meta) catch |e| {
-                        logger.warn("snapshot: failed to take snapshot at index {}: {}", .{ snap.up_to_index, e });
-                        continue;
-                    };
-
-                    self.raft.onSnapshotComplete(meta);
-                    self.log.truncateUpTo(snap.up_to_index);
-                    self.last_snapshot_index = snap.up_to_index;
-
-                    logger.info("snapshot: completed at index {}, term {}", .{ snap.up_to_index, snap.term });
-                },
-                // send actions — just note that we have some
-                else => {
-                    has_sends = true;
-                },
-            }
-        }
-
-        if (!has_sends) return;
-
-        // phase 2: release the lock and dispatch sends.
-        // this lets the recv thread process incoming messages while we're
-        // doing TCP I/O, reducing head-of-line blocking.
-        self.mu.unlock();
-        defer self.mu.lock();
-
-        for (actions) |action| {
-            switch (action) {
-                .send_request_vote => |rv| {
-                    self.transport.send(rv.target, .{ .request_vote = rv.args }) catch |e| {
-                        logger.warn("failed to send vote request to node {}: {}", .{ rv.target, e });
-                    };
-                },
-                .send_append_entries => |ae| {
-                    self.transport.send(ae.target, .{ .append_entries = ae.args }) catch |e| {
-                        logger.warn("failed to send append entries to node {}: {}", .{ ae.target, e });
-                    };
-                    freeEntries(self.alloc, ae.args.entries);
-                },
-                .send_request_vote_reply => |rv| {
-                    self.transport.send(rv.target, .{ .request_vote_reply = rv.reply }) catch |e| {
-                        logger.warn("failed to send vote reply to node {}: {}", .{ rv.target, e });
-                    };
-                },
-                .send_append_entries_reply => |ae| {
-                    self.transport.send(ae.target, .{ .append_entries_reply = ae.reply }) catch |e| {
-                        logger.warn("failed to send append entries reply to node {}: {}", .{ ae.target, e });
-                    };
-                },
-                .send_install_snapshot => |snap| {
-                    // the raft module produces this action with empty data.
-                    // we need to read the snapshot file and fill in the data
-                    // before sending it over the wire.
-                    self.sendSnapshot(snap.target, snap.args);
-                },
-                .send_install_snapshot_reply => |snap| {
-                    self.transport.send(snap.target, .{
-                        .install_snapshot_reply = snap.reply,
-                    }) catch |e| {
-                        logger.warn("failed to send snapshot reply to node {}: {}", .{ snap.target, e });
-                    };
-                },
-                // state actions already handled in phase 1
-                else => {},
-            }
-        }
+        action_loop.processActions(self);
     }
 
     /// read the snapshot file from disk and send it to a lagging follower.
     /// the raft module produces send_install_snapshot actions with empty data;
     /// this method fills in the data from the snapshot file on disk.
     fn sendSnapshot(self: *Node, target: NodeId, args: types.InstallSnapshotArgs) void {
-        // read the snapshot file. it contains a header + sqlite bytes
-        // in the format written by StateMachine.takeSnapshot().
-        var snap_path_buf: [512]u8 = undefined;
-        const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/snapshot.dat", .{self.config.data_dir}) catch return;
-
-        const data = std.fs.cwd().readFileAlloc(
-            self.alloc,
-            snap_path,
-            64 * 1024 * 1024, // 64MB max
-        ) catch |e| {
-            logger.warn("snapshot: failed to read snapshot file for node {}: {}", .{ target, e });
-            return;
-        };
-        defer self.alloc.free(data);
-
-        // send the snapshot with the actual data
-        self.transport.send(target, .{
-            .install_snapshot = .{
-                .term = args.term,
-                .leader_id = args.leader_id,
-                .last_included_index = args.last_included_index,
-                .last_included_term = args.last_included_term,
-                .data = data,
-            },
-        }) catch |e| {
-            logger.warn("failed to send snapshot to node {}: {}", .{ target, e });
-        };
+        snapshot_support.sendSnapshot(self, target, args);
     }
 };
 

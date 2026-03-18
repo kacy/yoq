@@ -1,256 +1,34 @@
-// scheduler — container placement via bin-packing
+// scheduler — placement facade
 //
-// pure function: takes placement requests + agent list, returns
-// assignments. no I/O, no state — the caller (API handler) is
-// responsible for proposing assignments through raft.
-//
-// scoring: agents with the most free resources win. draining and
-// offline agents are skipped. during a batch, resource usage is
-// tracked locally to avoid over-scheduling multiple containers
-// to the same agent.
+// keep the public scheduler API stable while the bin-packing, constraint,
+// gang, and SQL helpers live in cluster/scheduler/.
 
 const std = @import("std");
 const agent_types = @import("agent_types.zig");
-const sql_escape = @import("../lib/sql.zig");
-const volumes_mod = @import("../state/volumes.zig");
-const gpu_scheduler = @import("../gpu/scheduler.zig");
+const common = @import("scheduler/common.zig");
+const constraint_support = @import("scheduler/constraints.zig");
+const gang_support = @import("scheduler/gang_support.zig");
+const placement = @import("scheduler/placement.zig");
+const sql_support = @import("scheduler/sql_support.zig");
 
-const Allocator = std.mem.Allocator;
 const AgentRecord = agent_types.AgentRecord;
-pub const VolumeConstraint = volumes_mod.VolumeConstraint;
+pub const VolumeConstraint = common.VolumeConstraint;
+pub const PlacementRequest = common.PlacementRequest;
+pub const PlacementResult = common.PlacementResult;
+pub const GangPlacementResult = common.GangPlacementResult;
 
-pub const PlacementRequest = struct {
-    image: []const u8,
-    command: []const u8,
-    cpu_limit: i64, // millicores (1000 = 1 core)
-    memory_limit_mb: i64,
-    gpu_limit: i64 = 0,
-    gpu_model: ?[]const u8 = null,
-    gpu_vram_min_mb: ?u64 = null,
-    required_labels: []const u8 = "",
-    volume_constraints: []const VolumeConstraint = &.{},
-    gang_world_size: u32 = 0, // 0 = no gang scheduling
-    gpus_per_rank: u32 = 1,
-    gang_master_port: u16 = 29500,
-};
+pub const scheduleGang = gang_support.scheduleGang;
+pub const schedule = placement.schedule;
+pub const assignmentSql = sql_support.assignmentSql;
+pub const assignmentSqlGang = sql_support.assignmentSqlGang;
+pub const generateAssignmentId = sql_support.generateAssignmentId;
 
-pub const PlacementResult = struct {
-    agent_id: []const u8,
-    request_idx: usize,
-};
-
-pub const GangPlacementResult = struct {
-    placements: []const gpu_scheduler.GangPlacement,
-    request: PlacementRequest,
-};
-
-/// schedule a gang of ranks across agents.
-/// wraps gpu_scheduler.scheduleGang() for use from the deploy API.
-/// returns placements for all ranks, or null if the gang can't be fully placed.
-pub fn scheduleGang(
-    alloc: Allocator,
-    request: PlacementRequest,
-    agents: []const AgentRecord,
-) !?[]gpu_scheduler.GangPlacement {
-    const gang = gpu_scheduler.GangSpec{
-        .world_size = request.gang_world_size,
-        .gpus_per_rank = request.gpus_per_rank,
-        .master_port = request.gang_master_port,
-    };
-    return gpu_scheduler.scheduleGang(alloc, gang, agents);
-}
-
-/// schedule containers onto agents using best-fit bin-packing.
-///
-/// returns a list of placements. entries are null if the request
-/// couldn't fit on any agent. the caller should check for nulls
-/// and handle partial placement.
-pub fn schedule(
-    alloc: Allocator,
-    requests: []const PlacementRequest,
-    agents: []const AgentRecord,
-) ![]?PlacementResult {
-    var results = try alloc.alloc(?PlacementResult, requests.len);
-    @memset(results, null);
-
-    // track resource usage during this batch to avoid over-scheduling.
-    // keyed by index into agents slice.
-    var used_cpu = try alloc.alloc(i64, agents.len);
-    defer alloc.free(used_cpu);
-    var used_mem = try alloc.alloc(i64, agents.len);
-    defer alloc.free(used_mem);
-    var used_gpu = try alloc.alloc(i64, agents.len);
-    defer alloc.free(used_gpu);
-
-    for (agents, 0..) |a, i| {
-        used_cpu[i] = a.cpu_used;
-        used_mem[i] = a.memory_used_mb;
-        used_gpu[i] = a.gpu_used;
-    }
-
-    for (requests, 0..) |req, req_idx| {
-        var best_idx: ?usize = null;
-        var best_score: i64 = -1;
-
-        for (agents, 0..) |a, agent_idx| {
-            // skip non-active agents
-            if (!std.mem.eql(u8, a.status, "active")) continue;
-
-            // skip server-only agents — they run raft consensus, not workloads
-            if (a.role) |role| {
-                if (std.mem.eql(u8, role, "server")) continue;
-            }
-
-            // check capacity (cpu in millicores: cores * 1000)
-            const free_cpu = a.cpu_cores * 1000 - used_cpu[agent_idx];
-            const free_mem = a.memory_mb - used_mem[agent_idx];
-
-            if (free_cpu < req.cpu_limit) continue;
-            if (free_mem < req.memory_limit_mb) continue;
-
-            // check GPU capacity
-            if (req.gpu_limit > 0) {
-                const free_gpu = a.gpu_count - used_gpu[agent_idx];
-                if (free_gpu < req.gpu_limit) continue;
-
-                // check GPU model and VRAM requirements
-                if (req.gpu_model != null or req.gpu_vram_min_mb != null) {
-                    if (!gpu_scheduler.matchesGpuRequirements(a, req.gpu_model, req.gpu_vram_min_mb)) continue;
-                }
-            }
-
-            // check label constraints
-            if (req.required_labels.len > 0) {
-                if (!matchesLabels(if (a.labels) |l| l else "", req.required_labels)) continue;
-            }
-
-            // check volume locality constraints — local/parallel volumes
-            // must be on the node where the volume was created
-            if (req.volume_constraints.len > 0) {
-                if (!matchesVolumeConstraints(a, req.volume_constraints)) continue;
-            }
-
-            // score: total free resources (higher = more room)
-            const gpu_score: i64 = if (req.gpu_limit > 0) (a.gpu_count - used_gpu[agent_idx]) * 1000 else 0;
-            const score = free_cpu + free_mem + gpu_score;
-            if (score > best_score) {
-                best_score = score;
-                best_idx = agent_idx;
-            }
-        }
-
-        if (best_idx) |idx| {
-            results[req_idx] = .{
-                .agent_id = agents[idx].id,
-                .request_idx = req_idx,
-            };
-            // update tracked usage
-            used_cpu[idx] += req.cpu_limit;
-            used_mem[idx] += req.memory_limit_mb;
-            used_gpu[idx] += req.gpu_limit;
-        }
-    }
-
-    return results;
-}
-
-/// generate SQL INSERT for a container assignment.
-pub fn assignmentSql(
-    buf: []u8,
-    id: []const u8,
-    agent_id: []const u8,
-    request: PlacementRequest,
-    now: i64,
-) ![]const u8 {
-    return assignmentSqlGang(buf, id, agent_id, request, now, null);
-}
-
-/// generate SQL INSERT for a gang assignment with rank/mesh info.
-pub fn assignmentSqlGang(
-    buf: []u8,
-    id: []const u8,
-    agent_id: []const u8,
-    request: PlacementRequest,
-    now: i64,
-    gang: ?gpu_scheduler.GangPlacement,
-) ![]const u8 {
-    // escape user-controlled values (image and command come from API requests)
-    var img_esc_buf: [512]u8 = undefined;
-    const img_esc = try sql_escape.escapeSqlString(&img_esc_buf, request.image);
-    var cmd_esc_buf: [512]u8 = undefined;
-    const cmd_esc = try sql_escape.escapeSqlString(&cmd_esc_buf, request.command);
-
-    if (gang) |g| {
-        var master_esc_buf: [256]u8 = undefined;
-        const master_esc = try sql_escape.escapeSqlString(&master_esc_buf, g.master_addr);
-        return std.fmt.bufPrint(buf,
-            \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port, created_at)
-            \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d}, {d}, '{s}', {d}, {d});
-        , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, g.rank, g.world_size, master_esc, g.master_port, now });
-    } else {
-        return std.fmt.bufPrint(buf,
-            \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at)
-            \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d});
-        , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, now });
-    }
-}
-
-/// generate a random hex assignment ID.
-pub fn generateAssignmentId(buf: *[12]u8) void {
-    var random_bytes: [6]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
-    const hex = "0123456789abcdef";
-    for (random_bytes, 0..) |b, i| {
-        buf[i * 2] = hex[b >> 4];
-        buf[i * 2 + 1] = hex[b & 0x0f];
-    }
-}
-
-/// check that every required label exists in the agent's label set.
-/// labels are comma-separated key=value pairs (e.g., "zone=us-east,tier=gpu").
-/// empty required_labels matches any agent.
 fn matchesLabels(agent_labels: []const u8, required: []const u8) bool {
-    if (required.len == 0) return true;
-
-    // iterate over required labels
-    var req_iter = std.mem.splitScalar(u8, required, ',');
-    while (req_iter.next()) |req_label| {
-        const trimmed = std.mem.trim(u8, req_label, " ");
-        if (trimmed.len == 0) continue;
-
-        // check if this required label exists in agent_labels
-        var found = false;
-        var agent_iter = std.mem.splitScalar(u8, agent_labels, ',');
-        while (agent_iter.next()) |agent_label| {
-            const agent_trimmed = std.mem.trim(u8, agent_label, " ");
-            if (std.mem.eql(u8, agent_trimmed, trimmed)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return false;
-    }
-    return true;
+    return constraint_support.matchesLabels(agent_labels, required);
 }
 
-/// check if an agent satisfies volume locality constraints.
-/// for each constraint with a node_id, the agent must have a matching node_id.
-/// constraints without node_id (nfs, host) are unconstrained — any node works.
-fn matchesVolumeConstraints(agent: AgentRecord, constraints: []const VolumeConstraint) bool {
-    for (constraints) |vc| {
-        const required_node = vc.node_id orelse continue; // unconstrained
-        // agent must have a node_id that matches
-        if (agent.node_id) |agent_node_id| {
-            // compare as strings since node_id in constraints is text
-            var agent_node_buf: [32]u8 = undefined;
-            const agent_node_str = std.fmt.bufPrint(&agent_node_buf, "{d}", .{agent_node_id}) catch return false;
-            if (!std.mem.eql(u8, agent_node_str, required_node)) return false;
-        } else {
-            // agent has no node_id — can't satisfy a node-specific constraint
-            return false;
-        }
-    }
-    return true;
+fn matchesVolumeConstraints(agent: AgentRecord, volume_constraints: []const VolumeConstraint) bool {
+    return constraint_support.matchesVolumeConstraints(agent, volume_constraints);
 }
 
 // -- tests --

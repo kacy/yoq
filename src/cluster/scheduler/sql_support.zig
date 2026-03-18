@@ -1,0 +1,54 @@
+const std = @import("std");
+const sql_escape = @import("../../lib/sql.zig");
+const gpu_scheduler = @import("../../gpu/scheduler.zig");
+const common = @import("common.zig");
+
+pub const PlacementRequest = common.PlacementRequest;
+
+pub fn assignmentSql(
+    buf: []u8,
+    id: []const u8,
+    agent_id: []const u8,
+    request: PlacementRequest,
+    now: i64,
+) ![]const u8 {
+    return assignmentSqlGang(buf, id, agent_id, request, now, null);
+}
+
+pub fn assignmentSqlGang(
+    buf: []u8,
+    id: []const u8,
+    agent_id: []const u8,
+    request: PlacementRequest,
+    now: i64,
+    gang: ?gpu_scheduler.GangPlacement,
+) ![]const u8 {
+    var img_esc_buf: [512]u8 = undefined;
+    const img_esc = try sql_escape.escapeSqlString(&img_esc_buf, request.image);
+    var cmd_esc_buf: [512]u8 = undefined;
+    const cmd_esc = try sql_escape.escapeSqlString(&cmd_esc_buf, request.command);
+
+    if (gang) |placement| {
+        var master_esc_buf: [256]u8 = undefined;
+        const master_esc = try sql_escape.escapeSqlString(&master_esc_buf, placement.master_addr);
+        return std.fmt.bufPrint(buf,
+            \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port, created_at)
+            \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d}, {d}, '{s}', {d}, {d});
+        , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, placement.rank, placement.world_size, master_esc, placement.master_port, now });
+    }
+
+    return std.fmt.bufPrint(buf,
+        \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at)
+        \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d});
+    , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, now });
+}
+
+pub fn generateAssignmentId(buf: *[12]u8) void {
+    var random_bytes: [6]u8 = undefined;
+    std.crypto.random.bytes(&random_bytes);
+    const hex = "0123456789abcdef";
+    for (random_bytes, 0..) |byte, i| {
+        buf[i * 2] = hex[byte >> 4];
+        buf[i * 2 + 1] = hex[byte & 0x0f];
+    }
+}
