@@ -19,25 +19,20 @@ const posix = std.posix;
 
 const cli = @import("../lib/cli.zig");
 const spec = @import("spec.zig");
-const oci = @import("../image/oci.zig");
 const container = @import("../runtime/container.zig");
 const process = @import("../runtime/process.zig");
 const store = @import("../state/store.zig");
-const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
-const ip_mod = @import("../network/ip.zig");
 const watcher_mod = @import("../dev/watcher.zig");
-const logs = @import("../runtime/logs.zig");
 const health = @import("health.zig");
 const tls_proxy = @import("../tls/proxy.zig");
 const tls_backend = @import("../tls/backend.zig");
 const cert_store_mod = @import("../tls/cert_store.zig");
-const acme_mod = @import("../tls/acme.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
-const gpu_runtime = @import("gpu_runtime.zig");
 const sqlite = @import("sqlite");
+const runtime_loop = @import("orchestrator/runtime_loop.zig");
+const startup_runtime = @import("orchestrator/startup_runtime.zig");
 const service_runtime = @import("orchestrator/service_runtime.zig");
-const tls_support = @import("orchestrator/tls_support.zig");
 
 pub const OrchestratorError = error{
     /// one or more container images could not be pulled from the registry
@@ -308,167 +303,28 @@ pub const Orchestrator = struct {
 
     /// register services for health checking and start the checker thread.
     fn registerHealthChecks(self: *Orchestrator) void {
-        var has_checks = false;
-
-        for (self.manifest.services, 0..) |svc, i| {
-            if (!self.shouldStart(svc.name)) continue;
-            const hc = svc.health_check orelse continue;
-            has_checks = true;
-
-            // look up the container's IP from the store
-            const id = self.states[i].container_id;
-            const record = store.load(self.alloc, id[0..]) catch {
-                log.warn("orchestrator: failed to load container for health check registration: {s}", .{svc.name});
-                continue;
-            };
-            defer record.deinit(self.alloc);
-
-            const container_ip = if (record.ip_address) |ip_str|
-                ip_mod.parseIp(ip_str) orelse [4]u8{ 0, 0, 0, 0 }
-            else
-                [4]u8{ 0, 0, 0, 0 };
-
-            health.registerService(svc.name, id, container_ip, hc) catch {
-                writeErr("health: registry full, health checks disabled for {s}\n", .{svc.name});
-            };
-            self.states[i].health_status = .starting;
-        }
-
-        if (has_checks) {
-            health.startChecker();
-        }
+        startup_runtime.registerHealthChecks(
+            self.alloc,
+            self.manifest.services,
+            self.states,
+            self.start_set,
+        );
     }
 
     /// start the TLS reverse proxy if any services have TLS configs.
     /// registers backends for each TLS-enabled service and starts the proxy.
     fn startTlsProxy(self: *Orchestrator) void {
-        // check if any services have TLS configs
-        var has_tls = false;
-        for (self.manifest.services) |svc| {
-            if (!self.shouldStart(svc.name)) continue;
-            if (svc.tls != null) {
-                has_tls = true;
-                break;
-            }
-        }
-        if (!has_tls) return;
+        const resources = startup_runtime.startTlsProxy(
+            self.alloc,
+            self.manifest.services,
+            self.states,
+            self.start_set,
+        ) orelse return;
 
-        // create backend registry
-        const reg = self.alloc.create(tls_backend.BackendRegistry) catch {
-            writeErr("failed to allocate backend registry\n", .{});
-            return;
-        };
-        reg.* = tls_backend.BackendRegistry.init(self.alloc);
-        self.backend_registry = reg;
-
-        // register backends for TLS-enabled services
-        for (self.manifest.services, 0..) |svc, i| {
-            if (!self.shouldStart(svc.name)) continue;
-            const tls = svc.tls orelse continue;
-
-            // look up the container's IP from the store
-            const id = self.states[i].container_id;
-            const record = store.load(self.alloc, id[0..]) catch {
-                log.warn("could not find container for {s}, skipping TLS backend", .{svc.name});
-                continue;
-            };
-            defer record.deinit(self.alloc);
-
-            const ip = record.ip_address orelse {
-                log.warn("no IP for {s}, skipping TLS backend", .{svc.name});
-                continue;
-            };
-
-            // use the first port mapping's container port, or default to 80
-            const port: u16 = if (svc.ports.len > 0) svc.ports[0].container_port else 80;
-
-            reg.register(tls.domain, ip, port) catch {
-                log.warn("failed to register backend for {s}", .{tls.domain});
-                continue;
-            };
-            writeErr("  tls: {s} -> {s}:{d}\n", .{ tls.domain, ip, port });
-        }
-
-        // open database and cert store
-        const db_ptr = self.alloc.create(sqlite.Db) catch {
-            writeErr("failed to allocate database for cert store\n", .{});
-            return;
-        };
-        db_ptr.* = store.openDb() catch {
-            self.alloc.destroy(db_ptr);
-            writeErr("failed to open database for cert store\n", .{});
-            return;
-        };
-
-        const certs = self.alloc.create(cert_store_mod.CertStore) catch {
-            db_ptr.deinit();
-            self.alloc.destroy(db_ptr);
-            writeErr("failed to allocate cert store\n", .{});
-            return;
-        };
-        certs.* = cert_store_mod.CertStore.init(db_ptr, self.alloc) catch {
-            db_ptr.deinit();
-            self.alloc.destroy(db_ptr);
-            self.alloc.destroy(certs);
-            writeErr("failed to init cert store (is the master key set?)\n", .{});
-            return;
-        };
-
-        // auto-provision ACME certificates for services that need them.
-        // runs before starting the proxy so certs are ready when traffic arrives.
-        var acme_email: ?[]const u8 = null;
-        for (self.manifest.services) |svc| {
-            const tls = svc.tls orelse continue;
-            if (!tls.acme) continue;
-
-            // save the email for renewal config
-            if (acme_email == null) acme_email = tls.email;
-
-            // skip if a valid cert already exists
-            const needs = certs.needsRenewal(tls.domain, 30) catch |err| blk: {
-                if (err == cert_store_mod.CertError.NotFound) break :blk true;
-                break :blk false;
-            };
-            if (!needs) {
-                writeErr("  tls: {s} has valid certificate\n", .{tls.domain});
-                continue;
-            }
-
-            writeErr("  tls: provisioning certificate for {s}...\n", .{tls.domain});
-            provisionAcmeCert(self.alloc, certs, tls.domain, tls.email orelse "admin@localhost");
-        }
-
-        // create and start proxy
-        const proxy = self.alloc.create(tls_proxy.TlsProxy) catch {
-            std.crypto.secureZero(u8, &certs.key);
-            db_ptr.deinit();
-            self.alloc.destroy(db_ptr);
-            self.alloc.destroy(certs);
-            writeErr("failed to allocate TLS proxy\n", .{});
-            return;
-        };
-        proxy.* = tls_proxy.TlsProxy.init(self.alloc, reg, certs, 443, 80) catch {
-            std.crypto.secureZero(u8, &certs.key);
-            db_ptr.deinit();
-            self.alloc.destroy(db_ptr);
-            self.alloc.destroy(certs);
-            self.alloc.destroy(proxy);
-            writeErr("failed to bind TLS proxy ports (443/80)\n", .{});
-            return;
-        };
-
-        // configure auto-renewal if any service uses ACME
-        if (acme_email) |email| {
-            proxy.setRenewalConfig(.{
-                .email = email,
-                .directory_url = acme_mod.letsencrypt_production,
-            });
-        }
-
-        self.tls_db = db_ptr;
-        self.tls_certs = certs;
-        self.proxy = proxy;
-        proxy.start();
+        self.backend_registry = resources.backend_registry;
+        self.tls_db = resources.tls_db;
+        self.tls_certs = resources.tls_certs;
+        self.proxy = resources.proxy;
     }
 
     /// stop all running services in reverse dependency order.
@@ -590,20 +446,6 @@ pub fn ensureImageAvailable(alloc: std.mem.Allocator, image: []const u8) bool {
     return service_runtime.ensureImageAvailable(alloc, image);
 }
 
-// -- ACME provisioning --
-
-/// attempt to provision a certificate via ACME for the given domain.
-/// logs progress and errors but does not fail the startup — the service
-/// can still work without TLS if provisioning fails (e.g., DNS not ready).
-fn provisionAcmeCert(
-    alloc: std.mem.Allocator,
-    certs: *cert_store_mod.CertStore,
-    domain: []const u8,
-    email: []const u8,
-) void {
-    return tls_support.provisionAcmeCert(alloc, certs, domain, email);
-}
-
 // -- service thread helpers --
 //
 // these extract the setup phases from serviceThread so the main function
@@ -671,229 +513,7 @@ pub fn runOneShot(
 /// backoff resets when the container runs for longer than 10 seconds,
 /// indicating a healthy start rather than a crash loop.
 fn serviceThread(orch: *Orchestrator, idx: usize) void {
-    const svc = orch.manifest.services[idx];
-    const alloc = orch.alloc;
-
-    // resolve image config
-    var img = resolveServiceImage(alloc, svc.image) orelse {
-        orch.states[idx].status = .failed;
-        return;
-    };
-    defer img.deinit(alloc);
-
-    // resolve command
-    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, svc.command) catch {
-        log.err("failed to resolve command for {s}: out of memory", .{svc.name});
-        orch.states[idx].status = .failed;
-        return;
-    };
-    defer resolved.args.deinit(alloc);
-
-    // merge env
-    var merged_env = mergeServiceEnv(alloc, img.image_env, svc.env);
-    defer merged_env.deinit(alloc);
-
-    // working dir override
-    var working_dir = img.working_dir;
-    if (svc.working_dir) |wd| working_dir = wd;
-
-    // resolve volumes
-    var vols = resolveServiceVolumes(alloc, svc.volumes, orch.manifest.volumes, orch.app_name) catch {
-        orch.states[idx].status = .failed;
-        return;
-    };
-    defer vols.deinit(alloc);
-
-    // port mappings
-    var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
-    defer port_maps.deinit(alloc);
-    for (svc.ports) |pm| {
-        port_maps.append(alloc, .{
-            .host_port = pm.host_port,
-            .container_port = pm.container_port,
-            .protocol = .tcp,
-        }) catch |e| {
-            log.warn("failed to add port map: {}", .{e});
-        };
-    }
-
-    // build GPU indices from manifest gpu spec
-    var gpu_indices_buf: [8]u32 = undefined;
-    var gpu_indices_len: usize = 0;
-    if (svc.gpu) |gpu_spec| {
-        const count = @min(gpu_spec.count, 8);
-        for (0..count) |i| {
-            gpu_indices_buf[i] = @intCast(i);
-        }
-        gpu_indices_len = count;
-
-        gpu_runtime.appendGpuPassthroughEnv(alloc, &merged_env, gpu_indices_buf[0..count]);
-    }
-
-    // inject NCCL mesh environment for multi-GPU distributed training
-    var mesh_support: ?gpu_runtime.MeshSupport = null;
-    defer if (mesh_support) |*support| support.deinit();
-    if (svc.gpu_mesh) |mesh_spec| {
-        mesh_support = gpu_runtime.MeshSupport.init(alloc);
-        // for local orchestrator, rank 0 is always this node at 127.0.0.1
-        mesh_support.?.appendEnv(
-            alloc,
-            &merged_env,
-            "127.0.0.1",
-            mesh_spec.master_port,
-            mesh_spec.world_size,
-            0, // rank (local orchestrator = single node, rank 0)
-            0, // local_rank
-        );
-    }
-
-    // if the service has a health check, skip DNS registration on startup.
-    // the health checker will register it after the first successful check.
-    const has_health_check = svc.health_check != null;
-
-    const net_config: ?net_setup.NetworkConfig = if (port_maps.items.len > 0)
-        .{ .port_maps = port_maps.items, .skip_dns = has_health_check }
-    else
-        .{ .skip_dns = has_health_check };
-
-    // exponential backoff state for restart policies.
-    // starts at 1s, doubles each restart, caps at 30s.
-    // resets when the container runs for longer than 10s (healthy start).
-    var backoff_ms: u64 = initial_backoff_ms;
-
-    // main run loop
-    while (true) {
-        // generate a fresh container id for each run
-        var id_buf: [12]u8 = undefined;
-        container.generateId(&id_buf) catch {
-            writeErr("failed to generate container ID for {s}\n", .{svc.name});
-            orch.states[idx].status = .failed;
-            return;
-        };
-        const id = id_buf[0..];
-
-        // copy id into orchestrator state so stopAll can find it
-        @memcpy(&orch.states[idx].container_id, id);
-
-        // save container record with app_name
-        store.save(.{
-            .id = id,
-            .rootfs = img.rootfs,
-            .command = resolved.command,
-            .hostname = svc.name,
-            .status = "created",
-            .pid = null,
-            .exit_code = null,
-            .app_name = orch.app_name,
-            .created_at = std.time.timestamp(),
-        }) catch {
-            orch.states[idx].status = .failed;
-            return;
-        };
-
-        // create and start container
-        var c = container.Container{
-            .config = .{
-                .id = id,
-                .rootfs = img.rootfs,
-                .command = resolved.command,
-                .args = resolved.args.items,
-                .env = merged_env.items,
-                .working_dir = working_dir,
-                .lower_dirs = img.layer_paths,
-                .network = net_config,
-                .hostname = svc.name,
-                .mounts = vols.bind_mounts.items,
-                .dev_service_name = if (orch.dev_mode) svc.name else null,
-                .dev_color_idx = idx,
-                .gpu_indices = gpu_indices_buf[0..gpu_indices_len],
-            },
-            .status = .created,
-            .pid = null,
-            .exit_code = null,
-            .created_at = std.time.timestamp(),
-        };
-
-        // mark as running once the container starts
-        orch.states[idx].status = .running;
-
-        const start_time = std.time.nanoTimestamp();
-
-        c.start() catch {
-            orch.states[idx].status = .failed;
-            return;
-        };
-
-        const run_duration_ns = std.time.nanoTimestamp() - start_time;
-        const exit_code = c.wait() catch 255;
-
-        // clean up this container's resources before potentially restarting
-        logs.deleteLogFile(id);
-        container.cleanupContainerDirs(id);
-        store.remove(id) catch {};
-
-        // check for shutdown first — always takes priority
-        if (shutdown_requested.load(.acquire)) break;
-
-        // decide whether to restart based on mode and policy
-        if (orch.dev_mode) {
-            // dev mode: restart on file watcher signal
-            if (orch.restart_requested[idx].load(.acquire)) {
-                orch.restart_requested[idx].store(false, .release);
-                writeErr("restarting {s}...\n", .{svc.name});
-                continue;
-            }
-
-            // container exited on its own — wait for watcher signal or shutdown
-            orch.states[idx].status = .stopped;
-            var got_restart = false;
-            while (!shutdown_requested.load(.acquire)) {
-                if (orch.restart_requested[idx].load(.acquire)) {
-                    orch.restart_requested[idx].store(false, .release);
-                    writeErr("restarting {s}...\n", .{svc.name});
-                    got_restart = true;
-                    break;
-                }
-                std.Thread.sleep(200 * std.time.ns_per_ms);
-            }
-            if (!got_restart) break;
-        } else {
-            // normal mode: check restart policy
-            const should_restart = switch (svc.restart) {
-                .none => false,
-                .always => true,
-                .on_failure => exit_code != 0,
-            };
-
-            if (!should_restart) break;
-
-            // reset backoff if the container ran long enough to be considered healthy
-            if (run_duration_ns >= healthy_run_threshold_ns) {
-                backoff_ms = initial_backoff_ms;
-            }
-
-            writeErr("{s} exited (code {d}), restarting in {d}ms...\n", .{
-                svc.name, exit_code, backoff_ms,
-            });
-
-            // sleep for backoff duration, checking for shutdown periodically
-            var slept_ms: u64 = 0;
-            while (slept_ms < backoff_ms) {
-                if (shutdown_requested.load(.acquire)) break;
-                const remaining = backoff_ms - slept_ms;
-                const sleep_chunk: u64 = @min(remaining, 200);
-                std.Thread.sleep(sleep_chunk * std.time.ns_per_ms);
-                slept_ms += sleep_chunk;
-            }
-
-            if (shutdown_requested.load(.acquire)) break;
-
-            // increase backoff for next time (exponential, capped)
-            backoff_ms = @min(backoff_ms * 2, max_backoff_ms);
-        }
-    }
-
-    orch.states[idx].status = .stopped;
+    runtime_loop.serviceThread(orch, idx, &shutdown_requested);
 }
 
 // -- restart policy constants --
@@ -911,54 +531,7 @@ const healthy_run_threshold_ns: i128 = service_runtime.healthy_run_threshold_ns;
 /// watcher thread for dev mode — monitors bind-mounted directories
 /// and triggers container restarts when files change.
 pub fn watcherThread(orch: *Orchestrator, w: *watcher_mod.Watcher) void {
-    var services: [64]usize = undefined;
-
-    while (!shutdown_requested.load(.acquire)) {
-        // wait for changes, collect up to 64 services
-        const changed_services = w.waitForChange(&services);
-        if (changed_services.len == 0) break; // watcher closed
-
-        if (shutdown_requested.load(.acquire)) break;
-
-        // process all services that had changes
-        for (changed_services) |service_idx| {
-            const svc = orch.manifest.services[service_idx];
-            writeErr("change detected in {s}, restarting...\n", .{svc.name});
-
-            // stop the running container by sending SIGTERM to its process
-            const id = orch.states[service_idx].container_id;
-
-            // load container record - if this fails, container might already be stopped
-            const record = store.load(orch.alloc, id[0..]) catch |e| {
-                log.debug("watcher: container {s} not found (may have exited): {}", .{ svc.name, e });
-                // still request restart since file changed
-                orch.restart_requested[service_idx].store(true, .release);
-                continue;
-            };
-            defer record.deinit(orch.alloc);
-
-            if (record.pid) |pid| {
-                // double-check PID to avoid race with container restart
-                // re-load record to verify PID hasn't changed
-                const verify_record = store.load(orch.alloc, id[0..]) catch null;
-                if (verify_record) |vr| {
-                    defer vr.deinit(orch.alloc);
-                    if (vr.pid == record.pid) {
-                        // PID is stable, safe to terminate
-                        process.terminate(pid) catch {
-                            process.kill(pid) catch {};
-                        };
-                    } else {
-                        const new_pid = vr.pid orelse 0;
-                        log.debug("watcher: PID changed for {s} (was {d}, now {d}), skipping terminate", .{ svc.name, pid, new_pid });
-                    }
-                }
-            }
-
-            // signal the service thread to restart
-            orch.restart_requested[service_idx].store(true, .release);
-        }
-    }
+    runtime_loop.watcherThread(orch, w, &shutdown_requested);
 }
 
 /// extract the key part from a "KEY=VALUE" env var string

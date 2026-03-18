@@ -14,13 +14,12 @@ const filesystem = @import("filesystem.zig");
 const security = @import("security.zig");
 const process = @import("process.zig");
 const logs = @import("logs.zig");
-const init = @import("init.zig");
 const store = @import("../state/store.zig");
-const paths = @import("../lib/paths.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
-const exec_helpers = @import("../lib/exec_helpers.zig");
 const gpu_passthrough = @import("../gpu/passthrough.zig");
+const exec_runtime = @import("container/exec_runtime.zig");
+const id_paths = @import("container/id_paths.zig");
 
 /// PID of the currently running container process.
 /// set after spawn, cleared on exit. used by the signal handler
@@ -41,28 +40,11 @@ pub const ContainerError = error{
 
 /// container exit codes (following standard conventions)
 /// these are used by childMain to report specific failure modes
-pub const ExitCode = enum(u8) {
-    /// success
-    success = 0,
-    /// general error
-    general_error = 1,
-    /// filesystem setup failed (overlay, bind mount, pivot_root)
-    filesystem_error = 120,
-    /// bind mount security check failed (TOCTOU or path validation)
-    bind_mount_denied = 121,
-    /// essential filesystem mount failed (/proc, /dev, /sys)
-    essential_mount_failed = 122,
-    /// security restrictions failed (capabilities, seccomp)
-    security_failed = 123,
-    /// permission denied (convention from bash)
-    permission_denied = 126,
-    /// command not found (convention from bash)
-    command_not_found = 127,
-};
+pub const ExitCode = exec_runtime.ExitCode;
 
 /// a 12-character hex container identifier.
 /// using a distinct type improves type safety over raw strings.
-pub const ContainerId = [12]u8;
+pub const ContainerId = id_paths.ContainerId;
 
 /// validates that a container ID is safe to use in filesystem paths.
 /// checks that the ID:
@@ -71,26 +53,13 @@ pub const ContainerId = [12]u8;
 ///   - does not contain any path traversal sequences
 /// returns true only if all checks pass.
 pub fn isValidContainerId(id: []const u8) bool {
-    if (id.len != 12) return false;
-
-    // verify all characters are lowercase hex — this also rejects
-    // path traversal characters (./, \, :) since they aren't hex
-    for (id) |c| {
-        switch (c) {
-            '0'...'9', 'a'...'f' => {},
-            else => return false,
-        }
-    }
-    return true;
+    return id_paths.isValidContainerId(id);
 }
 
 /// validates a container ID and returns a typed ContainerId.
 /// returns InvalidId error if validation fails.
 pub fn validateContainerId(id: []const u8) ContainerError!ContainerId {
-    if (!isValidContainerId(id)) return ContainerError.InvalidId;
-    var result: ContainerId = undefined;
-    @memcpy(&result, id);
-    return result;
+    return id_paths.validateContainerId(id) catch ContainerError.InvalidId;
 }
 
 /// container states
@@ -111,49 +80,7 @@ pub const Status = enum {
 };
 
 /// a bind mount mapping a host path into the container
-pub const BindMount = struct {
-    /// absolute path on the host
-    source: []const u8,
-    /// absolute path inside the container
-    target: []const u8,
-    /// mount read-only
-    read_only: bool = true,
-
-    /// check that the source path doesn't point into sensitive system directories.
-    /// a manifest could otherwise mount /etc/shadow or /root/.ssh into a container.
-    pub fn isSourceAllowed(self: BindMount) bool {
-        // allow yoq-managed paths (volumes, NFS mounts) — must be a real
-        // suffix of a home directory, not an arbitrary substring match
-        if (std.mem.indexOf(u8, self.source, "/.local/share/yoq/")) |pos| {
-            // only allow if the prefix before the match looks like a home dir
-            // and the path has no traversal components
-            if (pos > 0 and std.mem.indexOf(u8, self.source, "..") == null) return true;
-        }
-
-        const blocked = [_][]const u8{
-            "/etc",
-            "/root",
-            "/var/lib",
-            "/home",
-            "/proc",
-            "/sys",
-            "/dev",
-            "/boot",
-            "/usr/sbin",
-            "/sbin",
-        };
-        for (blocked) |prefix| {
-            if (std.mem.startsWith(u8, self.source, prefix)) {
-                // allow exact prefix only if followed by '/' or end of string
-                // (so "/devtools" doesn't match "/dev")
-                if (self.source.len == prefix.len or self.source[prefix.len] == '/') {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-};
+pub const BindMount = exec_runtime.BindMount;
 
 /// configuration for creating a container
 pub const ContainerConfig = struct {
@@ -296,7 +223,7 @@ pub const Container = struct {
 
         // prepare child execution context
         // lives on our stack, gets copied to child's address space via clone3
-        var child_ctx = ChildExecContext{
+        var child_ctx = exec_runtime.ChildExecContext{
             .has_overlay = has_overlay,
             .host_mode = config.host_mode,
             .fs_config = fs_config,
@@ -324,7 +251,7 @@ pub const Container = struct {
         var spawn_result = namespaces.spawn(
             config.namespaces,
             null,
-            childMain,
+            exec_runtime.childMain,
             @ptrCast(&child_ctx),
         ) catch {
             if (has_overlay) cleanupContainerDirs(config.id);
@@ -333,7 +260,6 @@ pub const Container = struct {
         };
 
         self.pid = spawn_result.pid;
-        self.status = .running;
         active_pid.store(spawn_result.pid, .release);
 
         // add child to cgroup and set resource limits
@@ -441,6 +367,8 @@ pub const Container = struct {
         // signal child that all parent-side setup is complete
         spawn_result.signalReady();
 
+        self.status = .running;
+
         // update sqlite to "running"
         store.updateStatus(config.id, "running", spawn_result.pid, null) catch |e| {
             log.warn("failed to update status for {s}: {}", .{ config.id, e });
@@ -539,341 +467,35 @@ pub const Container = struct {
 
 /// context passed to the child process after clone3.
 /// contains everything needed to set up the container environment and exec.
-const ChildExecContext = struct {
-    has_overlay: bool,
-    host_mode: bool,
-    fs_config: filesystem.FilesystemConfig,
-    rootfs: []const u8,
-    command: []const u8,
-    args: []const []const u8,
-    env: []const []const u8,
-    working_dir: []const u8,
-    hostname: []const u8,
-    mounts: []const BindMount,
-};
-
-/// child process entry point (called after namespace creation).
-/// sets up filesystem, security, then runs init.run() which forks
-/// a workload process, reaps zombies, and forwards signals.
-/// uses distinct exit codes for different failure modes.
-fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
-    const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
-
-    // Try full container filesystem isolation first
-    // If permission denied, fall back to host mode automatically
-    var host_mode = ctx.host_mode;
-
-    if (!host_mode) {
-        // Attempt full container setup
-        var setup_failed = false;
-
-        // 1. set up filesystem (overlay or bind mounts + pivot_root)
-        if (ctx.has_overlay) {
-            filesystem.mountOverlay(ctx.fs_config) catch {
-                setup_failed = true;
-            };
-            if (!setup_failed) {
-                // apply bind mounts into the merged overlay
-                for (ctx.mounts) |m| {
-                    if (!m.isSourceAllowed()) return @intFromEnum(ExitCode.permission_denied);
-                    if (!isCanonicalBindSource(m.source)) return @intFromEnum(ExitCode.bind_mount_denied);
-                    filesystem.bindMount(ctx.fs_config.merged_dir, m.source, m.target, m.read_only) catch |e| {
-                        log.err("container: bind mount failed for {s}: {s}", .{ m.source, @errorName(e) });
-                        setup_failed = true;
-                        break;
-                    };
-                }
-            }
-            if (!setup_failed) {
-                filesystem.pivotRoot(ctx.fs_config.merged_dir) catch {
-                    setup_failed = true;
-                };
-            }
-        } else {
-            // bind mounts with a local rootfs — mount into rootfs before pivot.
-            // skip if rootfs is empty (shouldn't happen, but guard against it).
-            if (ctx.rootfs.len == 0 and ctx.mounts.len > 0) {
-                log.err("container: bind mounts specified but no rootfs configured", .{});
-                setup_failed = true;
-            }
-            for (ctx.mounts) |m| {
-                if (setup_failed) break;
-                if (!m.isSourceAllowed()) return @intFromEnum(ExitCode.permission_denied);
-                if (!isCanonicalBindSource(m.source)) return @intFromEnum(ExitCode.bind_mount_denied);
-                filesystem.bindMount(ctx.rootfs, m.source, m.target, m.read_only) catch |e| {
-                    log.err("container: bind mount failed for {s}: {s}", .{ m.source, @errorName(e) });
-                    setup_failed = true;
-                    break;
-                };
-            }
-            if (!setup_failed) {
-                filesystem.pivotRoot(ctx.rootfs) catch {
-                    setup_failed = true;
-                };
-            }
-        }
-
-        // 2. mount essential filesystems (/proc, /dev, /sys, /tmp)
-        if (!setup_failed) {
-            filesystem.mountEssential() catch |err| {
-                switch (err) {
-                    error.MountPermissionDenied => {
-                        setup_failed = true;
-                    },
-                    else => return @intFromEnum(ExitCode.essential_mount_failed),
-                }
-            };
-        }
-
-        // If setup failed with permission issues, fall back to host mode
-        if (setup_failed) {
-            host_mode = true;
-            log.warn("container: filesystem isolation not available due to permission restrictions - " ++
-                "falling back to host mode. Process/network/hostname isolation still active. " ++
-                "Note: Use full paths (e.g., /bin/echo) as PATH resolution differs in host mode.", .{});
-        }
-    }
-
-    if (host_mode) {
-        // Host mode: minimal setup, just chdir and run
-        // Skipping: pivot_root, mountEssential, full security restrictions
-        posix.chdir(ctx.working_dir) catch {
-            posix.chdir("/") catch {};
-        };
-
-        // Note: We still run in namespaces (PID, NET, UTS, IPC) which provide
-        // process, network, hostname, and IPC isolation even without filesystem isolation
-        return execCommandWrapper(@ptrCast(@constCast(ctx)));
-    } else {
-        // Normal container mode: full isolation
-        // 3. set hostname
-        setHostname(ctx.hostname);
-
-        // 4. set a safe default umask
-        _ = linux.syscall1(.umask, 0o022);
-
-        // 5. chdir to working directory
-        posix.chdir(ctx.working_dir) catch {
-            posix.chdir("/") catch {};
-        };
-
-        // 6. apply security restrictions (capabilities + seccomp)
-        security.apply() catch return @intFromEnum(ExitCode.security_failed);
-
-        // 7. run container init: forks the workload, reaps zombies, forwards signals.
-        return init.run(execCommandWrapper, @ptrCast(@constCast(ctx)));
-    }
-}
-
-/// C-callable wrapper around execCommand for use with init.run().
-/// init.run() forks and calls this in the child (workload) process.
-fn execCommandWrapper(arg: ?*anyopaque) callconv(.c) u8 {
-    const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
-    return execCommand(ctx.command, ctx.args, ctx.env);
-}
-
-/// build null-terminated argv and envp arrays on the stack and call execve.
-/// uses a ~64KB stack buffer to avoid heap allocation in the child.
-/// returns 127 if exec fails.
-fn execCommand(command: []const u8, args: []const []const u8, env: []const []const u8) u8 {
-    // comptime validation: ensure buffer sizes are reasonable
-    const str_buf_size = 65536;
-    const max_entries = 257; // 256 + 1 for null terminator
-
-    // verify we can fit reasonable worst-case scenario
-    // max command length: 4096 (PATH_MAX typical)
-    // max args: 256 * 256 (typical arg max)
-    // this is a sanity check, not exact calculation
-    comptime std.debug.assert(str_buf_size >= 4096);
-    comptime std.debug.assert(max_entries <= 512);
-
-    var str_buf: [str_buf_size]u8 = undefined;
-    var str_pos: usize = 0;
-
-    // argv: command + args + null terminator (max 256 entries)
-    var argv: [max_entries]?[*:0]const u8 = .{null} ** max_entries;
-    argv[0] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return 127;
-
-    var argv_idx: usize = 1;
-    for (args) |arg| {
-        if (argv_idx >= argv.len - 1) break;
-        argv[argv_idx] = exec_helpers.packString(&str_buf, &str_pos, arg) orelse return 127;
-        argv_idx += 1;
-    }
-
-    // envp: env vars + null terminator (max 256 entries)
-    var envp: [max_entries]?[*:0]const u8 = .{null} ** max_entries;
-    for (env, 0..) |e, i| {
-        if (i >= envp.len - 1) break;
-        envp[i] = exec_helpers.packString(&str_buf, &str_pos, e) orelse return 127;
-    }
-
-    // replace this process with the container command
-    _ = linux.syscall3(
-        .execve,
-        @intFromPtr(argv[0].?),
-        @intFromPtr(&argv),
-        @intFromPtr(&envp),
-    );
-
-    // if we get here, exec failed
-    return 127;
-}
-
-/// set the container hostname via the sethostname syscall
-fn setHostname(name: []const u8) void {
-    if (name.len == 0) return;
-    _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
-}
-
-fn isCanonicalBindSource(source: []const u8) bool {
-    if (source.len == 0) return false;
-    return filesystem.isCanonicalAbsolutePath(source);
-}
-
 /// base directory for per-container overlay storage
 const containers_subdir = "containers";
-
-/// paths to the overlay directories for a container
-pub const OverlayDirs = struct {
-    upper: [paths.max_path]u8,
-    upper_len: usize,
-    work: [paths.max_path]u8,
-    work_len: usize,
-    merged: [paths.max_path]u8,
-    merged_len: usize,
-
-    pub fn upperPath(self: *const OverlayDirs) []const u8 {
-        return self.upper[0..self.upper_len];
-    }
-
-    pub fn workPath(self: *const OverlayDirs) []const u8 {
-        return self.work[0..self.work_len];
-    }
-
-    pub fn mergedPath(self: *const OverlayDirs) []const u8 {
-        return self.merged[0..self.merged_len];
-    }
-};
+pub const OverlayDirs = id_paths.OverlayDirs;
 
 /// create the per-container overlay directories:
 ///   ~/.local/share/yoq/containers/<id>/upper
 ///   ~/.local/share/yoq/containers/<id>/work
 ///   ~/.local/share/yoq/containers/<id>/rootfs  (merged mount point)
 pub fn createContainerDirs(container_id: []const u8) ContainerError!OverlayDirs {
-    // validate the container ID to prevent path traversal
-    if (!isValidContainerId(container_id)) return ContainerError.InvalidId;
-
-    // initialize all fields to prevent partial initialization
-    var dirs: OverlayDirs = .{
-        .upper = undefined,
-        .upper_len = 0,
-        .work = undefined,
-        .work_len = 0,
-        .merged = undefined,
-        .merged_len = 0,
+    return id_paths.createContainerDirs(containers_subdir, container_id) catch |err| switch (err) {
+        error.CreateFailed => ContainerError.CreateFailed,
+        error.InvalidId => ContainerError.InvalidId,
     };
-
-    const upper_slice = paths.dataPathFmt(&dirs.upper, "{s}/{s}/upper", .{
-        containers_subdir, container_id,
-    }) catch return ContainerError.CreateFailed;
-    dirs.upper_len = upper_slice.len;
-
-    const work_slice = paths.dataPathFmt(&dirs.work, "{s}/{s}/work", .{
-        containers_subdir, container_id,
-    }) catch return ContainerError.CreateFailed;
-    dirs.work_len = work_slice.len;
-
-    const merged_slice = paths.dataPathFmt(&dirs.merged, "{s}/{s}/rootfs", .{
-        containers_subdir, container_id,
-    }) catch return ContainerError.CreateFailed;
-    dirs.merged_len = merged_slice.len;
-
-    // create all three directories (makePath creates parents too)
-    std.fs.cwd().makePath(dirs.upperPath()) catch return ContainerError.CreateFailed;
-    std.fs.cwd().makePath(dirs.workPath()) catch return ContainerError.CreateFailed;
-    std.fs.cwd().makePath(dirs.mergedPath()) catch return ContainerError.CreateFailed;
-
-    return dirs;
 }
 
 /// remove all per-container directories
 pub fn cleanupContainerDirs(container_id: []const u8) void {
-    // validate to prevent accidental deletion of wrong paths
-    if (!isValidContainerId(container_id)) return;
-
-    var path_buf: [paths.max_path]u8 = undefined;
-    const dir_path = paths.dataPathFmt(&path_buf, "{s}/{s}", .{
-        containers_subdir, container_id,
-    }) catch return;
-
-    std.fs.cwd().deleteTree(dir_path) catch {};
+    id_paths.cleanupContainerDirs(containers_subdir, container_id);
 }
 
 /// generate a unique container id (12 hex chars, 48 bits entropy).
 /// checks for collisions with existing containers up to 10 attempts.
 /// after 10 collisions, uses timestamp + counter to guarantee uniqueness.
 pub fn generateId(buf: *ContainerId) ContainerError!void {
-    std.debug.assert(@sizeOf(ContainerId) == 12);
-    const chars = "0123456789abcdef";
-    const max_collision_attempts: u32 = 10;
+    return id_paths.generateId(containers_subdir, buf) catch ContainerError.IdGenerationFailed;
+}
 
-    var collision_count: u32 = 0;
-    while (collision_count < max_collision_attempts) : (collision_count += 1) {
-        // use crypto secure random
-        var bytes: [6]u8 = undefined;
-        std.crypto.random.bytes(&bytes);
-
-        for (bytes, 0..) |b, i| {
-            buf[i * 2] = chars[b >> 4];
-            buf[i * 2 + 1] = chars[b & 0x0f];
-        }
-
-        // check for collision - if container dir doesn't exist, we're good
-        var path_buf: [paths.max_path]u8 = undefined;
-        const dir_path = paths.dataPathFmt(&path_buf, "{s}/{s}", .{
-            containers_subdir, buf,
-        }) catch continue;
-
-        std.fs.cwd().access(dir_path, .{}) catch {
-            // directory doesn't exist = no collision
-            return;
-        };
-        // directory exists = collision, try again
-    }
-
-    // too many collisions - use timestamp + counter for guaranteed uniqueness
-    const now = std.time.timestamp();
-    var counter: u16 = 0;
-    while (counter < 1000) : (counter += 1) {
-        // combine timestamp (upper 48 bits) with counter (lower 16 bits)
-        const unique_val: u64 = @as(u64, @intCast(now)) << 16 | counter;
-        var bytes: [6]u8 = undefined;
-        bytes[0] = @intCast((unique_val >> 40) & 0xFF);
-        bytes[1] = @intCast((unique_val >> 32) & 0xFF);
-        bytes[2] = @intCast((unique_val >> 24) & 0xFF);
-        bytes[3] = @intCast((unique_val >> 16) & 0xFF);
-        bytes[4] = @intCast((unique_val >> 8) & 0xFF);
-        bytes[5] = @intCast(unique_val & 0xFF);
-
-        for (bytes, 0..) |b, i| {
-            buf[i * 2] = chars[b >> 4];
-            buf[i * 2 + 1] = chars[b & 0x0f];
-        }
-
-        // verify uniqueness
-        var path_buf: [paths.max_path]u8 = undefined;
-        const dir_path = paths.dataPathFmt(&path_buf, "{s}/{s}", .{
-            containers_subdir, buf,
-        }) catch continue;
-
-        std.fs.cwd().access(dir_path, .{}) catch {
-            return;
-        };
-    }
-
-    // exhausted all attempts — return error instead of crashing the process
-    return ContainerError.IdGenerationFailed;
+pub fn isCanonicalBindSource(source: []const u8) bool {
+    return exec_runtime.isCanonicalBindSource(source);
 }
 
 // -- tests --

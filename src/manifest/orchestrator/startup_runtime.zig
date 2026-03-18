@@ -1,0 +1,203 @@
+const std = @import("std");
+
+const spec = @import("../spec.zig");
+const store = @import("../../state/store.zig");
+const log = @import("../../lib/log.zig");
+const ip_mod = @import("../../network/ip.zig");
+const health = @import("../health.zig");
+const tls_proxy = @import("../../tls/proxy.zig");
+const tls_backend = @import("../../tls/backend.zig");
+const cert_store_mod = @import("../../tls/cert_store.zig");
+const acme_mod = @import("../../tls/acme.zig");
+const sqlite = @import("sqlite");
+const cli = @import("../../lib/cli.zig");
+const tls_support = @import("tls_support.zig");
+
+const writeErr = cli.writeErr;
+
+pub const TlsResources = struct {
+    backend_registry: *tls_backend.BackendRegistry,
+    proxy: *tls_proxy.TlsProxy,
+    tls_certs: *cert_store_mod.CertStore,
+    tls_db: *sqlite.Db,
+};
+
+pub fn registerHealthChecks(
+    alloc: std.mem.Allocator,
+    services: []const spec.Service,
+    states: anytype,
+    start_set: ?std.StringHashMapUnmanaged(void),
+) void {
+    var has_checks = false;
+
+    for (services, 0..) |svc, i| {
+        if (!shouldStart(start_set, svc.name)) continue;
+        const hc = svc.health_check orelse continue;
+        has_checks = true;
+
+        const id = states[i].container_id;
+        const record = store.load(alloc, id[0..]) catch {
+            log.warn("orchestrator: failed to load container for health check registration: {s}", .{svc.name});
+            continue;
+        };
+        defer record.deinit(alloc);
+
+        const container_ip = if (record.ip_address) |ip_str|
+            ip_mod.parseIp(ip_str) orelse [4]u8{ 0, 0, 0, 0 }
+        else
+            [4]u8{ 0, 0, 0, 0 };
+
+        health.registerService(svc.name, id, container_ip, hc) catch {
+            writeErr("health: registry full, health checks disabled for {s}\n", .{svc.name});
+        };
+        states[i].health_status = .starting;
+    }
+
+    if (has_checks) health.startChecker();
+}
+
+pub fn startTlsProxy(
+    alloc: std.mem.Allocator,
+    services: []const spec.Service,
+    states: anytype,
+    start_set: ?std.StringHashMapUnmanaged(void),
+) ?TlsResources {
+    if (!hasTlsServices(services, start_set)) return null;
+
+    const reg = alloc.create(tls_backend.BackendRegistry) catch {
+        writeErr("failed to allocate backend registry\n", .{});
+        return null;
+    };
+    reg.* = tls_backend.BackendRegistry.init(alloc);
+    errdefer {
+        reg.deinit();
+        alloc.destroy(reg);
+    }
+
+    registerTlsBackends(alloc, reg, services, states, start_set);
+
+    const db_ptr = alloc.create(sqlite.Db) catch {
+        writeErr("failed to allocate database for cert store\n", .{});
+        return null;
+    };
+    errdefer alloc.destroy(db_ptr);
+    db_ptr.* = store.openDb() catch {
+        writeErr("failed to open database for cert store\n", .{});
+        return null;
+    };
+    errdefer db_ptr.deinit();
+
+    const certs = alloc.create(cert_store_mod.CertStore) catch {
+        writeErr("failed to allocate cert store\n", .{});
+        return null;
+    };
+    errdefer alloc.destroy(certs);
+    certs.* = cert_store_mod.CertStore.init(db_ptr, alloc) catch {
+        writeErr("failed to init cert store (is the master key set?)\n", .{});
+        return null;
+    };
+    errdefer std.crypto.secureZero(u8, &certs.key);
+
+    const acme_email = provisionAcmeCerts(alloc, certs, services, start_set);
+
+    const proxy = alloc.create(tls_proxy.TlsProxy) catch {
+        writeErr("failed to allocate TLS proxy\n", .{});
+        return null;
+    };
+    errdefer alloc.destroy(proxy);
+    proxy.* = tls_proxy.TlsProxy.init(alloc, reg, certs, 443, 80) catch {
+        writeErr("failed to bind TLS proxy ports (443/80)\n", .{});
+        return null;
+    };
+
+    if (acme_email) |email| {
+        proxy.setRenewalConfig(.{
+            .email = email,
+            .directory_url = acme_mod.letsencrypt_production,
+        });
+    }
+
+    proxy.start();
+    return .{
+        .backend_registry = reg,
+        .proxy = proxy,
+        .tls_certs = certs,
+        .tls_db = db_ptr,
+    };
+}
+
+fn shouldStart(start_set: ?std.StringHashMapUnmanaged(void), name: []const u8) bool {
+    const set = start_set orelse return true;
+    return set.contains(name);
+}
+
+fn hasTlsServices(services: []const spec.Service, start_set: ?std.StringHashMapUnmanaged(void)) bool {
+    for (services) |svc| {
+        if (!shouldStart(start_set, svc.name)) continue;
+        if (svc.tls != null) return true;
+    }
+    return false;
+}
+
+fn registerTlsBackends(
+    alloc: std.mem.Allocator,
+    reg: *tls_backend.BackendRegistry,
+    services: []const spec.Service,
+    states: anytype,
+    start_set: ?std.StringHashMapUnmanaged(void),
+) void {
+    for (services, 0..) |svc, i| {
+        if (!shouldStart(start_set, svc.name)) continue;
+        const tls = svc.tls orelse continue;
+
+        const id = states[i].container_id;
+        const record = store.load(alloc, id[0..]) catch {
+            log.warn("could not find container for {s}, skipping TLS backend", .{svc.name});
+            continue;
+        };
+        defer record.deinit(alloc);
+
+        const ip = record.ip_address orelse {
+            log.warn("no IP for {s}, skipping TLS backend", .{svc.name});
+            continue;
+        };
+
+        const port: u16 = if (svc.ports.len > 0) svc.ports[0].container_port else 80;
+        reg.register(tls.domain, ip, port) catch {
+            log.warn("failed to register backend for {s}", .{tls.domain});
+            continue;
+        };
+        writeErr("  tls: {s} -> {s}:{d}\n", .{ tls.domain, ip, port });
+    }
+}
+
+fn provisionAcmeCerts(
+    alloc: std.mem.Allocator,
+    certs: *cert_store_mod.CertStore,
+    services: []const spec.Service,
+    start_set: ?std.StringHashMapUnmanaged(void),
+) ?[]const u8 {
+    var acme_email: ?[]const u8 = null;
+
+    for (services) |svc| {
+        if (!shouldStart(start_set, svc.name)) continue;
+        const tls = svc.tls orelse continue;
+        if (!tls.acme) continue;
+
+        if (acme_email == null) acme_email = tls.email;
+
+        const needs = certs.needsRenewal(tls.domain, 30) catch |err| blk: {
+            if (err == cert_store_mod.CertError.NotFound) break :blk true;
+            break :blk false;
+        };
+        if (!needs) {
+            writeErr("  tls: {s} has valid certificate\n", .{tls.domain});
+            continue;
+        }
+
+        writeErr("  tls: provisioning certificate for {s}...\n", .{tls.domain});
+        tls_support.provisionAcmeCert(alloc, certs, tls.domain, tls.email orelse "admin@localhost");
+    }
+
+    return acme_email;
+}
