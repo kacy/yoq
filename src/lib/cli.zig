@@ -275,23 +275,23 @@ pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
 pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
     var raw: [32]u8 = undefined;
     std.crypto.random.bytes(&raw);
+    defer std.crypto.secureZero(u8, &raw);
 
     const hex = std.fmt.bytesToHex(raw, .lower);
     buf.* = hex;
 
     // ensure data directory exists
-    paths.ensureDataDir("") catch return null;
+    paths.ensureDataDirStrict("") catch return null;
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
 
     if (tokenFileExistsWithWeakPermissions(token_path)) return null;
 
-    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o600 }) catch return null;
+    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o600, .truncate = true }) catch return null;
     defer file.close();
 
     file.writeAll(buf) catch return null;
-    std.crypto.secureZero(u8, &raw);
     return buf;
 }
 
@@ -355,6 +355,9 @@ fn backupExistingToken() ?TokenTestBackup {
 
     const backup_path = paths.dataPath(&backup.backup_path_buf, "api_token.test_backup") catch return null;
     backup.backup_path_len = backup_path.len;
+
+    paths.ensureDataDirStrict("") catch return null;
+    std.fs.cwd().deleteFile(backup.backupPath()) catch {};
 
     const moved = if (std.fs.cwd().rename(token_path, backup_path)) |_| true else |_| false;
     backup.moved = moved;

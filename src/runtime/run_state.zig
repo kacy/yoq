@@ -83,7 +83,7 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     // validate container ID to prevent path traversal
     if (!container.isValidContainerId(id)) return RunStateError.InvalidId;
 
-    paths.ensureDataDir(configs_subdir) catch return RunStateError.CreateFailed;
+    paths.ensureDataDirStrict(configs_subdir) catch return RunStateError.CreateFailed;
 
     var path_buf: [paths.max_path]u8 = undefined;
     const path = try configPath(&path_buf, id);
@@ -495,7 +495,7 @@ test "RestartPolicy labels" {
 test "loadConfig rejects oversized serialized string length" {
     if (!container.isValidContainerId("deadbeefcafe")) return error.SkipZigTest;
 
-    paths.ensureDataDir(configs_subdir) catch return error.SkipZigTest;
+    paths.ensureDataDirStrict(configs_subdir) catch return error.SkipZigTest;
 
     var path_buf: [paths.max_path]u8 = undefined;
     const path = try configPath(&path_buf, "deadbeefcafe");

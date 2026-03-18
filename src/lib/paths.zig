@@ -37,6 +37,14 @@ pub fn ensureDataDir(subpath: []const u8) PathError!void {
     };
 }
 
+/// ensure a data subdirectory exists and propagate creation failures.
+/// use this when subsequent work cannot succeed without the directory.
+pub fn ensureDataDirStrict(subpath: []const u8) (PathError || error{CreateFailed})!void {
+    var buf: [max_path]u8 = undefined;
+    const path = try dataPath(&buf, subpath);
+    std.fs.cwd().makePath(path) catch return error.CreateFailed;
+}
+
 /// build a unique temp path under ~/.local/share/yoq/<subdir>/.
 /// suffix keeps the caller's file type visible (for example ".tar").
 pub fn uniqueDataTempPath(
@@ -101,5 +109,12 @@ test "ensureDataDir logs errors but doesn't panic" {
         // If this fails, it should be due to HOME not being set
         // rather than the directory creation itself
         try std.testing.expect(e == PathError.HomeDirNotFound);
+    };
+}
+
+test "ensureDataDirStrict creates directory or returns typed error" {
+    ensureDataDirStrict("test_strict_subdir") catch |e| {
+        try std.testing.expect(e == PathError.HomeDirNotFound or e == error.CreateFailed);
+        return;
     };
 }
