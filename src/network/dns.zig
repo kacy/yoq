@@ -26,30 +26,8 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const sqlite = @import("sqlite");
 const log = @import("../lib/log.zig");
-const ip_mod = @import("ip.zig");
-const ebpf = if (builtin.os.tag == .linux) @import("ebpf.zig") else struct {
-    pub const DnsInterceptor = struct {
-        pub fn updateService(_: *@This(), _: []const u8, _: [4]u8) void {}
-        pub fn deleteService(_: *@This(), _: []const u8) void {}
-    };
-
-    pub const LoadBalancer = struct {
-        pub fn addBackend(_: *@This(), _: [4]u8, _: [4]u8) void {}
-        pub fn removeBackend(_: *@This(), _: [4]u8, _: [4]u8) void {}
-    };
-
-    var dns_interceptor: DnsInterceptor = .{};
-    var load_balancer: LoadBalancer = .{};
-
-    pub fn getDnsInterceptor() ?*DnsInterceptor {
-        return &dns_interceptor;
-    }
-
-    pub fn getLoadBalancer() ?*LoadBalancer {
-        return &load_balancer;
-    }
-};
-const policy = @import("policy.zig");
+const packet_support = @import("dns/packet_support.zig");
+const registry_support = @import("dns/registry_support.zig");
 
 // -- service registry --
 //
@@ -57,28 +35,7 @@ const policy = @import("policy.zig");
 // capacity of 256 services is plenty for single-node use.
 // names are stored as fixed-size buffers to avoid heap allocation.
 
-const max_services = 256;
-const max_name_len = 63; // max DNS label length
-
-const ServiceEntry = struct {
-    name: [max_name_len]u8,
-    name_len: u8,
-    container_id: [12]u8,
-    container_id_len: u8,
-    ip: [4]u8,
-    active: bool,
-};
-
-var registry: [max_services]ServiceEntry = [_]ServiceEntry{.{
-    .name = undefined,
-    .name_len = 0,
-    .container_id = undefined,
-    .container_id_len = 0,
-    .ip = .{ 0, 0, 0, 0 },
-    .active = false,
-}} ** max_services;
-var registry_count: usize = 0;
-var registry_mutex: std.Thread.Mutex = .{};
+const max_name_len = registry_support.max_name_len;
 
 // -- cluster DNS --
 //
@@ -87,280 +44,29 @@ var registry_mutex: std.Thread.Mutex = .{};
 // the service_names table, enabling cross-node name resolution.
 // the DB is owned by the raft state machine — we just read from it.
 
-var cluster_db: ?*sqlite.Db = null;
-var cluster_db_mutex: std.Thread.Mutex = .{};
-
 /// set the cluster database for cross-node DNS lookups.
 /// called during agent startup after raft state machine is initialized.
 /// pass null to disable cluster lookups (single-node mode).
 pub fn setClusterDb(db: ?*sqlite.Db) void {
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
-    cluster_db = db;
+    registry_support.setClusterDb(db);
 }
 
 /// look up a service name in the replicated cluster database.
 /// queries the service_names table for the IP address.
 /// returns null if the name isn't found or the DB isn't available.
 pub fn lookupClusterService(name: []const u8) ?[4]u8 {
-    // validate name parameter
-    if (name.len == 0 or name.len > max_name_len) return null;
-
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
-
-    const db = cluster_db orelse return null;
-
-    const Row = struct { ip_address: sqlite.Text };
-
-    // query the service_names table for the most recently registered
-    // entry with this name. multiple containers may share a name
-    // (replicas), so we take the latest registration.
-    var stmt = db.prepare(
-        "SELECT ip_address FROM service_names WHERE name = ? ORDER BY registered_at DESC LIMIT 1;",
-    ) catch return null;
-    defer stmt.deinit();
-
-    const row = stmt.oneAlloc(Row, std.heap.page_allocator, .{}, .{name}) catch return null;
-    if (row) |r| {
-        defer std.heap.page_allocator.free(r.ip_address.data);
-        return ip_mod.parseIp(r.ip_address.data);
-    }
-
-    return null;
-}
-
-/// validate that an IP address is safe to use for DNS resolution.
-/// rejects addresses that could enable DNS rebinding attacks or
-/// access to sensitive infrastructure.
-fn isSafeIpForDns(ip: [4]u8) bool {
-    const ip_u32 = ipToU32(ip);
-
-    // reject 0.0.0.0 (unspecified)
-    if (ip_u32 == 0) return false;
-
-    // reject 127.0.0.0/8 (loopback) - prevents access to host services
-    if ((ip_u32 & 0xFF000000) == 0x7F000000) return false;
-
-    // reject 224.0.0.0/4 (multicast) - prevents multicast amplification
-    if ((ip_u32 & 0xF0000000) == 0xE0000000) return false;
-
-    // reject 255.255.255.255 (broadcast)
-    if (ip_u32 == 0xFFFFFFFF) return false;
-
-    // reject 169.254.169.254 (cloud metadata services)
-    if (ip_u32 == 0xFEA9FEA9) return false;
-
-    // reject 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 if they
-    // might be used to access internal services (we allow our own subnet 10.42.0.0/16)
-    // Note: Our subnet is 10.42.x.x, which is within 10.0.0.0/8 but is safe
-    // Additional checks can be added here if needed
-
-    return true;
+    return registry_support.lookupClusterService(name);
 }
 
 /// register a service name for a container IP.
 /// if the same name already exists, the IP is updated (last-write-wins).
 pub fn registerService(name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
-    if (name.len == 0 or name.len > max_name_len) return;
-
-    // validate container_id is not empty and contains safe characters
-    if (container_id.len == 0) {
-        log.warn("dns: rejected attempt to register service '{s}' with empty container_id", .{name});
-        return;
-    }
-
-    // validate name contains only safe characters — reject control chars,
-    // whitespace, and non-printable characters that could cause issues
-    // in DNS responses or log output
-    for (name) |c| {
-        if (c < 0x21 or c > 0x7e) return;
-    }
-
-    // SECURITY: Prevent DNS rebinding attacks by validating the IP
-    if (!isSafeIpForDns(container_ip)) {
-        log.err("dns: rejected attempt to register service '{s}' with unsafe IP {d}.{d}.{d}.{d}", .{
-            name, container_ip[0], container_ip[1], container_ip[2], container_ip[3],
-        });
-        return;
-    }
-
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
-
-    // check if this container already has an entry for this name
-    for (&registry) |*entry| {
-        if (entry.active and
-            entry.name_len == name.len and
-            std.mem.eql(u8, entry.name[0..entry.name_len], name) and
-            entry.container_id_len == container_id.len and
-            std.mem.eql(u8, entry.container_id[0..entry.container_id_len], container_id))
-        {
-            // update IP
-            entry.ip = container_ip;
-            updateBpfMap(name, container_ip);
-            return;
-        }
-    }
-
-    // check if the name already belongs to a different container.
-    // this happens during replica scaling or container replacement.
-    // we keep last-write-wins behavior but log the reassignment.
-    if (detectNameConflict(name, container_id, container_ip)) |prev| {
-        log.warn("dns: service name '{s}' reassigned from {d}.{d}.{d}.{d} ({s}) to {d}.{d}.{d}.{d} ({s})", .{
-            name,
-            prev.ip[0],
-            prev.ip[1],
-            prev.ip[2],
-            prev.ip[3],
-            prev.container_id[0..prev.container_id_len],
-            container_ip[0],
-            container_ip[1],
-            container_ip[2],
-            container_ip[3],
-            container_id[0..@min(container_id.len, 12)],
-        });
-    }
-
-    // find a free slot
-    for (&registry) |*entry| {
-        if (!entry.active) {
-            entry.active = true;
-            entry.name_len = @intCast(name.len);
-            @memcpy(entry.name[0..name.len], name);
-            const cid_len: usize = @min(container_id.len, 12);
-            entry.container_id_len = @intCast(cid_len);
-            @memcpy(entry.container_id[0..cid_len], container_id[0..cid_len]);
-            entry.ip = container_ip;
-            registry_count += 1;
-            updateBpfMap(name, container_ip);
-            return;
-        }
-    }
-
-    // registry full — log and drop
-    log.warn("dns registry full, cannot register {s}", .{name});
+    registry_support.registerService(name, container_id, container_ip);
 }
 
 /// unregister all service names for a container.
 pub fn unregisterService(container_id: []const u8) void {
-    // validate container_id is not empty
-    if (container_id.len == 0) {
-        log.warn("dns: unregisterService called with empty container_id", .{});
-        return;
-    }
-
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
-
-    const cid_len = @min(container_id.len, 12);
-    for (&registry) |*entry| {
-        if (entry.active and
-            entry.container_id_len == cid_len and
-            std.mem.eql(u8, entry.container_id[0..entry.container_id_len], container_id[0..cid_len]))
-        {
-            // remove policy map entries before DNS/LB cleanup
-            policy.removeForContainer(entry.ip, std.heap.page_allocator);
-            // remove from LB backends before removing from DNS map
-            deleteBpfBackend(entry.name[0..entry.name_len], entry.ip);
-            deleteBpfMap(entry.name[0..entry.name_len]);
-            entry.active = false;
-            registry_count -= 1;
-        }
-    }
-}
-
-// -- BPF map sync --
-//
-// when BPF programs are loaded, keep their maps in sync with the
-// in-memory registry. the DNS interceptor maps service names to IPs.
-// the load balancer maps service VIPs to backend lists.
-// these are best-effort — if BPF isn't loaded, they're no-ops.
-
-fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
-    // update DNS interceptor map (name → IP)
-    if (ebpf.getDnsInterceptor()) |interceptor| {
-        interceptor.updateService(name, ip_addr);
-    }
-
-    // update load balancer backends.
-    // the VIP is the first IP registered for this name — we use
-    // the DNS interceptor's IP as the VIP. each new container with
-    // the same name becomes a backend behind that VIP.
-    if (ebpf.getLoadBalancer()) |lb| {
-        // find the VIP (first registered IP for this name).
-        // we need the VIP to know which backends entry to update.
-        const vip = getServiceVip(name) orelse ip_addr;
-        lb.addBackend(vip, ip_addr);
-    }
-
-    // apply network policy rules for this container's service + IP.
-    // uses the page allocator since we're in a mutex-protected path
-    // and allocations are small/short-lived.
-    policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
-}
-
-fn deleteBpfMap(name: []const u8) void {
-    if (ebpf.getDnsInterceptor()) |interceptor| {
-        _ = interceptor.deleteService(name);
-    }
-}
-
-/// delete a specific service name + IP pair from BPF maps.
-/// used by unregisterService to remove individual backends.
-fn deleteBpfBackend(name: []const u8, ip_addr: [4]u8) void {
-    if (ebpf.getLoadBalancer()) |lb| {
-        const vip = getServiceVip(name) orelse ip_addr;
-        lb.removeBackend(vip, ip_addr);
-    }
-}
-
-/// find the first registered IP for a service name (the "VIP").
-/// caller must hold registry_mutex.
-fn getServiceVip(name: []const u8) ?[4]u8 {
-    for (&registry) |*entry| {
-        if (entry.active and
-            entry.name_len == name.len and
-            std.mem.eql(u8, entry.name[0..entry.name_len], name))
-        {
-            return entry.ip;
-        }
-    }
-    return null;
-}
-
-/// check if a service name is currently held by a different container.
-/// returns the existing entry's info if it would be a reassignment, null otherwise.
-/// caller must hold registry_mutex.
-fn detectNameConflict(name: []const u8, new_container_id: []const u8, _: [4]u8) ?struct { ip: [4]u8, container_id: [12]u8, container_id_len: u8 } {
-    const new_cid_len = @min(new_container_id.len, 12);
-
-    // scan backwards to find the most recent entry with this name
-    var i: usize = max_services;
-    while (i > 0) {
-        i -= 1;
-        const entry = &registry[i];
-        if (entry.active and
-            entry.name_len == name.len and
-            std.mem.eql(u8, entry.name[0..entry.name_len], name))
-        {
-            // same container — not a conflict (IP update is normal)
-            if (entry.container_id_len == new_cid_len and
-                std.mem.eql(u8, entry.container_id[0..entry.container_id_len], new_container_id[0..new_cid_len]))
-            {
-                return null;
-            }
-
-            // different container claiming the same name — reassignment
-            return .{
-                .ip = entry.ip,
-                .container_id = entry.container_id,
-                .container_id_len = entry.container_id_len,
-            };
-        }
-    }
-
-    return null;
+    registry_support.unregisterService(container_id);
 }
 
 /// look up the IP for a service name. returns null if not found.
@@ -368,27 +74,7 @@ fn detectNameConflict(name: []const u8, new_container_id: []const u8, _: [4]u8) 
 /// the cluster database if available (cross-node resolution).
 /// if multiple containers share a name, returns the last registered (last-write-wins).
 pub fn lookupService(name: []const u8) ?[4]u8 {
-    // check local in-memory registry first (hot path)
-    {
-        registry_mutex.lock();
-        defer registry_mutex.unlock();
-
-        // scan backwards to get the most recently registered entry
-        var i: usize = max_services;
-        while (i > 0) {
-            i -= 1;
-            const entry = &registry[i];
-            if (entry.active and
-                entry.name_len == name.len and
-                std.mem.eql(u8, entry.name[0..entry.name_len], name))
-            {
-                return entry.ip;
-            }
-        }
-    }
-
-    // not found locally — try the cluster database for cross-node resolution
-    return lookupClusterService(name);
+    return registry_support.lookupService(name);
 }
 
 // -- DNS wire format --
@@ -398,160 +84,34 @@ pub fn lookupService(name: []const u8) ?[4]u8 {
 // all parsing and building uses stack buffers — no heap allocation.
 
 /// DNS header flags and fields
-const DnsHeader = struct {
-    id: u16,
-    flags: u16,
-    qdcount: u16,
-    ancount: u16,
-    nscount: u16,
-    arcount: u16,
-};
-
-/// parsed DNS question
-const DnsQuestion = struct {
-    name: [253]u8, // max DNS name length
-    name_len: usize,
-    qtype: u16,
-    qclass: u16,
-    /// byte offset where the question section ends in the packet
-    end_offset: usize,
-};
-
-/// DNS record types
-const TYPE_A: u16 = 1;
-const CLASS_IN: u16 = 1;
+const DnsHeader = packet_support.DnsHeader;
+const DnsQuestion = packet_support.DnsQuestion;
+const TYPE_A: u16 = packet_support.TYPE_A;
+const CLASS_IN: u16 = packet_support.CLASS_IN;
 
 /// parse a DNS header from a packet buffer.
 /// returns null if the buffer is too short.
 pub fn parseHeader(buf: []const u8) ?DnsHeader {
-    if (buf.len < 12) return null;
-
-    return DnsHeader{
-        .id = readU16(buf[0..2]),
-        .flags = readU16(buf[2..4]),
-        .qdcount = readU16(buf[4..6]),
-        .ancount = readU16(buf[6..8]),
-        .nscount = readU16(buf[8..10]),
-        .arcount = readU16(buf[10..12]),
-    };
+    return packet_support.parseHeader(buf);
 }
 
 /// parse the question section from a DNS packet.
 /// handles the label-length encoding (e.g., 3www6google3com0).
 /// returns null if the packet is malformed.
 pub fn parseQuestion(buf: []const u8) ?DnsQuestion {
-    if (buf.len < 13) return null; // header (12) + at least 1 byte
-
-    var q = DnsQuestion{
-        .name = undefined,
-        .name_len = 0,
-        .qtype = 0,
-        .qclass = 0,
-        .end_offset = 0,
-    };
-
-    var pos: usize = 12; // skip header
-    var name_pos: usize = 0;
-
-    // read labels
-    while (pos < buf.len) {
-        const label_len = buf[pos];
-        pos += 1;
-
-        if (label_len == 0) break; // end of name
-
-        // SECURITY: Check for compression pointers (0xC0-0xFF) which we don't support
-        // RFC 1035: values 0xC0-0xFF indicate compression or reserved
-        if (label_len >= 0xC0) return null; // compression pointer or reserved
-        if (label_len > 63) return null; // label too long per RFC 1035
-        if (pos + label_len > buf.len) return null; // truncated
-
-        // add dot separator between labels
-        if (name_pos > 0) {
-            if (name_pos >= q.name.len) return null;
-            q.name[name_pos] = '.';
-            name_pos += 1;
-        }
-
-        if (name_pos + label_len > q.name.len) return null; // name too long
-        @memcpy(q.name[name_pos..][0..label_len], buf[pos..][0..label_len]);
-        name_pos += label_len;
-        pos += label_len;
-    }
-
-    q.name_len = name_pos;
-
-    // read QTYPE and QCLASS
-    if (pos + 4 > buf.len) return null;
-    q.qtype = readU16(buf[pos..][0..2]);
-    q.qclass = readU16(buf[pos + 2 ..][0..2]);
-    q.end_offset = pos + 4;
-
-    return q;
+    return packet_support.parseQuestion(buf);
 }
 
 /// build a DNS A record response for a query.
 /// copies the query ID and question section, adds an answer.
 /// returns the response length, or null if building fails.
 pub fn buildResponse(query_buf: []const u8, query_len: usize, response_ip: [4]u8, response_buf: *[512]u8) ?usize {
-    const header = parseHeader(query_buf[0..@min(query_buf.len, query_len)]) orelse return null;
-    const question = parseQuestion(query_buf[0..@min(query_buf.len, query_len)]) orelse return null;
-
-    // response header
-    writeU16(response_buf[0..2], header.id); // copy query ID
-    writeU16(response_buf[2..4], 0x8400); // QR=1, AA=1, RA=0
-    writeU16(response_buf[4..6], 1); // QDCOUNT = 1
-    writeU16(response_buf[6..8], 1); // ANCOUNT = 1
-    writeU16(response_buf[8..10], 0); // NSCOUNT = 0
-    writeU16(response_buf[10..12], 0); // ARCOUNT = 0
-
-    // copy question section from original query
-    const question_bytes = question.end_offset - 12;
-    if (12 + question_bytes > response_buf.len) return null;
-    @memcpy(response_buf[12..][0..question_bytes], query_buf[12..][0..question_bytes]);
-
-    var pos: usize = 12 + question_bytes;
-
-    // answer section: pointer to name in question (compression)
-    if (pos + 16 > response_buf.len) return null;
-    writeU16(response_buf[pos..][0..2], 0xC00C); // pointer to name at offset 12
-    pos += 2;
-    writeU16(response_buf[pos..][0..2], TYPE_A); // TYPE
-    pos += 2;
-    writeU16(response_buf[pos..][0..2], CLASS_IN); // CLASS
-    pos += 2;
-    writeU32(response_buf[pos..][0..4], 5); // TTL = 5 seconds
-    pos += 4;
-    writeU16(response_buf[pos..][0..2], 4); // RDLENGTH = 4 (IPv4)
-    pos += 2;
-    response_buf[pos] = response_ip[0]; // RDATA
-    response_buf[pos + 1] = response_ip[1];
-    response_buf[pos + 2] = response_ip[2];
-    response_buf[pos + 3] = response_ip[3];
-    pos += 4;
-
-    return pos;
+    return packet_support.buildResponse(query_buf, query_len, response_ip, response_buf);
 }
 
 /// build a "name not found" (NXDOMAIN) response.
 pub fn buildNxDomain(query_buf: []const u8, query_len: usize, response_buf: *[512]u8) ?usize {
-    const header = parseHeader(query_buf[0..@min(query_buf.len, query_len)]) orelse return null;
-    const question = parseQuestion(query_buf[0..@min(query_buf.len, query_len)]) orelse return null;
-
-    // response header — RCODE=3 (NXDOMAIN)
-    writeU16(response_buf[0..2], header.id);
-    writeU16(response_buf[2..4], 0x8403); // QR=1, AA=1, RCODE=3
-    writeU16(response_buf[4..6], 1); // QDCOUNT
-    writeU16(response_buf[6..8], 0); // ANCOUNT
-    writeU16(response_buf[8..10], 0); // NSCOUNT
-    writeU16(response_buf[10..12], 0); // ARCOUNT
-
-    // copy question section
-    const question_bytes = question.end_offset - 12;
-    if (12 + question_bytes > response_buf.len) return null;
-    @memcpy(response_buf[12..][0..question_bytes], query_buf[12..][0..question_bytes]);
-
-    return 12 + question_bytes;
+    return packet_support.buildNxDomain(query_buf, query_len, response_buf);
 }
 
 // -- resolver thread --
@@ -591,37 +151,7 @@ fn initUpstreamDns() void {
 /// parse the first nameserver line from resolv.conf content.
 /// returns the IPv4 address as a 4-byte array, or null if none found.
 pub fn parseResolvConf(content: []const u8) ?[4]u8 {
-    var pos: usize = 0;
-    while (pos < content.len) {
-        // find end of current line
-        const line_end = std.mem.indexOfPos(u8, content, pos, "\n") orelse content.len;
-        const line = content[pos..line_end];
-        pos = if (line_end < content.len) line_end + 1 else content.len;
-
-        // skip comments and blank lines
-        const trimmed = std.mem.trimLeft(u8, line, " \t");
-        if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
-
-        // look for "nameserver" prefix
-        const prefix = "nameserver";
-        if (trimmed.len <= prefix.len) continue;
-        if (!std.mem.eql(u8, trimmed[0..prefix.len], prefix)) continue;
-
-        // must be followed by whitespace
-        if (trimmed[prefix.len] != ' ' and trimmed[prefix.len] != '\t') continue;
-
-        // extract the address string
-        const addr_str = std.mem.trimLeft(u8, trimmed[prefix.len..], " \t");
-        // trim trailing whitespace and carriage return
-        const addr_clean = std.mem.trimRight(u8, addr_str, " \t\r");
-
-        if (addr_clean.len == 0) continue;
-
-        // parse dotted-quad IPv4 address
-        if (ip_mod.parseIp(addr_clean)) |addr| return addr;
-    }
-
-    return null;
+    return registry_support.parseResolvConf(content);
 }
 
 var resolver_thread: ?std.Thread = null;
@@ -919,25 +449,25 @@ fn forwardQuery(
 
 /// convert a 4-byte IP to a u32 in host byte order.
 fn ipToU32(ip: [4]u8) u32 {
-    return (@as(u32, ip[0]) << 24) | (@as(u32, ip[1]) << 16) | (@as(u32, ip[2]) << 8) | @as(u32, ip[3]);
+    return packet_support.ipToU32(ip);
 }
 
 // -- helpers --
 
 fn readU16(buf: *const [2]u8) u16 {
-    return (@as(u16, buf[0]) << 8) | @as(u16, buf[1]);
+    return packet_support.readU16(buf);
 }
 
 fn writeU16(buf: *[2]u8, val: u16) void {
-    buf[0] = @truncate(val >> 8);
-    buf[1] = @truncate(val);
+    packet_support.writeU16(buf, val);
 }
 
 fn writeU32(buf: *[4]u8, val: u32) void {
-    buf[0] = @truncate(val >> 24);
-    buf[1] = @truncate(val >> 16);
-    buf[2] = @truncate(val >> 8);
-    buf[3] = @truncate(val);
+    packet_support.writeU32(buf, val);
+}
+
+fn detectNameConflict(name: []const u8, new_container_id: []const u8, ip_addr: [4]u8) ?registry_support.ConflictInfo {
+    return registry_support.detectNameConflict(name, new_container_id, ip_addr);
 }
 
 // -- tests --
@@ -1221,12 +751,7 @@ test "lookupService returns null after registry reset" {
 /// reset registry state for test isolation.
 /// only used in tests.
 fn resetRegistryForTest() void {
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
-    for (&registry) |*entry| {
-        entry.active = false;
-    }
-    registry_count = 0;
+    registry_support.resetRegistryForTest();
 }
 
 // -- resolv.conf parsing tests --
@@ -1310,10 +835,6 @@ test "detectNameConflict — different container same name" {
 
     registerService("db", "ctr_old", .{ 10, 42, 0, 10 });
 
-    // calling detectNameConflict directly requires holding the mutex
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
-
     const conflict = detectNameConflict("db", "ctr_new", .{ 10, 42, 0, 20 });
     try std.testing.expect(conflict != null);
     try std.testing.expectEqual([4]u8{ 10, 42, 0, 10 }, conflict.?.ip);
@@ -1324,18 +845,12 @@ test "detectNameConflict — same container is not a conflict" {
 
     registerService("web", "ctr_001", .{ 10, 42, 0, 10 });
 
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
-
     const conflict = detectNameConflict("web", "ctr_001", .{ 10, 42, 0, 20 });
     try std.testing.expect(conflict == null);
 }
 
 test "detectNameConflict — unknown name is not a conflict" {
     resetRegistryForTest();
-
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
 
     const conflict = detectNameConflict("new_svc", "ctr_001", .{ 10, 42, 0, 10 });
     try std.testing.expect(conflict == null);
@@ -1354,24 +869,24 @@ test "ipToU32 — correct conversion" {
 
 test "lookupClusterService returns null when no cluster db" {
     // ensure cluster_db is null (default state)
-    const prev = cluster_db;
-    cluster_db = null;
-    defer cluster_db = prev;
+    const prev = registry_support.currentClusterDb();
+    setClusterDb(null);
+    defer setClusterDb(prev);
 
     try std.testing.expect(lookupClusterService("anything") == null);
 }
 
 test "setClusterDb sets and clears the db reference" {
-    const prev = cluster_db;
-    defer cluster_db = prev;
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
 
     setClusterDb(null);
-    try std.testing.expect(cluster_db == null);
+    try std.testing.expect(registry_support.currentClusterDb() == null);
 
     // we can't easily create a real sqlite.Db in tests without the
     // schema module, but we can verify the setter works with null
     setClusterDb(null);
-    try std.testing.expect(cluster_db == null);
+    try std.testing.expect(registry_support.currentClusterDb() == null);
 }
 
 test "lookupClusterService resolves from service_names table" {
@@ -1389,9 +904,9 @@ test "lookupClusterService resolves from service_names table" {
     ) catch return;
 
     // set up cluster db reference
-    const prev = cluster_db;
-    defer cluster_db = prev;
-    cluster_db = &db;
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
+    setClusterDb(&db);
 
     const result = lookupClusterService("remote-db");
     try std.testing.expect(result != null);
@@ -1405,9 +920,9 @@ test "lookupClusterService returns null for unknown name" {
     defer db.deinit();
     schema.init(&db) catch return;
 
-    const prev = cluster_db;
-    defer cluster_db = prev;
-    cluster_db = &db;
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
+    setClusterDb(&db);
 
     try std.testing.expect(lookupClusterService("nonexistent") == null);
 }
@@ -1428,9 +943,9 @@ test "lookupService falls through to cluster db" {
         .{ "cluster-svc", "ctr_remote", "10.42.5.10", @as(i64, 1000) },
     ) catch return;
 
-    const prev = cluster_db;
-    defer cluster_db = prev;
-    cluster_db = &db;
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
+    setClusterDb(&db);
 
     // lookupService should find it via the cluster db fallback
     const result = lookupService("cluster-svc");
@@ -1456,9 +971,9 @@ test "lookupService prefers local registry over cluster db" {
         .{ "web", "ctr_remote", "10.42.5.10", @as(i64, 1000) },
     ) catch return;
 
-    const prev = cluster_db;
-    defer cluster_db = prev;
-    cluster_db = &db;
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
+    setClusterDb(&db);
 
     // should return the local IP, not the cluster one
     const result = lookupService("web");

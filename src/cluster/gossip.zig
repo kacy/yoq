@@ -29,6 +29,11 @@
 //   // process actions: send UDP messages, update membership state
 
 const std = @import("std");
+const codec_support = @import("gossip/codec_support.zig");
+const membership_support = @import("gossip/membership_support.zig");
+const probe_runtime = @import("gossip/probe_runtime.zig");
+const state_updates = @import("gossip/state_updates.zig");
+const update_queue = @import("gossip/update_queue.zig");
 
 pub const MemberState = enum(u8) {
     alive = 0,
@@ -215,138 +220,48 @@ pub const Gossip = struct {
     /// compute ceil(log2(n)), minimum 1. used for adaptive interval scaling
     /// and gossip dissemination counts.
     pub fn ceilLog2(n: usize) u32 {
-        if (n <= 2) return 1;
-        var log: u32 = 0;
-        var val: usize = n - 1;
-        while (val > 0) : (val >>= 1) {
-            log += 1;
-        }
-        return log;
+        return membership_support.ceilLog2(n);
     }
 
     /// recalculate probe/suspect/dead intervals based on cluster size.
     /// uses ceil(log2(N)) where N = total members including self, capped
     /// at max_interval_multiplier to bound worst-case detection time.
     pub fn recalculateIntervals(self: *Gossip) void {
-        const member_count = self.members.count() + 1; // +1 for self
-        const multiplier = @min(ceilLog2(member_count), max_interval_multiplier);
-        const susp_mult = self.configured_suspicion_multiplier orelse 1;
-        self.probe_interval = base_probe_interval * multiplier;
-        self.suspect_timeout = base_suspect_timeout * multiplier * susp_mult;
-        self.dead_timeout = base_dead_timeout * multiplier * susp_mult;
+        membership_support.recalculateIntervals(
+            self,
+            base_probe_interval,
+            base_suspect_timeout,
+            base_dead_timeout,
+            max_interval_multiplier,
+        );
     }
 
     /// add a member to the membership list. if the member already exists,
     /// this is a no-op (use applyStateUpdate for state changes).
     pub fn addMember(self: *Gossip, id: u64, addr: MemberAddr) !void {
-        if (id == self.self_id) return;
-        const result = try self.members.getOrPut(id);
-        if (!result.found_existing) {
-            result.value_ptr.* = .{
-                .id = id,
-                .addr = addr,
-                .state = .alive,
-                .incarnation = 0,
-                .state_changed_at = self.tick_count,
-            };
-            self.rebuildProbeOrder() catch {};
-            self.recalculateIntervals();
-        }
+        try membership_support.addMember(self, addr, id);
     }
 
     /// advance the protocol by one tick. call this every ~500ms.
     /// generates Actions for the caller to process.
     pub fn tick(self: *Gossip) !void {
-        self.tick_count += 1;
-
-        // check suspect timeouts — promote suspect → dead
-        try self.checkSuspectTimeouts();
-
-        // advance probe cycle
-        switch (self.probe_phase) {
-            .idle => try self.startProbe(),
-            .direct => {
-                self.ticks_in_phase += 1;
-                if (self.ticks_in_phase >= self.probe_interval) {
-                    try self.escalateToIndirect();
-                }
-            },
-            .indirect => {
-                self.ticks_in_phase += 1;
-                if (self.ticks_in_phase >= self.probe_interval) {
-                    try self.suspectProbeTarget();
-                }
-            },
-        }
+        return probe_runtime.tick(self);
     }
 
     /// process an incoming ping message
     pub fn handlePing(self: *Gossip, msg: PingPayload) !void {
-        for (msg.updates.slice()) |update| {
-            try self.applyStateUpdate(update);
-        }
-
-        const updates = self.collectPiggybackUpdates();
-        try self.actions.append(self.alloc, .{ .send_message = .{
-            .target = msg.from,
-            .addr = self.getMemberAddr(msg.from) orelse return,
-            .message = .{ .ping_ack = .{
-                .from = self.self_id,
-                .sequence = msg.sequence,
-                .updates = updates,
-            } },
-        } });
+        return probe_runtime.handlePing(self, msg);
     }
 
     /// process an incoming ping ack
     pub fn handlePingAck(self: *Gossip, msg: PingAckPayload) !void {
-        for (msg.updates.slice()) |update| {
-            try self.applyStateUpdate(update);
-        }
-
-        // if this ack matches our current probe, clear it
-        if (self.probe_target) |target| {
-            if (msg.from == target and msg.sequence == self.probe_sequence) {
-                self.probe_phase = .idle;
-                self.probe_target = null;
-                self.ticks_in_phase = 0;
-
-                // ensure the member is marked alive
-                if (self.members.getPtr(target)) |member| {
-                    if (member.state == .suspect) {
-                        member.state = .alive;
-                        member.state_changed_at = self.tick_count;
-                        try self.actions.append(self.alloc, .{ .member_alive = .{ .id = target } });
-                        try self.addPendingUpdate(.{
-                            .id = target,
-                            .addr = member.addr,
-                            .state = .alive,
-                            .incarnation = member.incarnation,
-                        });
-                    }
-                }
-            }
-        }
+        return probe_runtime.handlePingAck(self, msg);
     }
 
     /// process an incoming ping_req — forward a ping to the target on behalf
     /// of the requester, and relay any ack back.
     pub fn handlePingReq(self: *Gossip, msg: PingReqPayload) !void {
-        for (msg.updates.slice()) |update| {
-            try self.applyStateUpdate(update);
-        }
-
-        const target_addr = self.getMemberAddr(msg.target) orelse return;
-        const updates = self.collectPiggybackUpdates();
-        try self.actions.append(self.alloc, .{ .send_message = .{
-            .target = msg.target,
-            .addr = target_addr,
-            .message = .{ .ping = .{
-                .from = self.self_id,
-                .sequence = msg.sequence,
-                .updates = updates,
-            } },
-        } });
+        return probe_runtime.handlePingReq(self, msg);
     }
 
     /// drain all pending actions for the caller to process
@@ -369,307 +284,49 @@ pub const Gossip = struct {
     // --- internal ---
 
     fn startProbe(self: *Gossip) !void {
-        if (self.probe_order.items.len == 0) {
-            try self.rebuildProbeOrder();
-            if (self.probe_order.items.len == 0) return;
-        }
-
-        // skip dead members
-        var attempts: usize = 0;
-        while (attempts < self.probe_order.items.len) : (attempts += 1) {
-            const target_id = self.probe_order.items[self.probe_index % self.probe_order.items.len];
-            self.probe_index = (self.probe_index + 1) % self.probe_order.items.len;
-
-            if (self.members.get(target_id)) |member| {
-                if (member.state == .dead) continue;
-
-                // found a live target — send ping
-                self.probe_target = target_id;
-                self.probe_phase = .direct;
-                self.probe_sequence += 1;
-                self.ticks_in_phase = 0;
-
-                const updates = self.collectPiggybackUpdates();
-                try self.actions.append(self.alloc, .{ .send_message = .{
-                    .target = target_id,
-                    .addr = member.addr,
-                    .message = .{ .ping = .{
-                        .from = self.self_id,
-                        .sequence = self.probe_sequence,
-                        .updates = updates,
-                    } },
-                } });
-                return;
-            }
-        }
-
-        // if we wrapped around the probe order, rebuild it (stale entries)
-        if (self.probe_index == 0) {
-            try self.rebuildProbeOrder();
-        }
+        return probe_runtime.startProbe(self);
     }
 
     fn escalateToIndirect(self: *Gossip) !void {
-        const target_id = self.probe_target orelse return;
-
-        self.probe_phase = .indirect;
-        self.ticks_in_phase = 0;
-
-        // pick up to K random live members (not self, not target) to relay
-        var candidates: std.ArrayListUnmanaged(u64) = .{};
-        defer candidates.deinit(self.alloc);
-
-        var iter = self.members.iterator();
-        while (iter.next()) |entry| {
-            const id = entry.key_ptr.*;
-            if (id != self.self_id and id != target_id and entry.value_ptr.state != .dead) {
-                try candidates.append(self.alloc, id);
-            }
-        }
-
-        // shuffle and take first K (configured fanout overrides default)
-        const random = self.prng.random();
-        random.shuffle(u64, candidates.items);
-        const fanout = self.configured_fanout orelse @max(ceilLog2(self.members.count() + 1), indirect_probe_count);
-        const relay_count = @min(fanout, candidates.items.len);
-
-        for (candidates.items[0..relay_count]) |relay_id| {
-            if (self.members.get(relay_id)) |relay| {
-                const updates = self.collectPiggybackUpdates();
-                try self.actions.append(self.alloc, .{ .send_message = .{
-                    .target = relay_id,
-                    .addr = relay.addr,
-                    .message = .{ .ping_req = .{
-                        .from = self.self_id,
-                        .target = target_id,
-                        .sequence = self.probe_sequence,
-                        .updates = updates,
-                    } },
-                } });
-            }
-        }
+        return probe_runtime.escalateToIndirect(self);
     }
 
     fn suspectProbeTarget(self: *Gossip) !void {
-        const target_id = self.probe_target orelse return;
-
-        self.probe_phase = .idle;
-        self.probe_target = null;
-        self.ticks_in_phase = 0;
-
-        if (self.members.getPtr(target_id)) |member| {
-            if (member.state == .alive) {
-                member.state = .suspect;
-                member.state_changed_at = self.tick_count;
-                try self.actions.append(self.alloc, .{ .member_suspect = .{ .id = target_id } });
-                try self.addPendingUpdate(.{
-                    .id = target_id,
-                    .addr = member.addr,
-                    .state = .suspect,
-                    .incarnation = member.incarnation,
-                });
-            }
-        }
+        return probe_runtime.suspectProbeTarget(self);
     }
 
     fn checkSuspectTimeouts(self: *Gossip) !void {
-        // collect suspects that have timed out. uses ArrayList instead of a
-        // fixed array so large clusters with network partitions don't silently
-        // drop suspects beyond an arbitrary limit.
-        var dead_list: std.ArrayListUnmanaged(u64) = .{};
-        defer dead_list.deinit(self.alloc);
-
-        var iter = self.members.iterator();
-        while (iter.next()) |entry| {
-            const member = entry.value_ptr;
-            if (member.state == .suspect) {
-                if (self.tick_count - member.state_changed_at >= self.suspect_timeout) {
-                    try dead_list.append(self.alloc, member.id);
-                }
-            }
-        }
-
-        for (dead_list.items) |id| {
-            if (self.members.getPtr(id)) |member| {
-                member.state = .dead;
-                member.state_changed_at = self.tick_count;
-                try self.actions.append(self.alloc, .{ .member_dead = .{ .id = id } });
-                try self.addPendingUpdate(.{
-                    .id = id,
-                    .addr = member.addr,
-                    .state = .dead,
-                    .incarnation = member.incarnation,
-                });
-            }
-        }
+        return probe_runtime.checkSuspectTimeouts(self);
     }
 
     /// apply a state update using incarnation-based conflict resolution.
     /// higher incarnation always wins. at same incarnation: dead > suspect > alive.
     /// if we ourselves are accused, increment incarnation and refute.
     fn applyStateUpdate(self: *Gossip, update: StateUpdate) !void {
-        // self-refutation: if someone says we're suspect or dead, refute it
-        if (update.id == self.self_id) {
-            if (update.state == .suspect or update.state == .dead) {
-                if (update.incarnation >= self.incarnation) {
-                    self.incarnation = update.incarnation +| 1; // saturating add to avoid overflow at u64 max
-                    try self.addPendingUpdate(.{
-                        .id = self.self_id,
-                        .addr = self.self_addr,
-                        .state = .alive,
-                        .incarnation = self.incarnation,
-                    });
-                }
-            }
-            return;
-        }
-
-        const member = self.members.getPtr(update.id) orelse {
-            // unknown member — add it if not dead
-            if (update.state != .dead) {
-                try self.members.put(update.id, .{
-                    .id = update.id,
-                    .addr = update.addr,
-                    .state = update.state,
-                    .incarnation = update.incarnation,
-                    .state_changed_at = self.tick_count,
-                });
-                self.rebuildProbeOrder() catch {};
-                if (update.state == .alive) {
-                    try self.actions.append(self.alloc, .{ .member_alive = .{ .id = update.id } });
-                } else {
-                    try self.actions.append(self.alloc, .{ .member_suspect = .{ .id = update.id } });
-                }
-            }
-            return;
-        };
-
-        // incarnation resolution
-        if (update.incarnation > member.incarnation) {
-            // higher incarnation always wins
-            const old_state = member.state;
-            member.incarnation = update.incarnation;
-            member.state = update.state;
-            member.addr = update.addr;
-            member.state_changed_at = self.tick_count;
-            try self.emitStateChange(update.id, old_state, update.state);
-        } else if (update.incarnation == member.incarnation) {
-            // same incarnation: dead > suspect > alive
-            const update_priority = @intFromEnum(update.state);
-            const current_priority = @intFromEnum(member.state);
-            if (update_priority > current_priority) {
-                const old_state = member.state;
-                member.state = update.state;
-                member.state_changed_at = self.tick_count;
-                try self.emitStateChange(update.id, old_state, update.state);
-            }
-        }
-        // lower incarnation — stale, ignore
+        return state_updates.applyStateUpdate(self, update);
     }
 
     fn emitStateChange(self: *Gossip, id: u64, old: MemberState, new: MemberState) !void {
-        _ = old;
-        switch (new) {
-            .alive => try self.actions.append(self.alloc, .{ .member_alive = .{ .id = id } }),
-            .suspect => try self.actions.append(self.alloc, .{ .member_suspect = .{ .id = id } }),
-            .dead => try self.actions.append(self.alloc, .{ .member_dead = .{ .id = id } }),
-        }
+        return state_updates.emitStateChange(self, id, old, new);
     }
 
-    fn getMemberAddr(self: *Gossip, id: u64) ?MemberAddr {
-        if (self.members.get(id)) |member| {
-            return member.addr;
-        }
-        return null;
+    pub fn getMemberAddr(self: *Gossip, id: u64) ?MemberAddr {
+        return membership_support.getMemberAddr(self, id);
     }
 
-    fn rebuildProbeOrder(self: *Gossip) !void {
-        self.probe_order.clearRetainingCapacity();
-        var iter = self.members.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.state != .dead) {
-                try self.probe_order.append(self.alloc, entry.key_ptr.*);
-            }
-        }
-        // shuffle for fairness
-        const random = self.prng.random();
-        random.shuffle(u64, self.probe_order.items);
-        self.probe_index = 0;
+    pub fn rebuildProbeOrder(self: *Gossip) !void {
+        try membership_support.rebuildProbeOrder(self);
     }
 
     /// collect up to max_piggyback_updates updates to piggyback on a message.
     /// prioritizes dead > suspect > alive updates. decrements remaining counters.
     /// returns a BoundedUpdates stored inline — no heap allocation.
-    fn collectPiggybackUpdates(self: *Gossip) BoundedUpdates {
-        if (self.pending_updates.items.len == 0) {
-            return .{};
-        }
-
-        // sort by priority: dead first (enum value 2), then suspect (1), then alive (0)
-        std.sort.insertion(PendingUpdate, self.pending_updates.items, {}, struct {
-            fn lessThan(_: void, lhs: PendingUpdate, rhs: PendingUpdate) bool {
-                return @intFromEnum(lhs.update.state) > @intFromEnum(rhs.update.state);
-            }
-        }.lessThan);
-
-        const count = @min(max_piggyback_updates, self.pending_updates.items.len);
-        var result: BoundedUpdates = .{};
-        result.len = @intCast(count);
-
-        for (0..count) |i| {
-            result.buf[i] = self.pending_updates.items[i].update;
-            self.pending_updates.items[i].remaining -= 1;
-        }
-
-        // remove expired updates (remaining == 0)
-        var i: usize = 0;
-        while (i < self.pending_updates.items.len) {
-            if (self.pending_updates.items[i].remaining == 0) {
-                _ = self.pending_updates.swapRemove(i);
-            } else {
-                i += 1;
-            }
-        }
-
-        return result;
+    pub fn collectPiggybackUpdates(self: *Gossip) BoundedUpdates {
+        return update_queue.collectPiggybackUpdates(self, BoundedUpdates, max_piggyback_updates);
     }
 
-    fn addPendingUpdate(self: *Gossip, update: StateUpdate) !void {
-        // compute gossip count: ceil(log2(N)) + 1
-        const member_count = self.members.count() + 1; // +1 for self
-        const gossip_count: u8 = @intCast(ceilLog2(member_count) + 1);
-
-        // replace existing update for same id if present
-        for (self.pending_updates.items) |*pending| {
-            if (pending.update.id == update.id) {
-                pending.update = update;
-                pending.remaining = gossip_count;
-                return;
-            }
-        }
-
-        // cap pending updates to avoid unbounded growth during rapid churn.
-        // when full, drop the lowest-priority (alive) update with fewest remaining rounds.
-        const max_pending: usize = 1000;
-        if (self.pending_updates.items.len >= max_pending) {
-            // find lowest-priority entry: lowest state enum, then lowest remaining
-            var worst: usize = 0;
-            for (self.pending_updates.items[1..], 1..) |item, idx| {
-                const worst_entry = self.pending_updates.items[worst];
-                if (@intFromEnum(item.update.state) < @intFromEnum(worst_entry.update.state) or
-                    (@intFromEnum(item.update.state) == @intFromEnum(worst_entry.update.state) and
-                        item.remaining < worst_entry.remaining))
-                {
-                    worst = idx;
-                }
-            }
-            _ = self.pending_updates.swapRemove(worst);
-        }
-
-        try self.pending_updates.append(self.alloc, .{
-            .update = update,
-            .remaining = gossip_count,
-        });
+    pub fn addPendingUpdate(self: *Gossip, update: StateUpdate) !void {
+        return update_queue.addPendingUpdate(self, update);
     }
 
     // --- serialization ---
@@ -682,103 +339,11 @@ pub const Gossip = struct {
     //   StateUpdate: [8B id] [4B ip] [2B port] [1B state] [8B incarnation] = 23B
 
     pub fn encode(buf: []u8, msg: GossipMessage) !usize {
-        var pos: usize = 0;
-
-        switch (msg) {
-            .ping => |p| {
-                const updates = p.updates.slice();
-                if (buf.len < 18 + updates.len * 23) return error.BufferTooSmall;
-                buf[pos] = 0x10;
-                pos += 1;
-                writeU64(buf[pos..], p.from);
-                pos += 8;
-                writeU64(buf[pos..], p.sequence);
-                pos += 8;
-                buf[pos] = @intCast(updates.len);
-                pos += 1;
-                pos = encodeUpdates(buf, pos, updates);
-            },
-            .ping_ack => |p| {
-                const updates = p.updates.slice();
-                if (buf.len < 18 + updates.len * 23) return error.BufferTooSmall;
-                buf[pos] = 0x11;
-                pos += 1;
-                writeU64(buf[pos..], p.from);
-                pos += 8;
-                writeU64(buf[pos..], p.sequence);
-                pos += 8;
-                buf[pos] = @intCast(updates.len);
-                pos += 1;
-                pos = encodeUpdates(buf, pos, updates);
-            },
-            .ping_req => |p| {
-                const updates = p.updates.slice();
-                if (buf.len < 26 + updates.len * 23) return error.BufferTooSmall;
-                buf[pos] = 0x12;
-                pos += 1;
-                writeU64(buf[pos..], p.from);
-                pos += 8;
-                writeU64(buf[pos..], p.target);
-                pos += 8;
-                writeU64(buf[pos..], p.sequence);
-                pos += 8;
-                buf[pos] = @intCast(updates.len);
-                pos += 1;
-                pos = encodeUpdates(buf, pos, updates);
-            },
-        }
-
-        return pos;
+        return codec_support.encode(buf, msg, max_piggyback_updates);
     }
 
     pub fn decode(_: std.mem.Allocator, data: []const u8) !GossipMessage {
-        if (data.len < 1) return error.InvalidMessage;
-        const msg_type = data[0];
-
-        switch (msg_type) {
-            0x10, 0x11 => {
-                if (data.len < 18) return error.InvalidMessage;
-                const from = readU64(data[1..]);
-                const sequence = readU64(data[9..]);
-                const count = data[17];
-                if (count > max_piggyback_updates) return error.InvalidMessage;
-                if (data.len < 18 + @as(usize, count) * 23) return error.InvalidMessage;
-
-                const updates = decodeUpdates(data[18..], count);
-
-                if (msg_type == 0x10) {
-                    return .{ .ping = .{
-                        .from = from,
-                        .sequence = sequence,
-                        .updates = updates,
-                    } };
-                } else {
-                    return .{ .ping_ack = .{
-                        .from = from,
-                        .sequence = sequence,
-                        .updates = updates,
-                    } };
-                }
-            },
-            0x12 => {
-                if (data.len < 26) return error.InvalidMessage;
-                const from = readU64(data[1..]);
-                const target = readU64(data[9..]);
-                const sequence = readU64(data[17..]);
-                const count = data[25];
-                if (count > max_piggyback_updates) return error.InvalidMessage;
-                if (data.len < 26 + @as(usize, count) * 23) return error.InvalidMessage;
-
-                const updates = decodeUpdates(data[26..], count);
-                return .{ .ping_req = .{
-                    .from = from,
-                    .target = target,
-                    .sequence = sequence,
-                    .updates = updates,
-                } };
-            },
-            else => return error.InvalidMessage,
-        }
+        return codec_support.decode(data, GossipMessage, BoundedUpdates, MemberState, max_piggyback_updates);
     }
 
     /// no-op — updates are stored inline, no heap memory to free.
@@ -786,50 +351,19 @@ pub const Gossip = struct {
     pub fn freeDecoded(_: std.mem.Allocator, _: GossipMessage) void {}
 
     fn encodeUpdates(buf: []u8, start: usize, updates: []const StateUpdate) usize {
-        var pos = start;
-        for (updates) |u| {
-            writeU64(buf[pos..], u.id);
-            pos += 8;
-            @memcpy(buf[pos..][0..4], &u.addr.ip);
-            pos += 4;
-            buf[pos] = @intCast(u.addr.port & 0xFF);
-            buf[pos + 1] = @intCast((u.addr.port >> 8) & 0xFF);
-            pos += 2;
-            buf[pos] = @intFromEnum(u.state);
-            pos += 1;
-            writeU64(buf[pos..], u.incarnation);
-            pos += 8;
-        }
-        return pos;
+        return codec_support.encodeUpdates(buf, start, updates);
     }
 
     fn decodeUpdates(data: []const u8, count: u8) BoundedUpdates {
-        var result: BoundedUpdates = .{};
-        result.len = count;
-
-        var pos: usize = 0;
-        for (0..count) |i| {
-            result.buf[i] = .{
-                .id = readU64(data[pos..]),
-                .addr = .{
-                    .ip = data[pos + 8 ..][0..4].*,
-                    .port = @as(u16, data[pos + 12]) | (@as(u16, data[pos + 13]) << 8),
-                },
-                .state = std.meta.intToEnum(MemberState, data[pos + 14]) catch return .{},
-                .incarnation = readU64(data[pos + 15 ..]),
-            };
-            pos += 23;
-        }
-
-        return result;
+        return codec_support.decodeUpdates(data, count, BoundedUpdates, MemberState);
     }
 
     fn writeU64(buf: []u8, val: u64) void {
-        buf[0..8].* = @bitCast(val);
+        codec_support.writeU64(buf, val);
     }
 
     fn readU64(buf: []const u8) u64 {
-        return @bitCast(buf[0..8].*);
+        return codec_support.readU64(buf);
     }
 };
 

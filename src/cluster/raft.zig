@@ -18,9 +18,12 @@
 //   // process actions (send messages, apply committed entries)
 
 const std = @import("std");
+const election_runtime = @import("raft/election_runtime.zig");
 const types = @import("raft_types.zig");
+const replication_runtime = @import("raft/replication_runtime.zig");
 const persistent_log = @import("log.zig");
 const logger = @import("../lib/log.zig");
+const snapshot_runtime = @import("raft/snapshot_runtime.zig");
 
 const NodeId = types.NodeId;
 const Term = types.Term;
@@ -148,129 +151,17 @@ pub const Raft = struct {
     /// call periodically (every ~100ms). drives election timeouts
     /// and heartbeats.
     pub fn tick(self: *Raft) void {
-        self.ticks_since_event += 1;
-
-        switch (self.role) {
-            .follower, .candidate => {
-                if (self.ticks_since_event >= self.election_timeout) {
-                    self.startElection();
-                }
-            },
-            .leader => {
-                self.heartbeat_ticks += 1;
-                if (self.heartbeat_ticks >= heartbeat_interval) {
-                    self.sendHeartbeats();
-                    self.heartbeat_ticks = 0;
-                }
-            },
-        }
+        election_runtime.tick(self, heartbeat_interval, min_election_ticks, max_election_ticks);
     }
 
     // -- RPC handlers --
 
     pub fn handleRequestVote(self: *Raft, args: RequestVoteArgs) RequestVoteReply {
-        const current_term = self.log.getCurrentTerm();
-
-        // reject if candidate's term is behind ours
-        if (args.term < current_term) {
-            return .{ .term = current_term, .vote_granted = false };
-        }
-
-        // step down if we see a higher term
-        if (args.term > current_term) {
-            self.stepDown(args.term);
-        }
-
-        const voted_for = self.log.getVotedFor();
-        const can_vote = voted_for == null or voted_for.? == args.candidate_id;
-
-        // only grant vote if candidate's log is at least as up-to-date
-        const our_last_term = self.log.lastTerm();
-        const our_last_index = self.log.lastIndex();
-        const log_ok = (args.last_log_term > our_last_term) or
-            (args.last_log_term == our_last_term and args.last_log_index >= our_last_index);
-
-        if (can_vote and log_ok) {
-            self.log.setVotedFor(args.candidate_id);
-            self.ticks_since_event = 0;
-            return .{ .term = self.log.getCurrentTerm(), .vote_granted = true };
-        }
-
-        return .{ .term = self.log.getCurrentTerm(), .vote_granted = false };
+        return election_runtime.handleRequestVote(self, args, min_election_ticks, max_election_ticks);
     }
 
     pub fn handleAppendEntries(self: *Raft, args: AppendEntriesArgs) AppendEntriesReply {
-        const current_term = self.log.getCurrentTerm();
-
-        // reject if leader's term is behind ours
-        if (args.term < current_term) {
-            return .{ .term = current_term, .success = false, .match_index = 0 };
-        }
-
-        // step down if we see a higher or equal term from a leader
-        if (args.term >= current_term) {
-            if (args.term > current_term) {
-                self.stepDown(args.term);
-            } else if (self.role == .candidate) {
-                // another node won the election in our term
-                self.role = .follower;
-                self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch |e| {
-                    logger.warn("raft: failed to queue become_follower action: {}", .{e});
-                };
-            }
-            self.ticks_since_event = 0;
-        }
-
-        // consistency check: verify we have the entry at prev_log_index
-        // with the matching term
-        if (args.prev_log_index > 0) {
-            const prev_term = self.log.termAt(args.prev_log_index);
-            if (prev_term == 0 or prev_term != args.prev_log_term) {
-                return .{
-                    .term = self.log.getCurrentTerm(),
-                    .success = false,
-                    .match_index = 0,
-                };
-            }
-        }
-
-        // append entries, handling conflicts
-        for (args.entries) |entry| {
-            const existing_term = self.log.termAt(entry.index);
-            if (existing_term != 0 and existing_term != entry.term) {
-                // conflict: delete this entry and everything after
-                self.log.truncateFrom(entry.index);
-            }
-            if (existing_term == 0 or existing_term != entry.term) {
-                self.log.append(entry) catch {
-                    return .{
-                        .term = self.log.getCurrentTerm(),
-                        .success = false,
-                        .match_index = 0,
-                    };
-                };
-            }
-        }
-
-        // advance commit index
-        if (args.leader_commit > self.commit_index) {
-            const last = self.log.lastIndex();
-            const new_commit = @min(args.leader_commit, last);
-            if (new_commit > self.commit_index) {
-                self.commit_index = new_commit;
-                self.actions.append(self.alloc, .{
-                    .commit_entries = .{ .up_to = new_commit },
-                }) catch |e| {
-                    logger.warn("raft: failed to queue commit action: {}", .{e});
-                };
-            }
-        }
-
-        return .{
-            .term = self.log.getCurrentTerm(),
-            .success = true,
-            .match_index = self.log.lastIndex(),
-        };
+        return replication_runtime.handleAppendEntries(self, args, min_election_ticks, max_election_ticks);
     }
 
     /// handle an InstallSnapshot RPC from the leader.
@@ -285,114 +176,22 @@ pub const Raft = struct {
     /// 3. queues an apply_snapshot action for the caller to process
     /// 4. updates commit_index and snapshot_meta
     pub fn handleInstallSnapshot(self: *Raft, args: InstallSnapshotArgs) InstallSnapshotReply {
-        const current_term = self.log.getCurrentTerm();
-
-        // reject if leader's term is behind ours
-        if (args.term < current_term) {
-            return .{ .term = current_term };
-        }
-
-        // step down if we see a higher term
-        if (args.term > current_term) {
-            self.stepDown(args.term);
-        }
-
-        self.ticks_since_event = 0;
-
-        // if the snapshot is not more recent than what we have, ignore it
-        if (args.last_included_index <= self.commit_index) {
-            return .{ .term = self.log.getCurrentTerm() };
-        }
-
-        // queue the snapshot for the caller to apply.
-        // the caller (node.zig) will:
-        //   1. restore the state machine from the snapshot data
-        //   2. update the log's snapshot metadata
-        //   3. truncate the log up to last_included_index
-        const meta = SnapshotMeta{
-            .last_included_index = args.last_included_index,
-            .last_included_term = args.last_included_term,
-            .data_len = @intCast(args.data.len),
-        };
-
-        self.actions.append(self.alloc, .{
-            .apply_snapshot = .{
-                .data = args.data,
-                .meta = meta,
-            },
-        }) catch |e| {
-            logger.warn("raft: failed to queue apply_snapshot action: {}", .{e});
-        };
-
-        // update our state
-        self.snapshot_meta = meta;
-        self.commit_index = args.last_included_index;
-        self.last_applied = args.last_included_index;
-
-        return .{ .term = self.log.getCurrentTerm() };
+        return snapshot_runtime.handleInstallSnapshot(self, args, min_election_ticks, max_election_ticks);
     }
 
     pub fn handleRequestVoteReply(self: *Raft, from: NodeId, reply: RequestVoteReply) void {
-        _ = from;
-        if (self.role != .candidate) return;
-
-        if (reply.term > self.log.getCurrentTerm()) {
-            self.stepDown(reply.term);
-            return;
-        }
-
-        if (reply.vote_granted) {
-            self.votes_received += 1;
-            const quorum = (self.peers.len + 1) / 2 + 1;
-            if (self.votes_received >= quorum) {
-                self.becomeLeader();
-            }
-        }
+        election_runtime.handleRequestVoteReply(self, from, reply, min_election_ticks, max_election_ticks);
     }
 
     pub fn handleAppendEntriesReply(self: *Raft, from: NodeId, reply: AppendEntriesReply) void {
-        if (self.role != .leader) return;
-
-        if (reply.term > self.log.getCurrentTerm()) {
-            self.stepDown(reply.term);
-            return;
-        }
-
-        const peer_idx = self.peerIndex(from) orelse return;
-
-        if (reply.success) {
-            self.match_index[peer_idx] = reply.match_index;
-            self.next_index[peer_idx] = reply.match_index + 1;
-            self.advanceCommitIndex();
-        } else {
-            // decrement next_index and retry
-            if (self.next_index[peer_idx] > 1) {
-                self.next_index[peer_idx] -= 1;
-            }
-            self.sendAppendEntries(peer_idx);
-        }
+        replication_runtime.handleAppendEntriesReply(self, from, reply, min_election_ticks, max_election_ticks);
     }
 
     /// handle a reply to our InstallSnapshot RPC.
     /// if the follower's term is higher, step down. otherwise,
     /// update next_index and match_index for that peer.
     pub fn handleInstallSnapshotReply(self: *Raft, from: NodeId, reply: InstallSnapshotReply) void {
-        if (self.role != .leader) return;
-
-        if (reply.term > self.log.getCurrentTerm()) {
-            self.stepDown(reply.term);
-            return;
-        }
-
-        const peer_idx = self.peerIndex(from) orelse return;
-
-        // the follower accepted the snapshot. update tracking to
-        // the snapshot's last_included_index so the next heartbeat
-        // sends entries from that point forward.
-        if (self.snapshot_meta) |meta| {
-            self.match_index[peer_idx] = meta.last_included_index;
-            self.next_index[peer_idx] = meta.last_included_index + 1;
-        }
+        snapshot_runtime.handleInstallSnapshotReply(self, from, reply, min_election_ticks, max_election_ticks);
     }
 
     /// submit a new command through the leader.
@@ -433,8 +232,7 @@ pub const Raft = struct {
     /// in-memory snapshot metadata so the leader knows it can send
     /// snapshots to lagging followers.
     pub fn onSnapshotComplete(self: *Raft, meta: SnapshotMeta) void {
-        self.snapshot_meta = meta;
-        self.log.setSnapshotMeta(meta);
+        snapshot_runtime.onSnapshotComplete(self, meta);
     }
 
     /// graceful leader step-down for rolling upgrades.
@@ -451,22 +249,7 @@ pub const Raft = struct {
     /// returns true if the node was leader and stepped down,
     /// false if the node was not leader.
     pub fn transferLeadership(self: *Raft) bool {
-        if (self.role != .leader) return false;
-
-        const new_term = self.log.getCurrentTerm() + 1;
-        logger.info("raft: leader {d} stepping down, advancing to term {d}", .{ self.id, new_term });
-
-        // send a final heartbeat with the new term so followers
-        // immediately know to start an election
-        self.stepDown(new_term);
-
-        self.actions.append(self.alloc, .{
-            .become_follower = .{ .leader_id = 0 },
-        }) catch |e| {
-            logger.warn("raft: failed to queue become_follower action during transfer: {}", .{e});
-        };
-
-        return true;
+        return election_runtime.transferLeadership(self, min_election_ticks, max_election_ticks);
     }
 
     /// returns the protocol version for version negotiation during
@@ -479,189 +262,42 @@ pub const Raft = struct {
     // -- internal --
 
     fn startElection(self: *Raft) void {
-        const new_term = self.log.getCurrentTerm() + 1;
-        self.log.setCurrentTerm(new_term);
-        self.log.setVotedFor(self.id);
-        self.role = .candidate;
-        self.votes_received = 1; // vote for self
-        self.ticks_since_event = 0;
-        self.resetElectionTimeout();
-
-        // single-node cluster: become leader immediately
-        if (self.peers.len == 0) {
-            self.becomeLeader();
-            return;
-        }
-
-        const last_index = self.log.lastIndex();
-        const last_term = self.log.lastTerm();
-
-        for (self.peers) |peer| {
-            self.actions.append(self.alloc, .{
-                .send_request_vote = .{
-                    .target = peer,
-                    .args = .{
-                        .term = new_term,
-                        .candidate_id = self.id,
-                        .last_log_index = last_index,
-                        .last_log_term = last_term,
-                    },
-                },
-            }) catch |e| {
-                logger.warn("raft: failed to queue vote request: {}", .{e});
-            };
-        }
+        election_runtime.startElection(self, min_election_ticks, max_election_ticks);
     }
 
     fn becomeLeader(self: *Raft) void {
-        self.role = .leader;
-        self.heartbeat_ticks = 0;
-
-        // reinitialize leader state
-        const last = self.log.lastIndex();
-        for (0..self.peers.len) |i| {
-            self.next_index[i] = last + 1;
-            self.match_index[i] = 0;
-        }
-
-        self.actions.append(self.alloc, .become_leader) catch |e| {
-            logger.warn("raft: failed to queue become_leader action: {}", .{e});
-        };
-
-        // send initial empty append entries (heartbeat) to assert leadership
-        self.sendHeartbeats();
+        election_runtime.becomeLeader(self);
     }
 
     fn stepDown(self: *Raft, new_term: Term) void {
-        self.log.setCurrentTerm(new_term);
-        self.log.setVotedFor(null);
-        self.role = .follower;
-        self.ticks_since_event = 0;
-        self.resetElectionTimeout();
+        election_runtime.stepDown(self, new_term, min_election_ticks, max_election_ticks);
     }
 
     fn sendHeartbeats(self: *Raft) void {
-        for (0..self.peers.len) |i| {
-            self.sendAppendEntries(i);
-        }
+        replication_runtime.sendHeartbeats(self);
     }
 
     fn sendAppendEntries(self: *Raft, peer_idx: usize) void {
-        const next = self.next_index[peer_idx];
-        const prev_index = if (next > 0) next - 1 else 0;
-        const prev_term = self.log.termAt(prev_index);
-
-        // if the previous entry has been compacted away (term is 0 for an
-        // index that should exist), and we have a snapshot, send the snapshot
-        // instead of append entries. this happens when a follower is so far
-        // behind that the leader has already truncated the needed entries.
-        if (prev_index > 0 and prev_term == 0) {
-            if (self.snapshot_meta) |meta| {
-                if (prev_index <= meta.last_included_index) {
-                    self.sendInstallSnapshot(peer_idx, meta);
-                    return;
-                }
-            }
-        }
-
-        const last = self.log.lastIndex();
-
-        // gather entries to send (from next_index to end of log)
-        var entries_buf: [64]LogEntry = undefined;
-        var count: usize = 0;
-        if (next <= last) {
-            var idx = next;
-            while (idx <= last and count < entries_buf.len) : (idx += 1) {
-                const alloc = self.alloc;
-                if (self.log.getEntry(alloc, idx) catch null) |entry| {
-                    entries_buf[count] = entry;
-                    count += 1;
-                }
-            }
-        }
-
-        self.actions.append(self.alloc, .{
-            .send_append_entries = .{
-                .target = self.peers[peer_idx],
-                .args = .{
-                    .term = self.log.getCurrentTerm(),
-                    .leader_id = self.id,
-                    .prev_log_index = prev_index,
-                    .prev_log_term = prev_term,
-                    .entries = if (count > 0) self.alloc.dupe(LogEntry, entries_buf[0..count]) catch {
-                        logger.warn("raft: failed to allocate entries for append_entries to node {}", .{self.peers[peer_idx]});
-                        return;
-                    } else &.{},
-                    .leader_commit = self.commit_index,
-                },
-            },
-        }) catch |e| {
-            logger.warn("raft: failed to queue append entries: {}", .{e});
-        };
+        replication_runtime.sendAppendEntries(self, peer_idx);
     }
 
     /// queue an InstallSnapshot action for a lagging peer.
     /// the actual snapshot data loading happens in node.zig when
     /// it processes this action — the raft module stays I/O-free.
     fn sendInstallSnapshot(self: *Raft, peer_idx: usize, meta: SnapshotMeta) void {
-        // we produce the action with empty data here. the caller (node.zig)
-        // is responsible for reading the snapshot file and filling in the data
-        // before sending it over the wire. this keeps the raft module pure.
-        self.actions.append(self.alloc, .{
-            .send_install_snapshot = .{
-                .target = self.peers[peer_idx],
-                .args = .{
-                    .term = self.log.getCurrentTerm(),
-                    .leader_id = self.id,
-                    .last_included_index = meta.last_included_index,
-                    .last_included_term = meta.last_included_term,
-                    .data = @constCast(&.{}), // filled by node.zig
-                },
-            },
-        }) catch |e| {
-            logger.warn("raft: failed to queue install snapshot: {}", .{e});
-        };
+        snapshot_runtime.sendInstallSnapshot(self, peer_idx, meta);
     }
 
     fn advanceCommitIndex(self: *Raft) void {
-        // find the highest N such that a majority of match_index[i] >= N
-        // and log[N].term == currentTerm
-        const current_term = self.log.getCurrentTerm();
-        const last = self.log.lastIndex();
-
-        var candidate_index = last;
-        while (candidate_index > self.commit_index and candidate_index > 0) : (candidate_index -= 1) {
-            if (self.log.termAt(candidate_index) != current_term) continue;
-
-            // count peers with match_index >= candidate_index (including self)
-            var count: usize = 1; // self
-            for (self.match_index) |mi| {
-                if (mi >= candidate_index) count += 1;
-            }
-
-            const quorum = (self.peers.len + 1) / 2 + 1;
-            if (count >= quorum) {
-                self.commit_index = candidate_index;
-                self.actions.append(self.alloc, .{
-                    .commit_entries = .{ .up_to = candidate_index },
-                }) catch |e| {
-                    logger.warn("raft: failed to queue commit action: {}", .{e});
-                };
-                break;
-            }
-        }
+        replication_runtime.advanceCommitIndex(self);
     }
 
     fn peerIndex(self: *Raft, id: NodeId) ?usize {
-        for (self.peers, 0..) |peer, i| {
-            if (peer == id) return i;
-        }
-        return null;
+        return replication_runtime.peerIndex(self, id);
     }
 
     fn resetElectionTimeout(self: *Raft) void {
-        const range = max_election_ticks - min_election_ticks;
-        self.election_timeout = min_election_ticks + self.rng.random().intRangeAtMost(u32, 0, range);
+        election_runtime.resetElectionTimeout(self, min_election_ticks, max_election_ticks);
     }
 
     /// get current term (convenience for external callers)
