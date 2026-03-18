@@ -22,8 +22,10 @@ const sqlite = @import("sqlite");
 const types = @import("raft_types.zig");
 const schema = @import("../state/schema.zig");
 const log = @import("../lib/log.zig");
+const apply_runtime = @import("state_machine/apply_runtime.zig");
+const snapshot_support = @import("state_machine/snapshot_support.zig");
+const sql_guard = @import("state_machine/sql_guard.zig");
 
-const c = sqlite.c;
 const LogEntry = types.LogEntry;
 const LogIndex = types.LogIndex;
 const SnapshotMeta = types.SnapshotMeta;
@@ -33,27 +35,9 @@ pub const StateMachineError = error{
     DbOpenFailed,
 };
 
-pub const SnapshotError = error{
-    /// the SQLite Online Backup API (sqlite3_backup_init/step/finish) failed
-    BackupFailed,
-    /// could not read or write the snapshot file on disk
-    IoError,
-    /// snapshot data is too short to contain the required header
-    InvalidSnapshot,
-    /// snapshot header claims more sqlite data than the file contains
-    CorruptSnapshot,
-};
-
-// snapshot file format:
-//   [8 bytes] last_included_index (little-endian)
-//   [8 bytes] last_included_term  (little-endian)
-//   [8 bytes] sqlite_data_len     (little-endian)
-//   [N bytes] raw sqlite database
-const snapshot_header_size = 24;
-
-// maximum snapshot size — matches transport's max_receive_size (64MB).
-// cluster metadata databases are small, so this is generous.
-const max_snapshot_size: u64 = 64 * 1024 * 1024;
+pub const SnapshotError = snapshot_support.SnapshotError;
+const snapshot_header_size = snapshot_support.snapshot_header_size;
+const max_snapshot_size = snapshot_support.max_snapshot_size;
 
 pub const StateMachine = struct {
     db: sqlite.Db,
@@ -98,212 +82,29 @@ pub const StateMachine = struct {
         self.db.deinit();
     }
 
-    /// apply a committed log entry by executing its data as SQL.
-    /// entries must be applied in order; skips if already applied.
-    ///
-    /// always advances last_applied, even if the SQL fails or is
-    /// rejected by the allowlist. a committed entry is "applied"
-    /// regardless — skipping bad entries prevents one malformed
-    /// entry from blocking all subsequent entries across the
-    /// entire cluster.
-    ///
-    /// security: only statements matching the SQL allowlist are
-    /// executed. this prevents a compromised raft peer from
-    /// injecting arbitrary SQL (DROP TABLE, ATTACH DATABASE, etc.)
-    /// into the replicated state machine.
     pub fn apply(self: *StateMachine, entry: LogEntry) void {
-        if (entry.index <= self.last_applied) return;
-
-        if (!isAllowedStatement(entry.data)) {
-            log.warn("state machine: rejected disallowed SQL at entry {d}", .{entry.index});
-            self.last_applied = entry.index;
-            return;
-        }
-
-        self.db.execDynamic(entry.data, .{}, .{}) catch |err| {
-            // log at err level — a failed apply means this node's state may
-            // diverge from peers that succeeded. we can't retry because raft
-            // requires deterministic apply order (retrying would re-order
-            // entries relative to subsequent ones). the entry is still marked
-            // applied below to prevent the state machine from stalling.
-            log.err("state machine: failed to apply entry {d}: {}", .{ entry.index, err });
-        };
-        self.last_applied = entry.index;
+        apply_runtime.apply(self, entry);
     }
 
-    /// apply all entries up to the given index.
     pub fn applyUpTo(
         self: *StateMachine,
         raft_log: *@import("log.zig").Log,
         alloc: std.mem.Allocator,
         up_to: LogIndex,
     ) void {
-        var idx = self.last_applied + 1;
-        while (idx <= up_to) : (idx += 1) {
-            const entry = (raft_log.getEntry(alloc, idx) catch {
-                log.warn("state_machine: failed to read log entry {d}, skipping", .{idx});
-                continue;
-            }) orelse continue;
-            defer alloc.free(entry.data);
-            self.apply(entry);
-        }
+        apply_runtime.applyUpTo(self, raft_log, alloc, up_to);
     }
 
-    /// create a snapshot of the current database state.
-    ///
-    /// uses the SQLite Online Backup API (sqlite3_backup_init/step/finish)
-    /// which is safe to call while the database is being written to.
-    /// the backup captures a consistent point-in-time snapshot.
-    ///
-    /// writes a snapshot file at dest_path with format:
-    ///   [8B index][8B term][8B data_len][sqlite bytes]
     pub fn takeSnapshot(self: *StateMachine, dest_path: []const u8, meta: SnapshotMeta) SnapshotError!void {
-        // open a new sqlite database at a temporary path for the backup
-        var tmp_path_buf: [512]u8 = undefined;
-        const tmp_path = bufPrintZ(&tmp_path_buf, "{s}.tmp", .{dest_path}) orelse
-            return SnapshotError.IoError;
-
-        // open destination database
-        var dest_db: ?*c.sqlite3 = null;
-        const open_rc = c.sqlite3_open(tmp_path.ptr, &dest_db);
-        if (open_rc != c.SQLITE_OK or dest_db == null) {
-            if (dest_db) |db| _ = c.sqlite3_close(db);
-            return SnapshotError.BackupFailed;
-        }
-        defer _ = c.sqlite3_close(dest_db);
-
-        // use the backup API to copy self.db -> dest_db
-        const backup = c.sqlite3_backup_init(dest_db, "main", self.db.db, "main");
-        if (backup == null) {
-            return SnapshotError.BackupFailed;
-        }
-
-        // step with -1 copies the entire database in one go.
-        // for very large databases you could step in pages, but our state
-        // machine databases are small (cluster metadata).
-        const step_rc = c.sqlite3_backup_step(backup, -1);
-        const finish_rc = c.sqlite3_backup_finish(backup);
-
-        if (step_rc != c.SQLITE_DONE) {
-            return SnapshotError.BackupFailed;
-        }
-        if (finish_rc != c.SQLITE_OK) {
-            return SnapshotError.BackupFailed;
-        }
-
-        // now read the temporary sqlite file and write the snapshot file
-        // with our header prepended
-        const tmp_data = std.fs.cwd().readFileAlloc(
-            std.heap.page_allocator,
-            tmp_path,
-            64 * 1024 * 1024, // 64MB max — plenty for cluster metadata
-        ) catch return SnapshotError.IoError;
-        defer std.heap.page_allocator.free(tmp_data);
-
-        // write the snapshot file: header + sqlite bytes
-        const file = std.fs.cwd().createFile(dest_path, .{}) catch
-            return SnapshotError.IoError;
-        defer file.close();
-
-        var header: [snapshot_header_size]u8 = undefined;
-        std.mem.writeInt(u64, header[0..8], meta.last_included_index, .little);
-        std.mem.writeInt(u64, header[8..16], meta.last_included_term, .little);
-        std.mem.writeInt(u64, header[16..24], @intCast(tmp_data.len), .little);
-
-        file.writeAll(&header) catch return SnapshotError.IoError;
-        file.writeAll(tmp_data) catch return SnapshotError.IoError;
-
-        // clean up the temporary sqlite file
-        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return snapshot_support.takeSnapshot(self, dest_path, meta);
     }
 
-    /// restore the state machine from a snapshot file.
-    ///
-    /// reads the snapshot header, then uses the SQLite Backup API to
-    /// copy the snapshot's database into the live state machine database.
-    /// after restoration, last_applied is set to the snapshot's index.
-    ///
-    /// returns the snapshot metadata so the caller can update the raft log.
     pub fn restoreFromSnapshot(self: *StateMachine, src_path: []const u8) SnapshotError!SnapshotMeta {
-        // read the snapshot file
-        const data = std.fs.cwd().readFileAlloc(
-            std.heap.page_allocator,
-            src_path,
-            64 * 1024 * 1024,
-        ) catch return SnapshotError.IoError;
-        defer std.heap.page_allocator.free(data);
-
-        return self.restoreFromBytes(data);
+        return snapshot_support.restoreFromSnapshot(self, src_path);
     }
 
-    /// restore from snapshot bytes (header + sqlite data).
-    /// useful when receiving a snapshot over the network.
     pub fn restoreFromBytes(self: *StateMachine, data: []const u8) SnapshotError!SnapshotMeta {
-        if (data.len < snapshot_header_size) return SnapshotError.InvalidSnapshot;
-
-        // parse header
-        const last_included_index = std.mem.readInt(u64, data[0..8], .little);
-        const last_included_term = std.mem.readInt(u64, data[8..16], .little);
-        const sqlite_data_len = std.mem.readInt(u64, data[16..24], .little);
-
-        // validate snapshot size before allocating or processing
-        if (sqlite_data_len > max_snapshot_size) return SnapshotError.InvalidSnapshot;
-
-        // exact match — the snapshot should contain exactly the header + sqlite data.
-        // a `<` check would accept trailing garbage which could mask corruption.
-        if (data.len != snapshot_header_size + sqlite_data_len) return SnapshotError.CorruptSnapshot;
-
-        const sqlite_data = data[snapshot_header_size .. snapshot_header_size + sqlite_data_len];
-
-        // write sqlite data to a temporary file so we can open it as a database
-        var tmp_path_buf: [64]u8 = undefined;
-        const tmp_path = bufPrintZ(&tmp_path_buf, "/tmp/yoq_snap_restore_{d}.db", .{
-            @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
-        }) orelse return SnapshotError.IoError;
-
-        // write the sqlite bytes to the temp file
-        const tmp_file = std.fs.cwd().createFile(tmp_path, .{}) catch
-            return SnapshotError.IoError;
-        tmp_file.writeAll(sqlite_data) catch {
-            tmp_file.close();
-            return SnapshotError.IoError;
-        };
-        tmp_file.close();
-        defer std.fs.cwd().deleteFile(tmp_path) catch {};
-
-        // open the temp database
-        var src_db: ?*c.sqlite3 = null;
-        const open_rc = c.sqlite3_open(tmp_path.ptr, &src_db);
-        if (open_rc != c.SQLITE_OK or src_db == null) {
-            if (src_db) |db| _ = c.sqlite3_close(db);
-            return SnapshotError.BackupFailed;
-        }
-        defer _ = c.sqlite3_close(src_db);
-
-        // use backup API to copy src_db -> self.db (reverse direction)
-        const backup = c.sqlite3_backup_init(self.db.db, "main", src_db, "main");
-        if (backup == null) {
-            return SnapshotError.BackupFailed;
-        }
-
-        const step_rc = c.sqlite3_backup_step(backup, -1);
-        const finish_rc = c.sqlite3_backup_finish(backup);
-
-        if (step_rc != c.SQLITE_DONE) {
-            return SnapshotError.BackupFailed;
-        }
-        if (finish_rc != c.SQLITE_OK) {
-            return SnapshotError.BackupFailed;
-        }
-
-        const meta = SnapshotMeta{
-            .last_included_index = last_included_index,
-            .last_included_term = last_included_term,
-            .data_len = sqlite_data_len,
-        };
-
-        self.last_applied = last_included_index;
-        return meta;
+        return snapshot_support.restoreFromBytes(self, data);
     }
 };
 
@@ -319,128 +120,13 @@ pub const StateMachine = struct {
 ///   - INSERT/UPDATE/DELETE on agents, assignments, and wireguard_peers tables
 ///   - CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS for schema init
 pub fn isAllowedStatement(sql: []const u8) bool {
-    var scanner = SqlStatementScanner{ .sql = sql };
-    var saw_statement = false;
-
-    while (scanner.next()) |statement| {
-        saw_statement = true;
-        if (!isAllowedSingleStatement(statement)) return false;
-    }
-
-    return saw_statement and scanner.isValid();
+    return sql_guard.isAllowedStatement(sql);
 }
-
-fn isAllowedSingleStatement(sql: []const u8) bool {
-    const allowed_prefixes = [_][]const u8{
-        // agents table — registry.zig: registerSql, heartbeatSql, drainSql, markOfflineSql
-        "INSERT INTO agents ",
-        "UPDATE agents SET ",
-        "DELETE FROM agents ",
-        // assignments table — scheduler.zig: assignmentSql, registry.zig: updateAssignmentStatusSql,
-        // orphanAssignmentsSql, reassignSql, deleteAgentAssignmentsSql
-        "INSERT INTO assignments ",
-        "UPDATE assignments SET ",
-        "DELETE FROM assignments ",
-        // wireguard_peers table — registry.zig: addWireguardPeerSql, removeWireguardPeerSql
-        "INSERT INTO wireguard_peers ",
-        "UPDATE wireguard_peers SET ",
-        "DELETE FROM wireguard_peers ",
-        // volumes table — volumes.zig: create, destroy
-        "INSERT INTO volumes ",
-        "UPDATE volumes SET ",
-        "DELETE FROM volumes ",
-        // s3_multipart_uploads and s3_upload_parts tables — s3.zig
-        "INSERT INTO s3_multipart_uploads ",
-        "UPDATE s3_multipart_uploads SET ",
-        "DELETE FROM s3_multipart_uploads ",
-        "INSERT INTO s3_upload_parts ",
-        "DELETE FROM s3_upload_parts ",
-        // schema initialization — schema.zig: CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS
-        "CREATE TABLE IF NOT EXISTS ",
-        "CREATE INDEX IF NOT EXISTS ",
-    };
-
-    for (allowed_prefixes) |prefix| {
-        if (sql.len >= prefix.len and std.mem.eql(u8, sql[0..prefix.len], prefix)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-const SqlStatementScanner = struct {
-    sql: []const u8,
-    pos: usize = 0,
-    valid: bool = true,
-
-    fn next(self: *SqlStatementScanner) ?[]const u8 {
-        while (self.pos < self.sql.len and std.ascii.isWhitespace(self.sql[self.pos])) {
-            self.pos += 1;
-        }
-        if (self.pos >= self.sql.len or !self.valid) return null;
-
-        const start = self.pos;
-        var in_quote = false;
-
-        while (self.pos < self.sql.len) : (self.pos += 1) {
-            const ch = self.sql[self.pos];
-
-            if (ch == '\'') {
-                if (in_quote and self.pos + 1 < self.sql.len and self.sql[self.pos + 1] == '\'') {
-                    self.pos += 1;
-                    continue;
-                }
-                in_quote = !in_quote;
-                continue;
-            }
-
-            if (!in_quote and ch == ';') {
-                const statement = std.mem.trim(u8, self.sql[start..self.pos], " \t\r\n");
-                self.pos += 1;
-                return if (statement.len == 0) self.next() else statement;
-            }
-        }
-
-        if (in_quote) {
-            self.valid = false;
-            return null;
-        }
-
-        const statement = std.mem.trim(u8, self.sql[start..self.pos], " \t\r\n");
-        return if (statement.len == 0) null else statement;
-    }
-
-    fn isValid(self: *const SqlStatementScanner) bool {
-        return self.valid;
-    }
-};
 
 /// read snapshot metadata from a snapshot file without loading the full database.
 /// useful for checking what a snapshot contains before deciding to restore it.
 pub fn readSnapshotMeta(path: []const u8) SnapshotError!SnapshotMeta {
-    const file = std.fs.cwd().openFile(path, .{}) catch
-        return SnapshotError.IoError;
-    defer file.close();
-
-    var header: [snapshot_header_size]u8 = undefined;
-    const bytes_read = file.readAll(&header) catch return SnapshotError.IoError;
-    if (bytes_read < snapshot_header_size) return SnapshotError.InvalidSnapshot;
-
-    return SnapshotMeta{
-        .last_included_index = std.mem.readInt(u64, header[0..8], .little),
-        .last_included_term = std.mem.readInt(u64, header[8..16], .little),
-        .data_len = std.mem.readInt(u64, header[16..24], .little),
-    };
-}
-
-/// format a string into a buffer and null-terminate it.
-/// returns null if the formatted string doesn't fit (needs room for the NUL).
-fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) ?[:0]const u8 {
-    const slice = std.fmt.bufPrint(buf, fmt, args) catch return null;
-    if (slice.len >= buf.len) return null;
-    buf[slice.len] = 0;
-    return buf[0..slice.len :0];
+    return snapshot_support.readSnapshotMeta(path);
 }
 
 // -- tests --

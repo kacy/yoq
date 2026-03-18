@@ -1,42 +1,21 @@
-// transport — TCP transport for raft RPC messages
+// transport — TCP and UDP transport for raft and gossip traffic.
 //
-// simple binary protocol over TCP. raft is management-plane traffic
-// (low volume heartbeats + occasional log entries) so blocking TCP
-// with short timeouts is fine — no need for io_uring here.
-//
-// wire format (unauthenticated):
-//   [4B length] [1B type] [payload...]
-//
-// wire format (authenticated, when shared_key is set):
-//   [4B length] [8B sender_id] [32B HMAC-SHA256] [1B type] [payload...]
-//
-// the HMAC is computed over [sender_id + type byte + payload]. the 32-byte
-// tag is inserted after sender_id. the length prefix covers sender_id + hmac
-// + type + payload. on receive, the HMAC is verified and sender_id must match
-// the configured peer for the remote socket address.
-//
-// message types:
-//   0x01 = RequestVote
-//   0x02 = RequestVoteReply
-//   0x03 = AppendEntries
-//   0x04 = AppendEntriesReply
-//   0x05 = InstallSnapshot
-//   0x06 = InstallSnapshotReply
-//
-// all integers are little-endian. entries in AppendEntries are
-// serialized inline: [8B index][8B term][4B data_len][data bytes]
-//
-// InstallSnapshot payloads can be megabytes (full state machine database),
-// so encoding/decoding uses dynamic allocation instead of the fixed 8KB
-// stack buffer used for other RPCs.
+// The top-level module keeps the public transport surface stable. The
+// implementation now lives behind small support modules so connection reuse,
+// HMAC handling, message codec logic, and UDP gossip I/O are easier to audit.
 
 const std = @import("std");
 const posix = std.posix;
 const types = @import("raft_types.zig");
+const common = @import("transport/common.zig");
+const connection_pool = @import("transport/connection_pool.zig");
+const auth_support = @import("transport/auth_support.zig");
+const codec_support = @import("transport/codec_support.zig");
+const io_support = @import("transport/io_support.zig");
+const udp_support = @import("transport/udp_support.zig");
 
+const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const NodeId = types.NodeId;
-const Term = types.Term;
-const LogIndex = types.LogIndex;
 const LogEntry = types.LogEntry;
 const RequestVoteArgs = types.RequestVoteArgs;
 const RequestVoteReply = types.RequestVoteReply;
@@ -45,174 +24,20 @@ const AppendEntriesReply = types.AppendEntriesReply;
 const InstallSnapshotArgs = types.InstallSnapshotArgs;
 const InstallSnapshotReply = types.InstallSnapshotReply;
 
-const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+pub const TransportError = common.TransportError;
+pub const Message = common.Message;
+pub const ReceivedMessage = common.ReceivedMessage;
+pub const GossipReceiveResult = common.GossipReceiveResult;
 
-pub const TransportError = error{
-    /// TCP connection to a peer could not be established
-    ConnectFailed,
-    /// failed to write the full message to the peer socket
-    SendFailed,
-    /// failed to read a complete message from an incoming connection
-    ReceiveFailed,
-    /// received data could not be decoded as a valid raft message
-    InvalidMessage,
-    /// HMAC verification failed — shared key mismatch or tampered message
-    AuthenticationFailed,
-    /// the target NodeId has no known address in the peer table
-    PeerNotFound,
-};
-
-pub const Message = union(enum) {
-    request_vote: RequestVoteArgs,
-    request_vote_reply: RequestVoteReply,
-    append_entries: AppendEntriesArgs,
-    append_entries_reply: AppendEntriesReply,
-    install_snapshot: InstallSnapshotArgs,
-    install_snapshot_reply: InstallSnapshotReply,
-};
-
-pub const ReceivedMessage = struct {
-    from_addr: std.net.Address,
-    sender_id: ?NodeId,
-    message: Message,
-    // entries data owned by the allocator passed to receive()
-};
-
-const PeerAddr = struct {
-    addr: std.net.Address,
-};
-
-/// connection pool for reusing TCP connections to raft peers.
-/// avoids the overhead of connect() + close() on every heartbeat.
-/// on write failure, the connection is evicted and recreated on next send.
-const ConnectionPool = struct {
-    connections: std.AutoHashMap(NodeId, posix.socket_t),
-
-    fn init(alloc: std.mem.Allocator) ConnectionPool {
-        return .{
-            .connections = std.AutoHashMap(NodeId, posix.socket_t).init(alloc),
-        };
-    }
-
-    fn deinit(self: *ConnectionPool) void {
-        var iter = self.connections.iterator();
-        while (iter.next()) |entry| {
-            posix.close(entry.value_ptr.*);
-        }
-        self.connections.deinit();
-    }
-
-    /// get an existing connection or create a new one.
-    /// uses non-blocking connect with a 500ms poll timeout so that a dead
-    /// peer doesn't block heartbeats to other live peers. see also the
-    /// 1s send/recv timeouts which cap blocking on established-but-dead
-    /// connections.
-    fn getOrConnect(self: *ConnectionPool, peer_id: NodeId, addr: std.net.Address) !posix.socket_t {
-        if (self.connections.get(peer_id)) |fd| {
-            return fd;
-        }
-
-        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-        errdefer posix.close(fd);
-
-        // send/recv timeouts for established connections (caps blocking
-        // if a peer dies after the connection was established)
-        const timeout = posix.timeval{ .sec = 1, .usec = 0 };
-        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
-        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
-
-        // enable TCP keepalive
-        const one: i32 = 1;
-        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
-        // keepalive interval: 5 seconds (uses raw TCP option constants)
-        const keepalive_time: i32 = 5;
-        const TCP_KEEPIDLE = 4;
-        const TCP_KEEPINTVL = 5;
-        posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_KEEPIDLE, std.mem.asBytes(&keepalive_time)) catch {};
-        posix.setsockopt(fd, posix.IPPROTO.TCP, TCP_KEEPINTVL, std.mem.asBytes(&keepalive_time)) catch {};
-
-        // non-blocking connect: set O_NONBLOCK, start connect, then poll
-        // for writability with a short timeout. this prevents a dead peer
-        // from blocking the entire raft action loop for seconds.
-        const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch {
-            return TransportError.ConnectFailed;
-        };
-        const nonblock_flag: usize = @as(u32, @bitCast(std.os.linux.O{ .NONBLOCK = true }));
-        _ = posix.fcntl(fd, posix.F.SETFL, flags | nonblock_flag) catch {
-            return TransportError.ConnectFailed;
-        };
-
-        posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| {
-            if (err != error.WouldBlock) {
-                posix.close(fd);
-                return TransportError.ConnectFailed;
-            }
-        };
-
-        // poll for connect completion (500ms — generous for LAN, fast
-        // enough to avoid starving heartbeats to live peers)
-        var poll_fds = [1]posix.pollfd{.{
-            .fd = fd,
-            .events = posix.POLL.OUT,
-            .revents = 0,
-        }};
-        const poll_result = posix.poll(&poll_fds, 500) catch {
-            posix.close(fd);
-            return TransportError.ConnectFailed;
-        };
-
-        if (poll_result == 0 or (poll_fds[0].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0) {
-            posix.close(fd);
-            return TransportError.ConnectFailed;
-        }
-
-        // confirm connect actually succeeded via SO_ERROR
-        var err_buf = std.mem.toBytes(@as(i32, 0));
-        posix.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, &err_buf) catch {
-            posix.close(fd);
-            return TransportError.ConnectFailed;
-        };
-        const so_error = std.mem.bytesToValue(i32, &err_buf);
-        if (so_error != 0) {
-            posix.close(fd);
-            return TransportError.ConnectFailed;
-        }
-
-        // restore blocking mode for normal send/recv
-        _ = posix.fcntl(fd, posix.F.SETFL, flags) catch {};
-
-        try self.connections.put(peer_id, fd);
-        return fd;
-    }
-
-    /// remove and close a connection (called on write failure).
-    fn removeConn(self: *ConnectionPool, peer_id: NodeId) void {
-        if (self.connections.fetchRemove(peer_id)) |kv| {
-            posix.close(kv.value);
-        }
-    }
-
-    /// close all pooled connections.
-    fn closeAll(self: *ConnectionPool) void {
-        var iter = self.connections.iterator();
-        while (iter.next()) |entry| {
-            posix.close(entry.value_ptr.*);
-        }
-        self.connections.clearRetainingCapacity();
-    }
-};
-
-// message type tags
-const msg_request_vote: u8 = 0x01;
-const msg_request_vote_reply: u8 = 0x02;
-const msg_append_entries: u8 = 0x03;
-const msg_append_entries_reply: u8 = 0x04;
-const msg_install_snapshot: u8 = 0x05;
-const msg_install_snapshot_reply: u8 = 0x06;
-
-// max receive size: 64MB. snapshot payloads (full sqlite databases)
-// can be several megabytes. normal RPCs are a few hundred bytes.
-const max_receive_size: u32 = 64 * 1024 * 1024;
+const PeerAddr = common.PeerAddr;
+const VerifiedBody = common.VerifiedBody;
+const ConnectionPool = connection_pool.ConnectionPool;
+const msg_request_vote = common.msg_request_vote;
+const msg_request_vote_reply = common.msg_request_vote_reply;
+const msg_append_entries = common.msg_append_entries;
+const msg_append_entries_reply = common.msg_append_entries_reply;
+const msg_install_snapshot = common.msg_install_snapshot;
+const msg_install_snapshot_reply = common.msg_install_snapshot_reply;
 
 pub const Transport = struct {
     alloc: std.mem.Allocator,
@@ -282,23 +107,11 @@ pub const Transport = struct {
         }
     }
 
-    /// send a message to a peer using a pooled TCP connection.
-    /// connections are reused across sends to reduce overhead for
-    /// raft heartbeats (~1/sec). on write failure the connection is
-    /// evicted and will be recreated on the next send.
-    ///
-    /// snapshot messages use dynamic allocation since they can be megabytes.
-    /// all other RPCs use a fixed stack buffer.
-    ///
-    /// when shared_key is set, computes HMAC-SHA256 over [type + payload]
-    /// and prepends the 32-byte tag to the body before sending.
     pub fn send(self: *Transport, target: NodeId, msg: Message) TransportError!void {
         const peer = self.peers.get(target) orelse return TransportError.PeerNotFound;
 
-        // snapshot messages need dynamic allocation — they can be megabytes
         if (msg == .install_snapshot) {
-            const encoded = encodeSnapshot(self.alloc, msg.install_snapshot) catch
-                return TransportError.SendFailed;
+            const encoded = encodeSnapshot(self.alloc, msg.install_snapshot) catch return TransportError.SendFailed;
             defer self.alloc.free(encoded);
 
             const final = self.applyHmac(encoded) catch return TransportError.SendFailed;
@@ -308,7 +121,6 @@ pub const Transport = struct {
             return;
         }
 
-        // all other RPCs fit in the 8KB stack buffer
         var buf: [8192]u8 = undefined;
         const len = encode(&buf, msg) catch return TransportError.SendFailed;
 
@@ -318,110 +130,16 @@ pub const Transport = struct {
         self.sendBytes(target, peer, final) catch return TransportError.SendFailed;
     }
 
-    /// if shared_key is set, compute HMAC over [sender_id + type + payload]
-    /// and produce a new buffer with the sender id and HMAC inserted:
-    /// [4B new_length] [8B sender_id] [32B HMAC] [type + payload].
-    /// returns `data` unchanged if no key is configured.
     fn applyHmac(self: *Transport, data: []const u8) ![]const u8 {
-        const key = self.shared_key orelse return data;
-        const local_id = self.local_id orelse return TransportError.SendFailed;
-        if (data.len < 5) return TransportError.SendFailed;
-
-        const body = data[4..]; // type + payload
-        var sender_buf: [8]u8 = undefined;
-        writeU64(&sender_buf, local_id);
-        var hmac_tag: [32]u8 = undefined;
-        var hmac = HmacSha256.init(&key);
-        hmac.update(&sender_buf);
-        hmac.update(body);
-        hmac.final(&hmac_tag);
-
-        const authenticated_len = body.len + 8 + 32; // sender + hmac + original body
-        if (authenticated_len > std.math.maxInt(u32)) return TransportError.SendFailed;
-        const new_len: u32 = @intCast(authenticated_len);
-        const out = try self.alloc.alloc(u8, 4 + 8 + 32 + body.len);
-        std.mem.writeInt(u32, out[0..4], new_len, .little);
-        @memcpy(out[4..12], &sender_buf);
-        @memcpy(out[12..44], &hmac_tag);
-        @memcpy(out[44..], body);
-        return out;
+        return auth_support.applyHmac(self.alloc, self.shared_key, self.local_id, data);
     }
 
-    /// send bytes using a pooled connection. evicts and returns error on write failure.
     fn sendBytes(self: *Transport, peer_id: NodeId, peer: PeerAddr, data: []const u8) !void {
-        const fd = self.pool.getOrConnect(peer_id, peer.addr) catch
-            return TransportError.ConnectFailed;
-
-        // write all bytes, handling partial writes
-        var total: usize = 0;
-        while (total < data.len) {
-            const bytes_written = posix.write(fd, data[total..]) catch {
-                self.pool.removeConn(peer_id);
-                return TransportError.SendFailed;
-            };
-            if (bytes_written == 0) {
-                self.pool.removeConn(peer_id);
-                return TransportError.SendFailed;
-            }
-            total += bytes_written;
-        }
+        return io_support.sendBytes(self, peer_id, peer, data);
     }
 
-    /// accept a connection and read one message. non-blocking on accept.
-    /// returns null if no connection is pending.
-    ///
-    /// when shared_key is set, verifies HMAC before decoding. drops the
-    /// connection (returns AuthenticationFailed) on mismatch.
     pub fn receive(self: *Transport, alloc: std.mem.Allocator) TransportError!?ReceivedMessage {
-        var client_addr: posix.sockaddr = undefined;
-        var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-
-        const client_fd = posix.accept(self.listen_fd, &client_addr, &addr_len, 0) catch |err| {
-            return switch (err) {
-                error.WouldBlock => null,
-                else => TransportError.ReceiveFailed,
-            };
-        };
-        defer posix.close(client_fd);
-
-        const from_addr = std.net.Address{ .any = client_addr };
-
-        // set receive timeout — longer to accommodate snapshot transfers
-        const timeout = posix.timeval{ .sec = 5, .usec = 0 };
-        posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
-
-        // read length prefix (4 bytes)
-        var len_buf: [4]u8 = undefined;
-        readExact(client_fd, &len_buf) catch return TransportError.ReceiveFailed;
-        const msg_len = std.mem.readInt(u32, &len_buf, .little);
-
-        if (msg_len > max_receive_size or msg_len < 1) return TransportError.InvalidMessage;
-
-        // use a stack buffer for small messages (heartbeats ~50B, typical RPCs ~1-2KB).
-        // only heap-allocate for large payloads like InstallSnapshot.
-        var stack_buf: [8192]u8 = undefined;
-        const body = if (msg_len <= stack_buf.len)
-            stack_buf[0..msg_len]
-        else
-            alloc.alloc(u8, msg_len) catch return TransportError.ReceiveFailed;
-        defer if (msg_len > stack_buf.len) alloc.free(body);
-
-        readExact(client_fd, body) catch return TransportError.ReceiveFailed;
-
-        const verified = if (self.shared_key) |key|
-            // When using authentication, verify HMAC and that sender is a known peer.
-            // Don't check source port since TCP ephemeral ports vary.
-            try verifyAuthenticatedBody(body, key, from_addr, &self.peers)
-        else
-            VerifiedBody{ .sender_id = null, .payload = body };
-
-        const msg = decode(alloc, verified.payload) catch return TransportError.InvalidMessage;
-
-        return ReceivedMessage{
-            .from_addr = from_addr,
-            .sender_id = verified.sender_id,
-            .message = msg,
-        };
+        return io_support.receive(self, alloc);
     }
 
     // --- UDP gossip transport ---
@@ -432,435 +150,65 @@ pub const Transport = struct {
     // UDP frame: [8B sender_id] [32B HMAC-SHA256] [gossip payload...]
     // HMAC is computed over [sender_id + payload].
 
-    /// bind a UDP socket for gossip protocol communication.
-    /// call this when gossip is activated (cluster exceeds size threshold).
     pub fn initUdp(self: *Transport, port: u16) !void {
-        if (self.udp_fd != null) return; // already initialized
-
-        const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-        errdefer posix.close(fd);
-
-        const one: i32 = 1;
-        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
-
-        const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-        try posix.bind(fd, &addr.any, addr.getOsSockLen());
-
-        self.udp_fd = fd;
+        return udp_support.initUdp(self, port);
     }
 
-    /// close the UDP socket.
     pub fn deinitUdp(self: *Transport) void {
-        if (self.udp_fd) |fd| {
-            posix.close(fd);
-            self.udp_fd = null;
-        }
+        udp_support.deinitUdp(self);
     }
 
-    /// send an HMAC-authenticated gossip message over UDP.
-    /// the payload should be a serialized GossipMessage (from gossip.zig).
     pub fn sendGossip(self: *Transport, ip: [4]u8, port: u16, payload: []const u8) TransportError!void {
-        const fd = self.udp_fd orelse return TransportError.SendFailed;
-        const key = self.shared_key orelse return TransportError.AuthenticationFailed;
-        const local_id = self.local_id orelse return TransportError.SendFailed;
-
-        // build frame: [8B sender_id] [32B HMAC] [payload]
-        var frame_buf: [1500]u8 = undefined; // MTU-sized buffer
-        const frame_len = 8 + 32 + payload.len;
-        if (frame_len > frame_buf.len) return TransportError.SendFailed;
-
-        // write sender_id
-        var sender_bytes: [8]u8 = undefined;
-        writeU64(&sender_bytes, local_id);
-        @memcpy(frame_buf[0..8], &sender_bytes);
-
-        // write payload after HMAC slot
-        @memcpy(frame_buf[40..][0..payload.len], payload);
-
-        // compute HMAC over [sender_id + payload]
-        var hmac = HmacSha256.init(&key);
-        hmac.update(&sender_bytes);
-        hmac.update(payload);
-        var tag: [32]u8 = undefined;
-        hmac.final(&tag);
-        @memcpy(frame_buf[8..40], &tag);
-
-        const dest = std.net.Address.initIp4(ip, port);
-        _ = posix.sendto(fd, frame_buf[0..frame_len], 0, &dest.any, dest.getOsSockLen()) catch
-            return TransportError.SendFailed;
+        return udp_support.sendGossip(self, ip, port, payload);
     }
 
-    pub const GossipReceiveResult = struct {
-        sender_id: u64,
-        /// payload slice within the buffer passed to receiveGossip.
-        /// valid until the next receiveGossip call with the same buffer.
-        payload: []const u8,
-    };
-
-    /// receive and verify an HMAC-authenticated gossip message from UDP.
-    /// returns null if no message is available (non-blocking).
-    /// the payload slice points into the provided buffer.
     pub fn receiveGossip(self: *Transport, buf: []u8) TransportError!?GossipReceiveResult {
-        const fd = self.udp_fd orelse return TransportError.ReceiveFailed;
-        const key = self.shared_key orelse return TransportError.AuthenticationFailed;
-
-        const recv_len = posix.recvfrom(fd, buf, 0, null, null) catch |err| {
-            return switch (err) {
-                error.WouldBlock => null,
-                else => TransportError.ReceiveFailed,
-            };
-        };
-
-        if (recv_len < 40) return TransportError.AuthenticationFailed;
-
-        const sender_bytes = buf[0..8];
-        const received_hmac = buf[8..40];
-        const payload = buf[40..recv_len];
-
-        // verify HMAC over [sender_id + payload]
-        var expected: [32]u8 = undefined;
-        var hmac = HmacSha256.init(&key);
-        hmac.update(sender_bytes);
-        hmac.update(payload);
-        hmac.final(&expected);
-
-        if (!std.crypto.timing_safe.eql([32]u8, received_hmac[0..32].*, expected)) {
-            return TransportError.AuthenticationFailed;
-        }
-
-        return .{
-            .sender_id = readU64(sender_bytes),
-            .payload = payload,
-        };
+        return udp_support.receiveGossip(self, buf);
     }
 
     fn resolvePeerId(self: *const Transport, addr: std.net.Address) ?NodeId {
-        var iter = self.peers.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.addr.any.family != addr.any.family) continue;
-            if (std.mem.eql(u8, std.mem.asBytes(&entry.value_ptr.addr.in.sa.addr), std.mem.asBytes(&addr.in.sa.addr)) and
-                entry.value_ptr.addr.in.sa.port == addr.in.sa.port)
-            {
-                return entry.key_ptr.*;
-            }
-        }
-        return null;
+        return udp_support.resolvePeerId(self, addr);
     }
-};
-
-const VerifiedBody = struct {
-    sender_id: ?NodeId,
-    payload: []const u8,
 };
 
 fn verifyAuthenticatedBody(body: []const u8, key: [32]u8, from_addr: std.net.Address, peers: *const std.AutoHashMap(NodeId, PeerAddr)) TransportError!VerifiedBody {
-    if (body.len < 41) return TransportError.AuthenticationFailed;
-
-    const sender_bytes = body[0..8];
-    const received_hmac = body[8..40];
-    const signed_data = body[40..];
-
-    var expected: [32]u8 = undefined;
-    var hmac = HmacSha256.init(&key);
-    hmac.update(sender_bytes);
-    hmac.update(signed_data);
-    hmac.final(&expected);
-
-    if (!std.crypto.timing_safe.eql([32]u8, received_hmac[0..32].*, expected)) {
-        return TransportError.AuthenticationFailed;
-    }
-
-    const sender_id = readU64(sender_bytes);
-    const peer = peers.get(sender_id) orelse return TransportError.AuthenticationFailed;
-    if (!samePeerIp(peer.addr, from_addr)) return TransportError.AuthenticationFailed;
-
-    return .{
-        .sender_id = sender_id,
-        .payload = signed_data,
-    };
+    return auth_support.verifyAuthenticatedBody(body, key, from_addr, peers);
 }
 
 fn samePeerIp(expected: std.net.Address, actual: std.net.Address) bool {
-    if (expected.any.family != actual.any.family) return false;
-    return std.mem.eql(u8, std.mem.asBytes(&expected.in.sa.addr), std.mem.asBytes(&actual.in.sa.addr));
+    return common.samePeerIp(expected, actual);
 }
-
-// -- encoding --
 
 fn encode(buf: []u8, msg: Message) !usize {
-    if (buf.len < 5) return error.BufferTooSmall;
-
-    // leave 4 bytes for length prefix, write type byte
-    var offset: usize = 4;
-
-    switch (msg) {
-        .request_vote => |args| {
-            buf[offset] = msg_request_vote;
-            offset += 1;
-            writeU64(buf[offset..], args.term);
-            offset += 8;
-            writeU64(buf[offset..], args.candidate_id);
-            offset += 8;
-            writeU64(buf[offset..], args.last_log_index);
-            offset += 8;
-            writeU64(buf[offset..], args.last_log_term);
-            offset += 8;
-        },
-        .request_vote_reply => |reply| {
-            buf[offset] = msg_request_vote_reply;
-            offset += 1;
-            writeU64(buf[offset..], reply.term);
-            offset += 8;
-            buf[offset] = if (reply.vote_granted) 1 else 0;
-            offset += 1;
-        },
-        .append_entries => |args| {
-            buf[offset] = msg_append_entries;
-            offset += 1;
-            writeU64(buf[offset..], args.term);
-            offset += 8;
-            writeU64(buf[offset..], args.leader_id);
-            offset += 8;
-            writeU64(buf[offset..], args.prev_log_index);
-            offset += 8;
-            writeU64(buf[offset..], args.prev_log_term);
-            offset += 8;
-            writeU64(buf[offset..], args.leader_commit);
-            offset += 8;
-            // entry count
-            if (args.entries.len > std.math.maxInt(u32)) return error.BufferTooSmall;
-            writeU32(buf[offset..], @intCast(args.entries.len));
-            offset += 4;
-            // entries
-            for (args.entries) |entry| {
-                if (offset + 20 + entry.data.len > buf.len) return error.BufferTooSmall;
-                writeU64(buf[offset..], entry.index);
-                offset += 8;
-                writeU64(buf[offset..], entry.term);
-                offset += 8;
-                if (entry.data.len > std.math.maxInt(u32)) return error.BufferTooSmall;
-                writeU32(buf[offset..], @intCast(entry.data.len));
-                offset += 4;
-                @memcpy(buf[offset..][0..entry.data.len], entry.data);
-                offset += entry.data.len;
-            }
-        },
-        .append_entries_reply => |reply| {
-            buf[offset] = msg_append_entries_reply;
-            offset += 1;
-            writeU64(buf[offset..], reply.term);
-            offset += 8;
-            buf[offset] = if (reply.success) 1 else 0;
-            offset += 1;
-            writeU64(buf[offset..], reply.match_index);
-            offset += 8;
-        },
-        .install_snapshot => {
-            // snapshot payloads are variable-length and can be megabytes.
-            // use encodeSnapshot() instead — this case should not be reached
-            // since Transport.send() handles it separately.
-            return error.BufferTooSmall;
-        },
-        .install_snapshot_reply => |reply| {
-            buf[offset] = msg_install_snapshot_reply;
-            offset += 1;
-            writeU64(buf[offset..], reply.term);
-            offset += 8;
-        },
-    }
-
-    // write length prefix (excludes the 4-byte length itself)
-    if (offset - 4 > std.math.maxInt(u32)) return error.BufferTooSmall;
-    const body_len: u32 = @intCast(offset - 4);
-    std.mem.writeInt(u32, buf[0..4], body_len, .little);
-
-    return offset;
+    return codec_support.encode(buf, msg);
 }
 
-/// encode an InstallSnapshot message with dynamic allocation.
-///
-/// wire format:
-///   [4B length][1B type=0x05][8B term][8B leader_id]
-///   [8B last_included_index][8B last_included_term]
-///   [4B data_len][data bytes]
-///
-/// returns an owned slice that the caller must free.
 fn encodeSnapshot(alloc: std.mem.Allocator, args: InstallSnapshotArgs) ![]u8 {
-    // header: 4B length + 1B type + 8*4 fields + 4B data_len = 41 bytes
-    const header_size = 4 + 1 + 32 + 4;
-    const total = header_size + args.data.len;
-
-    const buf = try alloc.alloc(u8, total);
-    errdefer alloc.free(buf);
-
-    var offset: usize = 4; // skip length prefix
-
-    buf[offset] = msg_install_snapshot;
-    offset += 1;
-    writeU64(buf[offset..], args.term);
-    offset += 8;
-    writeU64(buf[offset..], args.leader_id);
-    offset += 8;
-    writeU64(buf[offset..], args.last_included_index);
-    offset += 8;
-    writeU64(buf[offset..], args.last_included_term);
-    offset += 8;
-    if (args.data.len > std.math.maxInt(u32)) return error.OutOfMemory;
-    writeU32(buf[offset..], @intCast(args.data.len));
-    offset += 4;
-    @memcpy(buf[offset..][0..args.data.len], args.data);
-    offset += args.data.len;
-
-    // write length prefix
-    if (offset - 4 > std.math.maxInt(u32)) return error.OutOfMemory;
-    const body_len: u32 = @intCast(offset - 4);
-    std.mem.writeInt(u32, buf[0..4], body_len, .little);
-
-    return buf;
+    return codec_support.encodeSnapshot(alloc, args);
 }
 
 pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
-    if (buf.len < 1) return error.InvalidMessage;
-
-    const msg_type = buf[0];
-    const payload = buf[1..];
-
-    switch (msg_type) {
-        msg_request_vote => {
-            if (payload.len < 32) return error.InvalidMessage;
-            return .{ .request_vote = .{
-                .term = readU64(payload[0..]),
-                .candidate_id = readU64(payload[8..]),
-                .last_log_index = readU64(payload[16..]),
-                .last_log_term = readU64(payload[24..]),
-            } };
-        },
-        msg_request_vote_reply => {
-            if (payload.len < 9) return error.InvalidMessage;
-            return .{ .request_vote_reply = .{
-                .term = readU64(payload[0..]),
-                .vote_granted = payload[8] != 0,
-            } };
-        },
-        msg_append_entries => {
-            if (payload.len < 44) return error.InvalidMessage;
-            const term = readU64(payload[0..]);
-            const leader_id = readU64(payload[8..]);
-            const prev_log_index = readU64(payload[16..]);
-            const prev_log_term = readU64(payload[24..]);
-            const leader_commit = readU64(payload[32..]);
-            const entry_count = readU32(payload[40..]);
-
-            // each entry needs at least 20 bytes (8 index + 8 term + 4 data_len).
-            // cap entry_count against remaining payload to prevent allocation spikes
-            // from malicious or corrupt messages.
-            const remaining_payload = payload.len - 44;
-            const max_possible_entries = remaining_payload / 20;
-            if (entry_count > max_possible_entries) return error.InvalidMessage;
-
-            var entries = try alloc.alloc(LogEntry, entry_count);
-            var offset: usize = 44;
-            for (0..entry_count) |i| {
-                if (offset + 20 > payload.len) {
-                    alloc.free(entries);
-                    return error.InvalidMessage;
-                }
-                const index = readU64(payload[offset..]);
-                offset += 8;
-                const e_term = readU64(payload[offset..]);
-                offset += 8;
-                const data_len = readU32(payload[offset..]);
-                offset += 4;
-
-                if (offset + data_len > payload.len) {
-                    alloc.free(entries);
-                    return error.InvalidMessage;
-                }
-                const data = try alloc.dupe(u8, payload[offset..][0..data_len]);
-                offset += data_len;
-
-                entries[i] = .{
-                    .index = index,
-                    .term = e_term,
-                    .data = data,
-                };
-            }
-
-            return .{ .append_entries = .{
-                .term = term,
-                .leader_id = leader_id,
-                .prev_log_index = prev_log_index,
-                .prev_log_term = prev_log_term,
-                .entries = entries,
-                .leader_commit = leader_commit,
-            } };
-        },
-        msg_append_entries_reply => {
-            if (payload.len < 17) return error.InvalidMessage;
-            return .{ .append_entries_reply = .{
-                .term = readU64(payload[0..]),
-                .success = payload[8] != 0,
-                .match_index = readU64(payload[9..]),
-            } };
-        },
-        msg_install_snapshot => {
-            // 8B term + 8B leader_id + 8B last_included_index +
-            // 8B last_included_term + 4B data_len = 36 bytes minimum
-            if (payload.len < 36) return error.InvalidMessage;
-            const term = readU64(payload[0..]);
-            const leader_id = readU64(payload[8..]);
-            const last_included_index = readU64(payload[16..]);
-            const last_included_term = readU64(payload[24..]);
-            const data_len = readU32(payload[32..]);
-
-            if (payload.len < 36 + data_len) return error.InvalidMessage;
-
-            // duplicate the snapshot data so the caller owns it
-            const data = try alloc.dupe(u8, payload[36..][0..data_len]);
-
-            return .{ .install_snapshot = .{
-                .term = term,
-                .leader_id = leader_id,
-                .last_included_index = last_included_index,
-                .last_included_term = last_included_term,
-                .data = data,
-            } };
-        },
-        msg_install_snapshot_reply => {
-            if (payload.len < 8) return error.InvalidMessage;
-            return .{ .install_snapshot_reply = .{
-                .term = readU64(payload[0..]),
-            } };
-        },
-        else => return error.InvalidMessage,
-    }
+    return codec_support.decode(alloc, buf);
 }
 
-// -- helpers --
-
 fn writeU64(buf: []u8, val: u64) void {
-    std.mem.writeInt(u64, buf[0..8], val, .little);
+    common.writeU64(buf, val);
 }
 
 fn writeU32(buf: []u8, val: u32) void {
-    std.mem.writeInt(u32, buf[0..4], val, .little);
+    common.writeU32(buf, val);
 }
 
 fn readU64(buf: []const u8) u64 {
-    return std.mem.readInt(u64, buf[0..8], .little);
+    return common.readU64(buf);
 }
 
 fn readU32(buf: []const u8) u32 {
-    return std.mem.readInt(u32, buf[0..4], .little);
+    return common.readU32(buf);
 }
 
 fn readExact(fd: posix.socket_t, buf: []u8) !void {
-    var total: usize = 0;
-    while (total < buf.len) {
-        const bytes_read = posix.read(fd, buf[total..]) catch return error.ReadFailed;
-        if (bytes_read == 0) return error.ReadFailed; // connection closed
-        total += bytes_read;
-    }
+    return common.readExact(fd, buf);
 }
 
 // -- tests --

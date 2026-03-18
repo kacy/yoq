@@ -15,35 +15,27 @@
 // running containers — same code path as the local orchestrator.
 
 const std = @import("std");
-const posix = std.posix;
 const http_client = @import("http_client.zig");
 const agent_types = @import("agent_types.zig");
 const cli = @import("../lib/cli.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
 const log = @import("../lib/log.zig");
-const container = @import("../runtime/container.zig");
-const image_registry = @import("../image/registry.zig");
-const image_layer = @import("../image/layer.zig");
-const image_spec = @import("../image/spec.zig");
-const store = @import("../state/store.zig");
-const logs = @import("../runtime/logs.zig");
 const wireguard = @import("../network/wireguard.zig");
 const ip_mod = @import("../network/ip.zig");
 const setup = @import("../network/setup.zig");
-
-const paths = @import("../lib/paths.zig");
-const gpu_detect = @import("../gpu/detect.zig");
-const gpu_health = @import("../gpu/health.zig");
-const gpu_mig = @import("../gpu/mig.zig");
 const cluster_config = @import("config.zig");
 const gossip_mod = @import("gossip.zig");
 const transport_mod = @import("transport.zig");
 const agent_store = @import("agent_store.zig");
+const request_support = @import("agent/request_support.zig");
+const resource_support = @import("agent/resource_support.zig");
+const gossip_support = @import("agent/gossip_support.zig");
+const assignment_runtime = @import("agent/assignment_runtime.zig");
+const loop_runtime = @import("agent/loop_runtime.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentResources = agent_types.AgentResources;
 
-const write = cli.write;
 const writeErr = cli.writeErr;
 
 pub const AgentError = error{
@@ -129,7 +121,7 @@ pub const Agent = struct {
     /// generates a wireguard keypair and sends the public key to the
     /// server, which assigns a node_id and overlay IP in response.
     pub fn register(self: *Agent) AgentError!void {
-        const resources = getSystemResources();
+        const resources = resource_support.getSystemResources();
 
         // generate a wireguard keypair for mesh networking
         const kp = wireguard.generateKeyPair() catch {
@@ -140,9 +132,9 @@ pub const Agent = struct {
 
         // detect our local IP for the wireguard endpoint
         var local_ip_buf: [16]u8 = undefined;
-        const local_ip = detectLocalIp(self.server_addr, &local_ip_buf);
+        const local_ip = resource_support.detectLocalIp(self.server_addr, &local_ip_buf);
 
-        const body = buildRegisterBody(self.alloc, self.token, local_ip, resources, pub_key, self.wg_listen_port, self.role, self.region) catch
+        const body = request_support.buildRegisterBody(self.alloc, self.token, local_ip, resources, pub_key, self.wg_listen_port, self.role, self.region) catch
             return AgentError.RegisterFailed;
         defer self.alloc.free(body);
 
@@ -158,7 +150,7 @@ pub const Agent = struct {
         // follow leader hint on not-leader error and retry once
         if (resp.status_code != 200) {
             if (extractJsonString(resp.body, "leader")) |leader_str| {
-                if (parseHostPort(leader_str)) |hp| {
+                if (request_support.parseHostPort(leader_str)) |hp| {
                     log.info("registration redirected to leader at {s}", .{leader_str});
                     self.server_addr = hp.addr;
                     self.server_port = hp.port;
@@ -212,13 +204,13 @@ pub const Agent = struct {
 
         // parse gossip_seeds from the response for gossip bootstrap.
         // format: "gossip_seeds":["node_id@addr",...]
-        self.parseGossipSeeds(resp.body);
+        gossip_support.parseGossipSeeds(self, resp.body);
 
         // initialize gossip if we have seeds and a node_id
-        self.initGossip();
+        gossip_support.initGossip(self);
 
         // initialize the local assignment cache for offline resilience
-        self.initCache();
+        gossip_support.initCache(self);
 
         if (self.node_id) |nid| {
             log.info("registered as agent {s} (node_id={d}, role={s})", .{ &self.id, nid, self.role.toString() });
@@ -308,772 +300,83 @@ pub const Agent = struct {
     /// scales with ceil(log2(N)) where N is the gossip member count,
     /// so large clusters heartbeat less frequently.
     fn agentHeartbeatTicks(self: *Agent) u32 {
-        if (self.gossip) |g| {
-            const member_count = g.members.count() + 1;
-            const multiplier: u32 = @min(gossip_mod.Gossip.ceilLog2(member_count), gossip_mod.Gossip.max_interval_multiplier);
-            return 50 * multiplier;
-        }
-        return 50;
+        return loop_runtime.agentHeartbeatTicks(self);
     }
 
     fn agentLoop(self: *Agent) void {
-        while (self.running.load(.acquire)) {
-            self.doHeartbeat();
-            self.reconcile();
-
-            // sleep between cycles, ticking gossip every 500ms
-            var remaining: u32 = self.agentHeartbeatTicks();
-            while (remaining > 0 and self.running.load(.acquire)) : (remaining -= 1) {
-                std.Thread.sleep(100 * std.time.ns_per_ms);
-
-                // tick gossip every 500ms and check for incoming messages
-                if (remaining % 5 == 0) self.tickGossipLoop();
-                self.receiveGossipLoop();
-            }
-        }
+        loop_runtime.agentLoop(self);
     }
 
     fn doHeartbeat(self: *Agent) void {
-        const resources = getSystemResources();
-
-        // poll GPU health if NVML is available
-        var gpu_health_worst: gpu_health.GpuHealth = .healthy;
-        if (cached_gpu_info) |info| {
-            if (info.detect_result) |dr| {
-                if (dr.nvml) |*nvml| {
-                    const metrics = gpu_health.pollAllMetrics(nvml, @intCast(info.count));
-                    // report worst-case health across all GPUs
-                    for (0..@min(info.count, gpu_detect.max_gpus)) |i| {
-                        if (metrics[i]) |m| {
-                            const h = m.health();
-                            if (h == .unhealthy) {
-                                gpu_health_worst = .unhealthy;
-                                break;
-                            } else if (h == .warning) {
-                                gpu_health_worst = .warning;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        const body = buildHeartbeatBody(self.alloc, resources, @tagName(gpu_health_worst)) catch return;
-        defer self.alloc.free(body);
-
-        var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/heartbeat", .{self.id}) catch return;
-
-        var resp = http_client.postWithAuth(
-            self.alloc,
-            self.server_addr,
-            self.server_port,
-            path,
-            body,
-            self.token,
-        ) catch return;
-        defer resp.deinit(self.alloc);
-
-        // follow leader hint on error responses
-        if (resp.status_code != 200) {
-            if (extractJsonString(resp.body, "leader")) |leader_str| {
-                if (parseHostPort(leader_str)) |hp| {
-                    log.info("redirected to leader at {s}", .{leader_str});
-                    self.server_addr = hp.addr;
-                    self.server_port = hp.port;
-                }
-            }
-            return;
-        }
-
-        // check if server says we're being drained
-        const status = extractJsonString(resp.body, "status");
-        if (status) |s| {
-            if (std.mem.eql(u8, s, "draining")) {
-                writeErr("agent is being drained, stopping...\n", .{});
-                self.running.store(false, .release);
-            }
-        }
-
-        // follow leader hint from successful heartbeat responses
-        if (extractJsonString(resp.body, "leader")) |leader_str| {
-            if (parseHostPort(leader_str)) |hp| {
-                if (!std.mem.eql(u8, &self.server_addr, &hp.addr) or self.server_port != hp.port) {
-                    log.info("leader moved to {s}, following", .{leader_str});
-                    self.server_addr = hp.addr;
-                    self.server_port = hp.port;
-                }
-            }
-        }
-
-        // check if the peer list has changed. the server includes
-        // peers_count in the heartbeat response so the agent can
-        // detect membership changes without polling the full list
-        // every cycle.
-        if (self.node_id != null) {
-            if (extractJsonInt(resp.body, "peers_count")) |count| {
-                const server_count: u32 = if (count >= 0 and count <= max_peers)
-                    @intCast(count)
-                else
-                    0;
-
-                if (server_count != self.known_peers_count) {
-                    log.info("peer count changed ({d} -> {d}), reconciling", .{
-                        self.known_peers_count, server_count,
-                    });
-                    self.reconcilePeers();
-                }
-            }
-        }
+        loop_runtime.doHeartbeat(self);
     }
 
     /// fetch the full peer list from the server and reconcile with
     /// our local wireguard configuration. adds new peers and removes
     /// peers that are no longer in the server's list.
     fn reconcilePeers(self: *Agent) void {
-        var resp = self.fetchPeers() orelse return;
-        defer resp.deinit(self.alloc);
-
-        // parse peer objects from the response into a new map.
-        // each peer is: {"node_id":N,"public_key":"...","endpoint":"...","overlay_ip":"...","container_subnet":"..."}
-        var new_peers = std.AutoHashMap(u16, [44]u8).init(self.alloc);
-        defer new_peers.deinit();
-
-        var iter = json_helpers.extractJsonObjects(resp.body);
-        while (iter.next()) |obj| {
-            const pub_key = extractJsonString(obj, "public_key") orelse continue;
-            const overlay_str = extractJsonString(obj, "overlay_ip") orelse continue;
-            const node_id_val = extractJsonInt(obj, "node_id") orelse continue;
-            const endpoint = extractJsonString(obj, "endpoint") orelse "";
-
-            // skip ourselves
-            if (self.node_id) |our_id| {
-                if (node_id_val == our_id) continue;
-            }
-
-            const peer_node: u16 = if (node_id_val >= 1 and node_id_val <= 65534)
-                @intCast(node_id_val)
-            else
-                continue;
-
-            const overlay_ip = ip_mod.parseIp(overlay_str) orelse continue;
-
-            // check if this peer is already configured
-            const already_known = self.known_peers.contains(peer_node);
-
-            if (!already_known) {
-                // new peer — add it
-                log.info("adding peer node_id={d}", .{peer_node});
-                setup.addClusterPeer(.{
-                    .public_key = pub_key,
-                    .endpoint = endpoint,
-                    .overlay_ip = overlay_ip,
-                    .container_subnet_node = peer_node,
-                }) catch |e| {
-                    log.warn("failed to add cluster peer (node {d}): {}", .{ peer_node, e });
-                };
-            }
-
-            // track this peer in the new map
-            if (pub_key.len <= 44) {
-                var key_buf: [44]u8 = undefined;
-                @memcpy(key_buf[0..pub_key.len], pub_key);
-                // zero the rest so the buffer is deterministic
-                @memset(key_buf[pub_key.len..], 0);
-                new_peers.put(peer_node, key_buf) catch {};
-            }
-        }
-
-        // remove peers that are no longer in the server's list
-        var old_iter = self.known_peers.iterator();
-        while (old_iter.next()) |entry| {
-            const old_node = entry.key_ptr.*;
-
-            if (!new_peers.contains(old_node)) {
-                const old_key = entry.value_ptr;
-                // find the length of the key (first null byte)
-                var key_len: usize = 44;
-                for (old_key, 0..) |b, i| {
-                    if (b == 0) {
-                        key_len = i;
-                        break;
-                    }
-                }
-                log.info("removing peer node_id={d}", .{old_node});
-                setup.removeClusterPeer(.{
-                    .public_key = old_key[0..key_len],
-                    .endpoint = "", // not needed for removal
-                    .overlay_ip = overlayIpForNode(old_node),
-                    .container_subnet_node = old_node,
-                });
-            }
-        }
-
-        // swap the maps: replace known_peers with new_peers
-        self.known_peers.deinit();
-        self.known_peers = new_peers.move();
-        self.known_peers_count = @intCast(self.known_peers.count());
-
-        log.info("peer reconciliation complete ({d} peers)", .{self.known_peers_count});
+        loop_runtime.reconcilePeers(self);
     }
 
     /// GET /wireguard/peers from the server.
     /// agents with role=agent request only server peers (hub-and-spoke);
     /// role=both gets all peers (full-mesh).
     fn fetchPeers(self: *Agent) ?http_client.Response {
-        const path = if (self.role == .agent)
-            "/wireguard/peers?servers_only=1"
-        else
-            "/wireguard/peers";
-        return http_client.getWithAuth(
-            self.alloc,
-            self.server_addr,
-            self.server_port,
-            path,
-            self.token,
-        ) catch return null;
+        return loop_runtime.fetchPeers(self);
     }
 
     /// parse gossip seed addresses from a registration response body.
     /// format: "gossip_seeds":["addr1","addr2",...]
     /// best-effort — failure just means no seeds (gossip will discover peers).
     fn parseGossipSeeds(self: *Agent, body: []const u8) void {
-        const key = "\"gossip_seeds\":[";
-        const key_pos = std.mem.indexOf(u8, body, key) orelse return;
-        const arr_start = key_pos + key.len;
-        const arr_end = std.mem.indexOfPos(u8, body, arr_start, "]") orelse return;
-        const arr = body[arr_start..arr_end];
-        if (arr.len == 0) return;
-
-        var seeds: std.ArrayListUnmanaged([]const u8) = .{};
-
-        // parse quoted strings from the array
-        var pos: usize = 0;
-        while (pos < arr.len) {
-            const quote_start = std.mem.indexOfPos(u8, arr, pos, "\"") orelse break;
-            const quote_end = std.mem.indexOfPos(u8, arr, quote_start + 1, "\"") orelse break;
-            const seed = arr[quote_start + 1 .. quote_end];
-            if (seed.len > 0) {
-                const dupe = self.alloc.dupe(u8, seed) catch break;
-                seeds.append(self.alloc, dupe) catch {
-                    self.alloc.free(dupe);
-                    break;
-                };
-            }
-            pos = quote_end + 1;
-        }
-
-        if (seeds.items.len > 0) {
-            self.gossip_seeds = seeds.toOwnedSlice(self.alloc) catch {
-                for (seeds.items) |s| self.alloc.free(s);
-                seeds.deinit(self.alloc);
-                return;
-            };
-            log.info("received {d} gossip seeds", .{self.gossip_seeds.?.len});
-        } else {
-            seeds.deinit(self.alloc);
-        }
+        gossip_support.parseGossipSeeds(self, body);
     }
 
     // -- gossip integration --
-
-    /// default gossip port for agents.
-    const default_gossip_port: u16 = 9800;
 
     /// initialize gossip after registration if we have seeds and a node_id.
     /// creates a gossip state machine and UDP transport, then adds each
     /// seed as a member. non-fatal: if anything fails, agent runs without gossip.
     fn initGossip(self: *Agent) void {
-        const nid = self.node_id orelse return;
-        const seeds = self.gossip_seeds orelse return;
-        if (seeds.len == 0) return;
-
-        // derive shared key from join token (same KDF as server)
-        const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
-        var shared_key: [32]u8 = undefined;
-        HmacSha256.create(&shared_key, "yoq-raft-transport-key", self.token);
-
-        // create transport for UDP gossip (TCP port 0 = OS-assigned, unused)
-        const transport = self.alloc.create(transport_mod.Transport) catch return;
-        transport.* = transport_mod.Transport.init(self.alloc, 0) catch {
-            self.alloc.destroy(transport);
-            return;
-        };
-        transport.setLocalNodeId(@as(u64, nid));
-        transport.shared_key = shared_key;
-        transport.initUdp(default_gossip_port) catch {
-            log.warn("gossip: failed to bind UDP port {}, running without gossip", .{default_gossip_port});
-            transport.deinit();
-            self.alloc.destroy(transport);
-            return;
-        };
-
-        // create gossip state machine
-        const gossip_state = self.alloc.create(gossip_mod.Gossip) catch {
-            transport.deinit();
-            self.alloc.destroy(transport);
-            return;
-        };
-        gossip_state.* = gossip_mod.Gossip.init(self.alloc, @as(u64, nid), .{
-            .ip = self.overlay_ip orelse .{ 0, 0, 0, 0 },
-            .port = default_gossip_port,
-        }, .{});
-
-        // add seeds as gossip members. format: "node_id@address"
-        var added: u32 = 0;
-        for (seeds) |seed| {
-            const parsed = parseSeedAddr(seed) orelse continue;
-            gossip_state.addMember(parsed.id, .{ .ip = parsed.ip, .port = default_gossip_port }) catch continue;
-            added += 1;
-        }
-
-        if (added == 0) {
-            gossip_state.deinit();
-            self.alloc.destroy(gossip_state);
-            transport.deinit();
-            self.alloc.destroy(transport);
-            return;
-        }
-
-        self.gossip = gossip_state;
-        self.gossip_transport = transport;
-        log.info("gossip: initialized with {d} seeds on UDP port {}", .{ added, default_gossip_port });
+        gossip_support.initGossip(self);
     }
 
     /// initialize the local assignment cache database.
     /// non-fatal — agent continues without cache on failure.
-    fn initCache(_: *Agent) void {
-        paths.ensureDataDir("") catch {
-            log.warn("failed to create data dir for agent cache", .{});
-            return;
-        };
-        var path_buf: [paths.max_path]u8 = undefined;
-        const db_path = paths.dataPath(&path_buf, "agent-cache.db") catch {
-            log.warn("failed to get data path for agent cache", .{});
-            return;
-        };
-        agent_store.initWithPath(db_path) catch |e| {
-            log.warn("failed to init agent cache: {}", .{e});
-        };
+    fn initCache(self: *Agent) void {
+        gossip_support.initCache(self);
     }
 
     /// tick gossip state machine and process outgoing actions.
     fn tickGossipLoop(self: *Agent) void {
-        const gossip = self.gossip orelse return;
-        const transport = self.gossip_transport orelse return;
-
-        gossip.tick() catch return;
-
-        const actions = gossip.drainActions();
-        defer gossip.freeActions(actions);
-
-        for (actions) |action| {
-            switch (action) {
-                .send_message => |msg| {
-                    var encode_buf: [512]u8 = undefined;
-                    const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
-                    transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
-                },
-                // agents don't act on membership changes — the server leader does
-                .member_dead, .member_alive, .member_suspect => {},
-            }
-        }
+        gossip_support.tickGossipLoop(self);
     }
 
     /// receive and dispatch incoming gossip UDP messages.
     fn receiveGossipLoop(self: *Agent) void {
-        const gossip = self.gossip orelse return;
-        const transport = self.gossip_transport orelse return;
-
-        var buf: [1500]u8 = undefined;
-
-        // drain up to 5 messages per call
-        var msg_idx: u32 = 0;
-        while (msg_idx < 5) : (msg_idx += 1) {
-            const result = transport.receiveGossip(&buf) catch break;
-            const recv = result orelse break;
-
-            const msg = gossip_mod.Gossip.decode(self.alloc, recv.payload) catch continue;
-
-            switch (msg) {
-                .ping => |payload| gossip.handlePing(payload) catch {},
-                .ping_ack => |payload| gossip.handlePingAck(payload) catch {},
-                .ping_req => |payload| gossip.handlePingReq(payload) catch {},
-            }
-
-            // send any response actions immediately
-            const actions = gossip.drainActions();
-            defer gossip.freeActions(actions);
-
-            for (actions) |action| {
-                switch (action) {
-                    .send_message => |send| {
-                        var encode_buf: [512]u8 = undefined;
-                        const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
-                        transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
-                    },
-                    .member_dead, .member_alive, .member_suspect => {},
-                }
-            }
-        }
+        gossip_support.receiveGossipLoop(self);
     }
 
     /// parse a gossip seed string "node_id@ip_address" into its components.
     fn parseSeedAddr(seed: []const u8) ?struct { id: u64, ip: [4]u8 } {
-        const at_pos = std.mem.indexOf(u8, seed, "@") orelse return null;
-        const id = std.fmt.parseInt(u64, seed[0..at_pos], 10) catch return null;
-        const ip = ip_mod.parseIp(seed[at_pos + 1 ..]) orelse return null;
-        return .{ .id = id, .ip = ip };
+        const parsed = gossip_support.parseSeedAddr(seed) orelse return null;
+        return .{ .id = parsed.id, .ip = parsed.ip };
     }
 
     /// fetch assignments from the server and start containers for any
     /// gang scheduling info for a container assignment.
     /// when present, the agent injects NCCL mesh environment variables.
-    pub const GangInfo = struct {
-        rank: u32,
-        world_size: u32,
-        master_addr: []const u8,
-        master_port: u16,
-    };
+    pub const GangInfo = assignment_runtime.GangInfo;
 
     /// new pending assignments. this is the core reconciliation loop.
     fn reconcile(self: *Agent) void {
-        var resp = self.fetchAssignments() orelse {
-            // server unreachable — fall back to cache
-            self.reconcileFromCache();
-            return;
-        };
-        defer resp.deinit(self.alloc);
-
-        const now = std.time.timestamp();
-
-        var iter = json_helpers.extractJsonObjects(resp.body);
-        while (iter.next()) |obj| {
-            const assignment_id = extractJsonString(obj, "id") orelse continue;
-            const status = extractJsonString(obj, "status") orelse continue;
-            const image = extractJsonString(obj, "image") orelse continue;
-            const command = extractJsonString(obj, "command") orelse "";
-            const cpu_limit = extractJsonInt(obj, "cpu_limit") orelse 1000;
-            const memory_limit_mb = extractJsonInt(obj, "memory_limit_mb") orelse 256;
-
-            // parse optional gang scheduling fields
-            const gang_rank = extractJsonInt(obj, "gang_rank");
-            const gang_world_size = extractJsonInt(obj, "gang_world_size");
-            const gang_master_addr = extractJsonString(obj, "gang_master_addr");
-            const gang_master_port = extractJsonInt(obj, "gang_master_port");
-
-            // skip terminal assignments — just remove from cache
-            if (std.mem.eql(u8, status, "stopped") or std.mem.eql(u8, status, "failed")) {
-                agent_store.removeAssignment(assignment_id) catch {};
-                continue;
-            }
-
-            // cache assignment state (only non-terminal)
-            agent_store.upsertAssignment(.{
-                .id = assignment_id,
-                .image = image,
-                .command = command,
-                .status = status,
-                .cpu_limit = cpu_limit,
-                .memory_limit_mb = memory_limit_mb,
-                .synced_at = now,
-            }) catch {};
-
-            if (std.mem.eql(u8, status, "pending")) {
-                const gang_info: ?GangInfo = if (gang_rank != null and gang_world_size != null and gang_master_addr != null) .{
-                    .rank = @intCast(@max(0, gang_rank.?)),
-                    .world_size = @intCast(@max(0, gang_world_size.?)),
-                    .master_addr = gang_master_addr.?,
-                    .master_port = if (gang_master_port) |p| @intCast(@max(0, p)) else 29500,
-                } else null;
-                self.startPendingAssignment(assignment_id, image, command, gang_info);
-            }
-        }
-    }
-
-    /// fall back to cached assignments when the server is unreachable.
-    /// reads from the local cache and starts any pending assignments.
-    fn reconcileFromCache(self: *Agent) void {
-        const cached = agent_store.listPendingAssignments(self.alloc) catch return;
-        defer {
-            for (cached) |a| a.deinit(self.alloc);
-            self.alloc.free(cached);
-        }
-
-        if (cached.len == 0) return;
-        log.warn("server unreachable, reconciling from cache ({d} assignments)", .{cached.len});
-
-        for (cached) |assignment| {
-            self.startPendingAssignment(assignment.id, assignment.image, assignment.command, null);
-        }
-    }
-
-    /// dupe strings, track in local_containers, and spawn runAssignment thread.
-    /// skips silently if the assignment is already tracked or on alloc failure.
-    fn startPendingAssignment(self: *Agent, id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo) void {
-        self.container_lock.lock();
-        const already_tracked = self.local_containers.contains(id);
-        self.container_lock.unlock();
-        if (already_tracked) return;
-
-        const id_copy = self.alloc.dupe(u8, id) catch return;
-        const image_copy = self.alloc.dupe(u8, image) catch {
-            self.alloc.free(id_copy);
-            return;
-        };
-        const command_copy = self.alloc.dupe(u8, command) catch {
-            self.alloc.free(id_copy);
-            self.alloc.free(image_copy);
-            return;
-        };
-        // dupe gang master_addr if present (other fields are value types)
-        const gang_copy: ?GangInfo = if (gang_info) |gi| blk: {
-            const addr_copy = self.alloc.dupe(u8, gi.master_addr) catch {
-                self.alloc.free(id_copy);
-                self.alloc.free(image_copy);
-                self.alloc.free(command_copy);
-                return;
-            };
-            break :blk .{
-                .rank = gi.rank,
-                .world_size = gi.world_size,
-                .master_addr = addr_copy,
-                .master_port = gi.master_port,
-            };
-        } else null;
-
-        self.container_lock.lock();
-        self.local_containers.put(id_copy, .starting) catch {
-            self.container_lock.unlock();
-            self.alloc.free(id_copy);
-            self.alloc.free(image_copy);
-            self.alloc.free(command_copy);
-            if (gang_copy) |gc| self.alloc.free(gc.master_addr);
-            return;
-        };
-        self.container_lock.unlock();
-
-        if (gang_copy) |gc| {
-            log.info("starting gang assignment {s} (image: {s}, rank {d}/{d})", .{ id_copy, image_copy, gc.rank, gc.world_size });
-        } else {
-            log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
-        }
-
-        _ = std.Thread.spawn(.{}, runAssignment, .{
-            self, id_copy, image_copy, command_copy, gang_copy,
-        }) catch {
-            log.warn("failed to spawn thread for assignment {s}", .{id_copy});
-            self.container_lock.lock();
-            _ = self.local_containers.remove(id_copy);
-            self.container_lock.unlock();
-            self.alloc.free(id_copy);
-            self.alloc.free(image_copy);
-            self.alloc.free(command_copy);
-            if (gang_copy) |gc| self.alloc.free(gc.master_addr);
-        };
-    }
-
-    /// GET /agents/{id}/assignments from the server.
-    fn fetchAssignments(self: *Agent) ?http_client.Response {
-        var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/assignments", .{self.id}) catch return null;
-
-        return http_client.getWithAuth(
-            self.alloc,
-            self.server_addr,
-            self.server_port,
-            path,
-            self.token,
-        ) catch return null;
-    }
-
-    /// run a single assignment in its own thread.
-    /// pulls the image, starts the container, and blocks until it exits.
-    /// reports status back to the server at each stage.
-    fn runAssignment(self: *Agent, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo) void {
-        defer {
-            self.alloc.free(image);
-            self.alloc.free(command);
-            if (gang_info) |gi| self.alloc.free(gi.master_addr);
-            // note: assignment_id stays in local_containers map (key is owned by the map)
-        }
-
-        // report running status to server
-        self.reportStatus(assignment_id, "running");
-
-        self.container_lock.lock();
-        if (self.local_containers.getPtr(assignment_id)) |state| {
-            state.* = .running;
-        }
-        self.container_lock.unlock();
-
-        // pull image
-        const ref = image_spec.parseImageRef(image);
-        var pull_result = image_registry.pull(self.alloc, ref) catch {
-            log.warn("failed to pull image {s} for assignment {s}", .{ image, assignment_id });
-            self.setContainerState(assignment_id, .failed);
-            self.reportStatus(assignment_id, "failed");
-            return;
-        };
-        defer pull_result.deinit();
-
-        // assemble rootfs from layers
-        const layer_paths = image_layer.assembleRootfs(self.alloc, pull_result.layer_digests) catch {
-            log.warn("failed to assemble rootfs for assignment {s}", .{assignment_id});
-            self.setContainerState(assignment_id, .failed);
-            self.reportStatus(assignment_id, "failed");
-            return;
-        };
-        defer {
-            for (layer_paths) |p| self.alloc.free(p);
-            self.alloc.free(layer_paths);
-        }
-
-        // determine rootfs path (topmost layer)
-        const rootfs = if (layer_paths.len > 0) layer_paths[layer_paths.len - 1] else "/";
-
-        // generate a local container ID
-        var id_buf: [12]u8 = undefined;
-        container.generateId(&id_buf) catch {
-            log.warn("failed to generate container ID for assignment {s}", .{assignment_id});
-            self.setContainerState(assignment_id, .failed);
-            self.reportStatus(assignment_id, "failed");
-            return;
-        };
-        const container_id = id_buf[0..];
-
-        // save container record to local store
-        store.save(.{
-            .id = container_id,
-            .rootfs = rootfs,
-            .command = if (command.len > 0) command else "/bin/sh",
-            .hostname = "agent",
-            .status = "created",
-            .pid = null,
-            .exit_code = null,
-            .created_at = std.time.timestamp(),
-        }) catch {
-            log.warn("failed to save container record for assignment {s}", .{assignment_id});
-            self.setContainerState(assignment_id, .failed);
-            self.reportStatus(assignment_id, "failed");
-            return;
-        };
-
-        // generate mesh environment variables for gang assignments
-        const gpu_mesh = @import("../gpu/mesh.zig");
-        var mesh_env: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer {
-            for (mesh_env.items) |e| self.alloc.free(e);
-            mesh_env.deinit(self.alloc);
-        }
-        if (gang_info) |gi| {
-            const ib_result = gpu_mesh.detectInfiniband();
-            var mesh_env_buf: [1024]u8 = undefined;
-            if (gpu_mesh.generateMeshEnv(
-                &mesh_env_buf,
-                ib_result,
-                gi.master_addr,
-                gi.master_port,
-                gi.world_size,
-                gi.rank,
-                gi.rank, // local_rank = rank for single-GPU-per-container
-                null,
-            )) |env_data| {
-                // parse null-separated env vars
-                var env_pos: usize = 0;
-                while (env_pos < env_data.len) {
-                    const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
-                    if (end > env_pos) {
-                        if (self.alloc.dupe(u8, env_data[env_pos..end])) |duped| {
-                            mesh_env.append(self.alloc, duped) catch {};
-                        } else |_| {}
-                    }
-                    env_pos = end + 1;
-                }
-            } else |_| {}
-        }
-
-        // create and start the container
-        var c = container.Container{
-            .config = .{
-                .id = container_id,
-                .rootfs = rootfs,
-                .command = if (command.len > 0) command else "/bin/sh",
-                .lower_dirs = layer_paths,
-                .env = mesh_env.items,
-            },
-            .status = .created,
-            .pid = null,
-            .exit_code = null,
-            .created_at = std.time.timestamp(),
-        };
-
-        log.info("starting container {s} for assignment {s}", .{ container_id, assignment_id });
-        c.start() catch {
-            log.warn("container {s} failed to start for assignment {s}", .{ container_id, assignment_id });
-            self.setContainerState(assignment_id, .failed);
-            self.reportStatus(assignment_id, "failed");
-            cleanup(container_id);
-            return;
-        };
-
-        _ = c.wait() catch 255;
-
-        // container exited normally
-        log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });
-        self.setContainerState(assignment_id, .stopped);
-        self.reportStatus(assignment_id, "stopped");
-        cleanup(container_id);
-    }
-
-    /// report assignment status to the server. best-effort — log on failure.
-    fn reportStatus(self: *Agent, assignment_id: []const u8, status: []const u8) void {
-        var path_buf: [128]u8 = undefined;
-        const path = std.fmt.bufPrint(
-            &path_buf,
-            "/agents/{s}/assignments/{s}/status",
-            .{ self.id, assignment_id },
-        ) catch return;
-
-        var body_buf: [64]u8 = undefined;
-        const body = std.fmt.bufPrint(&body_buf, "{{\"status\":\"{s}\"}}", .{status}) catch return;
-
-        var resp = http_client.postWithAuth(
-            self.alloc,
-            self.server_addr,
-            self.server_port,
-            path,
-            body,
-            self.token,
-        ) catch {
-            log.warn("failed to report status '{s}' for assignment {s}", .{ status, assignment_id });
-            return;
-        };
-        resp.deinit(self.alloc);
-    }
-
-    /// update the local container state (thread-safe).
-    fn setContainerState(self: *Agent, assignment_id: []const u8, state: ContainerState) void {
-        self.container_lock.lock();
-        defer self.container_lock.unlock();
-        if (self.local_containers.getPtr(assignment_id)) |s| {
-            s.* = state;
-        }
-    }
-
-    /// clean up container files after exit.
-    fn cleanup(container_id: []const u8) void {
-        logs.deleteLogFile(container_id);
-        container.cleanupContainerDirs(container_id);
-        store.remove(container_id) catch {};
+        assignment_runtime.reconcile(self);
     }
 
     /// parse "host:port" into an IP address and port number.
     fn parseHostPort(s: []const u8) ?struct { addr: [4]u8, port: u16 } {
-        const colon = std.mem.lastIndexOfScalar(u8, s, ':') orelse return null;
-        const addr = ip_mod.parseIp(s[0..colon]) orelse return null;
-        const port = std.fmt.parseInt(u16, s[colon + 1 ..], 10) catch return null;
-        return .{ .addr = addr, .port = port };
+        const parsed = request_support.parseHostPort(s) orelse return null;
+        return .{ .addr = parsed.addr, .port = parsed.port };
     }
 };
 
@@ -1087,170 +390,16 @@ fn buildRegisterBody(
     role: cluster_config.NodeRole,
     region: ?[]const u8,
 ) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    try writer.writeAll("{\"token\":\"");
-    try json_helpers.writeJsonEscaped(writer, token);
-    try writer.writeAll("\",\"address\":\"");
-    try json_helpers.writeJsonEscaped(writer, address);
-    try writer.writeAll("\",\"cpu_cores\":");
-    try writer.print("{d}", .{resources.cpu_cores});
-    try writer.writeAll(",\"memory_mb\":");
-    try writer.print("{d}", .{resources.memory_mb});
-    try writer.writeAll(",\"wg_public_key\":\"");
-    try json_helpers.writeJsonEscaped(writer, pub_key);
-    try writer.writeAll("\",\"wg_listen_port\":");
-    try writer.print("{d}", .{wg_listen_port});
-    try writer.writeAll(",\"role\":\"");
-    try json_helpers.writeJsonEscaped(writer, role.toString());
-    try writer.writeByte('"');
-
-    if (region) |reg| {
-        try writer.writeAll(",\"region\":\"");
-        try json_helpers.writeJsonEscaped(writer, reg);
-        try writer.writeByte('"');
-    }
-
-    if (resources.gpu_count > 0) {
-        try writer.writeAll(",\"gpu_count\":");
-        try writer.print("{d}", .{resources.gpu_count});
-        try writer.writeAll(",\"gpu_vram_mb\":");
-        try writer.print("{d}", .{resources.gpu_vram_mb});
-
-        if (resources.gpu_model) |model| {
-            try writer.writeAll(",\"gpu_model\":\"");
-            try json_helpers.writeJsonEscaped(writer, model);
-            try writer.writeByte('"');
-        }
-    }
-
-    try writer.writeByte('}');
-    return try json_buf.toOwnedSlice(alloc);
+    return request_support.buildRegisterBody(alloc, token, address, resources, pub_key, wg_listen_port, role, region);
 }
 
 fn buildHeartbeatBody(alloc: Allocator, resources: AgentResources, gpu_health_label: []const u8) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    try writer.writeAll("{\"cpu_cores\":");
-    try writer.print("{d}", .{resources.cpu_cores});
-    try writer.writeAll(",\"memory_mb\":");
-    try writer.print("{d}", .{resources.memory_mb});
-    try writer.writeAll(",\"cpu_used\":");
-    try writer.print("{d}", .{resources.cpu_used});
-    try writer.writeAll(",\"memory_used_mb\":");
-    try writer.print("{d}", .{resources.memory_used_mb});
-    try writer.writeAll(",\"containers\":");
-    try writer.print("{d}", .{resources.containers});
-    try writer.writeAll(",\"gpu_count\":");
-    try writer.print("{d}", .{resources.gpu_count});
-    try writer.writeAll(",\"gpu_used\":");
-    try writer.print("{d}", .{resources.gpu_used});
-    try writer.writeAll(",\"gpu_health\":\"");
-    try json_helpers.writeJsonEscaped(writer, gpu_health_label);
-    try writer.writeAll("\"}");
-
-    return try json_buf.toOwnedSlice(alloc);
+    return request_support.buildHeartbeatBody(alloc, resources, gpu_health_label);
 }
 
 /// read system resources from /proc/meminfo and cpu count.
 pub fn getSystemResources() AgentResources {
-    const cpu_cores: u32 = @intCast(std.Thread.getCpuCount() catch 1);
-
-    // read total memory from /proc/meminfo
-    var memory_mb: u64 = 0;
-    const meminfo = std.fs.cwd().readFileAlloc(std.heap.page_allocator, "/proc/meminfo", 8192) catch "";
-    defer if (meminfo.len > 0) std.heap.page_allocator.free(meminfo);
-
-    if (meminfo.len > 0) {
-        // find "MemTotal:" line and parse the value
-        if (std.mem.indexOf(u8, meminfo, "MemTotal:")) |pos| {
-            var start = pos + "MemTotal:".len;
-            // skip whitespace
-            while (start < meminfo.len and meminfo[start] == ' ') start += 1;
-            // find end of number
-            var end = start;
-            while (end < meminfo.len and meminfo[end] >= '0' and meminfo[end] <= '9') end += 1;
-            if (end > start) {
-                const kb = std.fmt.parseInt(u64, meminfo[start..end], 10) catch 0;
-                memory_mb = kb / 1024;
-            }
-        }
-    }
-
-    // detect GPUs (cached — detection involves dlopen/sysfs scans)
-    const gpu_info = cachedGpuDetect();
-
-    return .{
-        .cpu_cores = cpu_cores,
-        .memory_mb = memory_mb,
-        .gpu_count = gpu_info.count,
-        .gpu_model = gpu_info.model,
-        .gpu_vram_mb = gpu_info.vram_mb,
-    };
-}
-
-/// cached GPU detection — avoids repeated dlopen/sysfs scans on every heartbeat.
-/// detection runs once on first call; result is stored in a global.
-/// we keep the full DetectResult alive so the NvmlHandle stays open for
-/// health polling and MIG discovery.
-const CachedGpuInfo = struct {
-    count: u32,
-    model: ?[]const u8,
-    vram_mb: u64,
-    detect_result: ?*gpu_detect.DetectResult,
-    mig_inventories: [gpu_detect.max_gpus]gpu_mig.MigInventory = .{gpu_mig.MigInventory{}} ** gpu_detect.max_gpus,
-    mig_gpu_count: u32 = 0,
-};
-
-var cached_gpu_info: ?CachedGpuInfo = null;
-var cached_detect_storage: gpu_detect.DetectResult = undefined;
-
-fn cachedGpuDetect() CachedGpuInfo {
-    if (cached_gpu_info) |info| return info;
-    cached_detect_storage = gpu_detect.detect();
-    const count = @as(u32, cached_detect_storage.count);
-
-    // extract model and VRAM from first GPU (representative for the node)
-    var model: ?[]const u8 = null;
-    var vram_mb: u64 = 0;
-    if (count > 0) {
-        const gpu = &cached_detect_storage.gpus[0];
-        const name = gpu.getName();
-        if (name.len > 0) model = name;
-        vram_mb = gpu.vram_mb;
-    }
-
-    // run MIG discovery if NVML is available and GPU is MIG-capable
-    var mig_inventories: [gpu_detect.max_gpus]gpu_mig.MigInventory = .{gpu_mig.MigInventory{}} ** gpu_detect.max_gpus;
-    var mig_gpu_count: u32 = 0;
-    if (cached_detect_storage.nvml) |*nvml| {
-        for (0..count) |i| {
-            const gpu = &cached_detect_storage.gpus[i];
-            if (gpu.mig_capable) {
-                const inventory = gpu_mig.discoverInstances(nvml, @intCast(i));
-                mig_inventories[i] = inventory;
-                if (inventory.count > 0) {
-                    mig_gpu_count += 1;
-                    log.info("GPU {d}: MIG mode active, {d} instance(s)", .{ i, inventory.count });
-                }
-            }
-        }
-    }
-
-    const info = CachedGpuInfo{
-        .count = count,
-        .model = model,
-        .vram_mb = vram_mb,
-        .detect_result = if (count > 0) &cached_detect_storage else null,
-        .mig_inventories = mig_inventories,
-        .mig_gpu_count = mig_gpu_count,
-    };
-    cached_gpu_info = info;
-    return info;
+    return resource_support.getSystemResources();
 }
 
 // use shared JSON extraction helpers
@@ -1263,37 +412,14 @@ const extractJsonInt = json_helpers.extractJsonInt;
 /// sends any data, just uses the kernel's routing table to determine which
 /// interface would be used.
 pub fn detectLocalIp(target: [4]u8, buf: *[16]u8) []const u8 {
-    const addr = std.net.Address.initIp4(target, 80);
-
-    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch {
-        return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
-    };
-    defer posix.close(sock);
-
-    posix.connect(sock, &addr.any, addr.getOsSockLen()) catch {
-        return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
-    };
-
-    var local_addr: posix.sockaddr.storage = undefined;
-    var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-    posix.getsockname(sock, @ptrCast(&local_addr), &addr_len) catch {
-        return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
-    };
-
-    // extract IPv4 address bytes
-    const sa_in: *const posix.sockaddr.in = @ptrCast(@alignCast(&local_addr));
-    const ip_bytes: [4]u8 = @bitCast(sa_in.addr);
-    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3] }) catch "127.0.0.1";
+    return resource_support.detectLocalIp(target, buf);
 }
 
 /// derive overlay IP from node_id.
 /// nodes 1-254:  10.40.0.{node_id}
 /// nodes 255+:   10.40.{node_id >> 8}.{node_id & 0xFF}
 fn overlayIpForNode(node_id: u16) [4]u8 {
-    if (node_id <= 254) {
-        return .{ 10, 40, 0, @intCast(node_id) };
-    }
-    return .{ 10, 40, @intCast(node_id >> 8), @intCast(node_id & 0xFF) };
+    return resource_support.overlayIpForNode(node_id);
 }
 
 // -- tests --
