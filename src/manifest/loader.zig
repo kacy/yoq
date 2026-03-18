@@ -17,43 +17,13 @@ const std = @import("std");
 const spec = @import("spec.zig");
 const toml = @import("../lib/toml.zig");
 const log = @import("../lib/log.zig");
+const common = @import("loader/common.zig");
+const variables = @import("loader/variables.zig");
+const fields = @import("loader/fields.zig");
+const dependencies = @import("loader/dependencies.zig");
+const entries = @import("loader/entries.zig");
 
-pub const LoadError = error{
-    /// the manifest file does not exist at the given path
-    FileNotFound,
-    /// the manifest file exists but could not be read (permissions, I/O error)
-    ReadFailed,
-    /// the file content is not valid TOML
-    ParseFailed,
-    /// a service declaration is missing the required `image` field
-    MissingImage,
-    /// a port mapping string is malformed (expected "host:container" or "container")
-    InvalidPortMapping,
-    /// an environment variable string is malformed (expected "KEY=VALUE")
-    InvalidEnvVar,
-    /// a volume mount string is malformed (expected "source:target" or "source:target:ro")
-    InvalidVolumeMount,
-    /// a health check configuration has invalid or missing fields
-    InvalidHealthCheck,
-    /// an unrecognized restart policy was specified
-    InvalidRestartPolicy,
-    /// a TLS configuration has invalid or missing fields
-    InvalidTlsConfig,
-    /// a volume configuration has invalid or missing fields (e.g. host driver without path)
-    InvalidVolumeConfig,
-    /// a service declares a dependency on a service name that doesn't exist in the manifest
-    UnknownDependency,
-    /// the service dependency graph contains a cycle
-    CircularDependency,
-    /// the manifest contains no service definitions
-    NoServices,
-    /// a cron schedule interval is missing or malformed (expected "30s", "5m", "1h")
-    InvalidSchedule,
-    /// a training job configuration has invalid or missing fields
-    InvalidTrainingConfig,
-    /// memory allocation failed during parsing
-    OutOfMemory,
-};
+pub const LoadError = common.LoadError;
 
 pub const default_filename = "manifest.toml";
 
@@ -84,8 +54,6 @@ pub fn load(alloc: std.mem.Allocator, path: []const u8) LoadError!spec.Manifest 
 /// returns a Manifest with services in dependency order.
 /// caller must call result.deinit() when done.
 pub fn loadFromString(alloc: std.mem.Allocator, content: []const u8) LoadError!spec.Manifest {
-    // expand environment variable references before parsing TOML.
-    // this allows variables in any string value throughout the manifest.
     const expanded = try expandVariables(alloc, content);
     defer alloc.free(expanded);
 
@@ -98,88 +66,11 @@ pub fn loadFromString(alloc: std.mem.Allocator, content: []const u8) LoadError!s
     return buildManifest(alloc, &parsed.root);
 }
 
-// -- variable substitution --
-
-/// expand environment variable references in a string.
-///
-/// supported patterns:
-///   ${VAR}              — replaced with the value of $VAR, or "" if not set
-///   ${VAR:-default}     — replaced with $VAR if set, otherwise "default"
-///   $$                  — literal "$" (escape sequence)
-///
-/// returns a new allocated string with all variables expanded.
-/// caller owns the returned memory.
 pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) LoadError![]const u8 {
-    var result: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer result.deinit(alloc);
-
-    var i: usize = 0;
-    while (i < input.len) {
-        if (input[i] == '$') {
-            // escaped dollar: $$ → literal $
-            if (i + 1 < input.len and input[i + 1] == '$') {
-                result.append(alloc, '$') catch return LoadError.OutOfMemory;
-                i += 2;
-                continue;
-            }
-
-            // variable reference: ${...}
-            if (i + 1 < input.len and input[i + 1] == '{') {
-                const start = i + 2;
-                const close = std.mem.indexOfScalarPos(u8, input, start, '}') orelse {
-                    // unclosed ${, emit literally
-                    result.append(alloc, '$') catch return LoadError.OutOfMemory;
-                    i += 1;
-                    continue;
-                };
-
-                const content = input[start..close];
-
-                // check for default value syntax: VAR:-default
-                var var_name: []const u8 = content;
-                var default_value: ?[]const u8 = null;
-
-                if (std.mem.indexOf(u8, content, ":-")) |sep| {
-                    var_name = content[0..sep];
-                    default_value = content[sep + 2 ..];
-                }
-
-                // look up the environment variable
-                const value = if (var_name.len > 0)
-                    std.process.getEnvVarOwned(alloc, var_name) catch |err| switch (err) {
-                        error.EnvironmentVariableNotFound => null,
-                        error.OutOfMemory => return LoadError.OutOfMemory,
-                        else => null,
-                    }
-                else
-                    null;
-                defer if (value) |v| alloc.free(v);
-
-                // use the env value if found, otherwise the default, otherwise empty string
-                const expanded = value orelse (default_value orelse "");
-
-                result.appendSlice(alloc, expanded) catch return LoadError.OutOfMemory;
-                i = close + 1;
-                continue;
-            }
-
-            // bare $ not followed by { or $ — emit literally
-            result.append(alloc, '$') catch return LoadError.OutOfMemory;
-            i += 1;
-        } else {
-            result.append(alloc, input[i]) catch return LoadError.OutOfMemory;
-            i += 1;
-        }
-    }
-
-    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
+    return variables.expandVariables(alloc, input);
 }
 
-// -- internal --
-
-/// build a Manifest from a parsed TOML root table
 fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!spec.Manifest {
-    // parse services from [service.*] subtables
     var services: std.ArrayListUnmanaged(spec.Service) = .empty;
     defer {
         for (services.items) |svc| svc.deinit(alloc);
@@ -190,7 +81,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         for (service_table.entries.keys(), service_table.entries.values()) |name, val| {
             switch (val) {
                 .table => |tbl| {
-                    const svc = try parseService(alloc, name, tbl);
+                    const svc = try entries.parseService(alloc, name, tbl);
                     services.append(alloc, svc) catch return LoadError.OutOfMemory;
                 },
                 else => {},
@@ -198,7 +89,6 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
-    // parse training jobs from [training.*] subtables
     var training_jobs: std.ArrayListUnmanaged(spec.TrainingJob) = .empty;
     defer {
         for (training_jobs.items) |tj| tj.deinit(alloc);
@@ -209,7 +99,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         for (training_table.entries.keys(), training_table.entries.values()) |name, val| {
             switch (val) {
                 .table => |tbl| {
-                    const tj = try parseTrainingJob(alloc, name, tbl);
+                    const tj = try entries.parseTrainingJob(alloc, name, tbl);
                     training_jobs.append(alloc, tj) catch return LoadError.OutOfMemory;
                 },
                 else => {},
@@ -233,7 +123,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         for (worker_table.entries.keys(), worker_table.entries.values()) |name, val| {
             switch (val) {
                 .table => |tbl| {
-                    const worker = try parseWorker(alloc, name, tbl);
+                    const worker = try entries.parseWorker(alloc, name, tbl);
                     workers.append(alloc, worker) catch return LoadError.OutOfMemory;
                 },
                 else => {},
@@ -252,7 +142,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         for (cron_table.entries.keys(), cron_table.entries.values()) |name, val| {
             switch (val) {
                 .table => |tbl| {
-                    const cron_job = try parseCron(alloc, name, tbl);
+                    const cron_job = try entries.parseCron(alloc, name, tbl);
                     crons.append(alloc, cron_job) catch return LoadError.OutOfMemory;
                 },
                 else => {},
@@ -260,7 +150,6 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
-    // parse volumes from [volume.*] subtables
     var volumes: std.ArrayListUnmanaged(spec.Volume) = .empty;
     defer {
         for (volumes.items) |vol| vol.deinit(alloc);
@@ -271,7 +160,7 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         for (volume_table.entries.keys(), volume_table.entries.values()) |name, val| {
             switch (val) {
                 .table => |tbl| {
-                    const vol = try parseVolume(alloc, name, tbl);
+                    const vol = try entries.parseVolume(alloc, name, tbl);
                     volumes.append(alloc, vol) catch return LoadError.OutOfMemory;
                 },
                 else => {},
@@ -279,15 +168,11 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
-    // validate that all depends_on entries reference real services or workers
-    try validateDependencies(services.items, workers.items);
+    try dependencies.validateDependencies(services.items, workers.items);
 
-    // topological sort — returns services in dependency order
-    const sorted = try sortByDependency(alloc, services.items);
+    const sorted = try dependencies.sortByDependency(alloc, services.items);
     errdefer alloc.free(sorted);
 
-    // the sorted array owns the services now — clear the original list
-    // so the defer doesn't double-free
     services.items.len = 0;
 
     const owned_workers = workers.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
@@ -324,841 +209,24 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
     };
 }
 
-/// fields shared by services, workers, and crons.
-const CommonFields = struct {
-    image: []const u8,
-    command: []const []const u8,
-    env: []const []const u8,
-    volumes: []const spec.VolumeMount,
-    working_dir: ?[]const u8,
-
-    fn deinit(self: CommonFields, alloc: std.mem.Allocator) void {
-        alloc.free(self.image);
-        for (self.command) |cmd| alloc.free(cmd);
-        alloc.free(self.command);
-        for (self.env) |e| alloc.free(e);
-        alloc.free(self.env);
-        for (self.volumes) |vm| vm.deinit(alloc);
-        alloc.free(self.volumes);
-        if (self.working_dir) |wd| alloc.free(wd);
-    }
-};
-
-/// parse the common fields (image, command, env, volumes, working_dir) from a TOML subtable.
-fn parseCommonFields(alloc: std.mem.Allocator, kind: []const u8, name: []const u8, table: *const toml.Table) LoadError!CommonFields {
-    const image_raw = table.getString("image") orelse {
-        log.err("manifest: {s} '{s}' is missing required field 'image'", .{ kind, name });
-        return LoadError.MissingImage;
-    };
-
-    const command = try parseStringArray(alloc, table.getArray("command"));
-    errdefer {
-        for (command) |cmd| alloc.free(cmd);
-        alloc.free(command);
-    }
-
-    const env = try parseEnvVars(alloc, table.getArray("env"));
-    errdefer {
-        for (env) |e| alloc.free(e);
-        alloc.free(env);
-    }
-
-    const volume_mounts = try parseVolumeMounts(alloc, table.getArray("volumes"));
-    errdefer {
-        for (volume_mounts) |vm| vm.deinit(alloc);
-        alloc.free(volume_mounts);
-    }
-
-    const working_dir: ?[]const u8 = if (table.getString("working_dir")) |wd|
-        alloc.dupe(u8, wd) catch return LoadError.OutOfMemory
-    else
-        null;
-
-    return .{
-        .image = alloc.dupe(u8, image_raw) catch return LoadError.OutOfMemory,
-        .command = command,
-        .env = env,
-        .volumes = volume_mounts,
-        .working_dir = working_dir,
-    };
-}
-
-/// parse a single service from its TOML subtable
-fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Service {
-    var common = try parseCommonFields(alloc, "service", name, table);
-    errdefer common.deinit(alloc);
-
-    const ports = try parsePortMappings(alloc, table.getArray("ports"));
-    errdefer alloc.free(ports);
-
-    const depends_on = try parseStringArray(alloc, table.getArray("depends_on"));
-    errdefer {
-        for (depends_on) |dep| alloc.free(dep);
-        alloc.free(depends_on);
-    }
-
-    const health_check = try parseHealthCheck(alloc, name, table.getTable("health_check"));
-    errdefer if (health_check) |hc| hc.deinit(alloc);
-
-    const restart = try parseRestartPolicy(name, table.getString("restart"));
-
-    const tls_config = try parseTlsConfig(alloc, name, table.getTable("tls"));
-    errdefer if (tls_config) |tc| tc.deinit(alloc);
-
-    const gpu_spec = try parseGpuSpec(alloc, table.getTable("gpu"));
-    errdefer if (gpu_spec) |g| g.deinit(alloc);
-
-    const gpu_mesh_spec = try parseGpuMeshSpec(table.getTable("gpu_mesh"));
-
-    return .{
-        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .image = common.image,
-        .command = common.command,
-        .ports = ports,
-        .env = common.env,
-        .depends_on = depends_on,
-        .working_dir = common.working_dir,
-        .volumes = common.volumes,
-        .health_check = health_check,
-        .restart = restart,
-        .tls = tls_config,
-        .gpu = gpu_spec,
-        .gpu_mesh = gpu_mesh_spec,
-    };
-}
-
-/// parse a volume definition from its TOML subtable.
-/// accepts `type` (plan-v2 syntax) or `driver` (backward compat), default "local".
-/// for host driver: requires `path` field.
-fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Volume {
-    const driver_str = table.getString("type") orelse table.getString("driver") orelse "local";
-
-    const driver: spec.VolumeDriver = if (std.mem.eql(u8, driver_str, "host")) blk: {
-        const path = table.getString("path") orelse {
-            log.err("manifest: volume '{s}' with host driver requires 'path' field", .{name});
-            return LoadError.InvalidVolumeConfig;
-        };
-        break :blk .{ .host = .{ .path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory } };
-    } else if (std.mem.eql(u8, driver_str, "nfs")) blk: {
-        const server = table.getString("server") orelse {
-            log.err("manifest: volume '{s}' with nfs driver requires 'server' field", .{name});
-            return LoadError.InvalidVolumeConfig;
-        };
-        if (server.len == 0) {
-            log.err("manifest: volume '{s}' nfs server must not be empty", .{name});
-            return LoadError.InvalidVolumeConfig;
-        }
-        const path = table.getString("path") orelse {
-            log.err("manifest: volume '{s}' with nfs driver requires 'path' field", .{name});
-            return LoadError.InvalidVolumeConfig;
-        };
-        if (path.len == 0 or path[0] != '/') {
-            log.err("manifest: volume '{s}' nfs path must be absolute (start with /)", .{name});
-            return LoadError.InvalidVolumeConfig;
-        }
-        const options_str = table.getString("options");
-        const server_dup = alloc.dupe(u8, server) catch return LoadError.OutOfMemory;
-        errdefer alloc.free(server_dup);
-        const path_dup = alloc.dupe(u8, path) catch return LoadError.OutOfMemory;
-        errdefer alloc.free(path_dup);
-        const options_dup = if (options_str) |o| (alloc.dupe(u8, o) catch return LoadError.OutOfMemory) else null;
-        break :blk .{ .nfs = .{
-            .server = server_dup,
-            .path = path_dup,
-            .options = options_dup,
-        } };
-    } else if (std.mem.eql(u8, driver_str, "parallel")) blk: {
-        const path = table.getString("path") orelse {
-            log.err("manifest: volume '{s}' with parallel driver requires 'path' field", .{name});
-            return LoadError.InvalidVolumeConfig;
-        };
-        break :blk .{ .parallel = .{ .mount_path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory } };
-    } else .{ .local = .{} };
-
-    return .{
-        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .driver = driver,
-    };
-}
-
-/// parse a worker definition from its TOML subtable.
-/// workers are like services but without ports, health checks, restart, or TLS.
-fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Worker {
-    var common = try parseCommonFields(alloc, "worker", name, table);
-    errdefer common.deinit(alloc);
-
-    const depends_on = try parseStringArray(alloc, table.getArray("depends_on"));
-    errdefer {
-        for (depends_on) |dep| alloc.free(dep);
-        alloc.free(depends_on);
-    }
-
-    const gpu_spec = try parseGpuSpec(alloc, table.getTable("gpu"));
-    errdefer if (gpu_spec) |g| g.deinit(alloc);
-
-    const gpu_mesh_spec = try parseGpuMeshSpec(table.getTable("gpu_mesh"));
-
-    return .{
-        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .image = common.image,
-        .command = common.command,
-        .env = common.env,
-        .depends_on = depends_on,
-        .working_dir = common.working_dir,
-        .volumes = common.volumes,
-        .gpu = gpu_spec,
-        .gpu_mesh = gpu_mesh_spec,
-    };
-}
-
-/// parse a cron definition from its TOML subtable.
-/// crons are like workers but with a required `every` interval field.
-fn parseCron(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.Cron {
-    const every_str = table.getString("every") orelse {
-        log.err("manifest: cron '{s}' is missing required field 'every'", .{name});
-        return LoadError.InvalidSchedule;
-    };
-
-    const every = parseDuration(every_str) orelse {
-        log.err("manifest: cron '{s}' has invalid schedule '{s}' (expected e.g. '30s', '5m', '1h')", .{ name, every_str });
-        return LoadError.InvalidSchedule;
-    };
-
-    var common = try parseCommonFields(alloc, "cron", name, table);
-    errdefer common.deinit(alloc);
-
-    return .{
-        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .image = common.image,
-        .command = common.command,
-        .env = common.env,
-        .working_dir = common.working_dir,
-        .volumes = common.volumes,
-        .every = every,
-    };
-}
-
-/// parse a training job definition from its TOML subtable.
-/// training jobs define multi-rank GPU workloads with checkpoint, data, and fault tolerance config.
-fn parseTrainingJob(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) LoadError!spec.TrainingJob {
-    var common = try parseCommonFields(alloc, "training", name, table);
-    errdefer common.deinit(alloc);
-
-    const gpus_raw = table.getInt("gpus") orelse {
-        log.err("manifest: training '{s}' is missing required field 'gpus'", .{name});
-        return LoadError.InvalidTrainingConfig;
-    };
-    if (gpus_raw < 1) {
-        log.err("manifest: training '{s}' gpus must be >= 1", .{name});
-        return LoadError.InvalidTrainingConfig;
-    }
-
-    const gpu_type_raw = table.getString("gpu_type");
-    const gpu_type: ?[]const u8 = if (gpu_type_raw) |gt|
-        alloc.dupe(u8, gt) catch return LoadError.OutOfMemory
-    else
-        null;
-    errdefer if (gpu_type) |gt| alloc.free(gt);
-
-    const data = try parseDataSpec(alloc, name, table.getTable("data"));
-    errdefer if (data) |d| d.deinit(alloc);
-
-    const checkpoint = try parseCheckpointSpec(alloc, name, table.getTable("checkpoint"));
-    errdefer if (checkpoint) |c| c.deinit(alloc);
-
-    const resources = parseTrainingResourceSpec(table.getTable("resources"));
-    const fault_tolerance = parseFaultToleranceSpec(table.getTable("fault_tolerance"));
-
-    return .{
-        .name = alloc.dupe(u8, name) catch return LoadError.OutOfMemory,
-        .image = common.image,
-        .command = common.command,
-        .env = common.env,
-        .working_dir = common.working_dir,
-        .volumes = common.volumes,
-        .gpus = @intCast(gpus_raw),
-        .gpu_type = gpu_type,
-        .data = data,
-        .checkpoint = checkpoint,
-        .resources = resources,
-        .fault_tolerance = fault_tolerance,
-    };
-}
-
-fn parseDataSpec(alloc: std.mem.Allocator, name: []const u8, table: ?*const toml.Table) LoadError!?spec.DataSpec {
-    const data_table = table orelse return null;
-
-    const dataset_raw = data_table.getString("dataset") orelse {
-        log.err("manifest: training '{s}' data section is missing required field 'dataset'", .{name});
-        return LoadError.InvalidTrainingConfig;
-    };
-
-    const sharding_raw = data_table.getString("sharding") orelse "file";
-
-    const preprocessing_raw = data_table.getString("preprocessing");
-    const preprocessing: ?[]const u8 = if (preprocessing_raw) |p|
-        alloc.dupe(u8, p) catch return LoadError.OutOfMemory
-    else
-        null;
-    errdefer if (preprocessing) |p| alloc.free(p);
-
-    const dataset = alloc.dupe(u8, dataset_raw) catch return LoadError.OutOfMemory;
-    errdefer alloc.free(dataset);
-
-    return .{
-        .dataset = dataset,
-        .sharding = alloc.dupe(u8, sharding_raw) catch return LoadError.OutOfMemory,
-        .preprocessing = preprocessing,
-    };
-}
-
-fn parseCheckpointSpec(alloc: std.mem.Allocator, name: []const u8, table: ?*const toml.Table) LoadError!?spec.CheckpointSpec {
-    const ckpt_table = table orelse return null;
-
-    const path_raw = ckpt_table.getString("path") orelse {
-        log.err("manifest: training '{s}' checkpoint section is missing required field 'path'", .{name});
-        return LoadError.InvalidTrainingConfig;
-    };
-
-    var interval_secs: u64 = 1800;
-    if (ckpt_table.getString("interval")) |interval_str| {
-        interval_secs = parseDuration(interval_str) orelse {
-            log.err("manifest: training '{s}' has invalid checkpoint interval '{s}' (expected e.g. '30m', '1h')", .{ name, interval_str });
-            return LoadError.InvalidSchedule;
-        };
-    }
-
-    const keep_raw = ckpt_table.getInt("keep");
-    const keep: u32 = if (keep_raw) |k| @intCast(@max(1, k)) else 5;
-
-    return .{
-        .path = alloc.dupe(u8, path_raw) catch return LoadError.OutOfMemory,
-        .interval_secs = interval_secs,
-        .keep = keep,
-    };
-}
-
-fn parseTrainingResourceSpec(table: ?*const toml.Table) spec.TrainingResourceSpec {
-    const res_table = table orelse return .{};
-
-    const cpu_raw = res_table.getInt("cpu");
-    const cpu: u32 = if (cpu_raw) |c| @intCast(@max(100, c)) else 1000;
-
-    const memory_mb_raw = res_table.getInt("memory_mb");
-    const memory_mb: u64 = if (memory_mb_raw) |m| @intCast(@max(256, m)) else 65536;
-
-    const ib_required = res_table.getBool("ib_required") orelse false;
-
-    return .{
-        .cpu = cpu,
-        .memory_mb = memory_mb,
-        .ib_required = ib_required,
-    };
-}
-
-fn parseFaultToleranceSpec(table: ?*const toml.Table) spec.FaultToleranceSpec {
-    const ft_table = table orelse return .{};
-
-    const spare_ranks_raw = ft_table.getInt("spare_ranks");
-    const spare_ranks: u32 = if (spare_ranks_raw) |s| @intCast(@max(0, s)) else 0;
-
-    const auto_restart = ft_table.getBool("auto_restart") orelse true;
-
-    const max_restarts_raw = ft_table.getInt("max_restarts");
-    const max_restarts: u32 = if (max_restarts_raw) |m| @intCast(@max(0, m)) else 10;
-
-    return .{
-        .spare_ranks = spare_ranks,
-        .auto_restart = auto_restart,
-        .max_restarts = max_restarts,
-    };
-}
-
-/// parse a duration string like "30s", "5m", "1h", "24h" into seconds.
-/// returns null if the format is invalid.
 fn parseDuration(s: []const u8) ?u64 {
-    if (s.len < 2) return null;
-
-    const suffix = s[s.len - 1];
-    const number_part = s[0 .. s.len - 1];
-
-    const value = std.fmt.parseInt(u64, number_part, 10) catch return null;
-    if (value == 0) return null;
-
-    return switch (suffix) {
-        's' => value,
-        'm' => value * 60,
-        'h' => value * 3600,
-        else => null,
-    };
+    return fields.parseDuration(s);
 }
 
-// -- dependency validation and ordering --
-
-/// check that all depends_on entries reference existing services or workers
-fn validateDependencies(services: []const spec.Service, workers: []const spec.Worker) LoadError!void {
-    for (services) |svc| {
-        for (svc.depends_on) |dep| {
-            // self-dependency check
-            if (std.mem.eql(u8, svc.name, dep)) {
-                log.err("manifest: service '{s}' depends on itself", .{svc.name});
-                return LoadError.CircularDependency;
-            }
-
-            // look in services and workers
-            var found = false;
-            for (services) |other| {
-                if (std.mem.eql(u8, other.name, dep)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                for (workers) |w| {
-                    if (std.mem.eql(u8, w.name, dep)) {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if (!found) {
-                log.err("manifest: service '{s}' depends on unknown service or worker '{s}'", .{ svc.name, dep });
-                return LoadError.UnknownDependency;
-            }
-        }
-    }
-}
-
-/// topological sort using Kahn's algorithm.
-/// returns a new slice with services in dependency order (dependencies first).
-/// detects cycles — returns CircularDependency if the graph has one.
-fn sortByDependency(alloc: std.mem.Allocator, services: []const spec.Service) LoadError![]const spec.Service {
-    const service_count = services.len;
-
-    // build name → index mapping
-    var name_to_idx: std.StringHashMapUnmanaged(usize) = .empty;
-    defer name_to_idx.deinit(alloc);
-
-    for (services, 0..) |svc, i| {
-        name_to_idx.put(alloc, svc.name, i) catch return LoadError.OutOfMemory;
-    }
-
-    // compute in-degrees (number of dependencies for each service)
-    const in_degree = alloc.alloc(usize, service_count) catch return LoadError.OutOfMemory;
-    defer alloc.free(in_degree);
-    @memset(in_degree, 0);
-
-    for (services) |svc| {
-        const idx = name_to_idx.get(svc.name).?;
-        // only count dependencies on other services — worker deps are
-        // validated by validateDependencies() but don't affect sort order
-        var service_dep_count: usize = 0;
-        for (svc.depends_on) |dep| {
-            if (name_to_idx.contains(dep)) service_dep_count += 1;
-        }
-        in_degree[idx] = service_dep_count;
-    }
-
-    // initialize queue with services that have no dependencies
-    var queue: std.ArrayListUnmanaged(usize) = .empty;
-    defer queue.deinit(alloc);
-
-    for (in_degree, 0..) |deg, i| {
-        if (deg == 0) {
-            queue.append(alloc, i) catch return LoadError.OutOfMemory;
-        }
-    }
-
-    // BFS — process services in dependency order
-    var sorted: std.ArrayListUnmanaged(spec.Service) = .empty;
-    defer sorted.deinit(alloc);
-
-    var queue_pos: usize = 0;
-    while (queue_pos < queue.items.len) {
-        const idx = queue.items[queue_pos];
-        queue_pos += 1;
-        sorted.append(alloc, services[idx]) catch return LoadError.OutOfMemory;
-
-        // for each service that depends on the one we just added,
-        // decrement its in-degree and enqueue if it reaches zero
-        for (services, 0..) |svc, i| {
-            for (svc.depends_on) |dep| {
-                if (std.mem.eql(u8, dep, services[idx].name)) {
-                    in_degree[i] -= 1;
-                    if (in_degree[i] == 0) {
-                        queue.append(alloc, i) catch return LoadError.OutOfMemory;
-                    }
-                }
-            }
-        }
-    }
-
-    if (sorted.items.len != service_count) {
-        log.err("manifest: circular dependency detected among services", .{});
-        return LoadError.CircularDependency;
-    }
-
-    return sorted.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
-}
-
-// -- field parsing helpers --
-
-/// dupe an optional TOML string array into owned slices
-fn parseStringArray(alloc: std.mem.Allocator, raw: ?[]const []const u8) LoadError![]const []const u8 {
-    const items = raw orelse {
-        return alloc.alloc([]const u8, 0) catch return LoadError.OutOfMemory;
-    };
-
-    var result: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer {
-        for (result.items) |s| alloc.free(s);
-        result.deinit(alloc);
-    }
-
-    for (items) |item| {
-        const duped = alloc.dupe(u8, item) catch return LoadError.OutOfMemory;
-        result.append(alloc, duped) catch {
-            alloc.free(duped);
-            return LoadError.OutOfMemory;
-        };
-    }
-
-    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
-}
-
-/// parse port mapping strings like "80:8080" into PortMapping structs
-fn parsePortMappings(alloc: std.mem.Allocator, raw: ?[]const []const u8) LoadError![]const spec.PortMapping {
-    const items = raw orelse {
-        return alloc.alloc(spec.PortMapping, 0) catch return LoadError.OutOfMemory;
-    };
-
-    var result: std.ArrayListUnmanaged(spec.PortMapping) = .empty;
-    errdefer result.deinit(alloc);
-
-    for (items) |item| {
-        const mapping = parseOnePort(item) orelse {
-            log.err("manifest: invalid port mapping: '{s}'", .{item});
-            return LoadError.InvalidPortMapping;
-        };
-        result.append(alloc, mapping) catch return LoadError.OutOfMemory;
-    }
-
-    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
-}
-
-/// parse a single "host:container" port string
 fn parseOnePort(s: []const u8) ?spec.PortMapping {
-    const colon = std.mem.indexOfScalar(u8, s, ':') orelse return null;
-    if (colon == 0 or colon >= s.len - 1) return null;
-
-    const host_port = std.fmt.parseInt(u16, s[0..colon], 10) catch return null;
-    const container_port = std.fmt.parseInt(u16, s[colon + 1 ..], 10) catch return null;
-
-    return .{ .host_port = host_port, .container_port = container_port };
+    return fields.parseOnePort(s);
 }
 
-/// validate and dupe env var strings (must contain '=' with non-empty key)
-fn parseEnvVars(alloc: std.mem.Allocator, raw: ?[]const []const u8) LoadError![]const []const u8 {
-    const items = raw orelse {
-        return alloc.alloc([]const u8, 0) catch return LoadError.OutOfMemory;
-    };
-
-    var result: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer {
-        for (result.items) |s| alloc.free(s);
-        result.deinit(alloc);
-    }
-
-    for (items) |item| {
-        if (!validateEnvVar(item)) {
-            log.err("manifest: invalid env var: '{s}'", .{item});
-            return LoadError.InvalidEnvVar;
-        }
-        const duped = alloc.dupe(u8, item) catch return LoadError.OutOfMemory;
-        result.append(alloc, duped) catch {
-            alloc.free(duped);
-            return LoadError.OutOfMemory;
-        };
-    }
-
-    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
-}
-
-/// check that an env var string has the form "KEY=VALUE" with a non-empty key
 fn validateEnvVar(s: []const u8) bool {
-    const eq = std.mem.indexOfScalar(u8, s, '=') orelse return false;
-    return eq > 0; // key must be non-empty, value can be empty
+    return fields.validateEnvVar(s);
 }
 
-/// parse volume mount strings like "./src:/app" into VolumeMount structs
-fn parseVolumeMounts(alloc: std.mem.Allocator, raw: ?[]const []const u8) LoadError![]const spec.VolumeMount {
-    const items = raw orelse {
-        return alloc.alloc(spec.VolumeMount, 0) catch return LoadError.OutOfMemory;
-    };
-
-    var result: std.ArrayListUnmanaged(spec.VolumeMount) = .empty;
-    errdefer {
-        for (result.items) |vm| vm.deinit(alloc);
-        result.deinit(alloc);
-    }
-
-    for (items) |item| {
-        const mount = try parseOneVolumeMount(alloc, item);
-        result.append(alloc, mount) catch {
-            mount.deinit(alloc);
-            return LoadError.OutOfMemory;
-        };
-    }
-
-    return result.toOwnedSlice(alloc) catch return LoadError.OutOfMemory;
-}
-
-/// parse a single "source:target" volume mount string.
-/// bind detection: source starts with /, ./, or ../ → bind, otherwise → named.
 fn parseOneVolumeMount(alloc: std.mem.Allocator, s: []const u8) LoadError!spec.VolumeMount {
-    const colon = std.mem.indexOfScalar(u8, s, ':') orelse {
-        log.err("manifest: invalid volume mount (missing ':'): '{s}'", .{s});
-        return LoadError.InvalidVolumeMount;
-    };
-    if (colon == 0 or colon >= s.len - 1) {
-        log.err("manifest: invalid volume mount: '{s}'", .{s});
-        return LoadError.InvalidVolumeMount;
-    }
-
-    const source = s[0..colon];
-    const target = s[colon + 1 ..];
-
-    const kind: spec.VolumeMount.Kind = if (std.mem.startsWith(u8, source, "/") or
-        std.mem.startsWith(u8, source, "./") or
-        std.mem.startsWith(u8, source, "../"))
-        .bind
-    else
-        .named;
-
-    return .{
-        .source = alloc.dupe(u8, source) catch return LoadError.OutOfMemory,
-        .target = alloc.dupe(u8, target) catch return LoadError.OutOfMemory,
-        .kind = kind,
-    };
+    return fields.parseOneVolumeMount(alloc, s);
 }
 
-// -- restart policy parsing --
-
-/// parse the restart policy string into a RestartPolicy enum.
-/// valid values: "none", "always", "on_failure".
-/// returns .none when no value is specified (the default).
 fn parseRestartPolicy(service_name: []const u8, raw: ?[]const u8) LoadError!spec.RestartPolicy {
-    const value = raw orelse return .none;
-
-    if (std.mem.eql(u8, value, "none")) return .none;
-    if (std.mem.eql(u8, value, "always")) return .always;
-    if (std.mem.eql(u8, value, "on_failure")) return .on_failure;
-
-    log.err("manifest: service '{s}' has invalid restart policy '{s}' (expected none, always, or on_failure)", .{ service_name, value });
-    return LoadError.InvalidRestartPolicy;
-}
-
-// -- TLS config parsing --
-
-/// parse an optional [service.*.tls] sub-table into a TlsConfig.
-/// returns null if the table is not present.
-///
-/// expected TOML format:
-///   [service.web.tls]
-///   domain = "example.com"   # required
-///   acme = true              # optional, default false
-fn parseTlsConfig(
-    alloc: std.mem.Allocator,
-    service_name: []const u8,
-    table: ?*const toml.Table,
-) LoadError!?spec.TlsConfig {
-    const tls_table = table orelse return null;
-
-    const domain = tls_table.getString("domain") orelse {
-        log.err("manifest: service '{s}' tls is missing required field 'domain'", .{service_name});
-        return LoadError.InvalidTlsConfig;
-    };
-
-    if (domain.len == 0) {
-        log.err("manifest: service '{s}' tls domain cannot be empty", .{service_name});
-        return LoadError.InvalidTlsConfig;
-    }
-
-    const acme = tls_table.getBool("acme") orelse false;
-
-    // email is required when acme is enabled
-    const email_raw = tls_table.getString("email");
-    if (acme and email_raw == null) {
-        log.err("manifest: service '{s}' tls has acme = true but no email", .{service_name});
-        return LoadError.InvalidTlsConfig;
-    }
-
-    const email: ?[]const u8 = if (email_raw) |e|
-        alloc.dupe(u8, e) catch return LoadError.OutOfMemory
-    else
-        null;
-
-    return .{
-        .domain = alloc.dupe(u8, domain) catch return LoadError.OutOfMemory,
-        .acme = acme,
-        .email = email,
-    };
-}
-
-// -- GPU spec parsing --
-
-/// parse an optional [service.*.gpu] sub-table into a GpuSpec.
-fn parseGpuSpec(
-    alloc: std.mem.Allocator,
-    table: ?*const toml.Table,
-) LoadError!?spec.GpuSpec {
-    const gpu_table = table orelse return null;
-
-    const count_raw = gpu_table.getInt("count") orelse return null;
-    if (count_raw < 1) return null;
-
-    const model_raw = gpu_table.getString("model");
-    const model: ?[]const u8 = if (model_raw) |m|
-        alloc.dupe(u8, m) catch return LoadError.OutOfMemory
-    else
-        null;
-
-    const vram_raw = gpu_table.getInt("vram_min_mb");
-    const vram_min_mb: ?u64 = if (vram_raw) |v| @intCast(@max(0, v)) else null;
-
-    return .{
-        .count = @intCast(count_raw),
-        .model = model,
-        .vram_min_mb = vram_min_mb,
-    };
-}
-
-/// parse an optional [service.*.gpu_mesh] sub-table into a GpuMeshSpec.
-fn parseGpuMeshSpec(
-    table: ?*const toml.Table,
-) LoadError!?spec.GpuMeshSpec {
-    const mesh_table = table orelse return null;
-
-    const world_size_raw = mesh_table.getInt("world_size") orelse return null;
-    if (world_size_raw < 1) return null;
-
-    const gpus_per_rank_raw = mesh_table.getInt("gpus_per_rank");
-    const gpus_per_rank: u32 = if (gpus_per_rank_raw) |g| @intCast(@max(1, g)) else 1;
-
-    const master_port_raw = mesh_table.getInt("master_port");
-    const master_port: u16 = if (master_port_raw) |p| @intCast(@min(65535, @max(1, p))) else 29500;
-
-    return .{
-        .world_size = @intCast(world_size_raw),
-        .gpus_per_rank = gpus_per_rank,
-        .master_port = master_port,
-    };
-}
-
-// -- health check parsing --
-
-/// parse an optional [service.*.health_check] sub-table into a HealthCheck.
-/// returns null if the table is not present (no health check configured).
-///
-/// expected TOML format:
-///   [service.web.health_check]
-///   type = "http"       # "http", "tcp", or "exec"
-///   path = "/health"    # http only
-///   port = 8080         # http and tcp
-///   command = ["cmd"]   # exec only
-///   interval = 10       # optional, seconds
-///   timeout = 5         # optional, seconds
-///   retries = 3         # optional
-///   start_period = 0    # optional, seconds
-fn parseHealthCheck(
-    alloc: std.mem.Allocator,
-    service_name: []const u8,
-    table: ?*const toml.Table,
-) LoadError!?spec.HealthCheck {
-    const hc_table = table orelse return null;
-
-    const type_str = hc_table.getString("type") orelse {
-        log.err("manifest: service '{s}' health_check is missing required field 'type'", .{service_name});
-        return LoadError.InvalidHealthCheck;
-    };
-
-    const check_type: spec.CheckType = if (std.mem.eql(u8, type_str, "http")) blk: {
-        const path = hc_table.getString("path") orelse {
-            log.err("manifest: service '{s}' http health_check is missing 'path'", .{service_name});
-            return LoadError.InvalidHealthCheck;
-        };
-        const port = hc_table.getInt("port") orelse {
-            log.err("manifest: service '{s}' http health_check is missing 'port'", .{service_name});
-            return LoadError.InvalidHealthCheck;
-        };
-        if (port < 1 or port > 65535) {
-            log.err("manifest: service '{s}' health_check port out of range", .{service_name});
-            return LoadError.InvalidHealthCheck;
-        }
-        break :blk .{ .http = .{
-            .path = alloc.dupe(u8, path) catch return LoadError.OutOfMemory,
-            .port = @intCast(port),
-        } };
-    } else if (std.mem.eql(u8, type_str, "tcp")) blk: {
-        const port = hc_table.getInt("port") orelse {
-            log.err("manifest: service '{s}' tcp health_check is missing 'port'", .{service_name});
-            return LoadError.InvalidHealthCheck;
-        };
-        if (port < 1 or port > 65535) {
-            log.err("manifest: service '{s}' health_check port out of range", .{service_name});
-            return LoadError.InvalidHealthCheck;
-        }
-        break :blk .{ .tcp = .{ .port = @intCast(port) } };
-    } else if (std.mem.eql(u8, type_str, "exec")) blk: {
-        const cmd = try parseStringArray(alloc, hc_table.getArray("command"));
-        if (cmd.len == 0) {
-            alloc.free(cmd);
-            log.err("manifest: service '{s}' exec health_check has empty command", .{service_name});
-            return LoadError.InvalidHealthCheck;
-        }
-        break :blk .{ .exec = .{ .command = cmd } };
-    } else {
-        log.err("manifest: service '{s}' health_check has unknown type '{s}'", .{ service_name, type_str });
-        return LoadError.InvalidHealthCheck;
-    };
-
-    // parse optional timing parameters (use defaults if missing)
-    var hc = spec.HealthCheck{ .check_type = check_type };
-
-    if (hc_table.getInt("interval")) |v| {
-        if (v < 1) {
-            log.err("manifest: service '{s}' health_check interval must be >= 1", .{service_name});
-            hc.deinit(alloc);
-            return LoadError.InvalidHealthCheck;
-        }
-        hc.interval = @intCast(v);
-    }
-    if (hc_table.getInt("timeout")) |v| {
-        if (v < 1) {
-            log.err("manifest: service '{s}' health_check timeout must be >= 1", .{service_name});
-            hc.deinit(alloc);
-            return LoadError.InvalidHealthCheck;
-        }
-        hc.timeout = @intCast(v);
-    }
-    if (hc_table.getInt("retries")) |v| {
-        if (v < 1) {
-            log.err("manifest: service '{s}' health_check retries must be >= 1", .{service_name});
-            hc.deinit(alloc);
-            return LoadError.InvalidHealthCheck;
-        }
-        hc.retries = @intCast(v);
-    }
-    if (hc_table.getInt("start_period")) |v| {
-        if (v < 0) {
-            log.err("manifest: service '{s}' health_check start_period must be >= 0", .{service_name});
-            hc.deinit(alloc);
-            return LoadError.InvalidHealthCheck;
-        }
-        hc.start_period = @intCast(v);
-    }
-
-    return hc;
+    return fields.parseRestartPolicy(service_name, raw);
 }
 
 // -- tests --

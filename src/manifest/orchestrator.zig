@@ -19,14 +19,10 @@ const posix = std.posix;
 
 const cli = @import("../lib/cli.zig");
 const spec = @import("spec.zig");
-const image_spec = @import("../image/spec.zig");
-const registry = @import("../image/registry.zig");
-const layer = @import("../image/layer.zig");
 const oci = @import("../image/oci.zig");
 const container = @import("../runtime/container.zig");
 const process = @import("../runtime/process.zig");
 const store = @import("../state/store.zig");
-const blob_store = @import("../image/store.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
 const ip_mod = @import("../network/ip.zig");
@@ -38,8 +34,10 @@ const tls_backend = @import("../tls/backend.zig");
 const cert_store_mod = @import("../tls/cert_store.zig");
 const acme_mod = @import("../tls/acme.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
-const volumes_mod = @import("../state/volumes.zig");
+const gpu_runtime = @import("gpu_runtime.zig");
 const sqlite = @import("sqlite");
+const service_runtime = @import("orchestrator/service_runtime.zig");
+const tls_support = @import("orchestrator/tls_support.zig");
 
 pub const OrchestratorError = error{
     /// one or more container images could not be pulled from the registry
@@ -589,40 +587,7 @@ pub const Orchestrator = struct {
 /// check if image exists locally, pull if not.
 /// usable outside the Orchestrator (e.g., for run-worker command).
 pub fn ensureImageAvailable(alloc: std.mem.Allocator, image: []const u8) bool {
-    const ref = image_spec.parseImageRef(image);
-
-    // check if already pulled
-    const existing = store.findImage(alloc, ref.repository, ref.reference);
-    if (existing) |img| {
-        img.deinit(alloc);
-        return true;
-    } else |_| {}
-
-    // pull from registry
-    var result = registry.pull(alloc, ref) catch return false;
-    defer result.deinit();
-
-    // extract layers
-    const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch return false;
-    defer {
-        for (layer_paths) |p| alloc.free(p);
-        alloc.free(layer_paths);
-    }
-
-    // save image record — compute config digest from raw bytes
-    const cfg_computed = blob_store.computeDigest(result.config_bytes);
-    var cfg_digest_buf: [71]u8 = undefined;
-    const cfg_digest_str = cfg_computed.string(&cfg_digest_buf);
-    oci.saveImageFromPull(
-        ref,
-        result.manifest_digest,
-        result.manifest_bytes,
-        result.config_bytes,
-        cfg_digest_str,
-        result.total_size,
-    ) catch return false;
-
-    return true;
+    return service_runtime.ensureImageAvailable(alloc, image);
 }
 
 // -- ACME provisioning --
@@ -636,63 +601,7 @@ fn provisionAcmeCert(
     domain: []const u8,
     email: []const u8,
 ) void {
-    var client = acme_mod.AcmeClient.init(alloc, acme_mod.letsencrypt_production);
-    defer client.deinit();
-
-    client.fetchDirectory() catch {
-        writeErr("    failed to fetch ACME directory\n", .{});
-        return;
-    };
-
-    client.createAccount(email) catch {
-        writeErr("    failed to create ACME account\n", .{});
-        return;
-    };
-
-    var order = client.createOrder(domain) catch {
-        writeErr("    failed to create certificate order\n", .{});
-        return;
-    };
-    defer order.deinit();
-
-    // handle HTTP-01 challenge
-    // note: the proxy isn't running yet at this point, so we can't serve
-    // challenges on port 80 during startup provisioning. the user needs
-    // to either:
-    //   1. pre-provision with 'yoq cert provision' (which runs the ACME
-    //      flow with manual challenge handling), or
-    //   2. have DNS already configured so the CA can reach us.
-    //
-    // during auto-renewal (after startup), the proxy IS running and
-    // challenge tokens are served automatically.
-    if (order.authorization_urls.len > 0) {
-        var challenge = client.getHttpChallenge(order.authorization_urls[0]) catch {
-            writeErr("    failed to get HTTP-01 challenge (is DNS configured?)\n", .{});
-            return;
-        };
-        defer challenge.deinit();
-
-        client.respondToChallenge(challenge.url) catch {
-            writeErr("    failed to respond to challenge\n", .{});
-            return;
-        };
-
-        // wait for validation
-        std.Thread.sleep(5 * std.time.ns_per_s);
-    }
-
-    var exported = client.finalizeAndExport(order.finalize_url, domain) catch {
-        writeErr("    failed to finalize certificate order\n", .{});
-        return;
-    };
-    defer exported.deinit();
-
-    certs.install(domain, exported.cert_pem, exported.key_pem, "acme") catch {
-        writeErr("    failed to store certificate\n", .{});
-        return;
-    };
-
-    writeErr("    provisioned certificate for {s}\n", .{domain});
+    return tls_support.provisionAcmeCert(alloc, certs, domain, email);
 }
 
 // -- service thread helpers --
@@ -702,55 +611,10 @@ fn provisionAcmeCert(
 
 /// resolved image configuration — owns the pull result, parsed config,
 /// and image record so they live as long as the service thread needs them.
-const ServiceImageConfig = struct {
-    rootfs: []const u8,
-    entrypoint: []const []const u8 = &.{},
-    default_cmd: []const []const u8 = &.{},
-    image_env: []const []const u8 = &.{},
-    working_dir: []const u8 = "/",
-    layer_paths: []const []const u8 = &.{},
-    pull_result: ?registry.PullResult = null,
-    config_parsed: ?image_spec.ParseResult(image_spec.ImageConfig) = null,
-    img_record: ?store.ImageRecord = null,
-
-    fn deinit(self: *ServiceImageConfig, alloc: std.mem.Allocator) void {
-        if (self.pull_result) |*r| r.deinit();
-        if (self.config_parsed) |*c| c.deinit();
-        if (self.img_record) |img| img.deinit(alloc);
-    }
-};
-
 /// resolve image config for a service: find image, pull for config,
 /// extract defaults (entrypoint, cmd, env, working_dir), assemble layers.
-fn resolveServiceImage(alloc: std.mem.Allocator, image: []const u8) ?ServiceImageConfig {
-    const ref = image_spec.parseImageRef(image);
-    const img = store.findImage(alloc, ref.repository, ref.reference) catch return null;
-
-    var result = ServiceImageConfig{ .rootfs = "/", .img_record = img };
-
-    // re-pull manifest for config
-    result.pull_result = registry.pull(alloc, ref) catch return null;
-
-    result.config_parsed = image_spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch return null;
-
-    // extract image defaults
-    if (result.config_parsed.?.value.config) |cc| {
-        if (cc.Entrypoint) |ep| result.entrypoint = ep;
-        if (cc.Cmd) |cmd| result.default_cmd = cmd;
-        if (cc.Env) |env| result.image_env = env;
-        if (cc.WorkingDir) |wd| {
-            if (wd.len > 0) result.working_dir = wd;
-        }
-    }
-
-    // assemble layers
-    result.layer_paths = layer.assembleRootfs(alloc, result.pull_result.?.layer_digests) catch return null;
-
-    if (result.layer_paths.len > 0) {
-        result.rootfs = result.layer_paths[result.layer_paths.len - 1];
-    }
-
-    return result;
+fn resolveServiceImage(alloc: std.mem.Allocator, image: []const u8) ?service_runtime.ServiceImageConfig {
+    return service_runtime.resolveServiceImage(alloc, image);
 }
 
 /// merge image env with manifest env. manifest vars override image vars
@@ -760,44 +624,10 @@ fn mergeServiceEnv(
     image_env: []const []const u8,
     manifest_env: []const []const u8,
 ) std.ArrayList([]const u8) {
-    var merged: std.ArrayList([]const u8) = .empty;
-
-    for (image_env) |img_var| {
-        const img_key = envKey(img_var);
-        var overridden = false;
-        for (manifest_env) |manifest_var| {
-            if (std.mem.eql(u8, envKey(manifest_var), img_key)) {
-                overridden = true;
-                break;
-            }
-        }
-        if (!overridden) {
-            merged.append(alloc, img_var) catch |e| {
-                log.warn("failed to merge image env var: {}", .{e});
-            };
-        }
-    }
-    for (manifest_env) |manifest_var| {
-        merged.append(alloc, manifest_var) catch |e| {
-            log.warn("failed to merge manifest env var: {}", .{e});
-        };
-    }
-
-    return merged;
+    return service_runtime.mergeServiceEnv(alloc, image_env, manifest_env);
 }
 
 /// resolved bind mounts with their allocated source paths.
-const ServiceVolumes = struct {
-    bind_mounts: std.ArrayList(container.BindMount),
-    resolved_sources: std.ArrayList([]const u8),
-
-    fn deinit(self: *ServiceVolumes, alloc: std.mem.Allocator) void {
-        for (self.resolved_sources.items) |s| alloc.free(s);
-        self.resolved_sources.deinit(alloc);
-        self.bind_mounts.deinit(alloc);
-    }
-};
-
 /// resolve bind mounts from manifest volume declarations.
 /// relative source paths are resolved to absolute paths.
 /// named volumes are resolved via the volumes module.
@@ -806,89 +636,13 @@ fn resolveServiceVolumes(
     volumes: []const spec.VolumeMount,
     manifest_volumes: []const spec.Volume,
     app_name: []const u8,
-) error{VolumeFailed}!ServiceVolumes {
-    var result = ServiceVolumes{
-        .bind_mounts = .empty,
-        .resolved_sources = .empty,
-    };
-
-    for (volumes) |vol| {
-        switch (vol.kind) {
-            .bind => {
-                var resolve_buf: [4096]u8 = undefined;
-                const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch {
-                    log.warn("failed to resolve bind mount source: {s}", .{vol.source});
-                    continue;
-                };
-
-                const duped = alloc.dupe(u8, abs_source) catch {
-                    log.warn("orchestrator: failed to allocate bind mount source: {s}", .{vol.source});
-                    continue;
-                };
-                result.resolved_sources.append(alloc, duped) catch {
-                    alloc.free(duped);
-                    continue;
-                };
-
-                result.bind_mounts.append(alloc, .{
-                    .source = duped,
-                    .target = vol.target,
-                }) catch |e| {
-                    log.warn("failed to add bind mount for {s}: {}", .{ vol.target, e });
-                };
-            },
-            .named => {
-                const vol_def = findVolumeByName(manifest_volumes, vol.source) orelse {
-                    log.err("named volume '{s}' not defined in manifest", .{vol.source});
-                    return error.VolumeFailed;
-                };
-
-                // ensure volume directory exists and is registered
-                const db = store.getDb() catch {
-                    log.err("orchestrator: no database for volume creation", .{});
-                    return error.VolumeFailed;
-                };
-                const timestamp = std.time.timestamp();
-                volumes_mod.create(db, app_name, vol_def, timestamp, null) catch |e| {
-                    log.err("failed to create volume '{s}': {}", .{ vol.source, e });
-                    return error.VolumeFailed;
-                };
-
-                // resolve path
-                var path_buf: [4096]u8 = undefined;
-                const vol_path = volumes_mod.resolveVolumePath(&path_buf, app_name, vol.source, vol_def.driver) catch |e| {
-                    log.err("failed to resolve volume path '{s}': {}", .{ vol.source, e });
-                    return error.VolumeFailed;
-                };
-
-                const duped = alloc.dupe(u8, vol_path) catch {
-                    log.warn("orchestrator: failed to allocate volume path: {s}", .{vol.source});
-                    continue;
-                };
-                result.resolved_sources.append(alloc, duped) catch {
-                    alloc.free(duped);
-                    continue;
-                };
-
-                result.bind_mounts.append(alloc, .{
-                    .source = duped,
-                    .target = vol.target,
-                }) catch |e| {
-                    log.warn("failed to add volume mount for {s}: {}", .{ vol.target, e });
-                };
-            },
-        }
-    }
-
-    return result;
+) error{VolumeFailed}!service_runtime.ServiceVolumes {
+    return service_runtime.resolveServiceVolumes(alloc, volumes, manifest_volumes, app_name);
 }
 
 /// find a volume definition by name in the manifest volumes list.
 fn findVolumeByName(manifest_volumes: []const spec.Volume, name: []const u8) ?spec.Volume {
-    for (manifest_volumes) |vol| {
-        if (std.mem.eql(u8, vol.name, name)) return vol;
-    }
-    return null;
+    return service_runtime.findVolumeByName(manifest_volumes, name);
 }
 
 /// run a container to completion and return whether it succeeded (exit code 0).
@@ -905,90 +659,7 @@ pub fn runOneShot(
     manifest_volumes: []const spec.Volume,
     app_name: []const u8,
 ) bool {
-    // resolve image
-    var img = resolveServiceImage(alloc, image) orelse {
-        writeErr("failed to resolve image for worker {s}\n", .{hostname});
-        return false;
-    };
-    defer img.deinit(alloc);
-
-    // resolve command
-    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, command) catch {
-        writeErr("failed to resolve command for worker {s}\n", .{hostname});
-        return false;
-    };
-    defer resolved.args.deinit(alloc);
-
-    // merge env
-    var merged_env = mergeServiceEnv(alloc, img.image_env, env);
-    defer merged_env.deinit(alloc);
-
-    // working dir
-    var wd = img.working_dir;
-    if (working_dir) |w| wd = w;
-
-    // resolve volumes
-    var vols = resolveServiceVolumes(alloc, volumes, manifest_volumes, app_name) catch {
-        writeErr("failed to resolve volumes for worker {s}\n", .{hostname});
-        return false;
-    };
-    defer vols.deinit(alloc);
-
-    // generate container id
-    var id_buf: [12]u8 = undefined;
-    container.generateId(&id_buf) catch {
-        writeErr("failed to generate container ID for worker {s}\n", .{hostname});
-        return false;
-    };
-    const id = id_buf[0..];
-
-    // save record
-    store.save(.{
-        .id = id,
-        .rootfs = img.rootfs,
-        .command = resolved.command,
-        .hostname = hostname,
-        .status = "created",
-        .pid = null,
-        .exit_code = null,
-        .app_name = null,
-        .created_at = std.time.timestamp(),
-    }) catch return false;
-
-    // create and run container
-    var c = container.Container{
-        .config = .{
-            .id = id,
-            .rootfs = img.rootfs,
-            .command = resolved.command,
-            .args = resolved.args.items,
-            .env = merged_env.items,
-            .working_dir = wd,
-            .lower_dirs = img.layer_paths,
-            .hostname = hostname,
-            .mounts = vols.bind_mounts.items,
-        },
-        .status = .created,
-        .pid = null,
-        .exit_code = null,
-        .created_at = std.time.timestamp(),
-    };
-
-    c.start() catch {
-        logs.deleteLogFile(id);
-        container.cleanupContainerDirs(id);
-        store.remove(id) catch {};
-        return false;
-    };
-
-    const exit_code = c.wait() catch 255;
-
-    // clean up
-    logs.deleteLogFile(id);
-    container.cleanupContainerDirs(id);
-    store.remove(id) catch {};
-
-    return exit_code == 0;
+    return service_runtime.runOneShot(alloc, image, command, env, volumes, working_dir, hostname, manifest_volumes, app_name);
 }
 
 /// runs a single service in its own thread.
@@ -1056,79 +727,24 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
         }
         gpu_indices_len = count;
 
-        // generate GPU env vars (CUDA_VISIBLE_DEVICES, etc.) for the container
-        const gpu_passthrough = @import("../gpu/passthrough.zig");
-        var gpu_env_buf: [4096]u8 = undefined;
-        if (gpu_passthrough.generateGpuEnv(gpu_indices_buf[0..count], &gpu_env_buf)) |env_data| {
-            var env_pos: usize = 0;
-            while (env_pos < env_data.len) {
-                const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
-                if (end > env_pos) {
-                    if (alloc.dupe(u8, env_data[env_pos..end])) |duped| {
-                        merged_env.append(alloc, duped) catch {};
-                    } else |_| {}
-                }
-                env_pos = end + 1;
-            }
-        } else |_| {}
+        gpu_runtime.appendGpuPassthroughEnv(alloc, &merged_env, gpu_indices_buf[0..count]);
     }
 
     // inject NCCL mesh environment for multi-GPU distributed training
+    var mesh_support: ?gpu_runtime.MeshSupport = null;
+    defer if (mesh_support) |*support| support.deinit();
     if (svc.gpu_mesh) |mesh_spec| {
-        const gpu_mesh = @import("../gpu/mesh.zig");
-        const gpu_detect = @import("../gpu/detect.zig");
-        const ib_result = gpu_mesh.detectInfiniband();
-
-        // generate NCCL topology XML and write to a temp file
-        var topo_file_path: ?[]const u8 = null;
-        const gpu_result = gpu_detect.detect();
-        if (gpu_result.count > 0) {
-            if (gpu_mesh.generateNcclTopology(
-                alloc,
-                gpu_result.gpus[0..gpu_result.count],
-                &ib_result.devices,
-                ib_result.count,
-            )) |topo_xml| {
-                defer alloc.free(topo_xml);
-                var topo_path_buf: [256]u8 = undefined;
-                const topo_path = std.fmt.bufPrint(&topo_path_buf, "/tmp/nccl_topo_{s}.xml", .{svc.name}) catch null;
-                if (topo_path) |tp| {
-                    if (std.fs.cwd().createFile(tp, .{})) |file| {
-                        file.writeAll(topo_xml) catch {};
-                        file.close();
-                        topo_file_path = alloc.dupe(u8, tp) catch null;
-                    } else |_| {}
-                }
-            } else |_| {}
-        }
-        defer if (topo_file_path) |p| alloc.free(p);
-
-        var mesh_env_buf: [1024]u8 = undefined;
+        mesh_support = gpu_runtime.MeshSupport.init(alloc);
         // for local orchestrator, rank 0 is always this node at 127.0.0.1
-        if (gpu_mesh.generateMeshEnv(
-            &mesh_env_buf,
-            ib_result,
+        mesh_support.?.appendEnv(
+            alloc,
+            &merged_env,
             "127.0.0.1",
             mesh_spec.master_port,
             mesh_spec.world_size,
             0, // rank (local orchestrator = single node, rank 0)
             0, // local_rank
-            topo_file_path, // topology file path (null if generation failed)
-        )) |env_data| {
-            // parse null-separated env vars and add to merged_env
-            var env_pos: usize = 0;
-            while (env_pos < env_data.len) {
-                const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
-                if (end > env_pos) {
-                    if (alloc.dupe(u8, env_data[env_pos..end])) |duped| {
-                        merged_env.append(alloc, duped) catch {};
-                    } else |_| {}
-                }
-                env_pos = end + 1;
-            }
-        } else |_| {}
-        // NOTE: topo file at /tmp/nccl_topo_{name}.xml persists after container exit.
-        // cleanup could be added to Orchestrator.stopAll() if needed.
+        );
     }
 
     // if the service has a health check, skip DNS registration on startup.
@@ -1283,14 +899,14 @@ fn serviceThread(orch: *Orchestrator, idx: usize) void {
 // -- restart policy constants --
 
 /// initial backoff delay when restarting a service (1 second)
-const initial_backoff_ms: u64 = 1_000;
+const initial_backoff_ms: u64 = service_runtime.initial_backoff_ms;
 
 /// maximum backoff delay (30 seconds)
-const max_backoff_ms: u64 = 30_000;
+const max_backoff_ms: u64 = service_runtime.max_backoff_ms;
 
 /// how long a container must run before we consider it a healthy start
 /// and reset the backoff timer (10 seconds)
-const healthy_run_threshold_ns: i128 = 10 * std.time.ns_per_s;
+const healthy_run_threshold_ns: i128 = service_runtime.healthy_run_threshold_ns;
 
 /// watcher thread for dev mode — monitors bind-mounted directories
 /// and triggers container restarts when files change.
@@ -1347,10 +963,7 @@ pub fn watcherThread(orch: *Orchestrator, w: *watcher_mod.Watcher) void {
 
 /// extract the key part from a "KEY=VALUE" env var string
 fn envKey(env_var: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, env_var, '=')) |eq| {
-        return env_var[0..eq];
-    }
-    return env_var;
+    return service_runtime.envKey(env_var);
 }
 
 // -- signal handling --
