@@ -22,39 +22,25 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const BPF = linux.BPF;
-const nl = @import("netlink.zig");
 const log = @import("../lib/log.zig");
+const attach_support = @import("ebpf/attach_support.zig");
+const common = @import("ebpf/common.zig");
+const dns_runtime = @import("ebpf/dns_runtime.zig");
+const lb_runtime = @import("ebpf/lb_runtime.zig");
+const map_support = @import("ebpf/map_support.zig");
+const metrics_runtime = @import("ebpf/metrics_runtime.zig");
+const port_map_runtime = @import("ebpf/port_map_runtime.zig");
+const policy_runtime = @import("ebpf/policy_runtime.zig");
+const program_support = @import("ebpf/program_support.zig");
+const resource_support = @import("ebpf/resource_support.zig");
+const dns_intercept = @import("bpf/dns_intercept.zig");
+const lb_prog = @import("bpf/lb.zig");
+const metrics_prog = @import("bpf/metrics.zig");
+const port_map_prog = @import("bpf/port_map.zig");
+const policy_prog = @import("bpf/policy.zig");
 
-pub const EbpfError = error{
-    /// failed to create a BPF map via the bpf() syscall
-    MapCreateFailed,
-    /// failed to insert or update a key/value pair in a BPF map
-    MapUpdateFailed,
-    /// the BPF verifier rejected the program or prog_load failed
-    ProgramLoadFailed,
-    /// failed to attach a BPF program to TC (qdisc or filter creation)
-    AttachFailed,
-    /// failed to detach a BPF program from TC (qdisc deletion)
-    DetachFailed,
-    /// BPF is not available on this system (no CAP_BPF or old kernel)
-    NotSupported,
-    /// invalid parameters passed to BPF operation
-    InvalidParameter,
-    /// map is full (reached max_entries limit)
-    MapFull,
-    /// key or value size doesn't match map definition
-    SizeMismatch,
-    /// too many BPF resources in use (approaching fd limit)
-    ResourceExhausted,
-    /// operation timed out (e.g., waiting for lock)
-    Timeout,
-};
-
-/// direction for TC program attachment
-pub const Direction = enum {
-    ingress,
-    egress,
-};
+pub const EbpfError = common.EbpfError;
+pub const Direction = common.Direction;
 
 // -- map operations --
 
@@ -65,61 +51,21 @@ pub fn createMap(
     value_size: u32,
     max_entries: u32,
 ) EbpfError!posix.fd_t {
-    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
-
-    // Validate parameters and check resource limits
-    try validateAndTrackMapCreate(map_type, key_size, value_size, max_entries);
-
-    const fd = BPF.map_create(map_type, key_size, value_size, max_entries) catch |e| {
-        // If creation fails, we need to decrement the counter we already incremented
-        trackBpfFdClosed();
-        log.warn("ebpf: map_create failed (type={d}, key={d}, val={d}): {}", .{
-            @intFromEnum(map_type), key_size, value_size, e,
-        });
-        return EbpfError.MapCreateFailed;
-    };
-
-    return fd;
+    return map_support.createMap(map_type, key_size, value_size, max_entries);
 }
 
 /// look up a value in a BPF map by key.
 /// returns true if found (value is written to the output buffer).
 /// validates that key and value buffers are within acceptable size limits.
 pub fn mapLookup(map_fd: posix.fd_t, key: []const u8, value: []u8) bool {
-    if (comptime builtin.os.tag != .linux) return false;
-
-    // Validate buffer sizes to prevent out-of-bounds access
-    if (key.len == 0 or key.len > max_key_size) {
-        log.warn("ebpf: mapLookup invalid key size {d}", .{key.len});
-        return false;
-    }
-    if (value.len == 0 or value.len > max_value_size) {
-        log.warn("ebpf: mapLookup invalid value size {d}", .{value.len});
-        return false;
-    }
-
-    BPF.map_lookup_elem(map_fd, key, value) catch return false;
-    return true;
+    return map_support.mapLookup(map_fd, key, value);
 }
 
 /// get the next key in a BPF map (for iteration).
 /// returns true if a next key was found.
 /// validates key buffer size for safety.
 pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
-    if (comptime builtin.os.tag != .linux) return false;
-
-    // Validate buffer sizes
-    if (key.len > max_key_size) {
-        log.warn("ebpf: mapGetNextKey invalid key size {d}", .{key.len});
-        return false;
-    }
-    if (next_key.len == 0 or next_key.len > max_key_size) {
-        log.warn("ebpf: mapGetNextKey invalid next_key size {d}", .{next_key.len});
-        return false;
-    }
-
-    const found = BPF.map_get_next_key(map_fd, key, next_key) catch return false;
-    return found;
+    return map_support.mapGetNextKey(map_fd, key, next_key);
 }
 
 /// insert or update a key/value pair in a BPF map.
@@ -127,85 +73,17 @@ pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
 /// uses circuit breaker pattern to prevent cascading failures.
 /// returns MapFull if the map has reached max_entries (for non-LRU maps).
 pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) EbpfError!void {
-    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
-
-    // Check circuit breaker before attempting operation
-    if (!map_op_circuit_breaker.allow()) {
-        log.warn("ebpf: mapUpdate circuit breaker open - skipping update", .{});
-        return EbpfError.MapUpdateFailed;
-    }
-
-    // Validate key size
-    if (key.len == 0 or key.len > max_key_size) {
-        log.err("ebpf: mapUpdate invalid key size {d}, must be 1-{d}", .{ key.len, max_key_size });
-        map_op_circuit_breaker.recordFailure();
-        return EbpfError.InvalidParameter;
-    }
-
-    // Validate value size
-    if (value.len == 0 or value.len > max_value_size) {
-        log.err("ebpf: mapUpdate invalid value size {d}, must be 1-{d}", .{ value.len, max_value_size });
-        map_op_circuit_breaker.recordFailure();
-        return EbpfError.InvalidParameter;
-    }
-
-    BPF.map_update_elem(map_fd, key, value, BPF.ANY) catch |e| {
-        map_op_circuit_breaker.recordFailure();
-        // Check for specific error conditions
-        const err_name = @errorName(e);
-        if (std.mem.indexOf(u8, err_name, "NoSpace")) |_| {
-            log.warn("ebpf: map_update failed: map is full", .{});
-            return EbpfError.MapFull;
-        }
-        log.warn("ebpf: map_update failed: {} ({s})", .{ e, err_name });
-        return EbpfError.MapUpdateFailed;
-    };
-
-    // Success - record it
-    map_op_circuit_breaker.recordSuccess();
+    try map_support.mapUpdate(map_fd, key, value);
 }
 
 /// delete a key from a BPF map.
 /// validates key size before attempting deletion.
 /// returns true if the key was found and deleted, false otherwise.
 pub fn mapDelete(map_fd: posix.fd_t, key: []const u8) bool {
-    if (comptime builtin.os.tag != .linux) return false;
-
-    // Validate key size
-    if (key.len == 0 or key.len > max_key_size) {
-        log.warn("ebpf: mapDelete invalid key size {d}", .{key.len});
-        return false;
-    }
-
-    BPF.map_delete_elem(map_fd, key) catch |e| {
-        // Log the error for debugging but don't crash
-        log.debug("ebpf: map_delete failed: {s}", .{@errorName(e)});
-        return false;
-    };
-    return true;
+    return map_support.mapDelete(map_fd, key);
 }
 
 // -- program loading --
-
-/// maximum number of BPF instructions we support in a single program.
-/// the kernel limit is 1M for privileged programs, but our programs
-/// are much smaller than this.
-const max_insns = 4096;
-
-/// maximum number of maps a single program can reference.
-const max_maps = 16;
-
-/// maximum key size for BPF maps (matches kernel limit for hash maps)
-const max_key_size = 512;
-
-/// maximum value size for BPF maps
-const max_value_size = 4096;
-
-/// maximum number of entries in a single BPF map
-const max_map_entries = 1048576; // 1M entries
-
-/// maximum total BPF file descriptors we allow across all programs
-const max_total_fds = 128;
 
 /// load a BPF program from comptime instruction and relocation arrays.
 ///
@@ -218,7 +96,7 @@ pub fn loadProgram(
     comptime prog: type,
     map_fds: []posix.fd_t,
 ) EbpfError!posix.fd_t {
-    return loadBpfProgramInner(prog.insns, prog.relocs, map_fds, .sched_cls, "");
+    return program_support.loadProgram(prog, map_fds);
 }
 
 /// load a BPF program with a specific program type.
@@ -230,7 +108,7 @@ pub fn loadProgramWithType(
     map_fds: []posix.fd_t,
     prog_type: BPF.ProgType,
 ) EbpfError!posix.fd_t {
-    return loadBpfProgramInner(prog.insns, prog.relocs, map_fds, prog_type, "");
+    return program_support.loadProgramWithType(prog, map_fds, prog_type);
 }
 
 /// load an egress BPF program from a module with egress_insns/egress_relocs.
@@ -238,76 +116,7 @@ fn loadEgressProgram(
     comptime prog: type,
     map_fds: []posix.fd_t,
 ) EbpfError!posix.fd_t {
-    return loadBpfProgramInner(prog.egress_insns, prog.egress_relocs, map_fds, .sched_cls, "egress ");
-}
-
-/// shared implementation for loading a BPF program.
-///
-/// copies instructions into a mutable buffer, patches ld_imm64 relocations
-/// with map file descriptors, and calls prog_load. on failure, retries with
-/// verifier logging enabled to capture the error message.
-fn loadBpfProgramInner(
-    insns: anytype,
-    relocs: anytype,
-    map_fds: []posix.fd_t,
-    prog_type: BPF.ProgType,
-    comptime label: []const u8,
-) EbpfError!posix.fd_t {
-    if (comptime builtin.os.tag != .linux) return EbpfError.NotSupported;
-
-    if (insns.len == 0) return EbpfError.ProgramLoadFailed;
-    if (insns.len > max_insns) return EbpfError.ProgramLoadFailed;
-
-    // copy instructions into a mutable buffer for patching
-    var mutable_insns: [insns.len]BPF.Insn = insns;
-
-    // patch relocations: set map fd in ld_imm64 instructions
-    for (relocs) |reloc| {
-        if (reloc.insn_idx >= insns.len) {
-            log.warn("ebpf: " ++ label ++ "skipping relocation with out-of-bounds insn_idx={d} (max={d})", .{ reloc.insn_idx, insns.len });
-            continue;
-        }
-        if (reloc.map_idx >= map_fds.len) {
-            log.warn("ebpf: " ++ label ++ "skipping relocation with out-of-bounds map_idx={d} (max={d})", .{ reloc.map_idx, map_fds.len });
-            continue;
-        }
-
-        patchMapFd(&mutable_insns[reloc.insn_idx], map_fds[reloc.map_idx]);
-    }
-
-    // first attempt: no verbose log (avoids ENOSPC from log buffer overflow)
-    const prog_fd = BPF.prog_load(
-        prog_type,
-        &mutable_insns,
-        null,
-        "GPL",
-        0,
-        0,
-    ) catch |e| {
-        // retry with logging to capture the verifier error message
-        var log_buf: [65536]u8 = undefined;
-        var bpf_log = BPF.Log{
-            .level = 1,
-            .buf = &log_buf,
-        };
-        _ = BPF.prog_load(
-            prog_type,
-            &mutable_insns,
-            &bpf_log,
-            "GPL",
-            0,
-            0,
-        ) catch {};
-
-        const log_end = std.mem.indexOfScalar(u8, &log_buf, 0) orelse log_buf.len;
-        if (log_end > 0) {
-            log.warn("ebpf: " ++ label ++ "verifier output: {s}", .{log_buf[0..log_end]});
-        }
-        log.warn("ebpf: " ++ label ++ "prog_load failed: {}", .{e});
-        return EbpfError.ProgramLoadFailed;
-    };
-
-    return prog_fd;
+    return program_support.loadEgressProgram(prog, map_fds);
 }
 
 /// patch a ld_imm64 instruction to reference a map fd.
@@ -316,35 +125,13 @@ fn loadBpfProgramInner(
 /// first instruction's imm field, and src_reg is set to PSEUDO_MAP_FD
 /// to tell the verifier this references a map.
 fn patchMapFd(insn: *BPF.Insn, fd: posix.fd_t) void {
-    insn.src = BPF.PSEUDO_MAP_FD;
-    insn.imm = @intCast(fd);
+    program_support.patchMapFd(insn, fd);
 }
 
 // -- TC attachment --
 
-/// attach a BPF program to a network interface via TC.
-///
-/// 1. creates a clsact qdisc on the interface (idempotent — ignores
-///    EEXIST so it's safe to call multiple times)
-/// 2. adds the BPF program as a TC filter on the specified direction
-///
-/// priority controls execution order — lower values run first.
-/// DNS interceptor and load balancer use priority 1, metrics uses 2.
 pub fn attachTC(if_index: u32, direction: Direction, prog_fd: posix.fd_t, priority: u32) EbpfError!void {
-    const fd = nl.openSocket() catch return EbpfError.AttachFailed;
-    defer posix.close(fd);
-
-    // step 1: create clsact qdisc (idempotent)
-    createClsactQdisc(fd, if_index) catch |e| {
-        log.warn("ebpf: failed to create clsact qdisc on ifindex {d}: {}", .{ if_index, e });
-        return EbpfError.AttachFailed;
-    };
-
-    // step 2: add BPF filter
-    addBpfFilter(fd, if_index, direction, prog_fd, priority) catch |e| {
-        log.warn("ebpf: failed to add BPF filter on ifindex {d}: {}", .{ if_index, e });
-        return EbpfError.AttachFailed;
-    };
+    try attach_support.attachTC(if_index, direction, prog_fd, priority);
 }
 
 /// detach all TC filters from an interface direction.
@@ -352,115 +139,7 @@ pub fn attachTC(if_index: u32, direction: Direction, prog_fd: posix.fd_t, priori
 /// removes the clsact qdisc entirely, which removes all attached
 /// programs (both ingress and egress). this is the simplest cleanup.
 pub fn detachTC(if_index: u32) EbpfError!void {
-    const fd = nl.openSocket() catch return EbpfError.DetachFailed;
-    defer posix.close(fd);
-
-    deleteClsactQdisc(fd, if_index) catch |e| {
-        log.warn("ebpf: failed to delete clsact qdisc on ifindex {d}: {}", .{ if_index, e });
-        return EbpfError.DetachFailed;
-    };
-}
-
-/// create the clsact qdisc on an interface.
-///
-/// clsact is a special qdisc that provides ingress and egress attachment
-/// points for BPF classifiers without actually doing any queuing.
-fn createClsactQdisc(fd: posix.fd_t, if_index: u32) nl.NetlinkError!void {
-    var buf: [nl.buf_size]u8 align(4) = undefined;
-    var mb = nl.MessageBuilder.init(&buf);
-
-    const hdr = try mb.putHeader(
-        .RTM_NEWQDISC,
-        nl.NLM_F.REQUEST | nl.NLM_F.ACK | nl.NLM_F.CREATE,
-        nl.TcMsg,
-    );
-    const tc = mb.getPayload(hdr, nl.TcMsg);
-    tc.family = 0;
-    tc._pad1 = 0;
-    tc._pad2 = 0;
-    tc.ifindex = @intCast(if_index);
-    tc.handle = nl.TC_H.CLSACT;
-    tc.parent = nl.TC_H.INGRESS;
-    tc.info = 0;
-
-    try mb.putAttrStr(hdr, nl.TCA.KIND, "clsact");
-
-    nl.sendAndCheck(fd, mb.message()) catch |e| {
-        // EEXIST is fine — qdisc already exists
-        if (e == nl.NetlinkError.KernelError) return;
-        return e;
-    };
-}
-
-/// delete the clsact qdisc from an interface.
-fn deleteClsactQdisc(fd: posix.fd_t, if_index: u32) nl.NetlinkError!void {
-    var buf: [nl.buf_size]u8 align(4) = undefined;
-    var mb = nl.MessageBuilder.init(&buf);
-
-    const hdr = try mb.putHeader(
-        .RTM_DELQDISC,
-        nl.NLM_F.REQUEST | nl.NLM_F.ACK,
-        nl.TcMsg,
-    );
-    const tc = mb.getPayload(hdr, nl.TcMsg);
-    tc.family = 0;
-    tc._pad1 = 0;
-    tc._pad2 = 0;
-    tc.ifindex = @intCast(if_index);
-    tc.handle = nl.TC_H.CLSACT;
-    tc.parent = nl.TC_H.INGRESS;
-    tc.info = 0;
-
-    try nl.sendAndCheck(fd, mb.message());
-}
-
-/// add a BPF program as a TC filter on ingress or egress.
-fn addBpfFilter(
-    fd: posix.fd_t,
-    if_index: u32,
-    direction: Direction,
-    prog_fd: posix.fd_t,
-    priority: u32,
-) nl.NetlinkError!void {
-    var buf: [nl.buf_size]u8 align(4) = undefined;
-    var mb = nl.MessageBuilder.init(&buf);
-
-    const parent = switch (direction) {
-        .ingress => nl.TC_H.CLSACT | nl.TC_H.MIN_INGRESS,
-        .egress => nl.TC_H.CLSACT | nl.TC_H.MIN_EGRESS,
-    };
-
-    // info encodes priority (upper 16 bits) and protocol (lower 16, network byte order).
-    // ETH_P_ALL = 0x0003.
-    const eth_p_all: u16 = 0x0003;
-    const info: u32 = (priority << 16) | @as(u32, std.mem.nativeToBig(u16, eth_p_all));
-
-    const hdr = try mb.putHeader(
-        .RTM_NEWTFILTER,
-        nl.NLM_F.REQUEST | nl.NLM_F.ACK | nl.NLM_F.CREATE | nl.NLM_F.EXCL,
-        nl.TcMsg,
-    );
-    const tc = mb.getPayload(hdr, nl.TcMsg);
-    tc.family = 0;
-    tc._pad1 = 0;
-    tc._pad2 = 0;
-    tc.ifindex = @intCast(if_index);
-    tc.handle = 0;
-    tc.parent = parent;
-    tc.info = info;
-
-    try mb.putAttrStr(hdr, nl.TCA.KIND, "bpf");
-
-    // nested TCA_OPTIONS containing the BPF fd and flags
-    const options = try mb.startNested(hdr, nl.TCA.OPTIONS);
-
-    try mb.putAttrU32(hdr, nl.TCA_BPF.FD, @intCast(prog_fd));
-    try mb.putAttrStr(hdr, nl.TCA_BPF.NAME, "yoq");
-    try mb.putAttrU32(hdr, nl.TCA_BPF.FLAGS, nl.TCA_BPF.FLAG_ACT_DIRECT);
-
-    mb.endNested(options);
-
-    try nl.sendAndCheck(fd, mb.message());
+    try attach_support.detachTC(if_index);
 }
 
 // -- DNS interceptor --
@@ -469,87 +148,10 @@ fn addBpfFilter(
 // BPF program. the program intercepts DNS A record queries on the
 // bridge interface and resolves known service names in-kernel.
 
-const dns_intercept = @import("bpf/dns_intercept.zig");
+pub const DnsInterceptor = dns_runtime.DnsInterceptor;
 
-/// state for a loaded DNS interceptor program.
-/// holds the program fd, map fd, and interface index for cleanup.
-pub const DnsInterceptor = struct {
-    prog_fd: posix.fd_t,
-    map_fd: posix.fd_t,
-    if_index: u32,
-
-    /// update the service_names map with a new name → IP mapping.
-    /// the name is padded to 64 bytes (matching the BPF map key size).
-    pub fn updateService(self: *const DnsInterceptor, name: []const u8, ip_addr: [4]u8) void {
-        var key = makeKey(name) orelse return;
-
-        mapUpdate(self.map_fd, &key, &ip_addr) catch |e| {
-            log.warn("ebpf: dns map update failed for '{s}': {}", .{ name, e });
-        };
-    }
-
-    /// remove a service name from the BPF map.
-    /// returns true if the service was found and removed, false otherwise.
-    pub fn deleteService(self: *const DnsInterceptor, name: []const u8) bool {
-        var key = makeKey(name) orelse return false;
-
-        return mapDelete(self.map_fd, &key);
-    }
-
-    /// detach the program and close all fds.
-    pub fn deinit(self: *DnsInterceptor) void {
-        detachTC(self.if_index) catch |e| {
-            log.debug("ebpf: failed to detach DNS interceptor: {}", .{e});
-        };
-        if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
-            trackBpfFdClosed();
-            self.prog_fd = -1;
-        }
-        if (self.map_fd >= 0) {
-            posix.close(self.map_fd);
-            trackBpfFdClosed();
-            self.map_fd = -1;
-        }
-    }
-};
-
-/// build a 64-byte BPF map key from a dot-separated service name.
-/// converts to DNS wire format (length-prefixed labels) so the key
-/// matches what the BPF program copies directly from the packet.
-/// e.g. "mydb" → "\x04mydb\x00" + zero padding to 64 bytes.
-///      "web.db" → "\x03web\x02db\x00" + zero padding.
-/// returns null if the name is empty, too long, or has invalid labels.
 fn makeKey(name: []const u8) ?[64]u8 {
-    if (name.len == 0 or name.len > 62) return null; // need room for length prefix + null
-
-    var key: [64]u8 = [_]u8{0} ** 64;
-    var pos: usize = 0;
-    var label_start: usize = 0;
-
-    for (name, 0..) |c, i| {
-        if (c == '.') {
-            const label_len = i - label_start;
-            if (label_len == 0 or label_len > 63) return null;
-            if (pos + 1 + label_len >= 63) return null; // would overflow key
-            key[pos] = @intCast(label_len);
-            pos += 1;
-            @memcpy(key[pos .. pos + label_len], name[label_start..i]);
-            pos += label_len;
-            label_start = i + 1;
-        }
-    }
-
-    // last (or only) label
-    const label_len = name.len - label_start;
-    if (label_len == 0 or label_len > 63) return null;
-    if (pos + 1 + label_len >= 63) return null;
-    key[pos] = @intCast(label_len);
-    pos += 1;
-    @memcpy(key[pos .. pos + label_len], name[label_start..name.len]);
-    pos += label_len;
-    key[pos] = 0; // null terminator (end of DNS name)
-    return key;
+    return dns_runtime.makeKey(name);
 }
 
 /// guards access to all global BPF state (dns_interceptor, load_balancer,
@@ -557,115 +159,10 @@ fn makeKey(name: []const u8) ?[64]u8 {
 /// startup is sequential, but this protects against future parallel
 /// startup (e.g. `yoq up` with multiple services).
 var global_mutex: std.Thread.Mutex = .{};
-
-/// tracks total number of BPF file descriptors in use to prevent resource exhaustion
-var total_bpf_fds: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-
-/// validates map parameters and tracks resource usage atomically
-fn validateAndTrackMapCreate(map_type: BPF.MapType, key_size: u32, value_size: u32, max_entries: u32) EbpfError!void {
-    _ = map_type; // map_type validation could be added here in future
-
-    // Validate key size
-    if (key_size == 0 or key_size > max_key_size) {
-        log.err("ebpf: invalid key size {d}, must be 1-{d}", .{ key_size, max_key_size });
-        return EbpfError.InvalidParameter;
-    }
-
-    // Validate value size
-    if (value_size == 0 or value_size > max_value_size) {
-        log.err("ebpf: invalid value size {d}, must be 1-{d}", .{ value_size, max_value_size });
-        return EbpfError.InvalidParameter;
-    }
-
-    // Validate max entries
-    if (max_entries == 0 or max_entries > max_map_entries) {
-        log.err("ebpf: invalid max_entries {d}, must be 1-{d}", .{ max_entries, max_map_entries });
-        return EbpfError.InvalidParameter;
-    }
-
-    // SECURITY: Atomic increment with overflow protection
-    // We increment first, then check if we exceeded the limit
-    const prev = total_bpf_fds.fetchAdd(1, .acq_rel);
-    if (prev >= max_total_fds) {
-        // We've exceeded the limit, decrement and return error
-        _ = total_bpf_fds.fetchSub(1, .acq_rel);
-        log.err("ebpf: too many BPF resources in use ({d}/{d})", .{ prev, max_total_fds });
-        return EbpfError.ResourceExhausted;
-    }
-}
-
-/// call when a BPF FD is successfully created
-fn trackBpfFdCreated() void {
-    _ = total_bpf_fds.fetchAdd(1, .acquire);
-}
-
-/// call when a BPF FD is closed
 fn trackBpfFdClosed() void {
-    _ = total_bpf_fds.fetchSub(1, .release);
+    resource_support.releaseBpfFd();
 }
 
-/// circuit breaker state for preventing cascading failures
-const CircuitBreaker = struct {
-    mutex: std.Thread.Mutex,
-    failures: u32,
-    last_failure_time: i64,
-    threshold: u32,
-    reset_timeout_ms: i64,
-
-    fn init(threshold: u32, reset_timeout_ms: i64) CircuitBreaker {
-        return .{
-            .mutex = .{},
-            .failures = 0,
-            .last_failure_time = 0,
-            .threshold = threshold,
-            .reset_timeout_ms = reset_timeout_ms,
-        };
-    }
-
-    /// returns true if operation should be allowed
-    fn allow(self: *CircuitBreaker) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.failures < self.threshold) return true;
-
-        // Check if enough time has passed to reset
-        const now = std.time.milliTimestamp();
-        if (now - self.last_failure_time > self.reset_timeout_ms) {
-            // Reset the circuit breaker
-            self.failures = 0;
-            self.last_failure_time = 0;
-            return true;
-        }
-
-        return false;
-    }
-
-    /// record a successful operation
-    fn recordSuccess(self: *CircuitBreaker) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Reset on first success after failures
-        if (self.failures > 0) {
-            self.failures = 0;
-        }
-    }
-
-    /// record a failed operation
-    fn recordFailure(self: *CircuitBreaker) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        self.failures += 1;
-        self.last_failure_time = std.time.milliTimestamp();
-    }
-};
-
-/// circuit breaker for map operations to prevent cascading failures
-var map_op_circuit_breaker = CircuitBreaker.init(5, 30000); // 5 failures, 30s timeout
-
-/// MapUpdate represents a single map update operation for batch processing
 /// global DNS interceptor instance. set after loadDnsInterceptor() succeeds.
 var dns_interceptor: ?DnsInterceptor = null;
 
@@ -679,30 +176,7 @@ pub fn loadDnsInterceptor(bridge_if_index: u32) EbpfError!void {
     defer global_mutex.unlock();
 
     if (dns_interceptor != null) return; // already loaded
-
-    // create the service_names map
-    const map_def = dns_intercept.maps[0];
-    const map_fd = try createMap(
-        @enumFromInt(map_def.map_type),
-        map_def.key_size,
-        map_def.value_size,
-        map_def.max_entries,
-    );
-    errdefer posix.close(map_fd);
-
-    // load the program with the map fd
-    var map_fds = [_]posix.fd_t{map_fd};
-    const prog_fd = try loadProgram(dns_intercept, &map_fds);
-    errdefer posix.close(prog_fd);
-
-    // attach to bridge ingress (priority 1 — runs first)
-    try attachTC(bridge_if_index, .ingress, prog_fd, 1);
-
-    dns_interceptor = .{
-        .prog_fd = prog_fd,
-        .map_fd = map_fd,
-        .if_index = bridge_if_index,
-    };
+    dns_interceptor = try dns_runtime.load(bridge_if_index);
 
     log.info("ebpf: DNS interceptor loaded on ifindex {d}", .{bridge_if_index});
 }
@@ -737,124 +211,9 @@ pub fn getDnsInterceptor() ?*const DnsInterceptor {
 // service has multiple containers, connections are distributed
 // across them via atomic round-robin with connection affinity.
 
-const lb_prog = @import("bpf/lb.zig");
-
-/// maximum backends per service (must match struct service_backends in lb.c)
-pub const max_backends = 16;
-
-/// backend list as stored in the BPF map.
-/// matches the C struct service_backends layout exactly.
-pub const ServiceBackends = extern struct {
-    count: u32,
-    ips: [max_backends]u32, // network byte order
-};
-
-/// state for the loaded load balancer program.
-pub const LoadBalancer = struct {
-    egress_prog_fd: posix.fd_t,
-    prog_fd: posix.fd_t,
-    backends_fd: posix.fd_t,
-    conntrack_fd: posix.fd_t,
-    rev_conntrack_fd: posix.fd_t,
-    if_index: u32,
-
-    /// add a backend IP for a service VIP.
-    /// if the service doesn't exist yet, creates it with one backend.
-    /// if it already exists, appends the backend to the list.
-    pub fn addBackend(self: *const LoadBalancer, vip: [4]u8, backend_ip: [4]u8) void {
-        const vip_net = ipToNetworkOrder(vip);
-        const backend_net = ipToNetworkOrder(backend_ip);
-
-        var backends: ServiceBackends = std.mem.zeroes(ServiceBackends);
-        const key = std.mem.asBytes(&vip_net);
-
-        if (mapLookup(self.backends_fd, key, std.mem.asBytes(&backends))) {
-            // service exists — add backend if not already present
-            if (backends.count >= max_backends) return;
-
-            // check for duplicate
-            for (0..backends.count) |i| {
-                if (backends.ips[i] == backend_net) return;
-            }
-
-            backends.ips[backends.count] = backend_net;
-            backends.count += 1;
-        } else {
-            // new service
-            backends = std.mem.zeroes(ServiceBackends);
-            backends.count = 1;
-            backends.ips[0] = backend_net;
-        }
-
-        mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch |e| {
-            log.warn("ebpf: failed to update load balancer backends: {}", .{e});
-        };
-    }
-
-    /// remove a backend IP from a service.
-    /// if this was the last backend, removes the service entry entirely.
-    pub fn removeBackend(self: *const LoadBalancer, vip: [4]u8, backend_ip: [4]u8) void {
-        const vip_net = ipToNetworkOrder(vip);
-        const backend_net = ipToNetworkOrder(backend_ip);
-
-        var backends: ServiceBackends = std.mem.zeroes(ServiceBackends);
-        const key = std.mem.asBytes(&vip_net);
-
-        if (!mapLookup(self.backends_fd, key, std.mem.asBytes(&backends))) return;
-
-        // find and remove the backend
-        var found: bool = false;
-        for (0..backends.count) |i| {
-            if (backends.ips[i] == backend_net) {
-                // shift remaining entries down
-                var j: u32 = @intCast(i);
-                while (j + 1 < backends.count) : (j += 1) {
-                    backends.ips[j] = backends.ips[j + 1];
-                }
-                backends.count -= 1;
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) return;
-
-        if (backends.count == 0) {
-            // last backend — remove the service entry
-            _ = mapDelete(self.backends_fd, key);
-        } else {
-            mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch |e| {
-                log.warn("ebpf: failed to update load balancer backends after removal: {}", .{e});
-            };
-        }
-    }
-
-    pub fn deinit(self: *LoadBalancer) void {
-        detachTC(self.if_index) catch |e| {
-            log.debug("ebpf: failed to detach load balancer: {}", .{e});
-        };
-        if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
-            trackBpfFdClosed();
-        }
-        if (self.egress_prog_fd >= 0) {
-            posix.close(self.egress_prog_fd);
-            trackBpfFdClosed();
-        }
-        if (self.backends_fd >= 0) {
-            posix.close(self.backends_fd);
-            trackBpfFdClosed();
-        }
-        if (self.conntrack_fd >= 0) {
-            posix.close(self.conntrack_fd);
-            trackBpfFdClosed();
-        }
-        if (self.rev_conntrack_fd >= 0) {
-            posix.close(self.rev_conntrack_fd);
-            trackBpfFdClosed();
-        }
-    }
-};
+pub const max_backends = lb_runtime.max_backends;
+pub const ServiceBackends = lb_runtime.ServiceBackends;
+pub const LoadBalancer = lb_runtime.LoadBalancer;
 
 /// global load balancer instance.
 var load_balancer: ?LoadBalancer = null;
@@ -865,60 +224,7 @@ pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
     defer global_mutex.unlock();
 
     if (load_balancer != null) return;
-
-    // create maps
-    const backends_fd = try createMap(
-        @enumFromInt(lb_prog.maps[0].map_type),
-        lb_prog.maps[0].key_size,
-        lb_prog.maps[0].value_size,
-        lb_prog.maps[0].max_entries,
-    );
-    errdefer posix.close(backends_fd);
-
-    const conntrack_fd = try createMap(
-        @enumFromInt(lb_prog.maps[1].map_type),
-        lb_prog.maps[1].key_size,
-        lb_prog.maps[1].value_size,
-        lb_prog.maps[1].max_entries,
-    );
-    errdefer posix.close(conntrack_fd);
-
-    const rev_conntrack_fd = try createMap(
-        @enumFromInt(lb_prog.maps[2].map_type),
-        lb_prog.maps[2].key_size,
-        lb_prog.maps[2].value_size,
-        lb_prog.maps[2].max_entries,
-    );
-    errdefer posix.close(rev_conntrack_fd);
-
-    var map_fds = [_]posix.fd_t{ backends_fd, conntrack_fd, rev_conntrack_fd };
-    const prog_fd = try loadProgram(lb_prog, &map_fds);
-    errdefer posix.close(prog_fd);
-
-    // attach to bridge ingress, priority 1 (qdisc should already exist from DNS interceptor)
-    try attachTC(bridge_if_index, .ingress, prog_fd, 1);
-
-    // load and attach egress program if available
-    var egress_fd: posix.fd_t = -1;
-    if (@hasDecl(lb_prog, "egress_insns")) {
-        egress_fd = loadEgressProgram(lb_prog, &map_fds) catch -1;
-        if (egress_fd >= 0) {
-            attachTC(bridge_if_index, .egress, egress_fd, 1) catch |e| {
-                log.warn("ebpf: failed to attach LB egress: {}", .{e});
-                posix.close(egress_fd);
-                egress_fd = -1;
-            };
-        }
-    }
-
-    load_balancer = .{
-        .egress_prog_fd = egress_fd,
-        .prog_fd = prog_fd,
-        .backends_fd = backends_fd,
-        .conntrack_fd = conntrack_fd,
-        .rev_conntrack_fd = rev_conntrack_fd,
-        .if_index = bridge_if_index,
-    };
+    load_balancer = try lb_runtime.load(bridge_if_index);
 
     log.info("ebpf: load balancer loaded on ifindex {d}", .{bridge_if_index});
 }
@@ -949,7 +255,7 @@ pub fn getLoadBalancer() ?*const LoadBalancer {
 /// convert a 4-byte IP to a u32 in network byte order.
 /// the bytes are already in network order — this is just a type pun.
 pub fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
-    return @bitCast(ip_bytes);
+    return lb_runtime.ipToNetworkOrder(ip_bytes);
 }
 
 // -- metrics collector --
@@ -961,108 +267,11 @@ pub fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
 // userspace reads the map to report per-container network traffic
 // via `yoq metrics`.
 
-const metrics_prog = @import("bpf/metrics.zig");
-
-/// per-IP metrics as stored in the BPF map.
-/// matches struct ip_metrics in bpf/metrics.c.
-pub const IpMetrics = extern struct {
-    packets: u64,
-    bytes: u64,
-};
-
-/// per-service-pair key as stored in the BPF map.
-/// matches struct pair_key in bpf/metrics.c.
-pub const PairKey = extern struct {
-    src_ip: u32,
-    dst_ip: u32,
-    dst_port: u16,
-    pad: u16 = 0,
-};
-
-/// per-service-pair metrics as stored in the BPF map.
-/// matches struct pair_metrics in bpf/metrics.c.
-pub const PairMetrics = extern struct {
-    packets: u64,
-    bytes: u64,
-    connections: u64,
-    errors: u64,
-};
-
-/// state for the loaded metrics collector program.
-pub const MetricsCollector = struct {
-    prog_fd: posix.fd_t,
-    metrics_fd: posix.fd_t,
-    pair_metrics_fd: posix.fd_t,
-    if_index: u32,
-
-    /// read packet/byte counters for a single IP.
-    /// the IP should be in network byte order (as stored by the BPF program).
-    pub fn readMetrics(self: *const MetricsCollector, ip_net: u32) ?IpMetrics {
-        var value: IpMetrics = std.mem.zeroes(IpMetrics);
-        const key = std.mem.asBytes(&ip_net);
-        if (mapLookup(self.metrics_fd, key, std.mem.asBytes(&value))) {
-            return value;
-        }
-        return null;
-    }
-
-    /// iterate all entries in the pair_metrics_map.
-    /// calls the callback for each (key, value) pair. stops early if callback
-    /// returns false. returns the number of entries visited.
-    pub fn readPairMetrics(
-        self: *const MetricsCollector,
-        buf: []PairEntry,
-    ) usize {
-        var count: usize = 0;
-        var key: PairKey = std.mem.zeroes(PairKey);
-        var next_key: PairKey = std.mem.zeroes(PairKey);
-        var first = true;
-
-        while (count < buf.len) {
-            const found = if (first)
-                mapGetNextKey(self.pair_metrics_fd, std.mem.asBytes(&key), std.mem.asBytes(&next_key))
-            else
-                mapGetNextKey(self.pair_metrics_fd, std.mem.asBytes(&key), std.mem.asBytes(&next_key));
-
-            if (!found) break;
-            first = false;
-
-            var value: PairMetrics = std.mem.zeroes(PairMetrics);
-            if (mapLookup(self.pair_metrics_fd, std.mem.asBytes(&next_key), std.mem.asBytes(&value))) {
-                buf[count] = .{ .key = next_key, .value = value };
-                count += 1;
-            }
-
-            key = next_key;
-        }
-
-        return count;
-    }
-
-    pub fn deinit(self: *MetricsCollector) void {
-        detachTC(self.if_index) catch |e| {
-            log.debug("ebpf: failed to detach metrics collector: {}", .{e});
-        };
-        if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
-            trackBpfFdClosed();
-        }
-        if (self.metrics_fd >= 0) {
-            posix.close(self.metrics_fd);
-            trackBpfFdClosed();
-        }
-        if (self.pair_metrics_fd >= 0) {
-            posix.close(self.pair_metrics_fd);
-            trackBpfFdClosed();
-        }
-    }
-};
-
-/// a single pair metrics entry (key + value).
-pub const PairEntry = struct {
-    key: PairKey,
-    value: PairMetrics,
-};
+pub const IpMetrics = metrics_runtime.IpMetrics;
+pub const PairKey = metrics_runtime.PairKey;
+pub const PairMetrics = metrics_runtime.PairMetrics;
+pub const MetricsCollector = metrics_runtime.MetricsCollector;
+pub const PairEntry = metrics_runtime.PairEntry;
 
 /// global metrics collector instance.
 var metrics_collector: ?MetricsCollector = null;
@@ -1073,40 +282,7 @@ pub fn loadMetricsCollector(bridge_if_index: u32) EbpfError!void {
     defer global_mutex.unlock();
 
     if (metrics_collector != null) return;
-
-    // create the metrics_map (LRU hash, per-IP)
-    const map0_def = metrics_prog.maps[0];
-    const map_fd = try createMap(
-        @enumFromInt(map0_def.map_type),
-        map0_def.key_size,
-        map0_def.value_size,
-        map0_def.max_entries,
-    );
-    errdefer posix.close(map_fd);
-
-    // create the pair_metrics_map (LRU hash, per-pair)
-    const map1_def = metrics_prog.maps[1];
-    const pair_fd = try createMap(
-        @enumFromInt(map1_def.map_type),
-        map1_def.key_size,
-        map1_def.value_size,
-        map1_def.max_entries,
-    );
-    errdefer posix.close(pair_fd);
-
-    var map_fds = [_]posix.fd_t{ map_fd, pair_fd };
-    const prog_fd = try loadProgram(metrics_prog, &map_fds);
-    errdefer posix.close(prog_fd);
-
-    // attach at priority 2 (after DNS/LB at priority 1)
-    try attachTC(bridge_if_index, .ingress, prog_fd, 2);
-
-    metrics_collector = .{
-        .prog_fd = prog_fd,
-        .metrics_fd = map_fd,
-        .pair_metrics_fd = pair_fd,
-        .if_index = bridge_if_index,
-    };
+    metrics_collector = try metrics_runtime.load(bridge_if_index);
 
     log.info("ebpf: metrics collector loaded on ifindex {d}", .{bridge_if_index});
 }
@@ -1140,86 +316,8 @@ pub fn getMetricsCollector() ?*const MetricsCollector {
 // at priority 0 (before DNS, LB, and metrics). drops packets matching
 // deny rules or packets from isolated sources without an allow entry.
 
-const policy_prog = @import("bpf/policy.zig");
-
-/// key for the policy_map: source + destination IP pair.
-/// matches struct policy_key in bpf/policy.c.
-pub const PolicyKey = extern struct {
-    src_ip: u32,
-    dst_ip: u32,
-};
-
-/// state for the loaded policy enforcer program.
-pub const PolicyEnforcer = struct {
-    prog_fd: posix.fd_t,
-    policy_fd: posix.fd_t,
-    isolation_fd: posix.fd_t,
-    if_index: u32,
-
-    /// add a deny rule: drop packets from src_ip to dst_ip.
-    pub fn addDeny(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
-        var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
-        var action: u8 = 0; // deny
-        mapUpdate(self.policy_fd, std.mem.asBytes(&key), std.mem.asBytes(&action)) catch |e| {
-            log.warn("ebpf: failed to add deny rule for {x} -> {x}: {}", .{ src_ip, dst_ip, e });
-        };
-    }
-
-    /// remove a deny rule.
-    pub fn removeDeny(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
-        var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
-        _ = mapDelete(self.policy_fd, std.mem.asBytes(&key));
-    }
-
-    /// add an allow rule: permit packets from src_ip to dst_ip.
-    pub fn addAllow(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
-        var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
-        var action: u8 = 1; // allow
-        mapUpdate(self.policy_fd, std.mem.asBytes(&key), std.mem.asBytes(&action)) catch |e| {
-            log.warn("ebpf: failed to add allow rule for {x} -> {x}: {}", .{ src_ip, dst_ip, e });
-        };
-    }
-
-    /// remove an allow rule.
-    pub fn removeAllow(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
-        var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
-        _ = mapDelete(self.policy_fd, std.mem.asBytes(&key));
-    }
-
-    /// mark a source IP as isolated (allow-only mode).
-    /// when isolated, only destinations with explicit allow entries are reachable.
-    pub fn isolate(self: *const PolicyEnforcer, src_ip: u32) void {
-        var key = src_ip;
-        var flag: u8 = 1;
-        mapUpdate(self.isolation_fd, std.mem.asBytes(&key), std.mem.asBytes(&flag)) catch |e| {
-            log.warn("ebpf: failed to isolate IP {x}: {}", .{ src_ip, e });
-        };
-    }
-
-    /// remove isolation for a source IP (return to default-allow).
-    pub fn unisolate(self: *const PolicyEnforcer, src_ip: u32) void {
-        var key = src_ip;
-        _ = mapDelete(self.isolation_fd, std.mem.asBytes(&key));
-    }
-
-    pub fn deinit(self: *PolicyEnforcer) void {
-        detachTC(self.if_index) catch |e| {
-            log.debug("ebpf: failed to detach policy enforcer: {}", .{e});
-        };
-        if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
-            trackBpfFdClosed();
-        }
-        if (self.policy_fd >= 0) {
-            posix.close(self.policy_fd);
-            trackBpfFdClosed();
-        }
-        if (self.isolation_fd >= 0) {
-            posix.close(self.isolation_fd);
-            trackBpfFdClosed();
-        }
-    }
-};
+pub const PolicyKey = policy_runtime.PolicyKey;
+pub const PolicyEnforcer = policy_runtime.PolicyEnforcer;
 
 /// global policy enforcer instance.
 var policy_enforcer: ?PolicyEnforcer = null;
@@ -1231,37 +329,7 @@ pub fn loadPolicyEnforcer(bridge_if_index: u32) EbpfError!void {
     defer global_mutex.unlock();
 
     if (policy_enforcer != null) return;
-
-    // create maps
-    const policy_fd = try createMap(
-        @enumFromInt(policy_prog.maps[0].map_type),
-        policy_prog.maps[0].key_size,
-        policy_prog.maps[0].value_size,
-        policy_prog.maps[0].max_entries,
-    );
-    errdefer posix.close(policy_fd);
-
-    const isolation_fd = try createMap(
-        @enumFromInt(policy_prog.maps[1].map_type),
-        policy_prog.maps[1].key_size,
-        policy_prog.maps[1].value_size,
-        policy_prog.maps[1].max_entries,
-    );
-    errdefer posix.close(isolation_fd);
-
-    var map_fds = [_]posix.fd_t{ policy_fd, isolation_fd };
-    const prog_fd = try loadProgram(policy_prog, &map_fds);
-    errdefer posix.close(prog_fd);
-
-    // attach at priority 0 — runs before everything else
-    try attachTC(bridge_if_index, .ingress, prog_fd, 0);
-
-    policy_enforcer = .{
-        .prog_fd = prog_fd,
-        .policy_fd = policy_fd,
-        .isolation_fd = isolation_fd,
-        .if_index = bridge_if_index,
-    };
+    policy_enforcer = try policy_runtime.load(bridge_if_index);
 
     log.info("ebpf: policy enforcer loaded on ifindex {d}", .{bridge_if_index});
 }
@@ -1299,71 +367,9 @@ pub fn getPolicyEnforcer() ?*const PolicyEnforcer {
 // falls back to iptables if XDP isn't available (old kernel,
 // no CAP_BPF, or interface doesn't support XDP).
 
-const port_map_prog = @import("bpf/port_map.zig");
-
-/// port mapping key — matches struct port_key in bpf/port_map.c.
-pub const PortKey = extern struct {
-    port: u16, // network byte order
-    protocol: u8, // IPPROTO_TCP (6) or IPPROTO_UDP (17)
-    _pad: u8 = 0,
-};
-
-/// port mapping target — matches struct port_target in bpf/port_map.c.
-pub const PortTarget = extern struct {
-    dst_ip: u32, // network byte order
-    dst_port: u16, // network byte order
-    _pad: u16 = 0,
-};
-
-/// state for the loaded XDP port mapping program.
-pub const PortMapper = struct {
-    prog_fd: posix.fd_t,
-    map_fd: posix.fd_t,
-    if_index: u32,
-
-    /// add a port mapping: host_port -> container_ip:container_port.
-    pub fn addMapping(self: *const PortMapper, host_port: u16, protocol: u8, container_ip: [4]u8, container_port: u16) void {
-        var key = PortKey{
-            .port = std.mem.nativeToBig(u16, host_port),
-            .protocol = protocol,
-        };
-        var target = PortTarget{
-            .dst_ip = ipToNetworkOrder(container_ip),
-            .dst_port = std.mem.nativeToBig(u16, container_port),
-        };
-        mapUpdate(self.map_fd, std.mem.asBytes(&key), std.mem.asBytes(&target)) catch |e| {
-            log.warn("ebpf: failed to add port mapping {d}/{d} -> {d}.{d}.{d}.{d}:{d}: {}", .{
-                host_port,       protocol,
-                container_ip[0], container_ip[1],
-                container_ip[2], container_ip[3],
-                container_port,  e,
-            });
-        };
-    }
-
-    /// remove a port mapping.
-    pub fn removeMapping(self: *const PortMapper, host_port: u16, protocol: u8) void {
-        var key = PortKey{
-            .port = std.mem.nativeToBig(u16, host_port),
-            .protocol = protocol,
-        };
-        _ = mapDelete(self.map_fd, std.mem.asBytes(&key));
-    }
-
-    pub fn deinit(self: *PortMapper) void {
-        detachXdp(self.if_index) catch |e| {
-            log.debug("ebpf: failed to detach port mapper: {}", .{e});
-        };
-        if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
-            trackBpfFdClosed();
-        }
-        if (self.map_fd >= 0) {
-            posix.close(self.map_fd);
-            trackBpfFdClosed();
-        }
-    }
-};
+pub const PortKey = port_map_runtime.PortKey;
+pub const PortTarget = port_map_runtime.PortTarget;
+pub const PortMapper = port_map_runtime.PortMapper;
 
 var port_mapper: ?PortMapper = null;
 
@@ -1373,39 +379,7 @@ pub fn loadPortMapper(if_index: u32) EbpfError!void {
     defer global_mutex.unlock();
 
     if (port_mapper != null) return;
-
-    const map_fd = try createMap(
-        @enumFromInt(port_map_prog.maps[0].map_type),
-        port_map_prog.maps[0].key_size,
-        port_map_prog.maps[0].value_size,
-        port_map_prog.maps[0].max_entries,
-    );
-    // Don't use errdefer here - we'll handle cleanup manually for better control
-
-    var map_fds = [_]posix.fd_t{map_fd};
-    const prog_fd = loadProgramWithType(port_map_prog, &map_fds, .xdp) catch |e| {
-        // Clean up map_fd on program load failure
-        posix.close(map_fd);
-        trackBpfFdClosed();
-        return e;
-    };
-    // Don't use errdefer here either
-
-    attachXdp(if_index, prog_fd) catch |e| {
-        log.warn("ebpf: failed to attach XDP on ifindex {d}: {}", .{ if_index, e });
-        // Clean up both resources on attach failure
-        posix.close(prog_fd);
-        trackBpfFdClosed();
-        posix.close(map_fd);
-        trackBpfFdClosed();
-        return EbpfError.AttachFailed;
-    };
-
-    port_mapper = .{
-        .prog_fd = prog_fd,
-        .map_fd = map_fd,
-        .if_index = if_index,
-    };
+    port_mapper = try port_map_runtime.load(if_index);
 
     log.info("ebpf: port mapper loaded on ifindex {d}", .{if_index});
 }
@@ -1437,63 +411,12 @@ pub fn getPortMapper() ?*const PortMapper {
 /// SKB mode (generic XDP) works on all interface types including
 /// virtual ones like bridges and veths.
 pub fn attachXdp(if_index: u32, prog_fd: posix.fd_t) EbpfError!void {
-    const fd = nl.openSocket() catch return EbpfError.AttachFailed;
-    defer posix.close(fd);
-
-    var buf: [nl.buf_size]u8 align(4) = undefined;
-    var mb = nl.MessageBuilder.init(&buf);
-
-    const hdr = mb.putHeader(
-        .RTM_NEWLINK,
-        nl.NLM_F.REQUEST | nl.NLM_F.ACK,
-        linux.ifinfomsg,
-    ) catch return EbpfError.AttachFailed;
-
-    const info = mb.getPayload(hdr, linux.ifinfomsg);
-    info.family = 0;
-    info.index = @bitCast(if_index);
-
-    // nested IFLA_XDP attribute
-    const xdp_attr = mb.startNested(hdr, nl.IFLA.XDP) catch return EbpfError.AttachFailed;
-    mb.putAttrU32(hdr, nl.IFLA_XDP.FD, @intCast(prog_fd)) catch return EbpfError.AttachFailed;
-    mb.putAttrU32(hdr, nl.IFLA_XDP.FLAGS, nl.XDP_FLAGS.SKB_MODE) catch return EbpfError.AttachFailed;
-    mb.endNested(xdp_attr);
-
-    nl.sendAndCheck(fd, mb.message()) catch |e| {
-        log.warn("ebpf: XDP attach failed on ifindex {d}: {}", .{ if_index, e });
-        return EbpfError.AttachFailed;
-    };
+    try attach_support.attachXdp(if_index, prog_fd);
 }
 
 /// detach XDP program from an interface.
 pub fn detachXdp(if_index: u32) EbpfError!void {
-    const fd = nl.openSocket() catch return EbpfError.DetachFailed;
-    defer posix.close(fd);
-
-    var buf: [nl.buf_size]u8 align(4) = undefined;
-    var mb = nl.MessageBuilder.init(&buf);
-
-    const hdr = mb.putHeader(
-        .RTM_NEWLINK,
-        nl.NLM_F.REQUEST | nl.NLM_F.ACK,
-        linux.ifinfomsg,
-    ) catch return EbpfError.DetachFailed;
-
-    const info = mb.getPayload(hdr, linux.ifinfomsg);
-    info.family = 0;
-    info.index = @bitCast(if_index);
-
-    // set fd to -1 to detach
-    const xdp_attr = mb.startNested(hdr, nl.IFLA.XDP) catch return EbpfError.DetachFailed;
-    const neg_one: u32 = @bitCast(@as(i32, -1));
-    mb.putAttrU32(hdr, nl.IFLA_XDP.FD, neg_one) catch return EbpfError.DetachFailed;
-    mb.putAttrU32(hdr, nl.IFLA_XDP.FLAGS, nl.XDP_FLAGS.SKB_MODE) catch return EbpfError.DetachFailed;
-    mb.endNested(xdp_attr);
-
-    nl.sendAndCheck(fd, mb.message()) catch |e| {
-        log.warn("ebpf: XDP detach failed on ifindex {d}: {}", .{ if_index, e });
-        return EbpfError.DetachFailed;
-    };
+    try attach_support.detachXdp(if_index);
 }
 
 // -- capability check --
