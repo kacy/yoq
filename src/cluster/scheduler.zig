@@ -10,6 +10,7 @@ const constraint_support = @import("scheduler/constraints.zig");
 const gang_support = @import("scheduler/gang_support.zig");
 const placement = @import("scheduler/placement.zig");
 const sql_support = @import("scheduler/sql_support.zig");
+const test_support = @import("scheduler/test_support.zig");
 
 const AgentRecord = agent_types.AgentRecord;
 pub const VolumeConstraint = common.VolumeConstraint;
@@ -33,32 +34,9 @@ fn matchesVolumeConstraints(agent: AgentRecord, volume_constraints: []const Volu
 
 // -- tests --
 
-fn makeAgent(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64) AgentRecord {
-    return makeAgentWithRole(id, status, cores, mem, cpu_used, mem_used, null);
-}
-
-fn makeAgentFull(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64, role: ?[]const u8, labels: ?[]const u8, gpu_count: i64, gpu_used: i64) AgentRecord {
-    return .{
-        .id = id,
-        .address = "localhost",
-        .status = status,
-        .cpu_cores = cores,
-        .memory_mb = mem,
-        .cpu_used = cpu_used,
-        .memory_used_mb = mem_used,
-        .containers = 0,
-        .last_heartbeat = 0,
-        .registered_at = 0,
-        .role = role,
-        .labels = labels,
-        .gpu_count = gpu_count,
-        .gpu_used = gpu_used,
-    };
-}
-
-fn makeAgentWithRole(id: []const u8, status: []const u8, cores: i64, mem: i64, cpu_used: i64, mem_used: i64, role: ?[]const u8) AgentRecord {
-    return makeAgentFull(id, status, cores, mem, cpu_used, mem_used, role, null, 0, 0);
-}
+const makeAgent = test_support.makeAgent;
+const makeAgentFull = test_support.makeAgentFull;
+const makeAgentWithRole = test_support.makeAgentWithRole;
 
 test "schedule single container on single agent" {
     const alloc = std.testing.allocator;

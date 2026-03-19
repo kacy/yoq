@@ -27,6 +27,7 @@ const cluster_config = @import("config.zig");
 const gossip_mod = @import("gossip.zig");
 const transport_mod = @import("transport.zig");
 const agent_store = @import("agent_store.zig");
+const lifecycle_support = @import("agent/lifecycle_support.zig");
 const request_support = @import("agent/request_support.zig");
 const resource_support = @import("agent/resource_support.zig");
 const gossip_support = @import("agent/gossip_support.zig");
@@ -62,6 +63,7 @@ pub const Agent = struct {
     server_addr: [4]u8,
     server_port: u16,
     token: []const u8,
+    owned_token: ?[]u8 = null,
     running: std.atomic.Value(bool),
     loop_thread: ?std.Thread,
 
@@ -102,18 +104,11 @@ pub const Agent = struct {
     known_peers: std.AutoHashMap(u16, [44]u8),
 
     pub fn init(alloc: Allocator, server_addr: [4]u8, server_port: u16, token: []const u8) Agent {
-        return .{
-            .alloc = alloc,
-            .id = undefined,
-            .server_addr = server_addr,
-            .server_port = server_port,
-            .token = token,
-            .running = std.atomic.Value(bool).init(false),
-            .loop_thread = null,
-            .local_containers = std.StringHashMap(ContainerState).init(alloc),
-            .container_lock = .{},
-            .known_peers = std.AutoHashMap(u16, [44]u8).init(alloc),
-        };
+        return lifecycle_support.init(alloc, server_addr, server_port, token, null);
+    }
+
+    pub fn initOwned(alloc: Allocator, server_addr: [4]u8, server_port: u16, token: []const u8) !Agent {
+        return lifecycle_support.initOwned(alloc, server_addr, server_port, token);
     }
 
     /// register this agent with the cluster server.
@@ -221,79 +216,22 @@ pub const Agent = struct {
 
     /// start the agent loop in a background thread.
     pub fn start(self: *Agent) !void {
-        self.running.store(true, .release);
-        self.loop_thread = std.Thread.spawn(.{}, agentLoop, .{self}) catch {
-            self.running.store(false, .release);
-            return error.ThreadSpawnFailed;
-        };
+        return lifecycle_support.start(self);
     }
 
     /// signal the agent to stop and wait for the loop thread to exit.
-    /// tears down the wireguard interface and securely zeroes the join token.
+    /// tears down the wireguard interface and securely zeroes any owned join token.
     pub fn stop(self: *Agent) void {
-        self.running.store(false, .release);
-        if (self.loop_thread) |t| {
-            t.join();
-            self.loop_thread = null;
-        }
+        lifecycle_support.stop(self);
+    }
 
-        // tear down wireguard interface if we set one up during registration.
-        // deleting the interface also removes all peers and routes, so this
-        // is a clean single-step teardown.
-        if (self.node_id != null) {
-            setup.teardownClusterNetworking();
-        }
-
-        // zero the token so it doesn't linger in memory after shutdown.
-        // the token slice points into caller-owned memory, but we still
-        // want to wipe our reference to prevent accidental leaks.
-        if (self.token.len > 0) {
-            const token_ptr: [*]u8 = @constCast(self.token.ptr);
-            std.crypto.secureZero(u8, token_ptr[0..self.token.len]);
-        }
-
-        // clean up the local containers map
-        self.container_lock.lock();
-        defer self.container_lock.unlock();
-
-        var it = self.local_containers.iterator();
-        while (it.next()) |entry| {
-            self.alloc.free(entry.key_ptr.*);
-        }
-        self.local_containers.deinit();
-
-        // clean up the peer tracking map
-        self.known_peers.deinit();
-
-        // clean up gossip
-        if (self.gossip) |g| {
-            g.deinit();
-            self.alloc.destroy(g);
-            self.gossip = null;
-        }
-        if (self.gossip_transport) |t| {
-            t.deinit();
-            self.alloc.destroy(t);
-            self.gossip_transport = null;
-        }
-
-        // clean up gossip seeds
-        if (self.gossip_seeds) |seeds| {
-            for (seeds) |s| self.alloc.free(s);
-            self.alloc.free(seeds);
-            self.gossip_seeds = null;
-        }
-
-        // close the agent cache database
-        agent_store.closeDb();
+    pub fn deinit(self: *Agent) void {
+        lifecycle_support.deinit(self);
     }
 
     /// block until the agent stops (used by cmdJoin).
     pub fn wait(self: *Agent) void {
-        if (self.loop_thread) |t| {
-            t.join();
-            self.loop_thread = null;
-        }
+        lifecycle_support.wait(self);
     }
 
     /// compute adaptive heartbeat interval in 100ms ticks.
@@ -441,8 +379,7 @@ test "ContainerState enum values" {
 test "Agent init creates empty local_containers" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), agent.local_containers.count());
     try std.testing.expect(!agent.running.load(.acquire));
@@ -451,8 +388,7 @@ test "Agent init creates empty local_containers" {
 test "Agent init wireguard fields default to null" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     try std.testing.expect(agent.node_id == null);
     try std.testing.expect(agent.wg_keypair == null);
@@ -476,8 +412,7 @@ test "detectLocalIp returns a dotted-quad string" {
 test "Agent init peer tracking defaults to zero" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), agent.known_peers_count);
 }
@@ -503,8 +438,7 @@ test "overlayIpForNode extended range" {
 test "Agent init role defaults to both" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     try std.testing.expectEqual(cluster_config.NodeRole.both, agent.role);
     try std.testing.expect(agent.region == null);
@@ -514,8 +448,7 @@ test "Agent init role defaults to both" {
 test "Agent role can be set before registration" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     agent.role = .agent;
     agent.region = "us-east-1";
@@ -527,16 +460,9 @@ test "Agent role can be set before registration" {
 test "parseGossipSeeds with valid seeds" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     agent.parseGossipSeeds("{\"gossip_seeds\":[\"5@10.0.0.1\",\"6@10.0.0.2\"]}");
-    defer {
-        if (agent.gossip_seeds) |seeds| {
-            for (seeds) |s| alloc.free(s);
-            alloc.free(seeds);
-        }
-    }
 
     try std.testing.expect(agent.gossip_seeds != null);
     try std.testing.expectEqual(@as(usize, 2), agent.gossip_seeds.?.len);
@@ -547,8 +473,7 @@ test "parseGossipSeeds with valid seeds" {
 test "parseGossipSeeds with empty array" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     agent.parseGossipSeeds("{\"gossip_seeds\":[]}");
 
@@ -558,8 +483,7 @@ test "parseGossipSeeds with empty array" {
 test "parseGossipSeeds with no seeds key" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     agent.parseGossipSeeds("{\"id\":\"abc123\"}");
 
@@ -583,8 +507,7 @@ test "parseSeedAddr with invalid format" {
 test "Agent gossip fields default to null" {
     const alloc = std.testing.allocator;
     var agent = Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "test-token");
-    defer agent.local_containers.deinit();
-    defer agent.known_peers.deinit();
+    defer agent.deinit();
 
     try std.testing.expect(agent.gossip == null);
     try std.testing.expect(agent.gossip_transport == null);

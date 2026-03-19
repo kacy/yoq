@@ -9,6 +9,7 @@ const agent_types = @import("agent_types.zig");
 const sql_mutations = @import("registry/sql_mutations.zig");
 const identity = @import("registry/identity.zig");
 const queries = @import("registry/queries.zig");
+const test_support = @import("registry/test_support.zig");
 
 pub const AgentRecord = agent_types.AgentRecord;
 pub const AgentResources = agent_types.AgentResources;
@@ -47,32 +48,6 @@ pub const getAssignments = queries.getAssignments;
 pub const getOrphanedAssignments = queries.getOrphanedAssignments;
 
 // -- tests --
-
-const test_agents_schema =
-    \\CREATE TABLE agents (
-    \\    id TEXT PRIMARY KEY,
-    \\    address TEXT NOT NULL,
-    \\    status TEXT NOT NULL DEFAULT 'active',
-    \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
-    \\    memory_mb INTEGER NOT NULL DEFAULT 0,
-    \\    cpu_used INTEGER NOT NULL DEFAULT 0,
-    \\    memory_used_mb INTEGER NOT NULL DEFAULT 0,
-    \\    containers INTEGER NOT NULL DEFAULT 0,
-    \\    last_heartbeat INTEGER NOT NULL,
-    \\    registered_at INTEGER NOT NULL,
-    \\    node_id INTEGER,
-    \\    wg_public_key TEXT,
-    \\    overlay_ip TEXT,
-    \\    role TEXT DEFAULT 'both',
-    \\    region TEXT,
-    \\    labels TEXT DEFAULT '',
-    \\    gpu_count INTEGER DEFAULT 0,
-    \\    gpu_used INTEGER DEFAULT 0,
-    \\    gpu_model TEXT,
-    \\    gpu_vram_mb INTEGER,
-    \\    rdma_capable INTEGER DEFAULT 0
-    \\);
-;
 
 test "registerSql generates valid SQL" {
     var buf: [1024]u8 = undefined;
@@ -152,7 +127,7 @@ test "heartbeatSql restores offline agent to active" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     // insert an offline agent
     db.exec(
@@ -186,7 +161,7 @@ test "heartbeatSql preserves draining status" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     // insert a draining agent
     db.exec(
@@ -277,7 +252,7 @@ test "listAgents with empty table" {
     defer db.deinit();
 
     // create the agents table
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     const alloc = std.testing.allocator;
     const agents = try listAgents(alloc, &db);
@@ -293,7 +268,7 @@ test "listAgents returns inserted agent" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     // insert via the generated SQL
     var sql_buf: [1024]u8 = undefined;
@@ -323,7 +298,7 @@ test "getAgent returns null for missing" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     const alloc = std.testing.allocator;
     const agent = try getAgent(alloc, &db, "nonexistent");
@@ -465,7 +440,7 @@ test "assignNodeId returns 1 for empty table" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     const nid = try assignNodeId(&db);
     try std.testing.expectEqual(@as(u8, 1), nid);
@@ -478,7 +453,7 @@ test "assignNodeId fills gaps" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     // insert agents with node_id 1 and 3 (gap at 2)
     db.exec("INSERT INTO agents (id, address, node_id, last_heartbeat, registered_at) VALUES ('a1', '10.0.0.1:7701', 1, 1000, 1000);", .{}, .{}) catch return;
@@ -495,7 +470,7 @@ test "assignNodeId skips agents without node_id" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     // agent without node_id (legacy)
     db.exec("INSERT INTO agents (id, address, last_heartbeat, registered_at) VALUES ('a0', '10.0.0.1:7701', 1000, 1000);", .{}, .{}) catch return;
@@ -511,7 +486,7 @@ test "getGossipSeeds respects requested count" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
     db.exec("INSERT INTO agents (id, address, status, node_id, role, last_heartbeat, registered_at) VALUES ('a1', '10.0.0.1', 'active', 1, 'agent', 1000, 1000);", .{}, .{}) catch return;
     db.exec("INSERT INTO agents (id, address, status, node_id, role, last_heartbeat, registered_at) VALUES ('a2', '10.0.0.2', 'active', 2, 'agent', 1000, 1000);", .{}, .{}) catch return;
     db.exec("INSERT INTO agents (id, address, status, node_id, role, last_heartbeat, registered_at) VALUES ('a3', '10.0.0.3', 'active', 3, 'agent', 1000, 1000);", .{}, .{}) catch return;
@@ -550,7 +525,7 @@ test "listAgents returns wireguard fields" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     // insert via registerSqlFull with wireguard fields
     var sql_buf: [2048]u8 = undefined;
@@ -580,7 +555,7 @@ test "getAgent returns wireguard fields" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     var sql_buf: [2048]u8 = undefined;
     const sql = registerSqlFull(&sql_buf, "wgtest123456", "10.0.0.5:7701", .{
@@ -605,7 +580,7 @@ test "getAgent returns null wireguard fields for legacy agent" {
     }) catch return;
     defer db.deinit();
 
-    db.exec(test_agents_schema, .{}, .{}) catch return;
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
 
     // legacy registration without WG fields
     var sql_buf: [1024]u8 = undefined;

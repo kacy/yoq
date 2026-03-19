@@ -1,6 +1,7 @@
 const std = @import("std");
 const logger = @import("../../lib/log.zig");
 const gossip_mod = @import("../gossip.zig");
+const path_support = @import("path_support.zig");
 
 const StartError = error{
     InitFailed,
@@ -8,11 +9,11 @@ const StartError = error{
 };
 
 pub fn raftDbPath(buf: []u8, data_dir: []const u8) ?[:0]const u8 {
-    return bufPrintZ(buf, "{s}/raft.db", .{data_dir});
+    return path_support.bufPrintZ(buf, "{s}/raft.db", .{data_dir});
 }
 
 pub fn stateDbPath(buf: []u8, data_dir: []const u8) ?[:0]const u8 {
-    return bufPrintZ(buf, "{s}/state.db", .{data_dir});
+    return path_support.bufPrintZ(buf, "{s}/state.db", .{data_dir});
 }
 
 pub fn snapshotPath(buf: []u8, data_dir: []const u8) ?[]const u8 {
@@ -58,11 +59,4 @@ pub fn start(self: anytype) StartError!void {
     self.recv_thread = std.Thread.spawn(.{}, @TypeOf(self.*).recvLoop, .{self}) catch {
         return StartError.InitFailed;
     };
-}
-
-fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) ?[:0]const u8 {
-    const slice = std.fmt.bufPrint(buf, fmt, args) catch return null;
-    if (slice.len >= buf.len) return null;
-    buf[slice.len] = 0;
-    return buf[0..slice.len :0];
 }

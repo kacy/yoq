@@ -30,7 +30,6 @@ pub const ReceivedMessage = common.ReceivedMessage;
 pub const GossipReceiveResult = common.GossipReceiveResult;
 
 const PeerAddr = common.PeerAddr;
-const VerifiedBody = common.VerifiedBody;
 const ConnectionPool = connection_pool.ConnectionPool;
 const msg_request_vote = common.msg_request_vote;
 const msg_request_vote_reply = common.msg_request_vote_reply;
@@ -171,45 +170,16 @@ pub const Transport = struct {
     }
 };
 
-fn verifyAuthenticatedBody(body: []const u8, key: [32]u8, from_addr: std.net.Address, peers: *const std.AutoHashMap(NodeId, PeerAddr)) TransportError!VerifiedBody {
-    return auth_support.verifyAuthenticatedBody(body, key, from_addr, peers);
-}
-
-fn samePeerIp(expected: std.net.Address, actual: std.net.Address) bool {
-    return common.samePeerIp(expected, actual);
-}
-
-fn encode(buf: []u8, msg: Message) !usize {
-    return codec_support.encode(buf, msg);
-}
-
-fn encodeSnapshot(alloc: std.mem.Allocator, args: InstallSnapshotArgs) ![]u8 {
-    return codec_support.encodeSnapshot(alloc, args);
-}
-
-pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
-    return codec_support.decode(alloc, buf);
-}
-
-fn writeU64(buf: []u8, val: u64) void {
-    common.writeU64(buf, val);
-}
-
-fn writeU32(buf: []u8, val: u32) void {
-    common.writeU32(buf, val);
-}
-
-fn readU64(buf: []const u8) u64 {
-    return common.readU64(buf);
-}
-
-fn readU32(buf: []const u8) u32 {
-    return common.readU32(buf);
-}
-
-fn readExact(fd: posix.socket_t, buf: []u8) !void {
-    return common.readExact(fd, buf);
-}
+const verifyAuthenticatedBody = auth_support.verifyAuthenticatedBody;
+const samePeerIp = common.samePeerIp;
+const encode = codec_support.encode;
+const encodeSnapshot = codec_support.encodeSnapshot;
+pub const decode = codec_support.decode;
+const writeU64 = common.writeU64;
+const writeU32 = common.writeU32;
+const readU64 = common.readU64;
+const readU32 = common.readU32;
+const readExact = common.readExact;
 
 // -- tests --
 

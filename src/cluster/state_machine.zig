@@ -19,9 +19,8 @@
 
 const std = @import("std");
 const sqlite = @import("sqlite");
+const db_runtime = @import("state_machine/db_runtime.zig");
 const types = @import("raft_types.zig");
-const schema = @import("../state/schema.zig");
-const log = @import("../lib/log.zig");
 const apply_runtime = @import("state_machine/apply_runtime.zig");
 const snapshot_support = @import("state_machine/snapshot_support.zig");
 const sql_guard = @import("state_machine/sql_guard.zig");
@@ -30,10 +29,7 @@ const LogEntry = types.LogEntry;
 const LogIndex = types.LogIndex;
 const SnapshotMeta = types.SnapshotMeta;
 
-pub const StateMachineError = error{
-    /// could not open or initialize the replicated state machine database
-    DbOpenFailed,
-};
+pub const StateMachineError = db_runtime.StateMachineError;
 
 pub const SnapshotError = snapshot_support.SnapshotError;
 const snapshot_header_size = snapshot_support.snapshot_header_size;
@@ -44,36 +40,15 @@ pub const StateMachine = struct {
     last_applied: LogIndex,
 
     pub fn init(path: [:0]const u8) StateMachineError!StateMachine {
-        var db = sqlite.Db.init(.{
-            .mode = .{ .File = path },
-            .open_flags = .{ .write = true, .create = true },
-        }) catch return StateMachineError.DbOpenFailed;
-
-        // create cluster tables (agents, assignments) in the replicated DB
-        schema.init(&db) catch |e| {
-            log.err("state_machine: failed to initialize schema: {}. Database may be corrupted.", .{e});
-            return StateMachineError.DbOpenFailed;
-        };
-
         return .{
-            .db = db,
+            .db = try db_runtime.init(path),
             .last_applied = 0,
         };
     }
 
     pub fn initMemory() StateMachineError!StateMachine {
-        var db = sqlite.Db.init(.{
-            .mode = .Memory,
-            .open_flags = .{ .write = true },
-        }) catch return StateMachineError.DbOpenFailed;
-
-        schema.init(&db) catch |e| {
-            log.err("state_machine: failed to initialize schema: {}. Database may be corrupted.", .{e});
-            return StateMachineError.DbOpenFailed;
-        };
-
         return .{
-            .db = db,
+            .db = try db_runtime.initMemory(),
             .last_applied = 0,
         };
     }

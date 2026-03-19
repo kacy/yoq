@@ -74,7 +74,8 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     writeErr("joining cluster at {s}:{d} (role={s})...\n", .{ host, api_port, role.toString() });
 
-    var agent = cluster_agent.Agent.init(alloc, server_addr, api_port, join_token);
+    var agent = try cluster_agent.Agent.initOwned(alloc, server_addr, api_port, join_token);
+    defer agent.deinit();
     agent.role = role;
     agent.region = region;
 
@@ -89,12 +90,6 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     if (agent.node_id != null and agent.wg_keypair != null and agent.overlay_ip != null) {
         setupAgentWireguard(&agent, alloc);
     }
-    defer {
-        if (agent.node_id != null) {
-            net_setup.teardownClusterNetworking();
-        }
-    }
-
     agent.start() catch |err| {
         writeErr("failed to start agent loop: {}\n", .{err});
         return MembershipError.ServerStartFailed;

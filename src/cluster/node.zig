@@ -37,6 +37,8 @@ const heartbeat_batcher_mod = @import("heartbeat_batcher.zig");
 const bootstrap = @import("node/bootstrap.zig");
 const action_loop = @import("node/action_loop.zig");
 const membership_sync = @import("node/membership_sync.zig");
+const path_support = @import("node/path_support.zig");
+const query_support = @import("node/query_support.zig");
 const snapshot_support = @import("node/snapshot_support.zig");
 
 const Raft = raft_mod.Raft;
@@ -273,38 +275,21 @@ pub const Node = struct {
     }
 
     pub fn currentTerm(self: *Node) types.Term {
-        self.mu.lock();
-        defer self.mu.unlock();
-        return self.raft.currentTerm();
+        return query_support.currentTerm(self);
     }
 
     pub fn role(self: *Node) types.Role {
-        self.mu.lock();
-        defer self.mu.unlock();
-        return self.raft.role;
+        return query_support.role(self);
     }
 
     pub fn leaderId(self: *Node) ?NodeId {
-        self.mu.lock();
-        defer self.mu.unlock();
-        return self.leader_id;
+        return query_support.leaderId(self);
     }
 
     /// returns the leader's API address as "ip:port", or null if unknown.
     /// writes into a caller-provided buffer to avoid allocation.
     pub fn leaderAddrBuf(self: *Node, buf: []u8) ?[]const u8 {
-        self.mu.lock();
-        defer self.mu.unlock();
-        const lid = self.leader_id orelse return null;
-        if (lid == self.config.id) return null; // caller is the leader
-        for (self.config.peers) |p| {
-            if (p.id == lid) {
-                return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
-                    p.addr[0], p.addr[1], p.addr[2], p.addr[3], self.config.api_port,
-                }) catch null;
-            }
-        }
-        return null;
+        return query_support.leaderAddrBuf(self, buf);
     }
 
     // -- internal threads --
@@ -403,10 +388,7 @@ pub const Node = struct {
 
     /// return the number of members tracked by gossip (for status endpoints).
     pub fn gossipMemberCount(self: *Node) usize {
-        self.mu.lock();
-        defer self.mu.unlock();
-        const g = self.gossip orelse return 0;
-        return g.members.count();
+        return query_support.gossipMemberCount(self);
     }
 
     /// resolve a network address to a peer's NodeId by matching against
@@ -438,12 +420,7 @@ pub const Node = struct {
 
 /// format a string into a buffer and null-terminate it.
 /// returns null if the formatted string doesn't fit (needs room for the NUL).
-fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) ?[:0]const u8 {
-    const slice = std.fmt.bufPrint(buf, fmt, args) catch return null;
-    if (slice.len >= buf.len) return null;
-    buf[slice.len] = 0;
-    return buf[0..slice.len :0];
-}
+const bufPrintZ = path_support.bufPrintZ;
 
 // -- tests --
 
