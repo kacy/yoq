@@ -1,5 +1,6 @@
 const std = @import("std");
 const logger = @import("../../lib/log.zig");
+const common = @import("common.zig");
 const replication_runtime = @import("replication_runtime.zig");
 const types = @import("../raft_types.zig");
 
@@ -38,7 +39,7 @@ pub fn handleRequestVote(
     }
 
     if (args.term > current_term) {
-        stepDown(self, args.term, min_election_ticks, max_election_ticks);
+        common.stepDown(self, args.term, min_election_ticks, max_election_ticks);
     }
 
     const voted_for = self.log.getVotedFor();
@@ -69,7 +70,7 @@ pub fn handleRequestVoteReply(
     if (self.role != .candidate) return;
 
     if (reply.term > self.log.getCurrentTerm()) {
-        stepDown(self, reply.term, min_election_ticks, max_election_ticks);
+        common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
 
@@ -88,7 +89,7 @@ pub fn transferLeadership(self: anytype, min_election_ticks: u32, max_election_t
     const new_term = self.log.getCurrentTerm() + 1;
     logger.info("raft: leader {d} stepping down, advancing to term {d}", .{ self.id, new_term });
 
-    stepDown(self, new_term, min_election_ticks, max_election_ticks);
+    common.stepDown(self, new_term, min_election_ticks, max_election_ticks);
     self.actions.append(self.alloc, .{
         .become_follower = .{ .leader_id = 0 },
     }) catch |e| {
@@ -104,7 +105,7 @@ pub fn startElection(self: anytype, min_election_ticks: u32, max_election_ticks:
     self.role = .candidate;
     self.votes_received = 1;
     self.ticks_since_event = 0;
-    resetElectionTimeout(self, min_election_ticks, max_election_ticks);
+    common.resetElectionTimeout(self, min_election_ticks, max_election_ticks);
 
     if (self.peers.len == 0) {
         becomeLeader(self);
@@ -147,15 +148,6 @@ pub fn becomeLeader(self: anytype) void {
     replication_runtime.sendHeartbeats(self);
 }
 
-pub fn stepDown(self: anytype, new_term: Term, min_election_ticks: u32, max_election_ticks: u32) void {
-    self.log.setCurrentTerm(new_term);
-    self.log.setVotedFor(null);
-    self.role = .follower;
-    self.ticks_since_event = 0;
-    resetElectionTimeout(self, min_election_ticks, max_election_ticks);
-}
-
 pub fn resetElectionTimeout(self: anytype, min_election_ticks: u32, max_election_ticks: u32) void {
-    const range = max_election_ticks - min_election_ticks;
-    self.election_timeout = min_election_ticks + self.rng.random().intRangeAtMost(u32, 0, range);
+    common.resetElectionTimeout(self, min_election_ticks, max_election_ticks);
 }

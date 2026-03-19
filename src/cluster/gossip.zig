@@ -29,6 +29,7 @@
 //   // process actions: send UDP messages, update membership state
 
 const std = @import("std");
+const action_queue = @import("action_queue.zig");
 const codec_support = @import("gossip/codec_support.zig");
 const membership_support = @import("gossip/membership_support.zig");
 const probe_runtime = @import("gossip/probe_runtime.zig");
@@ -209,9 +210,6 @@ pub const Gossip = struct {
 
     pub fn deinit(self: *Gossip) void {
         self.members.deinit();
-        for (self.actions.items) |action| {
-            self.freeActionUpdates(action);
-        }
         self.actions.deinit(self.alloc);
         self.pending_updates.deinit(self.alloc);
         self.probe_order.deinit(self.alloc);
@@ -266,19 +264,12 @@ pub const Gossip = struct {
 
     /// drain all pending actions for the caller to process
     pub fn drainActions(self: *Gossip) []Action {
-        return self.actions.toOwnedSlice(self.alloc) catch return &[_]Action{};
+        return action_queue.drainOwned(Action, self.alloc, &self.actions);
     }
 
     /// free actions returned by drainActions
     pub fn freeActions(self: *Gossip, actions: []Action) void {
-        for (actions) |action| {
-            self.freeActionUpdates(action);
-        }
         self.alloc.free(actions);
-    }
-
-    fn freeActionUpdates(_: *Gossip, _: Action) void {
-        // updates are stored inline as BoundedUpdates — no heap free needed.
     }
 
     // --- internal ---

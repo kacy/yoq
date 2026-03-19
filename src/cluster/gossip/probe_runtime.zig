@@ -1,4 +1,5 @@
 const std = @import("std");
+const membership_support = @import("membership_support.zig");
 const state_updates = @import("state_updates.zig");
 
 pub fn tick(self: anytype) !void {
@@ -143,7 +144,7 @@ pub fn escalateToIndirect(self: anytype) !void {
 
     const random = self.prng.random();
     random.shuffle(u64, candidates.items);
-    const fanout = self.configured_fanout orelse @max(ceilLog2(self.members.count() + 1), 3);
+    const fanout = self.configured_fanout orelse @max(membership_support.ceilLog2(self.members.count() + 1), 3);
     const relay_count = @min(fanout, candidates.items.len);
 
     for (candidates.items[0..relay_count]) |relay_id| {
@@ -161,16 +162,6 @@ pub fn escalateToIndirect(self: anytype) !void {
             } });
         }
     }
-}
-
-fn ceilLog2(n: usize) u32 {
-    if (n <= 2) return 1;
-    var log: u32 = 0;
-    var val: usize = n - 1;
-    while (val > 0) : (val >>= 1) {
-        log += 1;
-    }
-    return log;
 }
 
 pub fn suspectProbeTarget(self: anytype) !void {

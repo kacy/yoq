@@ -1,4 +1,5 @@
 const logger = @import("../../lib/log.zig");
+const common = @import("common.zig");
 const types = @import("../raft_types.zig");
 
 const InstallSnapshotArgs = types.InstallSnapshotArgs;
@@ -17,7 +18,7 @@ pub fn handleInstallSnapshot(
     }
 
     if (args.term > current_term) {
-        stepDown(self, args.term, min_election_ticks, max_election_ticks);
+        common.stepDown(self, args.term, min_election_ticks, max_election_ticks);
     }
 
     self.ticks_since_event = 0;
@@ -55,11 +56,11 @@ pub fn handleInstallSnapshotReply(
     if (self.role != .leader) return;
 
     if (reply.term > self.log.getCurrentTerm()) {
-        stepDown(self, reply.term, min_election_ticks, max_election_ticks);
+        common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
 
-    const peer_idx = peerIndex(self, from) orelse return;
+    const peer_idx = common.peerIndex(self, from) orelse return;
     if (self.snapshot_meta) |meta| {
         self.match_index[peer_idx] = meta.last_included_index;
         self.next_index[peer_idx] = meta.last_included_index + 1;
@@ -86,21 +87,4 @@ pub fn sendInstallSnapshot(self: anytype, peer_idx: usize, meta: SnapshotMeta) v
 pub fn onSnapshotComplete(self: anytype, meta: SnapshotMeta) void {
     self.snapshot_meta = meta;
     self.log.setSnapshotMeta(meta);
-}
-
-fn peerIndex(self: anytype, id: anytype) ?usize {
-    for (self.peers, 0..) |peer, i| {
-        if (peer == id) return i;
-    }
-    return null;
-}
-
-fn stepDown(self: anytype, new_term: anytype, min_election_ticks: u32, max_election_ticks: u32) void {
-    self.log.setCurrentTerm(new_term);
-    self.log.setVotedFor(null);
-    self.role = .follower;
-    self.ticks_since_event = 0;
-
-    const range = max_election_ticks - min_election_ticks;
-    self.election_timeout = min_election_ticks + self.rng.random().intRangeAtMost(u32, 0, range);
 }

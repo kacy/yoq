@@ -1,74 +1,34 @@
 // log — SQLite-backed persistent raft log
 //
-// stores raft persistent state: current term, voted_for, and the
-// replicated log entries. uses SQLite for crash recovery — if the
-// process dies, we can resume from the last persisted state.
-//
-// the raft paper requires that current_term, voted_for, and log
-// entries survive restarts. this module handles all three.
-//
-// snapshot awareness: after a snapshot is taken and log entries are
-// truncated, the log may be empty. queries like lastIndex() and
-// lastTerm() fall back to the snapshot metadata in that case, so
-// the rest of the raft algorithm doesn't need special cases.
+// the public log API stays here while storage, snapshot, and schema
+// details live in `cluster/log/` support modules.
 
 const std = @import("std");
 const sqlite = @import("sqlite");
-const types = @import("raft_types.zig");
+const common = @import("log/common.zig");
+const entry_runtime = @import("log/entry_runtime.zig");
 const logger = @import("../lib/log.zig");
+const snapshot_support = @import("log/snapshot_support.zig");
+const state_runtime = @import("log/state_runtime.zig");
 
-const Term = types.Term;
-const LogIndex = types.LogIndex;
-const NodeId = types.NodeId;
-const LogEntry = types.LogEntry;
-const SnapshotMeta = types.SnapshotMeta;
+const Term = common.Term;
+const LogIndex = common.LogIndex;
+const NodeId = common.NodeId;
+const LogEntry = common.LogEntry;
+const SnapshotMeta = common.SnapshotMeta;
 
-pub const LogError = error{
-    /// could not open or initialize the raft log SQLite database
-    DbOpenFailed,
-    /// failed to write a log entry or update raft persistent state
-    WriteFailed,
-    /// failed to read a log entry or query raft persistent state
-    ReadFailed,
-    /// database contains negative or out-of-range values in raft columns
-    CorruptedLog,
-};
-
-/// safely cast a sqlite i64 to u64. returns CorruptedLog if negative.
-inline fn safeU64(val: i64) LogError!u64 {
-    return std.math.cast(u64, val) orelse LogError.CorruptedLog;
-}
+pub const LogError = common.LogError;
 
 pub const Log = struct {
     db: sqlite.Db,
 
     pub fn init(path: [:0]const u8) LogError!Log {
-        var db = sqlite.Db.init(.{
-            .mode = .{ .File = path },
-            .open_flags = .{ .write = true, .create = true },
-        }) catch return LogError.DbOpenFailed;
-
-        initSchema(&db) catch {
-            db.deinit();
-            return LogError.DbOpenFailed;
-        };
-
-        return .{ .db = db };
+        return .{ .db = try state_runtime.init(path) };
     }
 
     /// open an in-memory database (for testing)
     pub fn initMemory() LogError!Log {
-        var db = sqlite.Db.init(.{
-            .mode = .Memory,
-            .open_flags = .{ .write = true },
-        }) catch return LogError.DbOpenFailed;
-
-        initSchema(&db) catch {
-            db.deinit();
-            return LogError.DbOpenFailed;
-        };
-
-        return .{ .db = db };
+        return .{ .db = try state_runtime.initMemory() };
     }
 
     pub fn deinit(self: *Log) void {
@@ -78,44 +38,21 @@ pub const Log = struct {
     // -- persistent state (survives restarts) --
 
     pub fn getCurrentTerm(self: *Log) Term {
-        const Row = struct { current_term: i64 };
-        const row = (self.db.one(
-            Row,
-            "SELECT current_term FROM raft_state WHERE id = 1;",
-            .{},
-            .{},
-        ) catch return 0) orelse return 0;
-        return safeU64(row.current_term) catch 0;
+        return state_runtime.getCurrentTerm(&self.db);
     }
 
     pub fn setCurrentTerm(self: *Log, term: Term) void {
-        self.db.exec(
-            "UPDATE raft_state SET current_term = ? WHERE id = 1;",
-            .{},
-            .{@as(i64, @intCast(term))},
-        ) catch |e| {
+        state_runtime.setCurrentTerm(&self.db, term) catch |e| {
             logger.warn("raft_log: failed to set current_term to {d}: {}", .{ term, e });
         };
     }
 
     pub fn getVotedFor(self: *Log) ?NodeId {
-        const Row = struct { voted_for: ?i64 };
-        const row = (self.db.one(
-            Row,
-            "SELECT voted_for FROM raft_state WHERE id = 1;",
-            .{},
-            .{},
-        ) catch return null) orelse return null;
-        return if (row.voted_for) |v| safeU64(v) catch null else null;
+        return state_runtime.getVotedFor(&self.db);
     }
 
     pub fn setVotedFor(self: *Log, id: ?NodeId) void {
-        const val: ?i64 = if (id) |v| @intCast(v) else null;
-        self.db.exec(
-            "UPDATE raft_state SET voted_for = ? WHERE id = 1;",
-            .{},
-            .{val},
-        ) catch |e| {
+        state_runtime.setVotedFor(&self.db, id) catch |e| {
             logger.warn("raft_log: failed to set voted_for to {?d}: {}", .{ id, e });
         };
     }
@@ -127,38 +64,11 @@ pub const Log = struct {
     // return correct values even when the log has been truncated.
 
     pub fn getSnapshotMeta(self: *Log) ?SnapshotMeta {
-        const Row = struct {
-            last_included_index: i64,
-            last_included_term: i64,
-            data_len: i64,
-        };
-        const row = (self.db.one(
-            Row,
-            "SELECT last_included_index, last_included_term, data_len FROM snapshot_meta WHERE id = 1;",
-            .{},
-            .{},
-        ) catch return null) orelse return null;
-
-        // no snapshot yet — the row exists but with all zeros
-        if (row.last_included_index == 0) return null;
-
-        return SnapshotMeta{
-            .last_included_index = safeU64(row.last_included_index) catch return null,
-            .last_included_term = safeU64(row.last_included_term) catch return null,
-            .data_len = safeU64(row.data_len) catch return null,
-        };
+        return snapshot_support.getSnapshotMeta(&self.db);
     }
 
     pub fn setSnapshotMeta(self: *Log, meta: SnapshotMeta) void {
-        self.db.exec(
-            "UPDATE snapshot_meta SET last_included_index = ?, last_included_term = ?, data_len = ? WHERE id = 1;",
-            .{},
-            .{
-                @as(i64, @intCast(meta.last_included_index)),
-                @as(i64, @intCast(meta.last_included_term)),
-                @as(i64, @intCast(meta.data_len)),
-            },
-        ) catch |e| {
+        snapshot_support.setSnapshotMeta(&self.db, meta) catch |e| {
             logger.warn("raft_log: failed to set snapshot metadata: {}", .{e});
         };
     }
@@ -166,72 +76,23 @@ pub const Log = struct {
     // -- log operations --
 
     pub fn append(self: *Log, entry: LogEntry) LogError!void {
-        self.db.exec(
-            "INSERT INTO raft_log (log_index, term, data) VALUES (?, ?, ?);",
-            .{},
-            .{
-                @as(i64, @intCast(entry.index)),
-                @as(i64, @intCast(entry.term)),
-                sqlite.Text{ .data = entry.data },
-            },
-        ) catch return LogError.WriteFailed;
+        return entry_runtime.append(&self.db, entry);
     }
 
     pub fn getEntry(self: *Log, alloc: std.mem.Allocator, index: LogIndex) LogError!?LogEntry {
-        const Row = struct { log_index: i64, term: i64, data: sqlite.Text };
-        const row = (self.db.oneAlloc(
-            Row,
-            alloc,
-            "SELECT log_index, term, data FROM raft_log WHERE log_index = ?;",
-            .{},
-            .{@as(i64, @intCast(index))},
-        ) catch return LogError.ReadFailed) orelse return null;
-        return LogEntry{
-            .index = safeU64(row.log_index) catch return LogError.ReadFailed,
-            .term = safeU64(row.term) catch return LogError.ReadFailed,
-            .data = row.data.data,
-        };
+        return entry_runtime.getEntry(&self.db, alloc, index);
     }
 
     /// returns the highest log index. if the log is empty but a snapshot
     /// exists, returns the snapshot's last_included_index.
     pub fn lastIndex(self: *Log) LogIndex {
-        const Row = struct { max_index: ?i64 };
-        const row = (self.db.one(
-            Row,
-            "SELECT MAX(log_index) AS max_index FROM raft_log;",
-            .{},
-            .{},
-        ) catch return self.snapshotLastIndex()) orelse return self.snapshotLastIndex();
-
-        if (row.max_index) |m| {
-            return safeU64(m) catch self.snapshotLastIndex();
-        }
-
-        // log is empty — fall back to snapshot
-        return self.snapshotLastIndex();
+        return snapshot_support.lastIndex(&self.db);
     }
 
     /// returns the term of the last log entry. if the log is empty but a
     /// snapshot exists, returns the snapshot's last_included_term.
     pub fn lastTerm(self: *Log) Term {
-        const last = self.lastLogIndex();
-        if (last > 0) {
-            const Row = struct { term: i64 };
-            const row = (self.db.one(
-                Row,
-                "SELECT term FROM raft_log WHERE log_index = ?;",
-                .{},
-                .{@as(i64, @intCast(last))},
-            ) catch return 0) orelse return 0;
-            return safeU64(row.term) catch 0;
-        }
-
-        // log is empty — fall back to snapshot
-        if (self.getSnapshotMeta()) |meta| {
-            return meta.last_included_term;
-        }
-        return 0;
+        return snapshot_support.lastTerm(&self.db);
     }
 
     /// get the term for a specific log index (needed for consistency checks).
@@ -239,39 +100,13 @@ pub const Log = struct {
     /// snapshot's term — this covers the case where the entry was truncated
     /// after snapshotting.
     pub fn termAt(self: *Log, index: LogIndex) Term {
-        if (index == 0) return 0;
-
-        // first try the log itself
-        const Row = struct { term: i64 };
-        const row = self.db.one(
-            Row,
-            "SELECT term FROM raft_log WHERE log_index = ?;",
-            .{},
-            .{@as(i64, @intCast(index))},
-        ) catch return 0;
-
-        if (row) |r| {
-            return safeU64(r.term) catch 0;
-        }
-
-        // not in log — check if the snapshot covers this index
-        if (self.getSnapshotMeta()) |meta| {
-            if (index == meta.last_included_index) {
-                return meta.last_included_term;
-            }
-        }
-
-        return 0;
+        return snapshot_support.termAt(&self.db, index);
     }
 
     /// remove all entries from index onwards (inclusive).
     /// used when a leader's log conflicts with ours.
     pub fn truncateFrom(self: *Log, index: LogIndex) void {
-        self.db.exec(
-            "DELETE FROM raft_log WHERE log_index >= ?;",
-            .{},
-            .{@as(i64, @intCast(index))},
-        ) catch |e| {
+        entry_runtime.truncateFrom(&self.db, index) catch |e| {
             logger.warn("raft_log: failed to truncate from index {d}: {}", .{ index, e });
         };
     }
@@ -280,11 +115,7 @@ pub const Log = struct {
     /// used after a snapshot is taken to reclaim space — we no longer
     /// need entries that are covered by the snapshot.
     pub fn truncateUpTo(self: *Log, index: LogIndex) void {
-        self.db.exec(
-            "DELETE FROM raft_log WHERE log_index <= ?;",
-            .{},
-            .{@as(i64, @intCast(index))},
-        ) catch |e| {
+        snapshot_support.truncateUpTo(&self.db, index) catch |e| {
             logger.warn("raft_log: failed to truncate up to index {d}: {}", .{ index, e });
         };
     }
@@ -292,97 +123,9 @@ pub const Log = struct {
     /// get entries in range [from, to] inclusive.
     /// caller owns the returned slice and entry data.
     pub fn getEntries(self: *Log, alloc: std.mem.Allocator, from: LogIndex, to: LogIndex) LogError![]LogEntry {
-        var entries: std.ArrayList(LogEntry) = .{};
-
-        const Row = struct { log_index: i64, term: i64, data: sqlite.Text };
-        var stmt = self.db.prepare(
-            "SELECT log_index, term, data FROM raft_log WHERE log_index >= ? AND log_index <= ? ORDER BY log_index;",
-        ) catch return LogError.ReadFailed;
-        defer stmt.deinit();
-
-        var iter = stmt.iterator(Row, .{
-            @as(i64, @intCast(from)),
-            @as(i64, @intCast(to)),
-        }) catch return LogError.ReadFailed;
-
-        while (iter.nextAlloc(alloc, .{}) catch return LogError.ReadFailed) |row| {
-            entries.append(alloc, LogEntry{
-                .index = safeU64(row.log_index) catch return LogError.ReadFailed,
-                .term = safeU64(row.term) catch return LogError.ReadFailed,
-                .data = row.data.data,
-            }) catch return LogError.ReadFailed;
-        }
-
-        return entries.toOwnedSlice(alloc) catch return LogError.ReadFailed;
-    }
-
-    // -- internal helpers --
-
-    /// the highest index actually present in the log table (ignoring snapshots).
-    /// used internally to distinguish "log has entries" from "only snapshot".
-    fn lastLogIndex(self: *Log) LogIndex {
-        const Row = struct { max_index: ?i64 };
-        const row = (self.db.one(
-            Row,
-            "SELECT MAX(log_index) AS max_index FROM raft_log;",
-            .{},
-            .{},
-        ) catch return 0) orelse return 0;
-        return if (row.max_index) |m| safeU64(m) catch 0 else 0;
-    }
-
-    /// snapshot fallback for lastIndex
-    fn snapshotLastIndex(self: *Log) LogIndex {
-        if (self.getSnapshotMeta()) |meta| {
-            return meta.last_included_index;
-        }
-        return 0;
+        return entry_runtime.getEntries(&self.db, alloc, from, to);
     }
 };
-
-// -- schema --
-
-fn initSchema(db: *sqlite.Db) !void {
-    db.exec(
-        \\CREATE TABLE IF NOT EXISTS raft_state (
-        \\    id INTEGER PRIMARY KEY CHECK (id = 1),
-        \\    current_term INTEGER NOT NULL DEFAULT 0,
-        \\    voted_for INTEGER
-        \\);
-    , .{}, .{}) catch return error.InitFailed;
-
-    // ensure the single state row exists
-    db.exec(
-        "INSERT OR IGNORE INTO raft_state (id, current_term) VALUES (1, 0);",
-        .{},
-        .{},
-    ) catch return error.InitFailed;
-
-    db.exec(
-        \\CREATE TABLE IF NOT EXISTS raft_log (
-        \\    log_index INTEGER PRIMARY KEY,
-        \\    term INTEGER NOT NULL,
-        \\    data BLOB NOT NULL
-        \\);
-    , .{}, .{}) catch return error.InitFailed;
-
-    // snapshot metadata — single row, like raft_state.
-    // records the last log entry included in the most recent snapshot.
-    db.exec(
-        \\CREATE TABLE IF NOT EXISTS snapshot_meta (
-        \\    id INTEGER PRIMARY KEY CHECK (id = 1),
-        \\    last_included_index INTEGER NOT NULL DEFAULT 0,
-        \\    last_included_term INTEGER NOT NULL DEFAULT 0,
-        \\    data_len INTEGER NOT NULL DEFAULT 0
-        \\);
-    , .{}, .{}) catch return error.InitFailed;
-
-    db.exec(
-        "INSERT OR IGNORE INTO snapshot_meta (id) VALUES (1);",
-        .{},
-        .{},
-    ) catch return error.InitFailed;
-}
 
 // -- tests --
 

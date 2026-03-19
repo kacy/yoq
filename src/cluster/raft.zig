@@ -18,6 +18,8 @@
 //   // process actions (send messages, apply committed entries)
 
 const std = @import("std");
+const action_queue = @import("action_queue.zig");
+const common = @import("raft/common.zig");
 const election_runtime = @import("raft/election_runtime.zig");
 const types = @import("raft_types.zig");
 const replication_runtime = @import("raft/replication_runtime.zig");
@@ -218,14 +220,8 @@ pub const Raft = struct {
 
     /// return all pending actions and clear the queue.
     /// caller owns the returned slice and must free it with self.alloc.free(actions)
-    /// note: returns an empty non-owned slice on allocation failure - caller must NOT free in that case
     pub fn drainActions(self: *Raft) []Action {
-        return self.actions.toOwnedSlice(self.alloc) catch blk: {
-            // on allocation failure, clear the queue and return empty
-            // caller must check if actions.len == 0 before freeing
-            self.actions.clearRetainingCapacity();
-            break :blk &.{};
-        };
+        return action_queue.drainOwned(Action, self.alloc, &self.actions);
     }
 
     /// called by the node after a successful snapshot. updates the
@@ -270,7 +266,7 @@ pub const Raft = struct {
     }
 
     fn stepDown(self: *Raft, new_term: Term) void {
-        election_runtime.stepDown(self, new_term, min_election_ticks, max_election_ticks);
+        common.stepDown(self, new_term, min_election_ticks, max_election_ticks);
     }
 
     fn sendHeartbeats(self: *Raft) void {
@@ -293,11 +289,11 @@ pub const Raft = struct {
     }
 
     fn peerIndex(self: *Raft, id: NodeId) ?usize {
-        return replication_runtime.peerIndex(self, id);
+        return common.peerIndex(self, id);
     }
 
     fn resetElectionTimeout(self: *Raft) void {
-        election_runtime.resetElectionTimeout(self, min_election_ticks, max_election_ticks);
+        common.resetElectionTimeout(self, min_election_ticks, max_election_ticks);
     }
 
     /// get current term (convenience for external callers)

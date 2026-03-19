@@ -1,4 +1,5 @@
 const std = @import("std");
+const membership_support = @import("membership_support.zig");
 
 pub fn collectPiggybackUpdates(self: anytype, BoundedUpdates: type, max_piggyback_updates: usize) BoundedUpdates {
     const PendingUpdate = @TypeOf(self.pending_updates.items[0]);
@@ -35,7 +36,7 @@ pub fn collectPiggybackUpdates(self: anytype, BoundedUpdates: type, max_piggybac
 
 pub fn addPendingUpdate(self: anytype, update: anytype) !void {
     const member_count = self.members.count() + 1;
-    const gossip_count: u8 = @intCast(ceilLog2(member_count) + 1);
+    const gossip_count: u8 = @intCast(membership_support.ceilLog2(member_count) + 1);
 
     for (self.pending_updates.items) |*pending| {
         if (pending.update.id == update.id) {
@@ -64,14 +65,4 @@ pub fn addPendingUpdate(self: anytype, update: anytype) !void {
         .update = update,
         .remaining = gossip_count,
     });
-}
-
-fn ceilLog2(n: usize) u32 {
-    if (n <= 2) return 1;
-    var log: u32 = 0;
-    var val: usize = n - 1;
-    while (val > 0) : (val >>= 1) {
-        log += 1;
-    }
-    return log;
 }

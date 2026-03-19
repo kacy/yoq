@@ -1,4 +1,5 @@
 const logger = @import("../../lib/log.zig");
+const common = @import("common.zig");
 const snapshot_runtime = @import("snapshot_runtime.zig");
 const types = @import("../raft_types.zig");
 
@@ -19,7 +20,7 @@ pub fn handleAppendEntries(
 
     if (args.term >= current_term) {
         if (args.term > current_term) {
-            stepDown(self, args.term, min_election_ticks, max_election_ticks);
+            common.stepDown(self, args.term, min_election_ticks, max_election_ticks);
         } else if (self.role == .candidate) {
             self.role = .follower;
             self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch |e| {
@@ -78,11 +79,11 @@ pub fn handleAppendEntriesReply(
     if (self.role != .leader) return;
 
     if (reply.term > self.log.getCurrentTerm()) {
-        stepDown(self, reply.term, min_election_ticks, max_election_ticks);
+        common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
 
-    const peer_idx = peerIndex(self, from) orelse return;
+    const peer_idx = common.peerIndex(self, from) orelse return;
     if (reply.success) {
         self.match_index[peer_idx] = reply.match_index;
         self.next_index[peer_idx] = reply.match_index + 1;
@@ -177,18 +178,5 @@ pub fn advanceCommitIndex(self: anytype) void {
 }
 
 pub fn peerIndex(self: anytype, id: anytype) ?usize {
-    for (self.peers, 0..) |peer, i| {
-        if (peer == id) return i;
-    }
-    return null;
-}
-
-fn stepDown(self: anytype, new_term: anytype, min_election_ticks: u32, max_election_ticks: u32) void {
-    self.log.setCurrentTerm(new_term);
-    self.log.setVotedFor(null);
-    self.role = .follower;
-    self.ticks_since_event = 0;
-
-    const range = max_election_ticks - min_election_ticks;
-    self.election_timeout = min_election_ticks + self.rng.random().intRangeAtMost(u32, 0, range);
+    return common.peerIndex(self, id);
 }
