@@ -19,126 +19,18 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const http = @import("http.zig");
-const routes = @import("routes.zig");
 const log = @import("../lib/log.zig");
 const orchestrator = @import("../manifest/orchestrator.zig");
+const rate_limit = @import("server/rate_limit.zig");
+const connection_runtime = @import("server/connection_runtime.zig");
 
-// connection limit — prevents thread exhaustion under load or attack.
-// 128 is generous for a management API where most operations complete
-// in milliseconds.
-const max_connections: u32 = 128;
-var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-
-// -- rate limiter --
-//
-// fixed-window per-IP rate limiter. each IP gets a counter that resets
-// every second. the burst limit allows short spikes above the per-second
-// rate, which is normal for legitimate clients making a few rapid calls.
-//
-// uses a small fixed-size table with linear probing. if the table fills
-// up, new IPs are rejected until entries age out. this is intentionally
-// fail-closed for a management API.
-
-const rate_limit_per_sec: u32 = 10;
-const rate_limit_burst: u32 = 50;
-const rate_table_size: usize = 64;
-
-pub const RateLimiter = struct {
-    entries: [rate_table_size]RateEntry,
-    mutex: std.Thread.Mutex,
-
-    const RateEntry = struct {
-        ip: u32,
-        count: u32,
-        window_start: i64, // seconds since epoch
-        active: bool,
-    };
-
-    const empty_entry = RateEntry{
-        .ip = 0,
-        .count = 0,
-        .window_start = 0,
-        .active = false,
-    };
-
-    pub fn init() RateLimiter {
-        return .{
-            .entries = [_]RateEntry{empty_entry} ** rate_table_size,
-            .mutex = .{},
-        };
-    }
-
-    /// check if a request from the given IP should be allowed.
-    /// returns true if allowed, false if rate limited.
-    pub fn checkRate(self: *RateLimiter, ip: u32) bool {
-        return self.checkRateAt(ip, std.time.timestamp());
-    }
-
-    /// testable version of checkRate that accepts a timestamp.
-    fn checkRateAt(self: *RateLimiter, ip: u32, now: i64) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // look for existing entry or empty slot
-        const start_idx = @as(usize, ip *% 2654435761); // knuth multiplicative hash
-        var probe: usize = 0;
-        var first_empty: ?usize = null;
-        var stale_slot: ?usize = null;
-
-        while (probe < rate_table_size) : (probe += 1) {
-            const idx = (start_idx +% probe) % rate_table_size;
-            const entry = &self.entries[idx];
-
-            if (!entry.active) {
-                if (first_empty == null) first_empty = idx;
-                // keep probing in case the IP exists further along
-                // but if we've hit an empty slot, the IP can't be beyond it
-                // (since we never delete mid-chain)
-                break;
-            }
-
-            if (entry.ip == ip) {
-                // found existing entry for this IP
-                if (now != entry.window_start) {
-                    // new window — reset counter
-                    entry.window_start = now;
-                    entry.count = 1;
-                    return true;
-                }
-
-                entry.count += 1;
-                return entry.count <= rate_limit_burst;
-            }
-
-            if (entry.window_start != now and stale_slot == null) {
-                stale_slot = idx;
-            }
-        }
-
-        // IP not found — reuse an empty slot first, then any stale slot.
-        if (first_empty orelse stale_slot) |idx| {
-            self.entries[idx] = .{
-                .ip = ip,
-                .count = 1,
-                .window_start = now,
-                .active = true,
-            };
-            return true;
-        }
-
-        // table full — fail closed rather than disabling rate limiting.
-        return false;
-    }
-
-    /// reset all entries. used for testing.
-    fn reset(self: *RateLimiter) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.entries = [_]RateEntry{empty_entry} ** rate_table_size;
-    }
-};
-
-var rate_limiter: RateLimiter = RateLimiter.init();
+const max_connections = connection_runtime.max_connections;
+const connectionWrapper = connection_runtime.connectionWrapper;
+const tryAcquireConnectionSlot = connection_runtime.tryAcquireConnectionSlot;
+const releaseConnectionSlot = connection_runtime.releaseConnectionSlot;
+pub const RateLimiter = rate_limit.RateLimiter;
+const rate_limit_burst = rate_limit.rate_limit_burst;
+const rate_table_size = rate_limit.rate_table_size;
 
 pub const ServerError = error{
     BindFailed,
@@ -284,146 +176,6 @@ pub const Server = struct {
     }
 };
 
-/// wrapper that decrements the connection counter on exit.
-fn connectionWrapper(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
-    defer releaseConnectionSlot();
-    handleConnection(alloc, client_fd);
-}
-
-/// reserve a connection slot, respecting max_connections.
-/// uses CAS to avoid races around check-then-increment.
-fn tryAcquireConnectionSlot() bool {
-    while (true) {
-        const current = active_connections.load(.acquire);
-        if (current >= max_connections) return false;
-        if (active_connections.cmpxchgWeak(current, current + 1, .acq_rel, .acquire) == null) {
-            return true;
-        }
-    }
-}
-
-fn releaseConnectionSlot() void {
-    _ = active_connections.fetchSub(1, .acq_rel);
-}
-
-/// extract the IPv4 address of the peer connected to a socket.
-/// returns 0 if the address can't be determined (non-IPv4, error, etc).
-fn getPeerIp(fd: posix.fd_t) u32 {
-    var addr: posix.sockaddr.in = undefined;
-    var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-    posix.getpeername(fd, @ptrCast(&addr), &addr_len) catch return 0;
-    return addr.addr;
-}
-
-/// handle a single HTTP connection. runs in a worker thread.
-/// reads the request, dispatches to route handler, writes response, closes.
-fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
-    defer posix.close(client_fd);
-
-    // rate limit check — extract client IP from the socket
-    const client_ip = getPeerIp(client_fd);
-    if (client_ip != 0 and !rate_limiter.checkRate(client_ip)) {
-        sendError(client_fd, .too_many_requests, "rate limit exceeded");
-        return;
-    }
-
-    setReadTimeout(client_fd, 5);
-
-    var buf: [65536]u8 = undefined;
-    const request = readRequest(client_fd, &buf) catch |err| switch (err) {
-        error.MalformedRequest => {
-            sendError(client_fd, .bad_request, "malformed request");
-            return;
-        },
-        error.UriTooLong => {
-            sendError(client_fd, .bad_request, "request uri too long");
-            return;
-        },
-        error.HeadersTooLarge => {
-            sendError(client_fd, .request_header_fields_too_large, "headers too large");
-            return;
-        },
-        error.BodyTooLarge => {
-            sendError(client_fd, .content_too_large, "request body too large");
-            return;
-        },
-        error.ReadIncomplete => {
-            sendError(client_fd, .bad_request, "request too large or timed out");
-            return;
-        },
-    };
-
-    // generate trace ID for this request
-    var trace_id: [16]u8 = undefined;
-    log.generateTraceId(&trace_id);
-    log.setTraceId(&trace_id);
-    defer log.clearTraceId();
-
-    const response = routes.dispatch(request, alloc);
-    defer if (response.allocated) alloc.free(response.body);
-
-    var resp_buf: [4096]u8 = undefined;
-    const content_type = response.content_type orelse "application/json";
-    const resp = http.formatResponseWithType(&resp_buf, response.status, content_type, response.body);
-    writeAll(client_fd, resp);
-}
-
-const ReadRequestError = error{
-    MalformedRequest,
-    UriTooLong,
-    HeadersTooLarge,
-    BodyTooLarge,
-    ReadIncomplete,
-};
-
-fn readRequest(fd: posix.fd_t, buf: []u8) ReadRequestError!http.Request {
-    var total: usize = 0;
-    while (total < buf.len) {
-        const bytes_read = posix.read(fd, buf[total..]) catch break;
-        if (bytes_read == 0) break;
-        total += bytes_read;
-
-        if (findHeaderEnd(buf[0..total]) == null and total > http.max_header_bytes) {
-            return error.HeadersTooLarge;
-        }
-
-        const parsed = http.parseRequest(buf[0..total]) catch |err| return switch (err) {
-            error.UriTooLong => error.UriTooLong,
-            error.HeadersTooLarge => error.HeadersTooLarge,
-            error.BodyTooLarge => error.BodyTooLarge,
-            else => error.MalformedRequest,
-        };
-        if (parsed) |req| return req;
-    }
-
-    return error.ReadIncomplete;
-}
-
-fn findHeaderEnd(buf: []const u8) ?usize {
-    return std.mem.indexOf(u8, buf, "\r\n\r\n");
-}
-
-fn setReadTimeout(fd: posix.fd_t, seconds: i64) void {
-    const timeout = posix.timeval{ .sec = seconds, .usec = 0 };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
-}
-
-fn sendError(fd: posix.fd_t, status: http.StatusCode, message: []const u8) void {
-    var resp_buf: [1024]u8 = undefined;
-    const resp = http.formatError(&resp_buf, status, message);
-    writeAll(fd, resp);
-}
-
-/// write all bytes to a file descriptor, handling partial writes.
-fn writeAll(fd: posix.fd_t, data: []const u8) void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const bytes_written = posix.write(fd, data[written..]) catch return;
-        if (bytes_written == 0) return;
-        written += bytes_written;
-    }
-}
-
 // -- tests --
 
 test "server init and deinit" {
@@ -440,8 +192,8 @@ test "server init and deinit" {
 }
 
 test "connection slot limit enforcement" {
-    active_connections.store(0, .release);
-    defer active_connections.store(0, .release);
+    connection_runtime.active_connections.store(0, .release);
+    defer connection_runtime.active_connections.store(0, .release);
 
     var acquired: usize = 0;
     while (acquired < max_connections and tryAcquireConnectionSlot()) : (acquired += 1) {}
