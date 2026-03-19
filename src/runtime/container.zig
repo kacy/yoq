@@ -13,7 +13,6 @@ const cgroups = @import("cgroups.zig");
 const filesystem = @import("filesystem.zig");
 const security = @import("security.zig");
 const process = @import("process.zig");
-const logs = @import("logs.zig");
 const store = @import("../state/store.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
@@ -233,14 +232,14 @@ pub const Container = struct {
         // these are hard failures - resource limits must be enforced
         self.runtime.cgroup.?.addProcess(spawn_result.pid) catch |e| {
             log.err("failed to add process to cgroup for {s}: {}. stopping container.", .{ config.id, e });
-            self.cleanupFailedSpawn(&spawn_result);
+            start_support.cleanupFailedSpawn(self, &spawn_result, &active_pid);
             if (overlay.has_overlay) cleanupContainerDirs(config.id);
             return ContainerError.StartFailed;
         };
 
         self.runtime.cgroup.?.setLimits(config.limits) catch |e| {
             log.err("failed to set cgroup limits for {s}: {}. stopping container.", .{ config.id, e });
-            self.cleanupFailedSpawn(&spawn_result);
+            start_support.cleanupFailedSpawn(self, &spawn_result, &active_pid);
             if (overlay.has_overlay) cleanupContainerDirs(config.id);
             return ContainerError.StartFailed;
         };
@@ -263,24 +262,6 @@ pub const Container = struct {
 
         self.status = .running;
         start_support.updateRunningStatus(config.id, spawn_result.pid);
-    }
-
-    /// clean up after a failed post-spawn operation (cgroup add/setLimits).
-    /// resets container state, kills the child, closes leaked FDs, and destroys the cgroup.
-    fn cleanupFailedSpawn(self: *Container, spawn_result: *namespaces.SpawnResult) void {
-        process.kill(spawn_result.pid) catch {};
-        self.runtime.cgroup.?.destroy() catch {};
-        // close pipe FDs that would otherwise leak
-        if (spawn_result.ready_fd >= 0) {
-            std.posix.close(spawn_result.ready_fd);
-            spawn_result.ready_fd = -1;
-        }
-        std.posix.close(spawn_result.stdout_fd);
-        std.posix.close(spawn_result.stderr_fd);
-        // reset container state
-        self.pid = null;
-        self.status = .created;
-        active_pid.store(0, .release);
     }
 
     /// wait for the running container to exit, then clean up runtime resources.
@@ -321,30 +302,7 @@ pub const Container = struct {
     }
 
     fn finalize(self: *Container, exit_code: u8) void {
-        if (self.runtime.stdout_thread) |t| t.join();
-        if (self.runtime.stderr_thread) |t| t.join();
-        if (self.runtime.log_file) |lf| lf.close();
-
-        if (self.net_info) |*info| {
-            if (self.config.network) |net_config| {
-                var db = store.openDb() catch null;
-                defer if (db) |*d| d.deinit();
-                if (db) |*d| net_setup.teardownContainer(self.config.id, info, net_config, d);
-            }
-        }
-
-        // cgroup is now mandatory - always clean it up
-        if (self.runtime.cgroup) |cg| {
-            cg.destroy() catch |err| {
-                log.warn("failed to destroy cgroup for {s}: {}", .{ self.config.id, err });
-            };
-        }
-
-        store.updateStatus(self.config.id, "stopped", null, exit_code) catch |e| {
-            log.warn("failed to update final status for {s}: {}", .{ self.config.id, e });
-        };
-
-        self.runtime = .{};
+        start_support.finalizeRuntime(self, exit_code);
     }
 };
 

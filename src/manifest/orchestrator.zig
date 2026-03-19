@@ -15,14 +15,9 @@
 //   orch.stopAll();
 
 const std = @import("std");
-const posix = std.posix;
 
 const cli = @import("../lib/cli.zig");
 const spec = @import("spec.zig");
-const container = @import("../runtime/container.zig");
-const process = @import("../runtime/process.zig");
-const store = @import("../state/store.zig");
-const log = @import("../lib/log.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const health = @import("health.zig");
 const tls_proxy = @import("../tls/proxy.zig");
@@ -30,7 +25,9 @@ const tls_backend = @import("../tls/backend.zig");
 const cert_store_mod = @import("../tls/cert_store.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
 const sqlite = @import("sqlite");
+const lifecycle_support = @import("orchestrator/lifecycle_support.zig");
 const runtime_loop = @import("orchestrator/runtime_loop.zig");
+const signal_support = @import("orchestrator/signal_support.zig");
 const startup_runtime = @import("orchestrator/startup_runtime.zig");
 const service_runtime = @import("orchestrator/service_runtime.zig");
 
@@ -142,167 +139,23 @@ pub const Orchestrator = struct {
     /// compute the set of services to start from a list of target names.
     /// walks depends_on transitively to include all required dependencies.
     pub fn computeStartSet(self: *Orchestrator) OrchestratorError!void {
-        const targets = self.service_filter orelse return;
-
-        var set: std.StringHashMapUnmanaged(void) = .empty;
-
-        // seed with the requested targets
-        for (targets) |name| {
-            set.put(self.alloc, name, {}) catch return OrchestratorError.StartFailed;
-        }
-
-        // fixed-point iteration: keep adding deps until nothing changes.
-        // walks both service and worker depends_on chains.
-        var changed = true;
-        while (changed) {
-            changed = false;
-            for (self.manifest.services) |svc| {
-                if (!set.contains(svc.name)) continue;
-                for (svc.depends_on) |dep| {
-                    if (!set.contains(dep)) {
-                        set.put(self.alloc, dep, {}) catch return OrchestratorError.StartFailed;
-                        changed = true;
-                    }
-                }
-            }
-            for (self.manifest.workers) |w| {
-                if (!set.contains(w.name)) continue;
-                for (w.depends_on) |dep| {
-                    if (!set.contains(dep)) {
-                        set.put(self.alloc, dep, {}) catch return OrchestratorError.StartFailed;
-                        changed = true;
-                    }
-                }
-            }
-        }
-
-        self.start_set = set;
+        return lifecycle_support.computeStartSet(self, OrchestratorError);
     }
 
     /// check if a service should be started (passes the filter)
     fn shouldStart(self: *const Orchestrator, name: []const u8) bool {
-        const set = self.start_set orelse return true;
-        return set.contains(name);
+        return lifecycle_support.shouldStart(self, name);
     }
 
     /// pull all images, then start services in dependency order.
     /// blocks until all services are running or one fails.
     /// respects service_filter — only starts filtered services + their deps.
     pub fn startAll(self: *Orchestrator) OrchestratorError!void {
-        const services = self.manifest.services;
-        if (services.len == 0) return OrchestratorError.ManifestEmpty;
-
-        // compute the start set from service_filter (if any)
-        try self.computeStartSet();
-
-        // phase 1: pull images sequentially (only for services we'll start)
-        for (services, 0..) |svc, i| {
-            if (!self.shouldStart(svc.name)) continue;
-
-            self.states[i].status = .pulling;
-            writeErr("pulling {s}...\n", .{svc.image});
-
-            if (!self.ensureImage(svc.image)) {
-                writeErr("failed to pull image: {s}\n", .{svc.image});
-                self.states[i].status = .failed;
-                return OrchestratorError.PullFailed;
-            }
-            writeErr("  {s} ready\n", .{svc.image});
-        }
-
-        // phase 2: start services in dependency order (already sorted).
-        // if a dependency is a worker, run it to completion first.
-        var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
-        defer completed_workers.deinit(self.alloc);
-
-        for (services, 0..) |svc, i| {
-            if (!self.shouldStart(svc.name)) continue;
-
-            // wait for dependencies — services wait for running, workers run to completion
-            for (svc.depends_on) |dep_name| {
-                if (self.manifest.workerByName(dep_name)) |worker| {
-                    // worker dependency — run it once if not already done
-                    if (!completed_workers.contains(dep_name)) {
-                        writeErr("running worker {s}...\n", .{dep_name});
-                        if (!runOneShot(self.alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, dep_name, self.manifest.volumes, self.app_name)) {
-                            writeErr("worker '{s}' failed\n", .{dep_name});
-                            self.stopAll();
-                            return OrchestratorError.StartFailed;
-                        }
-                        completed_workers.put(self.alloc, dep_name, {}) catch {};
-                        writeErr("  worker {s} completed\n", .{dep_name});
-                    }
-                } else {
-                    // service dependency — wait for it to reach running
-                    const dep_idx = self.serviceIndex(dep_name) orelse continue;
-                    if (!self.waitForRunning(dep_idx)) {
-                        writeErr("dependency '{s}' failed to start\n", .{dep_name});
-                        self.stopAll();
-                        return OrchestratorError.StartFailed;
-                    }
-                }
-            }
-
-            // spawn service thread
-            self.states[i].status = .starting;
-            container.generateId(&self.states[i].container_id) catch {
-                writeErr("failed to generate container ID for {s}\n", .{svc.name});
-                self.states[i].status = .failed;
-                self.stopAll();
-                return OrchestratorError.StartFailed;
-            };
-
-            const thread = std.Thread.spawn(.{}, serviceThread, .{
-                self, i,
-            }) catch {
-                writeErr("failed to spawn thread for {s}\n", .{svc.name});
-                self.states[i].status = .failed;
-                self.stopAll();
-                return OrchestratorError.StartFailed;
-            };
-            self.states[i].thread = thread;
-
-            // wait for this service to reach running (or fail)
-            if (!self.waitForRunning(i)) {
-                writeErr("service '{s}' failed to start\n", .{svc.name});
-                self.stopAll();
-                return OrchestratorError.StartFailed;
-            }
-
-            const id = self.states[i].container_id;
-            writeErr("started {s} ({s})\n", .{ svc.name, id[0..] });
-        }
-
-        // phase 3: register health checks and start checker thread.
-        // brief delay to let container networking finish setup —
-        // the service thread sets status=running then enters c.start()
-        // which does network setup synchronously before blocking.
-        self.registerHealthChecks();
-
-        // phase 4: start TLS proxy if any services have TLS configs.
-        // this runs after all services are up so backends are resolvable.
-        self.startTlsProxy();
-
-        // phase 5: start cron scheduler if there are crons and no service filter.
-        // crons run independently of services — they don't make sense with a filter.
-        if (self.service_filter == null and self.manifest.crons.len > 0) {
-            const cs = self.alloc.create(cron_scheduler.CronScheduler) catch {
-                writeErr("failed to allocate cron scheduler\n", .{});
-                return;
-            };
-            cs.* = cron_scheduler.CronScheduler.init(self.alloc, self.manifest.crons, self.manifest.volumes, self.app_name) catch {
-                self.alloc.destroy(cs);
-                writeErr("failed to init cron scheduler\n", .{});
-                return;
-            };
-            self.cron_sched = cs;
-            cs.start();
-            writeErr("{d} cron(s) scheduled\n", .{self.manifest.crons.len});
-        }
+        return lifecycle_support.startAll(self, OrchestratorError, serviceThread);
     }
 
     /// register services for health checking and start the checker thread.
-    fn registerHealthChecks(self: *Orchestrator) void {
+    pub fn registerHealthChecks(self: *Orchestrator) void {
         startup_runtime.registerHealthChecks(
             self.alloc,
             self.manifest.services,
@@ -313,7 +166,7 @@ pub const Orchestrator = struct {
 
     /// start the TLS reverse proxy if any services have TLS configs.
     /// registers backends for each TLS-enabled service and starts the proxy.
-    fn startTlsProxy(self: *Orchestrator) void {
+    pub fn startTlsProxy(self: *Orchestrator) void {
         const resources = startup_runtime.startTlsProxy(
             self.alloc,
             self.manifest.services,
@@ -329,80 +182,12 @@ pub const Orchestrator = struct {
 
     /// stop all running services in reverse dependency order.
     pub fn stopAll(self: *Orchestrator) void {
-        // stop cron scheduler first — prevent new cron containers from starting
-        if (self.cron_sched) |cs| {
-            cs.stop();
-            writeErr("stopped cron scheduler\n", .{});
-        }
-
-        // stop TLS proxy before stopping services so it stops routing traffic
-        if (self.proxy) |p| {
-            p.stop();
-            writeErr("stopped tls proxy\n", .{});
-        }
-
-        // stop health checker so it doesn't see partially-stopped services
-        health.stopChecker();
-
-        const services = self.manifest.services;
-
-        // unregister all services from health checking
-        for (services) |svc| {
-            health.unregisterService(svc.name);
-        }
-
-        // reverse order — dependents first
-        var i: usize = services.len;
-        while (i > 0) {
-            i -= 1;
-            if (self.states[i].status != .running and
-                self.states[i].status != .starting)
-                continue;
-
-            const id = self.states[i].container_id;
-            writeErr("stopping {s}...\n", .{services[i].name});
-
-            // find the container's PID and send SIGTERM
-            const record = store.load(self.alloc, id[0..]) catch {
-                log.warn("orchestrator: failed to load container for shutdown: {s}", .{services[i].name});
-                continue;
-            };
-            defer record.deinit(self.alloc);
-
-            if (record.pid) |pid| {
-                process.terminate(pid) catch {
-                    // if SIGTERM fails, try SIGKILL
-                    process.kill(pid) catch {};
-                };
-            }
-
-            self.states[i].status = .stopped;
-        }
-
-        // join all threads
-        for (self.states) |*s| {
-            if (s.thread) |t| {
-                t.join();
-                s.thread = null;
-            }
-        }
+        lifecycle_support.stopAll(self);
     }
 
     /// block until shutdown is requested (SIGINT/SIGTERM) or all services exit.
     pub fn waitForShutdown(self: *Orchestrator) void {
-        while (!shutdown_requested.load(.acquire)) {
-            // check if all services have exited
-            var all_done = true;
-            for (self.states) |s| {
-                if (s.status == .running or s.status == .starting or s.status == .pulling) {
-                    all_done = false;
-                    break;
-                }
-            }
-            if (all_done) break;
-
-            std.Thread.sleep(200 * std.time.ns_per_ms);
-        }
+        lifecycle_support.waitForShutdown(self, &shutdown_requested);
     }
 
     // -- internal --
@@ -414,27 +199,12 @@ pub const Orchestrator = struct {
 
     /// find the index of a service by name
     fn serviceIndex(self: *Orchestrator, name: []const u8) ?usize {
-        for (self.manifest.services, 0..) |svc, i| {
-            if (std.mem.eql(u8, svc.name, name)) return i;
-        }
-        return null;
+        return lifecycle_support.serviceIndex(self, name);
     }
 
     /// poll until a service reaches running status. timeout 30s.
     fn waitForRunning(self: *Orchestrator, idx: usize) bool {
-        const timeout_ns: u64 = 30 * std.time.ns_per_s;
-        const start = @as(u64, @intCast(std.time.nanoTimestamp()));
-
-        while (true) {
-            const status = self.states[idx].status;
-            if (status == .running) return true;
-            if (status == .failed or status == .stopped) return false;
-
-            const now = @as(u64, @intCast(std.time.nanoTimestamp()));
-            if (now - start > timeout_ns) return false;
-
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-        }
+        return lifecycle_support.waitForRunning(self, idx);
     }
 };
 
@@ -539,23 +309,11 @@ fn envKey(env_var: []const u8) []const u8 {
     return service_runtime.envKey(env_var);
 }
 
-// -- signal handling --
-
 pub var shutdown_requested: std.atomic.Value(bool) = .init(false);
 
 /// install SIGINT and SIGTERM handlers for graceful shutdown
 pub fn installSignalHandlers() void {
-    const act = posix.Sigaction{
-        .handler = .{ .handler = sigHandler },
-        .mask = posix.sigemptyset(),
-        .flags = 0,
-    };
-    posix.sigaction(posix.SIG.INT, &act, null);
-    posix.sigaction(posix.SIG.TERM, &act, null);
-}
-
-fn sigHandler(_: c_int) callconv(.c) void {
-    shutdown_requested.store(true, .release);
+    signal_support.installSignalHandlers(&shutdown_requested);
 }
 
 const writeErr = cli.writeErr;

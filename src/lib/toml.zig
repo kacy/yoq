@@ -7,109 +7,15 @@
 
 const std = @import("std");
 const log = @import("log.zig");
+const table_path = @import("toml/table_path.zig");
+const types = @import("toml/types.zig");
+const value_support = @import("toml/value_support.zig");
 
-pub const ParseError = error{
-    /// encountered a character that doesn't belong in the current context
-    UnexpectedCharacter,
-    /// a quoted string was opened but never closed
-    UnterminatedString,
-    /// an array '[' was opened but no matching ']' was found
-    UnterminatedArray,
-    /// a value could not be parsed as string, integer, boolean, or array
-    InvalidValue,
-    /// a key appears more than once in the same table
-    DuplicateKey,
-    /// a table header is malformed (missing brackets, empty, or empty segment)
-    InvalidTableHeader,
-    /// a key-value line has nothing before the '='
-    EmptyKey,
-    /// the allocator could not satisfy a memory request during parsing
-    OutOfMemory,
-};
-
-/// maximum nesting depth for TOML table paths. protects against
-/// stack overflow from deeply nested input like "[a.b.c.d.e.f.g...]".
-const max_table_depth = 64;
-
-pub const Value = union(enum) {
-    string: []const u8,
-    integer: i64,
-    boolean: bool,
-    array: []const []const u8,
-    table: *Table,
-};
-
-pub const Table = struct {
-    entries: std.StringArrayHashMapUnmanaged(Value),
-
-    pub fn getString(self: *const Table, key: []const u8) ?[]const u8 {
-        const val = self.entries.get(key) orelse return null;
-        return switch (val) {
-            .string => |s| s,
-            else => null,
-        };
-    }
-
-    pub fn getInt(self: *const Table, key: []const u8) ?i64 {
-        const val = self.entries.get(key) orelse return null;
-        return switch (val) {
-            .integer => |i| i,
-            else => null,
-        };
-    }
-
-    pub fn getBool(self: *const Table, key: []const u8) ?bool {
-        const val = self.entries.get(key) orelse return null;
-        return switch (val) {
-            .boolean => |b| b,
-            else => null,
-        };
-    }
-
-    pub fn getArray(self: *const Table, key: []const u8) ?[]const []const u8 {
-        const val = self.entries.get(key) orelse return null;
-        return switch (val) {
-            .array => |a| a,
-            else => null,
-        };
-    }
-
-    pub fn getTable(self: *const Table, key: []const u8) ?*Table {
-        const val = self.entries.get(key) orelse return null;
-        return switch (val) {
-            .table => |t| t,
-            else => null,
-        };
-    }
-
-    fn deinit(self: *Table, alloc: std.mem.Allocator) void {
-        for (self.entries.keys(), self.entries.values()) |key, val| {
-            switch (val) {
-                .string => |s| alloc.free(s),
-                .array => |arr| {
-                    for (arr) |item| alloc.free(item);
-                    alloc.free(arr);
-                },
-                .table => |t| {
-                    t.deinit(alloc);
-                    alloc.destroy(t);
-                },
-                .integer, .boolean => {},
-            }
-            alloc.free(key);
-        }
-        self.entries.deinit(alloc);
-    }
-};
-
-pub const ParseResult = struct {
-    root: Table,
-    alloc: std.mem.Allocator,
-
-    pub fn deinit(self: *ParseResult) void {
-        self.root.deinit(self.alloc);
-    }
-};
+pub const ParseError = types.ParseError;
+pub const Value = types.Value;
+pub const Table = types.Table;
+pub const ParseResult = types.ParseResult;
+const max_table_depth = types.max_table_depth;
 
 /// parse a TOML string into a table structure.
 /// caller must call result.deinit() when done.
@@ -138,7 +44,7 @@ pub fn parse(alloc: std.mem.Allocator, input: []const u8) ParseError!ParseResult
 
         // table header
         if (line[0] == '[') {
-            current = resolveTablePath(&root, alloc, line, line_num) catch |e| return e;
+            current = table_path.resolveTablePath(&root, alloc, line, line_num) catch |e| return e;
             continue;
         }
 
@@ -192,269 +98,24 @@ pub fn parse(alloc: std.mem.Allocator, input: []const u8) ParseError!ParseResult
             raw_value = multiline_buf.items;
         }
 
-        const value = parseValue(alloc, raw_value, line_num) catch |e| return e;
+        const value = value_support.parseValue(alloc, raw_value, line_num) catch |e| return e;
 
         // check for duplicates before allocating the key
         if (current.entries.contains(raw_key)) {
             log.err("toml: line {d}: duplicate key '{s}'", .{ line_num, raw_key });
-            freeValue(alloc, value);
+            value_support.freeValue(alloc, value);
             return ParseError.DuplicateKey;
         }
 
         const key = alloc.dupe(u8, raw_key) catch return ParseError.OutOfMemory;
         current.entries.put(alloc, key, value) catch {
             alloc.free(key);
-            freeValue(alloc, value);
+            value_support.freeValue(alloc, value);
             return ParseError.OutOfMemory;
         };
     }
 
     return ParseResult{ .root = root, .alloc = alloc };
-}
-
-// -- internal --
-
-fn freeValue(alloc: std.mem.Allocator, value: Value) void {
-    switch (value) {
-        .string => |s| alloc.free(s),
-        .array => |arr| {
-            for (arr) |item| alloc.free(item);
-            alloc.free(arr);
-        },
-        .table => |t| {
-            t.deinit(alloc);
-            alloc.destroy(t);
-        },
-        .integer, .boolean => {},
-    }
-}
-
-fn parseValue(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) ParseError!Value {
-    if (raw.len == 0) {
-        log.err("toml: line {d}: missing value", .{line_num});
-        return ParseError.InvalidValue;
-    }
-
-    // string
-    if (raw[0] == '"') return parseString(alloc, raw, line_num);
-
-    // array
-    if (raw[0] == '[') return parseStringArray(alloc, raw, line_num);
-
-    // boolean
-    if (std.mem.eql(u8, raw, "true")) return Value{ .boolean = true };
-    if (std.mem.eql(u8, raw, "false")) return Value{ .boolean = false };
-
-    // integer
-    if (raw[0] == '-' or std.ascii.isDigit(raw[0])) return parseInt(raw, line_num);
-
-    log.err("toml: line {d}: unrecognized value: {s}", .{ line_num, raw });
-    return ParseError.InvalidValue;
-}
-
-fn parseString(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) ParseError!Value {
-    // raw starts with '"', find the closing '"' while handling escapes
-    if (raw.len < 2 or raw[0] != '"') {
-        log.err("toml: line {d}: invalid string", .{line_num});
-        return ParseError.UnexpectedCharacter;
-    }
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(alloc);
-
-    var i: usize = 1; // skip opening quote
-    while (i < raw.len) {
-        const c = raw[i];
-        if (c == '"') {
-            // closing quote found
-            const result = alloc.dupe(u8, buf.items) catch return ParseError.OutOfMemory;
-            buf.deinit(alloc);
-            return Value{ .string = result };
-        }
-        if (c == '\\') {
-            i += 1;
-            if (i >= raw.len) {
-                log.err("toml: line {d}: unterminated escape sequence", .{line_num});
-                return ParseError.UnterminatedString;
-            }
-            const escaped: u8 = switch (raw[i]) {
-                '\\' => '\\',
-                '"' => '"',
-                'n' => '\n',
-                't' => '\t',
-                else => {
-                    log.err("toml: line {d}: unknown escape '\\{c}'", .{ line_num, raw[i] });
-                    return ParseError.UnexpectedCharacter;
-                },
-            };
-            buf.append(alloc, escaped) catch return ParseError.OutOfMemory;
-        } else {
-            buf.append(alloc, c) catch return ParseError.OutOfMemory;
-        }
-        i += 1;
-    }
-
-    log.err("toml: line {d}: unterminated string", .{line_num});
-    return ParseError.UnterminatedString;
-}
-
-fn parseInt(raw: []const u8, line_num: usize) ParseError!Value {
-    const value = std.fmt.parseInt(i64, raw, 10) catch {
-        log.err("toml: line {d}: invalid integer: {s}", .{ line_num, raw });
-        return ParseError.InvalidValue;
-    };
-    return Value{ .integer = value };
-}
-
-fn parseStringArray(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) ParseError!Value {
-    // raw starts with '[' and should end with ']'
-    if (raw.len < 2 or raw[0] != '[') {
-        log.err("toml: line {d}: invalid array", .{line_num});
-        return ParseError.UnexpectedCharacter;
-    }
-
-    const close = std.mem.indexOfScalar(u8, raw, ']') orelse {
-        log.err("toml: line {d}: unterminated array", .{line_num});
-        return ParseError.UnterminatedArray;
-    };
-
-    const inner = std.mem.trim(u8, raw[1..close], " \t");
-
-    // empty array
-    if (inner.len == 0) {
-        const empty = alloc.alloc([]const u8, 0) catch return ParseError.OutOfMemory;
-        return Value{ .array = empty };
-    }
-
-    // parse comma-separated quoted strings
-    var items: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer {
-        for (items.items) |item| alloc.free(item);
-        items.deinit(alloc);
-    }
-
-    var pos: usize = 0;
-    while (pos < inner.len) {
-        // skip whitespace and commas
-        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == '\t' or inner[pos] == ',')) {
-            pos += 1;
-        }
-        if (pos >= inner.len) break;
-
-        if (inner[pos] != '"') {
-            log.err("toml: line {d}: expected '\"' in array element", .{line_num});
-            return ParseError.UnexpectedCharacter;
-        }
-
-        // parse the quoted string
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer buf.deinit(alloc);
-
-        pos += 1; // skip opening quote
-        while (pos < inner.len) {
-            const c = inner[pos];
-            if (c == '"') {
-                pos += 1; // skip closing quote
-                const duped = alloc.dupe(u8, buf.items) catch return ParseError.OutOfMemory;
-                buf.deinit(alloc);
-                items.append(alloc, duped) catch {
-                    alloc.free(duped);
-                    return ParseError.OutOfMemory;
-                };
-                break;
-            }
-            if (c == '\\') {
-                pos += 1;
-                if (pos >= inner.len) {
-                    log.err("toml: line {d}: unterminated escape in array string", .{line_num});
-                    return ParseError.UnterminatedString;
-                }
-                const escaped: u8 = switch (inner[pos]) {
-                    '\\' => '\\',
-                    '"' => '"',
-                    'n' => '\n',
-                    't' => '\t',
-                    else => {
-                        log.err("toml: line {d}: unknown escape in array string", .{line_num});
-                        return ParseError.UnexpectedCharacter;
-                    },
-                };
-                buf.append(alloc, escaped) catch return ParseError.OutOfMemory;
-            } else {
-                buf.append(alloc, c) catch return ParseError.OutOfMemory;
-            }
-            pos += 1;
-        } else {
-            // ran out of input without closing quote
-            log.err("toml: line {d}: unterminated string in array", .{line_num});
-            return ParseError.UnterminatedString;
-        }
-    }
-
-    const result = items.toOwnedSlice(alloc) catch return ParseError.OutOfMemory;
-    return Value{ .array = result };
-}
-
-fn resolveTablePath(root: *Table, alloc: std.mem.Allocator, line: []const u8, line_num: usize) ParseError!*Table {
-    // line starts with '[' and should end with ']'
-    if (line.len < 3 or line[line.len - 1] != ']') {
-        log.err("toml: line {d}: invalid table header", .{line_num});
-        return ParseError.InvalidTableHeader;
-    }
-
-    const path = std.mem.trim(u8, line[1 .. line.len - 1], " \t");
-    if (path.len == 0) {
-        log.err("toml: line {d}: empty table header", .{line_num});
-        return ParseError.InvalidTableHeader;
-    }
-
-    // check nesting depth to prevent stack-like resource exhaustion
-    // from maliciously deep table paths
-    const depth = std.mem.count(u8, path, ".") + 1;
-    if (depth > max_table_depth) {
-        log.err("toml: line {d}: table nesting too deep ({d} levels, max {d})", .{ line_num, depth, max_table_depth });
-        return ParseError.InvalidTableHeader;
-    }
-
-    // walk dotted path, creating intermediate tables as needed
-    var current = root;
-    var parts = std.mem.splitScalar(u8, path, '.');
-    while (parts.next()) |raw_part| {
-        const part = std.mem.trim(u8, raw_part, " \t");
-        if (part.len == 0) {
-            log.err("toml: line {d}: empty segment in table path", .{line_num});
-            return ParseError.InvalidTableHeader;
-        }
-
-        if (current.entries.get(part)) |existing| {
-            switch (existing) {
-                .table => |t| {
-                    current = t;
-                },
-                else => {
-                    log.err("toml: line {d}: '{s}' is not a table", .{ line_num, part });
-                    return ParseError.DuplicateKey;
-                },
-            }
-        } else {
-            // create new subtable
-            const subtable = alloc.create(Table) catch return ParseError.OutOfMemory;
-            subtable.* = Table{ .entries = .{} };
-            errdefer {
-                subtable.deinit(alloc);
-                alloc.destroy(subtable);
-            }
-
-            const key = alloc.dupe(u8, part) catch return ParseError.OutOfMemory;
-            current.entries.put(alloc, key, Value{ .table = subtable }) catch {
-                alloc.free(key);
-                return ParseError.OutOfMemory;
-            };
-            current = subtable;
-        }
-    }
-
-    return current;
 }
 
 // -- tests --

@@ -4,6 +4,7 @@ const posix = std.posix;
 const namespaces = @import("../namespaces.zig");
 const filesystem = @import("../filesystem.zig");
 const logs = @import("../logs.zig");
+const process = @import("../process.zig");
 const store = @import("../../state/store.zig");
 const net_setup = @import("../../network/setup.zig");
 const gpu_passthrough = @import("../../gpu/passthrough.zig");
@@ -143,4 +144,48 @@ pub fn updateRunningStatus(container_id: []const u8, pid: posix.pid_t) void {
     store.updateStatus(container_id, "running", pid, null) catch |err| {
         log.warn("failed to update status for {s}: {}", .{ container_id, err });
     };
+}
+
+pub fn cleanupFailedSpawn(
+    self: anytype,
+    spawn_result: *namespaces.SpawnResult,
+    active_pid: *std.atomic.Value(i32),
+) void {
+    process.kill(spawn_result.pid) catch {};
+    self.runtime.cgroup.?.destroy() catch {};
+    if (spawn_result.ready_fd >= 0) {
+        std.posix.close(spawn_result.ready_fd);
+        spawn_result.ready_fd = -1;
+    }
+    std.posix.close(spawn_result.stdout_fd);
+    std.posix.close(spawn_result.stderr_fd);
+    self.pid = null;
+    self.status = .created;
+    active_pid.store(0, .release);
+}
+
+pub fn finalizeRuntime(self: anytype, exit_code: u8) void {
+    if (self.runtime.stdout_thread) |thread| thread.join();
+    if (self.runtime.stderr_thread) |thread| thread.join();
+    if (self.runtime.log_file) |log_file| log_file.close();
+
+    if (self.net_info) |*info| {
+        if (self.config.network) |net_config| {
+            var db = store.openDb() catch null;
+            defer if (db) |*d| d.deinit();
+            if (db) |*d| net_setup.teardownContainer(self.config.id, info, net_config, d);
+        }
+    }
+
+    if (self.runtime.cgroup) |cgroup| {
+        cgroup.destroy() catch |err| {
+            log.warn("failed to destroy cgroup for {s}: {}", .{ self.config.id, err });
+        };
+    }
+
+    store.updateStatus(self.config.id, "stopped", null, exit_code) catch |err| {
+        log.warn("failed to update final status for {s}: {}", .{ self.config.id, err });
+    };
+
+    self.runtime = .{};
 }
