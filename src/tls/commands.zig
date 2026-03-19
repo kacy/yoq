@@ -1,23 +1,13 @@
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
-const json_out = @import("../lib/json_output.zig");
-const cert_store = @import("cert_store.zig");
-const store = @import("../state/store.zig");
-const sqlite = @import("sqlite");
+const common = @import("cli/common.zig");
+const install_command = @import("cli/install_command.zig");
+const list_command = @import("cli/list_command.zig");
+const remove_command = @import("cli/remove_command.zig");
 
-const write = cli.write;
 const writeErr = cli.writeErr;
-const requireArg = cli.requireArg;
-const formatTimestamp = cli.formatTimestamp;
 
-const TlsCommandsError = error{
-    InvalidArgument,
-    CertificateNotFound,
-    StoreFailed,
-    ReadFailed,
-    NotSupported,
-    OutOfMemory,
-};
+pub const TlsCommandsError = common.TlsCommandsError;
 
 pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var subcmd: ?[]const u8 = null;
@@ -47,149 +37,26 @@ pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 
     if (std.mem.eql(u8, cmd, "install")) {
-        cmdCertInstall(args, alloc) catch |e| return e;
-    } else if (std.mem.eql(u8, cmd, "provision")) {
-        cmdCertProvision(args, alloc) catch |e| return e;
-    } else if (std.mem.eql(u8, cmd, "renew")) {
-        cmdCertRenew(args, alloc) catch |e| return e;
-    } else if (std.mem.eql(u8, cmd, "list")) {
-        // also check remaining args for --json
+        return install_command.run(args, alloc);
+    }
+    if (std.mem.eql(u8, cmd, "provision")) {
+        return cmdCertProvision(args, alloc);
+    }
+    if (std.mem.eql(u8, cmd, "renew")) {
+        return cmdCertRenew(args, alloc);
+    }
+    if (std.mem.eql(u8, cmd, "list")) {
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
         }
-        cmdCertList(alloc) catch |e| return e;
-    } else if (std.mem.eql(u8, cmd, "rm")) {
-        cmdCertRm(args, alloc) catch |e| return e;
-    } else {
-        writeErr("unknown cert command: {s}\n", .{cmd});
-        return TlsCommandsError.InvalidArgument;
+        return list_command.run(alloc);
     }
-}
-
-fn cmdCertInstall(args: *std.process.ArgIterator, alloc: std.mem.Allocator) TlsCommandsError!void {
-    var domain: ?[]const u8 = null;
-    var cert_path: ?[]const u8 = null;
-    var key_path: ?[]const u8 = null;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--cert")) {
-            cert_path = args.next() orelse {
-                writeErr("--cert requires a file path\n", .{});
-                return TlsCommandsError.InvalidArgument;
-            };
-        } else if (std.mem.eql(u8, arg, "--key")) {
-            key_path = args.next() orelse {
-                writeErr("--key requires a file path\n", .{});
-                return TlsCommandsError.InvalidArgument;
-            };
-        } else if (domain == null) {
-            domain = arg;
-        }
+    if (std.mem.eql(u8, cmd, "rm")) {
+        return remove_command.run(args, alloc);
     }
 
-    const dom = domain orelse {
-        writeErr("usage: yoq cert install <domain> --cert <path> --key <path>\n", .{});
-        return TlsCommandsError.InvalidArgument;
-    };
-    const cp = cert_path orelse {
-        writeErr("--cert is required\n", .{});
-        return TlsCommandsError.InvalidArgument;
-    };
-    const kp = key_path orelse {
-        writeErr("--key is required\n", .{});
-        return TlsCommandsError.InvalidArgument;
-    };
-
-    // read cert file
-    const cert_pem = std.fs.cwd().readFileAlloc(alloc, cp, 1024 * 1024) catch {
-        writeErr("failed to read certificate file: {s}\n", .{cp});
-        return TlsCommandsError.ReadFailed;
-    };
-    defer alloc.free(cert_pem);
-
-    // read key file
-    const key_pem = std.fs.cwd().readFileAlloc(alloc, kp, 1024 * 1024) catch {
-        writeErr("failed to read key file: {s}\n", .{kp});
-        return TlsCommandsError.ReadFailed;
-    };
-    defer {
-        std.crypto.secureZero(u8, key_pem);
-        alloc.free(key_pem);
-    }
-
-    var cs = openCertStore(alloc);
-    defer closeCertStore(alloc, &cs);
-
-    cs.install(dom, cert_pem, key_pem, "manual") catch |err| {
-        if (err == cert_store.CertError.InvalidCert) {
-            writeErr("failed to parse certificate (invalid PEM or X.509)\n", .{});
-        } else {
-            writeErr("failed to store certificate\n", .{});
-        }
-        return TlsCommandsError.StoreFailed;
-    };
-
-    write("{s}\n", .{dom});
-}
-
-fn cmdCertList(alloc: std.mem.Allocator) TlsCommandsError!void {
-    var cs = openCertStore(alloc);
-    defer closeCertStore(alloc, &cs);
-
-    var certs = cs.list() catch {
-        writeErr("failed to list certificates\n", .{});
-        return TlsCommandsError.StoreFailed;
-    };
-    defer {
-        for (certs.items) |c| c.deinit(alloc);
-        certs.deinit(alloc);
-    }
-
-    if (cli.output_mode == .json) {
-        var w = json_out.JsonWriter{};
-        w.beginArray();
-        for (certs.items) |c| {
-            w.beginObject();
-            w.stringField("domain", c.domain);
-            w.intField("not_after", c.not_after);
-            w.stringField("source", c.source);
-            w.intField("created_at", c.created_at);
-            w.endObject();
-        }
-        w.endArray();
-        w.flush();
-        return;
-    }
-
-    if (certs.items.len == 0) {
-        write("no certificates\n", .{});
-        return;
-    }
-
-    for (certs.items) |c| {
-        var ts_buf: [20]u8 = undefined;
-        const expires = formatTimestamp(&ts_buf, c.not_after);
-        write("{s}  expires={s}  source={s}\n", .{ c.domain, expires, c.source });
-    }
-}
-
-fn cmdCertRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) TlsCommandsError!void {
-    const domain = requireArg(args, "usage: yoq cert rm <domain>\n");
-
-    var cs = openCertStore(alloc);
-    defer closeCertStore(alloc, &cs);
-
-    cs.remove(domain) catch |err| {
-        if (err == cert_store.CertError.NotFound) {
-            writeErr("certificate not found: {s}\n", .{domain});
-            return TlsCommandsError.CertificateNotFound;
-        } else {
-            writeErr("failed to remove certificate\n", .{});
-            return TlsCommandsError.StoreFailed;
-        }
-    };
-
-    write("{s}\n", .{domain});
+    writeErr("unknown cert command: {s}\n", .{cmd});
+    return TlsCommandsError.InvalidArgument;
 }
 
 fn cmdCertProvision(args: *std.process.ArgIterator, alloc: std.mem.Allocator) TlsCommandsError!void {
@@ -204,33 +71,4 @@ fn cmdCertRenew(args: *std.process.ArgIterator, alloc: std.mem.Allocator) TlsCom
     _ = alloc;
     writeErr("acme renewal is not yet production-safe; renew manually with 'yoq cert install'\n", .{});
     return TlsCommandsError.NotSupported;
-}
-
-fn openCertStore(alloc: std.mem.Allocator) cert_store.CertStore {
-    const db_ptr = alloc.create(sqlite.Db) catch {
-        writeErr("failed to allocate database\n", .{});
-        std.process.exit(1);
-    };
-    db_ptr.* = store.openDb() catch {
-        alloc.destroy(db_ptr);
-        writeErr("failed to open database\n", .{});
-        std.process.exit(1);
-    };
-
-    return cert_store.CertStore.init(db_ptr, alloc) catch |err| {
-        db_ptr.deinit();
-        alloc.destroy(db_ptr);
-        if (err == cert_store.CertError.HomeDirNotFound) {
-            writeErr("HOME directory not found\n", .{});
-        } else {
-            writeErr("failed to initialize certificate store\n", .{});
-        }
-        std.process.exit(1);
-    };
-}
-
-/// close a cert store opened with openCertStore.
-fn closeCertStore(alloc: std.mem.Allocator, cs: *cert_store.CertStore) void {
-    cs.db.deinit();
-    alloc.destroy(cs.db);
 }
