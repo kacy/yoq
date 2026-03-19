@@ -18,124 +18,18 @@
 const std = @import("std");
 const store = @import("../state/store.zig");
 const log = @import("../lib/log.zig");
+const common = @import("update/common.zig");
+const deployment_store = @import("update/deployment_store.zig");
+const batch_runtime = @import("update/batch_runtime.zig");
 
-// -- types --
-
-/// how to handle a batch failure during a rolling update
-pub const FailureAction = enum {
-    /// automatically restore the previous containers
-    rollback,
-    /// stop the update and leave the service in a mixed state
-    pause,
-};
-
-/// deployment status — tracks where a deployment is in its lifecycle
-pub const DeploymentStatus = enum {
-    pending,
-    in_progress,
-    completed,
-    failed,
-    rolled_back,
-
-    pub fn toString(self: DeploymentStatus) []const u8 {
-        return switch (self) {
-            .pending => "pending",
-            .in_progress => "in_progress",
-            .completed => "completed",
-            .failed => "failed",
-            .rolled_back => "rolled_back",
-        };
-    }
-
-    pub fn fromString(s: []const u8) ?DeploymentStatus {
-        if (std.mem.eql(u8, s, "pending")) return .pending;
-        if (std.mem.eql(u8, s, "in_progress")) return .in_progress;
-        if (std.mem.eql(u8, s, "completed")) return .completed;
-        if (std.mem.eql(u8, s, "failed")) return .failed;
-        if (std.mem.eql(u8, s, "rolled_back")) return .rolled_back;
-        return null;
-    }
-};
-
-/// controls how containers are replaced during a rolling update
-pub const UpdateStrategy = struct {
-    /// how many containers to replace at once
-    parallelism: u32 = 1,
-
-    /// seconds to wait between batches (gives the system time to stabilize)
-    delay_between_batches: u32 = 0,
-
-    /// what to do if a batch fails health checks
-    failure_action: FailureAction = .rollback,
-
-    /// how long to wait for health checks after starting new containers (seconds).
-    /// zero means don't wait for health checks.
-    health_check_timeout: u32 = 60,
-};
-
-/// a deployment record — snapshot of what was deployed
-pub const Deployment = struct {
-    id: []const u8,
-    service_name: []const u8,
-    manifest_hash: []const u8,
-    config_snapshot: []const u8,
-    status: DeploymentStatus,
-    message: ?[]const u8,
-    created_at: i64,
-};
-
-/// tracks the progress of a rolling update
-pub const UpdateProgress = struct {
-    total_containers: usize,
-    replaced: usize,
-    failed: usize,
-    status: DeploymentStatus,
-    message: ?[]const u8,
-};
-
-pub const UpdateError = error{
-    /// a batch failed and rollback was triggered
-    BatchFailed,
-    /// a batch failed and the update was paused
-    UpdatePaused,
-    /// no previous deployment to rollback to
-    NoPreviousDeployment,
-    /// failed to record deployment in store
-    StoreFailed,
-    /// the stop or start callback reported an error
-    ContainerOperationFailed,
-};
-
-/// callbacks for container operations. the update engine calls these
-/// to actually start and stop containers, which keeps the engine
-/// testable without needing a real container runtime.
-pub const UpdateCallbacks = struct {
-    /// stop a container by ID. returns true on success.
-    stopContainer: *const fn (id: []const u8) bool,
-
-    /// start a new container with the given config. returns the new
-    /// container's ID on success, null on failure.
-    /// the `index` parameter tells the callback which container
-    /// in the batch this is (useful for generating unique IDs).
-    startContainer: *const fn (config: []const u8, index: usize) ?[12]u8,
-
-    /// check if a container is healthy. returns true if healthy,
-    /// false if unhealthy or still starting.
-    isHealthy: *const fn (id: []const u8) bool,
-};
-
-/// the context passed to performRollingUpdate
-pub const UpdateContext = struct {
-    service_name: []const u8,
-    manifest_hash: []const u8,
-    config_snapshot: []const u8,
-
-    /// IDs of containers currently running for this service
-    old_container_ids: []const []const u8,
-
-    /// callbacks for container operations
-    callbacks: UpdateCallbacks,
-};
+pub const FailureAction = common.FailureAction;
+pub const DeploymentStatus = common.DeploymentStatus;
+pub const UpdateStrategy = common.UpdateStrategy;
+pub const Deployment = common.Deployment;
+pub const UpdateProgress = common.UpdateProgress;
+pub const UpdateError = common.UpdateError;
+pub const UpdateCallbacks = common.UpdateCallbacks;
+pub const UpdateContext = common.UpdateContext;
 
 // -- core engine --
 
@@ -175,11 +69,11 @@ pub fn performRollingUpdate(
     // record deployment start (best-effort — the update proceeds even if
     // we can't write to the store, since the actual container work matters
     // more than the audit trail)
-    const deployment_id = generateDeploymentId(alloc) catch null;
+    const deployment_id = deployment_store.generateDeploymentId(alloc) catch null;
     defer if (deployment_id) |did| alloc.free(did);
 
     if (deployment_id) |did| {
-        recordDeployment(
+        deployment_store.recordDeployment(
             did,
             context.service_name,
             context.manifest_hash,
@@ -243,7 +137,7 @@ pub fn performRollingUpdate(
 
         // if all starts failed, handle the failure
         if (batch_new_ids.items.len == 0) {
-            return handleBatchFailure(
+            return batch_runtime.handleBatchFailure(
                 strategy,
                 context,
                 deployment_id,
@@ -255,14 +149,14 @@ pub fn performRollingUpdate(
 
         // step 2: wait for health checks on new containers
         if (strategy.health_check_timeout > 0) {
-            const all_healthy = waitForHealth(
+            const all_healthy = batch_runtime.waitForHealth(
                 &batch_new_ids,
                 context.callbacks,
                 strategy.health_check_timeout,
             );
 
             if (!all_healthy) {
-                return handleBatchFailure(
+                return batch_runtime.handleBatchFailure(
                     strategy,
                     context,
                     deployment_id,
@@ -297,7 +191,7 @@ pub fn performRollingUpdate(
     progress.message = null;
 
     if (deployment_id) |did| {
-        updateDeploymentStatus(did, .completed, null) catch {};
+        deployment_store.updateDeploymentStatus(did, .completed, null) catch {};
     }
 
     log.info("update: rolling update completed for {s} ({d} containers replaced)", .{
@@ -327,125 +221,6 @@ pub fn rollback(
     log.info("update: rolling back {s} to deployment {s}", .{ service_name, prev.id });
 
     return config;
-}
-
-// -- internal helpers --
-
-/// handle a batch failure: either rollback or pause based on strategy
-fn handleBatchFailure(
-    strategy: UpdateStrategy,
-    context: *const UpdateContext,
-    deployment_id: ?[]const u8,
-    new_container_ids: *std.ArrayList([12]u8),
-    progress: *UpdateProgress,
-    reason: []const u8,
-) UpdateError {
-    log.warn("update: batch failed for {s}: {s}", .{ context.service_name, reason });
-
-    switch (strategy.failure_action) {
-        .rollback => {
-            log.info("update: rolling back — stopping {d} new containers", .{new_container_ids.items.len});
-
-            // stop all new containers we started
-            for (new_container_ids.items) |new_id| {
-                _ = context.callbacks.stopContainer(&new_id);
-            }
-
-            // note: we don't restart old containers here because in a real
-            // system they may still be running (we stop old after health check).
-            // the orchestrator handles restarting from the previous config.
-
-            progress.status = .rolled_back;
-            progress.message = reason;
-
-            if (deployment_id) |did| {
-                updateDeploymentStatus(did, .rolled_back, reason) catch {};
-            }
-
-            return UpdateError.BatchFailed;
-        },
-        .pause => {
-            progress.status = .failed;
-            progress.message = reason;
-
-            if (deployment_id) |did| {
-                updateDeploymentStatus(did, .failed, reason) catch {};
-            }
-
-            return UpdateError.UpdatePaused;
-        },
-    }
-}
-
-/// wait for all containers in a batch to become healthy.
-/// polls at 1-second intervals up to `timeout` seconds.
-fn waitForHealth(
-    container_ids: *const std.ArrayList([12]u8),
-    callbacks: UpdateCallbacks,
-    timeout: u32,
-) bool {
-    const now = std.time.timestamp();
-    const deadline = @as(u64, @intCast(@max(0, now))) + timeout;
-
-    while (@as(u64, @intCast(@max(0, std.time.timestamp()))) < deadline) {
-        var all_healthy = true;
-
-        for (container_ids.items) |id| {
-            if (!callbacks.isHealthy(&id)) {
-                all_healthy = false;
-                break;
-            }
-        }
-
-        if (all_healthy) return true;
-
-        std.Thread.sleep(1 * std.time.ns_per_s);
-    }
-
-    return false;
-}
-
-/// generate a unique deployment ID (12-char hex string like container IDs)
-fn generateDeploymentId(alloc: std.mem.Allocator) ![]const u8 {
-    const chars = "0123456789abcdef";
-    var bytes: [6]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
-
-    const hex = try alloc.alloc(u8, 12);
-    for (bytes, 0..) |b, i| {
-        hex[i * 2] = chars[b >> 4];
-        hex[i * 2 + 1] = chars[b & 0x0f];
-    }
-    return hex;
-}
-
-/// record a deployment in the store
-fn recordDeployment(
-    id: []const u8,
-    service_name: []const u8,
-    manifest_hash: []const u8,
-    config_snapshot: []const u8,
-    status: DeploymentStatus,
-    message: ?[]const u8,
-) !void {
-    store.saveDeployment(.{
-        .id = id,
-        .service_name = service_name,
-        .manifest_hash = manifest_hash,
-        .config_snapshot = config_snapshot,
-        .status = status.toString(),
-        .message = message,
-        .created_at = std.time.timestamp(),
-    }) catch return error.StoreFailed;
-}
-
-/// update a deployment's status in the store
-fn updateDeploymentStatus(
-    id: []const u8,
-    status: DeploymentStatus,
-    message: ?[]const u8,
-) !void {
-    store.updateDeploymentStatus(id, status.toString(), message) catch return error.StoreFailed;
 }
 
 // -- tests --
@@ -645,7 +420,7 @@ test "update progress tracking" {
 
 test "generate deployment id produces 12-char hex" {
     const alloc = std.testing.allocator;
-    const id = try generateDeploymentId(alloc);
+    const id = try deployment_store.generateDeploymentId(alloc);
     defer alloc.free(id);
 
     try std.testing.expectEqual(@as(usize, 12), id.len);
@@ -658,9 +433,9 @@ test "generate deployment id produces 12-char hex" {
 
 test "two generated ids are different" {
     const alloc = std.testing.allocator;
-    const id1 = try generateDeploymentId(alloc);
+    const id1 = try deployment_store.generateDeploymentId(alloc);
     defer alloc.free(id1);
-    const id2 = try generateDeploymentId(alloc);
+    const id2 = try deployment_store.generateDeploymentId(alloc);
     defer alloc.free(id2);
 
     try std.testing.expect(!std.mem.eql(u8, id1, id2));
