@@ -66,7 +66,6 @@ pub fn handleRequestVoteReply(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) void {
-    _ = from;
     if (self.role != .candidate) return;
 
     if (reply.term > self.log.getCurrentTerm()) {
@@ -76,6 +75,10 @@ pub fn handleRequestVoteReply(
 
     if (!reply.vote_granted) return;
 
+    const peer_idx = common.peerIndex(self, from) orelse return;
+    if (self.votes_granted[peer_idx]) return;
+
+    self.votes_granted[peer_idx] = true;
     self.votes_received += 1;
     const quorum = (self.peers.len + 1) / 2 + 1;
     if (self.votes_received >= quorum) {
@@ -103,6 +106,7 @@ pub fn startElection(self: anytype, min_election_ticks: u32, max_election_ticks:
     self.log.setCurrentTerm(new_term);
     self.log.setVotedFor(self.id);
     self.role = .candidate;
+    @memset(self.votes_granted, false);
     self.votes_received = 1;
     self.ticks_since_event = 0;
     common.resetElectionTimeout(self, min_election_ticks, max_election_ticks);

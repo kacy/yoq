@@ -21,6 +21,7 @@ const std = @import("std");
 const action_queue = @import("action_queue.zig");
 const common = @import("raft/common.zig");
 const election_runtime = @import("raft/election_runtime.zig");
+const test_support = @import("raft/test_support.zig");
 const types = @import("raft_types.zig");
 const replication_runtime = @import("raft/replication_runtime.zig");
 const persistent_log = @import("log.zig");
@@ -80,6 +81,7 @@ pub const Raft = struct {
     match_index: []LogIndex,
 
     // election state
+    votes_granted: []bool,
     ticks_since_event: u32,
     election_timeout: u32,
     votes_received: u32,
@@ -107,11 +109,15 @@ pub const Raft = struct {
         const next_idx = try alloc.alloc(LogIndex, peer_count);
         errdefer alloc.free(next_idx);
         const match_idx = try alloc.alloc(LogIndex, peer_count);
+        errdefer alloc.free(match_idx);
+        const votes_granted = try alloc.alloc(bool, peer_count);
+        errdefer alloc.free(votes_granted);
 
         // initialize leader state (will be reset when becoming leader)
         for (0..peer_count) |i| {
             next_idx[i] = 1;
             match_idx[i] = 0;
+            votes_granted[i] = false;
         }
 
         // seed rng with node id + timestamp for uniqueness
@@ -130,6 +136,7 @@ pub const Raft = struct {
             .last_applied = 0,
             .next_index = next_idx,
             .match_index = match_idx,
+            .votes_granted = votes_granted,
             .ticks_since_event = 0,
             .election_timeout = 0,
             .votes_received = 0,
@@ -146,6 +153,7 @@ pub const Raft = struct {
     pub fn deinit(self: *Raft) void {
         self.alloc.free(self.next_index);
         self.alloc.free(self.match_index);
+        self.alloc.free(self.votes_granted);
         self.alloc.free(self.peers);
         self.actions.deinit(self.alloc);
     }
@@ -368,16 +376,7 @@ test "candidate becomes leader with majority vote" {
     try testing.expectEqual(Role.leader, raft.role);
 
     const leader_actions = raft.drainActions();
-    defer {
-        for (leader_actions) |action| {
-            if (action == .send_append_entries) {
-                if (action.send_append_entries.args.entries.len > 0) {
-                    alloc.free(action.send_append_entries.args.entries);
-                }
-            }
-        }
-        alloc.free(leader_actions);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, leader_actions);
 }
 
 test "reject vote if candidate log is behind" {
@@ -482,31 +481,14 @@ test "log replication: leader sends entries, follower appends" {
 
     // drain leader actions (become_leader + heartbeats)
     const la = leader.drainActions();
-    defer {
-        for (la) |action| {
-            if (action == .send_append_entries) {
-                if (action.send_append_entries.args.entries.len > 0)
-                    alloc.free(action.send_append_entries.args.entries);
-            }
-        }
-        alloc.free(la);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, la);
 
     // propose a command
     _ = try leader.propose("SET x 42");
 
     // get the append entries that were sent
     const propose_actions = leader.drainActions();
-    defer {
-        for (propose_actions) |action| {
-            if (action == .send_append_entries) {
-                const entries = action.send_append_entries.args.entries;
-                for (entries) |e| alloc.free(e.data);
-                if (entries.len > 0) alloc.free(entries);
-            }
-        }
-        alloc.free(propose_actions);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, propose_actions);
 
     // set up follower
     var follower_log = try Log.initMemory();
@@ -553,31 +535,14 @@ test "commit advancement when majority matches" {
         .vote_granted = true,
     });
     const la = leader.drainActions();
-    defer {
-        for (la) |action| {
-            if (action == .send_append_entries) {
-                if (action.send_append_entries.args.entries.len > 0)
-                    alloc.free(action.send_append_entries.args.entries);
-            }
-        }
-        alloc.free(la);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, la);
 
     // propose and replicate
     const idx = try leader.propose("cmd1");
     try testing.expectEqual(@as(LogIndex, 1), idx);
 
     const pa = leader.drainActions();
-    defer {
-        for (pa) |action| {
-            if (action == .send_append_entries) {
-                const entries = action.send_append_entries.args.entries;
-                for (entries) |e| alloc.free(e.data);
-                if (entries.len > 0) alloc.free(entries);
-            }
-        }
-        alloc.free(pa);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, pa);
 
     try testing.expectEqual(@as(LogIndex, 0), leader.commit_index);
 
@@ -809,15 +774,7 @@ test "leader sends install_snapshot when entries are truncated" {
         .vote_granted = true,
     });
     const la = leader.drainActions();
-    defer {
-        for (la) |action| {
-            if (action == .send_append_entries) {
-                if (action.send_append_entries.args.entries.len > 0)
-                    alloc.free(action.send_append_entries.args.entries);
-            }
-        }
-        alloc.free(la);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, la);
 
     // simulate: leader has a snapshot at index 50, log truncated
     leader.snapshot_meta = .{
@@ -875,15 +832,7 @@ test "handleInstallSnapshotReply updates peer tracking" {
         .vote_granted = true,
     });
     const la = leader.drainActions();
-    defer {
-        for (la) |action| {
-            if (action == .send_append_entries) {
-                if (action.send_append_entries.args.entries.len > 0)
-                    alloc.free(action.send_append_entries.args.entries);
-            }
-        }
-        alloc.free(la);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, la);
 
     leader.snapshot_meta = .{
         .last_included_index = 50,
@@ -965,17 +914,7 @@ test "heartbeat with empty entries doesn't crash on free" {
     leader.tick();
 
     const actions = leader.drainActions();
-    defer {
-        for (actions) |action| {
-            if (action == .send_append_entries) {
-                // this is the key check: entries.len should be 0 and
-                // freeing an empty comptime slice must not crash
-                const entries = action.send_append_entries.args.entries;
-                if (entries.len > 0) alloc.free(entries);
-            }
-        }
-        alloc.free(actions);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, actions);
 
     // verify we got heartbeats with empty entries
     var heartbeat_count: usize = 0;
@@ -1008,15 +947,7 @@ test "leader steps down on higher term in append_entries_reply" {
         .vote_granted = true,
     });
     const la = leader.drainActions();
-    defer {
-        for (la) |action| {
-            if (action == .send_append_entries) {
-                if (action.send_append_entries.args.entries.len > 0)
-                    alloc.free(action.send_append_entries.args.entries);
-            }
-        }
-        alloc.free(la);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, la);
 
     try testing.expectEqual(Role.leader, leader.role);
     const leader_term = leader.currentTerm();
@@ -1067,21 +998,10 @@ test "duplicate vote from same peer doesn't double count" {
         .vote_granted = true,
     });
 
-    // note: the current implementation does count duplicates (votes_received
-    // is a simple counter). this test documents the behavior — with 5 nodes
-    // and quorum of 3, two votes from peer 2 + self = 3 which reaches quorum.
-    // this is acceptable because in practice each peer only sends one reply
-    // per election term. if we want strict dedup, we'd need a voted set.
     const drain = raft.drainActions();
-    defer {
-        for (drain) |action| {
-            if (action == .send_append_entries) {
-                if (action.send_append_entries.args.entries.len > 0)
-                    alloc.free(action.send_append_entries.args.entries);
-            }
-        }
-        alloc.free(drain);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, drain);
+    try testing.expectEqual(Role.candidate, raft.role);
+    try testing.expectEqual(@as(usize, 0), drain.len);
 }
 
 test "commit index requires majority in 5-node cluster" {
@@ -1109,29 +1029,12 @@ test "commit index requires majority in 5-node cluster" {
         .vote_granted = true,
     });
     const la = leader.drainActions();
-    defer {
-        for (la) |action| {
-            if (action == .send_append_entries) {
-                if (action.send_append_entries.args.entries.len > 0)
-                    alloc.free(action.send_append_entries.args.entries);
-            }
-        }
-        alloc.free(la);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, la);
 
     // propose a command
     _ = try leader.propose("cmd1");
     const pa = leader.drainActions();
-    defer {
-        for (pa) |action| {
-            if (action == .send_append_entries) {
-                const entries = action.send_append_entries.args.entries;
-                for (entries) |e| alloc.free(e.data);
-                if (entries.len > 0) alloc.free(entries);
-            }
-        }
-        alloc.free(pa);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, pa);
 
     try testing.expectEqual(@as(LogIndex, 0), leader.commit_index);
 
@@ -1165,17 +1068,8 @@ test "commit index requires majority in 5-node cluster" {
 // raft is a pure state machine — we can simulate a cluster by manually
 // delivering drainActions() output to the correct peer.
 
-/// free any allocated entries in actions from drain
 fn freeActionEntries(alloc: std.mem.Allocator, actions: []const Action) void {
-    for (actions) |action| {
-        if (action == .send_append_entries) {
-            const entries = action.send_append_entries.args.entries;
-            for (entries) |e| {
-                if (e.data.len > 0) alloc.free(e.data);
-            }
-            if (entries.len > 0) alloc.free(entries);
-        }
-    }
+    test_support.freeActionEntries(Action, alloc, actions);
 }
 
 test "3-node cluster: election + propose + commit" {
@@ -1227,10 +1121,7 @@ test "3-node cluster: election + propose + commit" {
 
     // drain the become_leader + heartbeat actions (don't deliver heartbeats)
     const leader_actions = r1.drainActions();
-    defer {
-        freeActionEntries(alloc, leader_actions);
-        alloc.free(leader_actions);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, leader_actions);
 
     // verify exactly 1 leader
     var leader_count: u32 = 0;
@@ -1245,10 +1136,7 @@ test "3-node cluster: election + propose + commit" {
 
     // drain append_entries actions
     const propose_actions = r1.drainActions();
-    defer {
-        freeActionEntries(alloc, propose_actions);
-        alloc.free(propose_actions);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, propose_actions);
 
     // deliver to followers manually and route ack replies back to leader
     for (propose_actions) |action| {
@@ -1328,10 +1216,7 @@ test "leader loss triggers re-election with higher term" {
     try testing.expectEqual(Role.leader, r1.role);
 
     const la = r1.drainActions();
-    defer {
-        freeActionEntries(alloc, la);
-        alloc.free(la);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, la);
 
     const original_term = r1.currentTerm();
 
@@ -1362,10 +1247,7 @@ test "leader loss triggers re-election with higher term" {
 
     // drain new leader's actions (become_leader + heartbeats)
     const nl = r2.drainActions();
-    defer {
-        freeActionEntries(alloc, nl);
-        alloc.free(nl);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, nl);
 
     // verify become_leader was emitted
     var found_become_leader = false;
@@ -1418,10 +1300,7 @@ fn electLeader3(alloc: std.mem.Allocator, leader: *Raft, p1: *Raft, p2: *Raft) !
 fn proposeAndReplicate3(alloc: std.mem.Allocator, leader: *Raft, p1: *Raft, p2: *Raft, data: []const u8) ![]const Action {
     _ = try leader.propose(data);
     const pa = leader.drainActions();
-    defer {
-        freeActionEntries(alloc, pa);
-        alloc.free(pa);
-    }
+    defer test_support.deinitOwnedActions(Action, alloc, pa);
 
     for (pa) |action| {
         if (action == .send_append_entries) {
