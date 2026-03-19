@@ -17,9 +17,9 @@ const logs = @import("logs.zig");
 const store = @import("../state/store.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
-const gpu_passthrough = @import("../gpu/passthrough.zig");
 const exec_runtime = @import("container/exec_runtime.zig");
 const id_paths = @import("container/id_paths.zig");
+const start_support = @import("container/start_support.zig");
 
 /// PID of the currently running container process.
 /// set after spawn, cleared on exit. used by the signal handler
@@ -200,48 +200,15 @@ pub const Container = struct {
     /// and begin log capture. returns once the container is running.
     pub fn start(self: *Container) ContainerError!void {
         const config = self.config;
-        const has_overlay = config.lower_dirs.len > 0;
-
-        // create overlay directories if we have image layers
-        var dirs: ?OverlayDirs = null;
-        if (has_overlay) {
-            dirs = createContainerDirs(config.id) catch return ContainerError.StartFailed;
-        }
-
-        // build filesystem config for the child
-        const fs_config: filesystem.FilesystemConfig = if (dirs) |*d| .{
-            .lower_dirs = config.lower_dirs,
-            .upper_dir = d.upperPath(),
-            .work_dir = d.workPath(),
-            .merged_dir = d.mergedPath(),
-        } else .{
-            .lower_dirs = &.{},
-            .upper_dir = "",
-            .work_dir = "",
-            .merged_dir = "",
-        };
-
-        // prepare child execution context
-        // lives on our stack, gets copied to child's address space via clone3
-        var child_ctx = exec_runtime.ChildExecContext{
-            .has_overlay = has_overlay,
-            .host_mode = config.host_mode,
-            .fs_config = fs_config,
-            .rootfs = config.rootfs,
-            .command = config.command,
-            .args = config.args,
-            .env = config.env,
-            .working_dir = config.working_dir,
-            .hostname = config.hostname,
-            .mounts = config.mounts,
-        };
+        const overlay = start_support.prepareOverlayRuntime(config, containers_subdir) catch return ContainerError.StartFailed;
+        var child_ctx = start_support.initChildContext(config, overlay);
 
         // create cgroup for resource limits
         // this is a hard failure - we don't run containers without resource limits
         // as that would allow DoS attacks on the host
         self.runtime.cgroup = cgroups.Cgroup.create(config.id) catch |e| {
             log.err("cgroup setup failed for {s}: {}. container cannot start without resource limits.", .{ config.id, e });
-            if (has_overlay) cleanupContainerDirs(config.id);
+            if (overlay.has_overlay) cleanupContainerDirs(config.id);
             return ContainerError.StartFailed;
         };
 
@@ -254,7 +221,7 @@ pub const Container = struct {
             exec_runtime.childMain,
             @ptrCast(&child_ctx),
         ) catch {
-            if (has_overlay) cleanupContainerDirs(config.id);
+            if (overlay.has_overlay) cleanupContainerDirs(config.id);
             if (self.runtime.cgroup) |*cg| cg.destroy() catch {};
             return ContainerError.StartFailed;
         };
@@ -267,60 +234,20 @@ pub const Container = struct {
         self.runtime.cgroup.?.addProcess(spawn_result.pid) catch |e| {
             log.err("failed to add process to cgroup for {s}: {}. stopping container.", .{ config.id, e });
             self.cleanupFailedSpawn(&spawn_result);
-            if (has_overlay) cleanupContainerDirs(config.id);
+            if (overlay.has_overlay) cleanupContainerDirs(config.id);
             return ContainerError.StartFailed;
         };
 
         self.runtime.cgroup.?.setLimits(config.limits) catch |e| {
             log.err("failed to set cgroup limits for {s}: {}. stopping container.", .{ config.id, e });
             self.cleanupFailedSpawn(&spawn_result);
-            if (has_overlay) cleanupContainerDirs(config.id);
+            if (overlay.has_overlay) cleanupContainerDirs(config.id);
             return ContainerError.StartFailed;
         };
 
         // set up container networking (non-fatal — container works without it)
-        if (config.network) |net_config| {
-            var db = store.openDb() catch null;
-            defer if (db) |*d| d.deinit();
-
-            if (db) |*d| {
-                if (net_setup.setupContainer(config.id, spawn_result.pid, net_config, d, config.hostname)) |info| {
-                    self.net_info = info;
-
-                    // persist network info in the database
-                    var ip_buf: [16]u8 = undefined;
-                    const ip_str = @import("../network/ip.zig").formatIp(info.ip, &ip_buf);
-                    store.updateNetwork(config.id, ip_str, info.vethName()) catch |e| {
-                        log.warn("failed to persist network info for {s}: {}", .{ config.id, e });
-                    };
-
-                    // write resolv.conf and hosts into the rootfs
-                    if (dirs) |*overlay_dirs| {
-                        net_setup.writeNetworkFiles(
-                            overlay_dirs.mergedPath(),
-                            info.ip,
-                            config.hostname,
-                        );
-                    }
-                } else |e| {
-                    log.warn("container: network setup failed, continuing without network: {}", .{e});
-                }
-            }
-        }
-
-        // set up GPU passthrough if GPUs are assigned
-        if (config.gpu_indices.len > 0) {
-            if (dirs) |*overlay_dirs| {
-                var gpu_env_buf: [4096]u8 = undefined;
-                _ = gpu_passthrough.setupGpuPassthrough(
-                    overlay_dirs.mergedPath(),
-                    config.gpu_indices,
-                    &gpu_env_buf,
-                ) catch |e| {
-                    log.warn("GPU passthrough setup failed for {s}: {}", .{ config.id, e });
-                };
-            }
-        }
+        start_support.setupNetwork(config, if (overlay.dirs) |*dirs| dirs else null, spawn_result.pid, &self.net_info);
+        start_support.setupGpu(config, if (overlay.dirs) |*dirs| dirs else null);
 
         // open log file and start capture threads BEFORE signaling child ready.
         // if we signal ready first, fast-exiting commands (like echo) complete
@@ -329,50 +256,13 @@ pub const Container = struct {
         // fd ownership model:
         //   - on success: each capture thread owns its fd and closes it on exit
         //   - on failure: we close fds here before they'd otherwise leak
-        self.runtime.log_file = logs.createLogFile(config.id) catch |err| blk: {
-            log.warn("failed to create log file for {s}: {}", .{ config.id, err });
-            posix.close(spawn_result.stdout_fd);
-            posix.close(spawn_result.stderr_fd);
-            break :blk null;
-        };
-
-        if (self.runtime.log_file) |lf| {
-            self.runtime.stdout_thread = std.Thread.spawn(.{}, logs.captureStream, .{
-                lf,
-                spawn_result.stdout_fd,
-                "stdout",
-                config.dev_service_name,
-                config.dev_color_idx,
-                self.runtime.mirror_output,
-            }) catch |err| blk: {
-                log.warn("failed to spawn stdout capture thread: {}", .{err});
-                posix.close(spawn_result.stdout_fd);
-                break :blk null;
-            };
-
-            self.runtime.stderr_thread = std.Thread.spawn(.{}, logs.captureStream, .{
-                lf,
-                spawn_result.stderr_fd,
-                "stderr",
-                config.dev_service_name,
-                config.dev_color_idx,
-                self.runtime.mirror_output,
-            }) catch |err| blk: {
-                log.warn("failed to spawn stderr capture thread: {}", .{err});
-                posix.close(spawn_result.stderr_fd);
-                break :blk null;
-            };
-        }
+        start_support.startLogCapture(config, &self.runtime, &spawn_result);
 
         // signal child that all parent-side setup is complete
         spawn_result.signalReady();
 
         self.status = .running;
-
-        // update sqlite to "running"
-        store.updateStatus(config.id, "running", spawn_result.pid, null) catch |e| {
-            log.warn("failed to update status for {s}: {}", .{ config.id, e });
-        };
+        start_support.updateRunningStatus(config.id, spawn_result.pid);
     }
 
     /// clean up after a failed post-spawn operation (cgroup add/setLimits).
