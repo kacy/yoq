@@ -64,6 +64,11 @@ pub const ChallengeStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        if (self.tokens.fetchRemove(token)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
+
         const owned_token = try self.allocator.dupe(u8, token);
         errdefer self.allocator.free(owned_token);
         const owned_auth = try self.allocator.dupe(u8, key_auth);
@@ -77,6 +82,14 @@ pub const ChallengeStore = struct {
         defer self.mutex.unlock();
 
         return self.tokens.get(token);
+    }
+
+    pub fn getOwned(self: *ChallengeStore, alloc: std.mem.Allocator, token: []const u8) !?[]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const value = self.tokens.get(token) orelse return null;
+        return try alloc.dupe(u8, value);
     }
 
     pub fn remove(self: *ChallengeStore, token: []const u8) void {
@@ -425,10 +438,14 @@ pub const TlsProxy = struct {
         }
 
         // look up backend
-        const backend = self.backends.lookup(server_name) orelse {
+        const backend = self.backends.lookupOwned(self.allocator, server_name) catch {
+            log.warn("failed to copy backend for domain: {s}", .{server_name});
+            return;
+        } orelse {
             log.warn("no backend for domain: {s}", .{server_name});
             return;
         };
+        defer self.allocator.free(backend.ip);
 
         // perform TLS handshake and proxy traffic
         session_runtime.handleTlsSession(
@@ -492,10 +509,14 @@ pub const TlsProxy = struct {
             return;
         }
 
-        const key_auth = self.challenges.get(token) orelse {
+        const key_auth = self.challenges.getOwned(self.allocator, token) catch {
+            http_support.sendHttpResponse(client_fd, "500 Internal Server Error", "challenge lookup failed");
+            return;
+        } orelse {
             http_support.sendHttpResponse(client_fd, "404 Not Found", "not found");
             return;
         };
+        defer self.allocator.free(key_auth);
 
         var response_buf: [1024]u8 = undefined;
         const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ key_auth.len, key_auth }) catch return;
@@ -563,4 +584,30 @@ test "ChallengeStore remove" {
     try cs.set("token123", "auth-value");
     cs.remove("token123");
     try std.testing.expect(cs.get("token123") == null);
+}
+
+test "ChallengeStore getOwned returns stable copy" {
+    const alloc = std.testing.allocator;
+    var cs = ChallengeStore.init(alloc);
+    defer cs.deinit();
+
+    try cs.set("token123", "auth-value");
+    const owned = (try cs.getOwned(alloc, "token123")).?;
+    defer alloc.free(owned);
+
+    cs.remove("token123");
+    try std.testing.expectEqualStrings("auth-value", owned);
+}
+
+test "ChallengeStore set overwrites existing token safely" {
+    const alloc = std.testing.allocator;
+    var cs = ChallengeStore.init(alloc);
+    defer cs.deinit();
+
+    try cs.set("token123", "first");
+    try cs.set("token123", "second");
+
+    const auth = cs.get("token123");
+    try std.testing.expect(auth != null);
+    try std.testing.expectEqualStrings("second", auth.?);
 }

@@ -77,6 +77,17 @@ pub const BackendRegistry = struct {
 
         return self.backends.get(domain);
     }
+
+    pub fn lookupOwned(self: *BackendRegistry, alloc: std.mem.Allocator, domain: []const u8) !?Backend {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const backend = self.backends.get(domain) orelse return null;
+        return .{
+            .ip = try alloc.dupe(u8, backend.ip),
+            .port = backend.port,
+        };
+    }
 };
 
 // -- tests --
@@ -149,4 +160,18 @@ test "multiple domains" {
     try std.testing.expect(b != null);
     try std.testing.expectEqualStrings("10.42.0.1", a.?.ip);
     try std.testing.expectEqualStrings("10.42.0.2", b.?.ip);
+}
+
+test "lookupOwned returns stable backend copy" {
+    const alloc = std.testing.allocator;
+    var reg = BackendRegistry.init(alloc);
+    defer reg.deinit();
+
+    try reg.register("example.com", "10.42.0.5", 8080);
+    const owned = (try reg.lookupOwned(alloc, "example.com")).?;
+    defer alloc.free(owned.ip);
+
+    reg.unregister("example.com");
+    try std.testing.expectEqualStrings("10.42.0.5", owned.ip);
+    try std.testing.expectEqual(@as(u16, 8080), owned.port);
 }
