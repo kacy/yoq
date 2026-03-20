@@ -133,6 +133,43 @@ test "extract layer — missing blob returns error" {
     }
 }
 
+test "extract layer — stale cache dir is not trusted without completion marker" {
+    const alloc = std.testing.allocator;
+    const digest = blob_store.computeDigest("stale cache layer");
+    var digest_buf: [71]u8 = undefined;
+    const digest_str = digest.string(&digest_buf);
+    const digest_hex = digest.hex();
+
+    var path_buf: [max_path]u8 = undefined;
+    const path = try layerPath(digest, &path_buf);
+    defer layer_path.deleteExtractedLayer(&digest_hex);
+
+    try std.fs.cwd().makePath(path);
+    try std.testing.expectError(LayerError.BlobNotFound, extractLayer(alloc, digest_str));
+    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(path, .{}));
+}
+
+test "extract layer — corrupted blob is rejected before extraction" {
+    const alloc = std.testing.allocator;
+    const digest = blob_store.computeDigest("expected layer blob");
+    var digest_buf: [71]u8 = undefined;
+    const digest_str = digest.string(&digest_buf);
+
+    var blob_path_buf: [max_path]u8 = undefined;
+    const blob_path = try blob_store.blobPath(digest, &blob_path_buf);
+    if (std.fs.path.dirname(blob_path)) |parent| {
+        try std.fs.cwd().makePath(parent);
+    }
+
+    defer blob_store.removeBlob(digest);
+    const file = try std.fs.cwd().createFile(blob_path, .{ .truncate = true });
+    try file.writeAll("corrupted blob");
+    file.close();
+
+    try std.testing.expectError(LayerError.BlobNotFound, extractLayer(alloc, digest_str));
+    try std.testing.expect(!blob_store.hasBlob(digest));
+}
+
 test "assemble rootfs — empty layer list" {
     const alloc = std.testing.allocator;
     const layer_paths = try assembleRootfs(alloc, &.{});

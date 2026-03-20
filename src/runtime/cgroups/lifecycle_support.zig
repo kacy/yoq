@@ -148,8 +148,12 @@ pub const Cgroup = struct {
     }
 
     pub fn containsProcess(self: *const Cgroup, pid: std.posix.pid_t) bool {
+        return self.containsProcessChecked(pid) catch false;
+    }
+
+    pub fn containsProcessChecked(self: *const Cgroup, pid: std.posix.pid_t) CgroupError!bool {
         var buf: [4096]u8 = undefined;
-        const content = self.readFile("cgroup.procs", &buf) catch return false;
+        const content = self.readFile("cgroup.procs", &buf) catch return CgroupError.ReadFailed;
         return metrics_support.procsContainsPid(content, pid);
     }
 

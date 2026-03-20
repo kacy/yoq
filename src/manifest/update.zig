@@ -133,17 +133,13 @@ pub fn performRollingUpdate(
         if (start_failures > 0) {
             log.warn("update: {d}/{d} containers failed to start in batch", .{ start_failures, batch_size });
             progress.failed += start_failures;
-        }
-
-        // if all starts failed, handle the failure
-        if (batch_new_ids.items.len == 0) {
             return batch_runtime.handleBatchFailure(
                 strategy,
                 context,
                 deployment_id,
                 &new_container_ids,
                 &progress,
-                "all containers failed to start",
+                "one or more containers failed to start",
             );
         }
 
@@ -230,15 +226,19 @@ pub fn rollback(
 // set up expected behaviors.
 
 var test_start_should_fail: bool = false;
+var test_fail_start_call: ?u32 = null;
 var test_health_should_fail: bool = false;
 var test_stops: u32 = 0;
 var test_starts: u32 = 0;
+var test_start_calls: u32 = 0;
 
 fn resetTestState() void {
     test_start_should_fail = false;
+    test_fail_start_call = null;
     test_health_should_fail = false;
     test_stops = 0;
     test_starts = 0;
+    test_start_calls = 0;
 }
 
 fn testStopContainer(_: []const u8) bool {
@@ -247,7 +247,11 @@ fn testStopContainer(_: []const u8) bool {
 }
 
 fn testStartContainer(_: []const u8, _: usize) ?[12]u8 {
+    defer test_start_calls += 1;
     if (test_start_should_fail) return null;
+    if (test_fail_start_call) |call| {
+        if (test_start_calls == call) return null;
+    }
     test_starts += 1;
     return "newcontainer".*;
 }
@@ -393,6 +397,32 @@ test "start failure triggers pause when configured" {
 
     const result = performRollingUpdate(alloc, strategy, &context);
     try std.testing.expectError(UpdateError.UpdatePaused, result);
+}
+
+test "partial batch start failure rolls back before stopping old containers" {
+    resetTestState();
+    test_fail_start_call = 1;
+    const alloc = std.testing.allocator;
+
+    const old_ids: []const []const u8 = &.{ "old-1", "old-2" };
+    const context = UpdateContext{
+        .service_name = "web",
+        .manifest_hash = "sha256:partial",
+        .config_snapshot = "{}",
+        .old_container_ids = old_ids,
+        .callbacks = test_callbacks,
+    };
+
+    const strategy = UpdateStrategy{
+        .parallelism = 2,
+        .failure_action = .rollback,
+        .health_check_timeout = 0,
+    };
+
+    const result = performRollingUpdate(alloc, strategy, &context);
+    try std.testing.expectError(UpdateError.BatchFailed, result);
+    try std.testing.expectEqual(@as(u32, 1), test_starts);
+    try std.testing.expectEqual(@as(u32, 0), test_stops);
 }
 
 test "failure action enum values" {

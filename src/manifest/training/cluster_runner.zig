@@ -1,9 +1,13 @@
 const std = @import("std");
 
 const cli = @import("../../lib/cli.zig");
+const state_support = @import("state_support.zig");
 
 pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
     self.state = .scheduling;
+    state_support.generateClusterJobId(self) catch {};
+    state_support.createPersistentRecord(self);
+    state_support.persistState(self);
 
     const http_client = @import("../../cluster/http_client.zig");
     const json_helpers = @import("../../lib/json_helpers.zig");
@@ -47,15 +51,18 @@ pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
 
     var resp = http_client.postWithAuth(self.alloc, server_ip, server_port, "/deploy", json_buf.items, token) catch {
         self.state = .failed;
+        state_support.persistState(self);
         return error.ConnectionFailed;
     };
     defer resp.deinit(self.alloc);
 
     if (resp.status_code == 200) {
         self.state = .running;
+        state_support.persistState(self);
         cli.write("{s}\n", .{resp.body});
     } else {
         self.state = .failed;
+        state_support.persistState(self);
         cli.writeErr("deploy failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
         return error.DeployFailed;
     }

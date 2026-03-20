@@ -46,7 +46,7 @@ pub fn checkCache(alloc: std.mem.Allocator, cache_key: []const u8, state: *types
         defer e.deinit(alloc);
 
         const cached_digest = blob_store.Digest.parse(e.layer_digest) orelse return false;
-        if (!blob_store.hasBlob(cached_digest)) return false;
+        if (!blob_store.verifyBlob(cached_digest)) return false;
 
         log.info("  -> cached", .{});
         state.addLayer(e.layer_digest, e.diff_id, @intCast(e.layer_size)) catch return false;

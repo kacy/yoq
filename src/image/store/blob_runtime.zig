@@ -6,13 +6,13 @@ const types = @import("types.zig");
 
 pub fn putBlob(data: []const u8) types.BlobError!digest_support.Digest {
     const digest = digest_support.computeDigest(data);
-    if (hasBlob(digest)) return digest;
+    if (hasVerifiedBlob(digest)) return digest;
     try writeToStore(data, digest);
     return digest;
 }
 
 pub fn putBlobFromFile(source_path: []const u8, expected_digest: digest_support.Digest) types.BlobError!void {
-    if (hasBlob(expected_digest)) return;
+    if (hasVerifiedBlob(expected_digest)) return;
 
     var dir_buf: [types.max_path]u8 = undefined;
     const dir_path = blobDir(&dir_buf) catch return types.BlobError.PathTooLong;
@@ -60,7 +60,7 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: digest_support.
 }
 
 pub fn putBlobDirect(data: []const u8, digest: digest_support.Digest) types.BlobError!void {
-    if (hasBlob(digest)) return;
+    if (hasVerifiedBlob(digest)) return;
     try writeToStore(data, digest);
 }
 
@@ -90,9 +90,16 @@ fn renameTempToBlob(tmp_path: []const u8, digest: digest_support.Digest) types.B
     var path_buf: [types.max_path]u8 = undefined;
     const final_path = blobPath(digest, &path_buf) catch return types.BlobError.PathTooLong;
     std.fs.cwd().rename(tmp_path, final_path) catch {
-        std.fs.cwd().deleteFile(tmp_path) catch {};
-        if (hasBlob(digest)) return;
-        return types.BlobError.WriteFailed;
+        if (hasVerifiedBlob(digest)) {
+            std.fs.cwd().deleteFile(tmp_path) catch {};
+            return;
+        }
+
+        removeBlob(digest);
+        std.fs.cwd().rename(tmp_path, final_path) catch {
+            std.fs.cwd().deleteFile(tmp_path) catch {};
+            return types.BlobError.WriteFailed;
+        };
     };
 }
 
@@ -125,6 +132,13 @@ pub fn hasBlob(digest: digest_support.Digest) bool {
     const path = blobPath(digest, &path_buf) catch return false;
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
+}
+
+fn hasVerifiedBlob(digest: digest_support.Digest) bool {
+    if (!hasBlob(digest)) return false;
+    if (verifyBlob(digest)) return true;
+    removeBlob(digest);
+    return false;
 }
 
 pub fn deleteBlob(digest: digest_support.Digest) types.BlobError!void {

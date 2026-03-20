@@ -56,6 +56,47 @@ pub fn registerHealthChecks(
     if (has_checks) health.startChecker();
 }
 
+pub fn refreshServiceRuntimeBindings(
+    alloc: std.mem.Allocator,
+    svc: spec.Service,
+    state: anytype,
+    backend_registry: ?*tls_backend.BackendRegistry,
+) void {
+    const id = state.container_id;
+    const record = store.load(alloc, id[0..]) catch {
+        log.warn("orchestrator: failed to load container for runtime binding refresh: {s}", .{svc.name});
+        return;
+    };
+    defer record.deinit(alloc);
+
+    const container_ip = if (record.ip_address) |ip_str|
+        ip_mod.parseIp(ip_str) orelse [4]u8{ 0, 0, 0, 0 }
+    else
+        [4]u8{ 0, 0, 0, 0 };
+
+    if (svc.health_check) |hc| {
+        health.unregisterService(svc.name);
+        health.registerService(svc.name, id, container_ip, hc) catch {
+            writeErr("health: registry full, health checks disabled for {s}\n", .{svc.name});
+        };
+        state.health_status = .starting;
+        health.startChecker();
+    }
+
+    if (svc.tls) |tls| {
+        const reg = backend_registry orelse return;
+        const ip = record.ip_address orelse {
+            log.warn("no IP for {s}, skipping TLS backend refresh", .{svc.name});
+            return;
+        };
+        const port: u16 = if (svc.ports.len > 0) svc.ports[0].container_port else 80;
+        reg.register(tls.domain, ip, port) catch {
+            log.warn("failed to refresh backend for {s}", .{tls.domain});
+            return;
+        };
+    }
+}
+
 pub fn startTlsProxy(
     alloc: std.mem.Allocator,
     services: []const spec.Service,

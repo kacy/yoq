@@ -66,6 +66,10 @@ pub fn startResolver() void {
     log.info("dns resolver started on 10.42.0.1:53", .{});
 }
 
+pub fn isRunning() bool {
+    return resolver_running.load(.acquire);
+}
+
 pub fn stopResolver() void {
     resolver_mutex.lock();
 

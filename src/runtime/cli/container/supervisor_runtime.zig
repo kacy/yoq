@@ -123,6 +123,18 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     }
 
     process.kill(pid) catch {};
+
+    attempts = 0;
+    while (attempts < 40) : (attempts += 1) {
+        if (process.sendSignal(pid, 0)) |_| {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+        } else |_| {
+            return;
+        }
+    }
+
+    writeErr("container process {d} did not exit after SIGKILL\n", .{pid});
+    return ContainerError.StateUnknown;
 }
 
 fn forwardSignal(sig: c_int) callconv(.c) void {

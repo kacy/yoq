@@ -140,9 +140,10 @@ pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespa
     }
 }
 
-pub fn updateRunningStatus(container_id: []const u8, pid: posix.pid_t) void {
+pub fn updateRunningStatus(container_id: []const u8, pid: posix.pid_t) !void {
     store.updateStatus(container_id, "running", pid, null) catch |err| {
         log.warn("failed to update status for {s}: {}", .{ container_id, err });
+        return err;
     };
 }
 
@@ -169,6 +170,8 @@ pub fn finalizeRuntime(self: anytype, exit_code: u8) void {
     if (self.runtime.stderr_thread) |thread| thread.join();
     if (self.runtime.log_file) |log_file| log_file.close();
 
+    var final_status: []const u8 = "stopped";
+
     if (self.net_info) |*info| {
         if (self.config.network) |net_config| {
             var db = store.openDb() catch null;
@@ -180,10 +183,11 @@ pub fn finalizeRuntime(self: anytype, exit_code: u8) void {
     if (self.runtime.cgroup) |cgroup| {
         cgroup.destroy() catch |err| {
             log.warn("failed to destroy cgroup for {s}: {}", .{ self.config.id, err });
+            final_status = "cleanup_failed";
         };
     }
 
-    store.updateStatus(self.config.id, "stopped", null, exit_code) catch |err| {
+    store.updateStatus(self.config.id, final_status, null, exit_code) catch |err| {
         log.warn("failed to update final status for {s}: {}", .{ self.config.id, err });
     };
 

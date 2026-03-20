@@ -342,6 +342,8 @@ const TokenTestBackup = struct {
     }
 };
 
+var token_test_mutex: std.Thread.Mutex = .{};
+
 fn backupExistingToken() ?TokenTestBackup {
     var backup: TokenTestBackup = .{
         .moved = false,
@@ -431,6 +433,9 @@ test "invalid container names" {
 }
 
 test "generateAndSaveToken produces valid 64-char hex string" {
+    token_test_mutex.lock();
+    defer token_test_mutex.unlock();
+
     const backup = backupExistingToken() orelse return;
     defer backup.restore();
 
@@ -448,6 +453,9 @@ test "generateAndSaveToken produces valid 64-char hex string" {
 }
 
 test "readApiToken round-trip with generateAndSaveToken" {
+    token_test_mutex.lock();
+    defer token_test_mutex.unlock();
+
     const backup = backupExistingToken() orelse return;
     defer backup.restore();
 
@@ -466,6 +474,9 @@ test "readApiToken round-trip with generateAndSaveToken" {
 }
 
 test "readApiToken returns null for missing file" {
+    token_test_mutex.lock();
+    defer token_test_mutex.unlock();
+
     // temporarily rename token file if it exists, test, restore
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
@@ -485,6 +496,9 @@ test "readApiToken returns null for missing file" {
 }
 
 test "readApiToken rejects weak file permissions" {
+    token_test_mutex.lock();
+    defer token_test_mutex.unlock();
+
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
 

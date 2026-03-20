@@ -356,6 +356,7 @@ test "restart policy parse" {
 
 test "save and load config round-trips" {
     const alloc = std.testing.allocator;
+    const config_id = "deadbeefca11";
 
     const args = try alloc.alloc([]const u8, 2);
     defer alloc.free(args);
@@ -405,10 +406,10 @@ test "save and load config round-trips" {
         .restart_policy = .always,
     };
 
-    try saveConfig("deadbeefcafe", cfg);
-    defer removeConfig("deadbeefcafe");
+    try saveConfig(config_id, cfg);
+    defer removeConfig(config_id);
 
-    const loaded = try loadConfig(alloc, "deadbeefcafe");
+    const loaded = try loadConfig(alloc, config_id);
     defer loaded.deinit(alloc);
 
     try std.testing.expectEqualStrings("/tmp/rootfs", loaded.rootfs);
@@ -493,16 +494,17 @@ test "RestartPolicy labels" {
 }
 
 test "loadConfig rejects oversized serialized string length" {
-    if (!container.isValidContainerId("deadbeefcafe")) return error.SkipZigTest;
+    const config_id = "deadbeefca12";
+    if (!container.isValidContainerId(config_id)) return error.SkipZigTest;
 
     paths.ensureDataDirStrict(configs_subdir) catch return error.SkipZigTest;
 
     var path_buf: [paths.max_path]u8 = undefined;
-    const path = try configPath(&path_buf, "deadbeefcafe");
+    const path = try configPath(&path_buf, config_id);
 
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
-    defer removeConfig("deadbeefcafe");
+    defer removeConfig(config_id);
 
     var buf: [16]u8 = undefined;
     var writer = file.writer(&buf);
@@ -511,5 +513,5 @@ test "loadConfig rejects oversized serialized string length" {
     try writeInt(out, u32, max_serialized_string_bytes + 1);
     try out.flush();
 
-    try std.testing.expectError(RunStateError.InvalidFormat, loadConfig(std.testing.allocator, "deadbeefcafe"));
+    try std.testing.expectError(RunStateError.InvalidFormat, loadConfig(std.testing.allocator, config_id));
 }

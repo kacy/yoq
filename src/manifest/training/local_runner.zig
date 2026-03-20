@@ -10,49 +10,54 @@ const state_support = @import("state_support.zig");
 const writeErr = cli.writeErr;
 
 pub fn startLocal(self: anytype) !void {
-    self.state = .scheduling;
+    const new_job = self.job_id == null;
+    if (new_job) state_support.generateJobId(self) catch {};
+    if (new_job) state_support.createPersistentRecord(self);
 
-    if (self.job_id == null) state_support.generateJobId(self) catch {};
-    state_support.createPersistentRecord(self);
-
-    writeErr("pulling {s}...\n", .{self.job.image});
-    if (!orchestrator.ensureImageAvailable(self.alloc, self.job.image)) {
-        self.state = .failed;
+    while (true) {
+        self.state = .scheduling;
         state_support.persistState(self);
-        return error.ImagePullFailed;
-    }
 
-    self.state = .running;
-    state_support.persistState(self);
-
-    var mesh_support = gpu_runtime.MeshSupport.init(self.alloc);
-    defer mesh_support.deinit();
-
-    var failed_ranks: u32 = 0;
-
-    for (0..self.job.gpus) |rank| {
-        const success = runRank(self, &mesh_support, rank);
-        if (success) {
-            self.rank_status[rank] = .stopped;
-        } else {
-            self.rank_status[rank] = .failed;
-            failed_ranks += 1;
+        writeErr("pulling {s}...\n", .{self.job.image});
+        if (!orchestrator.ensureImageAvailable(self.alloc, self.job.image)) {
+            self.state = .failed;
+            state_support.persistState(self);
+            return error.ImagePullFailed;
         }
-    }
 
-    state_support.syncCheckpoints(self);
-
-    if (failed_ranks > 0) {
-        if (shouldAutoRestart(self, failed_ranks)) return;
-
-        self.state = .failed;
+        self.state = .running;
         state_support.persistState(self);
-        writeErr("{d}/{d} ranks failed\n", .{ failed_ranks, self.job.gpus });
+
+        var mesh_support = gpu_runtime.MeshSupport.init(self.alloc);
+        defer mesh_support.deinit();
+
+        var failed_ranks: u32 = 0;
+
+        for (0..self.job.gpus) |rank| {
+            const success = runRank(self, &mesh_support, rank);
+            if (success) {
+                self.rank_status[rank] = .stopped;
+            } else {
+                self.rank_status[rank] = .failed;
+                failed_ranks += 1;
+            }
+        }
+
+        state_support.syncCheckpoints(self);
+
+        if (failed_ranks > 0) {
+            if (shouldAutoRestart(self, failed_ranks)) continue;
+
+            self.state = .failed;
+            state_support.persistState(self);
+            writeErr("{d}/{d} ranks failed\n", .{ failed_ranks, self.job.gpus });
+            return;
+        }
+
+        self.state = .completed;
+        state_support.persistState(self);
         return;
     }
-
-    self.state = .completed;
-    state_support.persistState(self);
 }
 
 fn runRank(self: anytype, mesh_support: *gpu_runtime.MeshSupport, rank: usize) bool {
@@ -119,7 +124,8 @@ fn shouldAutoRestart(self: anytype, failed_ranks: u32) bool {
         self.job.fault_tolerance.max_restarts,
     });
     state_support.loadResumeCheckpoint(self);
-    self.state = .running;
+    for (self.rank_status) |*status| status.* = .pending;
+    self.state = .pending;
     state_support.persistState(self);
     return true;
 }

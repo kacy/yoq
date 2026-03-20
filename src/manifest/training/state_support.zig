@@ -3,11 +3,27 @@ const std = @import("std");
 const checkpoint_mgr = @import("../checkpoint.zig");
 const store = @import("../../state/store.zig");
 
+pub const cluster_job_prefix = "cluster-";
+
 pub fn generateJobId(self: anytype) !void {
+    return generateJobIdWithPrefix(self, "");
+}
+
+pub fn generateClusterJobId(self: anytype) !void {
+    return generateJobIdWithPrefix(self, cluster_job_prefix);
+}
+
+fn generateJobIdWithPrefix(self: anytype, prefix: []const u8) !void {
     var id_buf: [256]u8 = undefined;
     const ts = std.time.timestamp();
-    const id_str = std.fmt.bufPrint(&id_buf, "{s}-{s}-{d}", .{ self.app_name, self.job.name, ts }) catch return error.OutOfMemory;
+    const id_str = std.fmt.bufPrint(&id_buf, "{s}{s}-{s}-{d}", .{ prefix, self.app_name, self.job.name, ts }) catch return error.OutOfMemory;
+    if (self.job_id) |existing| self.alloc.free(existing);
     self.job_id = try self.alloc.dupe(u8, id_str);
+}
+
+pub fn isClusterManaged(self: anytype) bool {
+    const jid = self.job_id orelse return false;
+    return std.mem.startsWith(u8, jid, cluster_job_prefix);
 }
 
 pub fn persistState(self: anytype) void {

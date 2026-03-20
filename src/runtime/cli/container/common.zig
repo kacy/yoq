@@ -12,6 +12,7 @@ pub const ContainerError = error{
     ProcessNotFound,
     ContainerRunning,
     InvalidStatus,
+    StateUnknown,
     PullFailed,
     CommandResolveFailed,
     ConfigSaveFailed,
