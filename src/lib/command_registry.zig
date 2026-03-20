@@ -174,11 +174,11 @@ fn versionHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
         const json_out = @import("json_output.zig");
         var w = json_out.JsonWriter{};
         w.beginObject();
-        w.stringField("version", "0.1.2");
+        w.stringField("version", "0.1.4");
         w.endObject();
         w.flush();
     } else {
-        write("yoq 0.1.2\n", .{});
+        write("yoq 0.1.4\n", .{});
     }
 }
 
