@@ -19,18 +19,25 @@ pub var api_token: ?[]const u8 = null;
 pub const Response = common.Response;
 
 pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
-    if (api_token) |expected_token| {
-        const is_public = std.mem.eql(u8, request.path_only, "/health") or
-            std.mem.eql(u8, request.path_only, "/version");
-        const has_api_auth = common.hasValidBearerToken(&request, expected_token);
-        const has_join_auth = if (join_token) |expected_join_token|
-            isJoinTokenRoute(&request) and common.hasValidBearerToken(&request, expected_join_token)
-        else
-            false;
+    const is_public = std.mem.eql(u8, request.path_only, "/health") or
+        std.mem.eql(u8, request.path_only, "/version");
+    const is_join_route = isJoinTokenRoute(&request);
+    const has_any_auth = api_token != null or join_token != null;
+    const has_api_auth = if (api_token) |expected_token|
+        common.hasValidBearerToken(&request, expected_token)
+    else
+        false;
+    const has_join_auth = if (join_token) |expected_join_token|
+        is_join_route and common.hasValidBearerToken(&request, expected_join_token)
+    else
+        false;
 
-        if (!is_public and !has_api_auth and !has_join_auth) {
-            return common.unauthorized();
-        }
+    if (has_any_auth and !is_public and !has_api_auth and !has_join_auth) {
+        return common.unauthorized();
+    }
+
+    if (has_any_auth and !is_public and !is_join_route and !has_api_auth) {
+        return common.unauthorized();
     }
 
     if (request.method == .GET) {
@@ -394,4 +401,62 @@ test "dispatch rejects join token on operator-only agent list route" {
     const resp = dispatch(req, std.testing.allocator);
 
     try std.testing.expectEqual(http.StatusCode.unauthorized, resp.status);
+}
+
+test "dispatch rejects protected operator route when only join token is configured" {
+    const saved_api = api_token;
+    const saved_join = join_token;
+    defer {
+        api_token = saved_api;
+        join_token = saved_join;
+    }
+    api_token = null;
+    join_token = "join-secret";
+
+    const req = (try http.parseRequest(
+        "GET /agents HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+
+    try std.testing.expectEqual(http.StatusCode.unauthorized, resp.status);
+}
+
+test "dispatch allows join route when only join token is configured" {
+    const saved_api = api_token;
+    const saved_join = join_token;
+    const saved_cluster = cluster;
+    defer {
+        api_token = saved_api;
+        join_token = saved_join;
+        cluster = saved_cluster;
+    }
+    api_token = null;
+    join_token = "join-secret";
+    cluster = null;
+
+    const req = (try http.parseRequest(
+        "POST /agents/abc123def456/heartbeat HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer join-secret\r\nContent-Length: 2\r\n\r\n{}",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "dispatch allows unauthenticated public route when only join token is configured" {
+    const saved_api = api_token;
+    const saved_join = join_token;
+    defer {
+        api_token = saved_api;
+        join_token = saved_join;
+    }
+    api_token = null;
+    join_token = "join-secret";
+
+    const req = (try http.parseRequest(
+        "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )).?;
+    const resp = dispatch(req, std.testing.allocator);
+
+    try std.testing.expectEqual(http.StatusCode.ok, resp.status);
 }

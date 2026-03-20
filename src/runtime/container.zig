@@ -115,7 +115,7 @@ pub const ContainerConfig = struct {
     /// when non-empty, setupGpuPassthrough creates /dev/nvidia* and injects env vars
     gpu_indices: []const u32 = &.{},
     /// when true, runs in host mode with reduced filesystem isolation
-    /// auto-enabled when mount operations fail due to capability restrictions
+    /// this must be explicitly requested; isolation failures do not downgrade automatically
     host_mode: bool = false,
 };
 

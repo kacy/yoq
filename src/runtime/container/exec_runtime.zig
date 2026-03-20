@@ -68,7 +68,7 @@ pub const ChildExecContext = struct {
 pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
 
-    var host_mode = ctx.host_mode;
+    const host_mode = ctx.host_mode;
 
     if (!host_mode) {
         var setup_failed = false;
@@ -126,11 +126,9 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
             };
         }
 
-        if (setup_failed) {
-            host_mode = true;
-            log.warn("container: filesystem isolation not available due to permission restrictions - " ++
-                "falling back to host mode. Process/network/hostname isolation still active. " ++
-                "Note: Use full paths (e.g., /bin/echo) as PATH resolution differs in host mode.", .{});
+        if (shouldRefuseIsolationFallback(ctx.host_mode, setup_failed)) {
+            log.err("container: filesystem isolation setup failed; refusing unsafe host-mode fallback", .{});
+            return @intFromEnum(ExitCode.filesystem_error);
         }
     }
 
@@ -197,7 +195,17 @@ fn setHostname(name: []const u8) void {
     _ = linux.syscall2(.sethostname, @intFromPtr(name.ptr), name.len);
 }
 
+fn shouldRefuseIsolationFallback(requested_host_mode: bool, setup_failed: bool) bool {
+    return !requested_host_mode and setup_failed;
+}
+
 pub fn isCanonicalBindSource(source: []const u8) bool {
     if (source.len == 0) return false;
     return filesystem.isCanonicalAbsolutePath(source);
+}
+
+test "should refuse implicit host mode fallback when isolation was requested" {
+    try std.testing.expect(shouldRefuseIsolationFallback(false, true));
+    try std.testing.expect(!shouldRefuseIsolationFallback(true, true));
+    try std.testing.expect(!shouldRefuseIsolationFallback(false, false));
 }
