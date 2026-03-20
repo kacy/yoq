@@ -5,6 +5,7 @@
 // don't each reimplement the HOME lookup and bufPrint boilerplate.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const fmtx = std.fmt;
 const log = @import("log.zig");
 
@@ -12,17 +13,30 @@ pub const PathError = error{ HomeDirNotFound, PathTooLong };
 
 pub const max_path = 4096;
 
+fn dataRoot(buf: *[max_path]u8) PathError![]const u8 {
+    if (builtin.is_test) {
+        return std.fmt.bufPrint(buf, ".zig-local-cache/test-home/.local/share/yoq", .{}) catch
+            return PathError.PathTooLong;
+    }
+
+    const home = std.posix.getenv("HOME") orelse return PathError.HomeDirNotFound;
+    return std.fmt.bufPrint(buf, "{s}/.local/share/yoq", .{home}) catch
+        return PathError.PathTooLong;
+}
+
 /// build a path: ~/.local/share/yoq/<subpath>
 pub fn dataPath(buf: *[max_path]u8, subpath: []const u8) PathError![]const u8 {
-    const home = std.posix.getenv("HOME") orelse return PathError.HomeDirNotFound;
-    return std.fmt.bufPrint(buf, "{s}/.local/share/yoq/{s}", .{ home, subpath }) catch
+    var root_buf: [max_path]u8 = undefined;
+    const root = try dataRoot(&root_buf);
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ root, subpath }) catch
         return PathError.PathTooLong;
 }
 
 /// build a path with a formatted subpath: ~/.local/share/yoq/<fmt args>
 pub fn dataPathFmt(buf: *[max_path]u8, comptime fmt: []const u8, args: anytype) PathError![]const u8 {
-    const home = std.posix.getenv("HOME") orelse return PathError.HomeDirNotFound;
-    return std.fmt.bufPrint(buf, "{s}/.local/share/yoq/" ++ fmt, .{home} ++ args) catch
+    var root_buf: [max_path]u8 = undefined;
+    const root = try dataRoot(&root_buf);
+    return std.fmt.bufPrint(buf, "{s}/" ++ fmt, .{root} ++ args) catch
         return PathError.PathTooLong;
 }
 
@@ -66,33 +80,23 @@ pub fn uniqueDataTempPath(
 // -- tests --
 
 test "dataPath builds correct path" {
-    const home = std.posix.getenv("HOME") orelse return;
     var buf: [max_path]u8 = undefined;
     const path = try dataPath(&buf, "blobs/sha256");
 
-    try std.testing.expect(std.mem.startsWith(u8, path, home));
     try std.testing.expect(std.mem.endsWith(u8, path, "/.local/share/yoq/blobs/sha256"));
 }
 
 test "dataPathFmt with arguments" {
-    const home = std.posix.getenv("HOME") orelse return;
     var buf: [max_path]u8 = undefined;
     const path = try dataPathFmt(&buf, "containers/{s}/upper", .{"abc123"});
 
-    try std.testing.expect(std.mem.startsWith(u8, path, home));
     try std.testing.expect(std.mem.endsWith(u8, path, "containers/abc123/upper"));
 }
 
 test "dataPath without HOME returns error" {
-    // can't unset HOME in tests, so just verify the function compiles
-    // and works with HOME set
     var buf: [max_path]u8 = undefined;
-    const result = dataPath(&buf, "test");
-    if (result) |path| {
-        try std.testing.expect(path.len > 0);
-    } else |_| {
-        // HOME not set — expected in some CI environments
-    }
+    const path = try dataPath(&buf, "test");
+    try std.testing.expect(path.len > 0);
 }
 
 test "uniqueDataTempPath stays in target directory" {

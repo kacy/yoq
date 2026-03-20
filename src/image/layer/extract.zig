@@ -18,18 +18,23 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
         return types.LayerError.PathTooLong;
     const dest_owned = alloc.dupe(u8, dest_path) catch return types.LayerError.ExtractionFailed;
 
+    if (std.fs.cwd().access(dest_path, .{})) |_| {
+        if (hasCompleteCacheMarker(dest_path)) {
+            if (blob_store.verifyBlob(digest)) {
+                return dest_owned;
+            }
+            blob_store.removeBlob(digest);
+            alloc.free(dest_owned);
+            return types.LayerError.BlobNotFound;
+        }
+        removeExtractedLayer(dest_path);
+    } else |_| {}
+
     if (!blob_store.verifyBlob(digest)) {
         blob_store.removeBlob(digest);
         alloc.free(dest_owned);
         return types.LayerError.BlobNotFound;
     }
-
-    if (std.fs.cwd().access(dest_path, .{})) |_| {
-        if (hasCompleteCacheMarker(dest_path)) {
-            return dest_owned;
-        }
-        removeExtractedLayer(dest_path);
-    } else |_| {}
 
     var parent_buf: [max_path]u8 = undefined;
     const parent_path = layer_path.layerDir(&parent_buf) catch return types.LayerError.PathTooLong;

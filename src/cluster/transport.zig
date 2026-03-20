@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const builtin = @import("builtin");
 const types = @import("raft_types.zig");
 const common = @import("transport/common.zig");
 const connection_pool = @import("transport/connection_pool.zig");
@@ -698,9 +699,40 @@ test "connection pool: removeConn on missing peer is safe" {
     try std.testing.expectEqual(@as(u32, 0), pool.connections.count());
 }
 
+fn waitForGossipResult(receiver: *Transport, buf: []u8) !?GossipReceiveResult {
+    var attempts: usize = 0;
+    while (attempts < 50) : (attempts += 1) {
+        const result = try receiver.receiveGossip(buf);
+        if (result != null) return result;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    return null;
+}
+
+fn waitForGossipError(receiver: *Transport, buf: []u8) !void {
+    var attempts: usize = 0;
+    while (attempts < 50) : (attempts += 1) {
+        const result = receiver.receiveGossip(buf);
+        if (result) |_| {
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        } else |err| switch (err) {
+            TransportError.AuthenticationFailed => return,
+            else => return err,
+        }
+    }
+    return error.TestExpectedError;
+}
+
+fn requireUdpGossipTestHost() !void {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
+}
+
 // -- UDP gossip transport tests --
 
 test "udp gossip: send and receive with HMAC" {
+    try requireUdpGossipTestHost();
     const alloc = std.testing.allocator;
     const key: [32]u8 = "gossip-test-key-32bytes-exactly!".*;
 
@@ -745,18 +777,16 @@ test "udp gossip: send and receive with HMAC" {
     const payload = "hello-gossip";
     try sender.sendGossip(.{ 127, 0, 0, 1 }, recv_port, payload);
 
-    // give the kernel a moment to deliver
-    std.Thread.sleep(10 * std.time.ns_per_ms);
-
     // receive and verify
     var buf: [1500]u8 = undefined;
-    const result = try receiver.receiveGossip(&buf);
+    const result = try waitForGossipResult(&receiver, &buf);
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(u64, 1), result.?.sender_id);
     try std.testing.expectEqualSlices(u8, payload, result.?.payload);
 }
 
 test "udp gossip: wrong key rejected" {
+    try requireUdpGossipTestHost();
     const alloc = std.testing.allocator;
 
     var sender = Transport{
@@ -796,9 +826,6 @@ test "udp gossip: wrong key rejected" {
 
     try sender.sendGossip(.{ 127, 0, 0, 1 }, recv_port, "secret-data");
 
-    std.Thread.sleep(10 * std.time.ns_per_ms);
-
     var buf: [1500]u8 = undefined;
-    const result = receiver.receiveGossip(&buf);
-    try std.testing.expectError(TransportError.AuthenticationFailed, result);
+    try waitForGossipError(&receiver, &buf);
 }

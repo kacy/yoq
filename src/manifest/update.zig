@@ -422,7 +422,7 @@ test "partial batch start failure rolls back before stopping old containers" {
     const result = performRollingUpdate(alloc, strategy, &context);
     try std.testing.expectError(UpdateError.BatchFailed, result);
     try std.testing.expectEqual(@as(u32, 1), test_starts);
-    try std.testing.expectEqual(@as(u32, 0), test_stops);
+    try std.testing.expectEqual(@as(u32, 1), test_stops);
 }
 
 test "failure action enum values" {

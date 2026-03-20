@@ -347,6 +347,12 @@ fn readLimits(reader: anytype) !cgroups.ResourceLimits {
     };
 }
 
+fn uniqueTestConfigId() [12]u8 {
+    var raw: [6]u8 = undefined;
+    std.crypto.random.bytes(&raw);
+    return std.fmt.bytesToHex(raw, .lower);
+}
+
 test "restart policy parse" {
     try std.testing.expectEqual(RestartPolicy.no, RestartPolicy.parse("no").?);
     try std.testing.expectEqual(RestartPolicy.always, RestartPolicy.parse("always").?);
@@ -356,7 +362,7 @@ test "restart policy parse" {
 
 test "save and load config round-trips" {
     const alloc = std.testing.allocator;
-    const config_id = "deadbeefca11";
+    const config_id = uniqueTestConfigId();
 
     const args = try alloc.alloc([]const u8, 2);
     defer alloc.free(args);
@@ -406,10 +412,11 @@ test "save and load config round-trips" {
         .restart_policy = .always,
     };
 
-    try saveConfig(config_id, cfg);
-    defer removeConfig(config_id);
+    removeConfig(&config_id);
+    try saveConfig(&config_id, cfg);
+    defer removeConfig(&config_id);
 
-    const loaded = try loadConfig(alloc, config_id);
+    const loaded = try loadConfig(alloc, &config_id);
     defer loaded.deinit(alloc);
 
     try std.testing.expectEqualStrings("/tmp/rootfs", loaded.rootfs);
@@ -428,6 +435,7 @@ test "save and load config round-trips" {
 
 test "saveConfig validates container ID" {
     const alloc = std.testing.allocator;
+    const valid_id = uniqueTestConfigId();
 
     const cfg: SavedRunConfig = .{
         .rootfs = "/tmp/rootfs",
@@ -452,10 +460,11 @@ test "saveConfig validates container ID" {
     }
 
     // valid ID should succeed (or fail for other reasons, but not InvalidId)
-    saveConfig("abc123def456", cfg) catch |e| {
+    removeConfig(&valid_id);
+    saveConfig(&valid_id, cfg) catch |e| {
         try std.testing.expect(e != RunStateError.InvalidId);
     };
-    defer removeConfig("abc123def456");
+    defer removeConfig(&valid_id);
 
     // invalid IDs should return InvalidId
     try std.testing.expectError(RunStateError.InvalidId, saveConfig("../etc/passwd", cfg));
@@ -494,17 +503,19 @@ test "RestartPolicy labels" {
 }
 
 test "loadConfig rejects oversized serialized string length" {
-    const config_id = "deadbeefca12";
-    if (!container.isValidContainerId(config_id)) return error.SkipZigTest;
+    const config_id = uniqueTestConfigId();
+    if (!container.isValidContainerId(&config_id)) return error.SkipZigTest;
 
     paths.ensureDataDirStrict(configs_subdir) catch return error.SkipZigTest;
 
     var path_buf: [paths.max_path]u8 = undefined;
-    const path = try configPath(&path_buf, config_id);
+    const path = try configPath(&path_buf, &config_id);
+
+    removeConfig(&config_id);
 
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
-    defer removeConfig(config_id);
+    defer removeConfig(&config_id);
 
     var buf: [16]u8 = undefined;
     var writer = file.writer(&buf);
@@ -513,5 +524,5 @@ test "loadConfig rejects oversized serialized string length" {
     try writeInt(out, u32, max_serialized_string_bytes + 1);
     try out.flush();
 
-    try std.testing.expectError(RunStateError.InvalidFormat, loadConfig(std.testing.allocator, config_id));
+    try std.testing.expectError(RunStateError.InvalidFormat, loadConfig(std.testing.allocator, &config_id));
 }

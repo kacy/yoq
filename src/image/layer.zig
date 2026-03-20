@@ -110,14 +110,11 @@ test "writeTarEntry rejects unsupported entry kinds" {
 }
 
 test "layer path format" {
-    const home = std.posix.getenv("HOME") orelse return;
-
     const digest = blob_store.Digest.parse("sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9").?;
     var buf: [max_path]u8 = undefined;
     const path = try layerPath(digest, &buf);
 
-    // should contain the home dir, layer_subdir, and hex digest
-    try std.testing.expect(std.mem.startsWith(u8, path, home));
+    // should contain the cache subdir and the hex digest
     try std.testing.expect(std.mem.indexOf(u8, path, "layers/sha256") != null);
     try std.testing.expect(std.mem.endsWith(u8, path, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"));
 }

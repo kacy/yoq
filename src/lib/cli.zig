@@ -288,7 +288,11 @@ pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
 
     if (tokenFileExistsWithWeakPermissions(token_path)) return null;
 
-    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o600, .truncate = true }) catch return null;
+    const file = std.fs.cwd().createFile(token_path, .{
+        .mode = 0o600,
+        .truncate = true,
+        .exclusive = false,
+    }) catch return null;
     defer file.close();
 
     file.writeAll(buf) catch return null;
@@ -359,9 +363,18 @@ fn backupExistingToken() ?TokenTestBackup {
     backup.backup_path_len = backup_path.len;
 
     paths.ensureDataDirStrict("") catch return null;
-    std.fs.cwd().deleteFile(backup.backupPath()) catch {};
+    std.fs.cwd().deleteFile(backup.backupPath()) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return null,
+    };
 
-    const moved = if (std.fs.cwd().rename(token_path, backup_path)) |_| true else |_| false;
+    const moved = blk: {
+        std.fs.cwd().rename(token_path, backup_path) catch |err| switch (err) {
+            error.FileNotFound => break :blk false,
+            else => return null,
+        };
+        break :blk true;
+    };
     backup.moved = moved;
     return backup;
 }
@@ -477,19 +490,8 @@ test "readApiToken returns null for missing file" {
     token_test_mutex.lock();
     defer token_test_mutex.unlock();
 
-    // temporarily rename token file if it exists, test, restore
-    var path_buf: [paths.max_path]u8 = undefined;
-    const token_path = paths.dataPath(&path_buf, "api_token") catch return;
-
-    var backup_buf: [paths.max_path]u8 = undefined;
-    const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
-
-    // move existing file out of the way - if this fails, the file might not exist, which is fine
-    const moved = if (std.fs.cwd().rename(token_path, backup_path)) |_| true else |_| false;
-    // only try to restore if we actually moved the file
-    defer if (moved) std.fs.cwd().rename(backup_path, token_path) catch |e| {
-        log.warn("test cleanup: failed to restore token file: {}", .{e});
-    };
+    const backup = backupExistingToken() orelse return;
+    defer backup.restore();
 
     var buf: [64]u8 = undefined;
     try std.testing.expect(readApiToken(&buf) == null);

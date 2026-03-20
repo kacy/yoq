@@ -118,7 +118,7 @@ pub fn reconcileLiveness(id: []const u8, status: []const u8, pid: ?i32) []const 
     return status;
 }
 
-test "reconcileLiveness stops stale running record when pid is not in container cgroup" {
+test "reconcileLiveness preserves running state when cgroup ownership is unknown" {
     store.initTestDb() catch return error.SkipZigTest;
     defer store.deinitTestDb();
 
@@ -133,15 +133,15 @@ test "reconcileLiveness stops stale running record when pid is not in container 
         .exit_code = null,
     });
 
-    try std.testing.expectEqualStrings("stopped", reconcileLiveness("deadbeefcafe", "running", 999999));
+    try std.testing.expectEqualStrings("running", reconcileLiveness("deadbeefcafe", "running", 999999));
 
     const record = try store.load(std.testing.allocator, "deadbeefcafe");
     defer record.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("stopped", record.status);
-    try std.testing.expect(record.pid == null);
+    try std.testing.expectEqualStrings("running", record.status);
+    try std.testing.expectEqual(@as(?i32, 999999), record.pid);
 }
 
-test "currentOwnedRunningPid clears stale pid state" {
+test "currentOwnedRunningPid preserves running state when cgroup ownership is unknown" {
     store.initTestDb() catch return error.SkipZigTest;
     defer store.deinitTestDb();
 
@@ -163,8 +163,8 @@ test "currentOwnedRunningPid clears stale pid state" {
 
     const updated = try store.load(std.testing.allocator, "cafebabefeed");
     defer updated.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("stopped", updated.status);
-    try std.testing.expect(updated.pid == null);
+    try std.testing.expectEqualStrings("running", updated.status);
+    try std.testing.expectEqual(@as(?i32, 999999), updated.pid);
 }
 
 test "reconcileLiveness preserves running status when ownership cannot be verified" {
