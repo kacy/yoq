@@ -119,6 +119,31 @@ pub fn build(b: *std.Build) void {
     run_tests.has_side_effects = true;
     test_step.dependOn(&run_tests.step);
 
+    // -- gpu tests (no hardware required) --
+    //
+    // these focus on the src/gpu subtree plus manifest GPU env glue. they are
+    // intended to stay deterministic on hosts without physical GPUs by using
+    // fake procfs/sysfs layouts and synthetic topology fixtures.
+    const gpu_test_step = b.step("test-gpu", "Run GPU-focused tests");
+    const gpu_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_gpu_root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addSqlite(gpu_test_mod, b, target, optimize);
+
+    const gpu_tests = b.addTest(.{
+        .root_module = gpu_test_mod,
+    });
+    const run_gpu_tests = std.Build.Step.Run.create(b, "run gpu tests");
+    run_gpu_tests.producer = gpu_tests;
+    run_gpu_tests.addArtifactArg(gpu_tests);
+    run_gpu_tests.has_side_effects = true;
+    if (b.args) |args| {
+        run_gpu_tests.addArgs(args);
+    }
+    gpu_test_step.dependOn(&run_gpu_tests.step);
+
     // -- integration tests (no sqlite required) --
     //
     // these test the manifest loader, validator, CLI helpers, and JSON output

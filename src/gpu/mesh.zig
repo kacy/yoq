@@ -9,6 +9,7 @@
 // falls back gracefully to TCP when no InfiniBand is detected.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const detect = @import("detect.zig");
 const log = @import("../lib/log.zig");
 const env_buffer = @import("env_buffer.zig");
@@ -17,6 +18,13 @@ const Allocator = std.mem.Allocator;
 const GpuInfo = detect.GpuInfo;
 
 pub const max_ib_devices = 4;
+
+pub const DetectPaths = struct {
+    ib_root: []const u8 = "/sys/class/infiniband",
+    peermem_path: []const u8 = "/proc/driver/nvidia-peermem",
+};
+
+var detect_paths = DetectPaths{};
 
 pub const IbDevice = struct {
     name: [32]u8 = .{0} ** 32,
@@ -42,6 +50,16 @@ pub const IbDetectResult = struct {
     gdr_available: bool,
 };
 
+pub fn setTestDetectPaths(paths: DetectPaths) void {
+    if (!builtin.is_test) @panic("setTestDetectPaths is test-only");
+    detect_paths = paths;
+}
+
+pub fn resetTestDetectPaths() void {
+    if (!builtin.is_test) @panic("resetTestDetectPaths is test-only");
+    detect_paths = .{};
+}
+
 /// detect InfiniBand devices by scanning sysfs.
 pub fn detectInfiniband() IbDetectResult {
     var result = IbDetectResult{
@@ -53,7 +71,7 @@ pub fn detectInfiniband() IbDetectResult {
     // check for GPUDirect RDMA (nvidia-peermem)
     result.gdr_available = checkGdr();
 
-    var ib_dir = std.fs.openDirAbsolute("/sys/class/infiniband", .{ .iterate = true }) catch return result;
+    var ib_dir = std.fs.openDirAbsolute(detect_paths.ib_root, .{ .iterate = true }) catch return result;
     defer ib_dir.close();
 
     var iter = ib_dir.iterate();
@@ -91,7 +109,7 @@ pub fn detectInfiniband() IbDetectResult {
 /// check if GPUDirect RDMA is available.
 fn checkGdr() bool {
     // nvidia-peermem kernel module
-    const file = std.fs.cwd().openFile("/proc/driver/nvidia-peermem", .{}) catch {
+    const file = std.fs.cwd().openFile(detect_paths.peermem_path, .{}) catch {
         return false;
     };
     file.close();
@@ -103,7 +121,7 @@ fn countActivePorts(dev_name: []const u8) u8 {
     // check ports 1-4
     for (1..5) |port| {
         var path_buf: [256]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/sys/class/infiniband/{s}/ports/{d}/state", .{ dev_name, port }) catch continue;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}/ports/{d}/state", .{ detect_paths.ib_root, dev_name, port }) catch continue;
         const content = readSmallFile(path) orelse continue;
         if (std.mem.indexOf(u8, content.slice(), "ACTIVE") != null) {
             active += 1;
@@ -114,7 +132,7 @@ fn countActivePorts(dev_name: []const u8) u8 {
 
 fn readPortRate(dev_name: []const u8) u32 {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/sys/class/infiniband/{s}/ports/1/rate", .{dev_name}) catch return 0;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}/ports/1/rate", .{ detect_paths.ib_root, dev_name }) catch return 0;
     const content = readSmallFile(path) orelse return 0;
     const trimmed = std.mem.trim(u8, content.slice(), " \t\n\r");
     // format is like "200 Gb/sec" — parse the number
@@ -125,7 +143,7 @@ fn readPortRate(dev_name: []const u8) u32 {
 fn readIbPciBusId(dev_name: []const u8, dev: *IbDevice) void {
     // the device directory often has a symlink to the PCI device
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/sys/class/infiniband/{s}/device/uevent", .{dev_name}) catch return;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}/device/uevent", .{ detect_paths.ib_root, dev_name }) catch return;
     const content = readSmallFile(path) orelse return;
     if (detect.parsePciBusIdFromUevent(content.slice())) |pci| {
         const pci_len: u8 = @intCast(@min(pci.len, 16));
@@ -339,6 +357,39 @@ test "detectInfiniband returns gracefully" {
     if (result.count == 0) {
         try std.testing.expect(!result.gdr_available);
     }
+}
+
+test "detectInfiniband discovers fake IB tree" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sys/class/infiniband/mlx5_0/ports/1");
+    try tmp.dir.makePath("sys/class/infiniband/mlx5_0/device");
+    try tmp.dir.writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/state", .data = "4: ACTIVE\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/rate", .data = "200 Gb/sec\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/device/uevent", .data = "PCI_SLOT_NAME=0000:81:00.0\n" });
+    try tmp.dir.makePath("proc/driver");
+    try tmp.dir.writeFile(.{ .sub_path = "proc/driver/nvidia-peermem", .data = "loaded\n" });
+
+    var ib_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var peermem_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ib_root = try tmp.dir.realpath("sys/class/infiniband", &ib_buf);
+    const peermem_path = try tmp.dir.realpath("proc/driver/nvidia-peermem", &peermem_buf);
+
+    setTestDetectPaths(.{
+        .ib_root = ib_root,
+        .peermem_path = peermem_path,
+    });
+    defer resetTestDetectPaths();
+
+    const result = detectInfiniband();
+    try std.testing.expectEqual(@as(u8, 1), result.count);
+    try std.testing.expect(result.gdr_available);
+    try std.testing.expectEqualStrings("mlx5_0", result.devices[0].getName());
+    try std.testing.expectEqualStrings("0000:81:00.0", result.devices[0].getPciBusId());
+    try std.testing.expectEqual(@as(u8, 1), result.devices[0].active_ports);
+    try std.testing.expectEqual(@as(u32, 200), result.devices[0].rate_gbps);
+    try std.testing.expect(result.devices[0].gdr_supported);
 }
 
 test "generateNcclTopology empty" {
