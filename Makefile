@@ -49,8 +49,7 @@ define do_release
 	sed -i 's/"version":"$(CURRENT_VERSION)"/"version":"$(1)"/g' src/api/routes.zig
 	sed -i 's/"version", "$(CURRENT_VERSION)"/"version", "$(1)"/' src/lib/command_registry.zig
 	sed -i 's/yoq $(CURRENT_VERSION)/yoq $(1)/' src/lib/command_registry.zig
-	sed -i 's/^## unreleased/## unreleased\n\n### added\n\n### fixed\n\n### removed\n\n## $(1)/' CHANGELOG.md
-	git add build.zig.zon src/api/routes.zig src/lib/command_registry.zig CHANGELOG.md
+	git add build.zig.zon src/api/routes.zig src/lib/command_registry.zig
 	git commit -m "chore: release v$(1)"
 	git tag "v$(1)"
 	git push origin main "v$(1)"

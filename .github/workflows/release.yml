@@ -205,43 +205,12 @@ jobs:
           name: yoq-release-bundle
           path: dist
 
-      - name: write release notes
-        shell: bash
-        env:
-          TAG: ${{ needs.validate-tag.outputs.tag }}
-          VERSION: ${{ needs.validate-tag.outputs.version }}
-        run: |
-          notes="dist/release-notes.md"
-          {
-            echo "## yoq ${VERSION}"
-            echo
-            echo "release tag: ${TAG}"
-            echo
-            echo "artifacts:"
-            for f in dist/yoq-linux-*.tar.gz; do
-              echo "- $(basename "$f")"
-            done
-            echo
-            echo "install: \`curl -fsSL https://raw.githubusercontent.com/kacy/yoq/main/scripts/install.sh | sh\`"
-            echo
-            echo "## changelog"
-            if [ -f CHANGELOG.md ]; then
-              awk -v ver="${VERSION}" '
-                $0 == "## " ver { printing = 1; next }
-                printing && /^## / { exit }
-                printing { print }
-              ' CHANGELOG.md
-            else
-              echo "CHANGELOG.md not found."
-            fi
-          } > "$notes"
-
       - name: publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.validate-tag.outputs.tag }}
           name: yoq ${{ needs.validate-tag.outputs.tag }}
-          body_path: dist/release-notes.md
+          generate_release_notes: true
           files: |
             dist/*.tar.gz
             dist/*.sha256
