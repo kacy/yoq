@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const log = std.log;
 const types = @import("types.zig");
@@ -9,8 +10,25 @@ const NvmlHandle = types.NvmlHandle;
 const SysfsContent = types.SysfsContent;
 const max_gpus = types.max_gpus;
 
+pub const ProbeRoots = struct {
+    procfs_gpus: []const u8 = "/proc/driver/nvidia/gpus",
+    drm_root: []const u8 = "/sys/class/drm",
+};
+
+var probe_roots = ProbeRoots{};
+
+pub fn setTestProbeRoots(roots: ProbeRoots) void {
+    if (!builtin.is_test) @panic("setTestProbeRoots is test-only");
+    probe_roots = roots;
+}
+
+pub fn resetTestProbeRoots() void {
+    if (!builtin.is_test) @panic("resetTestProbeRoots is test-only");
+    probe_roots = .{};
+}
+
 pub fn detectProcfs() ?DetectResult {
-    var dir = std.fs.openDirAbsolute("/proc/driver/nvidia/gpus", .{ .iterate = true }) catch return null;
+    var dir = std.fs.openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
     defer dir.close();
 
     var result = emptyDetectResult(.procfs, null);
@@ -38,7 +56,7 @@ pub fn detectProcfs() ?DetectResult {
 
 pub fn detectSysfs() ?DetectResult {
     var result = emptyDetectResult(.sysfs, null);
-    var drm_dir = std.fs.openDirAbsolute("/sys/class/drm", .{ .iterate = true }) catch return null;
+    var drm_dir = std.fs.openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
     defer drm_dir.close();
 
     var iter = drm_dir.iterate();
@@ -50,7 +68,7 @@ pub fn detectSysfs() ?DetectResult {
         if (std.mem.indexOfScalar(u8, name, '-') != null) continue;
 
         var path_buf: [256]u8 = undefined;
-        const vendor_path = std.fmt.bufPrint(&path_buf, "/sys/class/drm/{s}/device/vendor", .{name}) catch continue;
+        const vendor_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/device/vendor", .{ probe_roots.drm_root, name }) catch continue;
         const vendor_content = readSysfsFile(vendor_path) orelse continue;
         const trimmed = std.mem.trim(u8, vendor_content.slice(), " \t\n\r");
         if (!std.mem.eql(u8, trimmed, "0x10de")) continue;
@@ -58,7 +76,7 @@ pub fn detectSysfs() ?DetectResult {
         var gpu = GpuInfo{ .index = result.count };
 
         var uevent_buf: [256]u8 = undefined;
-        const uevent_path = std.fmt.bufPrint(&uevent_buf, "/sys/class/drm/{s}/device/uevent", .{name}) catch {
+        const uevent_path = std.fmt.bufPrint(&uevent_buf, "{s}/{s}/device/uevent", .{ probe_roots.drm_root, name }) catch {
             result.gpus[result.count] = gpu;
             result.count += 1;
             continue;

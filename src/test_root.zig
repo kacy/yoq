@@ -88,6 +88,7 @@ comptime {
     _ = @import("storage/s3_xml.zig");
     _ = @import("storage/metrics.zig");
     _ = @import("api/routes/s3_gateway.zig");
+    _ = @import("gpu/env_buffer.zig");
     _ = @import("gpu/detect.zig");
     _ = @import("gpu/passthrough.zig");
     _ = @import("gpu/health.zig");
@@ -95,4 +96,5 @@ comptime {
     _ = @import("gpu/mesh.zig");
     _ = @import("gpu/mig.zig");
     _ = @import("gpu/mps.zig");
+    _ = @import("gpu/commands.zig");
 }

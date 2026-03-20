@@ -101,6 +101,8 @@ Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't t
 make build
 ```
 
+For GPU-focused validation without running the full suite, use `zig build test-gpu`. For a real-host smoke checklist, see [docs/gpu-validation.md](docs/gpu-validation.md).
+
 ### one-liner
 ```bash
 curl -fsSL https://yoq.dev/install | bash

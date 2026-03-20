@@ -241,7 +241,11 @@ fn mountFirstAvailableLib(merged_dir: []const u8, lib_name: []const u8) void {
 }
 
 fn findHostLibrary(buf: []u8, lib_name: []const u8) ?[]const u8 {
-    for (lib_search_paths) |search_path| {
+    return findHostLibraryInPaths(buf, lib_name, &lib_search_paths);
+}
+
+fn findHostLibraryInPaths(buf: []u8, lib_name: []const u8, search_paths: []const []const u8) ?[]const u8 {
+    for (search_paths) |search_path| {
         const src = std.fmt.bufPrint(buf, "{s}/{s}", .{ search_path, lib_name }) catch continue;
         if (!pathExists(src)) continue;
         return src;
@@ -297,6 +301,39 @@ test "formatGpuList multiple" {
     var buf: [32]u8 = undefined;
     const list = try formatGpuList(&buf, &[_]u32{ 0, 2, 5 });
     try std.testing.expectEqualStrings("0,2,5", list);
+}
+
+test "findHostLibraryInPaths finds fake library roots" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("lib-a");
+    try tmp.dir.makePath("lib-b");
+    try tmp.dir.writeFile(.{ .sub_path = "lib-b/libnvidia-ml.so.1", .data = "" });
+
+    var root_a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_b_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_a = try tmp.dir.realpath("lib-a", &root_a_buf);
+    const root_b = try tmp.dir.realpath("lib-b", &root_b_buf);
+
+    var path_buf: [512]u8 = undefined;
+    const found = findHostLibraryInPaths(&path_buf, "libnvidia-ml.so.1", &.{ root_a, root_b });
+    try std.testing.expect(found != null);
+
+    var expected_buf: [512]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "{s}/libnvidia-ml.so.1", .{root_b});
+    try std.testing.expectEqualStrings(expected, found.?);
+}
+
+test "findHostLibraryInPaths returns null for missing library" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try tmp.dir.realpath(".", &root_buf);
+
+    var path_buf: [512]u8 = undefined;
+    try std.testing.expect(findHostLibraryInPaths(&path_buf, "libcuda.so.999", &.{root}) == null);
 }
 
 test "setupGpuPassthrough no-op with empty indices" {

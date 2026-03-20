@@ -47,6 +47,10 @@ pub fn resolveNvLinkPeers(gpus: []GpuInfo, count: u8, nvml: *NvmlHandle) void {
     return nvml_runtime.resolveNvLinkPeers(gpus, count, nvml);
 }
 
+fn testRealpath(dir: std.fs.Dir, sub_path: []const u8, buf: []u8) ![]const u8 {
+    return dir.realpath(sub_path, buf);
+}
+
 // -- tests --
 
 test "GpuInfo defaults" {
@@ -110,6 +114,57 @@ test "detect returns gracefully when no GPUs" {
     var result = detect();
     defer result.deinit();
     try std.testing.expect(result.count <= max_gpus);
+}
+
+test "detectProcfs discovers fake GPU directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proc/driver/nvidia/gpus/0000:65:00.0");
+    try tmp.dir.makePath("proc/driver/nvidia/gpus/0000:b3:00.0");
+
+    var proc_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const proc_root = try testRealpath(tmp.dir, "proc/driver/nvidia/gpus", &proc_buf);
+
+    fallback_runtime.setTestProbeRoots(.{ .procfs_gpus = proc_root });
+    defer fallback_runtime.resetTestProbeRoots();
+
+    const maybe_result = fallback_runtime.detectProcfs();
+    try std.testing.expect(maybe_result != null);
+    var result = maybe_result.?;
+    defer result.deinit();
+
+    try std.testing.expectEqual(DetectSource.procfs, result.source);
+    try std.testing.expectEqual(@as(u8, 2), result.count);
+    try std.testing.expectEqualStrings("0000:65:00.0", result.gpus[0].getPciBusId());
+    try std.testing.expectEqualStrings("0000:b3:00.0", result.gpus[1].getPciBusId());
+}
+
+test "detectSysfs filters NVIDIA cards from fake drm tree" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("sys/class/drm/card0/device");
+    try tmp.dir.writeFile(.{ .sub_path = "sys/class/drm/card0/device/vendor", .data = "0x10de\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "sys/class/drm/card0/device/uevent", .data = "PCI_SLOT_NAME=0000:17:00.0\n" });
+
+    try tmp.dir.makePath("sys/class/drm/card1/device");
+    try tmp.dir.writeFile(.{ .sub_path = "sys/class/drm/card1/device/vendor", .data = "0x8086\n" });
+
+    var drm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const drm_root = try testRealpath(tmp.dir, "sys/class/drm", &drm_buf);
+
+    fallback_runtime.setTestProbeRoots(.{ .drm_root = drm_root });
+    defer fallback_runtime.resetTestProbeRoots();
+
+    const maybe_result = fallback_runtime.detectSysfs();
+    try std.testing.expect(maybe_result != null);
+    var result = maybe_result.?;
+    defer result.deinit();
+
+    try std.testing.expectEqual(DetectSource.sysfs, result.source);
+    try std.testing.expectEqual(@as(u8, 1), result.count);
+    try std.testing.expectEqualStrings("0000:17:00.0", result.gpus[0].getPciBusId());
 }
 
 test "max_gpus constant" {
