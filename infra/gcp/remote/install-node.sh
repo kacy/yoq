@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROLE="${1:?usage: install-node.sh <server|agent>}"
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y \
+  ca-certificates \
+  curl \
+  iproute2 \
+  iptables \
+  jq \
+  python3 \
+  wireguard-tools
+
+modprobe wireguard || true
+
+install -d -m 0755 /opt/yoq-gcp
+install -m 0755 /tmp/yoq /usr/local/bin/yoq
+install -m 0644 /tmp/smoke.py /opt/yoq-gcp/smoke.py
+
+HOME=/root yoq doctor --json > /opt/yoq-gcp/doctor.json || true
+
+if [ "${ROLE}" = "agent" ]; then
+  nvidia-smi -L >/opt/yoq-gcp/nvidia-smi.txt
+fi

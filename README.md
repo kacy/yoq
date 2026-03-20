@@ -102,6 +102,7 @@ make build
 ```
 
 For GPU-focused validation without running the full suite, use `zig build test-gpu`. For a real-host smoke checklist, see [docs/gpu-validation.md](docs/gpu-validation.md).
+For a temporary 5-node GCP validation rig that exercises cluster networking and GPU hosts, see [docs/gcp-cluster-validation.md](docs/gcp-cluster-validation.md).
 
 ### one-liner
 ```bash

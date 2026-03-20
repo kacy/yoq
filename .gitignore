@@ -22,5 +22,10 @@ zig-out/
 # private notes
 personal/
 
+# temporary GCP validation rig state
+infra/gcp/config.env
+infra/gcp/.state/
+infra/gcp/artifacts/
+
 # prebuilt dependencies (rebuild on version bump)
 vendor/prebuilt/
