@@ -179,11 +179,18 @@ pub fn unregisterService(container_id: []const u8) void {
             entry.container_id_len == cid_len and
             std.mem.eql(u8, entry.container_id[0..entry.container_id_len], container_id[0..cid_len]))
         {
-            policy.removeForContainer(entry.ip, std.heap.page_allocator);
-            deleteBpfBackend(entry.name[0..entry.name_len], entry.ip);
-            deleteBpfMap(entry.name[0..entry.name_len]);
+            const name = entry.name[0..entry.name_len];
+            const old_ip = entry.ip;
+            policy.removeForContainer(old_ip, std.heap.page_allocator);
+            deleteBpfBackend(name, old_ip);
             entry.active = false;
             registry_count -= 1;
+
+            if (findLatestActiveEntryLocked(name)) |survivor| {
+                updateBpfMap(survivor.name[0..survivor.name_len], survivor.ip);
+            } else {
+                deleteBpfMap(name);
+            }
         }
     }
 }
@@ -319,6 +326,21 @@ fn getServiceVip(name: []const u8) ?[4]u8 {
             std.mem.eql(u8, entry.name[0..entry.name_len], name))
         {
             return entry.ip;
+        }
+    }
+    return null;
+}
+
+fn findLatestActiveEntryLocked(name: []const u8) ?*const ServiceEntry {
+    var i: usize = max_services;
+    while (i > 0) {
+        i -= 1;
+        const entry = &registry[i];
+        if (entry.active and
+            entry.name_len == name.len and
+            std.mem.eql(u8, entry.name[0..entry.name_len], name))
+        {
+            return entry;
         }
     }
     return null;

@@ -17,6 +17,13 @@ pub fn setupClusterNetworking(config: common.ClusterNetworkConfig) !void {
         return error.BridgeFailed;
     };
     errdefer wireguard.deleteInterface(common.wg_interface) catch {};
+    var added_peers: usize = 0;
+    errdefer {
+        while (added_peers > 0) {
+            added_peers -= 1;
+            removeClusterPeer(config.peers[added_peers]);
+        }
+    }
 
     wireguard.assignOverlayIp(common.wg_interface, config.overlay_ip, 24) catch |e| {
         log.warn("failed to assign overlay IP to {s}: {}", .{ common.wg_interface, e });
@@ -26,17 +33,20 @@ pub fn setupClusterNetworking(config: common.ClusterNetworkConfig) !void {
     for (config.peers) |peer| {
         addClusterPeerInternal(peer) catch |e| {
             log.warn("failed to add peer (node {d}): {}", .{ peer.container_subnet_node, e });
+            return error.ConfigFailed;
         };
+        added_peers += 1;
     }
 
     if (config.role == .server) {
         const fwd_path = "/proc/sys/net/ipv4/conf/wg-yoq/forwarding";
         if (std.fs.cwd().openFile(fwd_path, .{ .mode = .write_only })) |file| {
             defer file.close();
-            file.writeAll("1") catch {};
+            file.writeAll("1") catch return error.ConfigFailed;
             log.info("IP forwarding enabled on wg-yoq (server role)", .{});
         } else |e| {
             log.warn("failed to enable IP forwarding on wg-yoq: {}", .{e});
+            return error.ConfigFailed;
         }
     }
 
@@ -69,10 +79,14 @@ fn addClusterPeerInternal(peer: common.PeerInfo) !void {
         log.warn("failed to add wireguard peer: {}", .{e});
         return error.ConfigFailed;
     };
+    errdefer wireguard.removePeer(common.wg_interface, peer.public_key) catch |e| {
+        log.warn("failed to roll back wireguard peer: {}", .{e});
+    };
 
     const dest = [4]u8{ subnet_base[0], subnet_base[1], subnet_base[2], 0 };
     wireguard.addRoute(dest, 24, peer.overlay_ip) catch |e| {
         log.warn("failed to add route for {d}.{d}.{d}.0/24: {}", .{ subnet_base[0], subnet_base[1], subnet_base[2], e });
+        return error.ConfigFailed;
     };
 }
 

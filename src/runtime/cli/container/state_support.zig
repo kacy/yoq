@@ -8,6 +8,12 @@ const common = @import("common.zig");
 const writeErr = cli.writeErr;
 const ContainerError = common.ContainerError;
 
+const LivenessState = enum {
+    running,
+    gone,
+    unknown,
+};
+
 pub fn resolveContainerRef(alloc: std.mem.Allocator, ref: []const u8) ContainerError!store.ContainerRecord {
     return store.load(alloc, ref) catch {
         const record = store.findByHostname(alloc, ref) catch |err| {
@@ -26,21 +32,27 @@ pub fn persistStoppedState(record: *const store.ContainerRecord, exit_code: ?u8)
 }
 
 pub fn isOwnedContainerPid(id: []const u8, pid: i32) bool {
-    const cg = cgroups.Cgroup.open(id) catch return false;
-    return cg.containsProcess(pid);
+    return ownedPidState(id, pid) == .running;
+}
+
+fn ownedPidState(id: []const u8, pid: i32) LivenessState {
+    const cg = cgroups.Cgroup.open(id) catch return .unknown;
+    const contains = cg.containsProcessChecked(pid) catch return .unknown;
+    if (!contains) return .gone;
+    process.sendSignal(pid, 0) catch return .gone;
+    return .running;
 }
 
 pub fn currentOwnedRunningPid(record: *const store.ContainerRecord) ?i32 {
     const pid = record.pid orelse return null;
-    if (!isOwnedContainerPid(record.id, pid)) {
-        persistStoppedState(record, null);
-        return null;
-    }
-    process.sendSignal(pid, 0) catch {
-        persistStoppedState(record, null);
-        return null;
+    return switch (ownedPidState(record.id, pid)) {
+        .running => pid,
+        .gone => blk: {
+            persistStoppedState(record, null);
+            break :blk null;
+        },
+        .unknown => null,
     };
-    return pid;
 }
 
 pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
@@ -53,6 +65,16 @@ pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
         defer record.deinit(alloc);
 
         if (std.mem.eql(u8, record.status, "stopped") and record.pid == null) return true;
+        if (record.pid) |pid| {
+            switch (ownedPidState(record.id, pid)) {
+                .gone => {
+                    persistStoppedState(&record, record.exit_code);
+                    return true;
+                },
+                .unknown => {},
+                .running => {},
+            }
+        }
         std.Thread.sleep(50 * std.time.ns_per_ms);
     }
 
@@ -84,14 +106,14 @@ pub fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) Container
 pub fn reconcileLiveness(id: []const u8, status: []const u8, pid: ?i32) []const u8 {
     if (!std.mem.eql(u8, status, "running")) return status;
     if (pid) |p| {
-        if (!isOwnedContainerPid(id, p)) {
-            store.updateStatus(id, "stopped", null, null) catch {};
-            return "stopped";
+        switch (ownedPidState(id, p)) {
+            .gone => {
+                store.updateStatus(id, "stopped", null, null) catch {};
+                return "stopped";
+            },
+            .unknown => return status,
+            .running => {},
         }
-        process.sendSignal(p, 0) catch {
-            store.updateStatus(id, "stopped", null, null) catch {};
-            return "stopped";
-        };
     }
     return status;
 }
@@ -143,4 +165,53 @@ test "currentOwnedRunningPid clears stale pid state" {
     defer updated.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("stopped", updated.status);
     try std.testing.expect(updated.pid == null);
+}
+
+test "reconcileLiveness preserves running status when ownership cannot be verified" {
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "invalid-owner",
+        .hostname = "test",
+        .rootfs = "/tmp/rootfs",
+        .status = "running",
+        .command = "sleep 1",
+        .created_at = 1,
+        .pid = 12345,
+        .exit_code = null,
+    });
+
+    try std.testing.expectEqualStrings("running", reconcileLiveness("invalid-owner", "running", 12345));
+
+    const record = try store.load(std.testing.allocator, "invalid-owner");
+    defer record.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("running", record.status);
+    try std.testing.expectEqual(@as(?i32, 12345), record.pid);
+}
+
+test "currentOwnedRunningPid preserves running state when ownership cannot be verified" {
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "invalid-owner",
+        .hostname = "test",
+        .rootfs = "/tmp/rootfs",
+        .status = "running",
+        .command = "sleep 1",
+        .created_at = 1,
+        .pid = 12345,
+        .exit_code = null,
+    });
+
+    const record = try store.load(std.testing.allocator, "invalid-owner");
+    defer record.deinit(std.testing.allocator);
+
+    try std.testing.expect(currentOwnedRunningPid(&record) == null);
+
+    const updated = try store.load(std.testing.allocator, "invalid-owner");
+    defer updated.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("running", updated.status);
+    try std.testing.expectEqual(@as(?i32, 12345), updated.pid);
 }

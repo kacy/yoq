@@ -98,6 +98,10 @@ pub const TrainingController = struct {
         state_support.loadResumeCheckpoint(self);
     }
 
+    pub fn isClusterManaged(self: *const TrainingController) bool {
+        return state_support.isClusterManaged(self);
+    }
+
     /// start training job locally by launching one container per rank.
     /// each rank gets RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT, LOCAL_RANK
     /// injected into its environment along with NCCL mesh config.
@@ -315,4 +319,26 @@ test "training controller rank_status matches gpus" {
 
     try std.testing.expectEqual(@as(usize, 100), ctrl.rank_status.len);
     try std.testing.expectEqual(@as(u32, 100), ctrl.job.gpus);
+}
+
+test "cluster-managed job detection follows job id prefix" {
+    const alloc = std.testing.allocator;
+
+    const tj = spec.TrainingJob{
+        .name = "test",
+        .image = "scratch",
+        .command = &.{},
+        .env = &.{},
+        .working_dir = null,
+        .volumes = &.{},
+        .gpus = 1,
+    };
+
+    var ctrl = try TrainingController.init(alloc, &tj, "test-app");
+    defer ctrl.deinit();
+
+    try std.testing.expect(!ctrl.isClusterManaged());
+
+    try state_support.generateClusterJobId(&ctrl);
+    try std.testing.expect(ctrl.isClusterManaged());
 }

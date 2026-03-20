@@ -121,6 +121,10 @@ pub fn startResolver() void {
     resolver_runtime.startResolver();
 }
 
+pub fn resolverRunning() bool {
+    return resolver_runtime.isRunning();
+}
+
 /// stop the DNS resolver thread.
 pub fn stopResolver() void {
     resolver_runtime.stopResolver();

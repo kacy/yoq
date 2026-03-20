@@ -262,6 +262,11 @@ fn trainStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return TrainError.DeploymentFailed;
     }
 
+    if (ctx.ctrl.isClusterManaged()) {
+        writeErr("training job {s} is cluster-managed; stop is not supported until remote lifecycle control is implemented\n", .{ctx.name});
+        return TrainError.DeploymentFailed;
+    }
+
     ctx.ctrl.stop();
     writeErr("training job {s} stopped\n", .{ctx.name});
 }
@@ -272,6 +277,11 @@ fn trainPause(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     if (!ctx.ctrl.loadFromStore()) {
         writeErr("no active training job found for {s}\n", .{ctx.name});
+        return TrainError.DeploymentFailed;
+    }
+
+    if (ctx.ctrl.isClusterManaged()) {
+        writeErr("training job {s} is cluster-managed; pause is not supported until remote lifecycle control is implemented\n", .{ctx.name});
         return TrainError.DeploymentFailed;
     }
 
@@ -290,6 +300,11 @@ fn trainResume(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     if (!ctx.ctrl.loadFromStore()) {
         writeErr("no training job found for {s} (start it first with 'yoq train start')\n", .{ctx.name});
+        return TrainError.DeploymentFailed;
+    }
+
+    if (ctx.ctrl.isClusterManaged()) {
+        writeErr("training job {s} is cluster-managed; resume is not supported until remote lifecycle control is implemented\n", .{ctx.name});
         return TrainError.DeploymentFailed;
     }
 
@@ -386,6 +401,11 @@ fn trainScale(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     if (!ctrl.loadFromStore()) {
         writeErr("no active training job found for {s} (start it first)\n", .{name});
+        return TrainError.DeploymentFailed;
+    }
+
+    if (ctrl.isClusterManaged()) {
+        writeErr("training job {s} is cluster-managed; scaling is not supported until remote lifecycle control is implemented\n", .{name});
         return TrainError.DeploymentFailed;
     }
 

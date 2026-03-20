@@ -63,7 +63,8 @@ pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     supervisor_runtime.stopProcess(pid) catch |e| return e;
     if (!state_support.waitForStoppedState(alloc, record.id)) {
-        state_support.persistStoppedState(&record, null);
+        writeErr("timed out waiting for container {s} to reach stopped state\n", .{record.id});
+        return ContainerError.StateUnknown;
     }
     write("{s}\n", .{record.id});
 }

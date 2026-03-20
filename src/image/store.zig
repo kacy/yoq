@@ -178,6 +178,30 @@ test "verify blob — missing blob returns false" {
     try std.testing.expect(!verifyBlob(digest));
 }
 
+test "putBlobDirect repairs corrupted existing blob" {
+    const home = std.posix.getenv("HOME") orelse return;
+    _ = home;
+
+    const data = "repair corrupted blob content";
+    const digest = try putBlob(data);
+    defer deleteBlob(digest) catch {};
+
+    var path_buf: [max_path]u8 = undefined;
+    const path = try blobPath(digest, &path_buf);
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("corrupted data");
+    try std.testing.expect(!verifyBlob(digest));
+
+    try putBlobDirect(data, digest);
+    try std.testing.expect(verifyBlob(digest));
+
+    const alloc = std.testing.allocator;
+    const repaired = try getBlob(alloc, digest);
+    defer alloc.free(repaired);
+    try std.testing.expectEqualStrings(data, repaired);
+}
+
 test "remove blob — silently handles missing blob" {
     const digest = computeDigest("never stored blob for remove test");
     removeBlob(digest);

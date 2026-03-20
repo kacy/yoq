@@ -88,6 +88,9 @@ pub const RTM = linux.NetlinkMessageType;
 pub const NLM_F = struct {
     pub const REQUEST: u16 = 0x01;
     pub const ACK: u16 = 0x04;
+    pub const ROOT: u16 = 0x100;
+    pub const MATCH: u16 = 0x200;
+    pub const DUMP: u16 = ROOT | MATCH;
     pub const CREATE: u16 = 0x400;
     pub const EXCL: u16 = 0x200;
 };

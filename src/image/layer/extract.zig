@@ -8,6 +8,7 @@ const types = @import("types.zig");
 
 const max_path = paths.max_path;
 const max_file_size: u64 = 10 * 1024 * 1024 * 1024;
+const cache_marker_name = ".yoq_complete";
 
 pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.LayerError![]const u8 {
     const digest = blob_store.Digest.parse(digest_str) orelse return types.LayerError.BlobNotFound;
@@ -17,8 +18,17 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
         return types.LayerError.PathTooLong;
     const dest_owned = alloc.dupe(u8, dest_path) catch return types.LayerError.ExtractionFailed;
 
+    if (!blob_store.verifyBlob(digest)) {
+        blob_store.removeBlob(digest);
+        alloc.free(dest_owned);
+        return types.LayerError.BlobNotFound;
+    }
+
     if (std.fs.cwd().access(dest_path, .{})) |_| {
-        return dest_owned;
+        if (hasCompleteCacheMarker(dest_path)) {
+            return dest_owned;
+        }
+        removeExtractedLayer(dest_path);
     } else |_| {}
 
     var parent_buf: [max_path]u8 = undefined;
@@ -34,7 +44,13 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
         return types.LayerError.BlobNotFound;
 
     extractTarGz(blob_path, dest_path) catch {
-        std.fs.cwd().deleteTree(dest_path) catch {};
+        removeExtractedLayer(dest_path);
+        alloc.free(dest_owned);
+        return types.LayerError.ExtractionFailed;
+    };
+
+    createCompleteCacheMarker(dest_path) catch {
+        removeExtractedLayer(dest_path);
         alloc.free(dest_owned);
         return types.LayerError.ExtractionFailed;
     };
@@ -218,5 +234,30 @@ fn createDirAndSymlink(dir: std.fs.Dir, link_name: []const u8, file_name: []cons
             }
         }
         return err;
+    };
+}
+
+fn hasCompleteCacheMarker(dest_path: []const u8) bool {
+    var marker_buf: [max_path]u8 = undefined;
+    const marker_path = cacheMarkerPath(&marker_buf, dest_path) catch return false;
+    std.fs.cwd().access(marker_path, .{}) catch return false;
+    return true;
+}
+
+fn createCompleteCacheMarker(dest_path: []const u8) !void {
+    var marker_buf: [max_path]u8 = undefined;
+    const marker_path = try cacheMarkerPath(&marker_buf, dest_path);
+    const file = try std.fs.cwd().createFile(marker_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("ok\n");
+}
+
+fn cacheMarkerPath(buf: *[max_path]u8, dest_path: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ dest_path, cache_marker_name });
+}
+
+fn removeExtractedLayer(dest_path: []const u8) void {
+    std.fs.cwd().deleteTree(dest_path) catch {
+        std.fs.cwd().deleteFile(dest_path) catch {};
     };
 }

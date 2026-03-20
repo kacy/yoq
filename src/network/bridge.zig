@@ -71,7 +71,10 @@ pub fn ensureBridgeWithConfig(config: BridgeConfig) BridgeError!void {
 
     // check if bridge already exists (TOCTOU race possible here, but NLM_F_EXCL handles it)
     const existing = nl.getIfIndex(fd, config.name) catch 0;
-    if (existing != 0) return; // already exists
+    if (existing != 0) {
+        try reconcileExistingBridge(fd, existing, config);
+        return;
+    }
 
     // create bridge with EXCL flag for atomic create-or-fail
     var buf: [nl.buf_size]u8 align(4) = undefined;
@@ -108,6 +111,17 @@ pub fn ensureBridgeWithConfig(config: BridgeConfig) BridgeError!void {
     nl.addAddress(fd, bridge_idx, &config.gateway_ip, config.prefix_len) catch return BridgeError.AddressFailed;
 
     // bring bridge up
+    nl.setLinkUp(fd, bridge_idx) catch return BridgeError.LinkSetFailed;
+}
+
+fn reconcileExistingBridge(fd: posix.fd_t, bridge_idx: u32, config: BridgeConfig) BridgeError!void {
+    const already_has_gateway = nl.hasAddress(fd, bridge_idx, &config.gateway_ip, config.prefix_len) catch
+        return BridgeError.AddressFailed;
+
+    if (!already_has_gateway) {
+        nl.addAddress(fd, bridge_idx, &config.gateway_ip, config.prefix_len) catch return BridgeError.AddressFailed;
+    }
+
     nl.setLinkUp(fd, bridge_idx) catch return BridgeError.LinkSetFailed;
 }
 
@@ -280,28 +294,28 @@ pub fn configurableContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8, plen: u8) B
     // enter container namespace
     setns(target_ns.handle) catch return BridgeError.NamespaceFailed;
 
-    // do all configuration, then restore namespace
-    defer setns(self_ns.handle) catch {
-        log.warn("failed to restore host network namespace", .{});
+    const config_result: BridgeError!void = blk: {
+        const fd = nl.openSocket() catch break :blk BridgeError.CreateFailed;
+        defer posix.close(fd);
+
+        // bring up loopback
+        bringUpLoopback(fd) catch |e| {
+            log.warn("failed to bring up loopback: {}", .{e});
+        };
+
+        // bring up eth0 and assign IP
+        const eth0_idx = nl.getIfIndex(fd, "eth0") catch break :blk BridgeError.InterfaceNotFound;
+        if (eth0_idx == 0) break :blk BridgeError.InterfaceNotFound;
+
+        nl.addAddress(fd, eth0_idx, &ip, plen) catch break :blk BridgeError.AddressFailed;
+        nl.setLinkUp(fd, eth0_idx) catch break :blk BridgeError.LinkSetFailed;
+
+        // add default route via gateway (0.0.0.0/0)
+        nl.addRoute(fd, null, 0, &gw) catch break :blk BridgeError.RouteFailed;
     };
 
-    const fd = nl.openSocket() catch return BridgeError.CreateFailed;
-    defer posix.close(fd);
-
-    // bring up loopback
-    bringUpLoopback(fd) catch |e| {
-        log.warn("failed to bring up loopback: {}", .{e});
-    };
-
-    // bring up eth0 and assign IP
-    const eth0_idx = nl.getIfIndex(fd, "eth0") catch return BridgeError.InterfaceNotFound;
-    if (eth0_idx == 0) return BridgeError.InterfaceNotFound;
-
-    nl.addAddress(fd, eth0_idx, &ip, plen) catch return BridgeError.AddressFailed;
-    nl.setLinkUp(fd, eth0_idx) catch return BridgeError.LinkSetFailed;
-
-    // add default route via gateway (0.0.0.0/0)
-    nl.addRoute(fd, null, 0, &gw) catch return BridgeError.RouteFailed;
+    setns(self_ns.handle) catch return BridgeError.NamespaceFailed;
+    try config_result;
 }
 
 /// enter a network namespace via setns(2)

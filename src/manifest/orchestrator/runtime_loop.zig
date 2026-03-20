@@ -12,6 +12,7 @@ const logs = @import("../../runtime/logs.zig");
 const watcher_mod = @import("../../dev/watcher.zig");
 const gpu_runtime = @import("../gpu_runtime.zig");
 const service_runtime = @import("service_runtime.zig");
+const startup_runtime = @import("startup_runtime.zig");
 
 const writeErr = cli.writeErr;
 
@@ -194,6 +195,12 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         };
 
         orch.states[idx].status = .running;
+        startup_runtime.refreshServiceRuntimeBindings(
+            orch.alloc,
+            svc,
+            &orch.states[idx],
+            orch.backend_registry,
+        );
 
         const exit_code = c.wait() catch 255;
         const run_duration_ns = std.time.nanoTimestamp() - start_time;

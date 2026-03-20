@@ -257,11 +257,17 @@ pub const Container = struct {
         //   - on failure: we close fds here before they'd otherwise leak
         start_support.startLogCapture(config, &self.runtime, &spawn_result);
 
-        // signal child that all parent-side setup is complete
+        start_support.updateRunningStatus(config.id, spawn_result.pid) catch {
+            start_support.cleanupFailedSpawn(self, &spawn_result, &active_pid);
+            if (overlay.has_overlay) cleanupContainerDirs(config.id);
+            return ContainerError.StartFailed;
+        };
+
+        // signal child that all parent-side setup is complete only after the
+        // persisted running state is durable enough for detached callers.
         spawn_result.signalReady();
 
         self.status = .running;
-        start_support.updateRunningStatus(config.id, spawn_result.pid);
     }
 
     /// wait for the running container to exit, then clean up runtime resources.

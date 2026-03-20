@@ -68,13 +68,30 @@ pub fn setupContainer(
 
     nat.enableForwarding() catch |e| {
         log.warn("failed to enable IP forwarding: {}", .{e});
+        return common.SetupError.NatFailed;
     };
     nat.ensureMasquerade(bridge.default_bridge, "10.42.0.0/16") catch |e| {
         log.warn("failed to set up masquerade on {s}: {}", .{ bridge.default_bridge, e });
+        return common.SetupError.NatFailed;
     };
 
     var ip_str_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(container_ip, &ip_str_buf);
+    var configured_port_maps: usize = 0;
+    errdefer {
+        var idx: usize = 0;
+        while (idx < configured_port_maps) : (idx += 1) {
+            const pm = config.port_maps[idx];
+            if (ebpf.getPortMapper()) |mapper| {
+                const proto: u8 = switch (pm.protocol) {
+                    .tcp => 6,
+                    .udp => 17,
+                };
+                mapper.removeMapping(pm.host_port, proto);
+            }
+            nat.removePortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat());
+        }
+    }
 
     for (config.port_maps) |pm| {
         if (ebpf.getPortMapper()) |mapper| {
@@ -86,10 +103,15 @@ pub fn setupContainer(
         }
         nat.addPortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat()) catch |e| {
             log.warn("failed to add port map {}:{} for {s}: {}", .{ pm.host_port, pm.container_port, container_id, e });
+            return common.SetupError.NatFailed;
         };
+        configured_port_maps += 1;
     }
 
     dns.startResolver();
+    if (!config.skip_dns and !dns.resolverRunning()) {
+        return common.SetupError.ConfigFailed;
+    }
     ebpf_support.loadDnsInterceptorOnBridge();
 
     if (!config.skip_dns) {
