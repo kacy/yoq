@@ -187,7 +187,7 @@ fn multipartOp(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
             const part_number = std.fmt.parseInt(u32, part_num_str, 10) catch
                 return s3Error(alloc, "InvalidArgument", "invalid partNumber");
 
-            const etag = s3.uploadPart(upload_id, part_number, request.body) catch |e| return switch (e) {
+            const etag = s3.uploadPart(upload_id, bucket, key, part_number, request.body) catch |e| return switch (e) {
                 s3.S3Error.UploadNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchUpload", "upload not found"),
                 s3.S3Error.InvalidPartNumber => s3Error(alloc, "InvalidPart", "invalid part number"),
                 s3.S3Error.InvalidUploadId => s3Error(alloc, "InvalidArgument", "invalid uploadId"),

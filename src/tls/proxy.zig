@@ -469,9 +469,8 @@ pub const TlsProxy = struct {
 
         const request = buf[0..bytes_read];
 
-        // check for ACME challenge path
-        if (std.mem.indexOf(u8, request, "GET /.well-known/acme-challenge/")) |_| {
-            self.serveAcmeChallenge(client_fd, request);
+        if (http_support.extractAcmeChallengeToken(request)) |token| {
+            self.serveAcmeChallenge(client_fd, token);
             return;
         }
 
@@ -493,22 +492,7 @@ pub const TlsProxy = struct {
         _ = posix.write(client_fd, response) catch {};
     }
 
-    fn serveAcmeChallenge(self: *TlsProxy, client_fd: posix.fd_t, request: []const u8) void {
-        const prefix = "GET /.well-known/acme-challenge/";
-        const token_start = (std.mem.indexOf(u8, request, prefix) orelse return) + prefix.len;
-
-        // find end of token (space or newline)
-        var end = token_start;
-        while (end < request.len and request[end] != ' ' and request[end] != '\r' and request[end] != '\n') {
-            end += 1;
-        }
-
-        const token = request[token_start..end];
-        if (token.len == 0) {
-            http_support.sendHttpResponse(client_fd, "404 Not Found", "not found");
-            return;
-        }
-
+    fn serveAcmeChallenge(self: *TlsProxy, client_fd: posix.fd_t, token: []const u8) void {
         const key_auth = self.challenges.getOwned(self.allocator, token) catch {
             http_support.sendHttpResponse(client_fd, "500 Internal Server Error", "challenge lookup failed");
             return;
@@ -563,6 +547,28 @@ test "extractHost lowercase" {
 test "extractHost missing" {
     const req = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n";
     try std.testing.expect(http_support.extractHost(req) == null);
+}
+
+test "extractHost ignores body text that looks like a header" {
+    const req = "GET / HTTP/1.1\r\nConnection: close\r\n\r\nHost: attacker.example";
+    try std.testing.expect(http_support.extractHost(req) == null);
+}
+
+test "extractHost rejects unsafe redirect host values" {
+    const req = "GET / HTTP/1.1\r\nHost: example.com/evil\r\n\r\n";
+    try std.testing.expect(http_support.extractHost(req) == null);
+}
+
+test "extractAcmeChallengeToken parses request line only" {
+    const req = "GET /.well-known/acme-challenge/token-123_abc HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    const token = http_support.extractAcmeChallengeToken(req);
+    try std.testing.expect(token != null);
+    try std.testing.expectEqualStrings("token-123_abc", token.?);
+}
+
+test "extractAcmeChallengeToken ignores body text" {
+    const req = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 37\r\n\r\nGET /.well-known/acme-challenge/token";
+    try std.testing.expect(http_support.extractAcmeChallengeToken(req) == null);
 }
 
 test "ChallengeStore round-trip" {

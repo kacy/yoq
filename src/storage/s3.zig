@@ -59,6 +59,13 @@ pub const MultipartUpload = struct {
     created: i64,
 };
 
+const multipart_meta_name = ".upload-meta";
+
+const MultipartMeta = struct {
+    bucket: []const u8,
+    key: []const u8,
+};
+
 fn validateUploadId(upload_id: []const u8) S3Error!void {
     if (upload_id.len != 24) return S3Error.InvalidUploadId;
     for (upload_id) |c| {
@@ -96,6 +103,9 @@ pub fn validateKey(key: []const u8) S3Error!void {
     // prevent path traversal
     if (std.mem.indexOf(u8, key, "..") != null) return S3Error.InvalidKey;
     if (key[0] == '/') return S3Error.InvalidKey;
+    for (key) |c| {
+        if (c < 0x20 or c == 0x7f or c == '\\') return S3Error.InvalidKey;
+    }
 }
 
 /// create a bucket (directory).
@@ -355,13 +365,19 @@ pub fn initiateMultipartUpload(name: []const u8, key: []const u8) S3Error![24]u8
     var buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&buf, multipart_subdir ++ "/{s}", .{upload_id});
     std.fs.cwd().makePath(staging_path) catch return S3Error.IoError;
+    writeMultipartMeta(staging_path, name, key) catch {
+        std.fs.cwd().deleteTree(staging_path) catch {};
+        return S3Error.IoError;
+    };
 
     return upload_id;
 }
 
 /// upload a part for a multipart upload.
-pub fn uploadPart(upload_id: []const u8, part_number: u32, data: []const u8) S3Error![32]u8 {
+pub fn uploadPart(upload_id: []const u8, bucket_name: []const u8, key: []const u8, part_number: u32, data: []const u8) S3Error![32]u8 {
     try validateUploadId(upload_id);
+    try validateBucketName(bucket_name);
+    try validateKey(key);
     if (part_number < 1 or part_number > 10000) return S3Error.InvalidPartNumber;
 
     var buf: [paths.max_path]u8 = undefined;
@@ -373,6 +389,7 @@ pub fn uploadPart(upload_id: []const u8, part_number: u32, data: []const u8) S3E
     var parent_buf: [paths.max_path]u8 = undefined;
     const parent = try storagePath(&parent_buf, multipart_subdir ++ "/{s}", .{upload_id});
     std.fs.cwd().access(parent, .{}) catch return S3Error.UploadNotFound;
+    try verifyMultipartTarget(parent, bucket_name, key);
 
     const file = std.fs.cwd().createFile(staging_path, .{}) catch return S3Error.IoError;
     defer file.close();
@@ -396,6 +413,7 @@ pub fn completeMultipartUpload(
     // open staging directory
     var staging_buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&staging_buf, multipart_subdir ++ "/{s}", .{upload_id});
+    try verifyMultipartTarget(staging_path, bucket_name, key);
 
     var dir = std.fs.cwd().openDir(staging_path, .{ .iterate = true }) catch return S3Error.UploadNotFound;
     defer dir.close();
@@ -410,6 +428,8 @@ pub fn completeMultipartUpload(
     var iter = dir.iterate();
     while (iter.next() catch return S3Error.IoError) |entry| {
         if (entry.kind != .file) continue;
+        if (std.mem.eql(u8, entry.name, multipart_meta_name)) continue;
+        if (!isPartFileName(entry.name)) return S3Error.UploadNotFound;
         const name_copy = alloc.dupe(u8, entry.name) catch return S3Error.IoError;
         part_names.append(alloc, name_copy) catch {
             alloc.free(name_copy);
@@ -465,6 +485,48 @@ pub fn computeEtag(data: []const u8) [32]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+fn writeMultipartMeta(staging_path: []const u8, bucket: []const u8, key: []const u8) !void {
+    var meta_path_buf: [paths.max_path]u8 = undefined;
+    const meta_path = std.fmt.bufPrint(&meta_path_buf, "{s}/{s}", .{ staging_path, multipart_meta_name }) catch
+        return error.PathTooLong;
+    const meta_file = try std.fs.cwd().createFile(meta_path, .{ .truncate = true });
+    defer meta_file.close();
+    try meta_file.writeAll(bucket);
+    try meta_file.writeAll("\n");
+    try meta_file.writeAll(key);
+}
+
+fn loadMultipartMeta(staging_path: []const u8, buf: []u8) S3Error!MultipartMeta {
+    var meta_path_buf: [paths.max_path]u8 = undefined;
+    const meta_path = std.fmt.bufPrint(&meta_path_buf, "{s}/{s}", .{ staging_path, multipart_meta_name }) catch
+        return S3Error.PathTooLong;
+    const content = std.fs.cwd().readFile(meta_path, buf) catch |err| switch (err) {
+        error.FileNotFound => return S3Error.UploadNotFound,
+        else => return S3Error.IoError,
+    };
+    const split = std.mem.indexOfScalar(u8, content, '\n') orelse return S3Error.UploadNotFound;
+    const bucket = content[0..split];
+    const key = content[split + 1 ..];
+    if (bucket.len == 0 or key.len == 0) return S3Error.UploadNotFound;
+    return .{ .bucket = bucket, .key = key };
+}
+
+fn verifyMultipartTarget(staging_path: []const u8, bucket: []const u8, key: []const u8) S3Error!void {
+    var meta_buf: [max_key_len + max_bucket_name + 8]u8 = undefined;
+    const meta = try loadMultipartMeta(staging_path, &meta_buf);
+    if (!std.mem.eql(u8, meta.bucket, bucket) or !std.mem.eql(u8, meta.key, key)) {
+        return S3Error.UploadNotFound;
+    }
+}
+
+fn isPartFileName(name: []const u8) bool {
+    if (name.len != 5) return false;
+    for (name) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
 // -- tests --
 
 test "validateBucketName — valid names" {
@@ -491,6 +553,8 @@ test "validateKey — invalid keys" {
     try std.testing.expectError(S3Error.InvalidKey, validateKey("")); // empty
     try std.testing.expectError(S3Error.InvalidKey, validateKey("/file.txt")); // starts with /
     try std.testing.expectError(S3Error.InvalidKey, validateKey("dir/../escape")); // path traversal
+    try std.testing.expectError(S3Error.InvalidKey, validateKey("line\nbreak"));
+    try std.testing.expectError(S3Error.InvalidKey, validateKey("dir\\file"));
 }
 
 test "validateUploadId — valid ids" {
@@ -531,4 +595,21 @@ test "putObject and getObject round-trip" {
     // test validation only — actual I/O needs HOME
     try validateKey("test/file.txt");
     try std.testing.expectError(S3Error.InvalidKey, validateKey("../escape"));
+}
+
+test "verifyMultipartTarget rejects reused upload id for different object" {
+    var path_buf: [256]u8 = undefined;
+    const staging = try std.fmt.bufPrint(
+        &path_buf,
+        "/tmp/yoq-s3-multipart-{d}",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.fs.cwd().deleteTree(staging) catch {};
+
+    try std.fs.cwd().makePath(staging);
+    try writeMultipartMeta(staging, "bucket-a", "key-a");
+
+    try verifyMultipartTarget(staging, "bucket-a", "key-a");
+    try std.testing.expectError(S3Error.UploadNotFound, verifyMultipartTarget(staging, "bucket-b", "key-a"));
+    try std.testing.expectError(S3Error.UploadNotFound, verifyMultipartTarget(staging, "bucket-a", "key-b"));
 }
