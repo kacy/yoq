@@ -18,31 +18,19 @@ pub fn handleInstallSnapshot(
     }
 
     if (args.term > current_term) {
-        common.stepDown(self, args.term, min_election_ticks, max_election_ticks);
+        if (!common.stepDown(self, args.term, min_election_ticks, max_election_ticks)) {
+            return .{ .term = current_term };
+        }
+    } else if (self.role == .candidate) {
+        self.role = .follower;
+        self.actions.append(self.alloc, .{
+            .become_follower = .{ .leader_id = args.leader_id },
+        }) catch |e| {
+            logger.warn("raft: failed to queue become_follower during snapshot install: {}", .{e});
+        };
     }
 
     self.ticks_since_event = 0;
-    if (args.last_included_index <= self.commit_index) {
-        return .{ .term = self.log.getCurrentTerm() };
-    }
-
-    const meta = SnapshotMeta{
-        .last_included_index = args.last_included_index,
-        .last_included_term = args.last_included_term,
-        .data_len = @intCast(args.data.len),
-    };
-    self.actions.append(self.alloc, .{
-        .apply_snapshot = .{
-            .data = args.data,
-            .meta = meta,
-        },
-    }) catch |e| {
-        logger.warn("raft: failed to queue apply_snapshot action: {}", .{e});
-    };
-
-    self.snapshot_meta = meta;
-    self.commit_index = args.last_included_index;
-    self.last_applied = args.last_included_index;
     return .{ .term = self.log.getCurrentTerm() };
 }
 
@@ -56,7 +44,7 @@ pub fn handleInstallSnapshotReply(
     if (self.role != .leader) return;
 
     if (reply.term > self.log.getCurrentTerm()) {
-        common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
+        _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
 
@@ -84,7 +72,16 @@ pub fn sendInstallSnapshot(self: anytype, peer_idx: usize, meta: SnapshotMeta) v
     };
 }
 
-pub fn onSnapshotComplete(self: anytype, meta: SnapshotMeta) void {
+pub fn finishInstallSnapshot(self: anytype, meta: SnapshotMeta) bool {
+    if (!self.log.setSnapshotMeta(meta)) return false;
     self.snapshot_meta = meta;
-    self.log.setSnapshotMeta(meta);
+    self.commit_index = meta.last_included_index;
+    self.last_applied = meta.last_included_index;
+    return true;
+}
+
+pub fn onSnapshotComplete(self: anytype, meta: SnapshotMeta) bool {
+    if (!self.log.setSnapshotMeta(meta)) return false;
+    self.snapshot_meta = meta;
+    return true;
 }

@@ -174,19 +174,16 @@ pub const Raft = struct {
         return replication_runtime.handleAppendEntries(self, args, min_election_ticks, max_election_ticks);
     }
 
-    /// handle an InstallSnapshot RPC from the leader.
-    ///
-    /// when a follower is far behind and the leader's log has been
-    /// truncated past the follower's next_index, the leader sends
-    /// a full snapshot instead of individual entries.
-    ///
-    /// the follower:
-    /// 1. steps down if the snapshot has a higher term
-    /// 2. rejects if our term is higher
-    /// 3. queues an apply_snapshot action for the caller to process
-    /// 4. updates commit_index and snapshot_meta
+    /// validate an InstallSnapshot RPC from the leader and update only
+    /// term/role state needed to accept it. the caller must restore the
+    /// snapshot bytes synchronously and then call finishInstallSnapshot()
+    /// before acknowledging success back to the leader.
     pub fn handleInstallSnapshot(self: *Raft, args: InstallSnapshotArgs) InstallSnapshotReply {
         return snapshot_runtime.handleInstallSnapshot(self, args, min_election_ticks, max_election_ticks);
+    }
+
+    pub fn finishInstallSnapshot(self: *Raft, meta: SnapshotMeta) bool {
+        return snapshot_runtime.finishInstallSnapshot(self, meta);
     }
 
     pub fn handleRequestVoteReply(self: *Raft, from: NodeId, reply: RequestVoteReply) void {
@@ -235,8 +232,8 @@ pub const Raft = struct {
     /// called by the node after a successful snapshot. updates the
     /// in-memory snapshot metadata so the leader knows it can send
     /// snapshots to lagging followers.
-    pub fn onSnapshotComplete(self: *Raft, meta: SnapshotMeta) void {
-        snapshot_runtime.onSnapshotComplete(self, meta);
+    pub fn onSnapshotComplete(self: *Raft, meta: SnapshotMeta) bool {
+        return snapshot_runtime.onSnapshotComplete(self, meta);
     }
 
     /// graceful leader step-down for rolling upgrades.
@@ -273,8 +270,8 @@ pub const Raft = struct {
         election_runtime.becomeLeader(self);
     }
 
-    fn stepDown(self: *Raft, new_term: Term) void {
-        common.stepDown(self, new_term, min_election_ticks, max_election_ticks);
+    fn stepDown(self: *Raft, new_term: Term) bool {
+        return common.stepDown(self, new_term, min_election_ticks, max_election_ticks);
     }
 
     fn sendHeartbeats(self: *Raft) void {
@@ -648,7 +645,7 @@ test "propose fails when not leader" {
 
 // -- snapshot tests --
 
-test "handleInstallSnapshot updates state and queues apply" {
+test "handleInstallSnapshot defers state update until snapshot is finished" {
     const alloc = testing.allocator;
     var log = try Log.initMemory();
     defer log.deinit();
@@ -669,23 +666,20 @@ test "handleInstallSnapshot updates state and queues apply" {
     // should accept (term >= ours)
     try testing.expectEqual(@as(Term, 3), reply.term);
 
-    // commit_index and last_applied should be updated
-    try testing.expectEqual(@as(LogIndex, 100), follower.commit_index);
-    try testing.expectEqual(@as(LogIndex, 100), follower.last_applied);
+    try testing.expectEqual(@as(LogIndex, 0), follower.commit_index);
+    try testing.expectEqual(@as(LogIndex, 0), follower.last_applied);
 
-    // should have queued an apply_snapshot action
     const actions = follower.drainActions();
     defer alloc.free(actions);
+    try testing.expectEqual(@as(usize, 0), actions.len);
 
-    var found_apply = false;
-    for (actions) |action| {
-        if (action == .apply_snapshot) {
-            try testing.expectEqual(@as(LogIndex, 100), action.apply_snapshot.meta.last_included_index);
-            try testing.expectEqualStrings("snapshot data", action.apply_snapshot.data);
-            found_apply = true;
-        }
-    }
-    try testing.expect(found_apply);
+    try testing.expect(follower.finishInstallSnapshot(.{
+        .last_included_index = 100,
+        .last_included_term = 2,
+        .data_len = snap_data.len,
+    }));
+    try testing.expectEqual(@as(LogIndex, 100), follower.commit_index);
+    try testing.expectEqual(@as(LogIndex, 100), follower.last_applied);
 }
 
 test "handleInstallSnapshot rejects stale term" {
@@ -694,7 +688,7 @@ test "handleInstallSnapshot rejects stale term" {
     defer log.deinit();
 
     // set our term higher
-    log.setCurrentTerm(5);
+    _ = log.setCurrentTerm(5);
 
     const peers: []const NodeId = &.{ 1, 3 };
     var follower = try setupTestRaft(alloc, 2, peers, &log);
@@ -782,7 +776,7 @@ test "leader sends install_snapshot when entries are truncated" {
         .last_included_term = 3,
         .data_len = 1024,
     };
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 50,
         .last_included_term = 3,
         .data_len = 1024,
@@ -861,7 +855,7 @@ test "onSnapshotComplete updates metadata" {
 
     try testing.expect(raft.snapshot_meta == null);
 
-    raft.onSnapshotComplete(.{
+    _ = raft.onSnapshotComplete(.{
         .last_included_index = 100,
         .last_included_term = 5,
         .data_len = 4096,
@@ -1825,7 +1819,7 @@ test "advanceCommitIndex skips entries from previous term" {
     // manually add an entry from term 1 and set current term to 2
     // so that the election will produce term 3+
     try log.append(.{ .index = 1, .term = 1, .data = "old-term" });
-    log.setCurrentTerm(2);
+    _ = log.setCurrentTerm(2);
 
     const peers: []const NodeId = &.{ 2, 3 };
     var leader = try setupTestRaft(alloc, 1, peers, &log);
@@ -1952,7 +1946,7 @@ test "handleAppendEntries rejects stale term" {
     defer log.deinit();
 
     // set our term to 5
-    log.setCurrentTerm(5);
+    _ = log.setCurrentTerm(5);
 
     const peers: []const NodeId = &.{ 2, 3 };
     var raft = try setupTestRaft(alloc, 1, peers, &log);
@@ -2006,7 +2000,7 @@ test "snapshot boundary: sendAppendEntries triggers install_snapshot" {
         .last_included_term = leader.currentTerm(),
         .data_len = 2048,
     };
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 100,
         .last_included_term = leader.currentTerm(),
         .data_len = 2048,

@@ -41,20 +41,24 @@ pub const Log = struct {
         return state_runtime.getCurrentTerm(&self.db);
     }
 
-    pub fn setCurrentTerm(self: *Log, term: Term) void {
+    pub fn setCurrentTerm(self: *Log, term: Term) bool {
         state_runtime.setCurrentTerm(&self.db, term) catch |e| {
             logger.warn("raft_log: failed to set current_term to {d}: {}", .{ term, e });
+            return false;
         };
+        return true;
     }
 
     pub fn getVotedFor(self: *Log) ?NodeId {
         return state_runtime.getVotedFor(&self.db);
     }
 
-    pub fn setVotedFor(self: *Log, id: ?NodeId) void {
+    pub fn setVotedFor(self: *Log, id: ?NodeId) bool {
         state_runtime.setVotedFor(&self.db, id) catch |e| {
             logger.warn("raft_log: failed to set voted_for to {?d}: {}", .{ id, e });
+            return false;
         };
+        return true;
     }
 
     // -- snapshot metadata --
@@ -67,10 +71,12 @@ pub const Log = struct {
         return snapshot_support.getSnapshotMeta(&self.db);
     }
 
-    pub fn setSnapshotMeta(self: *Log, meta: SnapshotMeta) void {
+    pub fn setSnapshotMeta(self: *Log, meta: SnapshotMeta) bool {
         snapshot_support.setSnapshotMeta(&self.db, meta) catch |e| {
             logger.warn("raft_log: failed to set snapshot metadata: {}", .{e});
+            return false;
         };
+        return true;
     }
 
     // -- log operations --
@@ -105,19 +111,23 @@ pub const Log = struct {
 
     /// remove all entries from index onwards (inclusive).
     /// used when a leader's log conflicts with ours.
-    pub fn truncateFrom(self: *Log, index: LogIndex) void {
+    pub fn truncateFrom(self: *Log, index: LogIndex) bool {
         entry_runtime.truncateFrom(&self.db, index) catch |e| {
             logger.warn("raft_log: failed to truncate from index {d}: {}", .{ index, e });
+            return false;
         };
+        return true;
     }
 
     /// remove all entries up to and including the given index.
     /// used after a snapshot is taken to reclaim space — we no longer
     /// need entries that are covered by the snapshot.
-    pub fn truncateUpTo(self: *Log, index: LogIndex) void {
+    pub fn truncateUpTo(self: *Log, index: LogIndex) bool {
         snapshot_support.truncateUpTo(&self.db, index) catch |e| {
             logger.warn("raft_log: failed to truncate up to index {d}: {}", .{ index, e });
+            return false;
         };
+        return true;
     }
 
     /// get entries in range [from, to] inclusive.
@@ -135,10 +145,10 @@ test "term persistence" {
 
     try std.testing.expectEqual(@as(Term, 0), log.getCurrentTerm());
 
-    log.setCurrentTerm(5);
+    _ = log.setCurrentTerm(5);
     try std.testing.expectEqual(@as(Term, 5), log.getCurrentTerm());
 
-    log.setCurrentTerm(10);
+    _ = log.setCurrentTerm(10);
     try std.testing.expectEqual(@as(Term, 10), log.getCurrentTerm());
 }
 
@@ -148,10 +158,10 @@ test "voted_for persistence" {
 
     try std.testing.expect(log.getVotedFor() == null);
 
-    log.setVotedFor(42);
+    _ = log.setVotedFor(42);
     try std.testing.expectEqual(@as(?NodeId, 42), log.getVotedFor());
 
-    log.setVotedFor(null);
+    _ = log.setVotedFor(null);
     try std.testing.expect(log.getVotedFor() == null);
 }
 
@@ -199,7 +209,7 @@ test "truncateFrom" {
     try log.append(.{ .index = 2, .term = 1, .data = "b" });
     try log.append(.{ .index = 3, .term = 2, .data = "c" });
 
-    log.truncateFrom(2);
+    _ = log.truncateFrom(2);
 
     try std.testing.expectEqual(@as(LogIndex, 1), log.lastIndex());
     try std.testing.expect((try log.getEntry(alloc, 2)) == null);
@@ -256,7 +266,7 @@ test "truncateFrom then append replaces entries" {
     try log.append(.{ .index = 3, .term = 1, .data = "c" });
 
     // leader conflict: truncate from index 2 and write new entries
-    log.truncateFrom(2);
+    _ = log.truncateFrom(2);
     try log.append(.{ .index = 2, .term = 2, .data = "new_b" });
 
     try std.testing.expectEqual(@as(LogIndex, 2), log.lastIndex());
@@ -302,7 +312,7 @@ test "snapshot meta persistence" {
     // no snapshot initially
     try std.testing.expect(log.getSnapshotMeta() == null);
 
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 100,
         .last_included_term = 5,
         .data_len = 4096,
@@ -321,7 +331,7 @@ test "lastIndex falls back to snapshot when log is empty" {
     try std.testing.expectEqual(@as(LogIndex, 0), log.lastIndex());
 
     // set snapshot metadata without any log entries
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 50,
         .last_included_term = 3,
         .data_len = 1024,
@@ -334,7 +344,7 @@ test "lastTerm falls back to snapshot when log is empty" {
     var log = try Log.initMemory();
     defer log.deinit();
 
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 50,
         .last_included_term = 3,
         .data_len = 1024,
@@ -347,7 +357,7 @@ test "lastIndex prefers log entries over snapshot" {
     var log = try Log.initMemory();
     defer log.deinit();
 
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 50,
         .last_included_term = 3,
         .data_len = 1024,
@@ -363,7 +373,7 @@ test "lastTerm prefers log entries over snapshot" {
     var log = try Log.initMemory();
     defer log.deinit();
 
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 50,
         .last_included_term = 3,
         .data_len = 1024,
@@ -378,7 +388,7 @@ test "termAt returns snapshot term for snapshot boundary index" {
     var log = try Log.initMemory();
     defer log.deinit();
 
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 50,
         .last_included_term = 3,
         .data_len = 1024,
@@ -401,7 +411,7 @@ test "truncateUpTo removes entries up to index" {
     try log.append(.{ .index = 3, .term = 2, .data = "c" });
     try log.append(.{ .index = 4, .term = 2, .data = "d" });
 
-    log.truncateUpTo(2);
+    _ = log.truncateUpTo(2);
 
     // entries 1 and 2 should be gone
     try std.testing.expect((try log.getEntry(alloc, 1)) == null);
@@ -426,12 +436,12 @@ test "truncateUpTo with snapshot preserves lastIndex" {
     try log.append(.{ .index = 3, .term = 2, .data = "c" });
 
     // snapshot at index 2, then truncate
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 2,
         .last_included_term = 1,
         .data_len = 512,
     });
-    log.truncateUpTo(2);
+    _ = log.truncateUpTo(2);
 
     // lastIndex should still be 3 (from the log)
     try std.testing.expectEqual(@as(LogIndex, 3), log.lastIndex());
@@ -447,12 +457,12 @@ test "truncateUpTo all entries with snapshot" {
     try log.append(.{ .index = 1, .term = 1, .data = "a" });
     try log.append(.{ .index = 2, .term = 1, .data = "b" });
 
-    log.setSnapshotMeta(.{
+    _ = log.setSnapshotMeta(.{
         .last_included_index = 2,
         .last_included_term = 1,
         .data_len = 512,
     });
-    log.truncateUpTo(2);
+    _ = log.truncateUpTo(2);
 
     // log is empty but snapshot provides the answer
     try std.testing.expectEqual(@as(LogIndex, 2), log.lastIndex());
