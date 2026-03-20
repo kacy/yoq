@@ -23,6 +23,7 @@ pub const S3Error = error{
     HomeDirNotFound,
     InvalidBucketName,
     InvalidKey,
+    InvalidUploadId,
 };
 
 /// max object key length
@@ -57,6 +58,15 @@ pub const MultipartUpload = struct {
     key: []const u8,
     created: i64,
 };
+
+fn validateUploadId(upload_id: []const u8) S3Error!void {
+    if (upload_id.len != 24) return S3Error.InvalidUploadId;
+    for (upload_id) |c| {
+        if (!((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'))) {
+            return S3Error.InvalidUploadId;
+        }
+    }
+}
 
 // -- bucket operations --
 
@@ -351,6 +361,7 @@ pub fn initiateMultipartUpload(name: []const u8, key: []const u8) S3Error![24]u8
 
 /// upload a part for a multipart upload.
 pub fn uploadPart(upload_id: []const u8, part_number: u32, data: []const u8) S3Error![32]u8 {
+    try validateUploadId(upload_id);
     if (part_number < 1 or part_number > 10000) return S3Error.InvalidPartNumber;
 
     var buf: [paths.max_path]u8 = undefined;
@@ -379,6 +390,7 @@ pub fn completeMultipartUpload(
 ) S3Error![32]u8 {
     try validateBucketName(bucket_name);
     try validateKey(key);
+    try validateUploadId(upload_id);
     if (!bucketExists(bucket_name)) return S3Error.BucketNotFound;
 
     // open staging directory
@@ -433,6 +445,7 @@ pub fn completeMultipartUpload(
 
 /// abort a multipart upload — removes staging directory.
 pub fn abortMultipartUpload(upload_id: []const u8) S3Error!void {
+    try validateUploadId(upload_id);
     var buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&buf, multipart_subdir ++ "/{s}", .{upload_id});
 
@@ -478,6 +491,17 @@ test "validateKey — invalid keys" {
     try std.testing.expectError(S3Error.InvalidKey, validateKey("")); // empty
     try std.testing.expectError(S3Error.InvalidKey, validateKey("/file.txt")); // starts with /
     try std.testing.expectError(S3Error.InvalidKey, validateKey("dir/../escape")); // path traversal
+}
+
+test "validateUploadId — valid ids" {
+    try validateUploadId("0123456789abcdef01234567");
+}
+
+test "validateUploadId — rejects traversal and malformed ids" {
+    try std.testing.expectError(S3Error.InvalidUploadId, validateUploadId(""));
+    try std.testing.expectError(S3Error.InvalidUploadId, validateUploadId("../escape"));
+    try std.testing.expectError(S3Error.InvalidUploadId, validateUploadId("0123456789abcdef0123456/"));
+    try std.testing.expectError(S3Error.InvalidUploadId, validateUploadId("0123456789abcdef0123456g"));
 }
 
 test "computeEtag — empty data" {

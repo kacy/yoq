@@ -190,6 +190,7 @@ fn multipartOp(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
             const etag = s3.uploadPart(upload_id, part_number, request.body) catch |e| return switch (e) {
                 s3.S3Error.UploadNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchUpload", "upload not found"),
                 s3.S3Error.InvalidPartNumber => s3Error(alloc, "InvalidPart", "invalid part number"),
+                s3.S3Error.InvalidUploadId => s3Error(alloc, "InvalidArgument", "invalid uploadId"),
                 else => s3Error(alloc, "InternalError", "failed to upload part"),
             };
 
@@ -200,6 +201,7 @@ fn multipartOp(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
             const etag = s3.completeMultipartUpload(alloc, bucket, key, upload_id) catch |e| return switch (e) {
                 s3.S3Error.UploadNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchUpload", "upload not found"),
                 s3.S3Error.BucketNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchBucket", "bucket not found"),
+                s3.S3Error.InvalidUploadId => s3Error(alloc, "InvalidArgument", "invalid uploadId"),
                 else => s3Error(alloc, "InternalError", "failed to complete multipart upload"),
             };
 
@@ -211,7 +213,10 @@ fn multipartOp(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
         },
         .DELETE => {
             // AbortMultipartUpload
-            s3.abortMultipartUpload(upload_id) catch {};
+            s3.abortMultipartUpload(upload_id) catch |e| return switch (e) {
+                s3.S3Error.InvalidUploadId => s3Error(alloc, "InvalidArgument", "invalid uploadId"),
+                else => .{ .status = .no_content, .body = "", .allocated = false },
+            };
             return .{ .status = .no_content, .body = "", .allocated = false };
         },
         else => common.methodNotAllowed(),
