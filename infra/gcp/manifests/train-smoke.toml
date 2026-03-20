@@ -1,0 +1,12 @@
+[training.train-env]
+image = "docker.io/library/debian:bookworm-slim"
+command = ["/usr/bin/env"]
+gpus = 2
+
+[training.train-env.resources]
+cpu = 500
+memory_mb = 256
+
+[training.train-env.fault_tolerance]
+auto_restart = false
+max_restarts = 0
