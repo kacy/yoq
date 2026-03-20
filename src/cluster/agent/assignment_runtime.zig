@@ -260,11 +260,16 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     reportStatus(self, assignment_id, "running");
     setContainerState(self, assignment_id, .running);
 
-    _ = c.wait() catch 255;
+    const exit_code = c.wait() catch 255;
 
     log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });
-    setContainerState(self, assignment_id, .stopped);
-    reportStatus(self, assignment_id, "stopped");
+    if (exit_code == 0) {
+        setContainerState(self, assignment_id, .stopped);
+        reportStatus(self, assignment_id, "stopped");
+    } else {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed");
+    }
     cleanup(container_id);
 }
 

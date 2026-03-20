@@ -153,7 +153,7 @@ test "apply skips already-applied entries" {
     try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
 }
 
-test "apply advances past disallowed SQL" {
+test "apply blocks disallowed SQL without advancing" {
     var sm = try StateMachine.initMemory();
     defer sm.deinit();
 
@@ -163,23 +163,23 @@ test "apply advances past disallowed SQL" {
         .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('test01', 'localhost', 'active', 4, 8192, 0, 0, 0, 1000, 1000);",
     });
 
-    // entry 2 is disallowed — should log warning but advance last_applied
+    // entry 2 is disallowed — should log warning and stop advancement
     sm.apply(.{
         .index = 2,
         .term = 1,
         .data = "DROP TABLE agents;",
     });
 
-    try std.testing.expectEqual(@as(LogIndex, 2), sm.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
 
-    // entry 3 should still work
+    // entry 3 should not apply because the sequence is now broken
     sm.apply(.{
         .index = 3,
         .term = 1,
         .data = "UPDATE agents SET status = 'draining' WHERE id = 'test01';",
     });
 
-    try std.testing.expectEqual(@as(LogIndex, 3), sm.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
 
     // verify the agent still exists (DROP was blocked) and was updated
     const Row = struct { status: sqlite.Text };
@@ -193,7 +193,7 @@ test "apply advances past disallowed SQL" {
     ) catch unreachable).?;
     defer alloc.free(row.status.data);
 
-    try std.testing.expectEqualStrings("draining", row.status.data);
+    try std.testing.expectEqualStrings("active", row.status.data);
 }
 
 test "applyUpTo applies entries in order" {
@@ -298,7 +298,7 @@ test "isAllowedStatement handles semicolons inside quoted values" {
     ));
 }
 
-test "apply with disallowed statement advances last_applied but does not execute" {
+test "apply with disallowed statement does not execute or advance" {
     var sm = try StateMachine.initMemory();
     defer sm.deinit();
 
@@ -316,8 +316,7 @@ test "apply with disallowed statement advances last_applied but does not execute
         .data = "DROP TABLE agents;",
     });
 
-    // last_applied should still advance
-    try std.testing.expectEqual(@as(LogIndex, 2), sm.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
 
     // agents table should still exist with data intact
     const Row = struct { id: sqlite.Text };
@@ -444,7 +443,7 @@ test "restoreFromBytes rejects oversized snapshot" {
     try std.testing.expectError(SnapshotError.InvalidSnapshot, result);
 }
 
-test "apply with failing SQL still advances last_applied" {
+test "apply with failing SQL does not advance last_applied" {
     var sm = try StateMachine.initMemory();
     defer sm.deinit();
 
@@ -457,20 +456,28 @@ test "apply with failing SQL still advances last_applied" {
         .data = "INSERT INTO agents (id, nonexistent_col) VALUES ('bad', 'x');",
     });
 
-    // last_applied must still advance even though SQL failed
-    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 0), sm.last_applied);
 
-    // next entry should still work
+    // next entry should not apply because entry 1 never committed
     sm.apply(.{
         .index = 2,
         .term = 1,
         .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('valid', 'localhost', 'active', 4, 8192, 0, 0, 0, 1000, 1000);",
     });
 
-    try std.testing.expectEqual(@as(LogIndex, 2), sm.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 0), sm.last_applied);
+
+    const Row = struct { count: i64 };
+    const row = (sm.db.one(
+        Row,
+        "SELECT COUNT(*) AS count FROM agents WHERE id = 'valid';",
+        .{},
+        .{},
+    ) catch unreachable).?;
+    try std.testing.expectEqual(@as(i64, 0), row.count);
 }
 
-test "applyUpTo skips missing entries without stalling" {
+test "applyUpTo stops at missing entries" {
     var sm = try StateMachine.initMemory();
     defer sm.deinit();
 
@@ -491,11 +498,10 @@ test "applyUpTo skips missing entries without stalling" {
         .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a3', 'host3', 'active', 4, 8192, 0, 0, 0, 300, 300);",
     });
 
-    // apply up to 3 — entry 2 is missing, should be skipped
+    // apply up to 3 — entry 2 is missing, so apply should stop at 1
     sm.applyUpTo(&raft_log, alloc, 3);
 
-    // last_applied should reach 3 even though entry 2 was missing
-    try std.testing.expectEqual(@as(LogIndex, 3), sm.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
 }
 
 test "snapshot round-trip preserves last_applied" {

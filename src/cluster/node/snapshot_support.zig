@@ -30,8 +30,14 @@ pub fn maybeSnapshot(self: anytype) void {
         return;
     };
 
-    self.raft.onSnapshotComplete(meta);
-    self.log.truncateUpTo(commit_index);
+    if (!self.raft.onSnapshotComplete(meta)) {
+        logger.warn("snapshot: failed to persist snapshot metadata at index {}", .{commit_index});
+        return;
+    }
+    if (!self.log.truncateUpTo(commit_index)) {
+        logger.warn("snapshot: failed to truncate raft log up to index {}", .{commit_index});
+        return;
+    }
     self.last_snapshot_index = commit_index;
     logger.info("snapshot: completed at index {}, term {}", .{ commit_index, term });
 }

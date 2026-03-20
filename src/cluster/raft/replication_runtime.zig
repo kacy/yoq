@@ -20,7 +20,9 @@ pub fn handleAppendEntries(
 
     if (args.term >= current_term) {
         if (args.term > current_term) {
-            common.stepDown(self, args.term, min_election_ticks, max_election_ticks);
+            if (!common.stepDown(self, args.term, min_election_ticks, max_election_ticks)) {
+                return .{ .term = current_term, .success = false, .match_index = 0 };
+            }
         } else if (self.role == .candidate) {
             self.role = .follower;
             self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch |e| {
@@ -40,7 +42,9 @@ pub fn handleAppendEntries(
     for (args.entries) |entry| {
         const existing_term = self.log.termAt(entry.index);
         if (existing_term != 0 and existing_term != entry.term) {
-            self.log.truncateFrom(entry.index);
+            if (!self.log.truncateFrom(entry.index)) {
+                return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+            }
         }
         if (existing_term == 0 or existing_term != entry.term) {
             self.log.append(entry) catch {
@@ -79,7 +83,7 @@ pub fn handleAppendEntriesReply(
     if (self.role != .leader) return;
 
     if (reply.term > self.log.getCurrentTerm()) {
-        common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
+        _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
 

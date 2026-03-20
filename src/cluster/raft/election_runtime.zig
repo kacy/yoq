@@ -39,7 +39,9 @@ pub fn handleRequestVote(
     }
 
     if (args.term > current_term) {
-        common.stepDown(self, args.term, min_election_ticks, max_election_ticks);
+        if (!common.stepDown(self, args.term, min_election_ticks, max_election_ticks)) {
+            return .{ .term = current_term, .vote_granted = false };
+        }
     }
 
     const voted_for = self.log.getVotedFor();
@@ -51,7 +53,9 @@ pub fn handleRequestVote(
         (args.last_log_term == our_last_term and args.last_log_index >= our_last_index);
 
     if (can_vote and log_ok) {
-        self.log.setVotedFor(args.candidate_id);
+        if (!self.log.setVotedFor(args.candidate_id)) {
+            return .{ .term = self.log.getCurrentTerm(), .vote_granted = false };
+        }
         self.ticks_since_event = 0;
         return .{ .term = self.log.getCurrentTerm(), .vote_granted = true };
     }
@@ -69,7 +73,7 @@ pub fn handleRequestVoteReply(
     if (self.role != .candidate) return;
 
     if (reply.term > self.log.getCurrentTerm()) {
-        common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
+        _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
 
@@ -92,7 +96,7 @@ pub fn transferLeadership(self: anytype, min_election_ticks: u32, max_election_t
     const new_term = self.log.getCurrentTerm() + 1;
     logger.info("raft: leader {d} stepping down, advancing to term {d}", .{ self.id, new_term });
 
-    common.stepDown(self, new_term, min_election_ticks, max_election_ticks);
+    if (!common.stepDown(self, new_term, min_election_ticks, max_election_ticks)) return false;
     self.actions.append(self.alloc, .{
         .become_follower = .{ .leader_id = 0 },
     }) catch |e| {
@@ -103,8 +107,8 @@ pub fn transferLeadership(self: anytype, min_election_ticks: u32, max_election_t
 
 pub fn startElection(self: anytype, min_election_ticks: u32, max_election_ticks: u32) void {
     const new_term = self.log.getCurrentTerm() + 1;
-    self.log.setCurrentTerm(new_term);
-    self.log.setVotedFor(self.id);
+    if (!self.log.setCurrentTerm(new_term)) return;
+    if (!self.log.setVotedFor(self.id)) return;
     self.role = .candidate;
     @memset(self.votes_granted, false);
     self.votes_received = 1;

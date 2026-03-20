@@ -167,13 +167,37 @@ pub fn handleMessage(self: anytype, received: transport_mod.ReceivedMessage) voi
 
             const commit_before = self.raft.commit_index;
             const reply = self.raft.handleInstallSnapshot(args);
+
+            if (args.term < reply.term or args.last_included_index <= commit_before) {
+                self.transport.send(peer_id, .{ .install_snapshot_reply = reply }) catch |e| {
+                    logger.warn("failed to send snapshot reply to node {}: {}", .{ peer_id, e });
+                };
+                self.alloc.free(args.data);
+                return;
+            }
+
+            const meta = self.state_machine.restoreFromBytes(args.data) catch |e| {
+                logger.warn("snapshot: failed to restore from bytes: {}", .{e});
+                self.alloc.free(args.data);
+                return;
+            };
+            if (!self.log.truncateUpTo(meta.last_included_index)) {
+                logger.warn("snapshot: failed to truncate raft log up to {}", .{meta.last_included_index});
+                self.alloc.free(args.data);
+                return;
+            }
+            if (!self.raft.finishInstallSnapshot(meta)) {
+                logger.warn("snapshot: failed to commit snapshot metadata at index {}", .{meta.last_included_index});
+                self.alloc.free(args.data);
+                return;
+            }
+
+            self.last_snapshot_index = meta.last_included_index;
+            logger.info("snapshot: restored state machine to index {}", .{meta.last_included_index});
             self.transport.send(peer_id, .{ .install_snapshot_reply = reply }) catch |e| {
                 logger.warn("failed to send snapshot reply to node {}: {}", .{ peer_id, e });
             };
-
-            if (self.raft.commit_index == commit_before) {
-                self.alloc.free(args.data);
-            }
+            self.alloc.free(args.data);
         },
         .install_snapshot_reply => |reply| {
             if (sender_id) |id| {
@@ -221,8 +245,14 @@ pub fn processActions(self: anytype) void {
                     continue;
                 };
 
-                self.log.setSnapshotMeta(meta);
-                self.log.truncateUpTo(meta.last_included_index);
+                if (!self.log.setSnapshotMeta(meta)) {
+                    logger.warn("snapshot: failed to persist snapshot metadata at index {}", .{meta.last_included_index});
+                    continue;
+                }
+                if (!self.log.truncateUpTo(meta.last_included_index)) {
+                    logger.warn("snapshot: failed to truncate raft log up to index {}", .{meta.last_included_index});
+                    continue;
+                }
                 self.last_snapshot_index = meta.last_included_index;
                 logger.info("snapshot: restored state machine to index {}", .{meta.last_included_index});
             },
@@ -241,8 +271,14 @@ pub fn processActions(self: anytype) void {
                     continue;
                 };
 
-                self.raft.onSnapshotComplete(meta);
-                self.log.truncateUpTo(snap.up_to_index);
+                if (!self.raft.onSnapshotComplete(meta)) {
+                    logger.warn("snapshot: failed to persist snapshot metadata at index {}", .{snap.up_to_index});
+                    continue;
+                }
+                if (!self.log.truncateUpTo(snap.up_to_index)) {
+                    logger.warn("snapshot: failed to truncate raft log up to index {}", .{snap.up_to_index});
+                    continue;
+                }
                 self.last_snapshot_index = snap.up_to_index;
                 logger.info("snapshot: completed at index {}, term {}", .{ snap.up_to_index, snap.term });
             },
