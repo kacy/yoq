@@ -11,7 +11,9 @@ case "${ROLE}" in
     API_PORT="${3:?api port required}"
     CLUSTER_JOIN_TOKEN="${4:?cluster join token required}"
     API_TOKEN="${5:?api token required}"
-    PEERS="${6:-}"
+    shift 5
+    PEERS="${*:-}"
+    printf 'starting server %s with peers: %s\n' "${ID}" "${PEERS:-<none>}" >/var/log/yoq-start-node.log
 
     pkill -f "yoq init-server" || true
     if [ -n "${PEERS}" ]; then
