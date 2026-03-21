@@ -183,6 +183,7 @@ require_state() {
   # shellcheck disable=SC1090
   source "${STATE_FILE}"
   refresh_instance_ips
+  save_state_file
 }
 
 locate_state_file() {
@@ -271,6 +272,16 @@ instance_ip() {
   esac
 }
 
+validate_ip() {
+  local label="$1" value="$2"
+  if [ -z "${value}" ]; then
+    die "${label} is empty; instance may not be running"
+  fi
+  if ! printf '%s' "${value}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+    die "${label} is not a valid IPv4 address: ${value}"
+  fi
+}
+
 refresh_instance_ips() {
   SERVER_1_EXTERNAL_IP="$(instance_ip "${SERVER_1_NAME}" external)"
   SERVER_2_EXTERNAL_IP="$(instance_ip "${SERVER_2_NAME}" external)"
@@ -283,6 +294,14 @@ refresh_instance_ips() {
   SERVER_3_INTERNAL_IP="$(instance_ip "${SERVER_3_NAME}" internal)"
   AGENT_1_INTERNAL_IP="$(instance_ip "${AGENT_1_NAME}" internal)"
   AGENT_2_INTERNAL_IP="$(instance_ip "${AGENT_2_NAME}" internal)"
+
+  local var
+  for var in SERVER_1_EXTERNAL_IP SERVER_2_EXTERNAL_IP SERVER_3_EXTERNAL_IP \
+             AGENT_1_EXTERNAL_IP AGENT_2_EXTERNAL_IP \
+             SERVER_1_INTERNAL_IP SERVER_2_INTERNAL_IP SERVER_3_INTERNAL_IP \
+             AGENT_1_INTERNAL_IP AGENT_2_INTERNAL_IP; do
+    validate_ip "${var}" "${!var}"
+  done
 }
 
 instance_status() {
