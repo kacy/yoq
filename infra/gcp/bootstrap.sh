@@ -88,7 +88,7 @@ wait_for_agents() {
   local tries=0
   while [ "${tries}" -lt 60 ]; do
     if http_get_json "${SERVER_1_EXTERNAL_IP}" "/agents" > "${ARTIFACT_DIR}/nodes-bootstrap.json" 2>/dev/null; then
-      if jq -e 'length == 2 and all(.[]; .status == "active" and .overlay_ip != null)' "${ARTIFACT_DIR}/nodes-bootstrap.json" >/dev/null 2>&1; then
+      if jq -e 'length == 2 and all(.[]; .status == "active")' "${ARTIFACT_DIR}/nodes-bootstrap.json" >/dev/null 2>&1; then
         return 0
       fi
     fi
