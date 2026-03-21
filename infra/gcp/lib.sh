@@ -182,6 +182,7 @@ require_state() {
   STATE_FILE="$(locate_state_file)" || die "missing state file under ${STATE_ROOT}; run infra/gcp/up.sh first"
   # shellcheck disable=SC1090
   source "${STATE_FILE}"
+  refresh_instance_ips
 }
 
 locate_state_file() {
@@ -251,17 +252,37 @@ gcloud_scp_to() {
 instance_ip() {
   local instance="$1"
   local field="$2"
-  gcloud compute instances describe "${instance}" \
-    --project="${PROJECT_ID}" \
-    --zone="${ZONE}" \
-    --format="get(networkInterfaces[0].accessConfigs[0].natIP,networkInterfaces[0].networkIP)" |
-    awk -v field="${field}" '
-      BEGIN { FS=";" }
-      {
-        if (field == "external") print $1;
-        else print $2;
-      }
-    '
+  case "${field}" in
+    external)
+      gcloud compute instances describe "${instance}" \
+        --project="${PROJECT_ID}" \
+        --zone="${ZONE}" \
+        --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
+      ;;
+    internal)
+      gcloud compute instances describe "${instance}" \
+        --project="${PROJECT_ID}" \
+        --zone="${ZONE}" \
+        --format='get(networkInterfaces[0].networkIP)'
+      ;;
+    *)
+      die "unknown instance_ip field: ${field}"
+      ;;
+  esac
+}
+
+refresh_instance_ips() {
+  SERVER_1_EXTERNAL_IP="$(instance_ip "${SERVER_1_NAME}" external)"
+  SERVER_2_EXTERNAL_IP="$(instance_ip "${SERVER_2_NAME}" external)"
+  SERVER_3_EXTERNAL_IP="$(instance_ip "${SERVER_3_NAME}" external)"
+  AGENT_1_EXTERNAL_IP="$(instance_ip "${AGENT_1_NAME}" external)"
+  AGENT_2_EXTERNAL_IP="$(instance_ip "${AGENT_2_NAME}" external)"
+
+  SERVER_1_INTERNAL_IP="$(instance_ip "${SERVER_1_NAME}" internal)"
+  SERVER_2_INTERNAL_IP="$(instance_ip "${SERVER_2_NAME}" internal)"
+  SERVER_3_INTERNAL_IP="$(instance_ip "${SERVER_3_NAME}" internal)"
+  AGENT_1_INTERNAL_IP="$(instance_ip "${AGENT_1_NAME}" internal)"
+  AGENT_2_INTERNAL_IP="$(instance_ip "${AGENT_2_NAME}" internal)"
 }
 
 instance_status() {
