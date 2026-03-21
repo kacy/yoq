@@ -34,17 +34,27 @@ install_remote() {
 install_remote "${SERVER_1_NAME}" server
 install_remote "${SERVER_2_NAME}" server
 install_remote "${SERVER_3_NAME}" server
-install_remote "${AGENT_1_NAME}" agent
-install_remote "${AGENT_2_NAME}" agent
+agent_role="agent-cpu"
+[ "${USE_GPU_AGENTS}" = "true" ] && agent_role="agent-gpu"
+
+install_remote "${AGENT_1_NAME}" "${agent_role}"
+install_remote "${AGENT_2_NAME}" "${agent_role}"
 
 for instance in "${SERVER_1_NAME}" "${SERVER_2_NAME}" "${SERVER_3_NAME}"; do
   log "checking doctor output on ${instance}"
   gcloud_ssh "${instance}" "sudo test -s /opt/yoq-gcp/doctor.json"
 done
 
-for instance in "${AGENT_1_NAME}" "${AGENT_2_NAME}"; do
-  log "checking GPU visibility on ${instance}"
-  gcloud_ssh "${instance}" "sudo nvidia-smi -L >/dev/null"
-done
+if [ "${USE_GPU_AGENTS}" = "true" ]; then
+  for instance in "${AGENT_1_NAME}" "${AGENT_2_NAME}"; do
+    log "checking GPU visibility on ${instance}"
+    gcloud_ssh "${instance}" "sudo nvidia-smi -L >/dev/null"
+  done
+else
+  for instance in "${AGENT_1_NAME}" "${AGENT_2_NAME}"; do
+    log "checking agent runtime on ${instance}"
+    gcloud_ssh "${instance}" "sudo test -s /opt/yoq-gcp/doctor.json"
+  done
+fi
 
 log "installation complete"

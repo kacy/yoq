@@ -6,8 +6,8 @@ Google Compute Engine for:
 - cluster formation
 - WireGuard overlay networking
 - container runtime on multiple nodes
-- GPU detection and passthrough
-- GPU-backed gang scheduling
+- GPU detection and passthrough when enabled
+- GPU-backed gang scheduling when enabled
 
 The rig lives under [`infra/gcp/`](../infra/gcp).
 
@@ -16,14 +16,15 @@ The rig lives under [`infra/gcp/`](../infra/gcp).
 Default layout:
 
 - 3 on-demand CPU server nodes
-- 2 Spot GPU agent nodes
+- 2 on-demand CPU agent nodes by default
+- optional Spot GPU agent nodes if `USE_GPU_AGENTS=true`
 
 This keeps Raft stable while still keeping GPU costs low.
 
 ## prerequisites
 
 - `gcloud` installed and authenticated
-- a GCP project with quota for 3 small CPU VMs and 2 T4-class GPU VMs
+- a GCP project with quota for 5 small CPU VMs; GPU quota is only needed if `USE_GPU_AGENTS=true`
 - local tools: `bash`, `jq`, `curl`, `openssl`, `ssh`, `scp`, `zig`
 - local `yoq` repo checkout
 
@@ -38,13 +39,12 @@ At minimum set:
 - `PROJECT_ID`
 - `REGION`
 - optionally `ZONE`
-- optionally `GPU_TYPE`
+- optionally `USE_GPU_AGENTS=true`
+- optionally `GPU_TYPE` if GPU mode is enabled
 
-Leave `ZONE` empty to let the scripts pick the first matching zone in the
-region for the requested GPU type.
+Leave `ZONE` empty to let the scripts pick a zone in the region.
 
-The project must also have non-zero `GPUS_ALL_REGIONS` quota before the rig can
-create the 2 GPU agents.
+GPU mode additionally requires non-zero `GPUS_ALL_REGIONS` quota.
 
 ## workflow
 
@@ -60,7 +60,7 @@ Build and install the local `yoq` binary plus node prerequisites:
 infra/gcp/install.sh
 ```
 
-Bootstrap the 3-server cluster and join the 2 GPU agents:
+Bootstrap the 3-server cluster and join the agents:
 
 ```bash
 infra/gcp/bootstrap.sh
@@ -84,25 +84,27 @@ It performs five classes of checks:
 
 1. cluster readiness
    - leader elected
-   - both GPU agents registered and active
+   - both agents registered and active
 
 2. overlay networking
    - `wg-yoq` exists on all nodes
-   - the two GPU agents can reach each other over overlay IPs
+   - the two agents can reach each other over overlay IPs
 
 3. multi-node containers
    - several containers are started directly on the agent nodes
    - one agent can reach a container IP hosted on the other agent
 
 4. GPU host and container visibility
+   - only when `USE_GPU_AGENTS=true`
    - `nvidia-smi`
    - `yoq gpu topo --json`
    - `yoq run <cuda-image> nvidia-smi`
 
 5. cluster training smoke
+   - only when `USE_GPU_AGENTS=true`
    - a 2-rank GPU training job is submitted through `yoq train start --server`
    - both ranks are placed
-   - each GPU agent log shows `MASTER_ADDR`, `WORLD_SIZE`, `RANK`, and `LOCAL_RANK`
+   - each agent log shows `MASTER_ADDR`, `WORLD_SIZE`, `RANK`, and `LOCAL_RANK`
 
 Artifacts are written under `infra/gcp/artifacts/<rig>/<timestamp>/`.
 
@@ -121,11 +123,11 @@ default automated cluster smoke does not depend on it yet.
 ## cost and stability defaults
 
 - server nodes are on-demand by default
-- GPU agents are Spot by default
+- GPU agents are Spot by default when enabled
 - one zone only
 
-If Spot interruptions make the run noisy, switch `USE_SPOT_GPU=false` in
-`infra/gcp/config.env`.
+If GPU mode is enabled and Spot interruptions make the run noisy, switch
+`USE_SPOT_GPU=false` in `infra/gcp/config.env`.
 
 `down.sh` prefers `infra/gcp/.state/current` and exits cleanly if no rig state
 is present, so you can use it after a failed `up.sh` without hand-editing state

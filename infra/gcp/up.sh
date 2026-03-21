@@ -82,19 +82,22 @@ create_agent() {
     compute instances create "${name}"
     --project="${PROJECT_ID}"
     --zone="${ZONE}"
-    --machine-type="${GPU_MACHINE_TYPE}"
-    --boot-disk-size="${GPU_DISK_GB}GB"
+    --machine-type="${AGENT_MACHINE_TYPE}"
+    --boot-disk-size="${AGENT_DISK_GB}GB"
     --network="${NETWORK_NAME}"
     --subnet="${SUBNET_NAME}"
-    --image-project="${GPU_IMAGE_PROJECT}"
-    --image-family="${GPU_IMAGE_FAMILY}"
-    --maintenance-policy=TERMINATE
-    --accelerator="type=${GPU_TYPE},count=${GPU_COUNT_PER_AGENT}"
+    --image-project="${AGENT_IMAGE_PROJECT}"
+    --image-family="${AGENT_IMAGE_FAMILY}"
     --tags="${RIG_LABEL}"
     --labels="yoq-rig=${RIG_LABEL},yoq-role=agent"
   )
 
-  if [ "${USE_SPOT_GPU}" = "true" ]; then
+  if [ "${USE_GPU_AGENTS}" = "true" ]; then
+    args+=(--maintenance-policy=TERMINATE)
+    args+=(--accelerator="type=${GPU_TYPE},count=${GPU_COUNT_PER_AGENT}")
+  fi
+
+  if [ "${USE_GPU_AGENTS}" = "true" ] && [ "${USE_SPOT_GPU}" = "true" ]; then
     args+=(--provisioning-model=SPOT --instance-termination-action=DELETE)
   fi
 

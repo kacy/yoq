@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROLE="${1:?usage: install-node.sh <server|agent>}"
+ROLE="${1:?usage: install-node.sh <server|agent-cpu|agent-gpu>}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -23,6 +23,6 @@ install -m 0644 /tmp/smoke.py /opt/yoq-gcp/smoke.py
 
 HOME=/root yoq doctor --json > /opt/yoq-gcp/doctor.json || true
 
-if [ "${ROLE}" = "agent" ]; then
+if [ "${ROLE}" = "agent-gpu" ]; then
   nvidia-smi -L >/opt/yoq-gcp/nvidia-smi.txt
 fi
