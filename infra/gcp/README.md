@@ -19,4 +19,5 @@ Notes:
 - State lives under `infra/gcp/.state/`.
 - The CPU image family defaults to `ubuntu-2204-lts`; older configs using `ubuntu-2204-lts-amd64` are translated automatically.
 - The project must have non-zero `GPUS_ALL_REGIONS` quota before `up.sh` can create the GPU agents.
+- `down.sh` uses `infra/gcp/.state/current` when available and exits cleanly if no rig state exists.
 - Full usage details are in `docs/gcp-cluster-validation.md`.

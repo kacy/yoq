@@ -83,7 +83,7 @@ require_gpu_quota() {
   die "project ${PROJECT_ID} has no GPU quota (GPUS_ALL_REGIONS limit is ${quota_limit}); request GPU quota in GCP before creating GPU agents"
 }
 
-load_config() {
+load_config_base() {
   require_cmd gcloud
   require_cmd jq
   require_cmd openssl
@@ -112,18 +112,6 @@ load_config() {
   NETWORK_NAME="${NETWORK_NAME:-${RIG_LABEL}-net}"
   SUBNET_NAME="${SUBNET_NAME:-${RIG_LABEL}-subnet}"
 
-  if [ -z "${ZONE:-}" ]; then
-    ZONE="$(pick_gpu_zone)"
-    log "auto-selected zone ${ZONE} for ${GPU_TYPE}"
-  fi
-
-  if [ -z "${GPU_IMAGE_FAMILY:-}" ]; then
-    GPU_IMAGE_FAMILY="$(pick_gpu_image_family)"
-    log "auto-selected GPU image family ${GPU_IMAGE_FAMILY}"
-  fi
-
-  require_gpu_quota
-
   SERVER_1_NAME="${RIG_LABEL}-s1"
   SERVER_2_NAME="${RIG_LABEL}-s2"
   SERVER_3_NAME="${RIG_LABEL}-s3"
@@ -137,11 +125,55 @@ load_config() {
   ARTIFACT_DIR="${ARTIFACT_ROOT}/${RIG_LABEL}"
 }
 
+load_config() {
+  load_config_base
+
+  if [ -z "${ZONE:-}" ]; then
+    ZONE="$(pick_gpu_zone)"
+    log "auto-selected zone ${ZONE} for ${GPU_TYPE}"
+  fi
+
+  if [ -z "${GPU_IMAGE_FAMILY:-}" ]; then
+    GPU_IMAGE_FAMILY="$(pick_gpu_image_family)"
+    log "auto-selected GPU image family ${GPU_IMAGE_FAMILY}"
+  fi
+
+  require_gpu_quota
+}
+
 require_state() {
-  load_config
-  [ -f "${STATE_FILE}" ] || die "missing state file: ${STATE_FILE}. run infra/gcp/up.sh first"
+  load_config_base
+  STATE_FILE="$(locate_state_file)" || die "missing state file under ${STATE_ROOT}; run infra/gcp/up.sh first"
   # shellcheck disable=SC1090
   source "${STATE_FILE}"
+}
+
+locate_state_file() {
+  local candidates=()
+  if [ -f "${STATE_FILE}" ]; then
+    printf '%s\n' "${STATE_FILE}"
+    return 0
+  fi
+
+  if [ -L "${STATE_ROOT}/current" ] && [ -f "$(readlink -f "${STATE_ROOT}/current")" ]; then
+    printf '%s\n' "$(readlink -f "${STATE_ROOT}/current")"
+    return 0
+  fi
+
+  while IFS= read -r candidate; do
+    [ -n "${candidate}" ] && candidates+=("${candidate}")
+  done < <(find "${STATE_ROOT}" -mindepth 2 -maxdepth 2 -name cluster.env -print 2>/dev/null | sort)
+
+  if [ "${#candidates[@]}" -eq 1 ]; then
+    printf '%s\n' "${candidates[0]}"
+    return 0
+  fi
+
+  if [ "${#candidates[@]}" -gt 1 ]; then
+    die "multiple GCP rig states exist under ${STATE_ROOT}; set RIG_NAME explicitly or remove old states"
+  fi
+
+  return 1
 }
 
 ensure_dirs() {

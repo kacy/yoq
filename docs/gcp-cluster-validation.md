@@ -126,3 +126,7 @@ default automated cluster smoke does not depend on it yet.
 
 If Spot interruptions make the run noisy, switch `USE_SPOT_GPU=false` in
 `infra/gcp/config.env`.
+
+`down.sh` prefers `infra/gcp/.state/current` and exits cleanly if no rig state
+is present, so you can use it after a failed `up.sh` without hand-editing state
+paths.
