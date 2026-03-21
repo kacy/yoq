@@ -538,7 +538,6 @@ test "applyHmac produces correct authenticated format" {
     };
     defer transport.peers.deinit();
 
-
     const authenticated = try transport.applyHmac(&plain);
     defer alloc.free(authenticated);
 
@@ -578,7 +577,6 @@ test "applyHmac returns data unchanged when no key" {
         .udp_fd = null,
     };
     defer transport.peers.deinit();
-
 
     const result = try transport.applyHmac(&plain);
     // should return the same pointer — no allocation
@@ -655,7 +653,6 @@ test "resolvePeerId matches configured peer" {
     };
     defer transport.peers.deinit();
 
-
     try transport.addPeer(2, .{ 10, 0, 0, 2 }, 9700);
 
     try std.testing.expectEqual(
@@ -666,7 +663,6 @@ test "resolvePeerId matches configured peer" {
         transport.resolvePeerId(std.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700)) == null,
     );
 }
-
 
 fn waitForGossipResult(receiver: *Transport, buf: []u8) !?GossipReceiveResult {
     var attempts: usize = 0;
