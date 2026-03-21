@@ -10,19 +10,37 @@ write_local_api_token
 LOCAL_YOQ="${YOQ_BINARY_PATH:-${REPO_ROOT}/zig-out/bin/yoq}"
 [ -x "${LOCAL_YOQ}" ] || die "missing local yoq binary at ${LOCAL_YOQ}; run infra/gcp/install.sh first"
 
+wait_for_remote_shell() {
+  local instance="$1"
+  local tries=0
+  while [ "${tries}" -lt 12 ]; do
+    if gcloud_ssh "${instance}" 'echo ready' >/dev/null 2>&1; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 5
+  done
+  return 1
+}
+
+for instance in "${SERVER_1_NAME}" "${SERVER_2_NAME}" "${SERVER_3_NAME}" "${AGENT_1_NAME}" "${AGENT_2_NAME}"; do
+  log "waiting for SSH access on ${instance}"
+  wait_for_remote_shell "${instance}" || die "SSH access never stabilized on ${instance}"
+done
+
 log "starting server 1"
 gcloud_ssh "${SERVER_1_NAME}" \
-  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 1 --port ${RAFT_PORT} --api-port ${API_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 &'"
+  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 1 --port ${RAFT_PORT} --api-port ${API_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 < /dev/null &'"
 
 sleep 5
 
 log "starting server 2"
 gcloud_ssh "${SERVER_2_NAME}" \
-  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 2 --port ${RAFT_PORT} --api-port ${API_PORT} --peers 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 &'"
+  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 2 --port ${RAFT_PORT} --api-port ${API_PORT} --peers 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 < /dev/null &'"
 
 log "starting server 3"
 gcloud_ssh "${SERVER_3_NAME}" \
-  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 3 --port ${RAFT_PORT} --api-port ${API_PORT} --peers 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT},2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 &'"
+  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 3 --port ${RAFT_PORT} --api-port ${API_PORT} --peers 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT},2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 < /dev/null &'"
 
 wait_for_cluster() {
   local tries=0
@@ -46,7 +64,7 @@ join_agent() {
   local instance="$1"
   log "joining ${instance} as agent"
   gcloud_ssh "${instance}" \
-    "sudo bash -lc 'pkill -f \"yoq join\" || true; nohup env HOME=/root yoq join ${SERVER_1_INTERNAL_IP} --token ${CLUSTER_JOIN_TOKEN} --port ${API_PORT} --role agent >/var/log/yoq-agent.log 2>&1 &'"
+    "sudo bash -lc 'pkill -f \"yoq join\" || true; nohup env HOME=/root yoq join ${SERVER_1_INTERNAL_IP} --token ${CLUSTER_JOIN_TOKEN} --port ${API_PORT} --role agent >/var/log/yoq-agent.log 2>&1 < /dev/null &'"
 }
 
 join_agent "${AGENT_1_NAME}"
