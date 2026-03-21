@@ -66,7 +66,7 @@ wait_for_agents() {
   return 1
 }
 
-log "waiting for both GPU agents to join"
+log "waiting for both agents to join"
 wait_for_agents || die "agents did not join cleanly"
 
 log "bootstrap complete"

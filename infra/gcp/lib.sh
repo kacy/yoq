@@ -24,6 +24,20 @@ sanitize_label() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed -E 's/^-+//; s/-+$//; s/-+/-/g'
 }
 
+pick_region_zone() {
+  local zone
+  zone="$(
+    gcloud compute zones list \
+      --project="${PROJECT_ID}" \
+      --filter="region:(${REGION}) AND status=UP" \
+      --format='value(name)' |
+      sort |
+      head -n1
+  )"
+  [ -n "${zone}" ] || die "could not auto-select a zone in ${REGION}; set ZONE explicitly"
+  printf '%s\n' "${zone}"
+}
+
 pick_gpu_zone() {
   local zones
   zones="$(
@@ -98,13 +112,25 @@ load_config_base() {
 
   : "${PROJECT_ID:?set PROJECT_ID in ${CONFIG_FILE}}"
   : "${REGION:?set REGION in ${CONFIG_FILE}}"
-  : "${GPU_TYPE:?set GPU_TYPE in ${CONFIG_FILE}}"
+
+  USE_GPU_AGENTS="${USE_GPU_AGENTS:-false}"
+  if [ "${USE_GPU_AGENTS}" = "true" ]; then
+    : "${GPU_TYPE:?set GPU_TYPE in ${CONFIG_FILE}}"
+  else
+    GPU_TYPE="${GPU_TYPE:-}"
+  fi
 
   if [ "${CPU_IMAGE_FAMILY:-}" = "ubuntu-2204-lts-amd64" ]; then
     CPU_IMAGE_FAMILY="ubuntu-2204-lts"
     log "translated legacy CPU image family ubuntu-2204-lts-amd64 -> ${CPU_IMAGE_FAMILY}"
   fi
   CPU_IMAGE_FAMILY="${CPU_IMAGE_FAMILY:-ubuntu-2204-lts}"
+  CPU_IMAGE_PROJECT="${CPU_IMAGE_PROJECT:-ubuntu-os-cloud}"
+
+  AGENT_IMAGE_PROJECT="${AGENT_IMAGE_PROJECT:-${CPU_IMAGE_PROJECT}}"
+  AGENT_IMAGE_FAMILY="${AGENT_IMAGE_FAMILY:-${CPU_IMAGE_FAMILY}}"
+  AGENT_MACHINE_TYPE="${AGENT_MACHINE_TYPE:-${SERVER_MACHINE_TYPE:-e2-standard-2}}"
+  AGENT_DISK_GB="${AGENT_DISK_GB:-${SERVER_DISK_GB:-30}}"
 
   RIG_NAME="${RIG_NAME:-yoq-gcp-$(date +%Y%m%d-%H%M%S)}"
   RIG_LABEL="$(sanitize_label "${RIG_NAME}")"
@@ -129,16 +155,26 @@ load_config() {
   load_config_base
 
   if [ -z "${ZONE:-}" ]; then
-    ZONE="$(pick_gpu_zone)"
-    log "auto-selected zone ${ZONE} for ${GPU_TYPE}"
+    if [ "${USE_GPU_AGENTS}" = "true" ]; then
+      ZONE="$(pick_gpu_zone)"
+      log "auto-selected zone ${ZONE} for ${GPU_TYPE}"
+    else
+      ZONE="$(pick_region_zone)"
+      log "auto-selected zone ${ZONE} for ${REGION}"
+    fi
   fi
 
-  if [ -z "${GPU_IMAGE_FAMILY:-}" ]; then
-    GPU_IMAGE_FAMILY="$(pick_gpu_image_family)"
-    log "auto-selected GPU image family ${GPU_IMAGE_FAMILY}"
+  if [ "${USE_GPU_AGENTS}" = "true" ]; then
+    if [ -z "${GPU_IMAGE_FAMILY:-}" ]; then
+      GPU_IMAGE_FAMILY="$(pick_gpu_image_family)"
+      log "auto-selected GPU image family ${GPU_IMAGE_FAMILY}"
+    fi
+    AGENT_IMAGE_PROJECT="${GPU_IMAGE_PROJECT}"
+    AGENT_IMAGE_FAMILY="${GPU_IMAGE_FAMILY}"
+    AGENT_MACHINE_TYPE="${GPU_MACHINE_TYPE}"
+    AGENT_DISK_GB="${GPU_DISK_GB}"
+    require_gpu_quota
   fi
-
-  require_gpu_quota
 }
 
 require_state() {
@@ -155,8 +191,8 @@ locate_state_file() {
     return 0
   fi
 
-  if [ -L "${STATE_ROOT}/current" ] && [ -f "$(readlink -f "${STATE_ROOT}/current")" ]; then
-    printf '%s\n' "$(readlink -f "${STATE_ROOT}/current")"
+  if [ -e "${STATE_ROOT}/current" ]; then
+    printf '%s\n' "${STATE_ROOT}/current"
     return 0
   fi
 
@@ -277,6 +313,11 @@ GPU_IMAGE_PROJECT=${GPU_IMAGE_PROJECT@Q}
 GPU_IMAGE_FAMILY=${GPU_IMAGE_FAMILY@Q}
 GPU_TYPE=${GPU_TYPE@Q}
 GPU_COUNT_PER_AGENT=${GPU_COUNT_PER_AGENT@Q}
+USE_GPU_AGENTS=${USE_GPU_AGENTS@Q}
+AGENT_IMAGE_PROJECT=${AGENT_IMAGE_PROJECT@Q}
+AGENT_IMAGE_FAMILY=${AGENT_IMAGE_FAMILY@Q}
+AGENT_MACHINE_TYPE=${AGENT_MACHINE_TYPE@Q}
+AGENT_DISK_GB=${AGENT_DISK_GB@Q}
 SERVER_MACHINE_TYPE=${SERVER_MACHINE_TYPE@Q}
 GPU_MACHINE_TYPE=${GPU_MACHINE_TYPE@Q}
 SERVER_DISK_GB=${SERVER_DISK_GB@Q}
