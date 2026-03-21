@@ -19,6 +19,8 @@ case "${ROLE}" in
     printf 'starting server %s with peers: %s\n' "${ID}" "${PEERS:-<none>}" >/var/log/yoq-start-node.log
 
     pkill -f "yoq init-server" || true
+    sleep 1
+    rm -rf /root/.local/share/yoq/cluster
     if [ -n "${PEERS}" ]; then
       nohup env HOME=/root yoq init-server \
         --id "${ID}" \
@@ -44,6 +46,8 @@ case "${ROLE}" in
     API_PORT="${3:?api port required}"
 
     pkill -f "yoq join" || true
+    sleep 1
+    rm -rf /root/.local/share/yoq/cluster
     nohup env HOME=/root yoq join \
       "${SERVER_ADDR}" \
       --token "${CLUSTER_JOIN_TOKEN}" \
