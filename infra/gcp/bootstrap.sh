@@ -29,18 +29,15 @@ for instance in "${SERVER_1_NAME}" "${SERVER_2_NAME}" "${SERVER_3_NAME}" "${AGEN
 done
 
 log "starting server 1"
-gcloud_ssh "${SERVER_1_NAME}" \
-  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 1 --port ${RAFT_PORT} --api-port ${API_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 < /dev/null &'"
+gcloud_ssh "${SERVER_1_NAME}" "sudo bash /tmp/start-node.sh server 1 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN}"
 
 sleep 5
 
 log "starting server 2"
-gcloud_ssh "${SERVER_2_NAME}" \
-  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 2 --port ${RAFT_PORT} --api-port ${API_PORT} --peers 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 < /dev/null &'"
+gcloud_ssh "${SERVER_2_NAME}" "sudo bash /tmp/start-node.sh server 2 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT}"
 
 log "starting server 3"
-gcloud_ssh "${SERVER_3_NAME}" \
-  "sudo bash -lc 'pkill -f \"yoq init-server\" || true; nohup env HOME=/root yoq init-server --id 3 --port ${RAFT_PORT} --api-port ${API_PORT} --peers 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT},2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT} --token ${CLUSTER_JOIN_TOKEN} --api-token ${API_TOKEN} >/var/log/yoq-server.log 2>&1 < /dev/null &'"
+gcloud_ssh "${SERVER_3_NAME}" "sudo bash /tmp/start-node.sh server 3 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT},2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT}"
 
 wait_for_cluster() {
   local tries=0
@@ -63,8 +60,7 @@ wait_for_cluster > "${ARTIFACT_DIR}/cluster-status-bootstrap.json" || die "clust
 join_agent() {
   local instance="$1"
   log "joining ${instance} as agent"
-  gcloud_ssh "${instance}" \
-    "sudo bash -lc 'pkill -f \"yoq join\" || true; nohup env HOME=/root yoq join ${SERVER_1_INTERNAL_IP} --token ${CLUSTER_JOIN_TOKEN} --port ${API_PORT} --role agent >/var/log/yoq-agent.log 2>&1 < /dev/null &'"
+  gcloud_ssh "${instance}" "sudo bash /tmp/start-node.sh agent ${SERVER_1_INTERNAL_IP} ${CLUSTER_JOIN_TOKEN} ${API_PORT}"
 }
 
 join_agent "${AGENT_1_NAME}"

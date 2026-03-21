@@ -13,6 +13,7 @@ for instance in \
   "${AGENT_1_NAME}" "${AGENT_2_NAME}"; do
   log "copying helpers to ${instance}"
   gcloud_scp_to "${GCP_DIR}/remote/install-node.sh" "${instance}" "/tmp/install-node.sh"
+  gcloud_scp_to "${GCP_DIR}/remote/start-node.sh" "${instance}" "/tmp/start-node.sh"
   gcloud_scp_to "${GCP_DIR}/train/smoke.py" "${instance}" "/tmp/smoke.py"
 done
 
