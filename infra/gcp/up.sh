@@ -40,7 +40,7 @@ gcloud compute firewall-rules describe "${RIG_LABEL}-cluster-internal" --project
     --direction=INGRESS \
     --action=ALLOW \
     --rules="tcp:${API_PORT},tcp:${RAFT_PORT},udp:${GOSSIP_PORT},udp:${WIREGUARD_PORT},icmp" \
-    --source-ranges="${NETWORK_CIDR}" \
+    --source-tags="${RIG_LABEL}" \
     --target-tags="${RIG_LABEL}"
 
 create_server() {

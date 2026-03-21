@@ -7,6 +7,13 @@ require_state
 ensure_dirs
 write_local_api_token
 
+# ensure internal firewall allows cluster traffic between tagged VMs
+gcloud compute firewall-rules update "${RIG_LABEL}-cluster-internal" \
+  --project="${PROJECT_ID}" \
+  --source-tags="${RIG_LABEL}" \
+  --rules="tcp:${API_PORT},tcp:${RAFT_PORT},udp:${GOSSIP_PORT},udp:${WIREGUARD_PORT},icmp" \
+  2>/dev/null || true
+
 wait_for_remote_shell() {
   local instance="$1"
   local tries=0
