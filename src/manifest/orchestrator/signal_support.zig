@@ -13,6 +13,15 @@ pub fn installSignalHandlers(target: *std.atomic.Value(bool)) void {
     };
     posix.sigaction(posix.SIG.INT, &act, null);
     posix.sigaction(posix.SIG.TERM, &act, null);
+
+    // Ignore SIGPIPE so writes to broken sockets return EPIPE instead of
+    // killing the process.
+    const ign = posix.Sigaction{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.PIPE, &ign, null);
 }
 
 fn sigHandler(_: c_int) callconv(.c) void {
