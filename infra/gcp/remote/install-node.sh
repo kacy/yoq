@@ -18,10 +18,7 @@ apt-get install -y \
 modprobe wireguard || true
 
 install -d -m 0755 /opt/yoq-gcp
-install -m 0755 /tmp/yoq /usr/local/bin/yoq
 install -m 0644 /tmp/smoke.py /opt/yoq-gcp/smoke.py
-
-HOME=/root yoq doctor --json > /opt/yoq-gcp/doctor.json || true
 
 if [ "${ROLE}" = "agent-gpu" ]; then
   nvidia-smi -L >/opt/yoq-gcp/nvidia-smi.txt
