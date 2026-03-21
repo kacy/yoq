@@ -54,11 +54,14 @@ Bring the infrastructure up and wait for SSH readiness:
 infra/gcp/up.sh
 ```
 
-Build and install the local `yoq` binary plus node prerequisites:
+Install the `yoq` binary plus node prerequisites:
 
 ```bash
 infra/gcp/install.sh
 ```
+
+`install.sh` fetches the node binary from the release installer URL on each VM,
+so the remote host chooses the right architecture automatically.
 
 Bootstrap the 3-server cluster and join the agents:
 
