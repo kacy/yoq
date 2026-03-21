@@ -75,6 +75,12 @@ load_config() {
   : "${REGION:?set REGION in ${CONFIG_FILE}}"
   : "${GPU_TYPE:?set GPU_TYPE in ${CONFIG_FILE}}"
 
+  if [ "${CPU_IMAGE_FAMILY:-}" = "ubuntu-2204-lts-amd64" ]; then
+    CPU_IMAGE_FAMILY="ubuntu-2204-lts"
+    log "translated legacy CPU image family ubuntu-2204-lts-amd64 -> ${CPU_IMAGE_FAMILY}"
+  fi
+  CPU_IMAGE_FAMILY="${CPU_IMAGE_FAMILY:-ubuntu-2204-lts}"
+
   RIG_NAME="${RIG_NAME:-yoq-gcp-$(date +%Y%m%d-%H%M%S)}"
   RIG_LABEL="$(sanitize_label "${RIG_NAME}")"
 
