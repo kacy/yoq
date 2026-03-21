@@ -133,6 +133,7 @@ CLUSTER_JOIN_TOKEN="${CLUSTER_JOIN_TOKEN:-$(openssl rand -hex 32)}"
 API_TOKEN="${API_TOKEN:-$(openssl rand -hex 32)}"
 
 save_state_file
+ln -sfn "${STATE_FILE}" "${STATE_ROOT}/current"
 
 log "cluster inventory written to ${STATE_FILE}"
 log "server API endpoint: ${SERVER_1_EXTERNAL_IP}:${API_PORT}"
