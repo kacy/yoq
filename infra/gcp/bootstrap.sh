@@ -23,6 +23,7 @@ wait_for_remote_shell() {
 for instance in "${SERVER_1_NAME}" "${SERVER_2_NAME}" "${SERVER_3_NAME}" "${AGENT_1_NAME}" "${AGENT_2_NAME}"; do
   log "waiting for SSH access on ${instance}"
   wait_for_remote_shell "${instance}" || die "SSH access never stabilized on ${instance}"
+  gcloud_scp_to "${GCP_DIR}/remote/start-node.sh" "${instance}" "/tmp/start-node.sh"
 done
 
 log "starting server 1"
