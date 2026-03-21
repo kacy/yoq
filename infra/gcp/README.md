@@ -18,4 +18,5 @@ Notes:
 - Artifacts go under `infra/gcp/artifacts/`.
 - State lives under `infra/gcp/.state/`.
 - The CPU image family defaults to `ubuntu-2204-lts`; older configs using `ubuntu-2204-lts-amd64` are translated automatically.
+- The project must have non-zero `GPUS_ALL_REGIONS` quota before `up.sh` can create the GPU agents.
 - Full usage details are in `docs/gcp-cluster-validation.md`.
