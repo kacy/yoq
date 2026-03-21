@@ -12,7 +12,10 @@ case "${ROLE}" in
     CLUSTER_JOIN_TOKEN="${4:?cluster join token required}"
     API_TOKEN="${5:?api token required}"
     shift 5
-    PEERS="${*:-}"
+    PEERS=""
+    if [ "$#" -gt 0 ]; then
+      PEERS="$(IFS=,; printf '%s' "$*")"
+    fi
     printf 'starting server %s with peers: %s\n' "${ID}" "${PEERS:-<none>}" >/var/log/yoq-start-node.log
 
     pkill -f "yoq init-server" || true
