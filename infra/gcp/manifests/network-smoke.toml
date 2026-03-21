@@ -1,0 +1,8 @@
+[service.redis]
+image = "docker.io/library/redis:7-alpine"
+
+[service.web]
+image = "docker.io/library/nginx:1.27-alpine"
+
+[service.httpd]
+image = "docker.io/library/httpd:2.4-alpine"
