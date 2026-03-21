@@ -29,15 +29,15 @@ for instance in "${SERVER_1_NAME}" "${SERVER_2_NAME}" "${SERVER_3_NAME}" "${AGEN
 done
 
 log "starting server 1"
-gcloud_ssh "${SERVER_1_NAME}" "sudo bash /tmp/start-node.sh server 1 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} 2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT},3@${SERVER_3_INTERNAL_IP}:${RAFT_PORT}"
+gcloud_ssh "${SERVER_1_NAME}" "sudo bash /tmp/start-node.sh server 1 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} 2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT} 3@${SERVER_3_INTERNAL_IP}:${RAFT_PORT}"
 
 sleep 5
 
 log "starting server 2"
-gcloud_ssh "${SERVER_2_NAME}" "sudo bash /tmp/start-node.sh server 2 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT},3@${SERVER_3_INTERNAL_IP}:${RAFT_PORT}"
+gcloud_ssh "${SERVER_2_NAME}" "sudo bash /tmp/start-node.sh server 2 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT} 3@${SERVER_3_INTERNAL_IP}:${RAFT_PORT}"
 
 log "starting server 3"
-gcloud_ssh "${SERVER_3_NAME}" "sudo bash /tmp/start-node.sh server 3 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT},2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT}"
+gcloud_ssh "${SERVER_3_NAME}" "sudo bash /tmp/start-node.sh server 3 ${RAFT_PORT} ${API_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} 1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT} 2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT}"
 
 wait_for_cluster() {
   local tries=0
