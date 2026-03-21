@@ -43,6 +43,9 @@ At minimum set:
 Leave `ZONE` empty to let the scripts pick the first matching zone in the
 region for the requested GPU type.
 
+The project must also have non-zero `GPUS_ALL_REGIONS` quota before the rig can
+create the 2 GPU agents.
+
 ## workflow
 
 Bring the infrastructure up and wait for SSH readiness:

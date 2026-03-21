@@ -58,6 +58,31 @@ pick_gpu_image_family() {
   printf '%s\n' "${family}"
 }
 
+require_gpu_quota() {
+  local quota_json quota_limit
+  quota_json="$(
+    gcloud compute project-info describe \
+      --project="${PROJECT_ID}" \
+      --format='json(quotas)' |
+      jq -r '
+        .quotas
+        | map(select((.metric // .name // "") == "GPUS_ALL_REGIONS"))
+        | .[0] // empty
+      '
+  )"
+  [ -n "${quota_json}" ] || die "could not read GPUS_ALL_REGIONS quota for ${PROJECT_ID}; request GPU quota in GCP or set up a CPU-only rig"
+
+  quota_limit="$(
+    jq -r '.limit // .hardLimit // 0' <<< "${quota_json}"
+  )"
+
+  if awk -v limit="${quota_limit}" 'BEGIN { exit !(limit + 0 > 0) }'; then
+    return 0
+  fi
+
+  die "project ${PROJECT_ID} has no GPU quota (GPUS_ALL_REGIONS limit is ${quota_limit}); request GPU quota in GCP before creating GPU agents"
+}
+
 load_config() {
   require_cmd gcloud
   require_cmd jq
@@ -96,6 +121,8 @@ load_config() {
     GPU_IMAGE_FAMILY="$(pick_gpu_image_family)"
     log "auto-selected GPU image family ${GPU_IMAGE_FAMILY}"
   fi
+
+  require_gpu_quota
 
   SERVER_1_NAME="${RIG_LABEL}-s1"
   SERVER_2_NAME="${RIG_LABEL}-s2"
