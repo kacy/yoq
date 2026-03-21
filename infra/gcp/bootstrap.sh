@@ -7,9 +7,6 @@ require_state
 ensure_dirs
 write_local_api_token
 
-LOCAL_YOQ="${YOQ_BINARY_PATH:-${REPO_ROOT}/zig-out/bin/yoq}"
-[ -x "${LOCAL_YOQ}" ] || die "missing local yoq binary at ${LOCAL_YOQ}; run infra/gcp/install.sh first"
-
 wait_for_remote_shell() {
   local instance="$1"
   local tries=0
@@ -82,7 +79,7 @@ join_agent "${AGENT_2_NAME}"
 wait_for_agents() {
   local tries=0
   while [ "${tries}" -lt 60 ]; do
-    if HOME="${LOCAL_HOME}" "${LOCAL_YOQ}" nodes --server "${SERVER_1_EXTERNAL_IP}:${API_PORT}" --json > "${ARTIFACT_DIR}/nodes-bootstrap.json" 2>/dev/null; then
+    if http_get_json "${SERVER_1_EXTERNAL_IP}" "/agents" > "${ARTIFACT_DIR}/nodes-bootstrap.json" 2>/dev/null; then
       if jq -e 'length == 2 and all(.[]; .status == "active" and .overlay_ip != null)' "${ARTIFACT_DIR}/nodes-bootstrap.json" >/dev/null 2>&1; then
         return 0
       fi
