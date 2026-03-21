@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const linux = std.os.linux;
 const types = @import("../raft_types.zig");
 const common = @import("common.zig");
 const auth_support = @import("auth_support.zig");
@@ -16,10 +17,20 @@ pub fn sendBytes(self: anytype, peer_id: NodeId, peer: PeerAddr, data: []const u
 
     var total: usize = 0;
     while (total < data.len) {
-        const bytes_written = posix.write(fd, data[total..]) catch {
+        const rc = linux.sendto(
+            fd,
+            data[total..].ptr,
+            data.len - total,
+            linux.MSG.NOSIGNAL,
+            null,
+            0,
+        );
+        const signed: isize = @bitCast(rc);
+        if (signed < 0) {
             self.pool.removeConn(peer_id);
             return TransportError.SendFailed;
-        };
+        }
+        const bytes_written = @as(usize, @intCast(signed));
         if (bytes_written == 0) {
             self.pool.removeConn(peer_id);
             return TransportError.SendFailed;
@@ -69,4 +80,38 @@ pub fn receive(self: anytype, alloc: std.mem.Allocator) TransportError!?Received
         .sender_id = verified.sender_id,
         .message = msg,
     };
+}
+
+test "sendBytes returns send failed on broken socket" {
+    var fds: [2]i32 = undefined;
+    const rc = linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds);
+    const signed: isize = @bitCast(rc);
+    try std.testing.expect(signed >= 0);
+    defer posix.close(fds[0]);
+
+    posix.close(fds[1]);
+
+    const FakePool = struct {
+        fd: posix.socket_t,
+
+        fn getOrConnect(self: *@This(), peer_id: NodeId, addr: std.net.Address) !posix.socket_t {
+            _ = peer_id;
+            _ = addr;
+            return self.fd;
+        }
+
+        fn removeConn(self: *@This(), peer_id: NodeId) void {
+            _ = self;
+            _ = peer_id;
+        }
+    };
+
+    const FakeTransport = struct {
+        pool: FakePool,
+    };
+
+    var transport = FakeTransport{ .pool = .{ .fd = fds[0] } };
+    const peer = PeerAddr{ .addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 9700) };
+
+    try std.testing.expectError(TransportError.SendFailed, sendBytes(&transport, 1, peer, "hello"));
 }
