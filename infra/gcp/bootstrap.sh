@@ -41,12 +41,25 @@ gcloud_ssh "${SERVER_3_NAME}" "sudo bash /tmp/start-node.sh server 3 ${RAFT_PORT
 
 wait_for_cluster() {
   local tries=0
+  local probed=0
   while [ "${tries}" -lt 60 ]; do
     if status_json="$(http_get_json "${SERVER_1_EXTERNAL_IP}" "/cluster/status" 2>/dev/null)"; then
       if printf '%s' "${status_json}" | jq -e '.cluster == true and .leader_id != null' >/dev/null 2>&1; then
         printf '%s\n' "${status_json}"
         return 0
       fi
+    fi
+    if [ "${probed}" -eq 0 ] && [ "${tries}" -ge 12 ]; then
+      probed=1
+      log "leader election still pending after 60s; collecting bootstrap diagnostics"
+      mkdir -p "${ARTIFACT_DIR}/bootstrap-probe"
+      if status_json="$(http_get_json "${SERVER_1_EXTERNAL_IP}" "/cluster/status" 2>/dev/null)"; then
+        printf '%s\n' "${status_json}" > "${ARTIFACT_DIR}/bootstrap-probe/cluster-status.json"
+      fi
+      for instance in "${SERVER_1_NAME}" "${SERVER_2_NAME}" "${SERVER_3_NAME}"; do
+        gcloud_ssh "${instance}" "sudo tail -n 200 /var/log/yoq-server.log" \
+          > "${ARTIFACT_DIR}/bootstrap-probe/${instance}.log" 2>&1 || true
+      done
     fi
     tries=$((tries + 1))
     sleep 5
