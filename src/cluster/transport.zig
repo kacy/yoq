@@ -1,15 +1,14 @@
 // transport — TCP and UDP transport for raft and gossip traffic.
 //
 // The top-level module keeps the public transport surface stable. The
-// implementation now lives behind small support modules so connection reuse,
-// HMAC handling, message codec logic, and UDP gossip I/O are easier to audit.
+// implementation now lives behind small support modules so HMAC handling,
+// message codec logic, and UDP gossip I/O are easier to audit.
 
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
 const types = @import("raft_types.zig");
 const common = @import("transport/common.zig");
-const connection_pool = @import("transport/connection_pool.zig");
 const auth_support = @import("transport/auth_support.zig");
 const codec_support = @import("transport/codec_support.zig");
 const io_support = @import("transport/io_support.zig");
@@ -31,7 +30,6 @@ pub const ReceivedMessage = common.ReceivedMessage;
 pub const GossipReceiveResult = common.GossipReceiveResult;
 
 const PeerAddr = common.PeerAddr;
-const ConnectionPool = connection_pool.ConnectionPool;
 const msg_request_vote = common.msg_request_vote;
 const msg_request_vote_reply = common.msg_request_vote_reply;
 const msg_append_entries = common.msg_append_entries;
@@ -50,9 +48,6 @@ pub const Transport = struct {
     /// (single-node mode or during initial bootstrap).
     /// when set, all messages include a 32-byte HMAC-SHA256 tag.
     shared_key: ?[32]u8,
-
-    /// reusable TCP connections to peers, keyed by NodeId.
-    pool: ConnectionPool,
 
     /// optional UDP socket for gossip protocol messages.
     /// initialized separately from the TCP listener since gossip is
@@ -77,14 +72,12 @@ pub const Transport = struct {
             .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
             .local_id = null,
             .shared_key = null,
-            .pool = ConnectionPool.init(alloc),
             .udp_fd = null,
         };
     }
 
     pub fn deinit(self: *Transport) void {
         self.deinitUdp();
-        self.pool.deinit();
         posix.close(self.listen_fd);
         self.peers.deinit();
     }
@@ -540,11 +533,11 @@ test "applyHmac produces correct authenticated format" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = 7,
         .shared_key = "test-key-32-bytes-exactly-here!!".*,
-        .pool = ConnectionPool.init(alloc),
+
         .udp_fd = null,
     };
     defer transport.peers.deinit();
-    defer transport.pool.deinit();
+
 
     const authenticated = try transport.applyHmac(&plain);
     defer alloc.free(authenticated);
@@ -581,11 +574,11 @@ test "applyHmac returns data unchanged when no key" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = null,
         .shared_key = null,
-        .pool = ConnectionPool.init(alloc),
+
         .udp_fd = null,
     };
     defer transport.peers.deinit();
-    defer transport.pool.deinit();
+
 
     const result = try transport.applyHmac(&plain);
     // should return the same pointer — no allocation
@@ -657,11 +650,11 @@ test "resolvePeerId matches configured peer" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = 1,
         .shared_key = null,
-        .pool = ConnectionPool.init(alloc),
+
         .udp_fd = null,
     };
     defer transport.peers.deinit();
-    defer transport.pool.deinit();
+
 
     try transport.addPeer(2, .{ 10, 0, 0, 2 }, 9700);
 
@@ -674,30 +667,6 @@ test "resolvePeerId matches configured peer" {
     );
 }
 
-// -- connection pool tests --
-
-test "connection pool: getOrConnect and closeAll" {
-    const alloc = std.testing.allocator;
-    var pool = ConnectionPool.init(alloc);
-    defer pool.deinit();
-
-    // pool starts empty
-    try std.testing.expectEqual(@as(u32, 0), pool.connections.count());
-
-    // closeAll on empty pool doesn't crash
-    pool.closeAll();
-    try std.testing.expectEqual(@as(u32, 0), pool.connections.count());
-}
-
-test "connection pool: removeConn on missing peer is safe" {
-    const alloc = std.testing.allocator;
-    var pool = ConnectionPool.init(alloc);
-    defer pool.deinit();
-
-    // removing a peer that doesn't exist should be a no-op
-    pool.removeConn(42);
-    try std.testing.expectEqual(@as(u32, 0), pool.connections.count());
-}
 
 fn waitForGossipResult(receiver: *Transport, buf: []u8) !?GossipReceiveResult {
     var attempts: usize = 0;
@@ -743,11 +712,11 @@ test "udp gossip: send and receive with HMAC" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = 1,
         .shared_key = key,
-        .pool = ConnectionPool.init(alloc),
+
         .udp_fd = null,
     };
     defer sender.peers.deinit();
-    defer sender.pool.deinit();
+
     defer sender.deinitUdp();
 
     var receiver = Transport{
@@ -756,11 +725,11 @@ test "udp gossip: send and receive with HMAC" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = 2,
         .shared_key = key,
-        .pool = ConnectionPool.init(alloc),
+
         .udp_fd = null,
     };
     defer receiver.peers.deinit();
-    defer receiver.pool.deinit();
+
     defer receiver.deinitUdp();
 
     try sender.initUdp(0); // OS assigns port
@@ -795,11 +764,11 @@ test "udp gossip: wrong key rejected" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = 1,
         .shared_key = "sender-key-aaaaaaaaaaaaaaaaaaaaa".*,
-        .pool = ConnectionPool.init(alloc),
+
         .udp_fd = null,
     };
     defer sender.peers.deinit();
-    defer sender.pool.deinit();
+
     defer sender.deinitUdp();
 
     var receiver = Transport{
@@ -808,11 +777,11 @@ test "udp gossip: wrong key rejected" {
         .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
         .local_id = 2,
         .shared_key = "receiver-key-bbbbbbbbbbbbbbbbbbb".*,
-        .pool = ConnectionPool.init(alloc),
+
         .udp_fd = null,
     };
     defer receiver.peers.deinit();
-    defer receiver.pool.deinit();
+
     defer receiver.deinitUdp();
 
     try sender.initUdp(0);

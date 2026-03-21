@@ -12,18 +12,20 @@ const TransportError = common.TransportError;
 const VerifiedBody = common.VerifiedBody;
 
 pub fn sendBytes(self: anytype, peer_id: NodeId, peer: PeerAddr, data: []const u8) !void {
-    const fd = self.pool.getOrConnect(peer_id, peer.addr) catch return TransportError.ConnectFailed;
+    _ = self;
+    _ = peer_id;
+    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return TransportError.ConnectFailed;
+    defer posix.close(fd);
+
+    const timeout = posix.timeval{ .sec = 1, .usec = 0 };
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+
+    posix.connect(fd, &peer.addr.any, peer.addr.getOsSockLen()) catch return TransportError.ConnectFailed;
 
     var total: usize = 0;
     while (total < data.len) {
-        const bytes_written = posix.write(fd, data[total..]) catch {
-            self.pool.removeConn(peer_id);
-            return TransportError.SendFailed;
-        };
-        if (bytes_written == 0) {
-            self.pool.removeConn(peer_id);
-            return TransportError.SendFailed;
-        }
+        const bytes_written = posix.write(fd, data[total..]) catch return TransportError.SendFailed;
+        if (bytes_written == 0) return TransportError.SendFailed;
         total += bytes_written;
     }
 }
