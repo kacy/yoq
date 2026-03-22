@@ -7,6 +7,12 @@ const logger = @import("../../lib/log.zig");
 
 const agent_gossip_port: u16 = 9800;
 
+fn proposeUnderLock(self: anytype, sql: []const u8) !void {
+    self.mu.lock();
+    defer self.mu.unlock();
+    _ = try self.raft.propose(sql);
+}
+
 pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecord) void {
     const now = std.time.timestamp();
     const base_timeout: i64 = 30;
@@ -22,14 +28,14 @@ pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecor
 
         var sql_buf: [256]u8 = undefined;
         const sql = agent_registry.markOfflineSql(&sql_buf, agent.id) catch continue;
-        _ = self.raft.propose(sql) catch |e| {
+        _ = proposeUnderLock(self, sql) catch |e| {
             logger.warn("failed to propose agent offline status: {}", .{e});
             continue;
         };
 
         var orphan_buf: [256]u8 = undefined;
         const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent.id) catch continue;
-        _ = self.raft.propose(orphan_sql) catch |e| {
+        _ = proposeUnderLock(self, orphan_sql) catch |e| {
             logger.warn("failed to propose assignment orphaning for agent {s}: {}", .{ agent.id, e });
         };
     }
@@ -61,7 +67,7 @@ pub fn reconcileOrphanedAssignments(
         if (placement) |picked| {
             var sql_buf: [256]u8 = undefined;
             const sql = agent_registry.reassignSql(&sql_buf, orphans[i].id, picked.agent_id) catch continue;
-            _ = self.raft.propose(sql) catch |e| {
+            _ = proposeUnderLock(self, sql) catch |e| {
                 logger.warn("failed to propose reassignment for {s}: {}", .{ orphans[i].id, e });
             };
         }
@@ -78,7 +84,7 @@ pub fn cleanupDeadAgents(self: anytype, agents: []const agent_registry.AgentReco
 
         var assign_buf: [256]u8 = undefined;
         const assign_sql = agent_registry.deleteAgentAssignmentsSql(&assign_buf, agent.id) catch continue;
-        _ = self.raft.propose(assign_sql) catch |e| {
+        _ = proposeUnderLock(self, assign_sql) catch |e| {
             logger.warn("failed to propose assignment cleanup for dead agent {s}: {}", .{ agent.id, e });
             continue;
         };
@@ -87,7 +93,7 @@ pub fn cleanupDeadAgents(self: anytype, agents: []const agent_registry.AgentReco
             if (nid >= 1 and nid <= 65534) {
                 var wg_buf: [256]u8 = undefined;
                 const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(nid)) catch continue;
-                _ = self.raft.propose(wg_sql) catch |e| {
+                _ = proposeUnderLock(self, wg_sql) catch |e| {
                     logger.warn("failed to remove wireguard peer for dead agent {s}: {}", .{ agent.id, e });
                 };
             }
@@ -95,7 +101,7 @@ pub fn cleanupDeadAgents(self: anytype, agents: []const agent_registry.AgentReco
 
         var remove_buf: [256]u8 = undefined;
         const remove_sql = agent_registry.removeSql(&remove_buf, agent.id) catch continue;
-        _ = self.raft.propose(remove_sql) catch |e| {
+        _ = proposeUnderLock(self, remove_sql) catch |e| {
             logger.warn("failed to propose removal of dead agent {s}: {}", .{ agent.id, e });
         };
     }
@@ -181,21 +187,21 @@ pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
 
     var sql_buf: [256]u8 = undefined;
     const sql = agent_registry.markOfflineSql(&sql_buf, agent_id) catch return;
-    _ = self.raft.propose(sql) catch |e| {
+    _ = proposeUnderLock(self, sql) catch |e| {
         logger.warn("gossip: failed to propose offline for agent {s}: {}", .{ agent_id, e });
         return;
     };
 
     var orphan_buf: [256]u8 = undefined;
     const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent_id) catch return;
-    _ = self.raft.propose(orphan_sql) catch |e| {
+    _ = proposeUnderLock(self, orphan_sql) catch |e| {
         logger.warn("gossip: failed to orphan assignments for agent {s}: {}", .{ agent_id, e });
     };
 
     if (member_id >= 1 and member_id <= 65534) {
         var wg_buf: [256]u8 = undefined;
         const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(member_id)) catch return;
-        _ = self.raft.propose(wg_sql) catch |e| {
+        _ = proposeUnderLock(self, wg_sql) catch |e| {
             logger.warn("gossip: failed to remove wireguard peer for dead member {}: {}", .{ member_id, e });
         };
     }
@@ -207,7 +213,7 @@ pub fn handleGossipMemberAlive(self: anytype, member_id: u64) void {
 
     var sql_buf: [256]u8 = undefined;
     const sql = agent_registry.markActiveSql(&sql_buf, agent_id) catch return;
-    _ = self.raft.propose(sql) catch |e| {
+    _ = proposeUnderLock(self, sql) catch |e| {
         logger.warn("gossip: failed to propose active for agent {s}: {}", .{ agent_id, e });
     };
 }
