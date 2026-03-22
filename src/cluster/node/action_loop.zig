@@ -53,6 +53,8 @@ pub fn tickLoop(self: anytype) void {
             if (heartbeat_batch) |batch| self.alloc.free(batch);
         }
 
+        var still_leader = false;
+        var gossip_tick_due = false;
         {
             self.mu.lock();
             defer self.mu.unlock();
@@ -61,24 +63,29 @@ pub fn tickLoop(self: anytype) void {
             processActions(self);
 
             self.tick_count +%= 1;
-            if (self.raft.role == .leader) {
-                if (agents) |records| {
-                    if (do_health) membership_sync.checkAgentHealth(self, records);
-                    if (do_reconcile) membership_sync.reconcileOrphanedAssignments(self, reconcile_orphans orelse &.{}, records);
-                    if (do_cleanup) membership_sync.cleanupDeadAgents(self, records);
-                }
-                if (heartbeat_batch) |batch| {
-                    _ = self.raft.propose(batch) catch |e| {
-                        logger.warn("failed to propose heartbeat batch: {}", .{e});
-                    };
-                }
-            }
-
-            if (self.gossip != null and self.tick_count % 5 == 0) {
-                membership_sync.tickGossip(self);
-            }
+            still_leader = self.raft.role == .leader;
+            gossip_tick_due = self.gossip != null and self.tick_count % 5 == 0;
 
             snapshot_support.maybeSnapshot(self);
+        }
+
+        if (still_leader) {
+            if (agents) |records| {
+                if (do_health) membership_sync.checkAgentHealth(self, records);
+                if (do_reconcile) membership_sync.reconcileOrphanedAssignments(self, reconcile_orphans orelse &.{}, records);
+                if (do_cleanup) membership_sync.cleanupDeadAgents(self, records);
+            }
+            if (heartbeat_batch) |batch| {
+                self.mu.lock();
+                _ = self.raft.propose(batch) catch |e| {
+                    logger.warn("failed to propose heartbeat batch: {}", .{e});
+                };
+                self.mu.unlock();
+            }
+        }
+
+        if (gossip_tick_due) {
+            membership_sync.tickGossip(self);
         }
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }

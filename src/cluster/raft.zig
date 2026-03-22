@@ -58,12 +58,12 @@ pub const Action = union(enum) {
 };
 
 // election timeout range in ticks. randomized per election to avoid
-// split votes. at 100ms per tick this gives 1.5-3s timeouts.
-const min_election_ticks: u32 = 15;
-const max_election_ticks: u32 = 30;
+// split votes. at 100ms per tick this gives 3-6s timeouts.
+const min_election_ticks: u32 = 30;
+const max_election_ticks: u32 = 60;
 
-// heartbeat interval in ticks (100ms per tick = 1s heartbeat)
-const heartbeat_interval: u32 = 10;
+// heartbeat interval in ticks (100ms per tick = 600ms heartbeat)
+const heartbeat_interval: u32 = 6;
 
 pub const Raft = struct {
     alloc: std.mem.Allocator,
