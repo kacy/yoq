@@ -332,7 +332,6 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_load_balancer_fault_mode Active load balancer fault mode\n");
     try writer.writeAll("# TYPE yoq_load_balancer_fault_mode gauge\n");
     try writeLoadBalancerFaultMode(writer);
-
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
     try writeShadowEventCounters(writer, .container_runtime);
@@ -411,7 +410,6 @@ fn writeLoadBalancerFaultMode(writer: anytype) !void {
         .{@intFromBool(mode == .endpoint_overflow)},
     );
 }
-
 fn writeShadowEventCounters(writer: anytype, source: service_reconciler.EventSource) !void {
     try writer.print(
         "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"container_registered\"}} {d}\n",
