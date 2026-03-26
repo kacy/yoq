@@ -132,6 +132,14 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             dns_registry.dnsInterceptorFaultInjectionCount(),
         },
     ) catch return common.internalError();
+    writer.writeAll("},\"load_balancer_fault\":{") catch return common.internalError();
+    writer.print(
+        "\"mode\":\"{s}\",\"injections\":{d}",
+        .{
+            dns_registry.loadBalancerFaultMode().label(),
+            dns_registry.loadBalancerFaultInjectionCount(),
+        },
+    ) catch return common.internalError();
     writer.writeAll("},\"events\":{\"counts\":{") catch return common.internalError();
     writer.print(
         "\"container_registered\":{d},\"container_unregistered\":{d},\"endpoint_healthy\":{d},\"endpoint_unhealthy\":{d}",

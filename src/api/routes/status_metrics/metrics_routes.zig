@@ -325,6 +325,14 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_dns_interceptor_fault_mode gauge\n");
     try writeDnsInterceptorFaultMode(writer);
 
+    try writer.writeAll("# HELP yoq_load_balancer_fault_injections_total Injected load balancer faults\n");
+    try writer.writeAll("# TYPE yoq_load_balancer_fault_injections_total counter\n");
+    try writer.print("yoq_load_balancer_fault_injections_total {d}\n", .{dns_registry.loadBalancerFaultInjectionCount()});
+
+    try writer.writeAll("# HELP yoq_load_balancer_fault_mode Active load balancer fault mode\n");
+    try writer.writeAll("# TYPE yoq_load_balancer_fault_mode gauge\n");
+    try writeLoadBalancerFaultMode(writer);
+
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
     try writeShadowEventCounters(writer, .container_runtime);
@@ -389,6 +397,18 @@ fn writeDnsInterceptorFaultMode(writer: anytype) !void {
     try writer.print(
         "yoq_dns_interceptor_fault_mode{{mode=\"unavailable\"}} {d}\n",
         .{@intFromBool(mode == .unavailable)},
+    );
+}
+
+fn writeLoadBalancerFaultMode(writer: anytype) !void {
+    const mode = dns_registry.loadBalancerFaultMode();
+    try writer.print(
+        "yoq_load_balancer_fault_mode{{mode=\"none\"}} {d}\n",
+        .{@intFromBool(mode == .none)},
+    );
+    try writer.print(
+        "yoq_load_balancer_fault_mode{{mode=\"endpoint_overflow\"}} {d}\n",
+        .{@intFromBool(mode == .endpoint_overflow)},
     );
 }
 
