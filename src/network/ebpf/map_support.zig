@@ -7,6 +7,24 @@ const log = @import("../../lib/log.zig");
 const common = @import("common.zig");
 const resource_support = @import("resource_support.zig");
 
+pub const MapUpdateFaultMode = enum {
+    none,
+    fail_update,
+    map_full,
+
+    pub fn label(self: MapUpdateFaultMode) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .fail_update => "fail_update",
+            .map_full => "map_full",
+        };
+    }
+};
+
+var fault_mutex: std.Thread.Mutex = .{};
+var map_update_fault_mode: MapUpdateFaultMode = .none;
+var map_update_fault_injections: u64 = 0;
+
 pub fn createMap(
     map_type: BPF.MapType,
     key_size: u32,
@@ -81,6 +99,20 @@ pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) common.
         return common.EbpfError.InvalidParameter;
     }
 
+    switch (currentMapUpdateFaultMode()) {
+        .none => {},
+        .fail_update => {
+            noteMapUpdateFaultInjection(.fail_update);
+            resource_support.recordMapOpFailure();
+            return common.EbpfError.MapUpdateFailed;
+        },
+        .map_full => {
+            noteMapUpdateFaultInjection(.map_full);
+            resource_support.recordMapOpFailure();
+            return common.EbpfError.MapFull;
+        },
+    }
+
     BPF.map_update_elem(map_fd, key, value, BPF.ANY) catch |e| {
         resource_support.recordMapOpFailure();
         const err_name = @errorName(e);
@@ -93,6 +125,31 @@ pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) common.
     };
 
     resource_support.recordMapOpSuccess();
+}
+
+pub fn mapUpdateFaultMode() MapUpdateFaultMode {
+    fault_mutex.lock();
+    defer fault_mutex.unlock();
+    return map_update_fault_mode;
+}
+
+pub fn mapUpdateFaultInjectionCount() u64 {
+    fault_mutex.lock();
+    defer fault_mutex.unlock();
+    return map_update_fault_injections;
+}
+
+pub fn setMapUpdateFaultModeForTest(mode: MapUpdateFaultMode) void {
+    fault_mutex.lock();
+    defer fault_mutex.unlock();
+    map_update_fault_mode = mode;
+}
+
+pub fn resetFaultInjectionForTest() void {
+    fault_mutex.lock();
+    defer fault_mutex.unlock();
+    map_update_fault_mode = .none;
+    map_update_fault_injections = 0;
 }
 
 pub fn mapDelete(map_fd: posix.fd_t, key: []const u8) bool {
@@ -108,4 +165,36 @@ pub fn mapDelete(map_fd: posix.fd_t, key: []const u8) bool {
         return false;
     };
     return true;
+}
+
+fn currentMapUpdateFaultMode() MapUpdateFaultMode {
+    fault_mutex.lock();
+    defer fault_mutex.unlock();
+    return map_update_fault_mode;
+}
+
+fn noteMapUpdateFaultInjection(mode: MapUpdateFaultMode) void {
+    fault_mutex.lock();
+    defer fault_mutex.unlock();
+    map_update_fault_injections += 1;
+    log.warn("ebpf: injected map_update fault mode={s}", .{mode.label()});
+}
+
+test "mapUpdate fault mode can force update failure" {
+    resetFaultInjectionForTest();
+    defer resetFaultInjectionForTest();
+
+    setMapUpdateFaultModeForTest(.fail_update);
+    try std.testing.expectEqual(MapUpdateFaultMode.fail_update, mapUpdateFaultMode());
+    try std.testing.expectError(common.EbpfError.MapUpdateFailed, mapUpdate(1, "k", "v"));
+    try std.testing.expectEqual(@as(u64, 1), mapUpdateFaultInjectionCount());
+}
+
+test "mapUpdate fault mode can force map full" {
+    resetFaultInjectionForTest();
+    defer resetFaultInjectionForTest();
+
+    setMapUpdateFaultModeForTest(.map_full);
+    try std.testing.expectError(common.EbpfError.MapFull, mapUpdate(1, "k", "v"));
+    try std.testing.expectEqual(@as(u64, 1), mapUpdateFaultInjectionCount());
 }

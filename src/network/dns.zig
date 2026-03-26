@@ -555,6 +555,8 @@ test "lookupClusterService returns null when no cluster db" {
     const prev = registry_support.currentClusterDb();
     setClusterDb(null);
     defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
 
     try std.testing.expect(lookupClusterService("anything") == null);
 }
@@ -589,6 +591,8 @@ test "lookupClusterService resolves from service_names table" {
     // set up cluster db reference
     const prev = registry_support.currentClusterDb();
     defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
     setClusterDb(&db);
 
     const result = lookupClusterService("remote-db");
@@ -605,9 +609,47 @@ test "lookupClusterService returns null for unknown name" {
 
     const prev = registry_support.currentClusterDb();
     defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
     setClusterDb(&db);
 
     try std.testing.expect(lookupClusterService("nonexistent") == null);
+}
+
+test "lookupClusterService can force miss for stale replica testing" {
+    const schema = @import("../state/schema.zig");
+
+    var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;
+    defer db.deinit();
+    schema.init(&db) catch return;
+
+    db.exec(
+        "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "remote-db", "ctr_remote", "10.42.3.5", @as(i64, 1000) },
+    ) catch return;
+
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
+    setClusterDb(&db);
+    registry_support.setClusterLookupFaultForTest(.force_miss, null);
+
+    try std.testing.expect(lookupClusterService("remote-db") == null);
+    try std.testing.expectEqual(@as(u64, 1), registry_support.clusterLookupFaultInjectionCount());
+}
+
+test "lookupClusterService can return injected stale override" {
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
+
+    registry_support.setClusterLookupFaultForTest(.stale_override, .{ 10, 42, 9, 9 });
+
+    const result = lookupClusterService("remote-db");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 9, 9 }, result.?);
+    try std.testing.expectEqual(@as(u64, 1), registry_support.clusterLookupFaultInjectionCount());
 }
 
 test "lookupService falls through to cluster db" {
@@ -662,6 +704,45 @@ test "lookupService prefers local registry over cluster db" {
     const result = lookupService("web");
     try std.testing.expect(result != null);
     try std.testing.expectEqual([4]u8{ 10, 42, 1, 10 }, result.?);
+}
+
+test "userspace dns still resolves when dns interceptor is unavailable" {
+    resetRegistryForTest();
+    registry_support.resetDnsInterceptorFaultsForTest();
+    defer registry_support.resetDnsInterceptorFaultsForTest();
+
+    registerService("api", "ctr_api", .{ 10, 42, 0, 44 });
+
+    const result = lookupService("api");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 44 }, result.?);
+    try std.testing.expectEqual(@as(u64, 0), registry_support.dnsInterceptorFaultInjectionCount());
+
+    registry_support.setDnsInterceptorFaultModeForTest(.unavailable);
+    registerService("web", "ctr_web", .{ 10, 42, 0, 45 });
+
+    const web = lookupService("web");
+    try std.testing.expect(web != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 45 }, web.?);
+    try std.testing.expectEqual(@as(u64, 1), registry_support.dnsInterceptorFaultInjectionCount());
+
+    unregisterService("ctr_web");
+    try std.testing.expect(lookupService("web") == null);
+    try std.testing.expectEqual(@as(u64, 2), registry_support.dnsInterceptorFaultInjectionCount());
+}
+
+test "userspace dns still resolves when load balancer add overflows" {
+    resetRegistryForTest();
+    registry_support.resetLoadBalancerFaultsForTest();
+    defer registry_support.resetLoadBalancerFaultsForTest();
+
+    registry_support.setLoadBalancerFaultModeForTest(.endpoint_overflow);
+    registerService("api", "ctr_api", .{ 10, 42, 0, 46 });
+
+    const result = lookupService("api");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 46 }, result.?);
+    try std.testing.expectEqual(@as(u64, 1), registry_support.loadBalancerFaultInjectionCount());
 }
 
 test "registerService rejects name with control characters" {

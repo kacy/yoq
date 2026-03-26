@@ -6,6 +6,7 @@ const writers = @import("writers.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const dns_registry = @import("../../../network/dns/registry_support.zig");
 const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
+const ebpf_map_support = @import("../../../network/ebpf/map_support.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
@@ -100,6 +101,43 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             service_registry_bridge.faultMode(.container_unregister).label(),
             service_registry_bridge.faultMode(.endpoint_healthy).label(),
             service_registry_bridge.faultMode(.endpoint_unhealthy).label(),
+        },
+    ) catch return common.internalError();
+    writer.writeAll("},\"ebpf_map_update_fault\":{") catch return common.internalError();
+    writer.print(
+        "\"mode\":\"{s}\",\"injections\":{d}",
+        .{
+            ebpf_map_support.mapUpdateFaultMode().label(),
+            ebpf_map_support.mapUpdateFaultInjectionCount(),
+        },
+    ) catch return common.internalError();
+    const cluster_fault_ip = dns_registry.clusterLookupFaultIp();
+    writer.writeAll("},\"cluster_lookup_fault\":{") catch return common.internalError();
+    writer.print(
+        "\"mode\":\"{s}\",\"injections\":{d},\"stale_ip\":\"{d}.{d}.{d}.{d}\"",
+        .{
+            dns_registry.clusterLookupFaultMode().label(),
+            dns_registry.clusterLookupFaultInjectionCount(),
+            cluster_fault_ip[0],
+            cluster_fault_ip[1],
+            cluster_fault_ip[2],
+            cluster_fault_ip[3],
+        },
+    ) catch return common.internalError();
+    writer.writeAll("},\"dns_interceptor_fault\":{") catch return common.internalError();
+    writer.print(
+        "\"mode\":\"{s}\",\"injections\":{d}",
+        .{
+            dns_registry.dnsInterceptorFaultMode().label(),
+            dns_registry.dnsInterceptorFaultInjectionCount(),
+        },
+    ) catch return common.internalError();
+    writer.writeAll("},\"load_balancer_fault\":{") catch return common.internalError();
+    writer.print(
+        "\"mode\":\"{s}\",\"injections\":{d}",
+        .{
+            dns_registry.loadBalancerFaultMode().label(),
+            dns_registry.loadBalancerFaultInjectionCount(),
         },
     ) catch return common.internalError();
     writer.writeAll("},\"events\":{\"counts\":{") catch return common.internalError();

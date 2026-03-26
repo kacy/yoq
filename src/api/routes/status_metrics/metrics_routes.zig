@@ -9,6 +9,7 @@ const gpu_detect = @import("../../../gpu/detect.zig");
 const ip_mod = @import("../../../network/ip.zig");
 const dns_registry = @import("../../../network/dns/registry_support.zig");
 const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
+const ebpf_map_support = @import("../../../network/ebpf/map_support.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
@@ -300,6 +301,37 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writeBridgeFaultMode(writer, .endpoint_healthy);
     try writeBridgeFaultMode(writer, .endpoint_unhealthy);
 
+    try writer.writeAll("# HELP yoq_ebpf_map_update_fault_injections_total Injected eBPF map_update faults\n");
+    try writer.writeAll("# TYPE yoq_ebpf_map_update_fault_injections_total counter\n");
+    try writer.print("yoq_ebpf_map_update_fault_injections_total {d}\n", .{ebpf_map_support.mapUpdateFaultInjectionCount()});
+
+    try writer.writeAll("# HELP yoq_ebpf_map_update_fault_mode Active eBPF map_update fault mode\n");
+    try writer.writeAll("# TYPE yoq_ebpf_map_update_fault_mode gauge\n");
+    try writeMapUpdateFaultMode(writer);
+
+    try writer.writeAll("# HELP yoq_dns_cluster_lookup_fault_injections_total Injected cluster lookup faults\n");
+    try writer.writeAll("# TYPE yoq_dns_cluster_lookup_fault_injections_total counter\n");
+    try writer.print("yoq_dns_cluster_lookup_fault_injections_total {d}\n", .{dns_registry.clusterLookupFaultInjectionCount()});
+
+    try writer.writeAll("# HELP yoq_dns_cluster_lookup_fault_mode Active cluster lookup fault mode\n");
+    try writer.writeAll("# TYPE yoq_dns_cluster_lookup_fault_mode gauge\n");
+    try writeClusterLookupFaultMode(writer);
+
+    try writer.writeAll("# HELP yoq_dns_interceptor_fault_injections_total Injected DNS interceptor faults\n");
+    try writer.writeAll("# TYPE yoq_dns_interceptor_fault_injections_total counter\n");
+    try writer.print("yoq_dns_interceptor_fault_injections_total {d}\n", .{dns_registry.dnsInterceptorFaultInjectionCount()});
+
+    try writer.writeAll("# HELP yoq_dns_interceptor_fault_mode Active DNS interceptor fault mode\n");
+    try writer.writeAll("# TYPE yoq_dns_interceptor_fault_mode gauge\n");
+    try writeDnsInterceptorFaultMode(writer);
+
+    try writer.writeAll("# HELP yoq_load_balancer_fault_injections_total Injected load balancer faults\n");
+    try writer.writeAll("# TYPE yoq_load_balancer_fault_injections_total counter\n");
+    try writer.print("yoq_load_balancer_fault_injections_total {d}\n", .{dns_registry.loadBalancerFaultInjectionCount()});
+
+    try writer.writeAll("# HELP yoq_load_balancer_fault_mode Active load balancer fault mode\n");
+    try writer.writeAll("# TYPE yoq_load_balancer_fault_mode gauge\n");
+    try writeLoadBalancerFaultMode(writer);
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
     try writeShadowEventCounters(writer, .container_runtime);
@@ -323,6 +355,61 @@ fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.Brid
     );
 }
 
+fn writeMapUpdateFaultMode(writer: anytype) !void {
+    const mode = ebpf_map_support.mapUpdateFaultMode();
+    try writer.print(
+        "yoq_ebpf_map_update_fault_mode{{mode=\"none\"}} {d}\n",
+        .{@intFromBool(mode == .none)},
+    );
+    try writer.print(
+        "yoq_ebpf_map_update_fault_mode{{mode=\"fail_update\"}} {d}\n",
+        .{@intFromBool(mode == .fail_update)},
+    );
+    try writer.print(
+        "yoq_ebpf_map_update_fault_mode{{mode=\"map_full\"}} {d}\n",
+        .{@intFromBool(mode == .map_full)},
+    );
+}
+
+fn writeClusterLookupFaultMode(writer: anytype) !void {
+    const mode = dns_registry.clusterLookupFaultMode();
+    try writer.print(
+        "yoq_dns_cluster_lookup_fault_mode{{mode=\"none\"}} {d}\n",
+        .{@intFromBool(mode == .none)},
+    );
+    try writer.print(
+        "yoq_dns_cluster_lookup_fault_mode{{mode=\"force_miss\"}} {d}\n",
+        .{@intFromBool(mode == .force_miss)},
+    );
+    try writer.print(
+        "yoq_dns_cluster_lookup_fault_mode{{mode=\"stale_override\"}} {d}\n",
+        .{@intFromBool(mode == .stale_override)},
+    );
+}
+
+fn writeDnsInterceptorFaultMode(writer: anytype) !void {
+    const mode = dns_registry.dnsInterceptorFaultMode();
+    try writer.print(
+        "yoq_dns_interceptor_fault_mode{{mode=\"none\"}} {d}\n",
+        .{@intFromBool(mode == .none)},
+    );
+    try writer.print(
+        "yoq_dns_interceptor_fault_mode{{mode=\"unavailable\"}} {d}\n",
+        .{@intFromBool(mode == .unavailable)},
+    );
+}
+
+fn writeLoadBalancerFaultMode(writer: anytype) !void {
+    const mode = dns_registry.loadBalancerFaultMode();
+    try writer.print(
+        "yoq_load_balancer_fault_mode{{mode=\"none\"}} {d}\n",
+        .{@intFromBool(mode == .none)},
+    );
+    try writer.print(
+        "yoq_load_balancer_fault_mode{{mode=\"endpoint_overflow\"}} {d}\n",
+        .{@intFromBool(mode == .endpoint_overflow)},
+    );
+}
 fn writeShadowEventCounters(writer: anytype, source: service_reconciler.EventSource) !void {
     try writer.print(
         "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"container_registered\"}} {d}\n",
