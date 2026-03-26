@@ -151,4 +151,3 @@ test "resetForTest clears overrides" {
     try std.testing.expect(!current_flags.dns_returns_vip);
     try std.testing.expect(!current_flags.l7_proxy_http);
 }
-

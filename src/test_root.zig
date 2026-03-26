@@ -46,6 +46,7 @@ comptime {
     _ = @import("network/wireguard.zig");
     _ = @import("network/commands.zig");
     _ = @import("network/service_rollout.zig");
+    _ = @import("network/service_reconciler.zig");
     _ = @import("build/dockerfile.zig");
     _ = @import("build/context.zig");
     _ = @import("build/engine.zig");

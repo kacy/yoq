@@ -4,6 +4,7 @@ const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
 const checks = @import("check_runtime.zig");
 const registry = @import("registry_support.zig");
+const service_reconciler = @import("../../network/service_reconciler.zig");
 
 pub fn startChecker() void {
     if (registry.checker_running.load(.acquire)) return;
@@ -130,10 +131,12 @@ pub fn updateState(entry: *types.ServiceHealth, success: bool) void {
 
 fn dnsRegister(entry: *const types.ServiceHealth) void {
     dns.registerService(entry.serviceName(), &entry.container_id, entry.container_ip);
+    service_reconciler.noteEndpointHealthy(entry.serviceName(), &entry.container_id, entry.container_ip);
     log.info("health: registered {s} in DNS", .{entry.serviceName()});
 }
 
 fn dnsUnregister(entry: *const types.ServiceHealth) void {
     dns.unregisterService(&entry.container_id);
+    service_reconciler.noteEndpointUnhealthy(entry.serviceName(), &entry.container_id, entry.container_ip);
     log.info("health: unregistered {s} from DNS", .{entry.serviceName()});
 }
