@@ -101,6 +101,12 @@ pub fn faultInjectionCount(operation: BridgeOperation) u64 {
     return fault_counts[@intFromEnum(operation)];
 }
 
+pub fn faultMode(operation: BridgeOperation) FaultMode {
+    fault_mutex.lock();
+    defer fault_mutex.unlock();
+    return fault_modes[@intFromEnum(operation)];
+}
+
 pub fn setFaultModeForTest(operation: BridgeOperation, mode: FaultMode) void {
     fault_mutex.lock();
     defer fault_mutex.unlock();
@@ -204,4 +210,13 @@ test "bridge can skip shadow record while preserving legacy apply" {
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 10 }), dns.lookupService("web"));
     try std.testing.expectEqual(@as(u64, 0), service_reconciler.eventCountBySource(.health_checker, .endpoint_healthy));
     try std.testing.expectEqual(@as(u64, 1), faultInjectionCount(.endpoint_healthy));
+}
+
+test "fault mode accessor returns configured mode" {
+    resetFaultsForTest();
+    defer resetFaultsForTest();
+
+    try std.testing.expectEqual(FaultMode.none, faultMode(.container_register));
+    setFaultModeForTest(.container_register, .skip_legacy_apply);
+    try std.testing.expectEqual(FaultMode.skip_legacy_apply, faultMode(.container_register));
 }

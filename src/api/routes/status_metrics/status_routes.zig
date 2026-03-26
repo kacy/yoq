@@ -92,6 +92,16 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             service_registry_bridge.faultInjectionCount(.endpoint_unhealthy),
         },
     ) catch return common.internalError();
+    writer.writeAll("},\"bridge_fault_modes\":{") catch return common.internalError();
+    writer.print(
+        "\"container_register\":\"{s}\",\"container_unregister\":\"{s}\",\"endpoint_healthy\":\"{s}\",\"endpoint_unhealthy\":\"{s}\"",
+        .{
+            service_registry_bridge.faultMode(.container_register).label(),
+            service_registry_bridge.faultMode(.container_unregister).label(),
+            service_registry_bridge.faultMode(.endpoint_healthy).label(),
+            service_registry_bridge.faultMode(.endpoint_unhealthy).label(),
+        },
+    ) catch return common.internalError();
     writer.writeAll("},\"events\":{\"counts\":{") catch return common.internalError();
     writer.print(
         "\"container_registered\":{d},\"container_unregistered\":{d},\"endpoint_healthy\":{d},\"endpoint_unhealthy\":{d}",
