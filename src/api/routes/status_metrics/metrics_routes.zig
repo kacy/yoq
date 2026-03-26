@@ -9,6 +9,7 @@ const gpu_detect = @import("../../../gpu/detect.zig");
 const ip_mod = @import("../../../network/ip.zig");
 const dns_registry = @import("../../../network/dns/registry_support.zig");
 const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
+const ebpf_map_support = @import("../../../network/ebpf/map_support.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
@@ -300,6 +301,14 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writeBridgeFaultMode(writer, .endpoint_healthy);
     try writeBridgeFaultMode(writer, .endpoint_unhealthy);
 
+    try writer.writeAll("# HELP yoq_ebpf_map_update_fault_injections_total Injected eBPF map_update faults\n");
+    try writer.writeAll("# TYPE yoq_ebpf_map_update_fault_injections_total counter\n");
+    try writer.print("yoq_ebpf_map_update_fault_injections_total {d}\n", .{ebpf_map_support.mapUpdateFaultInjectionCount()});
+
+    try writer.writeAll("# HELP yoq_ebpf_map_update_fault_mode Active eBPF map_update fault mode\n");
+    try writer.writeAll("# TYPE yoq_ebpf_map_update_fault_mode gauge\n");
+    try writeMapUpdateFaultMode(writer);
+
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
     try writeShadowEventCounters(writer, .container_runtime);
@@ -320,6 +329,22 @@ fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.Brid
     try writer.print(
         "yoq_service_registry_bridge_fault_mode{{operation=\"{s}\",mode=\"skip_shadow_record\"}} {d}\n",
         .{ operation.label(), @intFromBool(mode == .skip_shadow_record) },
+    );
+}
+
+fn writeMapUpdateFaultMode(writer: anytype) !void {
+    const mode = ebpf_map_support.mapUpdateFaultMode();
+    try writer.print(
+        "yoq_ebpf_map_update_fault_mode{{mode=\"none\"}} {d}\n",
+        .{@intFromBool(mode == .none)},
+    );
+    try writer.print(
+        "yoq_ebpf_map_update_fault_mode{{mode=\"fail_update\"}} {d}\n",
+        .{@intFromBool(mode == .fail_update)},
+    );
+    try writer.print(
+        "yoq_ebpf_map_update_fault_mode{{mode=\"map_full\"}} {d}\n",
+        .{@intFromBool(mode == .map_full)},
     );
 }
 
