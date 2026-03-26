@@ -48,7 +48,9 @@ comptime {
     _ = @import("network/vip_allocator.zig");
     _ = @import("network/service_rollout.zig");
     _ = @import("network/service_reconciler.zig");
+    _ = @import("network/service_registry.zig");
     _ = @import("network/service_registry_bridge.zig");
+    _ = @import("network/service_registry_runtime.zig");
     _ = @import("build/dockerfile.zig");
     _ = @import("build/context.zig");
     _ = @import("build/engine.zig");

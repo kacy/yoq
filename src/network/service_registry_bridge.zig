@@ -4,6 +4,7 @@ const dns_registry = @import("dns/registry_support.zig");
 const log = @import("../lib/log.zig");
 const rollout = @import("service_rollout.zig");
 const service_reconciler = @import("service_reconciler.zig");
+const service_registry_runtime = @import("service_registry_runtime.zig");
 const store = @import("../state/store.zig");
 
 // Phase 0 bridge: preserve the current legacy DNS writes while routing all
@@ -45,7 +46,10 @@ var fault_modes: [@typeInfo(BridgeOperation).@"enum".fields.len]FaultMode = [_]F
 var fault_counts: [@typeInfo(BridgeOperation).@"enum".fields.len]u64 = [_]u64{0} ** @typeInfo(BridgeOperation).@"enum".fields.len;
 
 pub fn registerContainerService(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
-    persistEndpoint(service_name, container_id, container_ip);
+    var endpoint_id_buf: [96]u8 = undefined;
+    const endpoint_id = activeEndpointId(container_id, &endpoint_id_buf);
+    persistEndpoint(service_name, endpoint_id, container_id, container_ip);
+    service_registry_runtime.syncServiceFromStore(service_name);
 
     const operation: BridgeOperation = .container_register;
     const mode = activeFaultMode(operation);
@@ -64,6 +68,7 @@ pub fn unregisterContainerService(container_id: []const u8) void {
         store.removeServiceEndpointsByContainer(container_id) catch |err| {
             log.warn("service registry bridge: failed to remove persisted endpoints for container {s}: {}", .{ container_id, err });
         };
+        service_registry_runtime.removeContainer(container_id);
     }
 
     const operation: BridgeOperation = .container_unregister;
@@ -79,8 +84,12 @@ pub fn unregisterContainerService(container_id: []const u8) void {
 }
 
 pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
-    persistEndpoint(service_name, container_id, container_ip);
-    markPersistedEndpointState(service_name, activeEndpointId(container_id), "active");
+    var endpoint_id_buf: [96]u8 = undefined;
+    const endpoint_id = activeEndpointId(container_id, &endpoint_id_buf);
+    persistEndpoint(service_name, endpoint_id, container_id, container_ip);
+    markPersistedEndpointState(service_name, endpoint_id, "active");
+    service_registry_runtime.syncServiceFromStore(service_name);
+    service_registry_runtime.noteProbeResult(service_name, endpoint_id, true);
 
     const operation: BridgeOperation = .endpoint_healthy;
     const mode = activeFaultMode(operation);
@@ -95,8 +104,12 @@ pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, c
 }
 
 pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
-    persistEndpoint(service_name, container_id, container_ip);
-    markPersistedEndpointState(service_name, activeEndpointId(container_id), "draining");
+    var endpoint_id_buf: [96]u8 = undefined;
+    const endpoint_id = activeEndpointId(container_id, &endpoint_id_buf);
+    persistEndpoint(service_name, endpoint_id, container_id, container_ip);
+    markPersistedEndpointState(service_name, endpoint_id, "draining");
+    service_registry_runtime.syncServiceFromStore(service_name);
+    service_registry_runtime.noteProbeResult(service_name, endpoint_id, false);
 
     const operation: BridgeOperation = .endpoint_unhealthy;
     const mode = activeFaultMode(operation);
@@ -151,7 +164,7 @@ fn noteFaultInjection(operation: BridgeOperation) void {
     });
 }
 
-fn persistEndpoint(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
+fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     if (rollout.mode() == .legacy) return;
 
     const alloc = std.heap.page_allocator;
@@ -163,7 +176,6 @@ fn persistEndpoint(service_name: []const u8, container_id: []const u8, container
 
     var ip_buf: [16]u8 = undefined;
     const ip_address = @import("ip.zig").formatIp(container_ip, &ip_buf);
-    const endpoint_id = activeEndpointId(container_id);
     const now = std.time.timestamp();
     store.upsertServiceEndpoint(.{
         .service_name = service_name,
@@ -190,8 +202,8 @@ fn markPersistedEndpointState(service_name: []const u8, endpoint_id: []const u8,
     };
 }
 
-fn activeEndpointId(container_id: []const u8) []const u8 {
-    return container_id;
+fn activeEndpointId(container_id: []const u8, buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}:0", .{container_id}) catch container_id;
 }
 
 test "container bridge preserves legacy DNS and shadow events" {
@@ -221,7 +233,7 @@ test "container bridge preserves legacy DNS and shadow events" {
         endpoints.deinit(alloc);
     }
     try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
-    try std.testing.expectEqualStrings("abc123", endpoints.items[0].endpoint_id);
+    try std.testing.expectEqualStrings("abc123:0", endpoints.items[0].endpoint_id);
     try std.testing.expectEqualStrings("10.42.0.9", endpoints.items[0].ip_address);
 
     unregisterContainerService("abc123");
@@ -242,6 +254,8 @@ test "endpoint bridge keeps legacy DNS in legacy rollout mode" {
     defer dns_registry.resetRegistryForTest();
     try store.initTestDb();
     defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
     resetFaultsForTest();
     defer resetFaultsForTest();
     rollout.setForTest(.{});
@@ -265,6 +279,8 @@ test "bridge can skip legacy apply while preserving shadow event" {
     defer dns_registry.resetRegistryForTest();
     try store.initTestDb();
     defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
     resetFaultsForTest();
     defer resetFaultsForTest();
     rollout.setForTest(.{ .service_registry_v2 = true });
@@ -284,6 +300,8 @@ test "bridge can skip shadow record while preserving legacy apply" {
     defer dns_registry.resetRegistryForTest();
     try store.initTestDb();
     defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
     resetFaultsForTest();
     defer resetFaultsForTest();
     rollout.setForTest(.{ .service_registry_v2 = true });
