@@ -66,6 +66,31 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\);
     );
     try exec(db,
+        \\CREATE TABLE IF NOT EXISTS services (
+        \\    service_name TEXT PRIMARY KEY,
+        \\    vip_address TEXT NOT NULL UNIQUE,
+        \\    lb_policy TEXT NOT NULL DEFAULT 'consistent_hash',
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL
+        \\);
+    );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS service_endpoints (
+        \\    service_name TEXT NOT NULL,
+        \\    endpoint_id TEXT NOT NULL,
+        \\    container_id TEXT NOT NULL,
+        \\    node_id INTEGER,
+        \\    ip_address TEXT NOT NULL,
+        \\    port INTEGER NOT NULL,
+        \\    weight INTEGER NOT NULL DEFAULT 1,
+        \\    admin_state TEXT NOT NULL DEFAULT 'active',
+        \\    generation INTEGER NOT NULL,
+        \\    registered_at INTEGER NOT NULL,
+        \\    last_seen_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (service_name, endpoint_id)
+        \\);
+    );
+    try exec(db,
         \\CREATE TABLE IF NOT EXISTS deployments (
         \\    id TEXT PRIMARY KEY,
         \\    service_name TEXT NOT NULL,
