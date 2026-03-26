@@ -10,22 +10,22 @@ const service_reconciler = @import("service_reconciler.zig");
 
 pub fn registerContainerService(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     dns.registerService(service_name, container_id, container_ip);
-    service_reconciler.noteContainerRegistered(service_name, container_id, container_ip);
+    service_reconciler.noteContainerRegisteredFrom(.container_runtime, service_name, container_id, container_ip);
 }
 
 pub fn unregisterContainerService(container_id: []const u8) void {
     dns.unregisterService(container_id);
-    service_reconciler.noteContainerUnregistered(container_id);
+    service_reconciler.noteContainerUnregisteredFrom(.container_runtime, container_id);
 }
 
 pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     dns.registerService(service_name, container_id, container_ip);
-    service_reconciler.noteEndpointHealthy(service_name, container_id, container_ip);
+    service_reconciler.noteEndpointHealthyFrom(.health_checker, service_name, container_id, container_ip);
 }
 
 pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     dns.unregisterService(container_id);
-    service_reconciler.noteEndpointUnhealthy(service_name, container_id, container_ip);
+    service_reconciler.noteEndpointUnhealthyFrom(.health_checker, service_name, container_id, container_ip);
 }
 
 test "container bridge preserves legacy DNS and shadow events" {
@@ -39,11 +39,13 @@ test "container bridge preserves legacy DNS and shadow events" {
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCount(.container_registered));
+    try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCountBySource(.container_runtime, .container_registered));
 
     unregisterContainerService("abc123");
 
     try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCount(.container_unregistered));
+    try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCountBySource(.container_runtime, .container_unregistered));
 }
 
 test "endpoint bridge keeps legacy DNS in legacy rollout mode" {

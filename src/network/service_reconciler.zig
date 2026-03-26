@@ -18,8 +18,23 @@ pub const EventKind = enum {
     }
 };
 
+pub const EventSource = enum {
+    container_runtime,
+    health_checker,
+    unspecified,
+
+    pub fn label(self: EventSource) []const u8 {
+        return switch (self) {
+            .container_runtime => "container_runtime",
+            .health_checker => "health_checker",
+            .unspecified => "unspecified",
+        };
+    }
+};
+
 pub const Event = struct {
     kind: EventKind,
+    source: EventSource,
     service_name_buf: [64]u8 = [_]u8{0} ** 64,
     service_name_len: u8 = 0,
     container_id_buf: [64]u8 = [_]u8{0} ** 64,
@@ -43,28 +58,53 @@ var recent_events: [max_recent_events]Event = undefined;
 var recent_start: usize = 0;
 var recent_len: usize = 0;
 var event_counts: [@typeInfo(EventKind).@"enum".fields.len]u64 = [_]u64{0} ** @typeInfo(EventKind).@"enum".fields.len;
+var event_counts_by_source: [@typeInfo(EventSource).@"enum".fields.len][@typeInfo(EventKind).@"enum".fields.len]u64 = [_][@typeInfo(EventKind).@"enum".fields.len]u64{
+    [_]u64{0} ** @typeInfo(EventKind).@"enum".fields.len,
+} ** @typeInfo(EventSource).@"enum".fields.len;
 var logged_authoritative_flag_notice: bool = false;
 
 pub fn noteContainerRegistered(service_name: []const u8, container_id: []const u8, ip: [4]u8) void {
-    noteEvent(buildEvent(.container_registered, service_name, container_id, ip));
+    noteContainerRegisteredFrom(.unspecified, service_name, container_id, ip);
+}
+
+pub fn noteContainerRegisteredFrom(source: EventSource, service_name: []const u8, container_id: []const u8, ip: [4]u8) void {
+    noteEvent(buildEvent(.container_registered, source, service_name, container_id, ip));
 }
 
 pub fn noteContainerUnregistered(container_id: []const u8) void {
-    noteEvent(buildEvent(.container_unregistered, "", container_id, null));
+    noteContainerUnregisteredFrom(.unspecified, container_id);
+}
+
+pub fn noteContainerUnregisteredFrom(source: EventSource, container_id: []const u8) void {
+    noteEvent(buildEvent(.container_unregistered, source, "", container_id, null));
 }
 
 pub fn noteEndpointHealthy(service_name: []const u8, container_id: []const u8, ip: [4]u8) void {
-    noteEvent(buildEvent(.endpoint_healthy, service_name, container_id, ip));
+    noteEndpointHealthyFrom(.unspecified, service_name, container_id, ip);
+}
+
+pub fn noteEndpointHealthyFrom(source: EventSource, service_name: []const u8, container_id: []const u8, ip: [4]u8) void {
+    noteEvent(buildEvent(.endpoint_healthy, source, service_name, container_id, ip));
 }
 
 pub fn noteEndpointUnhealthy(service_name: []const u8, container_id: []const u8, ip: [4]u8) void {
-    noteEvent(buildEvent(.endpoint_unhealthy, service_name, container_id, ip));
+    noteEndpointUnhealthyFrom(.unspecified, service_name, container_id, ip);
+}
+
+pub fn noteEndpointUnhealthyFrom(source: EventSource, service_name: []const u8, container_id: []const u8, ip: [4]u8) void {
+    noteEvent(buildEvent(.endpoint_unhealthy, source, service_name, container_id, ip));
 }
 
 pub fn eventCount(kind: EventKind) u64 {
     mutex.lock();
     defer mutex.unlock();
     return event_counts[@intFromEnum(kind)];
+}
+
+pub fn eventCountBySource(source: EventSource, kind: EventKind) u64 {
+    mutex.lock();
+    defer mutex.unlock();
+    return event_counts_by_source[@intFromEnum(source)][@intFromEnum(kind)];
 }
 
 pub fn snapshotRecentEvents(out: []Event) usize {
@@ -86,6 +126,9 @@ pub fn resetForTest() void {
     recent_start = 0;
     recent_len = 0;
     event_counts = [_]u64{0} ** event_counts.len;
+    event_counts_by_source = [_][@typeInfo(EventKind).@"enum".fields.len]u64{
+        [_]u64{0} ** @typeInfo(EventKind).@"enum".fields.len,
+    } ** @typeInfo(EventSource).@"enum".fields.len;
     logged_authoritative_flag_notice = false;
 }
 
@@ -111,16 +154,18 @@ fn noteEvent(event: Event) void {
     }
 
     event_counts[@intFromEnum(event.kind)] += 1;
+    event_counts_by_source[@intFromEnum(event.source)][@intFromEnum(event.kind)] += 1;
 
     log.debug(
-        "service reconciler: shadow event kind={s} service={s} container={s}",
-        .{ event.kind.label(), event.serviceName(), event.containerId() },
+        "service reconciler: shadow event source={s} kind={s} service={s} container={s}",
+        .{ event.source.label(), event.kind.label(), event.serviceName(), event.containerId() },
     );
 }
 
-fn buildEvent(kind: EventKind, service_name: []const u8, container_id: []const u8, ip: ?[4]u8) Event {
+fn buildEvent(kind: EventKind, source: EventSource, service_name: []const u8, container_id: []const u8, ip: ?[4]u8) Event {
     var event = Event{
         .kind = kind,
+        .source = source,
         .recorded_at = std.time.timestamp(),
         .ip = ip,
     };
@@ -151,11 +196,13 @@ test "shadow mode records container and health events" {
     defer rollout.resetForTest();
     resetForTest();
 
-    noteContainerRegistered("api", "abc123", .{ 10, 42, 0, 9 });
-    noteEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
+    noteContainerRegisteredFrom(.container_runtime, "api", "abc123", .{ 10, 42, 0, 9 });
+    noteEndpointHealthyFrom(.health_checker, "api", "abc123", .{ 10, 42, 0, 9 });
 
     try std.testing.expectEqual(@as(u64, 1), eventCount(.container_registered));
     try std.testing.expectEqual(@as(u64, 1), eventCount(.endpoint_healthy));
+    try std.testing.expectEqual(@as(u64, 1), eventCountBySource(.container_runtime, .container_registered));
+    try std.testing.expectEqual(@as(u64, 1), eventCountBySource(.health_checker, .endpoint_healthy));
 
     var events: [4]Event = undefined;
     const count = snapshotRecentEvents(&events);
@@ -163,7 +210,9 @@ test "shadow mode records container and health events" {
     try std.testing.expectEqualStrings("api", events[0].serviceName());
     try std.testing.expectEqualStrings("abc123", events[0].containerId());
     try std.testing.expectEqual(EventKind.container_registered, events[0].kind);
+    try std.testing.expectEqual(EventSource.container_runtime, events[0].source);
     try std.testing.expectEqual(EventKind.endpoint_healthy, events[1].kind);
+    try std.testing.expectEqual(EventSource.health_checker, events[1].source);
 }
 
 test "recent event buffer keeps only the newest events" {
