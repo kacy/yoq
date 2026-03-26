@@ -8,6 +8,7 @@ const dns_registry = @import("../../../network/dns/registry_support.zig");
 const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
+const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 
@@ -79,6 +80,16 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             lb_runtime.max_backends,
             lb_prog.maps[1].max_entries,
             service_reconciler.max_recent_events,
+        },
+    ) catch return common.internalError();
+    writer.writeAll("},\"bridge_fault_injections\":{") catch return common.internalError();
+    writer.print(
+        "\"container_register\":{d},\"container_unregister\":{d},\"endpoint_healthy\":{d},\"endpoint_unhealthy\":{d}",
+        .{
+            service_registry_bridge.faultInjectionCount(.container_register),
+            service_registry_bridge.faultInjectionCount(.container_unregister),
+            service_registry_bridge.faultInjectionCount(.endpoint_healthy),
+            service_registry_bridge.faultInjectionCount(.endpoint_unhealthy),
         },
     ) catch return common.internalError();
     writer.writeAll("},\"events\":{\"counts\":{") catch return common.internalError();

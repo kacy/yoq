@@ -139,13 +139,17 @@ test "route returns null for DELETE to metrics" {
 
 test "route handles /v1/status?mode=service_rollout GET" {
     const service_rollout = @import("../../network/service_rollout.zig");
+    const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
 
     service_rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
     defer service_rollout.resetForTest();
+    service_registry_bridge.resetFaultsForTest();
+    defer service_registry_bridge.resetFaultsForTest();
     service_reconciler.resetForTest();
 
-    service_reconciler.noteContainerRegisteredFrom(.container_runtime, "api", "abc123", .{ 10, 42, 0, 9 });
+    service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
+    service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
 
     const req = http.Request{
         .method = .GET,
@@ -167,6 +171,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_bpf_services\":256") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_backends_per_vip\":16") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"recent_shadow_events\":32") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"bridge_fault_injections\":{\"container_register\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_registered\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_runtime\":{\"container_registered\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"source\":\"container_runtime\"") != null);
@@ -292,6 +297,7 @@ test "handleMetricsPrometheus returns text content type" {
 
 test "handleMetricsPrometheus exposes service rollout metrics" {
     const service_rollout = @import("../../network/service_rollout.zig");
+    const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
 
     service_rollout.setForTest(.{
@@ -300,10 +306,13 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
         .dns_returns_vip = true,
     });
     defer service_rollout.resetForTest();
+    service_registry_bridge.resetFaultsForTest();
+    defer service_registry_bridge.resetFaultsForTest();
     service_reconciler.resetForTest();
 
-    service_reconciler.noteContainerRegisteredFrom(.container_runtime, "api", "abc123", .{ 10, 42, 0, 9 });
-    service_reconciler.noteEndpointHealthyFrom(.health_checker, "api", "abc123", .{ 10, 42, 0, 9 });
+    service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
+    service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
+    service_registry_bridge.markEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
 
     const resp = handleMetricsPrometheus(testing.allocator);
     defer if (resp.allocated) testing.allocator.free(resp.body);
@@ -312,6 +321,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"service_registry_v2\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"dns_returns_vip\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"load_balancer_backends_per_vip\"} 16") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_injections_total{operation=\"container_register\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"container_runtime\",kind=\"container_registered\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"health_checker\",kind=\"endpoint_healthy\"} 1") != null);
 }
