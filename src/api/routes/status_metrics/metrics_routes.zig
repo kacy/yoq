@@ -317,6 +317,14 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_dns_cluster_lookup_fault_mode gauge\n");
     try writeClusterLookupFaultMode(writer);
 
+    try writer.writeAll("# HELP yoq_dns_interceptor_fault_injections_total Injected DNS interceptor faults\n");
+    try writer.writeAll("# TYPE yoq_dns_interceptor_fault_injections_total counter\n");
+    try writer.print("yoq_dns_interceptor_fault_injections_total {d}\n", .{dns_registry.dnsInterceptorFaultInjectionCount()});
+
+    try writer.writeAll("# HELP yoq_dns_interceptor_fault_mode Active DNS interceptor fault mode\n");
+    try writer.writeAll("# TYPE yoq_dns_interceptor_fault_mode gauge\n");
+    try writeDnsInterceptorFaultMode(writer);
+
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
     try writeShadowEventCounters(writer, .container_runtime);
@@ -369,6 +377,18 @@ fn writeClusterLookupFaultMode(writer: anytype) !void {
     try writer.print(
         "yoq_dns_cluster_lookup_fault_mode{{mode=\"stale_override\"}} {d}\n",
         .{@intFromBool(mode == .stale_override)},
+    );
+}
+
+fn writeDnsInterceptorFaultMode(writer: anytype) !void {
+    const mode = dns_registry.dnsInterceptorFaultMode();
+    try writer.print(
+        "yoq_dns_interceptor_fault_mode{{mode=\"none\"}} {d}\n",
+        .{@intFromBool(mode == .none)},
+    );
+    try writer.print(
+        "yoq_dns_interceptor_fault_mode{{mode=\"unavailable\"}} {d}\n",
+        .{@intFromBool(mode == .unavailable)},
     );
 }
 
