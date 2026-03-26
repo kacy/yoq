@@ -7,6 +7,12 @@ const storage_metrics = @import("../../../storage/metrics.zig");
 const gpu_health = @import("../../../gpu/health.zig");
 const gpu_detect = @import("../../../gpu/detect.zig");
 const ip_mod = @import("../../../network/ip.zig");
+const dns_registry = @import("../../../network/dns/registry_support.zig");
+const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
+const lb_prog = @import("../../../network/bpf/lb.zig");
+const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
+const service_rollout = @import("../../../network/service_rollout.zig");
+const service_reconciler = @import("../../../network/service_reconciler.zig");
 
 const Response = common.Response;
 const ebpf = if (builtin.os.tag == .linux) @import("../../../network/ebpf.zig") else struct {
@@ -188,6 +194,8 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
     defer buf.deinit(alloc);
     var writer = buf.writer(alloc);
 
+    writeServiceRolloutPrometheus(writer) catch return common.internalError();
+
     if (ebpf.getMetricsCollector()) |collector| {
         var entries: [1024]ebpf.PairEntry = undefined;
         const count = collector.readPairMetrics(&entries);
@@ -238,6 +246,51 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
         .allocated = true,
         .content_type = "text/plain; version=0.0.4; charset=utf-8",
     };
+}
+
+fn writeServiceRolloutPrometheus(writer: anytype) !void {
+    const flags = service_rollout.current();
+    const is_shadow = service_rollout.mode() == .shadow;
+
+    try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Service rollout mode, 1 when shadow mode is active\n");
+    try writer.writeAll("# TYPE yoq_service_rollout_shadow_mode gauge\n");
+    try writer.print("yoq_service_rollout_shadow_mode {d}\n", .{@intFromBool(is_shadow)});
+
+    try writer.writeAll("# HELP yoq_service_rollout_flag Service rollout feature flags\n");
+    try writer.writeAll("# TYPE yoq_service_rollout_flag gauge\n");
+    try writer.print("yoq_service_rollout_flag{{flag=\"service_registry_v2\"}} {d}\n", .{@intFromBool(flags.service_registry_v2)});
+    try writer.print("yoq_service_rollout_flag{{flag=\"service_registry_reconciler\"}} {d}\n", .{@intFromBool(flags.service_registry_reconciler)});
+    try writer.print("yoq_service_rollout_flag{{flag=\"dns_returns_vip\"}} {d}\n", .{@intFromBool(flags.dns_returns_vip)});
+    try writer.print("yoq_service_rollout_flag{{flag=\"l7_proxy_http\"}} {d}\n", .{@intFromBool(flags.l7_proxy_http)});
+
+    try writer.writeAll("# HELP yoq_service_rollout_limit Compile-time rollout and data-plane limits\n");
+    try writer.writeAll("# TYPE yoq_service_rollout_limit gauge\n");
+    try writer.print("yoq_service_rollout_limit{{limit=\"dns_registry_services\"}} {d}\n", .{dns_registry.max_services});
+    try writer.print("yoq_service_rollout_limit{{limit=\"dns_name_length\"}} {d}\n", .{dns_registry.max_name_len});
+    try writer.print("yoq_service_rollout_limit{{limit=\"dns_bpf_services\"}} {d}\n", .{dns_prog.maps[0].max_entries});
+    try writer.print("yoq_service_rollout_limit{{limit=\"load_balancer_vips\"}} {d}\n", .{lb_prog.maps[0].max_entries});
+    try writer.print("yoq_service_rollout_limit{{limit=\"load_balancer_backends_per_vip\"}} {d}\n", .{lb_runtime.max_backends});
+    try writer.print("yoq_service_rollout_limit{{limit=\"conntrack_entries\"}} {d}\n", .{lb_prog.maps[1].max_entries});
+    try writer.print("yoq_service_rollout_limit{{limit=\"recent_shadow_events\"}} {d}\n", .{service_reconciler.max_recent_events});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
+    try writer.print(
+        "yoq_service_reconciler_shadow_events_total{{kind=\"container_registered\"}} {d}\n",
+        .{service_reconciler.eventCount(.container_registered)},
+    );
+    try writer.print(
+        "yoq_service_reconciler_shadow_events_total{{kind=\"container_unregistered\"}} {d}\n",
+        .{service_reconciler.eventCount(.container_unregistered)},
+    );
+    try writer.print(
+        "yoq_service_reconciler_shadow_events_total{{kind=\"endpoint_healthy\"}} {d}\n",
+        .{service_reconciler.eventCount(.endpoint_healthy)},
+    );
+    try writer.print(
+        "yoq_service_reconciler_shadow_events_total{{kind=\"endpoint_unhealthy\"}} {d}\n",
+        .{service_reconciler.eventCount(.endpoint_unhealthy)},
+    );
 }
 
 pub fn handleGpuMetrics(alloc: std.mem.Allocator) Response {

@@ -6,6 +6,7 @@ const http_client = @import("../http_client.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const ip = @import("../../network/ip.zig");
 const net_setup = @import("../../network/setup.zig");
+const service_rollout = @import("../../network/service_rollout.zig");
 const orchestrator = @import("../../manifest/orchestrator.zig");
 
 const writeErr = cli.writeErr;
@@ -72,6 +73,7 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return MembershipError.InvalidArgument;
     };
 
+    service_rollout.logStartupSummary();
     writeErr("joining cluster at {s}:{d} (role={s})...\n", .{ host, api_port, role.toString() });
 
     var agent = try cluster_agent.Agent.initOwned(alloc, server_addr, api_port, join_token);

@@ -24,9 +24,15 @@ pub fn current() Flags {
 }
 
 pub fn mode() Mode {
-    const current_flags = current();
-    if (current_flags.service_registry_v2 or current_flags.service_registry_reconciler) return .shadow;
-    return .legacy;
+    return modeFromFlags(current());
+}
+
+pub fn logStartupSummary() void {
+    ensureInitialized();
+
+    flags_mutex.lock();
+    defer flags_mutex.unlock();
+    logRolloutStateLocked();
 }
 
 pub fn resetForTest() void {
@@ -58,30 +64,34 @@ fn ensureInitialized() void {
         .l7_proxy_http = readBoolEnv("YOQ_L7_PROXY_HTTP"),
     };
     flags_initialized = true;
-    logRolloutStateLocked();
 }
 
 fn logRolloutStateLocked() void {
     if (logged_rollout_state) return;
     logged_rollout_state = true;
 
-    if (!flags.service_registry_v2 and
-        !flags.service_registry_reconciler and
-        !flags.dns_returns_vip and
-        !flags.l7_proxy_http)
-    {
-        return;
-    }
-
     log.info(
-        "service rollout flags: registry_v2={}, reconciler={}, dns_returns_vip={}, l7_proxy_http={}",
+        "service rollout: mode={s}, registry_v2={}, reconciler={}, dns_returns_vip={}, l7_proxy_http={}",
         .{
+            modeLabel(modeFromFlags(flags)),
             flags.service_registry_v2,
             flags.service_registry_reconciler,
             flags.dns_returns_vip,
             flags.l7_proxy_http,
         },
     );
+}
+
+fn modeFromFlags(current_flags: Flags) Mode {
+    if (current_flags.service_registry_v2 or current_flags.service_registry_reconciler) return .shadow;
+    return .legacy;
+}
+
+fn modeLabel(current_mode: Mode) []const u8 {
+    return switch (current_mode) {
+        .legacy => "legacy",
+        .shadow => "shadow",
+    };
 }
 
 fn readBoolEnv(name: []const u8) bool {

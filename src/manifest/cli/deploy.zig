@@ -9,6 +9,7 @@ const process = @import("../../runtime/process.zig");
 const http_client = @import("../../cluster/http_client.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const container_cmds = @import("../../runtime/container_commands.zig");
+const service_rollout = @import("../../network/service_rollout.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -87,6 +88,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         writeErr("starting {s} ({d} services)...\n", .{ app_name, manifest.services.len });
     }
 
+    service_rollout.logStartupSummary();
     orchestrator.installSignalHandlers();
 
     var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name) catch |err| {
