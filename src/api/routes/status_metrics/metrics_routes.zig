@@ -275,21 +275,27 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
 
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
+    try writeShadowEventCounters(writer, .container_runtime);
+    try writeShadowEventCounters(writer, .health_checker);
+    try writeShadowEventCounters(writer, .unspecified);
+}
+
+fn writeShadowEventCounters(writer: anytype, source: service_reconciler.EventSource) !void {
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{kind=\"container_registered\"}} {d}\n",
-        .{service_reconciler.eventCount(.container_registered)},
+        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"container_registered\"}} {d}\n",
+        .{ source.label(), service_reconciler.eventCountBySource(source, .container_registered) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{kind=\"container_unregistered\"}} {d}\n",
-        .{service_reconciler.eventCount(.container_unregistered)},
+        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"container_unregistered\"}} {d}\n",
+        .{ source.label(), service_reconciler.eventCountBySource(source, .container_unregistered) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{kind=\"endpoint_healthy\"}} {d}\n",
-        .{service_reconciler.eventCount(.endpoint_healthy)},
+        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"endpoint_healthy\"}} {d}\n",
+        .{ source.label(), service_reconciler.eventCountBySource(source, .endpoint_healthy) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{kind=\"endpoint_unhealthy\"}} {d}\n",
-        .{service_reconciler.eventCount(.endpoint_unhealthy)},
+        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"endpoint_unhealthy\"}} {d}\n",
+        .{ source.label(), service_reconciler.eventCountBySource(source, .endpoint_unhealthy) },
     );
 }
 
