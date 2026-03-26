@@ -111,6 +111,19 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             ebpf_map_support.mapUpdateFaultInjectionCount(),
         },
     ) catch return common.internalError();
+    const cluster_fault_ip = dns_registry.clusterLookupFaultIp();
+    writer.writeAll("},\"cluster_lookup_fault\":{") catch return common.internalError();
+    writer.print(
+        "\"mode\":\"{s}\",\"injections\":{d},\"stale_ip\":\"{d}.{d}.{d}.{d}\"",
+        .{
+            dns_registry.clusterLookupFaultMode().label(),
+            dns_registry.clusterLookupFaultInjectionCount(),
+            cluster_fault_ip[0],
+            cluster_fault_ip[1],
+            cluster_fault_ip[2],
+            cluster_fault_ip[3],
+        },
+    ) catch return common.internalError();
     writer.writeAll("},\"events\":{\"counts\":{") catch return common.internalError();
     writer.print(
         "\"container_registered\":{d},\"container_unregistered\":{d},\"endpoint_healthy\":{d},\"endpoint_unhealthy\":{d}",

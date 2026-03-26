@@ -141,17 +141,21 @@ test "route handles /v1/status?mode=service_rollout GET" {
     const ebpf_map_support = @import("../../network/ebpf/map_support.zig");
     const service_rollout = @import("../../network/service_rollout.zig");
     const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
+    const dns_registry = @import("../../network/dns/registry_support.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
 
     service_rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
     defer service_rollout.resetForTest();
     ebpf_map_support.resetFaultInjectionForTest();
     defer ebpf_map_support.resetFaultInjectionForTest();
+    dns_registry.resetClusterLookupFaultsForTest();
+    defer dns_registry.resetClusterLookupFaultsForTest();
     service_registry_bridge.resetFaultsForTest();
     defer service_registry_bridge.resetFaultsForTest();
     service_reconciler.resetForTest();
 
     ebpf_map_support.setMapUpdateFaultModeForTest(.map_full);
+    dns_registry.setClusterLookupFaultForTest(.stale_override, .{ 10, 42, 9, 9 });
     service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
     service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
 
@@ -178,6 +182,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"bridge_fault_injections\":{\"container_register\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"bridge_fault_modes\":{\"container_register\":\"skip_legacy_apply\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"ebpf_map_update_fault\":{\"mode\":\"map_full\",\"injections\":0}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"cluster_lookup_fault\":{\"mode\":\"stale_override\",\"injections\":0,\"stale_ip\":\"10.42.9.9\"}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_registered\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_runtime\":{\"container_registered\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"source\":\"container_runtime\"") != null);
@@ -305,6 +310,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     const ebpf_map_support = @import("../../network/ebpf/map_support.zig");
     const service_rollout = @import("../../network/service_rollout.zig");
     const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
+    const dns_registry = @import("../../network/dns/registry_support.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
 
     service_rollout.setForTest(.{
@@ -315,11 +321,14 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     defer service_rollout.resetForTest();
     ebpf_map_support.resetFaultInjectionForTest();
     defer ebpf_map_support.resetFaultInjectionForTest();
+    dns_registry.resetClusterLookupFaultsForTest();
+    defer dns_registry.resetClusterLookupFaultsForTest();
     service_registry_bridge.resetFaultsForTest();
     defer service_registry_bridge.resetFaultsForTest();
     service_reconciler.resetForTest();
 
     ebpf_map_support.setMapUpdateFaultModeForTest(.fail_update);
+    dns_registry.setClusterLookupFaultForTest(.force_miss, null);
     service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
     service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
     service_registry_bridge.markEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
@@ -336,6 +345,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"endpoint_healthy\",mode=\"none\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_ebpf_map_update_fault_injections_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_ebpf_map_update_fault_mode{mode=\"fail_update\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_dns_cluster_lookup_fault_injections_total 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_dns_cluster_lookup_fault_mode{mode=\"force_miss\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"container_runtime\",kind=\"container_registered\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"health_checker\",kind=\"endpoint_healthy\"} 1") != null);
 }

@@ -309,6 +309,14 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_ebpf_map_update_fault_mode gauge\n");
     try writeMapUpdateFaultMode(writer);
 
+    try writer.writeAll("# HELP yoq_dns_cluster_lookup_fault_injections_total Injected cluster lookup faults\n");
+    try writer.writeAll("# TYPE yoq_dns_cluster_lookup_fault_injections_total counter\n");
+    try writer.print("yoq_dns_cluster_lookup_fault_injections_total {d}\n", .{dns_registry.clusterLookupFaultInjectionCount()});
+
+    try writer.writeAll("# HELP yoq_dns_cluster_lookup_fault_mode Active cluster lookup fault mode\n");
+    try writer.writeAll("# TYPE yoq_dns_cluster_lookup_fault_mode gauge\n");
+    try writeClusterLookupFaultMode(writer);
+
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
     try writeShadowEventCounters(writer, .container_runtime);
@@ -345,6 +353,22 @@ fn writeMapUpdateFaultMode(writer: anytype) !void {
     try writer.print(
         "yoq_ebpf_map_update_fault_mode{{mode=\"map_full\"}} {d}\n",
         .{@intFromBool(mode == .map_full)},
+    );
+}
+
+fn writeClusterLookupFaultMode(writer: anytype) !void {
+    const mode = dns_registry.clusterLookupFaultMode();
+    try writer.print(
+        "yoq_dns_cluster_lookup_fault_mode{{mode=\"none\"}} {d}\n",
+        .{@intFromBool(mode == .none)},
+    );
+    try writer.print(
+        "yoq_dns_cluster_lookup_fault_mode{{mode=\"force_miss\"}} {d}\n",
+        .{@intFromBool(mode == .force_miss)},
+    );
+    try writer.print(
+        "yoq_dns_cluster_lookup_fault_mode{{mode=\"stale_override\"}} {d}\n",
+        .{@intFromBool(mode == .stale_override)},
     );
 }
 
