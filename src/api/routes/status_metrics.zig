@@ -19,6 +19,12 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
     const path = request.path_only;
 
     if (request.method == .GET and std.mem.eql(u8, path, "/v1/status")) {
+        const mode = common.extractQueryParam(request.path, "mode");
+        if (mode) |value| {
+            if (std.mem.eql(u8, value, "service_rollout")) {
+                return status_routes.handleServiceRolloutStatus(alloc);
+            }
+        }
         return status_routes.handleStatus(alloc);
     }
 
@@ -129,6 +135,37 @@ test "route returns null for DELETE to metrics" {
 
     const response = route(req, testing.allocator);
     try testing.expect(response == null);
+}
+
+test "route handles /v1/status?mode=service_rollout GET" {
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const service_reconciler = @import("../../network/service_reconciler.zig");
+
+    service_rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer service_rollout.resetForTest();
+    service_reconciler.resetForTest();
+
+    service_reconciler.noteContainerRegistered("api", "abc123", .{ 10, 42, 0, 9 });
+
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/status?mode=service_rollout",
+        .path_only = "/v1/status",
+        .query = "mode=service_rollout",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"mode\":\"shadow\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"service_registry_v2\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"container_registered\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"kind\":\"container_registered\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"service\":\"api\"") != null);
 }
 
 test "resolveIpToService returns unknown for empty records" {
