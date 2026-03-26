@@ -47,6 +47,20 @@ pub const ConflictInfo = struct {
     container_id_len: u8,
 };
 
+pub const ClusterLookupFaultMode = enum {
+    none,
+    force_miss,
+    stale_override,
+
+    pub fn label(self: ClusterLookupFaultMode) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .force_miss => "force_miss",
+            .stale_override => "stale_override",
+        };
+    }
+};
+
 var registry: [max_services]ServiceEntry = [_]ServiceEntry{.{
     .name = undefined,
     .name_len = 0,
@@ -60,6 +74,9 @@ var registry_mutex: std.Thread.Mutex = .{};
 
 var cluster_db: ?*sqlite.Db = null;
 var cluster_db_mutex: std.Thread.Mutex = .{};
+var cluster_lookup_fault_mode: ClusterLookupFaultMode = .none;
+var cluster_lookup_fault_ip: [4]u8 = .{ 10, 255, 255, 254 };
+var cluster_lookup_fault_injections: u64 = 0;
 
 pub fn setClusterDb(db: ?*sqlite.Db) void {
     cluster_db_mutex.lock();
@@ -78,6 +95,27 @@ pub fn lookupClusterService(name: []const u8) ?[4]u8 {
 
     cluster_db_mutex.lock();
     defer cluster_db_mutex.unlock();
+
+    switch (cluster_lookup_fault_mode) {
+        .none => {},
+        .force_miss => {
+            cluster_lookup_fault_injections += 1;
+            log.warn("dns: injected cluster lookup fault mode={s} for '{s}'", .{ cluster_lookup_fault_mode.label(), name });
+            return null;
+        },
+        .stale_override => {
+            cluster_lookup_fault_injections += 1;
+            log.warn("dns: injected cluster lookup fault mode={s} for '{s}' -> {d}.{d}.{d}.{d}", .{
+                cluster_lookup_fault_mode.label(),
+                name,
+                cluster_lookup_fault_ip[0],
+                cluster_lookup_fault_ip[1],
+                cluster_lookup_fault_ip[2],
+                cluster_lookup_fault_ip[3],
+            });
+            return cluster_lookup_fault_ip;
+        },
+    }
 
     const db = cluster_db orelse return null;
     const Row = struct { ip_address: sqlite.Text };
@@ -281,6 +319,39 @@ pub fn resetRegistryForTest() void {
         entry.active = false;
     }
     registry_count = 0;
+}
+
+pub fn clusterLookupFaultMode() ClusterLookupFaultMode {
+    cluster_db_mutex.lock();
+    defer cluster_db_mutex.unlock();
+    return cluster_lookup_fault_mode;
+}
+
+pub fn clusterLookupFaultIp() [4]u8 {
+    cluster_db_mutex.lock();
+    defer cluster_db_mutex.unlock();
+    return cluster_lookup_fault_ip;
+}
+
+pub fn clusterLookupFaultInjectionCount() u64 {
+    cluster_db_mutex.lock();
+    defer cluster_db_mutex.unlock();
+    return cluster_lookup_fault_injections;
+}
+
+pub fn setClusterLookupFaultForTest(mode: ClusterLookupFaultMode, ip: ?[4]u8) void {
+    cluster_db_mutex.lock();
+    defer cluster_db_mutex.unlock();
+    cluster_lookup_fault_mode = mode;
+    if (ip) |fault_ip| cluster_lookup_fault_ip = fault_ip;
+}
+
+pub fn resetClusterLookupFaultsForTest() void {
+    cluster_db_mutex.lock();
+    defer cluster_db_mutex.unlock();
+    cluster_lookup_fault_mode = .none;
+    cluster_lookup_fault_ip = .{ 10, 255, 255, 254 };
+    cluster_lookup_fault_injections = 0;
 }
 
 fn isSafeIpForDns(ip: [4]u8) bool {

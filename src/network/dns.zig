@@ -555,6 +555,8 @@ test "lookupClusterService returns null when no cluster db" {
     const prev = registry_support.currentClusterDb();
     setClusterDb(null);
     defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
 
     try std.testing.expect(lookupClusterService("anything") == null);
 }
@@ -589,6 +591,8 @@ test "lookupClusterService resolves from service_names table" {
     // set up cluster db reference
     const prev = registry_support.currentClusterDb();
     defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
     setClusterDb(&db);
 
     const result = lookupClusterService("remote-db");
@@ -605,9 +609,47 @@ test "lookupClusterService returns null for unknown name" {
 
     const prev = registry_support.currentClusterDb();
     defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
     setClusterDb(&db);
 
     try std.testing.expect(lookupClusterService("nonexistent") == null);
+}
+
+test "lookupClusterService can force miss for stale replica testing" {
+    const schema = @import("../state/schema.zig");
+
+    var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;
+    defer db.deinit();
+    schema.init(&db) catch return;
+
+    db.exec(
+        "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
+        .{},
+        .{ "remote-db", "ctr_remote", "10.42.3.5", @as(i64, 1000) },
+    ) catch return;
+
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
+    setClusterDb(&db);
+    registry_support.setClusterLookupFaultForTest(.force_miss, null);
+
+    try std.testing.expect(lookupClusterService("remote-db") == null);
+    try std.testing.expectEqual(@as(u64, 1), registry_support.clusterLookupFaultInjectionCount());
+}
+
+test "lookupClusterService can return injected stale override" {
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
+
+    registry_support.setClusterLookupFaultForTest(.stale_override, .{ 10, 42, 9, 9 });
+
+    const result = lookupClusterService("remote-db");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 9, 9 }, result.?);
+    try std.testing.expectEqual(@as(u64, 1), registry_support.clusterLookupFaultInjectionCount());
 }
 
 test "lookupService falls through to cluster db" {
