@@ -118,6 +118,46 @@ test "init creates service_names table" {
     ) catch unreachable;
 }
 
+test "init creates services table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO services (service_name, vip_address, lb_policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "api", "10.43.0.10", "consistent_hash", @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
+test "init creates service_endpoints table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO service_endpoints (" ++
+            "service_name, endpoint_id, container_id, node_id, ip_address, port, weight, admin_state, generation, registered_at, last_seen_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{
+            "api",
+            "ctr-1:8080",
+            "ctr-1",
+            @as(i64, 1),
+            "10.42.0.10",
+            @as(i64, 8080),
+            @as(i64, 1),
+            "active",
+            @as(i64, 1),
+            @as(i64, 1000),
+            @as(i64, 1000),
+        },
+    ) catch unreachable;
+}
+
 test "init creates agents table" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();

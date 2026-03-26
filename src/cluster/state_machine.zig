@@ -268,6 +268,15 @@ test "isAllowedStatement accepts valid volume operations" {
     try std.testing.expect(isAllowedStatement("DELETE FROM volumes WHERE name = 'data' AND app_name = 'myapp';"));
 }
 
+test "isAllowedStatement accepts valid service registry operations" {
+    try std.testing.expect(isAllowedStatement("INSERT INTO services (service_name, vip_address, lb_policy, created_at, updated_at) VALUES ('api', '10.43.0.10', 'consistent_hash', 1000, 1000);"));
+    try std.testing.expect(isAllowedStatement("UPDATE services SET updated_at = 2000 WHERE service_name = 'api';"));
+    try std.testing.expect(isAllowedStatement("DELETE FROM services WHERE service_name = 'api';"));
+    try std.testing.expect(isAllowedStatement("INSERT INTO service_endpoints (service_name, endpoint_id, container_id, ip_address, port, generation, registered_at, last_seen_at) VALUES ('api', 'ctr-1:8080', 'ctr-1', '10.42.0.10', 8080, 1, 1000, 1000);"));
+    try std.testing.expect(isAllowedStatement("UPDATE service_endpoints SET admin_state = 'draining' WHERE service_name = 'api' AND endpoint_id = 'ctr-1:8080';"));
+    try std.testing.expect(isAllowedStatement("DELETE FROM service_endpoints WHERE container_id = 'ctr-1';"));
+}
+
 test "isAllowedStatement accepts schema init" {
     try std.testing.expect(isAllowedStatement("CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY);"));
     try std.testing.expect(isAllowedStatement("CREATE INDEX IF NOT EXISTS idx_test ON agents (id);"));

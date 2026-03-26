@@ -33,6 +33,12 @@ fn isAllowedSingleStatement(sql: []const u8) bool {
         "DELETE FROM s3_upload_parts ",
         "CREATE TABLE IF NOT EXISTS ",
         "CREATE INDEX IF NOT EXISTS ",
+        "INSERT INTO services ",
+        "UPDATE services SET ",
+        "DELETE FROM services ",
+        "INSERT INTO service_endpoints ",
+        "UPDATE service_endpoints SET ",
+        "DELETE FROM service_endpoints ",
     };
 
     for (allowed_prefixes) |prefix| {

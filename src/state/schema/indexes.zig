@@ -32,6 +32,22 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
         \\    ON service_names (container_id);
     );
     try exec(db,
+        \\CREATE INDEX IF NOT EXISTS idx_service_endpoints_service_admin_state
+        \\    ON service_endpoints (service_name, admin_state);
+    );
+    try exec(db,
+        \\CREATE INDEX IF NOT EXISTS idx_service_endpoints_container
+        \\    ON service_endpoints (container_id);
+    );
+    try exec(db,
+        \\CREATE INDEX IF NOT EXISTS idx_service_endpoints_node
+        \\    ON service_endpoints (node_id);
+    );
+    try exec(db,
+        \\CREATE UNIQUE INDEX IF NOT EXISTS idx_services_vip_address
+        \\    ON services (vip_address);
+    );
+    try exec(db,
         \\CREATE INDEX IF NOT EXISTS idx_agents_status
         \\    ON agents (status);
     );
