@@ -11,6 +11,7 @@ const cluster_runtime = @import("cluster_runtime.zig");
 const file_support = @import("file_support.zig");
 const ebpf = @import("ebpf_module.zig").ebpf;
 const ebpf_support = @import("ebpf_support.zig");
+const service_reconciler = @import("../service_reconciler.zig");
 
 pub fn setupContainer(
     container_id: []const u8,
@@ -116,6 +117,7 @@ pub fn setupContainer(
 
     if (!config.skip_dns) {
         dns.registerService(hostname, container_id, container_ip);
+        service_reconciler.noteContainerRegistered(hostname, container_id, container_ip);
     }
 
     var info = common.NetworkInfo{
@@ -134,6 +136,7 @@ pub fn teardownContainer(
     db: *sqlite.Db,
 ) void {
     dns.unregisterService(container_id);
+    service_reconciler.noteContainerUnregistered(container_id);
 
     var ip_str_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(net_info.ip, &ip_str_buf);
