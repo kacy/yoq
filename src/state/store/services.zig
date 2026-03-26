@@ -2,6 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
 const schema = @import("../schema.zig");
+const vip_allocator = @import("../../network/vip_allocator.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
@@ -133,6 +134,58 @@ pub fn createService(record: ServiceRecord) StoreError!void {
             record.updated_at,
         },
     ) catch return StoreError.WriteFailed;
+}
+
+pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []const u8) StoreError!ServiceRecord {
+    const db = try common.getDb();
+    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
+
+    var committed = false;
+    errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
+
+    if (db.oneAlloc(
+        ServiceRow,
+        alloc,
+        "SELECT " ++ service_columns ++ " FROM services WHERE service_name = ?;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.ReadFailed) |row| {
+        const record = rowToServiceRecord(row);
+        db.exec("COMMIT;", .{}, .{}) catch {
+            record.deinit(alloc);
+            return StoreError.WriteFailed;
+        };
+        committed = true;
+        return record;
+    }
+
+    const vip = vip_allocator.allocate(db) catch return StoreError.WriteFailed;
+    var vip_buf: [16]u8 = undefined;
+    const vip_address = @import("../../network/ip.zig").formatIp(vip, &vip_buf);
+    const now = std.time.timestamp();
+
+    db.exec(
+        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ service_name, vip_address, lb_policy, now, now },
+    ) catch return StoreError.WriteFailed;
+
+    db.exec("COMMIT;", .{}, .{}) catch return StoreError.WriteFailed;
+    committed = true;
+
+    const service_name_copy = alloc.dupe(u8, service_name) catch return StoreError.ReadFailed;
+    errdefer alloc.free(service_name_copy);
+    const vip_copy = alloc.dupe(u8, vip_address) catch return StoreError.ReadFailed;
+    errdefer alloc.free(vip_copy);
+    const lb_policy_copy = alloc.dupe(u8, lb_policy) catch return StoreError.ReadFailed;
+
+    return .{
+        .service_name = service_name_copy,
+        .vip_address = vip_copy,
+        .lb_policy = lb_policy_copy,
+        .created_at = now,
+        .updated_at = now,
+    };
 }
 
 pub fn getService(alloc: Allocator, service_name: []const u8) StoreError!ServiceRecord {
@@ -390,6 +443,28 @@ test "listServices returns services ordered by name" {
     try std.testing.expectEqual(@as(usize, 2), services.items.len);
     try std.testing.expectEqualStrings("api", services.items[0].service_name);
     try std.testing.expectEqualStrings("web", services.items[1].service_name);
+}
+
+test "ensureService allocates once and returns the existing VIP thereafter" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    const alloc = std.testing.allocator;
+
+    const first = try ensureService(alloc, "api", "consistent_hash");
+    defer first.deinit(alloc);
+    try std.testing.expectEqualStrings("10.43.0.2", first.vip_address);
+
+    const second = try ensureService(alloc, "api", "consistent_hash");
+    defer second.deinit(alloc);
+    try std.testing.expectEqualStrings("10.43.0.2", second.vip_address);
+
+    var services = try listServices(alloc);
+    defer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 1), services.items.len);
 }
 
 test "upsertServiceEndpoint updates an existing endpoint" {

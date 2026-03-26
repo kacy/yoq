@@ -45,6 +45,7 @@ comptime {
     _ = @import("network/nat.zig");
     _ = @import("network/wireguard.zig");
     _ = @import("network/commands.zig");
+    _ = @import("network/vip_allocator.zig");
     _ = @import("network/service_rollout.zig");
     _ = @import("network/service_reconciler.zig");
     _ = @import("network/service_registry_bridge.zig");
