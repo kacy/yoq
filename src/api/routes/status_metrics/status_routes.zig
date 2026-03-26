@@ -91,12 +91,20 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             service_reconciler.eventCount(.endpoint_unhealthy),
         },
     ) catch return common.internalError();
+    writer.writeAll("},\"by_source\":{") catch return common.internalError();
+    writeSourceCounts(writer, .container_runtime) catch return common.internalError();
+    writer.writeByte(',') catch return common.internalError();
+    writeSourceCounts(writer, .health_checker) catch return common.internalError();
+    writer.writeByte(',') catch return common.internalError();
+    writeSourceCounts(writer, .unspecified) catch return common.internalError();
     writer.writeAll("},\"recent\":[") catch return common.internalError();
 
     for (events[0..event_count], 0..) |event, idx| {
         if (idx > 0) writer.writeByte(',') catch return common.internalError();
 
-        writer.writeAll("{\"kind\":\"") catch return common.internalError();
+        writer.writeAll("{\"source\":\"") catch return common.internalError();
+        writer.writeAll(event.source.label()) catch return common.internalError();
+        writer.writeAll("\",\"kind\":\"") catch return common.internalError();
         writer.writeAll(event.kind.label()) catch return common.internalError();
         writer.writeAll("\",\"service\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, event.serviceName()) catch return common.internalError();
@@ -116,4 +124,17 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
 
     const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn writeSourceCounts(writer: anytype, source: service_reconciler.EventSource) !void {
+    try writer.print(
+        "\"{s}\":{{\"container_registered\":{d},\"container_unregistered\":{d},\"endpoint_healthy\":{d},\"endpoint_unhealthy\":{d}}}",
+        .{
+            source.label(),
+            service_reconciler.eventCountBySource(source, .container_registered),
+            service_reconciler.eventCountBySource(source, .container_unregistered),
+            service_reconciler.eventCountBySource(source, .endpoint_healthy),
+            service_reconciler.eventCountBySource(source, .endpoint_unhealthy),
+        },
+    );
 }
