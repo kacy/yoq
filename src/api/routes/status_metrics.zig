@@ -163,6 +163,10 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expectEqual(http.StatusCode.ok, response.status);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"mode\":\"shadow\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"service_registry_v2\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_registry_services\":256") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_bpf_services\":256") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_backends_per_vip\":16") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"recent_shadow_events\":32") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_registered\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"kind\":\"container_registered\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"service\":\"api\"") != null);
