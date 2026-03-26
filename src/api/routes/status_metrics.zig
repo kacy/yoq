@@ -288,6 +288,32 @@ test "handleMetricsPrometheus returns text content type" {
     try testing.expectEqualStrings("text/plain; version=0.0.4; charset=utf-8", resp.content_type.?);
 }
 
+test "handleMetricsPrometheus exposes service rollout metrics" {
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const service_reconciler = @import("../../network/service_reconciler.zig");
+
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+    });
+    defer service_rollout.resetForTest();
+    service_reconciler.resetForTest();
+
+    service_reconciler.noteContainerRegistered("api", "abc123", .{ 10, 42, 0, 9 });
+    service_reconciler.noteEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
+
+    const resp = handleMetricsPrometheus(testing.allocator);
+    defer if (resp.allocated) testing.allocator.free(resp.body);
+
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_shadow_mode 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"service_registry_v2\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"dns_returns_vip\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"load_balancer_backends_per_vip\"} 16") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{kind=\"container_registered\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{kind=\"endpoint_healthy\"} 1") != null);
+}
+
 test "handleGpuMetrics returns valid JSON" {
     const resp = handleGpuMetrics(testing.allocator);
     defer if (resp.allocated) testing.allocator.free(resp.body);
