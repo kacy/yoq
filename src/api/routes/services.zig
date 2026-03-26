@@ -1,0 +1,402 @@
+const std = @import("std");
+const http = @import("../http.zig");
+const common = @import("common.zig");
+const json_helpers = @import("../../lib/json_helpers.zig");
+const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+const store = @import("../../state/store.zig");
+
+const Response = common.Response;
+
+pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
+    const path = request.path_only;
+
+    if (request.method == .GET and std.mem.eql(u8, path, "/v1/services")) {
+        return handleListServices(alloc);
+    }
+
+    if (path.len <= "/v1/services/".len or !std.mem.startsWith(u8, path, "/v1/services/")) {
+        return null;
+    }
+
+    const rest = path["/v1/services/".len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    const service_name = rest[0..slash];
+    if (!isValidSegment(service_name)) return common.badRequest("invalid service name");
+
+    const after = rest[slash..];
+    if (after.len == 0) {
+        if (request.method != .GET) return common.methodNotAllowed();
+        return handleGetService(alloc, service_name);
+    }
+
+    if (std.mem.eql(u8, after, "/endpoints")) {
+        if (request.method != .GET) return common.methodNotAllowed();
+        return handleListServiceEndpoints(alloc, service_name);
+    }
+
+    if (std.mem.eql(u8, after, "/reconcile")) {
+        if (request.method != .POST) return common.methodNotAllowed();
+        return handleRequestReconcile(service_name);
+    }
+
+    const endpoint_prefix = "/endpoints/";
+    if (!std.mem.startsWith(u8, after, endpoint_prefix)) return common.notFound();
+
+    const endpoint_rest = after[endpoint_prefix.len..];
+    const endpoint_slash = std.mem.indexOfScalar(u8, endpoint_rest, '/') orelse endpoint_rest.len;
+    const endpoint_id = endpoint_rest[0..endpoint_slash];
+    if (!isValidSegment(endpoint_id)) return common.badRequest("invalid endpoint id");
+
+    const endpoint_after = endpoint_rest[endpoint_slash..];
+    if (endpoint_after.len == 0) {
+        if (request.method != .DELETE) return common.methodNotAllowed();
+        return handleDeleteEndpoint(service_name, endpoint_id);
+    }
+
+    if (std.mem.eql(u8, endpoint_after, "/drain")) {
+        if (request.method != .POST) return common.methodNotAllowed();
+        return handleDrainEndpoint(service_name, endpoint_id);
+    }
+
+    return common.notFound();
+}
+
+fn handleListServices(alloc: std.mem.Allocator) Response {
+    var services = service_registry_runtime.snapshotServices(alloc) catch return common.internalError();
+    defer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return common.internalError();
+    for (services.items, 0..) |service, idx| {
+        if (idx > 0) writer.writeByte(',') catch return common.internalError();
+        writeServiceJson(writer, service) catch return common.internalError();
+    }
+    writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleGetService(alloc: std.mem.Allocator, service_name: []const u8) Response {
+    const service = service_registry_runtime.snapshotService(alloc, service_name) catch |err| switch (err) {
+        error.ServiceNotFound => return common.notFound(),
+        else => return common.internalError(),
+    };
+    defer service.deinit(alloc);
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+    writeServiceJson(writer, service) catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleListServiceEndpoints(alloc: std.mem.Allocator, service_name: []const u8) Response {
+    var endpoints = service_registry_runtime.snapshotServiceEndpoints(alloc, service_name) catch |err| switch (err) {
+        error.ServiceNotFound => return common.notFound(),
+        else => return common.internalError(),
+    };
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+        endpoints.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return common.internalError();
+    for (endpoints.items, 0..) |endpoint, idx| {
+        if (idx > 0) writer.writeByte(',') catch return common.internalError();
+        writeEndpointJson(writer, endpoint) catch return common.internalError();
+    }
+    writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleRequestReconcile(service_name: []const u8) Response {
+    service_registry_runtime.requestReconcile(service_name) catch |err| switch (err) {
+        error.ServiceNotFound => return common.notFound(),
+        else => return common.internalError(),
+    };
+    return .{ .status = .ok, .body = "{\"status\":\"queued\"}", .allocated = false };
+}
+
+fn handleDrainEndpoint(service_name: []const u8, endpoint_id: []const u8) Response {
+    service_registry_runtime.drainEndpoint(service_name, endpoint_id) catch |err| switch (err) {
+        error.ServiceNotFound, error.EndpointNotFound => return common.notFound(),
+        else => return common.internalError(),
+    };
+    return .{ .status = .ok, .body = "{\"status\":\"draining\"}", .allocated = false };
+}
+
+fn handleDeleteEndpoint(service_name: []const u8, endpoint_id: []const u8) Response {
+    service_registry_runtime.deleteEndpoint(service_name, endpoint_id) catch |err| switch (err) {
+        error.ServiceNotFound, error.EndpointNotFound => return common.notFound(),
+        else => return common.internalError(),
+    };
+    return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn writeServiceJson(writer: anytype, service: service_registry_runtime.ServiceSnapshot) !void {
+    try writer.writeAll("{\"service_name\":\"");
+    try json_helpers.writeJsonEscaped(writer, service.service_name);
+    try writer.writeAll("\",\"vip_address\":\"");
+    try json_helpers.writeJsonEscaped(writer, service.vip_address);
+    try writer.writeAll("\",\"lb_policy\":\"");
+    try json_helpers.writeJsonEscaped(writer, service.lb_policy);
+    try writer.print(
+        "\",\"total_endpoints\":{d},\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"draining_endpoints\":{d},\"last_reconcile_status\":\"",
+        .{
+            service.total_endpoints,
+            service.eligible_endpoints,
+            service.healthy_endpoints,
+            service.draining_endpoints,
+        },
+    );
+    try json_helpers.writeJsonEscaped(writer, service.last_reconcile_status);
+    try writer.writeAll("\",\"last_reconcile_error\":");
+    if (service.last_reconcile_error) |message| {
+        try writer.writeByte('"');
+        try json_helpers.writeJsonEscaped(writer, message);
+        try writer.writeByte('"');
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"last_reconcile_requested_at\":");
+    if (service.last_reconcile_requested_at) |requested_at| {
+        try writer.print("{d}", .{requested_at});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.print(",\"overflow\":{},\"degraded\":{}}}", .{
+        service.overflow,
+        service.degraded,
+    });
+}
+
+fn writeEndpointJson(writer: anytype, endpoint: service_registry_runtime.EndpointSnapshot) !void {
+    try writer.writeAll("{\"endpoint_id\":\"");
+    try json_helpers.writeJsonEscaped(writer, endpoint.endpoint_id);
+    try writer.writeAll("\",\"container_id\":\"");
+    try json_helpers.writeJsonEscaped(writer, endpoint.container_id);
+    try writer.writeAll("\",\"node_id\":");
+    if (endpoint.node_id) |node_id| {
+        try writer.print("{d}", .{node_id});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"ip_address\":\"");
+    try json_helpers.writeJsonEscaped(writer, endpoint.ip_address);
+    try writer.print(
+        "\",\"port\":{d},\"weight\":{d},\"admin_state\":\"",
+        .{ endpoint.port, endpoint.weight },
+    );
+    try json_helpers.writeJsonEscaped(writer, endpoint.admin_state);
+    try writer.print(
+        "\",\"generation\":{d},\"registered_at\":{d},\"last_seen_at\":{d},\"observed_health\":\"",
+        .{ endpoint.generation, endpoint.registered_at, endpoint.last_seen_at },
+    );
+    try json_helpers.writeJsonEscaped(writer, endpoint.observed_health);
+    try writer.print("\",\"eligible\":{},\"last_transition_at\":", .{endpoint.eligible});
+    if (endpoint.last_transition_at) |last_transition_at| {
+        try writer.print("{d}", .{last_transition_at});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeByte('}');
+}
+
+fn isValidSegment(value: []const u8) bool {
+    if (value.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, value, '/')) |_| return false;
+    return common.validateClusterInput(value);
+}
+
+fn testRequest(method: http.Method, path: []const u8) http.Request {
+    return .{
+        .method = method,
+        .path = path,
+        .path_only = path,
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+}
+
+test "route handles GET /v1/services" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    const response = route(testRequest(.GET, "/v1/services"), std.testing.allocator).?;
+    defer if (response.allocated) std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
+}
+
+test "route handles GET /v1/services/{name}" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "web",
+        .vip_address = "10.43.0.3",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    const response = route(testRequest(.GET, "/v1/services/web"), std.testing.allocator).?;
+    defer if (response.allocated) std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"web\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
+}
+
+test "route handles GET /v1/services/{name}/endpoints" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    const response = route(testRequest(.GET, "/v1/services/api/endpoints"), std.testing.allocator).?;
+    defer if (response.allocated) std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"endpoint_id\":\"ctr-1:0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"observed_health\":\"unknown\"") != null);
+}
+
+test "route handles POST drain and DELETE endpoint" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    const drain_response = route(testRequest(.POST, "/v1/services/api/endpoints/ctr-1:0/drain"), std.testing.allocator).?;
+    try std.testing.expectEqual(http.StatusCode.ok, drain_response.status);
+    try std.testing.expectEqualStrings("{\"status\":\"draining\"}", drain_response.body);
+
+    var drained = try store.listServiceEndpoints(std.testing.allocator, "api");
+    defer {
+        for (drained.items) |endpoint| endpoint.deinit(std.testing.allocator);
+        drained.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqualStrings("draining", drained.items[0].admin_state);
+
+    const delete_response = route(testRequest(.DELETE, "/v1/services/api/endpoints/ctr-1:0"), std.testing.allocator).?;
+    try std.testing.expectEqual(http.StatusCode.ok, delete_response.status);
+    try std.testing.expectEqualStrings("{\"status\":\"removed\"}", delete_response.body);
+
+    var remaining = try store.listServiceEndpoints(std.testing.allocator, "api");
+    defer {
+        for (remaining.items) |endpoint| endpoint.deinit(std.testing.allocator);
+        remaining.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 0), remaining.items.len);
+}
+
+test "route handles POST /v1/services/{name}/reconcile" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    const response = route(testRequest(.POST, "/v1/services/api/reconcile"), std.testing.allocator).?;
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expectEqualStrings("{\"status\":\"queued\"}", response.body);
+
+    const service = try service_registry_runtime.snapshotService(std.testing.allocator, "api");
+    defer service.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("pending", service.last_reconcile_status);
+}

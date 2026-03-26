@@ -8,6 +8,7 @@ const json_helpers = @import("../lib/json_helpers.zig");
 const common = @import("routes/common.zig");
 const containers_images = @import("routes/containers_images.zig");
 const cluster_agents = @import("routes/cluster_agents.zig");
+const services = @import("routes/services.zig");
 const status_metrics = @import("routes/status_metrics.zig");
 const security = @import("routes/security.zig");
 const s3_gateway = @import("routes/s3_gateway.zig");
@@ -58,6 +59,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     };
 
     if (cluster_agents.route(request, alloc, ctx)) |resp| return resp;
+    if (services.route(request, alloc)) |resp| return resp;
     if (status_metrics.route(request, alloc)) |resp| return resp;
     if (security.route(request, alloc)) |resp| return resp;
 
@@ -245,6 +247,26 @@ test "dispatch deploy without cluster returns error" {
     defer if (resp.allocated) std.testing.allocator.free(resp.body);
 
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "dispatch services routing" {
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    const req = (try http.parseRequest("GET /v1/services/api HTTP/1.1\r\nHost: localhost\r\n\r\n")).?;
+    const resp = dispatch(req, std.testing.allocator);
+    defer if (resp.allocated) std.testing.allocator.free(resp.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"service_name\":\"api\"") != null);
 }
 
 test "dispatch rejects non-hex container id" {

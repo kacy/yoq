@@ -8,6 +8,10 @@ const Allocator = std.mem.Allocator;
 
 pub const ServiceSnapshot = service_registry.ServiceSnapshot;
 pub const EndpointSnapshot = service_registry.EndpointSnapshot;
+pub const RuntimeError = service_registry.Error || error{
+    StoreReadFailed,
+    StoreWriteFailed,
+};
 
 var mutex: std.Thread.Mutex = .{};
 var initialized: bool = false;
@@ -70,12 +74,44 @@ pub fn noteProbeResult(service_name: []const u8, endpoint_id: []const u8, health
     };
 }
 
-pub fn requestReconcile(service_name: []const u8) service_registry.Error!void {
+pub fn requestReconcile(service_name: []const u8) RuntimeError!void {
     mutex.lock();
     defer mutex.unlock();
 
     try ensureInitializedLocked();
     _ = try registry.requestReconcile(service_name);
+}
+
+pub fn noteNodeLost(node_id: i64) !usize {
+    mutex.lock();
+    defer mutex.unlock();
+
+    try ensureInitializedLocked();
+    return registry.noteNodeLost(node_id);
+}
+
+pub fn noteNodeRecovered(node_id: i64) !usize {
+    mutex.lock();
+    defer mutex.unlock();
+
+    try ensureInitializedLocked();
+    return registry.noteNodeRecovered(node_id);
+}
+
+pub fn markReconcileSucceeded(service_name: []const u8) RuntimeError!void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    try ensureInitializedLocked();
+    try registry.markReconcileSucceeded(service_name);
+}
+
+pub fn markReconcileFailed(service_name: []const u8, message: []const u8) RuntimeError!void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    try ensureInitializedLocked();
+    try registry.markReconcileFailed(service_name, message);
 }
 
 pub fn snapshotServices(alloc: Allocator) !std.ArrayList(ServiceSnapshot) {
@@ -102,27 +138,26 @@ pub fn snapshotServiceEndpoints(alloc: Allocator, service_name: []const u8) !std
     return registry.snapshotServiceEndpoints(alloc, service_name);
 }
 
-pub fn drainEndpoint(service_name: []const u8, endpoint_id: []const u8) !void {
-    store.markServiceEndpointAdminState(service_name, endpoint_id, "draining") catch return error.StoreWriteFailed;
-
+pub fn drainEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeError!void {
     mutex.lock();
     defer mutex.unlock();
 
     try ensureInitializedLocked();
+    try registry.ensureEndpointExists(service_name, endpoint_id);
+
+    store.markServiceEndpointAdminState(service_name, endpoint_id, "draining") catch return error.StoreWriteFailed;
     try syncServiceFromStoreLocked(service_name);
 }
 
-pub fn deleteEndpoint(service_name: []const u8, endpoint_id: []const u8) !void {
-    store.removeServiceEndpoint(service_name, endpoint_id) catch return error.StoreWriteFailed;
-
+pub fn deleteEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeError!void {
     mutex.lock();
     defer mutex.unlock();
 
     try ensureInitializedLocked();
-    _ = registry.removeServiceEndpoint(service_name, endpoint_id) catch |err| switch (err) {
-        error.EndpointNotFound => {},
-        else => return err,
-    };
+    try registry.ensureEndpointExists(service_name, endpoint_id);
+
+    store.removeServiceEndpoint(service_name, endpoint_id) catch return error.StoreWriteFailed;
+    try syncServiceFromStoreLocked(service_name);
 }
 
 fn ensureInitializedLocked() !void {
@@ -316,4 +351,33 @@ test "runtime sync preserves probe health across persisted refresh" {
     try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
     try std.testing.expectEqualStrings("healthy", endpoints.items[0].observed_health);
     try std.testing.expectEqualStrings("10.42.0.19", endpoints.items[0].ip_address);
+}
+
+test "runtime can mark reconcile failure and recovery" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    resetForTest();
+    defer resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true });
+    defer rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    try markReconcileFailed("api", "sync failed");
+    var failed = try snapshotService(std.testing.allocator, "api");
+    defer failed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("failed", failed.last_reconcile_status);
+    try std.testing.expectEqualStrings("sync failed", failed.last_reconcile_error.?);
+
+    try markReconcileSucceeded("api");
+    var recovered = try snapshotService(std.testing.allocator, "api");
+    defer recovered.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("idle", recovered.last_reconcile_status);
+    try std.testing.expect(recovered.last_reconcile_error == null);
 }

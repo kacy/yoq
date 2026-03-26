@@ -278,6 +278,59 @@ pub const Registry = struct {
         return buildAction(service_name, .reconcile_requested);
     }
 
+    pub fn ensureEndpointExists(self: *const Registry, service_name: []const u8, endpoint_id: []const u8) Error!void {
+        const service_index = self.findServiceIndex(service_name) orelse return Error.ServiceNotFound;
+        if (findEndpointIndex(self.services.items[service_index].endpoints.items, endpoint_id) == null) {
+            return Error.EndpointNotFound;
+        }
+    }
+
+    pub fn noteNodeLost(self: *Registry, node_id: i64) usize {
+        var changed: usize = 0;
+        const now = std.time.timestamp();
+        for (self.services.items) |*service| {
+            for (service.endpoints.items) |*endpoint| {
+                if (endpoint.node_id != node_id) continue;
+                if (endpoint.node_lost) continue;
+                endpoint.node_lost = true;
+                endpoint.last_transition_at = now;
+                changed += 1;
+            }
+        }
+        return changed;
+    }
+
+    pub fn noteNodeRecovered(self: *Registry, node_id: i64) usize {
+        var changed: usize = 0;
+        const now = std.time.timestamp();
+        for (self.services.items) |*service| {
+            for (service.endpoints.items) |*endpoint| {
+                if (endpoint.node_id != node_id) continue;
+                if (!endpoint.node_lost) continue;
+                endpoint.node_lost = false;
+                endpoint.last_transition_at = now;
+                changed += 1;
+            }
+        }
+        return changed;
+    }
+
+    pub fn markReconcileSucceeded(self: *Registry, service_name: []const u8) Error!void {
+        const service = try self.getServiceMut(service_name);
+        service.last_reconcile_status = .idle;
+        if (service.last_reconcile_error) |message| {
+            self.alloc.free(message);
+            service.last_reconcile_error = null;
+        }
+    }
+
+    pub fn markReconcileFailed(self: *Registry, service_name: []const u8, message: []const u8) Error!void {
+        const service = try self.getServiceMut(service_name);
+        service.last_reconcile_status = .failed;
+        if (service.last_reconcile_error) |current| self.alloc.free(current);
+        service.last_reconcile_error = try self.alloc.dupe(u8, message);
+    }
+
     pub fn snapshotServices(self: *const Registry, alloc: Allocator) Error!std.ArrayList(ServiceSnapshot) {
         var services: std.ArrayList(ServiceSnapshot) = .empty;
         errdefer deinitServiceSnapshots(alloc, &services);
@@ -572,4 +625,64 @@ test "requestReconcile marks the service pending" {
     defer snapshot.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("pending", snapshot.last_reconcile_status);
     try std.testing.expect(snapshot.last_reconcile_requested_at != null);
+}
+
+test "node loss and recovery toggle endpoint eligibility" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    try registry.upsertService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+    });
+    try registry.replaceServiceEndpoints("api", &.{
+        .{
+            .endpoint_id = "ctr-1:0",
+            .container_id = "ctr-1",
+            .node_id = 7,
+            .ip_address = "10.42.0.9",
+            .port = 0,
+            .weight = 1,
+            .admin_state = "active",
+            .generation = 1,
+            .registered_at = 1000,
+            .last_seen_at = 1000,
+        },
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), registry.noteNodeLost(7));
+
+    var after_loss = try registry.snapshotServiceEndpoints(std.testing.allocator, "api");
+    defer deinitEndpointSnapshots(std.testing.allocator, &after_loss);
+    try std.testing.expect(!after_loss.items[0].eligible);
+
+    try std.testing.expectEqual(@as(usize, 1), registry.noteNodeRecovered(7));
+
+    var after_recovery = try registry.snapshotServiceEndpoints(std.testing.allocator, "api");
+    defer deinitEndpointSnapshots(std.testing.allocator, &after_recovery);
+    try std.testing.expect(after_recovery.items[0].eligible);
+}
+
+test "markReconcileFailed and markReconcileSucceeded update service detail" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    try registry.upsertService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+    });
+
+    try registry.markReconcileFailed("api", "map update failed");
+    var failed = try registry.snapshotService(std.testing.allocator, "api");
+    defer failed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("failed", failed.last_reconcile_status);
+    try std.testing.expectEqualStrings("map update failed", failed.last_reconcile_error.?);
+
+    try registry.markReconcileSucceeded("api");
+    var recovered = try registry.snapshotService(std.testing.allocator, "api");
+    defer recovered.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("idle", recovered.last_reconcile_status);
+    try std.testing.expect(recovered.last_reconcile_error == null);
 }
