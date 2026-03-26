@@ -73,6 +73,18 @@ pub const DnsInterceptorFaultMode = enum {
     }
 };
 
+pub const LoadBalancerFaultMode = enum {
+    none,
+    endpoint_overflow,
+
+    pub fn label(self: LoadBalancerFaultMode) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .endpoint_overflow => "endpoint_overflow",
+        };
+    }
+};
+
 var registry: [max_services]ServiceEntry = [_]ServiceEntry{.{
     .name = undefined,
     .name_len = 0,
@@ -92,6 +104,9 @@ var cluster_lookup_fault_injections: u64 = 0;
 var dns_interceptor_fault_mutex: std.Thread.Mutex = .{};
 var dns_interceptor_fault_mode: DnsInterceptorFaultMode = .none;
 var dns_interceptor_fault_injections: u64 = 0;
+var load_balancer_fault_mutex: std.Thread.Mutex = .{};
+var load_balancer_fault_mode: LoadBalancerFaultMode = .none;
+var load_balancer_fault_injections: u64 = 0;
 
 pub fn setClusterDb(db: ?*sqlite.Db) void {
     cluster_db_mutex.lock();
@@ -394,6 +409,31 @@ pub fn resetDnsInterceptorFaultsForTest() void {
     dns_interceptor_fault_injections = 0;
 }
 
+pub fn loadBalancerFaultMode() LoadBalancerFaultMode {
+    load_balancer_fault_mutex.lock();
+    defer load_balancer_fault_mutex.unlock();
+    return load_balancer_fault_mode;
+}
+
+pub fn loadBalancerFaultInjectionCount() u64 {
+    load_balancer_fault_mutex.lock();
+    defer load_balancer_fault_mutex.unlock();
+    return load_balancer_fault_injections;
+}
+
+pub fn setLoadBalancerFaultModeForTest(mode: LoadBalancerFaultMode) void {
+    load_balancer_fault_mutex.lock();
+    defer load_balancer_fault_mutex.unlock();
+    load_balancer_fault_mode = mode;
+}
+
+pub fn resetLoadBalancerFaultsForTest() void {
+    load_balancer_fault_mutex.lock();
+    defer load_balancer_fault_mutex.unlock();
+    load_balancer_fault_mode = .none;
+    load_balancer_fault_injections = 0;
+}
+
 fn isSafeIpForDns(ip: [4]u8) bool {
     const ip_u32 = packet_support.ipToU32(ip);
     if (ip_u32 == 0) return false;
@@ -421,7 +461,9 @@ fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
 
     if (ebpf.getLoadBalancer()) |lb| {
         const vip = getServiceVip(name) orelse ip_addr;
-        lb.addBackend(vip, ip_addr);
+        if (!shouldSkipLoadBalancerAdd(name, vip, ip_addr)) {
+            lb.addBackend(vip, ip_addr);
+        }
     }
 
     policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
@@ -480,6 +522,28 @@ fn shouldSkipDnsInterceptorApply(operation: []const u8, name: []const u8) bool {
         dns_interceptor_fault_mode.label(),
         operation,
         name,
+    });
+    return true;
+}
+
+fn shouldSkipLoadBalancerAdd(name: []const u8, vip: [4]u8, backend_ip: [4]u8) bool {
+    load_balancer_fault_mutex.lock();
+    defer load_balancer_fault_mutex.unlock();
+
+    if (load_balancer_fault_mode == .none) return false;
+
+    load_balancer_fault_injections += 1;
+    log.warn("dns: injected load balancer fault mode={s} service='{s}' vip={d}.{d}.{d}.{d} backend={d}.{d}.{d}.{d}", .{
+        load_balancer_fault_mode.label(),
+        name,
+        vip[0],
+        vip[1],
+        vip[2],
+        vip[3],
+        backend_ip[0],
+        backend_ip[1],
+        backend_ip[2],
+        backend_ip[3],
     });
     return true;
 }

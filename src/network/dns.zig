@@ -731,6 +731,20 @@ test "userspace dns still resolves when dns interceptor is unavailable" {
     try std.testing.expectEqual(@as(u64, 2), registry_support.dnsInterceptorFaultInjectionCount());
 }
 
+test "userspace dns still resolves when load balancer add overflows" {
+    resetRegistryForTest();
+    registry_support.resetLoadBalancerFaultsForTest();
+    defer registry_support.resetLoadBalancerFaultsForTest();
+
+    registry_support.setLoadBalancerFaultModeForTest(.endpoint_overflow);
+    registerService("api", "ctr_api", .{ 10, 42, 0, 46 });
+
+    const result = lookupService("api");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 46 }, result.?);
+    try std.testing.expectEqual(@as(u64, 1), registry_support.loadBalancerFaultInjectionCount());
+}
+
 test "registerService rejects name with control characters" {
     resetRegistryForTest();
 
