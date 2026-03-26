@@ -706,6 +706,31 @@ test "lookupService prefers local registry over cluster db" {
     try std.testing.expectEqual([4]u8{ 10, 42, 1, 10 }, result.?);
 }
 
+test "userspace dns still resolves when dns interceptor is unavailable" {
+    resetRegistryForTest();
+    registry_support.resetDnsInterceptorFaultsForTest();
+    defer registry_support.resetDnsInterceptorFaultsForTest();
+
+    registerService("api", "ctr_api", .{ 10, 42, 0, 44 });
+
+    const result = lookupService("api");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 44 }, result.?);
+    try std.testing.expectEqual(@as(u64, 0), registry_support.dnsInterceptorFaultInjectionCount());
+
+    registry_support.setDnsInterceptorFaultModeForTest(.unavailable);
+    registerService("web", "ctr_web", .{ 10, 42, 0, 45 });
+
+    const web = lookupService("web");
+    try std.testing.expect(web != null);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 45 }, web.?);
+    try std.testing.expectEqual(@as(u64, 1), registry_support.dnsInterceptorFaultInjectionCount());
+
+    unregisterService("ctr_web");
+    try std.testing.expect(lookupService("web") == null);
+    try std.testing.expectEqual(@as(u64, 2), registry_support.dnsInterceptorFaultInjectionCount());
+}
+
 test "registerService rejects name with control characters" {
     resetRegistryForTest();
 

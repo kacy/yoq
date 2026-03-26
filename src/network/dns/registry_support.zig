@@ -61,6 +61,18 @@ pub const ClusterLookupFaultMode = enum {
     }
 };
 
+pub const DnsInterceptorFaultMode = enum {
+    none,
+    unavailable,
+
+    pub fn label(self: DnsInterceptorFaultMode) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .unavailable => "unavailable",
+        };
+    }
+};
+
 var registry: [max_services]ServiceEntry = [_]ServiceEntry{.{
     .name = undefined,
     .name_len = 0,
@@ -77,6 +89,9 @@ var cluster_db_mutex: std.Thread.Mutex = .{};
 var cluster_lookup_fault_mode: ClusterLookupFaultMode = .none;
 var cluster_lookup_fault_ip: [4]u8 = .{ 10, 255, 255, 254 };
 var cluster_lookup_fault_injections: u64 = 0;
+var dns_interceptor_fault_mutex: std.Thread.Mutex = .{};
+var dns_interceptor_fault_mode: DnsInterceptorFaultMode = .none;
+var dns_interceptor_fault_injections: u64 = 0;
 
 pub fn setClusterDb(db: ?*sqlite.Db) void {
     cluster_db_mutex.lock();
@@ -354,6 +369,31 @@ pub fn resetClusterLookupFaultsForTest() void {
     cluster_lookup_fault_injections = 0;
 }
 
+pub fn dnsInterceptorFaultMode() DnsInterceptorFaultMode {
+    dns_interceptor_fault_mutex.lock();
+    defer dns_interceptor_fault_mutex.unlock();
+    return dns_interceptor_fault_mode;
+}
+
+pub fn dnsInterceptorFaultInjectionCount() u64 {
+    dns_interceptor_fault_mutex.lock();
+    defer dns_interceptor_fault_mutex.unlock();
+    return dns_interceptor_fault_injections;
+}
+
+pub fn setDnsInterceptorFaultModeForTest(mode: DnsInterceptorFaultMode) void {
+    dns_interceptor_fault_mutex.lock();
+    defer dns_interceptor_fault_mutex.unlock();
+    dns_interceptor_fault_mode = mode;
+}
+
+pub fn resetDnsInterceptorFaultsForTest() void {
+    dns_interceptor_fault_mutex.lock();
+    defer dns_interceptor_fault_mutex.unlock();
+    dns_interceptor_fault_mode = .none;
+    dns_interceptor_fault_injections = 0;
+}
+
 fn isSafeIpForDns(ip: [4]u8) bool {
     const ip_u32 = packet_support.ipToU32(ip);
     if (ip_u32 == 0) return false;
@@ -365,6 +405,16 @@ fn isSafeIpForDns(ip: [4]u8) bool {
 }
 
 fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
+    if (shouldSkipDnsInterceptorApply("update", name)) {
+        if (ebpf.getLoadBalancer()) |lb| {
+            const vip = getServiceVip(name) orelse ip_addr;
+            lb.addBackend(vip, ip_addr);
+        }
+
+        policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
+        return;
+    }
+
     if (ebpf.getDnsInterceptor()) |interceptor| {
         interceptor.updateService(name, ip_addr);
     }
@@ -378,6 +428,8 @@ fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
 }
 
 fn deleteBpfMap(name: []const u8) void {
+    if (shouldSkipDnsInterceptorApply("delete", name)) return;
+
     if (ebpf.getDnsInterceptor()) |interceptor| {
         _ = interceptor.deleteService(name);
     }
@@ -415,4 +467,19 @@ fn findLatestActiveEntryLocked(name: []const u8) ?*const ServiceEntry {
         }
     }
     return null;
+}
+
+fn shouldSkipDnsInterceptorApply(operation: []const u8, name: []const u8) bool {
+    dns_interceptor_fault_mutex.lock();
+    defer dns_interceptor_fault_mutex.unlock();
+
+    if (dns_interceptor_fault_mode == .none) return false;
+
+    dns_interceptor_fault_injections += 1;
+    log.warn("dns: injected interceptor fault mode={s} operation={s} name='{s}'", .{
+        dns_interceptor_fault_mode.label(),
+        operation,
+        name,
+    });
+    return true;
 }
