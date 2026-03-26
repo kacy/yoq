@@ -111,12 +111,12 @@ fn beginExclusiveRestore(db: *c.sqlite3) BackupError!void {
 fn validateBackupSchema(db: *c.sqlite3) BackupError!void {
     const required_tables_sql =
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN (" ++
-        "'containers','images','ip_allocations','build_cache','service_names'," ++
+        "'containers','images','ip_allocations','build_cache','service_names','services','service_endpoints'," ++
         "'agents','assignments','deployments','secrets','network_policies'," ++
         "'wireguard_peers','volumes','certificates','s3_multipart_uploads'," ++
         "'s3_upload_parts','training_jobs','training_checkpoints'" ++
         ");";
-    const required_table_count = 17;
+    const required_table_count = 19;
 
     var stmt: ?*c.sqlite3_stmt = null;
     if (c.sqlite3_prepare_v2(db, required_tables_sql, @intCast(required_tables_sql.len), &stmt, null) != c.SQLITE_OK) {
