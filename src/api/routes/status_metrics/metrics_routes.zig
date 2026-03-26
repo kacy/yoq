@@ -293,11 +293,34 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
         .{service_registry_bridge.faultInjectionCount(.endpoint_unhealthy)},
     );
 
+    try writer.writeAll("# HELP yoq_service_registry_bridge_fault_mode Active bridge fault mode by operation\n");
+    try writer.writeAll("# TYPE yoq_service_registry_bridge_fault_mode gauge\n");
+    try writeBridgeFaultMode(writer, .container_register);
+    try writeBridgeFaultMode(writer, .container_unregister);
+    try writeBridgeFaultMode(writer, .endpoint_healthy);
+    try writeBridgeFaultMode(writer, .endpoint_unhealthy);
+
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
     try writeShadowEventCounters(writer, .container_runtime);
     try writeShadowEventCounters(writer, .health_checker);
     try writeShadowEventCounters(writer, .unspecified);
+}
+
+fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.BridgeOperation) !void {
+    const mode = service_registry_bridge.faultMode(operation);
+    try writer.print(
+        "yoq_service_registry_bridge_fault_mode{{operation=\"{s}\",mode=\"none\"}} {d}\n",
+        .{ operation.label(), @intFromBool(mode == .none) },
+    );
+    try writer.print(
+        "yoq_service_registry_bridge_fault_mode{{operation=\"{s}\",mode=\"skip_legacy_apply\"}} {d}\n",
+        .{ operation.label(), @intFromBool(mode == .skip_legacy_apply) },
+    );
+    try writer.print(
+        "yoq_service_registry_bridge_fault_mode{{operation=\"{s}\",mode=\"skip_shadow_record\"}} {d}\n",
+        .{ operation.label(), @intFromBool(mode == .skip_shadow_record) },
+    );
 }
 
 fn writeShadowEventCounters(writer: anytype, source: service_reconciler.EventSource) !void {
