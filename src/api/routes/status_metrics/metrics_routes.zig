@@ -11,6 +11,7 @@ const dns_registry = @import("../../../network/dns/registry_support.zig");
 const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
+const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 
@@ -272,6 +273,25 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_rollout_limit{{limit=\"load_balancer_backends_per_vip\"}} {d}\n", .{lb_runtime.max_backends});
     try writer.print("yoq_service_rollout_limit{{limit=\"conntrack_entries\"}} {d}\n", .{lb_prog.maps[1].max_entries});
     try writer.print("yoq_service_rollout_limit{{limit=\"recent_shadow_events\"}} {d}\n", .{service_reconciler.max_recent_events});
+
+    try writer.writeAll("# HELP yoq_service_registry_bridge_fault_injections_total Injected bridge faults by operation\n");
+    try writer.writeAll("# TYPE yoq_service_registry_bridge_fault_injections_total counter\n");
+    try writer.print(
+        "yoq_service_registry_bridge_fault_injections_total{{operation=\"container_register\"}} {d}\n",
+        .{service_registry_bridge.faultInjectionCount(.container_register)},
+    );
+    try writer.print(
+        "yoq_service_registry_bridge_fault_injections_total{{operation=\"container_unregister\"}} {d}\n",
+        .{service_registry_bridge.faultInjectionCount(.container_unregister)},
+    );
+    try writer.print(
+        "yoq_service_registry_bridge_fault_injections_total{{operation=\"endpoint_healthy\"}} {d}\n",
+        .{service_registry_bridge.faultInjectionCount(.endpoint_healthy)},
+    );
+    try writer.print(
+        "yoq_service_registry_bridge_fault_injections_total{{operation=\"endpoint_unhealthy\"}} {d}\n",
+        .{service_registry_bridge.faultInjectionCount(.endpoint_unhealthy)},
+    );
 
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
