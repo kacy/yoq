@@ -162,6 +162,20 @@ pub const ReverseProxy = struct {
     }
 
     fn forwardPlan(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
+        var retries_remaining = plan.route.retries;
+        while (true) {
+            const response = self.forwardSingleAttempt(raw_request, plan) catch |err| {
+                if (shouldRetryForward(plan.method, retries_remaining, err)) {
+                    retries_remaining -= 1;
+                    continue;
+                }
+                return formatProxyResponse(self.allocator, proxyFailureResponse(err));
+            };
+            return response;
+        }
+    }
+
+    fn forwardSingleAttempt(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
         const request = try self.buildForwardRequest(raw_request, plan);
         defer self.allocator.free(request);
 
@@ -209,6 +223,52 @@ fn formatProxyResponse(alloc: std.mem.Allocator, response: ProxyResponse) ![]u8 
             response.body,
         },
     );
+}
+
+fn proxyFailureResponse(err: anyerror) ProxyResponse {
+    return switch (err) {
+        error.InvalidUpstreamAddress => .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"invalid upstream address\"}",
+        },
+        error.ResponseTooLarge => .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"upstream response too large\"}",
+        },
+        error.ConnectFailed => .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"upstream connect failed\"}",
+        },
+        error.SendFailed => .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"upstream send failed\"}",
+        },
+        error.ReceiveFailed => .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"upstream receive failed\"}",
+        },
+        else => .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"upstream request failed\"}",
+        },
+    };
+}
+
+fn shouldRetryForward(method: http.Method, retries_remaining: u8, err: anyerror) bool {
+    if (retries_remaining == 0) return false;
+    if (!isSafeRetryMethod(method)) return false;
+
+    return switch (err) {
+        error.ConnectFailed, error.SendFailed, error.ReceiveFailed => true,
+        else => false,
+    };
+}
+
+fn isSafeRetryMethod(method: http.Method) bool {
+    return switch (method) {
+        .GET, .HEAD => true,
+        .POST, .PUT, .DELETE => false,
+    };
 }
 
 fn connectToUpstream(plan: *const ForwardPlan) !posix.socket_t {
@@ -635,15 +695,21 @@ test "buildForwardRequest preserves body and content length" {
     try std.testing.expect(std.mem.endsWith(u8, forwarded, "hello"));
 }
 
+const TestUpstreamAction = union(enum) {
+    close,
+    respond: []const u8,
+};
+
 const TestUpstreamServer = struct {
     listen_fd: posix.socket_t,
     port: u16,
-    response: []const u8,
+    actions: []const TestUpstreamAction,
     thread: ?std.Thread = null,
-    request_buf: [2048]u8 = undefined,
-    request_len: usize = 0,
+    request_bufs: [4][2048]u8 = undefined,
+    request_lens: [4]usize = [_]usize{0} ** 4,
+    accepted: usize = 0,
 
-    fn init(response: []const u8) !TestUpstreamServer {
+    fn init(actions: []const TestUpstreamAction) !TestUpstreamServer {
         const listen_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
         errdefer posix.close(listen_fd);
 
@@ -661,7 +727,7 @@ const TestUpstreamServer = struct {
         return .{
             .listen_fd = listen_fd,
             .port = std.mem.bigToNative(u16, bound_addr.port),
-            .response = response,
+            .actions = actions,
         };
     }
 
@@ -674,17 +740,24 @@ const TestUpstreamServer = struct {
         self.thread = try std.Thread.spawn(.{}, acceptOne, .{self});
     }
 
-    fn request(self: *const TestUpstreamServer) []const u8 {
-        return self.request_buf[0..self.request_len];
+    fn request(self: *const TestUpstreamServer, index: usize) []const u8 {
+        return self.request_bufs[index][0..self.request_lens[index]];
     }
 
     fn acceptOne(self: *TestUpstreamServer) void {
-        const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
-        defer posix.close(client_fd);
+        for (self.actions, 0..) |action, index| {
+            const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            defer posix.close(client_fd);
 
-        setSocketTimeoutMs(client_fd, 1000);
-        self.request_len = posix.read(client_fd, &self.request_buf) catch 0;
-        _ = writeAll(client_fd, self.response) catch {};
+            setSocketTimeoutMs(client_fd, 1000);
+            self.request_lens[index] = posix.read(client_fd, &self.request_bufs[index]) catch 0;
+            self.accepted = index + 1;
+
+            switch (action) {
+                .close => {},
+                .respond => |response| _ = writeAll(client_fd, response) catch {},
+            }
+        }
     }
 };
 
@@ -693,9 +766,10 @@ test "forwardRequest proxies upstream response bytes" {
     const service_rollout = @import("../service_rollout.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
 
-    var upstream = try TestUpstreamServer.init(
-        "HTTP/1.1 201 Created\r\nContent-Length: 7\r\nConnection: close\r\n\r\ncreated",
-    );
+    const actions = [_]TestUpstreamAction{
+        .{ .respond = "HTTP/1.1 201 Created\r\nContent-Length: 7\r\nConnection: close\r\n\r\ncreated" },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
     defer upstream.deinit();
     try upstream.start();
 
@@ -758,10 +832,10 @@ test "forwardRequest proxies upstream response bytes" {
 
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 201 Created\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "\r\n\r\ncreated") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "GET /v1/users HTTP/1.1\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "Host: api\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "X-Test: 1\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "Connection: close\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "GET /v1/users HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Host: api\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Test: 1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Connection: close\r\n") != null);
 }
 
 test "forwardRequest formats local error responses" {
@@ -784,4 +858,85 @@ test "forwardRequest formats local error responses" {
 
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 400 Bad Request\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "{\"error\":\"missing host header\"}") != null);
+}
+
+test "forwardRequest retries safe methods after upstream receive failure" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const actions = [_]TestUpstreamAction{
+        .close,
+        .{ .respond = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .http_proxy_retries = 1,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .retries = 1,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const response = try proxy.forwardRequest(
+        "GET /users HTTP/1.1\r\nHost: api.internal\r\n\r\n",
+    );
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expectEqual(@as(usize, 2), upstream.accepted);
+    try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
+}
+
+test "shouldRetryForward only retries safe methods and retryable errors" {
+    try std.testing.expect(shouldRetryForward(.GET, 1, error.ReceiveFailed));
+    try std.testing.expect(!shouldRetryForward(.POST, 1, error.ReceiveFailed));
+    try std.testing.expect(!shouldRetryForward(.GET, 0, error.ReceiveFailed));
+    try std.testing.expect(!shouldRetryForward(.GET, 1, error.ResponseTooLarge));
 }
