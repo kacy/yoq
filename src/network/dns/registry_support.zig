@@ -5,6 +5,7 @@ const log = @import("../../lib/log.zig");
 const ip_mod = @import("../ip.zig");
 const policy = @import("../policy.zig");
 const packet_support = @import("packet_support.zig");
+const rollout = @import("../service_rollout.zig");
 
 const ebpf = if (builtin.os.tag == .linux) @import("../ebpf.zig") else struct {
     pub const LoadBalancerBackends = struct {
@@ -40,8 +41,9 @@ const ebpf = if (builtin.os.tag == .linux) @import("../ebpf.zig") else struct {
     }
 };
 
-pub const max_services = 256;
+pub const max_services = 1024;
 pub const max_name_len = 63;
+pub const max_backends_per_service = 64;
 
 const ServiceEntry = struct {
     name: [max_name_len]u8,
@@ -49,6 +51,21 @@ const ServiceEntry = struct {
     container_id: [12]u8,
     container_id_len: u8,
     ip: [4]u8,
+    active: bool,
+};
+
+const ServiceBackend = struct {
+    container_id: [12]u8,
+    container_id_len: u8,
+    ip: [4]u8,
+};
+
+const ServiceView = struct {
+    name: [max_name_len]u8,
+    name_len: u8,
+    dns_ip: [4]u8,
+    backend_count: u8,
+    backends: [max_backends_per_service]ServiceBackend,
     active: bool,
 };
 
@@ -65,6 +82,11 @@ pub const RegistryEntrySnapshot = struct {
     pub fn deinit(self: RegistryEntrySnapshot, alloc: std.mem.Allocator) void {
         alloc.free(self.container_id);
     }
+};
+
+pub const BackendBinding = struct {
+    container_id: []const u8,
+    ip: [4]u8,
 };
 
 pub const ClusterLookupFaultMode = enum {
@@ -114,6 +136,14 @@ var registry: [max_services]ServiceEntry = [_]ServiceEntry{.{
     .active = false,
 }} ** max_services;
 var registry_count: usize = 0;
+var service_views: [max_services]ServiceView = [_]ServiceView{.{
+    .name = undefined,
+    .name_len = 0,
+    .dns_ip = .{ 0, 0, 0, 0 },
+    .backend_count = 0,
+    .backends = undefined,
+    .active = false,
+}} ** max_services;
 var registry_mutex: std.Thread.Mutex = .{};
 
 var cluster_db: ?*sqlite.Db = null;
@@ -316,10 +346,66 @@ pub fn unregisterServiceEndpoint(name: []const u8, container_id: []const u8) voi
     }
 }
 
+pub fn replaceServiceState(name: []const u8, dns_ip: [4]u8, backends: []const BackendBinding) void {
+    if (name.len == 0 or name.len > max_name_len) return;
+    if (!isSafeIpForDns(dns_ip)) return;
+
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+
+    const view_index = findOrCreateServiceViewLocked(name) orelse {
+        log.warn("dns: service view full, cannot replace state for {s}", .{name});
+        return;
+    };
+    var view = &service_views[view_index];
+    view.dns_ip = dns_ip;
+
+    if (backends.len > max_backends_per_service) {
+        log.warn("dns: service {s} has {d} backends, exceeds max {d}; programming zero-backend VIP", .{
+            name,
+            backends.len,
+            max_backends_per_service,
+        });
+        view.backend_count = 0;
+    } else {
+        view.backend_count = @intCast(backends.len);
+        for (backends, 0..) |backend, idx| {
+            const cid_len = @min(backend.container_id.len, 12);
+            view.backends[idx].container_id_len = @intCast(cid_len);
+            @memcpy(view.backends[idx].container_id[0..cid_len], backend.container_id[0..cid_len]);
+            view.backends[idx].ip = backend.ip;
+        }
+    }
+
+    updateBpfMap(name, dns_ip);
+    replaceBpfBackendsLocked(name, dns_ip, view.backends[0..view.backend_count]);
+}
+
+pub fn removeServiceState(name: []const u8) void {
+    if (name.len == 0 or name.len > max_name_len) return;
+
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+
+    const view_index = findServiceViewIndexLocked(name) orelse {
+        deleteBpfMap(name);
+        deleteAllBpfBackendsLocked(name);
+        return;
+    };
+    const vip = service_views[view_index].dns_ip;
+    service_views[view_index].active = false;
+    service_views[view_index].backend_count = 0;
+
+    deleteBpfMap(name);
+    deleteAllBpfBackendsLockedVip(vip);
+}
+
 pub fn lookupService(name: []const u8) ?[4]u8 {
     {
         registry_mutex.lock();
         defer registry_mutex.unlock();
+
+        if (findServiceViewLocked(name)) |view| return view.dns_ip;
 
         var i: usize = max_services;
         while (i > 0) {
@@ -340,6 +426,8 @@ pub fn lookupService(name: []const u8) ?[4]u8 {
 pub fn lookupLocalService(name: []const u8) ?[4]u8 {
     registry_mutex.lock();
     defer registry_mutex.unlock();
+
+    if (findServiceViewLocked(name)) |view| return view.dns_ip;
 
     var i: usize = max_services;
     while (i > 0) {
@@ -365,6 +453,16 @@ pub fn snapshotServiceEntries(alloc: std.mem.Allocator, name: []const u8) !std.A
     registry_mutex.lock();
     defer registry_mutex.unlock();
 
+    if (findServiceViewLocked(name)) |view| {
+        for (view.backends[0..view.backend_count]) |backend| {
+            try entries.append(alloc, .{
+                .container_id = try alloc.dupe(u8, backend.container_id[0..backend.container_id_len]),
+                .ip = backend.ip,
+            });
+        }
+        return entries;
+    }
+
     for (&registry) |entry| {
         if (!entry.active) continue;
         if (entry.name_len != name.len) continue;
@@ -389,6 +487,7 @@ pub fn lookupDnsInterceptorService(name: []const u8) ?[4]u8 {
 pub fn currentLoadBalancerVip(name: []const u8) ?[4]u8 {
     registry_mutex.lock();
     defer registry_mutex.unlock();
+    if (findServiceViewLocked(name)) |view| return view.dns_ip;
     return getServiceVip(name);
 }
 
@@ -404,6 +503,34 @@ pub fn snapshotLoadBalancerBackends(alloc: std.mem.Allocator, name: []const u8) 
         try backends.append(alloc, @bitCast(snapshot.ips[i]));
     }
     return backends;
+}
+
+fn findServiceViewLocked(name: []const u8) ?*const ServiceView {
+    const idx = findServiceViewIndexLocked(name) orelse return null;
+    return &service_views[idx];
+}
+
+fn findServiceViewIndexLocked(name: []const u8) ?usize {
+    for (&service_views, 0..) |*view, idx| {
+        if (!view.active) continue;
+        if (view.name_len != name.len) continue;
+        if (std.mem.eql(u8, view.name[0..view.name_len], name)) return idx;
+    }
+    return null;
+}
+
+fn findOrCreateServiceViewLocked(name: []const u8) ?usize {
+    if (findServiceViewIndexLocked(name)) |idx| return idx;
+
+    for (&service_views, 0..) |*view, idx| {
+        if (view.active) continue;
+        view.active = true;
+        view.name_len = @intCast(name.len);
+        @memcpy(view.name[0..name.len], name);
+        view.backend_count = 0;
+        return idx;
+    }
+    return null;
 }
 
 pub fn parseResolvConf(content: []const u8) ?[4]u8 {
@@ -469,6 +596,10 @@ pub fn resetRegistryForTest() void {
 
     for (&registry) |*entry| {
         entry.active = false;
+    }
+    for (&service_views) |*view| {
+        view.active = false;
+        view.backend_count = 0;
     }
     registry_count = 0;
 }
@@ -568,8 +699,10 @@ fn isSafeIpForDns(ip: [4]u8) bool {
 
 fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
     if (shouldSkipDnsInterceptorApply("update", name)) {
-        applyLoadBalancerBackend(name, ip_addr);
-        policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
+        if (!rollout.current().dns_returns_vip) {
+            applyLoadBalancerBackend(name, ip_addr);
+            policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
+        }
         return;
     }
 
@@ -577,9 +710,10 @@ fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
         interceptor.updateService(name, ip_addr);
     }
 
-    applyLoadBalancerBackend(name, ip_addr);
-
-    policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
+    if (!rollout.current().dns_returns_vip) {
+        applyLoadBalancerBackend(name, ip_addr);
+        policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
+    }
 }
 
 fn deleteBpfMap(name: []const u8) void {
@@ -597,7 +731,20 @@ fn deleteBpfBackend(name: []const u8, ip_addr: [4]u8) void {
     }
 }
 
+fn deleteAllBpfBackendsLocked(name: []const u8) void {
+    const vip = currentLoadBalancerVipLocked(name) orelse return;
+    deleteAllBpfBackendsLockedVip(vip);
+}
+
+fn deleteAllBpfBackendsLockedVip(vip: [4]u8) void {
+    if (ebpf.getLoadBalancer()) |lb| {
+        lb.deleteBackends(vip);
+    }
+}
+
 fn getServiceVip(name: []const u8) ?[4]u8 {
+    if (findServiceViewLocked(name)) |view| return view.dns_ip;
+
     for (&registry) |*entry| {
         if (entry.active and
             entry.name_len == name.len and
@@ -616,6 +763,25 @@ fn applyLoadBalancerBackend(name: []const u8, ip_addr: [4]u8) void {
     if (ebpf.getLoadBalancer()) |lb| {
         lb.addBackend(vip, ip_addr);
     }
+}
+
+fn replaceBpfBackendsLocked(name: []const u8, dns_ip: [4]u8, backends: []const ServiceBackend) void {
+    if (shouldSkipLoadBalancerAdd(name, dns_ip, if (backends.len > 0) backends[0].ip else dns_ip)) {
+        return;
+    }
+
+    if (ebpf.getLoadBalancer()) |lb| {
+        var backend_ips: [max_backends_per_service][4]u8 = undefined;
+        for (backends, 0..) |backend, idx| backend_ips[idx] = backend.ip;
+        lb.replaceBackends(dns_ip, backend_ips[0..backends.len]) catch |err| {
+            log.warn("dns: failed to replace load balancer backends for {s}: {}", .{ name, err });
+        };
+    }
+}
+
+fn currentLoadBalancerVipLocked(name: []const u8) ?[4]u8 {
+    if (findServiceViewLocked(name)) |view| return view.dns_ip;
+    return getServiceVip(name);
 }
 
 fn findLatestActiveEntryLocked(name: []const u8) ?*const ServiceEntry {
@@ -684,6 +850,32 @@ test "snapshotServiceEntries returns active endpoints for a service" {
         entries.deinit(std.testing.allocator);
     }
 
+    try std.testing.expectEqual(@as(usize, 2), entries.items.len);
+    try std.testing.expectEqualStrings("ctr-1", entries.items[0].container_id);
+    try std.testing.expectEqual(@as([4]u8, .{ 10, 42, 0, 9 }), entries.items[0].ip);
+    try std.testing.expectEqualStrings("ctr-2", entries.items[1].container_id);
+    try std.testing.expectEqual(@as([4]u8, .{ 10, 42, 0, 10 }), entries.items[1].ip);
+}
+
+test "replaceServiceState exposes stable vip and backend set" {
+    rollout.setForTest(.{ .dns_returns_vip = true });
+    defer rollout.resetForTest();
+    resetRegistryForTest();
+    defer resetRegistryForTest();
+
+    const backends = [_]BackendBinding{
+        .{ .container_id = "ctr-1", .ip = .{ 10, 42, 0, 9 } },
+        .{ .container_id = "ctr-2", .ip = .{ 10, 42, 0, 10 } },
+    };
+    replaceServiceState("api", .{ 10, 43, 0, 2 }, &backends);
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), lookupLocalService("api"));
+
+    var entries = try snapshotServiceEntries(std.testing.allocator, "api");
+    defer {
+        for (entries.items) |entry| entry.deinit(std.testing.allocator);
+        entries.deinit(std.testing.allocator);
+    }
     try std.testing.expectEqual(@as(usize, 2), entries.items.len);
     try std.testing.expectEqualStrings("ctr-1", entries.items[0].container_id);
     try std.testing.expectEqual(@as([4]u8, .{ 10, 42, 0, 9 }), entries.items[0].ip);

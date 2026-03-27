@@ -527,9 +527,9 @@ test "ipToNetworkOrder converts correctly" {
 
 test "ServiceBackends struct size matches BPF map value" {
     // must match lb.c: struct service_backends
-    // count (4) + ips[16] (64) = 68 bytes
-    try std.testing.expectEqual(@as(usize, 68), @sizeOf(ServiceBackends));
-    try std.testing.expectEqual(@as(u32, 68), lb_prog.maps[0].value_size);
+    // count (4) + ips[64] (256) = 260 bytes
+    try std.testing.expectEqual(@as(usize, 260), @sizeOf(ServiceBackends));
+    try std.testing.expectEqual(@as(u32, 260), lb_prog.maps[0].value_size);
 }
 
 test "lb_prog bytecode has expected maps" {
