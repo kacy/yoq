@@ -10,6 +10,7 @@ const ebpf_map_support = @import("../../../network/ebpf/map_support.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
 const health = @import("../../../manifest/health.zig");
+const service_registry_backfill = @import("../../../network/service_registry_backfill.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
@@ -48,6 +49,8 @@ pub fn handleStatus(alloc: std.mem.Allocator) Response {
 
 pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     const flags = service_rollout.current();
+    var backfill = service_registry_backfill.snapshot(alloc) catch return common.internalError();
+    defer backfill.deinit(alloc);
     var audit = service_reconciler.snapshotAuditState(alloc) catch return common.internalError();
     defer audit.deinit(alloc);
     const node_signals = service_reconciler.snapshotNodeSignalState();
@@ -164,6 +167,29 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     } else {
         writer.writeAll("null") catch return common.internalError();
     }
+    writer.writeAll("},\"backfill\":{") catch return common.internalError();
+    writer.print(
+        "\"enabled\":{},\"runs_total\":{d},\"services_created_total\":{d},\"endpoints_created_total\":{d},\"last_run_at\":",
+        .{
+            backfill.enabled,
+            backfill.runs_total,
+            backfill.services_created_total,
+            backfill.endpoints_created_total,
+        },
+    ) catch return common.internalError();
+    if (backfill.last_run_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_error\":") catch return common.internalError();
+    if (backfill.last_error) |message| {
+        writer.writeByte('"') catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, message) catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
     writer.writeAll("},\"health_checker\":{") catch return common.internalError();
     writer.print(
         "\"running\":{},\"tracked_endpoints\":{d},\"in_flight_checks\":{d},\"queued_checks\":{d},\"worker_threads\":{d},\"scheduled_total\":{d},\"completed_total\":{d},\"stale_results_total\":{d},\"dropped_queue_full_total\":{d},\"last_scheduled_at\":",
@@ -192,12 +218,16 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"audit\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"passes_total\":{d},\"mismatch_services_total\":{d},\"repairs_total\":{d},\"stale_endpoint_quarantines_total\":{d},\"last_audit_at\":",
+        "\"enabled\":{},\"running\":{},\"passes_total\":{d},\"mismatch_services_total\":{d},\"vip_mismatches_total\":{d},\"endpoint_count_mismatches_total\":{d},\"stale_endpoint_mismatches_total\":{d},\"eligibility_mismatches_total\":{d},\"repairs_total\":{d},\"stale_endpoint_quarantines_total\":{d},\"last_audit_at\":",
         .{
             audit.enabled,
             audit.running,
             audit.passes_total,
             audit.mismatch_services_total,
+            audit.vip_mismatches_total,
+            audit.endpoint_count_mismatches_total,
+            audit.stale_endpoint_mismatches_total,
+            audit.eligibility_mismatches_total,
             audit.repairs_total,
             audit.stale_endpoint_quarantines_total,
         },
