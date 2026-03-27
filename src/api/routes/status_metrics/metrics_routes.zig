@@ -18,6 +18,7 @@ const service_registry_bridge = @import("../../../network/service_registry_bridg
 const service_cutover_readiness = @import("../../../network/service_cutover_readiness.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
+const proxy_runtime = @import("../../../network/proxy/runtime.zig");
 
 const Response = common.Response;
 const ebpf = if (builtin.os.tag == .linux) @import("../../../network/ebpf.zig") else struct {
@@ -262,6 +263,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     defer audit.deinit(std.heap.page_allocator);
     var cutover = try service_cutover_readiness.snapshot(std.heap.page_allocator);
     defer cutover.deinit(std.heap.page_allocator);
+    var l7_proxy = try proxy_runtime.snapshot(std.heap.page_allocator);
+    defer l7_proxy.deinit(std.heap.page_allocator);
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
@@ -288,6 +291,22 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_rollout_limit{{limit=\"recent_shadow_events\"}} {d}\n", .{service_reconciler.max_recent_events});
     try writer.print("yoq_service_rollout_limit{{limit=\"health_workers\"}} {d}\n", .{health.max_worker_threads});
     try writer.print("yoq_service_rollout_limit{{limit=\"health_queued_checks\"}} {d}\n", .{health.max_queued_checks});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_enabled Whether the L7 proxy control plane is enabled\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_enabled gauge\n");
+    try writer.print("yoq_service_l7_proxy_enabled {d}\n", .{@intFromBool(l7_proxy.enabled)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_running Whether the L7 proxy control plane has bootstrapped\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_running gauge\n");
+    try writer.print("yoq_service_l7_proxy_running {d}\n", .{@intFromBool(l7_proxy.running)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_configured_services Services with HTTP proxy policy configured\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_configured_services gauge\n");
+    try writer.print("yoq_service_l7_proxy_configured_services {d}\n", .{l7_proxy.configured_services});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_routes Materialized HTTP proxy routes\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_routes gauge\n");
+    try writer.print("yoq_service_l7_proxy_routes {d}\n", .{l7_proxy.routes});
 
     try writer.writeAll("# HELP yoq_service_registry_bridge_fault_injections_total Injected bridge faults by operation\n");
     try writer.writeAll("# TYPE yoq_service_registry_bridge_fault_injections_total counter\n");
