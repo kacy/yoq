@@ -125,9 +125,11 @@ test "init creates services table" {
     try init(&db);
 
     db.exec(
-        "INSERT INTO services (service_name, vip_address, lb_policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?);",
+        "INSERT INTO services (" ++
+            "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_preserve_host, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "api", "10.43.0.10", "consistent_hash", @as(i64, 1000), @as(i64, 1000) },
+        .{ "api", "10.43.0.10", "consistent_hash", "api.internal", "/v1", @as(i64, 2), @as(i64, 1000), @as(i64, 5000), @as(i64, 1), @as(i64, 1000), @as(i64, 1000) },
     ) catch unreachable;
 }
 

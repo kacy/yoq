@@ -69,6 +69,12 @@ pub const ServiceDefinition = struct {
     service_name: []const u8,
     vip_address: []const u8,
     lb_policy: []const u8,
+    http_proxy_host: ?[]const u8 = null,
+    http_proxy_path_prefix: ?[]const u8 = null,
+    http_proxy_retries: ?u8 = null,
+    http_proxy_connect_timeout_ms: ?u32 = null,
+    http_proxy_request_timeout_ms: ?u32 = null,
+    http_proxy_preserve_host: ?bool = null,
 };
 
 pub const EndpointDefinition = struct {
@@ -113,6 +119,12 @@ pub const ServiceSnapshot = struct {
     service_name: []const u8,
     vip_address: []const u8,
     lb_policy: []const u8,
+    http_proxy_host: ?[]const u8,
+    http_proxy_path_prefix: ?[]const u8,
+    http_proxy_retries: ?u8,
+    http_proxy_connect_timeout_ms: ?u32,
+    http_proxy_request_timeout_ms: ?u32,
+    http_proxy_preserve_host: ?bool,
     total_endpoints: usize,
     eligible_endpoints: usize,
     healthy_endpoints: usize,
@@ -127,6 +139,8 @@ pub const ServiceSnapshot = struct {
         alloc.free(self.service_name);
         alloc.free(self.vip_address);
         alloc.free(self.lb_policy);
+        if (self.http_proxy_host) |host| alloc.free(host);
+        if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
         alloc.free(self.last_reconcile_status);
         if (self.last_reconcile_error) |message| alloc.free(message);
     }
@@ -160,6 +174,12 @@ const ServiceState = struct {
     service_name: []const u8,
     vip_address: []const u8,
     lb_policy: []const u8,
+    http_proxy_host: ?[]const u8 = null,
+    http_proxy_path_prefix: ?[]const u8 = null,
+    http_proxy_retries: ?u8 = null,
+    http_proxy_connect_timeout_ms: ?u32 = null,
+    http_proxy_request_timeout_ms: ?u32 = null,
+    http_proxy_preserve_host: ?bool = null,
     endpoints: std.ArrayList(EndpointState) = .empty,
     last_reconcile_status: ReconcileStatus = .idle,
     last_reconcile_error: ?[]const u8 = null,
@@ -170,6 +190,8 @@ const ServiceState = struct {
         alloc.free(self.service_name);
         alloc.free(self.vip_address);
         alloc.free(self.lb_policy);
+        if (self.http_proxy_host) |host| alloc.free(host);
+        if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
         if (self.last_reconcile_error) |message| alloc.free(message);
         for (self.endpoints.items) |endpoint| endpoint.deinit(alloc);
         self.endpoints.deinit(alloc);
@@ -197,6 +219,12 @@ pub const Registry = struct {
             var service = &self.services.items[service_index];
             try replaceOwned(self.alloc, &service.vip_address, definition.vip_address);
             try replaceOwned(self.alloc, &service.lb_policy, definition.lb_policy);
+            try replaceOptionalOwned(self.alloc, &service.http_proxy_host, definition.http_proxy_host);
+            try replaceOptionalOwned(self.alloc, &service.http_proxy_path_prefix, definition.http_proxy_path_prefix);
+            service.http_proxy_retries = definition.http_proxy_retries;
+            service.http_proxy_connect_timeout_ms = definition.http_proxy_connect_timeout_ms;
+            service.http_proxy_request_timeout_ms = definition.http_proxy_request_timeout_ms;
+            service.http_proxy_preserve_host = definition.http_proxy_preserve_host;
             return;
         }
 
@@ -204,6 +232,12 @@ pub const Registry = struct {
             .service_name = try self.alloc.dupe(u8, definition.service_name),
             .vip_address = try self.alloc.dupe(u8, definition.vip_address),
             .lb_policy = try self.alloc.dupe(u8, definition.lb_policy),
+            .http_proxy_host = if (definition.http_proxy_host) |host| try self.alloc.dupe(u8, host) else null,
+            .http_proxy_path_prefix = if (definition.http_proxy_path_prefix) |path_prefix| try self.alloc.dupe(u8, path_prefix) else null,
+            .http_proxy_retries = definition.http_proxy_retries,
+            .http_proxy_connect_timeout_ms = definition.http_proxy_connect_timeout_ms,
+            .http_proxy_request_timeout_ms = definition.http_proxy_request_timeout_ms,
+            .http_proxy_preserve_host = definition.http_proxy_preserve_host,
         });
     }
 
@@ -476,6 +510,12 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .service_name = try alloc.dupe(u8, service.service_name),
         .vip_address = try alloc.dupe(u8, service.vip_address),
         .lb_policy = try alloc.dupe(u8, service.lb_policy),
+        .http_proxy_host = if (service.http_proxy_host) |host| try alloc.dupe(u8, host) else null,
+        .http_proxy_path_prefix = if (service.http_proxy_path_prefix) |path_prefix| try alloc.dupe(u8, path_prefix) else null,
+        .http_proxy_retries = service.http_proxy_retries,
+        .http_proxy_connect_timeout_ms = service.http_proxy_connect_timeout_ms,
+        .http_proxy_request_timeout_ms = service.http_proxy_request_timeout_ms,
+        .http_proxy_preserve_host = service.http_proxy_preserve_host,
         .total_endpoints = total_endpoints,
         .eligible_endpoints = eligible_endpoints,
         .healthy_endpoints = healthy_endpoints,
@@ -500,6 +540,25 @@ fn replaceOwned(alloc: Allocator, current: *[]const u8, next: []const u8) Error!
     const owned = try alloc.dupe(u8, next);
     alloc.free(current.*);
     current.* = owned;
+}
+
+fn replaceOptionalOwned(alloc: Allocator, current: *?[]const u8, next: ?[]const u8) Error!void {
+    if (current.*) |existing| {
+        if (next) |candidate| {
+            if (std.mem.eql(u8, existing, candidate)) return;
+            const owned = try alloc.dupe(u8, candidate);
+            alloc.free(existing);
+            current.* = owned;
+            return;
+        }
+        alloc.free(existing);
+        current.* = null;
+        return;
+    }
+
+    if (next) |candidate| {
+        current.* = try alloc.dupe(u8, candidate);
+    }
 }
 
 fn buildAction(service_name: []const u8, reason: ActionReason) Action {
@@ -747,6 +806,33 @@ test "requestReconcile marks the service pending" {
     defer snapshot.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("pending", snapshot.last_reconcile_status);
     try std.testing.expect(snapshot.last_reconcile_requested_at != null);
+}
+
+test "service snapshots include optional http proxy policy" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    try registry.upsertService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_retries = 2,
+        .http_proxy_connect_timeout_ms = 1500,
+        .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_preserve_host = false,
+    });
+
+    const snapshot = try registry.snapshotService(std.testing.allocator, "api");
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("api.internal", snapshot.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/v1", snapshot.http_proxy_path_prefix.?);
+    try std.testing.expectEqual(@as(?u8, 2), snapshot.http_proxy_retries);
+    try std.testing.expectEqual(@as(?u32, 1500), snapshot.http_proxy_connect_timeout_ms);
+    try std.testing.expectEqual(@as(?u32, 5000), snapshot.http_proxy_request_timeout_ms);
+    try std.testing.expectEqual(@as(?bool, false), snapshot.http_proxy_preserve_host);
 }
 
 test "node loss and recovery toggle endpoint eligibility" {

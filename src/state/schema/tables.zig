@@ -70,6 +70,12 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    service_name TEXT PRIMARY KEY,
         \\    vip_address TEXT NOT NULL UNIQUE,
         \\    lb_policy TEXT NOT NULL DEFAULT 'consistent_hash',
+        \\    http_proxy_host TEXT,
+        \\    http_proxy_path_prefix TEXT,
+        \\    http_proxy_retries INTEGER,
+        \\    http_proxy_connect_timeout_ms INTEGER,
+        \\    http_proxy_request_timeout_ms INTEGER,
+        \\    http_proxy_preserve_host INTEGER,
         \\    created_at INTEGER NOT NULL,
         \\    updated_at INTEGER NOT NULL
         \\);
