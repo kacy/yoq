@@ -59,6 +59,11 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer cutover.deinit(alloc);
     var l7_proxy = proxy_runtime.snapshot(alloc) catch return common.internalError();
     defer l7_proxy.deinit(alloc);
+    var l7_routes = proxy_runtime.snapshotRoutes(alloc) catch return common.internalError();
+    defer {
+        for (l7_routes.items) |route| route.deinit(alloc);
+        l7_routes.deinit(alloc);
+    }
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
@@ -245,6 +250,33 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     } else {
         writer.writeAll("null") catch return common.internalError();
     }
+    writer.writeAll(",\"sample_routes\":[") catch return common.internalError();
+    for (l7_routes.items[0..@min(l7_routes.items.len, proxy_runtime.max_routes_in_status)], 0..) |route, idx| {
+        if (idx > 0) writer.writeByte(',') catch return common.internalError();
+        writer.writeAll("{\"name\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, route.name) catch return common.internalError();
+        writer.writeAll("\",\"service\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, route.service) catch return common.internalError();
+        writer.writeAll("\",\"vip_address\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, route.vip_address) catch return common.internalError();
+        writer.writeAll("\",\"host\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, route.host) catch return common.internalError();
+        writer.writeAll("\",\"path_prefix\":\"") catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, route.path_prefix) catch return common.internalError();
+        writer.print(
+            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            .{
+                route.eligible_endpoints,
+                route.healthy_endpoints,
+                route.degraded,
+                route.retries,
+                route.connect_timeout_ms,
+                route.request_timeout_ms,
+                route.preserve_host,
+            },
+        ) catch return common.internalError();
+    }
+    writer.writeByte(']') catch return common.internalError();
     writer.writeAll("},\"audit\":{") catch return common.internalError();
     writer.print(
         "\"enabled\":{},\"running\":{},\"passes_total\":{d},\"mismatch_services_total\":{d},\"vip_mismatches_total\":{d},\"endpoint_count_mismatches_total\":{d},\"stale_endpoint_mismatches_total\":{d},\"eligibility_mismatches_total\":{d},\"repairs_total\":{d},\"stale_endpoint_quarantines_total\":{d},\"last_audit_at\":",

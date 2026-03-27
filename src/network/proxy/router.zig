@@ -8,7 +8,15 @@ pub const Match = struct {
 pub const Route = struct {
     name: []const u8,
     service: []const u8,
+    vip_address: []const u8,
     match: Match,
+    eligible_endpoints: u32 = 0,
+    healthy_endpoints: u32 = 0,
+    degraded: bool = false,
+    retries: u8 = 0,
+    connect_timeout_ms: u32 = 1000,
+    request_timeout_ms: u32 = 5000,
+    preserve_host: bool = true,
 };
 
 pub fn matchRoute(routes: []const Route, host: []const u8, path: []const u8) ?Route {
@@ -35,11 +43,13 @@ test "matchRoute matches host and path prefix" {
         .{
             .name = "web-root",
             .service = "web",
+            .vip_address = "10.43.0.2",
             .match = .{ .host = "example.com", .path_prefix = "/" },
         },
         .{
             .name = "api-v1",
             .service = "api",
+            .vip_address = "10.43.0.3",
             .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
         },
     };
@@ -53,11 +63,13 @@ test "matchRoute prefers longest path prefix" {
         .{
             .name = "api-root",
             .service = "api",
+            .vip_address = "10.43.0.2",
             .match = .{ .host = "api.example.com", .path_prefix = "/" },
         },
         .{
             .name = "api-v1",
             .service = "api-v1",
+            .vip_address = "10.43.0.3",
             .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
         },
     };
@@ -71,6 +83,7 @@ test "matchRoute accepts wildcard host when omitted" {
         .{
             .name = "catch-all",
             .service = "web",
+            .vip_address = "10.43.0.2",
             .match = .{ .host = null, .path_prefix = "/" },
         },
     };

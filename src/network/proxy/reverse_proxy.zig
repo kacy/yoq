@@ -36,6 +36,7 @@ test "reverse proxy starts and stops" {
         .{
             .name = "api",
             .service = "api",
+            .vip_address = "10.43.0.2",
             .match = .{ .host = "api.example.com", .path_prefix = "/" },
         },
     };
@@ -56,6 +57,7 @@ test "reverse proxy retains configured routes" {
         .{
             .name = "api-v1",
             .service = "api",
+            .vip_address = "10.43.0.2",
             .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
         },
     };
