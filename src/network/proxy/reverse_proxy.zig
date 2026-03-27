@@ -263,40 +263,82 @@ pub const ReverseProxy = struct {
         var attempt: u8 = 0;
         var retries_used: u8 = 0;
         while (true) : (attempt += 1) {
-            const response = self.forwardSingleAttempt(raw_request, plan) catch |err| {
+            var upstream = resolveAttemptUpstream(self.allocator, plan, attempt) catch |err| switch (err) {
+                error.NoHealthyUpstream => {
+                    log.warn("l7 proxy no eligible upstream after retries method={s} host={s} path={s} service={s} retries={d}", .{
+                        methodString(plan.method),
+                        plan.host,
+                        plan.path,
+                        plan.route.service,
+                        retries_used,
+                    });
+                    return formatProxyResponse(self.allocator, .{
+                        .status = .service_unavailable,
+                        .body = "{\"error\":\"no eligible upstream\"}",
+                    });
+                },
+                else => return err,
+            };
+            defer upstream.deinit(self.allocator);
+
+            const response = self.forwardSingleAttempt(raw_request, plan, &upstream) catch |err| {
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+                proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
                 if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
                     proxy_runtime.recordRetry();
                     retries_used += 1;
                     continue;
                 }
-                proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
                 log.warn("l7 proxy upstream failure method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d} error={}", .{
                     methodString(plan.method),
                     plan.host,
                     plan.path,
                     plan.route.service,
-                    plan.upstream.address,
-                    plan.upstream.port,
+                    upstream.address,
+                    upstream.port,
                     retries_used,
                     err,
                 });
                 return formatProxyResponse(self.allocator, proxyFailureResponse(err));
             };
 
-            const status_code = parseUpstreamStatusCode(response) catch null;
+            const status_code = parseUpstreamStatusCode(response) catch {
+                proxy_runtime.recordUpstreamFailure(.other);
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+                log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
+                    methodString(plan.method),
+                    plan.host,
+                    plan.path,
+                    plan.route.service,
+                    upstream.address,
+                    upstream.port,
+                    retries_used,
+                });
+                self.allocator.free(response);
+                return formatProxyResponse(self.allocator, .{
+                    .status = .bad_gateway,
+                    .body = "{\"error\":\"invalid upstream response\"}",
+                });
+            };
+
+            if (status_code >= 500 and status_code <= 599) {
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+            } else {
+                proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
+            }
             if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, status_code, false)) {
                 proxy_runtime.recordRetry();
                 retries_used += 1;
                 self.allocator.free(response);
                 continue;
             }
-            log.info("l7 proxy proxied method={s} host={s} path={s} service={s} upstream={s}:{d} status={?d} retries={d}", .{
+            log.info("l7 proxy proxied method={s} host={s} path={s} service={s} upstream={s}:{d} status={d} retries={d}", .{
                 methodString(plan.method),
                 plan.host,
                 plan.path,
                 plan.route.service,
-                plan.upstream.address,
-                plan.upstream.port,
+                upstream.address,
+                upstream.port,
                 status_code,
                 retries_used,
             });
@@ -304,11 +346,11 @@ pub const ReverseProxy = struct {
         }
     }
 
-    fn forwardSingleAttempt(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
+    fn forwardSingleAttempt(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, upstream: *const upstream_mod.Upstream) ![]u8 {
         const request = try self.buildForwardRequest(raw_request, plan);
         defer self.allocator.free(request);
 
-        const fd = try connectToUpstream(plan);
+        const fd = try connectToUpstream(plan.route, upstream);
         defer posix.close(fd);
 
         writeAll(fd, request) catch return error.SendFailed;
@@ -392,6 +434,20 @@ fn mapUpstreamFailure(err: anyerror) proxy_runtime.UpstreamFailureKind {
     };
 }
 
+fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, attempt: u8) !upstream_mod.Upstream {
+    if (attempt == 0) {
+        return .{
+            .service = try alloc.dupe(u8, plan.upstream.service),
+            .endpoint_id = try alloc.dupe(u8, plan.upstream.endpoint_id),
+            .address = try alloc.dupe(u8, plan.upstream.address),
+            .port = plan.upstream.port,
+            .eligible = plan.upstream.eligible,
+        };
+    }
+
+    return proxy_runtime.resolveUpstream(alloc, plan.route.service);
+}
+
 fn parseUpstreamStatusCode(response: []const u8) !u16 {
     if (response.len < 12) return error.InvalidResponse;
     if (!std.mem.startsWith(u8, response, "HTTP/")) return error.InvalidResponse;
@@ -402,17 +458,17 @@ fn parseUpstreamStatusCode(response: []const u8) !u16 {
     return std.fmt.parseInt(u16, response[status_start .. status_start + 3], 10) catch error.InvalidResponse;
 }
 
-fn connectToUpstream(plan: *const ForwardPlan) !posix.socket_t {
-    const upstream_ip = ip.parseIp(plan.upstream.address) orelse return error.InvalidUpstreamAddress;
+fn connectToUpstream(route: proxy_runtime.RouteSnapshot, upstream: *const upstream_mod.Upstream) !posix.socket_t {
+    const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
 
     const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch
         return error.ConnectFailed;
     errdefer posix.close(fd);
 
-    setSocketTimeoutMs(fd, plan.route.connect_timeout_ms);
-    const addr = std.net.Address.initIp4(upstream_ip, plan.upstream.port);
+    setSocketTimeoutMs(fd, route.connect_timeout_ms);
+    const addr = std.net.Address.initIp4(upstream_ip, upstream.port);
     posix.connect(fd, &addr.any, addr.getOsSockLen()) catch return error.ConnectFailed;
-    setSocketTimeoutMs(fd, plan.route.request_timeout_ms);
+    setSocketTimeoutMs(fd, route.request_timeout_ms);
     return fd;
 }
 
@@ -1220,6 +1276,100 @@ test "forwardRequest retries safe methods on upstream 5xx" {
     defer std.testing.allocator.free(response);
 
     try std.testing.expectEqual(@as(usize, 2), upstream.accepted);
+    try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
+}
+
+test "forwardRequest retries onto a different endpoint after circuit opens" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const failing_actions = [_]TestUpstreamAction{.close};
+    var failing_upstream = try TestUpstreamServer.init(&failing_actions);
+    defer failing_upstream.deinit();
+    try failing_upstream.start();
+
+    const healthy_actions = [_]TestUpstreamAction{
+        .{ .respond = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" },
+    };
+    var healthy_upstream = try TestUpstreamServer.init(&healthy_actions);
+    defer healthy_upstream.deinit();
+    try healthy_upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .http_proxy_retries = 1,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = failing_upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-2",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = healthy_upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1001,
+        .last_seen_at = 1001,
+    });
+    proxy_runtime.recordEndpointFailure("api-1");
+    proxy_runtime.recordEndpointFailure("api-1");
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .eligible_endpoints = 2,
+            .healthy_endpoints = 2,
+            .retries = 1,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const response = try proxy.forwardRequest(
+        "GET /users HTTP/1.1\r\nHost: api.internal\r\n\r\n",
+    );
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expectEqual(@as(usize, 1), failing_upstream.accepted);
+    try std.testing.expectEqual(@as(usize, 1), healthy_upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
 }
 
