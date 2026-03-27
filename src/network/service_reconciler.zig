@@ -1119,16 +1119,20 @@ fn applyDesiredStateLocked(service_name: []const u8, vip: ?[4]u8, desired: []con
             dns_registry_support.removeServiceState(service_name);
         }
     } else {
-        const current = currentAppliedEndpoints(service_name);
+        var current = try dns_registry_support.snapshotServiceEntries(alloc, service_name);
+        defer {
+            for (current.items) |entry| entry.deinit(alloc);
+            current.deinit(alloc);
+        }
 
-        for (current) |applied| {
+        for (current.items) |applied| {
             if (!containsAppliedEndpoint(desired, applied.container_id, applied.ip)) {
                 dns.unregisterServiceEndpoint(service_name, applied.container_id);
             }
         }
 
         for (desired) |endpoint| {
-            if (!containsAppliedEndpoint(current, endpoint.container_id, endpoint.ip)) {
+            if (!containsRegistryEntry(current.items, endpoint.container_id, endpoint.ip)) {
                 dns.registerService(service_name, endpoint.container_id, endpoint.ip);
             }
         }
@@ -1205,6 +1209,15 @@ fn findAppliedServiceIndex(service_name: []const u8) ?usize {
 fn containsAppliedEndpoint(endpoints: []const AppliedEndpoint, container_id: []const u8, endpoint_ip: [4]u8) bool {
     for (endpoints) |endpoint| {
         if (std.mem.eql(u8, endpoint.container_id, container_id) and std.mem.eql(u8, endpoint.ip[0..], endpoint_ip[0..])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn containsRegistryEntry(entries: []const dns_registry_support.RegistryEntrySnapshot, container_id: []const u8, endpoint_ip: [4]u8) bool {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.container_id, container_id) and std.mem.eql(u8, entry.ip[0..], endpoint_ip[0..])) {
             return true;
         }
     }
@@ -1408,6 +1421,7 @@ test "authoritative bootstrap populates DNS and compatibility mirror" {
     rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
     defer rollout.resetForTest();
     defer resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1458,6 +1472,7 @@ test "authoritative bootstrap returns vip when dns_returns_vip is enabled" {
     });
     defer rollout.resetForTest();
     defer resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1538,6 +1553,7 @@ test "audit pass repairs compatibility mirror drift" {
     defer resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1592,6 +1608,7 @@ test "audit pass repairs live dns registry drift" {
     defer resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1720,6 +1737,7 @@ test "component state change triggers full resync" {
     defer resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1988,6 +2006,7 @@ test "vip dns marks services degraded when eligible backends exceed capacity" {
         const container_id = try std.fmt.bufPrint(&container_id_buf, "ctr-{d}", .{idx});
         var ip_buf: [16]u8 = undefined;
         const ip_text = try std.fmt.bufPrint(&ip_buf, "10.42.0.{d}", .{idx + 1});
+        try saveLocalContainerFixture(container_id, "api", ip_text);
         try store.upsertServiceEndpoint(.{
             .service_name = "api",
             .endpoint_id = endpoint_id,
@@ -2010,4 +2029,20 @@ test "vip dns marks services degraded when eligible backends exceed capacity" {
     defer snapshot.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("failed", snapshot.last_reconcile_status);
     try std.testing.expect(snapshot.degraded);
+}
+
+fn saveLocalContainerFixture(container_id: []const u8, hostname: []const u8, ip_address: []const u8) !void {
+    try store.save(.{
+        .id = container_id,
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = hostname,
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = ip_address,
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1000,
+    });
 }

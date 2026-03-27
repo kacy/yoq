@@ -676,7 +676,7 @@ test "service name register and lookup" {
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
-    const row = (db.oneAlloc(ServiceNameRow, alloc, "SELECT ip_address FROM service_names WHERE name = ?;", .{}, .{"web"}) catch unreachable).?;
+    const row = (db.oneAlloc(ServiceNameIpRow, alloc, "SELECT ip_address FROM service_names WHERE name = ?;", .{}, .{"web"}) catch unreachable).?;
     defer alloc.free(row.ip_address.data);
 
     try std.testing.expectEqualStrings("10.42.0.2", row.ip_address.data);
@@ -705,6 +705,6 @@ test "service name lookup returns empty for unknown" {
     try schema.init(&db);
 
     const alloc = std.testing.allocator;
-    const row = db.oneAlloc(ServiceNameRow, alloc, "SELECT ip_address FROM service_names WHERE name = ?;", .{}, .{"nonexistent"}) catch unreachable;
+    const row = db.oneAlloc(ServiceNameIpRow, alloc, "SELECT ip_address FROM service_names WHERE name = ?;", .{}, .{"nonexistent"}) catch unreachable;
     try std.testing.expect(row == null);
 }
