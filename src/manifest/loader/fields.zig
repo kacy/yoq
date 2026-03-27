@@ -179,6 +179,64 @@ pub fn parseTlsConfig(
     };
 }
 
+pub fn parseHttpProxyConfig(
+    alloc: std.mem.Allocator,
+    service_name: []const u8,
+    table: ?*const toml.Table,
+) common.LoadError!?spec.HttpProxyConfig {
+    const proxy_table = table orelse return null;
+
+    const host = proxy_table.getString("host") orelse {
+        log.err("manifest: service '{s}' http_proxy is missing required field 'host'", .{service_name});
+        return common.LoadError.InvalidHttpProxyConfig;
+    };
+    if (host.len == 0) {
+        log.err("manifest: service '{s}' http_proxy host cannot be empty", .{service_name});
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    const path_prefix = proxy_table.getString("path_prefix") orelse "/";
+    if (path_prefix.len == 0 or path_prefix[0] != '/') {
+        log.err("manifest: service '{s}' http_proxy path_prefix must start with '/'", .{service_name});
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    const retries_raw = proxy_table.getInt("retries") orelse 0;
+    if (retries_raw < 0 or retries_raw > 5) {
+        log.err("manifest: service '{s}' http_proxy retries must be between 0 and 5", .{service_name});
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    const connect_timeout_raw = proxy_table.getInt("connect_timeout_ms") orelse 1000;
+    if (connect_timeout_raw < 1 or connect_timeout_raw > std.math.maxInt(u32)) {
+        log.err("manifest: service '{s}' http_proxy connect_timeout_ms must be between 1 and {d}", .{
+            service_name,
+            std.math.maxInt(u32),
+        });
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    const request_timeout_raw = proxy_table.getInt("request_timeout_ms") orelse 5000;
+    if (request_timeout_raw < 1 or request_timeout_raw > std.math.maxInt(u32)) {
+        log.err("manifest: service '{s}' http_proxy request_timeout_ms must be between 1 and {d}", .{
+            service_name,
+            std.math.maxInt(u32),
+        });
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    const preserve_host = proxy_table.getBool("preserve_host") orelse true;
+
+    return .{
+        .host = alloc.dupe(u8, host) catch return common.LoadError.OutOfMemory,
+        .path_prefix = alloc.dupe(u8, path_prefix) catch return common.LoadError.OutOfMemory,
+        .retries = @intCast(retries_raw),
+        .connect_timeout_ms = @intCast(connect_timeout_raw),
+        .request_timeout_ms = @intCast(request_timeout_raw),
+        .preserve_host = preserve_host,
+    };
+}
+
 pub fn parseGpuSpec(
     alloc: std.mem.Allocator,
     table: ?*const toml.Table,

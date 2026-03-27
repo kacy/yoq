@@ -112,6 +112,20 @@ pub const TlsConfig = struct {
     }
 };
 
+pub const HttpProxyConfig = struct {
+    host: []const u8,
+    path_prefix: []const u8 = "/",
+    retries: u8 = 0,
+    connect_timeout_ms: u32 = 1000,
+    request_timeout_ms: u32 = 5000,
+    preserve_host: bool = true,
+
+    pub fn deinit(self: HttpProxyConfig, alloc: std.mem.Allocator) void {
+        alloc.free(self.host);
+        alloc.free(self.path_prefix);
+    }
+};
+
 pub const PortMapping = struct {
     host_port: u16,
     container_port: u16,

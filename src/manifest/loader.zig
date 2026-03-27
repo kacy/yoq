@@ -1303,6 +1303,78 @@ test "tls config — missing domain returns error" {
     ));
 }
 
+test "http proxy config — host and path prefix" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_proxy]
+        \\host = "api.internal"
+        \\path_prefix = "/v1"
+        \\retries = 2
+        \\connect_timeout_ms = 1500
+        \\request_timeout_ms = 9000
+        \\preserve_host = false
+    );
+    defer manifest.deinit();
+
+    const proxy = manifest.services[0].http_proxy orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqualStrings("api.internal", proxy.host);
+    try std.testing.expectEqualStrings("/v1", proxy.path_prefix);
+    try std.testing.expectEqual(@as(u8, 2), proxy.retries);
+    try std.testing.expectEqual(@as(u32, 1500), proxy.connect_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 9000), proxy.request_timeout_ms);
+    try std.testing.expect(!proxy.preserve_host);
+}
+
+test "http proxy config — defaults" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_proxy]
+        \\host = "api.internal"
+    );
+    defer manifest.deinit();
+
+    const proxy = manifest.services[0].http_proxy orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqualStrings("api.internal", proxy.host);
+    try std.testing.expectEqualStrings("/", proxy.path_prefix);
+    try std.testing.expectEqual(@as(u8, 0), proxy.retries);
+    try std.testing.expectEqual(@as(u32, 1000), proxy.connect_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 5000), proxy.request_timeout_ms);
+    try std.testing.expect(proxy.preserve_host);
+}
+
+test "http proxy config — missing host returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_proxy]
+        \\path_prefix = "/v1"
+    ));
+}
+
+test "http proxy config — invalid path prefix returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_proxy]
+        \\host = "api.internal"
+        \\path_prefix = "v1"
+    ));
+}
+
 // -- worker tests --
 
 test "worker parsing — basic worker" {

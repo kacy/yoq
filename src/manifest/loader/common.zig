@@ -12,6 +12,7 @@ pub const LoadError = error{
     InvalidHealthCheck,
     InvalidRestartPolicy,
     InvalidTlsConfig,
+    InvalidHttpProxyConfig,
     InvalidVolumeConfig,
     UnknownDependency,
     CircularDependency,
