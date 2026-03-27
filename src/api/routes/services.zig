@@ -208,7 +208,10 @@ fn writeEndpointJson(writer: anytype, endpoint: service_registry_runtime.Endpoin
         .{ endpoint.generation, endpoint.registered_at, endpoint.last_seen_at },
     );
     try json_helpers.writeJsonEscaped(writer, endpoint.observed_health);
-    try writer.print("\",\"eligible\":{},\"last_transition_at\":", .{endpoint.eligible});
+    try writer.print("\",\"eligible\":{},\"readiness_required\":{},\"last_transition_at\":", .{
+        endpoint.eligible,
+        endpoint.readiness_required,
+    });
     if (endpoint.last_transition_at) |last_transition_at| {
         try writer.print("{d}", .{last_transition_at});
     } else {

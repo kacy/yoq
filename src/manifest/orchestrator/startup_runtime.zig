@@ -47,8 +47,8 @@ pub fn registerHealthChecks(
         else
             [4]u8{ 0, 0, 0, 0 };
 
-        health.registerService(svc.name, id, container_ip, hc) catch {
-            writeErr("health: registry full, health checks disabled for {s}\n", .{svc.name});
+        health.registerService(svc.name, id, container_ip, hc) catch |err| {
+            writeErr("health: failed to register checks for {s}: {}\n", .{ svc.name, err });
         };
         states[i].health_status = .starting;
     }
@@ -76,8 +76,8 @@ pub fn refreshServiceRuntimeBindings(
 
     if (svc.health_check) |hc| {
         health.unregisterService(svc.name);
-        health.registerService(svc.name, id, container_ip, hc) catch {
-            writeErr("health: registry full, health checks disabled for {s}\n", .{svc.name});
+        health.registerService(svc.name, id, container_ip, hc) catch |err| {
+            writeErr("health: failed to register checks for {s}: {}\n", .{ svc.name, err });
         };
         state.health_status = .starting;
         health.startChecker();
