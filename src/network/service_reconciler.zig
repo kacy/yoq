@@ -97,6 +97,14 @@ pub const AuditSnapshot = struct {
     }
 };
 
+pub const NodeSignalSnapshot = struct {
+    lost_total: u64,
+    recovered_total: u64,
+    endpoints_changed_total: u64,
+    last_lost_node_id: ?i64,
+    last_recovered_node_id: ?i64,
+};
+
 var mutex: std.Thread.Mutex = .{};
 var recent_events: [max_recent_events]Event = undefined;
 var recent_start: usize = 0;
@@ -117,6 +125,11 @@ var last_mismatch_at: ?i64 = null;
 var last_audit_error: ?[]const u8 = null;
 var audit_thread: ?std.Thread = null;
 var audit_running = std.atomic.Value(bool).init(false);
+var node_lost_signals_total: u64 = 0;
+var node_recovered_signals_total: u64 = 0;
+var node_signal_endpoints_changed_total: u64 = 0;
+var last_lost_node_id: ?i64 = null;
+var last_recovered_node_id: ?i64 = null;
 
 pub fn noteContainerRegistered(service_name: []const u8, container_id: []const u8, endpoint_ip: [4]u8) void {
     noteContainerRegisteredFrom(.unspecified, service_name, container_id, endpoint_ip);
@@ -199,6 +212,11 @@ pub fn resetForTest() void {
     audit_repairs_total = 0;
     last_audit_at = null;
     last_mismatch_at = null;
+    node_lost_signals_total = 0;
+    node_recovered_signals_total = 0;
+    node_signal_endpoints_changed_total = 0;
+    last_lost_node_id = null;
+    last_recovered_node_id = null;
     clearLastAuditErrorLocked();
 }
 
@@ -259,6 +277,27 @@ pub fn snapshotAuditState(alloc: std.mem.Allocator) !AuditSnapshot {
     };
 }
 
+pub fn snapshotNodeSignalState() NodeSignalSnapshot {
+    mutex.lock();
+    defer mutex.unlock();
+
+    return .{
+        .lost_total = node_lost_signals_total,
+        .recovered_total = node_recovered_signals_total,
+        .endpoints_changed_total = node_signal_endpoints_changed_total,
+        .last_lost_node_id = last_lost_node_id,
+        .last_recovered_node_id = last_recovered_node_id,
+    };
+}
+
+pub fn noteNodeLost(node_id: i64) void {
+    noteNodeSignal(node_id, true);
+}
+
+pub fn noteNodeRecovered(node_id: i64) void {
+    noteNodeSignal(node_id, false);
+}
+
 fn noteEvent(event: Event) void {
     if (rollout.mode() == .legacy) return;
 
@@ -305,6 +344,56 @@ fn noteEvent(event: Event) void {
     reconcileAllLocked() catch |err| {
         log.warn("service reconciler: failed to reconcile all services: {}", .{err});
     };
+}
+
+fn noteNodeSignal(node_id: i64, is_loss: bool) void {
+    if (rollout.mode() == .legacy) return;
+
+    mutex.lock();
+    defer mutex.unlock();
+
+    const alloc = std.heap.page_allocator;
+    var service_names = collectServicesForNodeLocked(alloc, node_id) catch |err| {
+        log.warn("service reconciler: failed to enumerate services for node {}: {}", .{ node_id, err });
+        return;
+    };
+    defer {
+        for (service_names.items) |service_name| alloc.free(service_name);
+        service_names.deinit(alloc);
+    }
+
+    const changed_count = if (is_loss)
+        service_registry_runtime.noteNodeLost(node_id) catch |err| {
+            log.warn("service reconciler: failed to apply node signal node={} loss={}: {}", .{ node_id, is_loss, err });
+            return;
+        }
+    else
+        service_registry_runtime.noteNodeRecovered(node_id) catch |err| {
+            log.warn("service reconciler: failed to apply node signal node={} loss={}: {}", .{ node_id, is_loss, err });
+            return;
+        };
+
+    if (is_loss) {
+        node_lost_signals_total += 1;
+        last_lost_node_id = node_id;
+    } else {
+        node_recovered_signals_total += 1;
+        last_recovered_node_id = node_id;
+    }
+    node_signal_endpoints_changed_total += changed_count;
+
+    if (changed_count == 0 or !rollout.current().service_registry_reconciler) return;
+
+    if (!authoritative_bootstrapped) {
+        bootstrapAuthoritativeLocked();
+        return;
+    }
+
+    for (service_names.items) |service_name| {
+        reconcileServiceLocked(service_name) catch |err| {
+            log.warn("service reconciler: failed to reconcile service {s} after node signal for {}: {}", .{ service_name, node_id, err });
+        };
+    }
 }
 
 fn buildEvent(kind: EventKind, source: EventSource, service_name: []const u8, container_id: []const u8, endpoint_ip: ?[4]u8) Event {
@@ -483,6 +572,26 @@ fn computeAuditMismatchReason(
     }
 
     return null;
+}
+
+fn collectServicesForNodeLocked(alloc: std.mem.Allocator, node_id: i64) !std.ArrayList([]const u8) {
+    var service_names: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (service_names.items) |name| alloc.free(name);
+        service_names.deinit(alloc);
+    }
+
+    var endpoints = store.listServiceEndpointsByNode(alloc, node_id) catch return error.StoreReadFailed;
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+        endpoints.deinit(alloc);
+    }
+
+    for (endpoints.items) |endpoint| {
+        if (containsServiceName(service_names.items, endpoint.service_name)) continue;
+        try service_names.append(alloc, try alloc.dupe(u8, endpoint.service_name));
+    }
+    return service_names;
 }
 
 fn reconcileAllLocked() !void {
@@ -850,4 +959,83 @@ test "audit pass repairs compatibility mirror drift" {
     }
     try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
     try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
+}
+
+test "node loss and recovery reconcile authoritative DNS immediately" {
+    const dns_registry = @import("dns/registry_support.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = 7,
+        .ip_address = "10.42.7.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 7, 9 }), dns.lookupService("api"));
+
+    noteNodeLost(7);
+
+    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    var mirrored_after_loss = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored_after_loss.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored_after_loss.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 0), mirrored_after_loss.items.len);
+
+    var endpoints_after_loss = try service_registry_runtime.snapshotServiceEndpoints(std.testing.allocator, "api");
+    defer {
+        for (endpoints_after_loss.items) |endpoint| endpoint.deinit(std.testing.allocator);
+        endpoints_after_loss.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), endpoints_after_loss.items.len);
+    try std.testing.expect(!endpoints_after_loss.items[0].eligible);
+
+    const after_loss = snapshotNodeSignalState();
+    try std.testing.expectEqual(@as(u64, 1), after_loss.lost_total);
+    try std.testing.expectEqual(@as(u64, 0), after_loss.recovered_total);
+    try std.testing.expectEqual(@as(u64, 1), after_loss.endpoints_changed_total);
+    try std.testing.expectEqual(@as(?i64, 7), after_loss.last_lost_node_id);
+
+    noteNodeRecovered(7);
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 7, 9 }), dns.lookupService("api"));
+    var mirrored_after_recovery = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored_after_recovery.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored_after_recovery.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), mirrored_after_recovery.items.len);
+    try std.testing.expectEqualStrings("10.42.7.9", mirrored_after_recovery.items[0]);
+
+    const after_recovery = snapshotNodeSignalState();
+    try std.testing.expectEqual(@as(u64, 1), after_recovery.lost_total);
+    try std.testing.expectEqual(@as(u64, 1), after_recovery.recovered_total);
+    try std.testing.expectEqual(@as(u64, 2), after_recovery.endpoints_changed_total);
+    try std.testing.expectEqual(@as(?i64, 7), after_recovery.last_recovered_node_id);
 }

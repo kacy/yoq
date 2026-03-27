@@ -143,7 +143,12 @@ test "route handles /v1/status?mode=service_rollout GET" {
     const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
     const dns_registry = @import("../../network/dns/registry_support.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
     service_rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
     defer service_rollout.resetForTest();
     ebpf_map_support.resetFaultInjectionForTest();
@@ -154,6 +159,8 @@ test "route handles /v1/status?mode=service_rollout GET" {
     defer dns_registry.resetDnsInterceptorFaultsForTest();
     dns_registry.resetLoadBalancerFaultsForTest();
     defer dns_registry.resetLoadBalancerFaultsForTest();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
     service_registry_bridge.resetFaultsForTest();
     defer service_registry_bridge.resetFaultsForTest();
     service_reconciler.resetForTest();
@@ -163,7 +170,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     dns_registry.setDnsInterceptorFaultModeForTest(.unavailable);
     dns_registry.setLoadBalancerFaultModeForTest(.endpoint_overflow);
     service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
-    service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
+    service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
 
     const req = http.Request{
         .method = .GET,
@@ -193,6 +200,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_fault\":{\"mode\":\"endpoint_overflow\",\"injections\":0}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"node_signals\":{\"lost_total\":0,\"recovered_total\":0,\"endpoints_changed_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_registered\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_runtime\":{\"container_registered\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"source\":\"container_runtime\"") != null);
@@ -322,7 +330,12 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
     const dns_registry = @import("../../network/dns/registry_support.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
     service_rollout.setForTest(.{
         .service_registry_v2 = true,
         .service_registry_reconciler = true,
@@ -337,6 +350,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     defer dns_registry.resetDnsInterceptorFaultsForTest();
     dns_registry.resetLoadBalancerFaultsForTest();
     defer dns_registry.resetLoadBalancerFaultsForTest();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
     service_registry_bridge.resetFaultsForTest();
     defer service_registry_bridge.resetFaultsForTest();
     service_reconciler.resetForTest();
@@ -346,7 +361,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     dns_registry.setDnsInterceptorFaultModeForTest(.unavailable);
     dns_registry.setLoadBalancerFaultModeForTest(.endpoint_overflow);
     service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
-    service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
+    service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
     service_registry_bridge.markEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
 
     const resp = handleMetricsPrometheus(testing.allocator);
@@ -372,6 +387,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_passes_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_running 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_degraded_services 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_node_signals_total{kind=\"lost\"} 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_node_signal_endpoints_changed_total 0") != null);
 }
 
 test "handleGpuMetrics returns valid JSON" {

@@ -3,6 +3,7 @@ const agent_registry = @import("../registry.zig");
 const scheduler = @import("../scheduler.zig");
 const gossip_mod = @import("../gossip.zig");
 const ip_mod = @import("../../network/ip.zig");
+const service_reconciler = @import("../../network/service_reconciler.zig");
 const logger = @import("../../lib/log.zig");
 
 const agent_gossip_port: u16 = 9800;
@@ -32,6 +33,9 @@ pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecor
             logger.warn("failed to propose agent offline status: {}", .{e});
             continue;
         };
+        if (agent.node_id) |node_id| {
+            service_reconciler.noteNodeLost(node_id);
+        }
 
         var orphan_buf: [256]u8 = undefined;
         const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent.id) catch continue;
@@ -191,6 +195,7 @@ pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
         logger.warn("gossip: failed to propose offline for agent {s}: {}", .{ agent_id, e });
         return;
     };
+    service_reconciler.noteNodeLost(@intCast(member_id));
 
     var orphan_buf: [256]u8 = undefined;
     const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent_id) catch return;
@@ -215,7 +220,9 @@ pub fn handleGossipMemberAlive(self: anytype, member_id: u64) void {
     const sql = agent_registry.markActiveSql(&sql_buf, agent_id) catch return;
     _ = proposeUnderLock(self, sql) catch |e| {
         logger.warn("gossip: failed to propose active for agent {s}: {}", .{ agent_id, e });
+        return;
     };
+    service_reconciler.noteNodeRecovered(@intCast(member_id));
 }
 
 pub fn syncGossipMembership(self: anytype) void {

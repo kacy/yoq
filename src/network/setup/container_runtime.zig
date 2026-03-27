@@ -116,7 +116,12 @@ pub fn setupContainer(
     ebpf_support.loadDnsInterceptorOnBridge();
 
     if (!config.skip_dns) {
-        service_registry_bridge.registerContainerService(hostname, container_id, container_ip);
+        service_registry_bridge.registerContainerService(
+            hostname,
+            container_id,
+            container_ip,
+            if (config.node_id) |node_id| @as(i64, node_id) else null,
+        );
     }
 
     var info = common.NetworkInfo{

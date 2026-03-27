@@ -49,6 +49,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     const flags = service_rollout.current();
     var audit = service_reconciler.snapshotAuditState(alloc) catch return common.internalError();
     defer audit.deinit(alloc);
+    const node_signals = service_reconciler.snapshotNodeSignalState();
 
     var events: [service_reconciler.max_recent_events]service_reconciler.Event = undefined;
     const event_count = service_reconciler.snapshotRecentEvents(&events);
@@ -178,6 +179,26 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeByte('"') catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, service_name) catch return common.internalError();
         writer.writeByte('"') catch return common.internalError();
+    }
+    writer.writeAll("],\"node_signals\":{") catch return common.internalError();
+    writer.print(
+        "\"lost_total\":{d},\"recovered_total\":{d},\"endpoints_changed_total\":{d},\"last_lost_node_id\":",
+        .{
+            node_signals.lost_total,
+            node_signals.recovered_total,
+            node_signals.endpoints_changed_total,
+        },
+    ) catch return common.internalError();
+    if (node_signals.last_lost_node_id) |node_id| {
+        writer.print("{d}", .{node_id}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_recovered_node_id\":") catch return common.internalError();
+    if (node_signals.last_recovered_node_id) |node_id| {
+        writer.print("{d}", .{node_id}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
     }
     writer.writeAll("},\"events\":{\"counts\":{") catch return common.internalError();
     writer.print(
