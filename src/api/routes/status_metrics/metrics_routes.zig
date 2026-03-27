@@ -308,6 +308,31 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_routes gauge\n");
     try writer.print("yoq_service_l7_proxy_routes {d}\n", .{l7_proxy.routes});
 
+    try writer.writeAll("# HELP yoq_service_l7_proxy_requests_total Total L7 proxy requests handled\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_requests_total counter\n");
+    try writer.print("yoq_service_l7_proxy_requests_total {d}\n", .{l7_proxy.requests_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_responses_total L7 proxy responses by class\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_responses_total counter\n");
+    try writer.print("yoq_service_l7_proxy_responses_total{{class=\"2xx\"}} {d}\n", .{l7_proxy.responses_2xx_total});
+    try writer.print("yoq_service_l7_proxy_responses_total{{class=\"4xx\"}} {d}\n", .{l7_proxy.responses_4xx_total});
+    try writer.print("yoq_service_l7_proxy_responses_total{{class=\"5xx\"}} {d}\n", .{l7_proxy.responses_5xx_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_retries_total L7 proxy retry attempts\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_retries_total counter\n");
+    try writer.print("yoq_service_l7_proxy_retries_total {d}\n", .{l7_proxy.retries_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_loop_rejections_total L7 proxy requests rejected to prevent loops\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_loop_rejections_total counter\n");
+    try writer.print("yoq_service_l7_proxy_loop_rejections_total {d}\n", .{l7_proxy.loop_rejections_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_upstream_failures_total L7 proxy upstream failures by stage\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_upstream_failures_total counter\n");
+    try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"connect\"}} {d}\n", .{l7_proxy.upstream_connect_failures_total});
+    try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"send\"}} {d}\n", .{l7_proxy.upstream_send_failures_total});
+    try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"receive\"}} {d}\n", .{l7_proxy.upstream_receive_failures_total});
+    try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"other\"}} {d}\n", .{l7_proxy.upstream_other_failures_total});
+
     try writer.writeAll("# HELP yoq_service_registry_bridge_fault_injections_total Injected bridge faults by operation\n");
     try writer.writeAll("# TYPE yoq_service_registry_bridge_fault_injections_total counter\n");
     try writer.print(
