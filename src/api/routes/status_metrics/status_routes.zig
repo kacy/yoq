@@ -47,6 +47,8 @@ pub fn handleStatus(alloc: std.mem.Allocator) Response {
 
 pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     const flags = service_rollout.current();
+    var audit = service_reconciler.snapshotAuditState(alloc) catch return common.internalError();
+    defer audit.deinit(alloc);
 
     var events: [service_reconciler.max_recent_events]service_reconciler.Event = undefined;
     const event_count = service_reconciler.snapshotRecentEvents(&events);
@@ -140,6 +142,43 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             dns_registry.loadBalancerFaultInjectionCount(),
         },
     ) catch return common.internalError();
+    writer.writeAll("},\"audit\":{") catch return common.internalError();
+    writer.print(
+        "\"enabled\":{},\"running\":{},\"passes_total\":{d},\"mismatch_services_total\":{d},\"repairs_total\":{d},\"last_audit_at\":",
+        .{
+            audit.enabled,
+            audit.running,
+            audit.passes_total,
+            audit.mismatch_services_total,
+            audit.repairs_total,
+        },
+    ) catch return common.internalError();
+    if (audit.last_audit_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_mismatch_at\":") catch return common.internalError();
+    if (audit.last_mismatch_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_error\":") catch return common.internalError();
+    if (audit.last_error) |message| {
+        writer.writeByte('"') catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, message) catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"degraded_services\":[") catch return common.internalError();
+    for (audit.degraded_services.items, 0..) |service_name, idx| {
+        if (idx > 0) writer.writeByte(',') catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, service_name) catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+    }
     writer.writeAll("},\"events\":{\"counts\":{") catch return common.internalError();
     writer.print(
         "\"container_registered\":{d},\"container_unregistered\":{d},\"endpoint_healthy\":{d},\"endpoint_unhealthy\":{d}",

@@ -57,6 +57,7 @@ pub const Event = struct {
 };
 
 pub const max_recent_events = 32;
+pub const audit_interval_secs: u64 = 30;
 
 const AppliedEndpoint = struct {
     container_id: []const u8,
@@ -78,6 +79,24 @@ const AppliedService = struct {
     }
 };
 
+pub const AuditSnapshot = struct {
+    enabled: bool,
+    running: bool,
+    passes_total: u64,
+    mismatch_services_total: u64,
+    repairs_total: u64,
+    degraded_services: std.ArrayList([]const u8),
+    last_audit_at: ?i64,
+    last_mismatch_at: ?i64,
+    last_error: ?[]const u8,
+
+    pub fn deinit(self: *AuditSnapshot, alloc: std.mem.Allocator) void {
+        for (self.degraded_services.items) |name| alloc.free(name);
+        self.degraded_services.deinit(alloc);
+        if (self.last_error) |message| alloc.free(message);
+    }
+};
+
 var mutex: std.Thread.Mutex = .{};
 var recent_events: [max_recent_events]Event = undefined;
 var recent_start: usize = 0;
@@ -89,6 +108,15 @@ var event_counts_by_source: [@typeInfo(EventSource).@"enum".fields.len][@typeInf
 var logged_authoritative_flag_notice: bool = false;
 var authoritative_bootstrapped: bool = false;
 var applied_services: std.ArrayList(AppliedService) = .empty;
+var degraded_services: std.ArrayList([]const u8) = .empty;
+var audit_passes_total: u64 = 0;
+var audit_mismatch_services_total: u64 = 0;
+var audit_repairs_total: u64 = 0;
+var last_audit_at: ?i64 = null;
+var last_mismatch_at: ?i64 = null;
+var last_audit_error: ?[]const u8 = null;
+var audit_thread: ?std.Thread = null;
+var audit_running = std.atomic.Value(bool).init(false);
 
 pub fn noteContainerRegistered(service_name: []const u8, container_id: []const u8, endpoint_ip: [4]u8) void {
     noteContainerRegisteredFrom(.unspecified, service_name, container_id, endpoint_ip);
@@ -148,6 +176,12 @@ pub fn snapshotRecentEvents(out: []Event) usize {
 }
 
 pub fn resetForTest() void {
+    audit_running.store(false, .release);
+    if (audit_thread) |thread| {
+        thread.join();
+        audit_thread = null;
+    }
+
     mutex.lock();
     defer mutex.unlock();
     recent_start = 0;
@@ -159,6 +193,13 @@ pub fn resetForTest() void {
     logged_authoritative_flag_notice = false;
     authoritative_bootstrapped = false;
     deinitAppliedServicesLocked();
+    deinitDegradedServicesLocked();
+    audit_passes_total = 0;
+    audit_mismatch_services_total = 0;
+    audit_repairs_total = 0;
+    last_audit_at = null;
+    last_mismatch_at = null;
+    clearLastAuditErrorLocked();
 }
 
 pub fn bootstrapIfEnabled() void {
@@ -168,6 +209,54 @@ pub fn bootstrapIfEnabled() void {
     defer mutex.unlock();
 
     bootstrapAuthoritativeLocked();
+}
+
+pub fn startAuditLoopIfEnabled() void {
+    const flags = rollout.current();
+    if (!flags.service_registry_reconciler) return;
+    if (audit_running.load(.acquire)) return;
+
+    audit_running.store(true, .release);
+    audit_thread = std.Thread.spawn(.{}, auditLoop, .{}) catch |err| {
+        audit_running.store(false, .release);
+        log.warn("service reconciler: failed to spawn audit loop: {}", .{err});
+        return;
+    };
+}
+
+pub fn runAuditPassIfEnabled() void {
+    const flags = rollout.current();
+    if (!flags.service_registry_reconciler) return;
+
+    mutex.lock();
+    defer mutex.unlock();
+    runAuditPassLocked();
+}
+
+pub fn snapshotAuditState(alloc: std.mem.Allocator) !AuditSnapshot {
+    mutex.lock();
+    defer mutex.unlock();
+
+    var degraded: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (degraded.items) |name| alloc.free(name);
+        degraded.deinit(alloc);
+    }
+    for (degraded_services.items) |name| {
+        try degraded.append(alloc, try alloc.dupe(u8, name));
+    }
+
+    return .{
+        .enabled = rollout.current().service_registry_reconciler,
+        .running = audit_running.load(.acquire),
+        .passes_total = audit_passes_total,
+        .mismatch_services_total = audit_mismatch_services_total,
+        .repairs_total = audit_repairs_total,
+        .degraded_services = degraded,
+        .last_audit_at = last_audit_at,
+        .last_mismatch_at = last_mismatch_at,
+        .last_error = if (last_audit_error) |message| try alloc.dupe(u8, message) else null,
+    };
 }
 
 fn noteEvent(event: Event) void {
@@ -243,6 +332,157 @@ fn bootstrapAuthoritativeLocked() void {
         return;
     };
     authoritative_bootstrapped = true;
+}
+
+fn auditLoop() void {
+    while (audit_running.load(.acquire)) {
+        std.Thread.sleep(audit_interval_secs * std.time.ns_per_s);
+        if (!audit_running.load(.acquire)) break;
+        runAuditPassIfEnabled();
+    }
+}
+
+fn runAuditPassLocked() void {
+    audit_passes_total += 1;
+    last_audit_at = std.time.timestamp();
+    clearLastAuditErrorLocked();
+    deinitDegradedServicesLocked();
+
+    auditOnceLocked() catch |err| {
+        setLastAuditErrorLocked(@errorName(err));
+        log.warn("service reconciler: audit pass failed: {}", .{err});
+    };
+}
+
+fn auditOnceLocked() !void {
+    const alloc = std.heap.page_allocator;
+
+    var runtime_services = try service_registry_runtime.snapshotServices(alloc);
+    defer {
+        for (runtime_services.items) |service| service.deinit(alloc);
+        runtime_services.deinit(alloc);
+    }
+
+    var db_services = store.listServices(alloc) catch return error.StoreReadFailed;
+    defer {
+        for (db_services.items) |service| service.deinit(alloc);
+        db_services.deinit(alloc);
+    }
+
+    var audit_names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (audit_names.items) |name| alloc.free(name);
+        audit_names.deinit(alloc);
+    }
+
+    for (db_services.items) |service| {
+        try audit_names.append(alloc, try alloc.dupe(u8, service.service_name));
+        try auditServiceLocked(service.service_name, &runtime_services);
+    }
+
+    for (runtime_services.items) |service| {
+        if (containsServiceName(audit_names.items, service.service_name)) continue;
+        try audit_names.append(alloc, try alloc.dupe(u8, service.service_name));
+        try auditServiceLocked(service.service_name, &runtime_services);
+    }
+}
+
+fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.ArrayList(service_registry_runtime.ServiceSnapshot)) !void {
+    const alloc = std.heap.page_allocator;
+
+    const runtime_service = findRuntimeService(runtime_services.items, service_name);
+    const db_service = store.getService(alloc, service_name) catch |err| switch (err) {
+        store.StoreError.NotFound => null,
+        else => return error.StoreReadFailed,
+    };
+    defer if (db_service) |service| service.deinit(alloc);
+
+    const mismatch_reason = try computeAuditMismatchReason(alloc, service_name, runtime_service, db_service);
+    defer if (mismatch_reason) |message| alloc.free(message);
+
+    if (mismatch_reason) |reason| {
+        audit_mismatch_services_total += 1;
+        last_mismatch_at = std.time.timestamp();
+        log.warn("service reconciler: audit mismatch service={s} reason={s}", .{ service_name, reason });
+        try degraded_services.append(alloc, try alloc.dupe(u8, service_name));
+        service_registry_runtime.markReconcileFailed(service_name, reason) catch {};
+        service_registry_runtime.syncServiceFromStore(service_name);
+        try reconcileServiceLocked(service_name);
+
+        const refreshed_runtime = service_registry_runtime.snapshotService(alloc, service_name) catch |err| switch (err) {
+            error.ServiceNotFound => null,
+            else => return err,
+        };
+        defer if (refreshed_runtime) |service| service.deinit(alloc);
+
+        const repaired_reason = try computeAuditMismatchReason(alloc, service_name, refreshed_runtime, db_service);
+        defer if (repaired_reason) |message| alloc.free(message);
+
+        if (repaired_reason == null) {
+            audit_repairs_total += 1;
+            removeDegradedServiceLocked(service_name);
+            service_registry_runtime.markReconcileSucceeded(service_name) catch {};
+        }
+        return;
+    }
+
+    service_registry_runtime.markReconcileSucceeded(service_name) catch {};
+}
+
+fn computeAuditMismatchReason(
+    alloc: std.mem.Allocator,
+    service_name: []const u8,
+    runtime_service: ?service_registry_runtime.ServiceSnapshot,
+    db_service: ?store.ServiceRecord,
+) !?[]const u8 {
+    if (db_service == null and runtime_service == null) return null;
+    if (db_service == null) return try alloc.dupe(u8, "runtime service missing from durable store");
+    if (runtime_service == null) return try alloc.dupe(u8, "runtime service missing from in-memory registry");
+
+    var db_endpoints = store.listServiceEndpoints(alloc, service_name) catch return error.StoreReadFailed;
+    defer {
+        for (db_endpoints.items) |endpoint| endpoint.deinit(alloc);
+        db_endpoints.deinit(alloc);
+    }
+    if (runtime_service.?.total_endpoints != db_endpoints.items.len) {
+        return try std.fmt.allocPrint(alloc, "endpoint count drift runtime={d} db={d}", .{ runtime_service.?.total_endpoints, db_endpoints.items.len });
+    }
+
+    var mirror_ips = store.lookupServiceNames(alloc, service_name) catch return error.StoreReadFailed;
+    defer {
+        for (mirror_ips.items) |ip_text| alloc.free(ip_text);
+        mirror_ips.deinit(alloc);
+    }
+
+    var runtime_endpoints = service_registry_runtime.snapshotServiceEndpoints(alloc, service_name) catch |err| switch (err) {
+        error.ServiceNotFound => return try alloc.dupe(u8, "runtime endpoints missing"),
+        else => return err,
+    };
+    defer {
+        for (runtime_endpoints.items) |endpoint| endpoint.deinit(alloc);
+        runtime_endpoints.deinit(alloc);
+    }
+
+    var desired_ips: std.ArrayList([4]u8) = .empty;
+    defer desired_ips.deinit(alloc);
+    for (runtime_endpoints.items) |endpoint| {
+        if (!endpoint.eligible) continue;
+        const endpoint_ip = ip_mod.parseIp(endpoint.ip_address) orelse continue;
+        if (!containsIp(desired_ips.items, endpoint_ip)) try desired_ips.append(alloc, endpoint_ip);
+    }
+
+    if (mirror_ips.items.len != desired_ips.items.len) {
+        return try std.fmt.allocPrint(alloc, "compatibility mirror count drift mirror={d} desired={d}", .{ mirror_ips.items.len, desired_ips.items.len });
+    }
+
+    for (mirror_ips.items) |mirror_ip| {
+        const parsed = ip_mod.parseIp(mirror_ip) orelse return try alloc.dupe(u8, "compatibility mirror contains invalid ip");
+        if (!containsIp(desired_ips.items, parsed)) {
+            return try alloc.dupe(u8, "compatibility mirror endpoints differ from eligible set");
+        }
+    }
+
+    return null;
 }
 
 fn reconcileAllLocked() !void {
@@ -407,11 +647,54 @@ fn containsServiceName(service_names: []const []const u8, name: []const u8) bool
     return false;
 }
 
+fn containsIp(ips: []const [4]u8, candidate: [4]u8) bool {
+    for (ips) |ip_addr| {
+        if (std.mem.eql(u8, ip_addr[0..], candidate[0..])) return true;
+    }
+    return false;
+}
+
+fn findRuntimeService(services: []const service_registry_runtime.ServiceSnapshot, service_name: []const u8) ?service_registry_runtime.ServiceSnapshot {
+    for (services) |service| {
+        if (std.mem.eql(u8, service.service_name, service_name)) return service;
+    }
+    return null;
+}
+
 fn deinitAppliedServicesLocked() void {
     const alloc = std.heap.page_allocator;
     for (applied_services.items) |*service| service.deinit(alloc);
     applied_services.deinit(alloc);
     applied_services = .empty;
+}
+
+fn deinitDegradedServicesLocked() void {
+    const alloc = std.heap.page_allocator;
+    for (degraded_services.items) |name| alloc.free(name);
+    degraded_services.deinit(alloc);
+    degraded_services = .empty;
+}
+
+fn removeDegradedServiceLocked(service_name: []const u8) void {
+    var idx: usize = 0;
+    while (idx < degraded_services.items.len) {
+        if (std.mem.eql(u8, degraded_services.items[idx], service_name)) {
+            const name = degraded_services.orderedRemove(idx);
+            std.heap.page_allocator.free(name);
+            return;
+        }
+        idx += 1;
+    }
+}
+
+fn clearLastAuditErrorLocked() void {
+    if (last_audit_error) |message| std.heap.page_allocator.free(message);
+    last_audit_error = null;
+}
+
+fn setLastAuditErrorLocked(message: []const u8) void {
+    clearLastAuditErrorLocked();
+    last_audit_error = std.heap.page_allocator.dupe(u8, message) catch null;
 }
 
 test "legacy mode does not record events" {
@@ -505,6 +788,61 @@ test "authoritative bootstrap populates DNS and compatibility mirror" {
     bootstrapIfEnabled();
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
+    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
+}
+
+test "audit pass repairs compatibility mirror drift" {
+    const dns_registry = @import("dns/registry_support.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+    try store.removeServiceNamesByName("api");
+
+    runAuditPassIfEnabled();
+
+    var audit = try snapshotAuditState(std.testing.allocator);
+    defer audit.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), audit.passes_total);
+    try std.testing.expectEqual(@as(u64, 1), audit.mismatch_services_total);
+    try std.testing.expectEqual(@as(u64, 1), audit.repairs_total);
+    try std.testing.expectEqual(@as(usize, 0), audit.degraded_services.items.len);
+
     var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
     defer {
         for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);

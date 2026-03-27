@@ -54,6 +54,7 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     log.setFormat(log_fmt);
     service_rollout.logStartupSummary();
     service_reconciler.bootstrapIfEnabled();
+    service_reconciler.startAuditLoopIfEnabled();
 
     var token_buf: [64]u8 = undefined;
     const token: ?[]const u8 = readApiToken(&token_buf) orelse generateAndSaveToken(&token_buf);
@@ -151,6 +152,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     log.setFormat(log_fmt);
     service_rollout.logStartupSummary();
     service_reconciler.bootstrapIfEnabled();
+    service_reconciler.startAuditLoopIfEnabled();
 
     var data_dir_buf: [paths.max_path]u8 = undefined;
     const data_dir = cluster_config.defaultDataDir(&data_dir_buf) catch |err| {
