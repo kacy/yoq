@@ -229,7 +229,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"l7_proxy\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"routes\":{d},\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"loop_rejections_total\":{d},\"upstream_connect_failures_total\":{d},\"upstream_send_failures_total\":{d},\"upstream_receive_failures_total\":{d},\"upstream_other_failures_total\":{d},\"last_sync_at\":",
+        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"routes\":{d},\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"loop_rejections_total\":{d},\"upstream_connect_failures_total\":{d},\"upstream_send_failures_total\":{d},\"upstream_receive_failures_total\":{d},\"upstream_other_failures_total\":{d},\"circuit_trips_total\":{d},\"circuit_open_endpoints\":{d},\"circuit_half_open_endpoints\":{d},\"last_sync_at\":",
         .{
             l7_proxy.enabled,
             l7_proxy.running,
@@ -245,6 +245,9 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             l7_proxy.upstream_send_failures_total,
             l7_proxy.upstream_receive_failures_total,
             l7_proxy.upstream_other_failures_total,
+            l7_proxy.circuit_trips_total,
+            l7_proxy.circuit_open_endpoints,
+            l7_proxy.circuit_half_open_endpoints,
         },
     ) catch return common.internalError();
     if (l7_proxy.last_sync_at) |timestamp| {

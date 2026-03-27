@@ -214,7 +214,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"components\":{\"dns_resolver_running\":true,\"dns_interceptor_loaded\":false,\"load_balancer_loaded\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"backfill\":{\"enabled\":true,\"runs_total\":0,\"services_created_total\":0,\"endpoints_created_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"requests_total\":0,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"loop_rejections_total\":0,\"upstream_connect_failures_total\":0,\"upstream_send_failures_total\":0,\"upstream_receive_failures_total\":0,\"upstream_other_failures_total\":0,\"last_sync_at\":null,\"last_error\":null,\"sample_routes\":[]}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"requests_total\":0,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"loop_rejections_total\":0,\"upstream_connect_failures_total\":0,\"upstream_send_failures_total\":0,\"upstream_receive_failures_total\":0,\"upstream_other_failures_total\":0,\"circuit_trips_total\":0,\"circuit_open_endpoints\":0,\"circuit_half_open_endpoints\":0,\"last_sync_at\":null,\"last_error\":null,\"sample_routes\":[]}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"vip_mismatches_total\":0") != null);
@@ -476,6 +476,9 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     proxy_runtime.recordRetry();
     proxy_runtime.recordLoopRejection();
     proxy_runtime.recordUpstreamFailure(.connect);
+    proxy_runtime.recordEndpointFailure("edge-1");
+    proxy_runtime.recordEndpointFailure("edge-1");
+    proxy_runtime.recordEndpointFailure("edge-1");
 
     const resp = handleMetricsPrometheus(testing.allocator);
     defer if (resp.allocated) testing.allocator.free(resp.body);
@@ -496,6 +499,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_retries_total 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_loop_rejections_total 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_upstream_failures_total{kind=\"connect\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_circuit_trips_total 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_circuit_endpoints{state=\"open\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_injections_total{operation=\"container_register\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"container_register\",mode=\"skip_legacy_apply\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"endpoint_healthy\",mode=\"none\"} 1") != null);

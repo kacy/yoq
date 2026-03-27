@@ -333,6 +333,15 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"receive\"}} {d}\n", .{l7_proxy.upstream_receive_failures_total});
     try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"other\"}} {d}\n", .{l7_proxy.upstream_other_failures_total});
 
+    try writer.writeAll("# HELP yoq_service_l7_proxy_circuit_trips_total L7 proxy endpoint circuit breaker trips\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_circuit_trips_total counter\n");
+    try writer.print("yoq_service_l7_proxy_circuit_trips_total {d}\n", .{l7_proxy.circuit_trips_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_circuit_endpoints L7 proxy endpoints currently gated by circuit state\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_circuit_endpoints gauge\n");
+    try writer.print("yoq_service_l7_proxy_circuit_endpoints{{state=\"open\"}} {d}\n", .{l7_proxy.circuit_open_endpoints});
+    try writer.print("yoq_service_l7_proxy_circuit_endpoints{{state=\"half_open\"}} {d}\n", .{l7_proxy.circuit_half_open_endpoints});
+
     try writer.writeAll("# HELP yoq_service_registry_bridge_fault_injections_total Injected bridge faults by operation\n");
     try writer.writeAll("# TYPE yoq_service_registry_bridge_fault_injections_total counter\n");
     try writer.print(

@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
+const proxy_policy = @import("policy.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
 const service_registry_runtime = @import("../service_registry_runtime.zig");
@@ -46,6 +47,9 @@ pub const Snapshot = struct {
     upstream_send_failures_total: u64,
     upstream_receive_failures_total: u64,
     upstream_other_failures_total: u64,
+    circuit_trips_total: u64,
+    circuit_open_endpoints: u32,
+    circuit_half_open_endpoints: u32,
     last_sync_at: ?i64,
     last_error: ?[]const u8,
 
@@ -69,14 +73,25 @@ var upstream_connect_failures_total: u64 = 0;
 var upstream_send_failures_total: u64 = 0;
 var upstream_receive_failures_total: u64 = 0;
 var upstream_other_failures_total: u64 = 0;
+var circuit_trips_total: u64 = 0;
 var last_sync_at: ?i64 = null;
 var last_error: ?[]u8 = null;
+var endpoint_circuits: std.StringHashMapUnmanaged(EndpointCircuit) = .{};
 
 pub const UpstreamFailureKind = enum {
     connect,
     send,
     receive,
     other,
+};
+
+const default_circuit_policy: proxy_policy.CircuitBreakerPolicy = .{};
+
+const EndpointCircuit = struct {
+    state: proxy_policy.CircuitState = .closed,
+    consecutive_failures: u8 = 0,
+    opened_at_ms: ?i64 = null,
+    half_open_in_flight: bool = false,
 };
 
 pub fn resetForTest() void {
@@ -96,8 +111,10 @@ pub fn resetForTest() void {
     upstream_send_failures_total = 0;
     upstream_receive_failures_total = 0;
     upstream_other_failures_total = 0;
+    circuit_trips_total = 0;
     last_sync_at = null;
     deinitRoutesLocked();
+    deinitCircuitsLocked();
     clearLastErrorLocked();
 }
 
@@ -117,6 +134,17 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     mutex.lock();
     defer mutex.unlock();
 
+    var circuit_open_endpoints: u32 = 0;
+    var circuit_half_open_endpoints: u32 = 0;
+    var it = endpoint_circuits.iterator();
+    while (it.next()) |entry| {
+        switch (entry.value_ptr.state) {
+            .open => circuit_open_endpoints += 1,
+            .half_open => circuit_half_open_endpoints += 1,
+            .closed => {},
+        }
+    }
+
     return .{
         .enabled = service_rollout.current().l7_proxy_http,
         .running = running,
@@ -132,6 +160,9 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .upstream_send_failures_total = upstream_send_failures_total,
         .upstream_receive_failures_total = upstream_receive_failures_total,
         .upstream_other_failures_total = upstream_other_failures_total,
+        .circuit_trips_total = circuit_trips_total,
+        .circuit_open_endpoints = circuit_open_endpoints,
+        .circuit_half_open_endpoints = circuit_half_open_endpoints,
         .last_sync_at = last_sync_at,
         .last_error = if (last_error) |message| try alloc.dupe(u8, message) else null,
     };
@@ -180,6 +211,54 @@ pub fn recordUpstreamFailure(kind: UpstreamFailureKind) void {
         .send => upstream_send_failures_total += 1,
         .receive => upstream_receive_failures_total += 1,
         .other => upstream_other_failures_total += 1,
+    }
+}
+
+pub fn recordEndpointSuccess(endpoint_id: []const u8) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const circuit = endpoint_circuits.getPtr(endpoint_id) orelse return;
+    circuit.* = .{};
+}
+
+pub fn recordEndpointFailure(endpoint_id: []const u8) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const circuit = blk: {
+        if (endpoint_circuits.getPtr(endpoint_id)) |existing| break :blk existing;
+
+        const key_copy = std.heap.page_allocator.dupe(u8, endpoint_id) catch return;
+        errdefer std.heap.page_allocator.free(key_copy);
+
+        endpoint_circuits.put(std.heap.page_allocator, key_copy, .{}) catch return;
+        break :blk endpoint_circuits.getPtr(key_copy).?;
+    };
+
+    switch (circuit.state) {
+        .closed => {
+            if (circuit.consecutive_failures < std.math.maxInt(u8)) {
+                circuit.consecutive_failures += 1;
+            }
+            if (proxy_policy.shouldTripCircuit(default_circuit_policy, circuit.consecutive_failures)) {
+                circuit.state = .open;
+                circuit.opened_at_ms = std.time.milliTimestamp();
+                circuit.half_open_in_flight = false;
+                circuit_trips_total += 1;
+            }
+        },
+        .half_open => {
+            circuit.state = .open;
+            circuit.opened_at_ms = std.time.milliTimestamp();
+            circuit.half_open_in_flight = false;
+            circuit.consecutive_failures = default_circuit_policy.failure_threshold;
+            circuit_trips_total += 1;
+        },
+        .open => {
+            circuit.opened_at_ms = std.time.milliTimestamp();
+            circuit.half_open_in_flight = false;
+        },
     }
 }
 
@@ -249,6 +328,10 @@ pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upst
         candidates.deinit(alloc);
     }
 
+    mutex.lock();
+    defer mutex.unlock();
+
+    const now_ms = std.time.milliTimestamp();
     for (endpoints.items) |endpoint| {
         const port: u16 = if (endpoint.port < 0) 0 else @intCast(endpoint.port);
         try candidates.append(alloc, .{
@@ -256,7 +339,7 @@ pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upst
             .endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id),
             .address = try alloc.dupe(u8, endpoint.ip_address),
             .port = port,
-            .eligible = endpoint.eligible,
+            .eligible = endpoint.eligible and endpointAllowsRequestLocked(endpoint.endpoint_id, now_ms),
         });
     }
 
@@ -268,6 +351,27 @@ pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upst
         .port = selected.port,
         .eligible = selected.eligible,
     };
+}
+
+fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64) bool {
+    const circuit = endpoint_circuits.getPtr(endpoint_id) orelse return true;
+
+    switch (circuit.state) {
+        .closed => return true,
+        .open => {
+            const opened_at_ms = circuit.opened_at_ms orelse return false;
+            if (!proxy_policy.shouldAllowHalfOpen(default_circuit_policy, opened_at_ms, now_ms)) return false;
+
+            circuit.state = .half_open;
+            circuit.half_open_in_flight = true;
+            return true;
+        },
+        .half_open => {
+            if (circuit.half_open_in_flight) return false;
+            circuit.half_open_in_flight = true;
+            return true;
+        },
+    }
 }
 
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnapshot {
@@ -353,6 +457,14 @@ fn deinitRoutesLocked() void {
         std.heap.page_allocator.free(route.match.path_prefix);
     }
     materialized_routes.clearAndFree(std.heap.page_allocator);
+}
+
+fn deinitCircuitsLocked() void {
+    var it = endpoint_circuits.iterator();
+    while (it.next()) |entry| {
+        std.heap.page_allocator.free(entry.key_ptr.*);
+    }
+    endpoint_circuits.clearAndFree(std.heap.page_allocator);
 }
 
 fn clearLastErrorLocked() void {
@@ -679,4 +791,75 @@ test "snapshot exposes L7 proxy observability counters" {
     try std.testing.expectEqual(@as(u64, 0), state.upstream_send_failures_total);
     try std.testing.expectEqual(@as(u64, 1), state.upstream_receive_failures_total);
     try std.testing.expectEqual(@as(u64, 1), state.upstream_other_failures_total);
+    try std.testing.expectEqual(@as(u64, 0), state.circuit_trips_total);
+    try std.testing.expectEqual(@as(u32, 0), state.circuit_open_endpoints);
+    try std.testing.expectEqual(@as(u32, 0), state.circuit_half_open_endpoints);
+}
+
+test "resolveUpstream skips endpoints with open circuits" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-2",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "10.42.0.10",
+        .port = 8081,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1001,
+        .last_seen_at = 1001,
+    });
+
+    recordEndpointFailure("api-1");
+    recordEndpointFailure("api-1");
+    recordEndpointFailure("api-1");
+
+    const upstream = try resolveUpstream(std.testing.allocator, "api");
+    defer upstream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("api-2", upstream.endpoint_id);
+
+    const state = try snapshot(std.testing.allocator);
+    defer state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 1), state.circuit_trips_total);
+    try std.testing.expectEqual(@as(u32, 1), state.circuit_open_endpoints);
+    try std.testing.expectEqual(@as(u32, 0), state.circuit_half_open_endpoints);
 }
