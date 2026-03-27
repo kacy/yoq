@@ -15,6 +15,7 @@ const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
 const health = @import("../../../manifest/health.zig");
 const service_registry_backfill = @import("../../../network/service_registry_backfill.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
+const service_cutover_readiness = @import("../../../network/service_cutover_readiness.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 
@@ -259,6 +260,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     defer backfill.deinit(std.heap.page_allocator);
     var audit = try service_reconciler.snapshotAuditState(std.heap.page_allocator);
     defer audit.deinit(std.heap.page_allocator);
+    var cutover = try service_cutover_readiness.snapshot(std.heap.page_allocator);
+    defer cutover.deinit(std.heap.page_allocator);
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
@@ -411,6 +414,17 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_service_reconciler_component_full_resyncs_total Full resyncs triggered by component transitions\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_component_full_resyncs_total counter\n");
     try writer.print("yoq_service_reconciler_component_full_resyncs_total {d}\n", .{components.full_resyncs_total});
+
+    try writer.writeAll("# HELP yoq_service_rollout_cutover_ready Cutover readiness checks and decisions\n");
+    try writer.writeAll("# TYPE yoq_service_rollout_cutover_ready gauge\n");
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"backfill_complete\"}} {d}\n", .{@intFromBool(cutover.backfill_complete)});
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"audit_fresh\"}} {d}\n", .{@intFromBool(cutover.audit_fresh)});
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"shadow_clean\"}} {d}\n", .{@intFromBool(cutover.shadow_clean)});
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"components_ready\"}} {d}\n", .{@intFromBool(cutover.components_ready)});
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"fault_modes_clear\"}} {d}\n", .{@intFromBool(cutover.fault_modes_clear)});
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"downgrade_safe\"}} {d}\n", .{@intFromBool(cutover.downgrade_safe)});
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"reconciler_cutover\"}} {d}\n", .{@intFromBool(cutover.ready_for_reconciler_cutover)});
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"vip_cutover\"}} {d}\n", .{@intFromBool(cutover.ready_for_vip_cutover)});
 
     try writer.writeAll("# HELP yoq_health_checker_running Whether the health checker scheduler is running\n");
     try writer.writeAll("# TYPE yoq_health_checker_running gauge\n");

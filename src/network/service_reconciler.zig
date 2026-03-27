@@ -1597,6 +1597,60 @@ test "audit pass repairs compatibility mirror drift" {
     try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
 }
 
+test "audit repair preserves compatibility mirror for downgrade safety in vip mode" {
+    const dns_registry = @import("dns/registry_support.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+    });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+    try store.removeServiceNamesByName("api");
+
+    runAuditPassIfEnabled();
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
+    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
+    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
+}
+
 test "audit pass repairs live dns registry drift" {
     try store.initTestDb();
     defer store.deinitTestDb();

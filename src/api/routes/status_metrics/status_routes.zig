@@ -12,6 +12,7 @@ const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
 const health = @import("../../../manifest/health.zig");
 const service_registry_backfill = @import("../../../network/service_registry_backfill.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
+const service_cutover_readiness = @import("../../../network/service_cutover_readiness.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 
@@ -53,6 +54,8 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer backfill.deinit(alloc);
     var audit = service_reconciler.snapshotAuditState(alloc) catch return common.internalError();
     defer audit.deinit(alloc);
+    var cutover = service_cutover_readiness.snapshot(alloc) catch return common.internalError();
+    defer cutover.deinit(alloc);
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
@@ -262,6 +265,26 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         if (idx > 0) writer.writeByte(',') catch return common.internalError();
         writer.writeByte('"') catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, service_name) catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+    }
+    writer.writeAll("},\"cutover_readiness\":{") catch return common.internalError();
+    writer.print(
+        "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
+        .{
+            cutover.backfill_complete,
+            cutover.audit_fresh,
+            cutover.shadow_clean,
+            cutover.components_ready,
+            cutover.fault_modes_clear,
+            cutover.downgrade_safe,
+            cutover.ready_for_reconciler_cutover,
+            cutover.ready_for_vip_cutover,
+        },
+    ) catch return common.internalError();
+    for (cutover.blockers.items, 0..) |blocker, idx| {
+        if (idx > 0) writer.writeByte(',') catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, blocker) catch return common.internalError();
         writer.writeByte('"') catch return common.internalError();
     }
     writer.writeAll("],\"node_signals\":{") catch return common.internalError();
