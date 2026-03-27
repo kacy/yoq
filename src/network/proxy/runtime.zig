@@ -12,6 +12,9 @@ pub const RouteSnapshot = struct {
     vip_address: []const u8,
     host: []const u8,
     path_prefix: []const u8,
+    eligible_endpoints: u32,
+    healthy_endpoints: u32,
+    degraded: bool,
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
@@ -137,6 +140,9 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .vip_address = try alloc.dupe(u8, route.vip_address),
         .host = try alloc.dupe(u8, route.match.host orelse ""),
         .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
+        .eligible_endpoints = route.eligible_endpoints,
+        .healthy_endpoints = route.healthy_endpoints,
+        .degraded = route.degraded,
         .retries = route.retries,
         .connect_timeout_ms = route.connect_timeout_ms,
         .request_timeout_ms = route.request_timeout_ms,
@@ -177,6 +183,9 @@ fn syncLocked() !void {
                 .host = try std.heap.page_allocator.dupe(u8, host),
                 .path_prefix = try std.heap.page_allocator.dupe(u8, service.http_proxy_path_prefix orelse "/"),
             },
+            .eligible_endpoints = @intCast(service.eligible_endpoints),
+            .healthy_endpoints = @intCast(service.healthy_endpoints),
+            .degraded = service.degraded,
             .retries = service.http_proxy_retries orelse 0,
             .connect_timeout_ms = service.http_proxy_connect_timeout_ms orelse 1000,
             .request_timeout_ms = service.http_proxy_request_timeout_ms orelse 5000,
@@ -278,6 +287,8 @@ test "bootstrap tracks configured proxy routes from service state" {
     try std.testing.expectEqualStrings("10.43.0.2", routes_snapshot.items[0].vip_address);
     try std.testing.expectEqualStrings("api.internal", routes_snapshot.items[0].host);
     try std.testing.expectEqualStrings("/v1", routes_snapshot.items[0].path_prefix);
+    try std.testing.expectEqual(@as(u32, 0), routes_snapshot.items[0].eligible_endpoints);
+    try std.testing.expect(routes_snapshot.items[0].degraded);
 }
 
 test "bootstrap is inert when l7 proxy flag is disabled" {
@@ -356,4 +367,56 @@ test "snapshotServiceRoutes filters routes by service" {
     }
     try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
     try std.testing.expectEqualStrings("api.internal", routes_snapshot.items[0].host);
+}
+
+test "materialized routes include service endpoint readiness counts" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+
+    var routes_snapshot = try snapshotServiceRoutes(std.testing.allocator, "api");
+    defer {
+        for (routes_snapshot.items) |route| route.deinit(std.testing.allocator);
+        routes_snapshot.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
+    try std.testing.expectEqual(@as(u32, 1), routes_snapshot.items[0].eligible_endpoints);
+    try std.testing.expectEqual(@as(u32, 0), routes_snapshot.items[0].healthy_endpoints);
+    try std.testing.expect(!routes_snapshot.items[0].degraded);
 }

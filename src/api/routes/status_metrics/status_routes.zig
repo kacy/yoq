@@ -264,8 +264,11 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeAll("\",\"path_prefix\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, route.path_prefix) catch return common.internalError();
         writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
             .{
+                route.eligible_endpoints,
+                route.healthy_endpoints,
+                route.degraded,
                 route.retries,
                 route.connect_timeout_ms,
                 route.request_timeout_ms,

@@ -281,8 +281,11 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     try writer.writeAll("\",\"path_prefix\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.path_prefix);
     try writer.print(
-        "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
         .{
+            proxy_route.eligible_endpoints,
+            proxy_route.healthy_endpoints,
+            proxy_route.degraded,
             proxy_route.retries,
             proxy_route.connect_timeout_ms,
             proxy_route.request_timeout_ms,
@@ -447,6 +450,8 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"host\":\"api.internal\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"path_prefix\":\"/v1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
 }
 
 test "route handles POST drain and DELETE endpoint" {
