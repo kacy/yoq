@@ -2,9 +2,16 @@ const std = @import("std");
 
 pub const Upstream = struct {
     service: []const u8,
+    endpoint_id: []const u8,
     address: []const u8,
     port: u16,
     eligible: bool = true,
+
+    pub fn deinit(self: Upstream, alloc: std.mem.Allocator) void {
+        alloc.free(self.service);
+        alloc.free(self.endpoint_id);
+        alloc.free(self.address);
+    }
 };
 
 pub fn selectFirstEligible(upstreams: []const Upstream) ?Upstream {
@@ -16,8 +23,8 @@ pub fn selectFirstEligible(upstreams: []const Upstream) ?Upstream {
 
 test "selectFirstEligible returns first eligible upstream" {
     const upstreams = [_]Upstream{
-        .{ .service = "api", .address = "10.0.0.2", .port = 8080, .eligible = false },
-        .{ .service = "api", .address = "10.0.0.3", .port = 8080, .eligible = true },
+        .{ .service = "api", .endpoint_id = "api-1", .address = "10.0.0.2", .port = 8080, .eligible = false },
+        .{ .service = "api", .endpoint_id = "api-2", .address = "10.0.0.3", .port = 8080, .eligible = true },
     };
 
     const selected = selectFirstEligible(&upstreams) orelse return error.TestExpectedNonNull;
@@ -26,8 +33,8 @@ test "selectFirstEligible returns first eligible upstream" {
 
 test "selectFirstEligible returns null when all upstreams are ineligible" {
     const upstreams = [_]Upstream{
-        .{ .service = "api", .address = "10.0.0.2", .port = 8080, .eligible = false },
-        .{ .service = "api", .address = "10.0.0.3", .port = 8080, .eligible = false },
+        .{ .service = "api", .endpoint_id = "api-1", .address = "10.0.0.2", .port = 8080, .eligible = false },
+        .{ .service = "api", .endpoint_id = "api-2", .address = "10.0.0.3", .port = 8080, .eligible = false },
     };
 
     try std.testing.expect(selectFirstEligible(&upstreams) == null);

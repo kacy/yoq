@@ -29,6 +29,7 @@ pub const StatusCode = enum(u16) {
     too_many_requests = 429,
     request_header_fields_too_large = 431,
     internal_server_error = 500,
+    service_unavailable = 503,
 
     pub fn phrase(self: StatusCode) []const u8 {
         return switch (self) {
@@ -43,6 +44,7 @@ pub const StatusCode = enum(u16) {
             .too_many_requests => "Too Many Requests",
             .request_header_fields_too_large => "Request Header Fields Too Large",
             .internal_server_error => "Internal Server Error",
+            .service_unavailable => "Service Unavailable",
         };
     }
 };
@@ -391,6 +393,7 @@ test "status code phrases" {
     try std.testing.expectEqualStrings("OK", StatusCode.ok.phrase());
     try std.testing.expectEqualStrings("Not Found", StatusCode.not_found.phrase());
     try std.testing.expectEqualStrings("Internal Server Error", StatusCode.internal_server_error.phrase());
+    try std.testing.expectEqualStrings("Service Unavailable", StatusCode.service_unavailable.phrase());
     try std.testing.expectEqualStrings("Method Not Allowed", StatusCode.method_not_allowed.phrase());
     try std.testing.expectEqualStrings("Too Many Requests", StatusCode.too_many_requests.phrase());
 }

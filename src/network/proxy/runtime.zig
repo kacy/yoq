@@ -1,6 +1,7 @@
 const std = @import("std");
 const log = @import("../../lib/log.zig");
 const router = @import("router.zig");
+const upstream_mod = @import("upstream.zig");
 const service_registry_runtime = @import("../service_registry_runtime.zig");
 const service_rollout = @import("../service_rollout.zig");
 
@@ -131,6 +132,48 @@ pub fn snapshotServiceRoutes(alloc: std.mem.Allocator, service_name: []const u8)
     }
 
     return routes_snapshot;
+}
+
+pub fn resolveRoute(alloc: std.mem.Allocator, host: []const u8, path: []const u8) !RouteSnapshot {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const matched = router.matchRoute(materialized_routes.items, host, path) orelse return error.RouteNotFound;
+    return cloneRouteSnapshot(alloc, matched);
+}
+
+pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upstream_mod.Upstream {
+    var endpoints = try service_registry_runtime.snapshotServiceEndpoints(alloc, service_name);
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+        endpoints.deinit(alloc);
+    }
+
+    var candidates: std.ArrayList(upstream_mod.Upstream) = .empty;
+    defer {
+        for (candidates.items) |candidate| candidate.deinit(alloc);
+        candidates.deinit(alloc);
+    }
+
+    for (endpoints.items) |endpoint| {
+        const port: u16 = if (endpoint.port < 0) 0 else @intCast(endpoint.port);
+        try candidates.append(alloc, .{
+            .service = try alloc.dupe(u8, service_name),
+            .endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id),
+            .address = try alloc.dupe(u8, endpoint.ip_address),
+            .port = port,
+            .eligible = endpoint.eligible,
+        });
+    }
+
+    const selected = upstream_mod.selectFirstEligible(candidates.items) orelse return error.NoHealthyUpstream;
+    return .{
+        .service = try alloc.dupe(u8, selected.service),
+        .endpoint_id = try alloc.dupe(u8, selected.endpoint_id),
+        .address = try alloc.dupe(u8, selected.address),
+        .port = selected.port,
+        .eligible = selected.eligible,
+    };
 }
 
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnapshot {
@@ -419,4 +462,97 @@ test "materialized routes include service endpoint readiness counts" {
     try std.testing.expectEqual(@as(u32, 1), routes_snapshot.items[0].eligible_endpoints);
     try std.testing.expectEqual(@as(u32, 0), routes_snapshot.items[0].healthy_endpoints);
     try std.testing.expect(!routes_snapshot.items[0].degraded);
+}
+
+test "resolveRoute matches by host and path" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+
+    const route = try resolveRoute(std.testing.allocator, "api.internal", "/v1/users");
+    defer route.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("api", route.service);
+    try std.testing.expectEqualStrings("/v1", route.path_prefix);
+}
+
+test "resolveUpstream returns the first eligible endpoint" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "draining",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-2",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "10.42.0.10",
+        .port = 8081,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1001,
+        .last_seen_at = 1001,
+    });
+
+    const upstream = try resolveUpstream(std.testing.allocator, "api");
+    defer upstream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("api-2", upstream.endpoint_id);
+    try std.testing.expectEqualStrings("10.42.0.10", upstream.address);
+    try std.testing.expectEqual(@as(u16, 8081), upstream.port);
 }
