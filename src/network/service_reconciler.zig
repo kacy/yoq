@@ -813,7 +813,7 @@ fn computeAuditMismatchReason(
     }
 
     if (component_state.load_balancer_loaded) {
-        var maybe_lb_backends = dns_registry_support.snapshotLoadBalancerBackends(alloc, service_name) catch return error.StoreReadFailed;
+        const maybe_lb_backends = dns_registry_support.snapshotLoadBalancerBackends(alloc, service_name) catch return error.StoreReadFailed;
         if (maybe_lb_backends) |backends_value| {
             var backends = backends_value;
             defer backends.deinit(alloc);
