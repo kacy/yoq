@@ -206,9 +206,14 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_interceptor_fault\":{\"mode\":\"unavailable\",\"injections\":0}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_fault\":{\"mode\":\"endpoint_overflow\",\"injections\":0}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"components\":{\"dns_resolver_running\":true,\"dns_interceptor_loaded\":false,\"load_balancer_loaded\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"backfill\":{\"enabled\":true,\"runs_total\":0,\"services_created_total\":0,\"endpoints_created_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"vip_mismatches_total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"endpoint_count_mismatches_total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_mismatches_total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"eligibility_mismatches_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_quarantines_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"node_signals\":{\"lost_total\":0,\"recovered_total\":0,\"endpoints_changed_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_registered\":1") != null);
@@ -391,6 +396,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_injections_total{operation=\"container_register\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"container_register\",mode=\"skip_legacy_apply\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"endpoint_healthy\",mode=\"none\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_backfill_runs_total 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_backfill_created_total{kind=\"services\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_ebpf_map_update_fault_injections_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_ebpf_map_update_fault_mode{mode=\"fail_update\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_dns_cluster_lookup_fault_injections_total 0") != null);
@@ -402,6 +409,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"container_runtime\",kind=\"container_registered\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"health_checker\",kind=\"endpoint_healthy\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_passes_total 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_mismatches_by_kind_total{kind=\"vip\"} 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_mismatches_by_kind_total{kind=\"eligibility\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_running 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_degraded_services 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_stale_endpoint_quarantines_total 0") != null);

@@ -13,6 +13,7 @@ const ebpf_map_support = @import("../../../network/ebpf/map_support.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
 const health = @import("../../../manifest/health.zig");
+const service_registry_backfill = @import("../../../network/service_registry_backfill.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
@@ -254,6 +255,8 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
 fn writeServiceRolloutPrometheus(writer: anytype) !void {
     const flags = service_rollout.current();
     const is_shadow = service_rollout.mode() == .shadow;
+    var backfill = try service_registry_backfill.snapshot(std.heap.page_allocator);
+    defer backfill.deinit(std.heap.page_allocator);
     var audit = try service_reconciler.snapshotAuditState(std.heap.page_allocator);
     defer audit.deinit(std.heap.page_allocator);
     const node_signals = service_reconciler.snapshotNodeSignalState();
@@ -346,6 +349,15 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writeShadowEventCounters(writer, .health_checker);
     try writeShadowEventCounters(writer, .unspecified);
 
+    try writer.writeAll("# HELP yoq_service_registry_backfill_runs_total Legacy service_names backfill runs\n");
+    try writer.writeAll("# TYPE yoq_service_registry_backfill_runs_total counter\n");
+    try writer.print("yoq_service_registry_backfill_runs_total {d}\n", .{backfill.runs_total});
+
+    try writer.writeAll("# HELP yoq_service_registry_backfill_created_total Canonical records created by legacy backfill\n");
+    try writer.writeAll("# TYPE yoq_service_registry_backfill_created_total counter\n");
+    try writer.print("yoq_service_registry_backfill_created_total{{kind=\"services\"}} {d}\n", .{backfill.services_created_total});
+    try writer.print("yoq_service_registry_backfill_created_total{{kind=\"endpoints\"}} {d}\n", .{backfill.endpoints_created_total});
+
     try writer.writeAll("# HELP yoq_service_reconciler_audit_passes_total Service reconciler audit passes\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_audit_passes_total counter\n");
     try writer.print("yoq_service_reconciler_audit_passes_total {d}\n", .{audit.passes_total});
@@ -353,6 +365,13 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_service_reconciler_audit_mismatch_services_total Service reconciler audit mismatches by service\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_audit_mismatch_services_total counter\n");
     try writer.print("yoq_service_reconciler_audit_mismatch_services_total {d}\n", .{audit.mismatch_services_total});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_audit_mismatches_by_kind_total Service reconciler audit mismatches by kind\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_audit_mismatches_by_kind_total counter\n");
+    try writer.print("yoq_service_reconciler_audit_mismatches_by_kind_total{{kind=\"vip\"}} {d}\n", .{audit.vip_mismatches_total});
+    try writer.print("yoq_service_reconciler_audit_mismatches_by_kind_total{{kind=\"endpoint_count\"}} {d}\n", .{audit.endpoint_count_mismatches_total});
+    try writer.print("yoq_service_reconciler_audit_mismatches_by_kind_total{{kind=\"stale_endpoint\"}} {d}\n", .{audit.stale_endpoint_mismatches_total});
+    try writer.print("yoq_service_reconciler_audit_mismatches_by_kind_total{{kind=\"eligibility\"}} {d}\n", .{audit.eligibility_mismatches_total});
 
     try writer.writeAll("# HELP yoq_service_reconciler_audit_repairs_total Service reconciler audit repairs\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_audit_repairs_total counter\n");

@@ -100,6 +100,10 @@ pub const AuditSnapshot = struct {
     running: bool,
     passes_total: u64,
     mismatch_services_total: u64,
+    vip_mismatches_total: u64,
+    endpoint_count_mismatches_total: u64,
+    stale_endpoint_mismatches_total: u64,
+    eligibility_mismatches_total: u64,
     repairs_total: u64,
     stale_endpoint_quarantines_total: u64,
     degraded_services: std.ArrayList([]const u8),
@@ -113,6 +117,18 @@ pub const AuditSnapshot = struct {
         self.degraded_services.deinit(alloc);
         if (self.last_error) |message| alloc.free(message);
     }
+};
+
+const AuditMismatchKind = enum {
+    vip,
+    endpoint_count,
+    stale_endpoint,
+    eligibility,
+};
+
+const AuditMismatch = struct {
+    kind: AuditMismatchKind,
+    reason: []const u8,
 };
 
 pub const NodeSignalSnapshot = struct {
@@ -151,6 +167,10 @@ var degraded_services: std.ArrayList([]const u8) = .empty;
 var retry_states: std.ArrayList(RetryState) = .empty;
 var audit_passes_total: u64 = 0;
 var audit_mismatch_services_total: u64 = 0;
+var audit_vip_mismatches_total: u64 = 0;
+var audit_endpoint_count_mismatches_total: u64 = 0;
+var audit_stale_endpoint_mismatches_total: u64 = 0;
+var audit_eligibility_mismatches_total: u64 = 0;
 var audit_repairs_total: u64 = 0;
 var stale_endpoint_quarantines_total: u64 = 0;
 var last_audit_at: ?i64 = null;
@@ -253,6 +273,10 @@ pub fn resetForTest() void {
     deinitRetryStatesLocked();
     audit_passes_total = 0;
     audit_mismatch_services_total = 0;
+    audit_vip_mismatches_total = 0;
+    audit_endpoint_count_mismatches_total = 0;
+    audit_stale_endpoint_mismatches_total = 0;
+    audit_eligibility_mismatches_total = 0;
     audit_repairs_total = 0;
     stale_endpoint_quarantines_total = 0;
     last_audit_at = null;
@@ -276,7 +300,7 @@ pub fn resetForTest() void {
 }
 
 pub fn ensureDataPlaneReadyIfEnabled() void {
-    if (!rollout.current().service_registry_reconciler) return;
+    if (!auditEnabled(rollout.current())) return;
 
     bridge.ensureBridge(bridge.default_bridge) catch |err| {
         log.warn("service reconciler: failed to ensure bridge before data-plane bootstrap: {}", .{err});
@@ -287,7 +311,19 @@ pub fn ensureDataPlaneReadyIfEnabled() void {
 }
 
 pub fn bootstrapIfEnabled() void {
-    if (!rollout.current().service_registry_reconciler) return;
+    const flags = rollout.current();
+    if (!auditEnabled(flags)) return;
+    if (!flags.service_registry_reconciler) {
+        var services = service_registry_runtime.snapshotServices(std.heap.page_allocator) catch |err| {
+            log.warn("service reconciler: failed to initialize runtime state during shadow bootstrap: {}", .{err});
+            return;
+        };
+        defer {
+            for (services.items) |service| service.deinit(std.heap.page_allocator);
+            services.deinit(std.heap.page_allocator);
+        }
+        return;
+    }
 
     mutex.lock();
     defer mutex.unlock();
@@ -299,7 +335,7 @@ pub fn bootstrapIfEnabled() void {
 
 pub fn startAuditLoopIfEnabled() void {
     const flags = rollout.current();
-    if (!flags.service_registry_reconciler) return;
+    if (!auditEnabled(flags)) return;
     if (audit_running.load(.acquire)) return;
 
     audit_running.store(true, .release);
@@ -312,7 +348,7 @@ pub fn startAuditLoopIfEnabled() void {
 
 pub fn runAuditPassIfEnabled() void {
     const flags = rollout.current();
-    if (!flags.service_registry_reconciler) return;
+    if (!auditEnabled(flags)) return;
 
     mutex.lock();
     defer mutex.unlock();
@@ -333,10 +369,14 @@ pub fn snapshotAuditState(alloc: std.mem.Allocator) !AuditSnapshot {
     }
 
     return .{
-        .enabled = rollout.current().service_registry_reconciler,
+        .enabled = auditEnabled(rollout.current()),
         .running = audit_running.load(.acquire),
         .passes_total = audit_passes_total,
         .mismatch_services_total = audit_mismatch_services_total,
+        .vip_mismatches_total = audit_vip_mismatches_total,
+        .endpoint_count_mismatches_total = audit_endpoint_count_mismatches_total,
+        .stale_endpoint_mismatches_total = audit_stale_endpoint_mismatches_total,
+        .eligibility_mismatches_total = audit_eligibility_mismatches_total,
         .repairs_total = audit_repairs_total,
         .stale_endpoint_quarantines_total = stale_endpoint_quarantines_total,
         .degraded_services = degraded,
@@ -577,6 +617,7 @@ fn auditOnceLocked() !void {
 fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.ArrayList(service_registry_runtime.ServiceSnapshot)) !void {
     const alloc = std.heap.page_allocator;
     const now = std.time.timestamp();
+    const authoritative = rollout.current().service_registry_reconciler;
 
     const runtime_service = findRuntimeService(runtime_services.items, service_name);
     const db_service = store.getService(alloc, service_name) catch |err| switch (err) {
@@ -585,15 +626,18 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
     };
     defer if (db_service) |service| service.deinit(alloc);
 
-    const mismatch_reason = try computeAuditMismatchReason(alloc, service_name, runtime_service, db_service);
-    defer if (mismatch_reason) |message| alloc.free(message);
+    const mismatch = try computeAuditMismatch(alloc, service_name, runtime_service, db_service);
+    defer if (mismatch) |value| alloc.free(value.reason);
 
-    if (mismatch_reason) |reason| {
+    if (mismatch) |value| {
         audit_mismatch_services_total += 1;
+        noteAuditMismatchKind(value.kind);
         last_mismatch_at = now;
-        log.warn("service reconciler: audit mismatch service={s} reason={s}", .{ service_name, reason });
-        service_registry_runtime.markReconcileFailed(service_name, reason) catch {};
+        log.warn("service reconciler: audit mismatch service={s} kind={s} reason={s}", .{ service_name, auditMismatchKindLabel(value.kind), value.reason });
         try ensureDegradedServiceLocked(service_name);
+        if (!authoritative) return;
+
+        service_registry_runtime.markReconcileFailed(service_name, value.reason) catch {};
 
         if (!retryDueLocked(service_name, now)) return;
 
@@ -606,10 +650,10 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
         };
         defer if (refreshed_runtime) |service| service.deinit(alloc);
 
-        const repaired_reason = try computeAuditMismatchReason(alloc, service_name, refreshed_runtime, db_service);
-        defer if (repaired_reason) |message| alloc.free(message);
+        const repaired_mismatch = try computeAuditMismatch(alloc, service_name, refreshed_runtime, db_service);
+        defer if (repaired_mismatch) |value_inner| alloc.free(value_inner.reason);
 
-        if (repaired_reason == null) {
+        if (repaired_mismatch == null) {
             audit_repairs_total += 1;
             removeDegradedServiceLocked(service_name);
             clearRetryStateLocked(service_name);
@@ -624,7 +668,7 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
 
     removeDegradedServiceLocked(service_name);
     clearRetryStateLocked(service_name);
-    service_registry_runtime.markReconcileSucceeded(service_name) catch {};
+    if (authoritative) service_registry_runtime.markReconcileSucceeded(service_name) catch {};
 }
 
 fn quarantineStaleEndpointsLocked() void {
@@ -736,15 +780,22 @@ fn quarantineStaleEndpointsLocked() void {
     }
 }
 
-fn computeAuditMismatchReason(
+fn computeAuditMismatch(
     alloc: std.mem.Allocator,
     service_name: []const u8,
     runtime_service: ?service_registry_runtime.ServiceSnapshot,
     db_service: ?store.ServiceRecord,
-) !?[]const u8 {
+) !?AuditMismatch {
     if (db_service == null and runtime_service == null) return null;
-    if (db_service == null) return try alloc.dupe(u8, "runtime service missing from durable store");
-    if (runtime_service == null) return try alloc.dupe(u8, "runtime service missing from in-memory registry");
+    if (db_service == null) return .{ .kind = .stale_endpoint, .reason = try alloc.dupe(u8, "runtime service missing from durable store") };
+    if (runtime_service == null) return .{ .kind = .stale_endpoint, .reason = try alloc.dupe(u8, "runtime service missing from in-memory registry") };
+
+    if (!std.mem.eql(u8, runtime_service.?.vip_address, db_service.?.vip_address)) {
+        return .{
+            .kind = .vip,
+            .reason = try std.fmt.allocPrint(alloc, "service vip drift runtime={s} db={s}", .{ runtime_service.?.vip_address, db_service.?.vip_address }),
+        };
+    }
 
     var db_endpoints = store.listServiceEndpoints(alloc, service_name) catch return error.StoreReadFailed;
     defer {
@@ -752,7 +803,10 @@ fn computeAuditMismatchReason(
         db_endpoints.deinit(alloc);
     }
     if (runtime_service.?.total_endpoints != db_endpoints.items.len) {
-        return try std.fmt.allocPrint(alloc, "endpoint count drift runtime={d} db={d}", .{ runtime_service.?.total_endpoints, db_endpoints.items.len });
+        return .{
+            .kind = .endpoint_count,
+            .reason = try std.fmt.allocPrint(alloc, "endpoint count drift runtime={d} db={d}", .{ runtime_service.?.total_endpoints, db_endpoints.items.len }),
+        };
     }
 
     var mirror_ips = store.lookupServiceNames(alloc, service_name) catch return error.StoreReadFailed;
@@ -762,12 +816,28 @@ fn computeAuditMismatchReason(
     }
 
     var runtime_endpoints = service_registry_runtime.snapshotServiceEndpoints(alloc, service_name) catch |err| switch (err) {
-        error.ServiceNotFound => return try alloc.dupe(u8, "runtime endpoints missing"),
+        error.ServiceNotFound => return .{
+            .kind = .stale_endpoint,
+            .reason = try alloc.dupe(u8, "runtime endpoints missing"),
+        },
         else => return err,
     };
     defer {
         for (runtime_endpoints.items) |endpoint| endpoint.deinit(alloc);
         runtime_endpoints.deinit(alloc);
+    }
+
+    const expected_vip = ip_mod.parseIp(runtime_service.?.vip_address) orelse return error.StoreReadFailed;
+    const actual_dns_ip = dns_registry_support.lookupLocalService(service_name);
+    if (!optionalIpEqual(actual_dns_ip, expected_vip)) {
+        return .{
+            .kind = .vip,
+            .reason = try std.fmt.allocPrint(
+                alloc,
+                "dns vip mismatch expected={d}.{d}.{d}.{d}",
+                .{ expected_vip[0], expected_vip[1], expected_vip[2], expected_vip[3] },
+            ),
+        };
     }
 
     var desired_ips: std.ArrayList([4]u8) = .empty;
@@ -793,22 +863,25 @@ fn computeAuditMismatchReason(
         registry_endpoints.deinit(alloc);
     }
     if (registry_endpoints.items.len != desired_endpoints.items.len) {
-        return try std.fmt.allocPrint(alloc, "dns registry endpoint count drift registry={d} desired={d}", .{
-            registry_endpoints.items.len,
-            desired_endpoints.items.len,
-        });
+        return .{
+            .kind = .endpoint_count,
+            .reason = try std.fmt.allocPrint(alloc, "dns registry endpoint count drift registry={d} desired={d}", .{
+                registry_endpoints.items.len,
+                desired_endpoints.items.len,
+            }),
+        };
     }
     for (registry_endpoints.items) |endpoint| {
         if (!containsAppliedEndpoint(desired_endpoints.items, endpoint.container_id, endpoint.ip)) {
-            return try alloc.dupe(u8, "dns registry endpoints differ from eligible set");
+            return .{ .kind = .eligibility, .reason = try alloc.dupe(u8, "dns registry endpoints differ from eligible set") };
         }
     }
 
     if (component_state.dns_interceptor_loaded) {
         const expected_dns_ip = dns_registry_support.lookupLocalService(service_name);
-        const actual_dns_ip = dns_registry_support.lookupDnsInterceptorService(service_name);
-        if (!optionalIpEqual(expected_dns_ip, actual_dns_ip)) {
-            return try alloc.dupe(u8, "dns interceptor map differs from registry");
+        const actual_interceptor_ip = dns_registry_support.lookupDnsInterceptorService(service_name);
+        if (!optionalIpEqual(expected_dns_ip, actual_interceptor_ip)) {
+            return .{ .kind = .eligibility, .reason = try alloc.dupe(u8, "dns interceptor map differs from registry") };
         }
     }
 
@@ -819,31 +892,59 @@ fn computeAuditMismatchReason(
             defer backends.deinit(alloc);
 
             if (backends.items.len != desired_ips.items.len) {
-                return try std.fmt.allocPrint(alloc, "load balancer backend count drift backends={d} desired={d}", .{
-                    backends.items.len,
-                    desired_ips.items.len,
-                });
+                return .{
+                    .kind = .endpoint_count,
+                    .reason = try std.fmt.allocPrint(alloc, "load balancer backend count drift backends={d} desired={d}", .{
+                        backends.items.len,
+                        desired_ips.items.len,
+                    }),
+                };
             }
             for (backends.items) |backend_ip| {
                 if (!containsIp(desired_ips.items, backend_ip)) {
-                    return try alloc.dupe(u8, "load balancer backends differ from eligible set");
+                    return .{ .kind = .eligibility, .reason = try alloc.dupe(u8, "load balancer backends differ from eligible set") };
                 }
             }
         }
     }
 
     if (mirror_ips.items.len != desired_ips.items.len) {
-        return try std.fmt.allocPrint(alloc, "compatibility mirror count drift mirror={d} desired={d}", .{ mirror_ips.items.len, desired_ips.items.len });
+        return .{
+            .kind = .endpoint_count,
+            .reason = try std.fmt.allocPrint(alloc, "compatibility mirror count drift mirror={d} desired={d}", .{ mirror_ips.items.len, desired_ips.items.len }),
+        };
     }
 
     for (mirror_ips.items) |mirror_ip| {
-        const parsed = ip_mod.parseIp(mirror_ip) orelse return try alloc.dupe(u8, "compatibility mirror contains invalid ip");
+        const parsed = ip_mod.parseIp(mirror_ip) orelse return .{ .kind = .stale_endpoint, .reason = try alloc.dupe(u8, "compatibility mirror contains invalid ip") };
         if (!containsIp(desired_ips.items, parsed)) {
-            return try alloc.dupe(u8, "compatibility mirror endpoints differ from eligible set");
+            return .{ .kind = .eligibility, .reason = try alloc.dupe(u8, "compatibility mirror endpoints differ from eligible set") };
         }
     }
 
     return null;
+}
+
+fn auditEnabled(flags: rollout.Flags) bool {
+    return flags.service_registry_v2 or flags.service_registry_reconciler;
+}
+
+fn noteAuditMismatchKind(kind: AuditMismatchKind) void {
+    switch (kind) {
+        .vip => audit_vip_mismatches_total += 1,
+        .endpoint_count => audit_endpoint_count_mismatches_total += 1,
+        .stale_endpoint => audit_stale_endpoint_mismatches_total += 1,
+        .eligibility => audit_eligibility_mismatches_total += 1,
+    }
+}
+
+fn auditMismatchKindLabel(kind: AuditMismatchKind) []const u8 {
+    return switch (kind) {
+        .vip => "vip",
+        .endpoint_count => "endpoint_count",
+        .stale_endpoint => "stale_endpoint",
+        .eligibility => "eligibility",
+    };
 }
 
 fn refreshComponentStateLocked() void {
@@ -1018,16 +1119,20 @@ fn applyDesiredStateLocked(service_name: []const u8, vip: ?[4]u8, desired: []con
             dns_registry_support.removeServiceState(service_name);
         }
     } else {
-        const current = currentAppliedEndpoints(service_name);
+        var current = try dns_registry_support.snapshotServiceEntries(alloc, service_name);
+        defer {
+            for (current.items) |entry| entry.deinit(alloc);
+            current.deinit(alloc);
+        }
 
-        for (current) |applied| {
+        for (current.items) |applied| {
             if (!containsAppliedEndpoint(desired, applied.container_id, applied.ip)) {
                 dns.unregisterServiceEndpoint(service_name, applied.container_id);
             }
         }
 
         for (desired) |endpoint| {
-            if (!containsAppliedEndpoint(current, endpoint.container_id, endpoint.ip)) {
+            if (!containsRegistryEntry(current.items, endpoint.container_id, endpoint.ip)) {
                 dns.registerService(service_name, endpoint.container_id, endpoint.ip);
             }
         }
@@ -1104,6 +1209,15 @@ fn findAppliedServiceIndex(service_name: []const u8) ?usize {
 fn containsAppliedEndpoint(endpoints: []const AppliedEndpoint, container_id: []const u8, endpoint_ip: [4]u8) bool {
     for (endpoints) |endpoint| {
         if (std.mem.eql(u8, endpoint.container_id, container_id) and std.mem.eql(u8, endpoint.ip[0..], endpoint_ip[0..])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn containsRegistryEntry(entries: []const dns_registry_support.RegistryEntrySnapshot, container_id: []const u8, endpoint_ip: [4]u8) bool {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.container_id, container_id) and std.mem.eql(u8, entry.ip[0..], endpoint_ip[0..])) {
             return true;
         }
     }
@@ -1307,6 +1421,7 @@ test "authoritative bootstrap populates DNS and compatibility mirror" {
     rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
     defer rollout.resetForTest();
     defer resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1357,6 +1472,7 @@ test "authoritative bootstrap returns vip when dns_returns_vip is enabled" {
     });
     defer rollout.resetForTest();
     defer resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1393,6 +1509,38 @@ test "authoritative bootstrap returns vip when dns_returns_vip is enabled" {
     try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
 }
 
+test "shadow audit surfaces vip mismatch without mutating legacy dns" {
+    const dns_registry = @import("dns/registry_support.zig");
+    const service_registry_bridge = @import("service_registry_bridge.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
+
+    runAuditPassIfEnabled();
+
+    const audit = try snapshotAuditState(std.testing.allocator);
+    defer {
+        var mutable = audit;
+        mutable.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expect(audit.enabled);
+    try std.testing.expectEqual(@as(u64, 1), audit.passes_total);
+    try std.testing.expectEqual(@as(u64, 1), audit.mismatch_services_total);
+    try std.testing.expectEqual(@as(u64, 1), audit.vip_mismatches_total);
+    try std.testing.expectEqual(@as(u64, 0), audit.repairs_total);
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+}
+
 test "audit pass repairs compatibility mirror drift" {
     const dns_registry = @import("dns/registry_support.zig");
     try store.initTestDb();
@@ -1405,6 +1553,7 @@ test "audit pass repairs compatibility mirror drift" {
     defer resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1459,6 +1608,7 @@ test "audit pass repairs live dns registry drift" {
     defer resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1587,6 +1737,7 @@ test "component state change triggers full resync" {
     defer resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    try saveLocalContainerFixture("ctr-1", "api", "10.42.0.9");
 
     try store.createService(.{
         .service_name = "api",
@@ -1855,6 +2006,7 @@ test "vip dns marks services degraded when eligible backends exceed capacity" {
         const container_id = try std.fmt.bufPrint(&container_id_buf, "ctr-{d}", .{idx});
         var ip_buf: [16]u8 = undefined;
         const ip_text = try std.fmt.bufPrint(&ip_buf, "10.42.0.{d}", .{idx + 1});
+        try saveLocalContainerFixture(container_id, "api", ip_text);
         try store.upsertServiceEndpoint(.{
             .service_name = "api",
             .endpoint_id = endpoint_id,
@@ -1877,4 +2029,20 @@ test "vip dns marks services degraded when eligible backends exceed capacity" {
     defer snapshot.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("failed", snapshot.last_reconcile_status);
     try std.testing.expect(snapshot.degraded);
+}
+
+fn saveLocalContainerFixture(container_id: []const u8, hostname: []const u8, ip_address: []const u8) !void {
+    try store.save(.{
+        .id = container_id,
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = hostname,
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = ip_address,
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1000,
+    });
 }

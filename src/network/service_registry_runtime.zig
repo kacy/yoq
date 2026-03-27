@@ -1,5 +1,6 @@
 const std = @import("std");
 const log = @import("../lib/log.zig");
+const service_registry_backfill = @import("service_registry_backfill.zig");
 const rollout = @import("service_rollout.zig");
 const service_registry = @import("service_registry.zig");
 const store = @import("../state/store.zig");
@@ -26,6 +27,7 @@ pub fn resetForTest() void {
         registry.deinit();
         initialized = false;
     }
+    service_registry_backfill.resetForTest();
 }
 
 pub fn syncServiceFromStore(service_name: []const u8) void {
@@ -201,6 +203,7 @@ fn ensureInitializedLocked() !void {
     var next_registry = service_registry.Registry.init(std.heap.page_allocator);
     errdefer next_registry.deinit();
 
+    service_registry_backfill.runIfEnabled();
     try loadSnapshotInto(&next_registry);
 
     registry = next_registry;
