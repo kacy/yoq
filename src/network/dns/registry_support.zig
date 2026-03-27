@@ -7,14 +7,25 @@ const policy = @import("../policy.zig");
 const packet_support = @import("packet_support.zig");
 
 const ebpf = if (builtin.os.tag == .linux) @import("../ebpf.zig") else struct {
+    pub const LoadBalancerBackends = struct {
+        count: u32 = 0,
+        ips: [16]u32 = [_]u32{0} ** 16,
+    };
+
     pub const DnsInterceptor = struct {
         pub fn updateService(_: *@This(), _: []const u8, _: [4]u8) void {}
         pub fn deleteService(_: *@This(), _: []const u8) void {}
+        pub fn lookupService(_: *@This(), _: []const u8) ?[4]u8 {
+            return null;
+        }
     };
 
     pub const LoadBalancer = struct {
         pub fn addBackend(_: *@This(), _: [4]u8, _: [4]u8) void {}
         pub fn removeBackend(_: *@This(), _: [4]u8, _: [4]u8) void {}
+        pub fn lookupBackends(_: *@This(), _: [4]u8) ?LoadBalancerBackends {
+            return null;
+        }
     };
 
     var dns_interceptor: DnsInterceptor = .{};
@@ -45,6 +56,15 @@ pub const ConflictInfo = struct {
     ip: [4]u8,
     container_id: [12]u8,
     container_id_len: u8,
+};
+
+pub const RegistryEntrySnapshot = struct {
+    container_id: []const u8,
+    ip: [4]u8,
+
+    pub fn deinit(self: RegistryEntrySnapshot, alloc: std.mem.Allocator) void {
+        alloc.free(self.container_id);
+    }
 };
 
 pub const ClusterLookupFaultMode = enum {
@@ -317,6 +337,75 @@ pub fn lookupService(name: []const u8) ?[4]u8 {
     return lookupClusterService(name);
 }
 
+pub fn lookupLocalService(name: []const u8) ?[4]u8 {
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+
+    var i: usize = max_services;
+    while (i > 0) {
+        i -= 1;
+        const entry = &registry[i];
+        if (entry.active and
+            entry.name_len == name.len and
+            std.mem.eql(u8, entry.name[0..entry.name_len], name))
+        {
+            return entry.ip;
+        }
+    }
+    return null;
+}
+
+pub fn snapshotServiceEntries(alloc: std.mem.Allocator, name: []const u8) !std.ArrayList(RegistryEntrySnapshot) {
+    var entries: std.ArrayList(RegistryEntrySnapshot) = .empty;
+    errdefer {
+        for (entries.items) |entry| entry.deinit(alloc);
+        entries.deinit(alloc);
+    }
+
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+
+    for (&registry) |entry| {
+        if (!entry.active) continue;
+        if (entry.name_len != name.len) continue;
+        if (!std.mem.eql(u8, entry.name[0..entry.name_len], name)) continue;
+
+        try entries.append(alloc, .{
+            .container_id = try alloc.dupe(u8, entry.container_id[0..entry.container_id_len]),
+            .ip = entry.ip,
+        });
+    }
+
+    return entries;
+}
+
+pub fn lookupDnsInterceptorService(name: []const u8) ?[4]u8 {
+    if (ebpf.getDnsInterceptor()) |interceptor| {
+        return interceptor.lookupService(name);
+    }
+    return null;
+}
+
+pub fn currentLoadBalancerVip(name: []const u8) ?[4]u8 {
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+    return getServiceVip(name);
+}
+
+pub fn snapshotLoadBalancerBackends(alloc: std.mem.Allocator, name: []const u8) !?std.ArrayList([4]u8) {
+    const lb = ebpf.getLoadBalancer() orelse return null;
+    var backends: std.ArrayList([4]u8) = .empty;
+    errdefer backends.deinit(alloc);
+
+    const vip = currentLoadBalancerVip(name) orelse return backends;
+    const snapshot = lb.lookupBackends(vip) orelse return backends;
+    const count: usize = @intCast(snapshot.count);
+    for (0..count) |i| {
+        try backends.append(alloc, @bitCast(snapshot.ips[i]));
+    }
+    return backends;
+}
+
 pub fn parseResolvConf(content: []const u8) ?[4]u8 {
     var pos: usize = 0;
     while (pos < content.len) {
@@ -579,4 +668,25 @@ fn shouldSkipLoadBalancerAdd(name: []const u8, vip: [4]u8, backend_ip: [4]u8) bo
         backend_ip[3],
     });
     return true;
+}
+
+test "snapshotServiceEntries returns active endpoints for a service" {
+    resetRegistryForTest();
+    defer resetRegistryForTest();
+
+    registerService("api", "ctr-1", .{ 10, 42, 0, 9 });
+    registerService("api", "ctr-2", .{ 10, 42, 0, 10 });
+    registerService("web", "ctr-3", .{ 10, 42, 0, 11 });
+
+    var entries = try snapshotServiceEntries(std.testing.allocator, "api");
+    defer {
+        for (entries.items) |entry| entry.deinit(std.testing.allocator);
+        entries.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), entries.items.len);
+    try std.testing.expectEqualStrings("ctr-1", entries.items[0].container_id);
+    try std.testing.expectEqual(@as([4]u8, .{ 10, 42, 0, 9 }), entries.items[0].ip);
+    try std.testing.expectEqualStrings("ctr-2", entries.items[1].container_id);
+    try std.testing.expectEqual(@as([4]u8, .{ 10, 42, 0, 10 }), entries.items[1].ip);
 }

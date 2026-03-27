@@ -27,6 +27,13 @@ pub const DnsInterceptor = struct {
         return map_support.mapDelete(self.map_fd, &key);
     }
 
+    pub fn lookupService(self: *const DnsInterceptor, name: []const u8) ?[4]u8 {
+        var key = makeKey(name) orelse return null;
+        var ip_addr: [4]u8 = undefined;
+        if (!map_support.mapLookup(self.map_fd, &key, &ip_addr)) return null;
+        return ip_addr;
+    }
+
     pub fn deinit(self: *DnsInterceptor) void {
         attach_support.detachTC(self.if_index) catch |e| {
             log.debug("ebpf: failed to detach DNS interceptor: {}", .{e});
