@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const http = @import("../../api/http.zig");
+const log = @import("../../lib/log.zig");
 const ip = @import("../ip.zig");
 const proxy_policy = @import("policy.zig");
 const proxy_runtime = @import("runtime.zig");
@@ -87,27 +88,47 @@ pub const ReverseProxy = struct {
             .status = .bad_request,
             .body = "{\"error\":\"missing host header\"}",
         } };
+        const host = normalizeHost(host_header);
         if (http.findHeaderValue(request.headers_raw, proxy_loop_header) != null) {
             proxy_runtime.recordLoopRejection();
+            log.warn("l7 proxy loop rejected method={s} host={s} path={s}", .{
+                methodString(request.method),
+                host,
+                request.path_only,
+            });
             return .{ .response = .{
                 .status = .bad_gateway,
                 .body = "{\"error\":\"proxy loop detected\"}",
             } };
         }
-        const host = normalizeHost(host_header);
 
-        const matched_route = router.matchRoute(self.routes, host, request.path_only) orelse return .{ .response = .{
-            .status = .not_found,
-            .body = "{\"error\":\"route not found\"}",
-        } };
+        const matched_route = router.matchRoute(self.routes, host, request.path_only) orelse {
+            log.info("l7 proxy no route method={s} host={s} path={s}", .{
+                methodString(request.method),
+                host,
+                request.path_only,
+            });
+            return .{ .response = .{
+                .status = .not_found,
+                .body = "{\"error\":\"route not found\"}",
+            } };
+        };
         const route = try cloneRouteSnapshot(self.allocator, matched_route);
         errdefer route.deinit(self.allocator);
 
         const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
-            error.NoHealthyUpstream => return .{ .response = .{
-                .status = .service_unavailable,
-                .body = "{\"error\":\"no eligible upstream\"}",
-            } },
+            error.NoHealthyUpstream => {
+                log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
+                    methodString(request.method),
+                    host,
+                    request.path_only,
+                    route.service,
+                });
+                return .{ .response = .{
+                    .status = .service_unavailable,
+                    .body = "{\"error\":\"no eligible upstream\"}",
+                } };
+            },
             else => return err,
         };
         errdefer upstream.deinit(self.allocator);
@@ -149,6 +170,10 @@ pub const ReverseProxy = struct {
     pub fn handleConnection(self: *const ReverseProxy, client_fd: posix.fd_t) void {
         defer posix.close(client_fd);
         setSocketTimeoutMs(client_fd, 5000);
+        var trace_id: [16]u8 = undefined;
+        log.generateTraceId(&trace_id);
+        log.setTraceId(&trace_id);
+        defer log.clearTraceId();
 
         var request_buf: [64 * 1024]u8 = undefined;
         const request = readRequestBytes(client_fd, &request_buf) catch |err| {
@@ -236,22 +261,45 @@ pub const ReverseProxy = struct {
             .preserve_host = plan.route.preserve_host,
         };
         var attempt: u8 = 0;
+        var retries_used: u8 = 0;
         while (true) : (attempt += 1) {
             const response = self.forwardSingleAttempt(raw_request, plan) catch |err| {
                 if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
                     proxy_runtime.recordRetry();
+                    retries_used += 1;
                     continue;
                 }
                 proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
+                log.warn("l7 proxy upstream failure method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d} error={}", .{
+                    methodString(plan.method),
+                    plan.host,
+                    plan.path,
+                    plan.route.service,
+                    plan.upstream.address,
+                    plan.upstream.port,
+                    retries_used,
+                    err,
+                });
                 return formatProxyResponse(self.allocator, proxyFailureResponse(err));
             };
 
             const status_code = parseUpstreamStatusCode(response) catch null;
             if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, status_code, false)) {
                 proxy_runtime.recordRetry();
+                retries_used += 1;
                 self.allocator.free(response);
                 continue;
             }
+            log.info("l7 proxy proxied method={s} host={s} path={s} service={s} upstream={s}:{d} status={?d} retries={d}", .{
+                methodString(plan.method),
+                plan.host,
+                plan.path,
+                plan.route.service,
+                plan.upstream.address,
+                plan.upstream.port,
+                status_code,
+                retries_used,
+            });
             return response;
         }
     }
