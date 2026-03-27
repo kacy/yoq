@@ -47,6 +47,10 @@ pub fn setClusterDb(db: ?*sqlite.Db) void {
     registry_support.setClusterDb(db);
 }
 
+pub fn currentClusterDb() ?*sqlite.Db {
+    return registry_support.currentClusterDb();
+}
+
 /// look up a service name in the replicated cluster database.
 /// queries the service_names table for the IP address.
 /// returns null if the name isn't found or the DB isn't available.

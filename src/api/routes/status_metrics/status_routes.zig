@@ -162,13 +162,14 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"audit\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"passes_total\":{d},\"mismatch_services_total\":{d},\"repairs_total\":{d},\"last_audit_at\":",
+        "\"enabled\":{},\"running\":{},\"passes_total\":{d},\"mismatch_services_total\":{d},\"repairs_total\":{d},\"stale_endpoint_quarantines_total\":{d},\"last_audit_at\":",
         .{
             audit.enabled,
             audit.running,
             audit.passes_total,
             audit.mismatch_services_total,
             audit.repairs_total,
+            audit.stale_endpoint_quarantines_total,
         },
     ) catch return common.internalError();
     if (audit.last_audit_at) |timestamp| {
@@ -178,6 +179,12 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll(",\"last_mismatch_at\":") catch return common.internalError();
     if (audit.last_mismatch_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_stale_quarantine_at\":") catch return common.internalError();
+    if (audit.last_stale_quarantine_at) |timestamp| {
         writer.print("{d}", .{timestamp}) catch return common.internalError();
     } else {
         writer.writeAll("null") catch return common.internalError();
