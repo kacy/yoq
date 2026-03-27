@@ -253,6 +253,8 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
 fn writeServiceRolloutPrometheus(writer: anytype) !void {
     const flags = service_rollout.current();
     const is_shadow = service_rollout.mode() == .shadow;
+    var audit = try service_reconciler.snapshotAuditState(std.heap.page_allocator);
+    defer audit.deinit(std.heap.page_allocator);
 
     try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Service rollout mode, 1 when shadow mode is active\n");
     try writer.writeAll("# TYPE yoq_service_rollout_shadow_mode gauge\n");
@@ -337,6 +339,26 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writeShadowEventCounters(writer, .container_runtime);
     try writeShadowEventCounters(writer, .health_checker);
     try writeShadowEventCounters(writer, .unspecified);
+
+    try writer.writeAll("# HELP yoq_service_reconciler_audit_passes_total Service reconciler audit passes\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_audit_passes_total counter\n");
+    try writer.print("yoq_service_reconciler_audit_passes_total {d}\n", .{audit.passes_total});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_audit_mismatch_services_total Service reconciler audit mismatches by service\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_audit_mismatch_services_total counter\n");
+    try writer.print("yoq_service_reconciler_audit_mismatch_services_total {d}\n", .{audit.mismatch_services_total});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_audit_repairs_total Service reconciler audit repairs\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_audit_repairs_total counter\n");
+    try writer.print("yoq_service_reconciler_audit_repairs_total {d}\n", .{audit.repairs_total});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_audit_running Whether the audit loop is running\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_audit_running gauge\n");
+    try writer.print("yoq_service_reconciler_audit_running {d}\n", .{@intFromBool(audit.running)});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_degraded_services Current degraded services tracked by audits\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_degraded_services gauge\n");
+    try writer.print("yoq_service_reconciler_degraded_services {d}\n", .{audit.degraded_services.items.len});
 }
 
 fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.BridgeOperation) !void {

@@ -91,6 +91,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     service_rollout.logStartupSummary();
     service_reconciler.bootstrapIfEnabled();
+    service_reconciler.startAuditLoopIfEnabled();
     orchestrator.installSignalHandlers();
 
     var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name) catch |err| {
