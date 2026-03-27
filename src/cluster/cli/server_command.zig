@@ -235,6 +235,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     const dns = @import("../../network/dns.zig");
     dns.setClusterDb(node.stateMachineDb());
     defer dns.setClusterDb(null);
+    service_reconciler.bootstrapIfEnabled();
 
     routes.api_token = api_token;
     defer routes.api_token = null;

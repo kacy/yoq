@@ -354,6 +354,10 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_reconciler_audit_repairs_total counter\n");
     try writer.print("yoq_service_reconciler_audit_repairs_total {d}\n", .{audit.repairs_total});
 
+    try writer.writeAll("# HELP yoq_service_reconciler_stale_endpoint_quarantines_total Durable endpoints quarantined as stale\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_stale_endpoint_quarantines_total counter\n");
+    try writer.print("yoq_service_reconciler_stale_endpoint_quarantines_total {d}\n", .{audit.stale_endpoint_quarantines_total});
+
     try writer.writeAll("# HELP yoq_service_reconciler_audit_running Whether the audit loop is running\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_audit_running gauge\n");
     try writer.print("yoq_service_reconciler_audit_running {d}\n", .{@intFromBool(audit.running)});
