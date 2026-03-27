@@ -164,6 +164,11 @@ test "route handles /v1/status?mode=service_rollout GET" {
     service_registry_bridge.resetFaultsForTest();
     defer service_registry_bridge.resetFaultsForTest();
     service_reconciler.resetForTest();
+    service_reconciler.setComponentStateOverrideForTest(.{
+        .dns_resolver_running = true,
+        .dns_interceptor_loaded = false,
+        .load_balancer_loaded = false,
+    });
 
     ebpf_map_support.setMapUpdateFaultModeForTest(.map_full);
     dns_registry.setClusterLookupFaultForTest(.stale_override, .{ 10, 42, 9, 9 });
@@ -198,6 +203,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"cluster_lookup_fault\":{\"mode\":\"stale_override\",\"injections\":0,\"stale_ip\":\"10.42.9.9\"}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_interceptor_fault\":{\"mode\":\"unavailable\",\"injections\":0}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_fault\":{\"mode\":\"endpoint_overflow\",\"injections\":0}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"components\":{\"dns_resolver_running\":true,\"dns_interceptor_loaded\":false,\"load_balancer_loaded\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"node_signals\":{\"lost_total\":0,\"recovered_total\":0,\"endpoints_changed_total\":0") != null);
@@ -355,6 +361,11 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     service_registry_bridge.resetFaultsForTest();
     defer service_registry_bridge.resetFaultsForTest();
     service_reconciler.resetForTest();
+    service_reconciler.setComponentStateOverrideForTest(.{
+        .dns_resolver_running = true,
+        .dns_interceptor_loaded = true,
+        .load_balancer_loaded = true,
+    });
 
     ebpf_map_support.setMapUpdateFaultModeForTest(.fail_update);
     dns_registry.setClusterLookupFaultForTest(.force_miss, null);
@@ -389,6 +400,9 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_degraded_services 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_node_signals_total{kind=\"lost\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_node_signal_endpoints_changed_total 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_ready{component=\"dns_resolver\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_ready{component=\"dns_interceptor\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_full_resyncs_total 0") != null);
 }
 
 test "handleGpuMetrics returns valid JSON" {
