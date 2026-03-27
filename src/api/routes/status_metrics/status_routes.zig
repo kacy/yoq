@@ -50,6 +50,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     var audit = service_reconciler.snapshotAuditState(alloc) catch return common.internalError();
     defer audit.deinit(alloc);
     const node_signals = service_reconciler.snapshotNodeSignalState();
+    const components = service_reconciler.snapshotComponentState();
 
     var events: [service_reconciler.max_recent_events]service_reconciler.Event = undefined;
     const event_count = service_reconciler.snapshotRecentEvents(&events);
@@ -143,6 +144,22 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             dns_registry.loadBalancerFaultInjectionCount(),
         },
     ) catch return common.internalError();
+    writer.writeAll("},\"components\":{") catch return common.internalError();
+    writer.print(
+        "\"dns_resolver_running\":{},\"dns_interceptor_loaded\":{},\"load_balancer_loaded\":{},\"state_changes_total\":{d},\"full_resyncs_total\":{d},\"last_change_at\":",
+        .{
+            components.state.dns_resolver_running,
+            components.state.dns_interceptor_loaded,
+            components.state.load_balancer_loaded,
+            components.state_changes_total,
+            components.full_resyncs_total,
+        },
+    ) catch return common.internalError();
+    if (components.last_change_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
     writer.writeAll("},\"audit\":{") catch return common.internalError();
     writer.print(
         "\"enabled\":{},\"running\":{},\"passes_total\":{d},\"mismatch_services_total\":{d},\"repairs_total\":{d},\"last_audit_at\":",

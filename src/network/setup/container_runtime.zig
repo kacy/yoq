@@ -12,6 +12,7 @@ const file_support = @import("file_support.zig");
 const ebpf = @import("ebpf_module.zig").ebpf;
 const ebpf_support = @import("ebpf_support.zig");
 const service_registry_bridge = @import("../service_registry_bridge.zig");
+const service_reconciler = @import("../service_reconciler.zig");
 
 pub fn setupContainer(
     container_id: []const u8,
@@ -114,6 +115,7 @@ pub fn setupContainer(
         return common.SetupError.ConfigFailed;
     }
     ebpf_support.loadDnsInterceptorOnBridge();
+    service_reconciler.refreshComponentStateIfEnabled();
 
     if (!config.skip_dns) {
         service_registry_bridge.registerContainerService(

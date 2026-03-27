@@ -53,6 +53,7 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     log.setFormat(log_fmt);
     service_rollout.logStartupSummary();
+    service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
 
@@ -151,6 +152,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
 
     log.setFormat(log_fmt);
     service_rollout.logStartupSummary();
+    service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
 

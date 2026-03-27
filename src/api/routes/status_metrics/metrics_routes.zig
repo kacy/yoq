@@ -256,6 +256,7 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     var audit = try service_reconciler.snapshotAuditState(std.heap.page_allocator);
     defer audit.deinit(std.heap.page_allocator);
     const node_signals = service_reconciler.snapshotNodeSignalState();
+    const components = service_reconciler.snapshotComponentState();
 
     try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Service rollout mode, 1 when shadow mode is active\n");
     try writer.writeAll("# TYPE yoq_service_rollout_shadow_mode gauge\n");
@@ -369,6 +370,20 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_service_reconciler_node_signal_endpoints_changed_total Endpoint eligibility changes from node signals\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_node_signal_endpoints_changed_total counter\n");
     try writer.print("yoq_service_reconciler_node_signal_endpoints_changed_total {d}\n", .{node_signals.endpoints_changed_total});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_component_ready Whether a reconciler component is currently ready\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_component_ready gauge\n");
+    try writer.print("yoq_service_reconciler_component_ready{{component=\"dns_resolver\"}} {d}\n", .{@intFromBool(components.state.dns_resolver_running)});
+    try writer.print("yoq_service_reconciler_component_ready{{component=\"dns_interceptor\"}} {d}\n", .{@intFromBool(components.state.dns_interceptor_loaded)});
+    try writer.print("yoq_service_reconciler_component_ready{{component=\"load_balancer\"}} {d}\n", .{@intFromBool(components.state.load_balancer_loaded)});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_component_state_changes_total Reconciler component state transitions\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_component_state_changes_total counter\n");
+    try writer.print("yoq_service_reconciler_component_state_changes_total {d}\n", .{components.state_changes_total});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_component_full_resyncs_total Full resyncs triggered by component transitions\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_component_full_resyncs_total counter\n");
+    try writer.print("yoq_service_reconciler_component_full_resyncs_total {d}\n", .{components.full_resyncs_total});
 }
 
 fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.BridgeOperation) !void {

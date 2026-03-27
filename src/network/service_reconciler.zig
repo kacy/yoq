@@ -2,9 +2,12 @@ const std = @import("std");
 const dns = @import("dns.zig");
 const ip_mod = @import("ip.zig");
 const log = @import("../lib/log.zig");
+const bridge = @import("bridge.zig");
 const policy = @import("policy.zig");
 const rollout = @import("service_rollout.zig");
 const service_registry_runtime = @import("service_registry_runtime.zig");
+const ebpf = @import("setup/ebpf_module.zig").ebpf;
+const ebpf_support = @import("setup/ebpf_support.zig");
 const store = @import("../state/store.zig");
 
 pub const EventKind = enum {
@@ -105,6 +108,19 @@ pub const NodeSignalSnapshot = struct {
     last_recovered_node_id: ?i64,
 };
 
+pub const ComponentState = struct {
+    dns_resolver_running: bool,
+    dns_interceptor_loaded: bool,
+    load_balancer_loaded: bool,
+};
+
+pub const ComponentSnapshot = struct {
+    state: ComponentState,
+    state_changes_total: u64,
+    full_resyncs_total: u64,
+    last_change_at: ?i64,
+};
+
 var mutex: std.Thread.Mutex = .{};
 var recent_events: [max_recent_events]Event = undefined;
 var recent_start: usize = 0;
@@ -130,6 +146,15 @@ var node_recovered_signals_total: u64 = 0;
 var node_signal_endpoints_changed_total: u64 = 0;
 var last_lost_node_id: ?i64 = null;
 var last_recovered_node_id: ?i64 = null;
+var component_state: ComponentState = .{
+    .dns_resolver_running = false,
+    .dns_interceptor_loaded = false,
+    .load_balancer_loaded = false,
+};
+var component_state_changes_total: u64 = 0;
+var component_full_resyncs_total: u64 = 0;
+var component_last_change_at: ?i64 = null;
+var component_state_override: ?ComponentState = null;
 
 pub fn noteContainerRegistered(service_name: []const u8, container_id: []const u8, endpoint_ip: [4]u8) void {
     noteContainerRegisteredFrom(.unspecified, service_name, container_id, endpoint_ip);
@@ -217,7 +242,27 @@ pub fn resetForTest() void {
     node_signal_endpoints_changed_total = 0;
     last_lost_node_id = null;
     last_recovered_node_id = null;
+    component_state = .{
+        .dns_resolver_running = false,
+        .dns_interceptor_loaded = false,
+        .load_balancer_loaded = false,
+    };
+    component_state_changes_total = 0;
+    component_full_resyncs_total = 0;
+    component_last_change_at = null;
+    component_state_override = null;
     clearLastAuditErrorLocked();
+}
+
+pub fn ensureDataPlaneReadyIfEnabled() void {
+    if (!rollout.current().service_registry_reconciler) return;
+
+    bridge.ensureBridge(bridge.default_bridge) catch |err| {
+        log.warn("service reconciler: failed to ensure bridge before data-plane bootstrap: {}", .{err});
+    };
+    dns.startResolver();
+    ebpf_support.loadDnsInterceptorOnBridge();
+    refreshComponentStateIfEnabled();
 }
 
 pub fn bootstrapIfEnabled() void {
@@ -227,6 +272,7 @@ pub fn bootstrapIfEnabled() void {
     defer mutex.unlock();
 
     bootstrapAuthoritativeLocked();
+    refreshComponentStateLocked();
 }
 
 pub fn startAuditLoopIfEnabled() void {
@@ -290,12 +336,38 @@ pub fn snapshotNodeSignalState() NodeSignalSnapshot {
     };
 }
 
+pub fn snapshotComponentState() ComponentSnapshot {
+    mutex.lock();
+    defer mutex.unlock();
+
+    return .{
+        .state = detectComponentStateLocked(),
+        .state_changes_total = component_state_changes_total,
+        .full_resyncs_total = component_full_resyncs_total,
+        .last_change_at = component_last_change_at,
+    };
+}
+
 pub fn noteNodeLost(node_id: i64) void {
     noteNodeSignal(node_id, true);
 }
 
 pub fn noteNodeRecovered(node_id: i64) void {
     noteNodeSignal(node_id, false);
+}
+
+pub fn refreshComponentStateIfEnabled() void {
+    if (rollout.mode() == .legacy) return;
+
+    mutex.lock();
+    defer mutex.unlock();
+    refreshComponentStateLocked();
+}
+
+pub fn setComponentStateOverrideForTest(state: ComponentState) void {
+    mutex.lock();
+    defer mutex.unlock();
+    component_state_override = state;
 }
 
 fn noteEvent(event: Event) void {
@@ -432,6 +504,7 @@ fn auditLoop() void {
 }
 
 fn runAuditPassLocked() void {
+    refreshComponentStateLocked();
     audit_passes_total += 1;
     last_audit_at = std.time.timestamp();
     clearLastAuditErrorLocked();
@@ -572,6 +645,46 @@ fn computeAuditMismatchReason(
     }
 
     return null;
+}
+
+fn refreshComponentStateLocked() void {
+    const next_state = detectComponentStateLocked();
+    if (std.meta.eql(component_state, next_state)) return;
+
+    component_state = next_state;
+    component_state_changes_total += 1;
+    component_last_change_at = std.time.timestamp();
+
+    log.info(
+        "service reconciler: component state changed resolver={} dns_interceptor={} load_balancer={}",
+        .{
+            component_state.dns_resolver_running,
+            component_state.dns_interceptor_loaded,
+            component_state.load_balancer_loaded,
+        },
+    );
+
+    if (!rollout.current().service_registry_reconciler) return;
+
+    component_full_resyncs_total += 1;
+    if (!authoritative_bootstrapped) {
+        bootstrapAuthoritativeLocked();
+        return;
+    }
+
+    reconcileAllLocked() catch |err| {
+        log.warn("service reconciler: failed full resync after component state change: {}", .{err});
+    };
+}
+
+fn detectComponentStateLocked() ComponentState {
+    if (component_state_override) |state| return state;
+
+    return .{
+        .dns_resolver_running = dns.resolverRunning(),
+        .dns_interceptor_loaded = ebpf.getDnsInterceptor() != null,
+        .load_balancer_loaded = ebpf.getLoadBalancer() != null,
+    };
 }
 
 fn collectServicesForNodeLocked(alloc: std.mem.Allocator, node_id: i64) !std.ArrayList([]const u8) {
@@ -1038,4 +1151,75 @@ test "node loss and recovery reconcile authoritative DNS immediately" {
     try std.testing.expectEqual(@as(u64, 1), after_recovery.recovered_total);
     try std.testing.expectEqual(@as(u64, 2), after_recovery.endpoints_changed_total);
     try std.testing.expectEqual(@as(?i64, 7), after_recovery.last_recovered_node_id);
+}
+
+test "component state change triggers full resync" {
+    const dns_registry = @import("dns/registry_support.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    setComponentStateOverrideForTest(.{
+        .dns_resolver_running = false,
+        .dns_interceptor_loaded = false,
+        .load_balancer_loaded = false,
+    });
+    bootstrapIfEnabled();
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+
+    try store.removeServiceNamesByName("api");
+    dns_registry.resetRegistryForTest();
+    setComponentStateOverrideForTest(.{
+        .dns_resolver_running = true,
+        .dns_interceptor_loaded = true,
+        .load_balancer_loaded = true,
+    });
+
+    refreshComponentStateIfEnabled();
+
+    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
+    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+
+    const snapshot = snapshotComponentState();
+    try std.testing.expect(snapshot.state.dns_resolver_running);
+    try std.testing.expect(snapshot.state.dns_interceptor_loaded);
+    try std.testing.expect(snapshot.state.load_balancer_loaded);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.state_changes_total);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.full_resyncs_total);
+    try std.testing.expect(snapshot.last_change_at != null);
 }
