@@ -53,6 +53,11 @@ comptime {
     _ = @import("network/service_registry_backfill.zig");
     _ = @import("network/service_registry_bridge.zig");
     _ = @import("network/service_registry_runtime.zig");
+    _ = @import("network/proxy/runtime.zig");
+    _ = @import("network/proxy/router.zig");
+    _ = @import("network/proxy/policy.zig");
+    _ = @import("network/proxy/upstream.zig");
+    _ = @import("network/proxy/reverse_proxy.zig");
     _ = @import("build/dockerfile.zig");
     _ = @import("build/context.zig");
     _ = @import("build/engine.zig");

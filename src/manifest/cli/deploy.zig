@@ -3,6 +3,7 @@ const cli = @import("../../lib/cli.zig");
 const manifest_loader = @import("../loader.zig");
 const manifest_spec = @import("../spec.zig");
 const orchestrator = @import("../orchestrator.zig");
+const startup_runtime = @import("../orchestrator/startup_runtime.zig");
 const watcher_mod = @import("../../dev/watcher.zig");
 const store = @import("../../state/store.zig");
 const process = @import("../../runtime/process.zig");
@@ -11,6 +12,7 @@ const json_helpers = @import("../../lib/json_helpers.zig");
 const container_cmds = @import("../../runtime/container_commands.zig");
 const service_rollout = @import("../../network/service_rollout.zig");
 const service_reconciler = @import("../../network/service_reconciler.zig");
+const proxy_runtime = @import("../../network/proxy/runtime.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -89,12 +91,6 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         writeErr("starting {s} ({d} services)...\n", .{ app_name, manifest.services.len });
     }
 
-    service_rollout.logStartupSummary();
-    service_reconciler.ensureDataPlaneReadyIfEnabled();
-    service_reconciler.bootstrapIfEnabled();
-    service_reconciler.startAuditLoopIfEnabled();
-    orchestrator.installSignalHandlers();
-
     var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name) catch |err| {
         writeErr("failed to initialize orchestrator: {}\n", .{err});
         return DeployError.DeploymentFailed;
@@ -105,6 +101,20 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     if (service_names.items.len > 0) {
         orch.service_filter = service_names.items;
     }
+
+    orch.computeStartSet() catch |err| {
+        writeErr("failed to resolve service start set: {}\n", .{err});
+        return DeployError.DeploymentFailed;
+    };
+
+    startup_runtime.syncServiceDefinitions(alloc, manifest.services, orch.start_set);
+
+    service_rollout.logStartupSummary();
+    service_reconciler.ensureDataPlaneReadyIfEnabled();
+    service_reconciler.bootstrapIfEnabled();
+    service_reconciler.startAuditLoopIfEnabled();
+    proxy_runtime.bootstrapIfEnabled();
+    orchestrator.installSignalHandlers();
 
     orch.startAll() catch |err| {
         writeErr("failed to start services: {}\n", .{err});

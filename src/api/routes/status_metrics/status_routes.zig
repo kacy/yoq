@@ -15,6 +15,7 @@ const service_registry_bridge = @import("../../../network/service_registry_bridg
 const service_cutover_readiness = @import("../../../network/service_cutover_readiness.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
+const proxy_runtime = @import("../../../network/proxy/runtime.zig");
 
 const Response = common.Response;
 
@@ -56,6 +57,8 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer audit.deinit(alloc);
     var cutover = service_cutover_readiness.snapshot(alloc) catch return common.internalError();
     defer cutover.deinit(alloc);
+    var l7_proxy = proxy_runtime.snapshot(alloc) catch return common.internalError();
+    defer l7_proxy.deinit(alloc);
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
@@ -216,6 +219,29 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     writer.writeAll(",\"last_completed_at\":") catch return common.internalError();
     if (checker.last_completed_at) |timestamp| {
         writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll("},\"l7_proxy\":{") catch return common.internalError();
+    writer.print(
+        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"routes\":{d},\"last_sync_at\":",
+        .{
+            l7_proxy.enabled,
+            l7_proxy.running,
+            l7_proxy.configured_services,
+            l7_proxy.routes,
+        },
+    ) catch return common.internalError();
+    if (l7_proxy.last_sync_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_error\":") catch return common.internalError();
+    if (l7_proxy.last_error) |message| {
+        writer.writeByte('"') catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, message) catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
     } else {
         writer.writeAll("null") catch return common.internalError();
     }

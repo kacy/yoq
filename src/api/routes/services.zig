@@ -155,6 +155,24 @@ fn writeServiceJson(writer: anytype, service: service_registry_runtime.ServiceSn
     try json_helpers.writeJsonEscaped(writer, service.vip_address);
     try writer.writeAll("\",\"lb_policy\":\"");
     try json_helpers.writeJsonEscaped(writer, service.lb_policy);
+    try writer.writeAll("\",\"http_proxy\":");
+    if (service.http_proxy_host) |host| {
+        try writer.writeAll("{\"host\":\"");
+        try json_helpers.writeJsonEscaped(writer, host);
+        try writer.writeAll("\",\"path_prefix\":\"");
+        try json_helpers.writeJsonEscaped(writer, service.http_proxy_path_prefix orelse "/");
+        try writer.print(
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            .{
+                service.http_proxy_retries orelse 0,
+                service.http_proxy_connect_timeout_ms orelse 1000,
+                service.http_proxy_request_timeout_ms orelse 5000,
+                service.http_proxy_preserve_host orelse true,
+            },
+        );
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.print(
         "\",\"total_endpoints\":{d},\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"draining_endpoints\":{d},\"last_reconcile_status\":\"",
         .{
@@ -248,6 +266,12 @@ test "route handles GET /v1/services" {
         .service_name = "api",
         .vip_address = "10.43.0.2",
         .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_retries = 2,
+        .http_proxy_connect_timeout_ms = 1500,
+        .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_preserve_host = false,
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -271,6 +295,7 @@ test "route handles GET /v1/services" {
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }
 

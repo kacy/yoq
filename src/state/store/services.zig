@@ -35,6 +35,12 @@ pub const ServiceRecord = struct {
     service_name: []const u8,
     vip_address: []const u8,
     lb_policy: []const u8,
+    http_proxy_host: ?[]const u8 = null,
+    http_proxy_path_prefix: ?[]const u8 = null,
+    http_proxy_retries: ?i64 = null,
+    http_proxy_connect_timeout_ms: ?i64 = null,
+    http_proxy_request_timeout_ms: ?i64 = null,
+    http_proxy_preserve_host: ?bool = null,
     created_at: i64,
     updated_at: i64,
 
@@ -42,16 +48,24 @@ pub const ServiceRecord = struct {
         alloc.free(self.service_name);
         alloc.free(self.vip_address);
         alloc.free(self.lb_policy);
+        if (self.http_proxy_host) |host| alloc.free(host);
+        if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
     }
 };
 
 const service_columns =
-    "service_name, vip_address, lb_policy, created_at, updated_at";
+    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_preserve_host, created_at, updated_at";
 
 const ServiceRow = struct {
     service_name: sqlite.Text,
     vip_address: sqlite.Text,
     lb_policy: sqlite.Text,
+    http_proxy_host: ?sqlite.Text,
+    http_proxy_path_prefix: ?sqlite.Text,
+    http_proxy_retries: ?i64,
+    http_proxy_connect_timeout_ms: ?i64,
+    http_proxy_request_timeout_ms: ?i64,
+    http_proxy_preserve_host: ?i64,
     created_at: i64,
     updated_at: i64,
 };
@@ -120,6 +134,12 @@ fn rowToServiceRecord(row: ServiceRow) ServiceRecord {
         .service_name = row.service_name.data,
         .vip_address = row.vip_address.data,
         .lb_policy = row.lb_policy.data,
+        .http_proxy_host = if (row.http_proxy_host) |host| host.data else null,
+        .http_proxy_path_prefix = if (row.http_proxy_path_prefix) |path_prefix| path_prefix.data else null,
+        .http_proxy_retries = row.http_proxy_retries,
+        .http_proxy_connect_timeout_ms = row.http_proxy_connect_timeout_ms,
+        .http_proxy_request_timeout_ms = row.http_proxy_request_timeout_ms,
+        .http_proxy_preserve_host = if (row.http_proxy_preserve_host) |preserve_host| preserve_host != 0 else null,
         .created_at = row.created_at,
         .updated_at = row.updated_at,
     };
@@ -153,12 +173,18 @@ fn rowToServiceNameRecord(row: ServiceNameRow) ServiceNameRecord {
 pub fn createService(record: ServiceRecord) StoreError!void {
     const db = try common.getDb();
     db.exec(
-        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?);",
+        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.service_name,
             record.vip_address,
             record.lb_policy,
+            record.http_proxy_host,
+            record.http_proxy_path_prefix,
+            record.http_proxy_retries,
+            record.http_proxy_connect_timeout_ms,
+            record.http_proxy_request_timeout_ms,
+            if (record.http_proxy_preserve_host) |preserve_host| @as(?i64, @intFromBool(preserve_host)) else null,
             record.created_at,
             record.updated_at,
         },
@@ -212,9 +238,50 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
         .service_name = service_name_copy,
         .vip_address = vip_copy,
         .lb_policy = lb_policy_copy,
+        .http_proxy_host = null,
+        .http_proxy_path_prefix = null,
+        .http_proxy_retries = null,
+        .http_proxy_connect_timeout_ms = null,
+        .http_proxy_request_timeout_ms = null,
+        .http_proxy_preserve_host = null,
         .created_at = now,
         .updated_at = now,
     };
+}
+
+pub fn syncServiceConfig(
+    alloc: Allocator,
+    service_name: []const u8,
+    lb_policy: []const u8,
+    http_proxy_host: ?[]const u8,
+    http_proxy_path_prefix: ?[]const u8,
+    http_proxy_retries: ?i64,
+    http_proxy_connect_timeout_ms: ?i64,
+    http_proxy_request_timeout_ms: ?i64,
+    http_proxy_preserve_host: ?bool,
+) StoreError!ServiceRecord {
+    var existing = try ensureService(alloc, service_name, lb_policy);
+    defer existing.deinit(alloc);
+
+    const db = try common.getDb();
+    const now = std.time.timestamp();
+    db.exec(
+        "UPDATE services SET lb_policy = ?, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
+        .{},
+        .{
+            lb_policy,
+            http_proxy_host,
+            http_proxy_path_prefix,
+            http_proxy_retries,
+            http_proxy_connect_timeout_ms,
+            http_proxy_request_timeout_ms,
+            if (http_proxy_preserve_host) |preserve_host| @as(?i64, @intFromBool(preserve_host)) else null,
+            now,
+            service_name,
+        },
+    ) catch return StoreError.WriteFailed;
+
+    return getService(alloc, service_name);
 }
 
 pub fn getService(alloc: Allocator, service_name: []const u8) StoreError!ServiceRecord {
@@ -464,6 +531,12 @@ test "createService and getService round-trip" {
         .service_name = "api",
         .vip_address = "10.43.0.10",
         .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_retries = 2,
+        .http_proxy_connect_timeout_ms = 1500,
+        .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_preserve_host = true,
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -475,6 +548,12 @@ test "createService and getService round-trip" {
     try std.testing.expectEqualStrings("api", service.service_name);
     try std.testing.expectEqualStrings("10.43.0.10", service.vip_address);
     try std.testing.expectEqualStrings("consistent_hash", service.lb_policy);
+    try std.testing.expectEqualStrings("api.internal", service.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/v1", service.http_proxy_path_prefix.?);
+    try std.testing.expectEqual(@as(?i64, 2), service.http_proxy_retries);
+    try std.testing.expectEqual(@as(?i64, 1500), service.http_proxy_connect_timeout_ms);
+    try std.testing.expectEqual(@as(?i64, 5000), service.http_proxy_request_timeout_ms);
+    try std.testing.expectEqual(@as(?bool, true), service.http_proxy_preserve_host);
     try std.testing.expectEqual(@as(i64, 1000), service.created_at);
 }
 
@@ -529,6 +608,34 @@ test "ensureService allocates once and returns the existing VIP thereafter" {
         services.deinit(alloc);
     }
     try std.testing.expectEqual(@as(usize, 1), services.items.len);
+}
+
+test "syncServiceConfig updates proxy policy without changing vip" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    const alloc = std.testing.allocator;
+
+    const first = try ensureService(alloc, "api", "consistent_hash");
+    defer first.deinit(alloc);
+
+    const updated = try syncServiceConfig(
+        alloc,
+        "api",
+        "consistent_hash",
+        "api.internal",
+        "/v1",
+        2,
+        1500,
+        5000,
+        false,
+    );
+    defer updated.deinit(alloc);
+
+    try std.testing.expectEqualStrings(first.vip_address, updated.vip_address);
+    try std.testing.expectEqualStrings("api.internal", updated.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/v1", updated.http_proxy_path_prefix.?);
+    try std.testing.expectEqual(@as(?bool, false), updated.http_proxy_preserve_host);
 }
 
 test "upsertServiceEndpoint updates an existing endpoint" {

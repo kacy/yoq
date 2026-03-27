@@ -69,6 +69,9 @@ pub fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const to
     const tls_config = try fields.parseTlsConfig(alloc, name, table.getTable("tls"));
     errdefer if (tls_config) |tls_config_value| tls_config_value.deinit(alloc);
 
+    const http_proxy = try fields.parseHttpProxyConfig(alloc, name, table.getTable("http_proxy"));
+    errdefer if (http_proxy) |proxy| proxy.deinit(alloc);
+
     const gpu_spec = try fields.parseGpuSpec(alloc, table.getTable("gpu"));
     errdefer if (gpu_spec) |gpu| gpu.deinit(alloc);
 
@@ -86,6 +89,7 @@ pub fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const to
         .health_check = health_check,
         .restart = restart,
         .tls = tls_config,
+        .http_proxy = http_proxy,
         .gpu = gpu_spec,
         .gpu_mesh = gpu_mesh_spec,
     };

@@ -35,6 +35,7 @@ pub const Service = struct {
     health_check: ?shared_types.HealthCheck = null,
     restart: shared_types.RestartPolicy = .none,
     tls: ?shared_types.TlsConfig = null,
+    http_proxy: ?shared_types.HttpProxyConfig = null,
     gpu: ?shared_types.GpuSpec = null,
     gpu_mesh: ?shared_types.GpuMeshSpec = null,
     alerts: ?shared_types.AlertSpec = null,
@@ -46,6 +47,7 @@ pub const Service = struct {
         alloc.free(self.ports);
         if (self.health_check) |hc| hc.deinit(alloc);
         if (self.tls) |tc| tc.deinit(alloc);
+        if (self.http_proxy) |proxy| proxy.deinit(alloc);
         if (self.gpu) |g| g.deinit(alloc);
         if (self.alerts) |a| a.deinit(alloc);
     }

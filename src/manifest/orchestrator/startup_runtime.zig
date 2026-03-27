@@ -56,6 +56,35 @@ pub fn registerHealthChecks(
     if (has_checks) health.startChecker();
 }
 
+pub fn syncServiceDefinitions(
+    alloc: std.mem.Allocator,
+    services: []const spec.Service,
+    start_set: ?std.StringHashMapUnmanaged(void),
+) void {
+    for (services) |svc| {
+        if (!shouldStart(start_set, svc.name)) continue;
+
+        const proxy = svc.http_proxy;
+        const record = store.syncServiceConfig(
+            alloc,
+            svc.name,
+            "consistent_hash",
+            if (proxy) |cfg| cfg.host else null,
+            if (proxy) |cfg| cfg.path_prefix else null,
+            if (proxy) |cfg| @as(i64, cfg.retries) else null,
+            if (proxy) |cfg| @as(i64, cfg.connect_timeout_ms) else null,
+            if (proxy) |cfg| @as(i64, cfg.request_timeout_ms) else null,
+            if (proxy) |cfg| cfg.preserve_host else null,
+        ) catch |err| {
+            log.warn("orchestrator: failed to sync service definition for {s}: {}", .{ svc.name, err });
+            continue;
+        };
+        defer record.deinit(alloc);
+
+        @import("../../network/service_registry_runtime.zig").syncServiceFromStore(svc.name);
+    }
+}
+
 pub fn refreshServiceRuntimeBindings(
     alloc: std.mem.Allocator,
     svc: spec.Service,
@@ -241,4 +270,52 @@ fn provisionAcmeCerts(
     }
 
     return acme_email;
+}
+
+test "syncServiceDefinitions persists http proxy config for started services" {
+    const rollout = @import("../../network/service_rollout.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const test_support = @import("../spec/test_support.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true });
+    defer rollout.resetForTest();
+
+    const alloc = std.testing.allocator;
+    const services = try alloc.alloc(spec.Service, 2);
+    defer alloc.free(services);
+
+    services[0] = try test_support.testService(alloc, "api");
+    defer services[0].deinit(alloc);
+    services[0].http_proxy = .{
+        .host = try alloc.dupe(u8, "api.internal"),
+        .path_prefix = try alloc.dupe(u8, "/v1"),
+        .retries = 2,
+        .connect_timeout_ms = 1500,
+        .request_timeout_ms = 5000,
+        .preserve_host = false,
+    };
+
+    services[1] = try test_support.testService(alloc, "worker");
+    defer services[1].deinit(alloc);
+
+    var start_set: std.StringHashMapUnmanaged(void) = .empty;
+    defer start_set.deinit(alloc);
+    try start_set.put(alloc, "api", {});
+
+    syncServiceDefinitions(alloc, services, start_set);
+
+    const api = try store.getService(alloc, "api");
+    defer api.deinit(alloc);
+    try std.testing.expectEqualStrings("api.internal", api.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/v1", api.http_proxy_path_prefix.?);
+
+    const api_snapshot = try service_registry_runtime.snapshotService(alloc, "api");
+    defer api_snapshot.deinit(alloc);
+    try std.testing.expectEqualStrings("api.internal", api_snapshot.http_proxy_host.?);
+
+    try std.testing.expectError(store.StoreError.NotFound, store.getService(alloc, "worker"));
 }

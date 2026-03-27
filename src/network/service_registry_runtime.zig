@@ -223,6 +223,12 @@ fn loadSnapshotInto(next_registry: *service_registry.Registry) !void {
             .service_name = service.service_name,
             .vip_address = service.vip_address,
             .lb_policy = service.lb_policy,
+            .http_proxy_host = service.http_proxy_host,
+            .http_proxy_path_prefix = service.http_proxy_path_prefix,
+            .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
+            .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+            .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+            .http_proxy_preserve_host = service.http_proxy_preserve_host,
         });
 
         var endpoints = store.listServiceEndpoints(alloc, service.service_name) catch return error.StoreReadFailed;
@@ -267,6 +273,12 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
         .service_name = service.service_name,
         .vip_address = service.vip_address,
         .lb_policy = service.lb_policy,
+        .http_proxy_host = service.http_proxy_host,
+        .http_proxy_path_prefix = service.http_proxy_path_prefix,
+        .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
+        .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+        .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+        .http_proxy_preserve_host = service.http_proxy_preserve_host,
     });
 
     var endpoints = store.listServiceEndpoints(alloc, service_name) catch return error.StoreReadFailed;
@@ -307,6 +319,12 @@ test "runtime bootstraps from persisted services" {
         .service_name = "api",
         .vip_address = "10.43.0.2",
         .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_retries = 2,
+        .http_proxy_connect_timeout_ms = 1500,
+        .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_preserve_host = false,
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -328,6 +346,12 @@ test "runtime bootstraps from persisted services" {
     defer snapshot.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("10.43.0.2", snapshot.vip_address);
+    try std.testing.expectEqualStrings("api.internal", snapshot.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/v1", snapshot.http_proxy_path_prefix.?);
+    try std.testing.expectEqual(@as(?u8, 2), snapshot.http_proxy_retries);
+    try std.testing.expectEqual(@as(?u32, 1500), snapshot.http_proxy_connect_timeout_ms);
+    try std.testing.expectEqual(@as(?u32, 5000), snapshot.http_proxy_request_timeout_ms);
+    try std.testing.expectEqual(@as(?bool, false), snapshot.http_proxy_preserve_host);
     try std.testing.expectEqual(@as(usize, 1), snapshot.total_endpoints);
     try std.testing.expectEqual(@as(usize, 1), snapshot.eligible_endpoints);
 }

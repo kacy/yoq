@@ -145,11 +145,14 @@ test "route handles /v1/status?mode=service_rollout GET" {
     const dns_registry = @import("../../network/dns/registry_support.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
     const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
 
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
     service_rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
     defer service_rollout.resetForTest();
     ebpf_map_support.resetFaultInjectionForTest();
@@ -211,6 +214,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"components\":{\"dns_resolver_running\":true,\"dns_interceptor_loaded\":false,\"load_balancer_loaded\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"backfill\":{\"enabled\":true,\"runs_total\":0,\"services_created_total\":0,\"endpoints_created_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"last_sync_at\":null,\"last_error\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"vip_mismatches_total\":0") != null);
@@ -234,11 +238,14 @@ test "route rollout status reports reconciler cutover ready after clean backfill
     const dns_registry = @import("../../network/dns/registry_support.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
     const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
 
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
     service_registry_backfill.resetForTest();
     defer service_registry_backfill.resetForTest();
     dns_registry.resetRegistryForTest();
@@ -413,15 +420,19 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     const dns_registry = @import("../../network/dns/registry_support.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
     const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
 
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
     service_rollout.setForTest(.{
         .service_registry_v2 = true,
         .service_registry_reconciler = true,
         .dns_returns_vip = true,
+        .l7_proxy_http = true,
     });
     defer service_rollout.resetForTest();
     ebpf_map_support.resetFaultInjectionForTest();
@@ -450,6 +461,16 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
     service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
     service_registry_bridge.markEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
+    try store.createService(.{
+        .service_name = "edge",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "edge.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
 
     const resp = handleMetricsPrometheus(testing.allocator);
     defer if (resp.allocated) testing.allocator.free(resp.body);
@@ -457,9 +478,14 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_shadow_mode 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"service_registry_v2\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"dns_returns_vip\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"l7_proxy_http\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"load_balancer_backends_per_vip\"} 64") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_workers\"} 4") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_queued_checks\"} 64") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_enabled 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_running 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_configured_services 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_routes 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_injections_total{operation=\"container_register\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"container_register\",mode=\"skip_legacy_apply\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"endpoint_healthy\",mode=\"none\"} 1") != null);
