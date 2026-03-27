@@ -31,7 +31,7 @@ struct bpf_map_def SEC("maps") service_names = {
     .type = BPF_MAP_TYPE_HASH,
     .key_size = 64,
     .value_size = 4,
-    .max_entries = 256,
+    .max_entries = 1024,
     .map_flags = 0,
 };
 

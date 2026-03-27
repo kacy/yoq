@@ -15,7 +15,7 @@ pub const MapDef = struct {
 };
 
 pub const maps = [_]MapDef{
-    .{ .name = "service_names", .map_type = 1, .key_size = 64, .value_size = 4, .max_entries = 256 },
+    .{ .name = "service_names", .map_type = 1, .key_size = 64, .value_size = 4, .max_entries = 1024 },
 };
 
 pub const Reloc = struct {
@@ -1074,3 +1074,4 @@ pub const insns = [_]BPF.Insn{
     .{ .code = 0xbf, .dst = 0, .src = 9, .off = 0, .imm = 0 },
     .{ .code = 0x95, .dst = 0, .src = 0, .off = 0, .imm = 0 },
 };
+

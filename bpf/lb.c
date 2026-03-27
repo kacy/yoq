@@ -42,10 +42,10 @@ static long (*bpf_skb_store_bytes)(void *skb, __u32 offset, const void *from,
 
 // service backends: service VIP (virtual IP) → list of backend IPs.
 // key: 4-byte IPv4 address (the service's VIP / first backend IP)
-// value: struct with count + up to 16 backend IPs
+// value: struct with count + up to 64 backend IPs
 struct service_backends {
     __u32 count;
-    __u32 ips[16]; // network byte order
+    __u32 ips[64]; // network byte order
 };
 
 struct bpf_map_def SEC("maps") backends_map = {
@@ -98,7 +98,7 @@ static __attribute__((always_inline)) __u32
 select_backend(__u32 src_ip, struct service_backends *svc)
 {
     // SECURITY: Validate backend count
-    if (svc->count == 0 || svc->count > 16)
+    if (svc->count == 0 || svc->count > 64)
         return 0;
 
     if (svc->count == 1)
@@ -115,8 +115,8 @@ select_backend(__u32 src_ip, struct service_backends *svc)
     hash ^= ((src_ip >> 24) & 0xFF);
     hash *= 16777619U;
 
-    // mask with 0xF so the verifier can prove idx < 16 (array bounds).
-    __u32 idx = (hash % svc->count) & 0xF;
+    // mask with 0x3F so the verifier can prove idx < 64 (array bounds).
+    __u32 idx = (hash % svc->count) & 0x3F;
     return svc->ips[idx];
 }
 
@@ -197,6 +197,9 @@ int lb_ingress(struct __sk_buff *skb)
     if (!svc)
         return TC_ACT_OK; // not a service IP
 
+    if (svc->count == 0)
+        return TC_ACT_SHOT;
+
     // -- connection tracking --
     // SECURITY: Fully initialize all fields to prevent info leaks
     struct conn_key key = {
@@ -218,7 +221,7 @@ int lb_ingress(struct __sk_buff *skb)
         // new connection — select a backend via source-IP hash
         backend_ip = select_backend(ip->saddr, svc);
         if (backend_ip == 0)
-            return TC_ACT_OK;
+            return TC_ACT_SHOT;
 
         // store in conntrack for future packets
         bpf_map_update_elem(&conntrack_map, &key, &backend_ip, 0);

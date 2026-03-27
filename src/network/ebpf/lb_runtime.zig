@@ -9,7 +9,7 @@ const resource_support = @import("resource_support.zig");
 
 const lb_prog = @import("../bpf/lb.zig");
 
-pub const max_backends = 16;
+pub const max_backends = 64;
 
 pub const ServiceBackends = extern struct {
     count: u32,
@@ -47,6 +47,19 @@ pub const LoadBalancer = struct {
         map_support.mapUpdate(self.backends_fd, key, std.mem.asBytes(&backends)) catch |e| {
             log.warn("ebpf: failed to update load balancer backends: {}", .{e});
         };
+    }
+
+    pub fn replaceBackends(self: *const LoadBalancer, vip: [4]u8, backend_ips: []const [4]u8) common.EbpfError!void {
+        if (backend_ips.len > max_backends) return error.InvalidParameter;
+
+        const vip_net = ipToNetworkOrder(vip);
+        var backends: ServiceBackends = std.mem.zeroes(ServiceBackends);
+        backends.count = @intCast(backend_ips.len);
+        for (backend_ips, 0..) |backend_ip, idx| {
+            backends.ips[idx] = ipToNetworkOrder(backend_ip);
+        }
+
+        try map_support.mapUpdate(self.backends_fd, std.mem.asBytes(&vip_net), std.mem.asBytes(&backends));
     }
 
     pub fn removeBackend(self: *const LoadBalancer, vip: [4]u8, backend_ip: [4]u8) void {
@@ -87,6 +100,11 @@ pub const LoadBalancer = struct {
         var backends: ServiceBackends = std.mem.zeroes(ServiceBackends);
         if (!map_support.mapLookup(self.backends_fd, std.mem.asBytes(&vip_net), std.mem.asBytes(&backends))) return null;
         return backends;
+    }
+
+    pub fn deleteBackends(self: *const LoadBalancer, vip: [4]u8) void {
+        const vip_net = ipToNetworkOrder(vip);
+        _ = map_support.mapDelete(self.backends_fd, std.mem.asBytes(&vip_net));
     }
 
     pub fn deinit(self: *LoadBalancer) void {
