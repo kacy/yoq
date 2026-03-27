@@ -24,6 +24,9 @@ const check_runtime = @import("health/check_runtime.zig");
 pub const HealthStatus = types.HealthStatus;
 pub const ServiceHealth = types.ServiceHealth;
 pub const HealthError = types.HealthError;
+pub const CheckerSnapshot = types.CheckerSnapshot;
+pub const max_worker_threads = types.max_worker_threads;
+pub const max_queued_checks = types.max_queued_checks;
 
 pub fn registerService(
     service_name: []const u8,
@@ -52,6 +55,10 @@ pub fn getServiceHealth(service_name: []const u8) ?ServiceHealth {
     return registry_support.getServiceHealth(service_name);
 }
 
+pub fn snapshotChecker() CheckerSnapshot {
+    return registry_support.snapshotChecker();
+}
+
 /// start the health checker thread. idempotent.
 pub fn startChecker() void {
     checker_runtime.startChecker();
@@ -66,7 +73,7 @@ pub fn stopChecker() void {
 
 test "state machine — starting to healthy on first success" {
     var entry = testEntry(.starting);
-    checker_runtime.updateState(&entry, true);
+    _ = checker_runtime.updateState(&entry, true);
     try std.testing.expectEqual(HealthStatus.healthy, entry.status);
     try std.testing.expectEqual(@as(u32, 1), entry.consecutive_successes);
     try std.testing.expectEqual(@as(u32, 0), entry.consecutive_failures);
@@ -75,7 +82,7 @@ test "state machine — starting to healthy on first success" {
 test "state machine — starting stays starting on single failure" {
     var entry = testEntry(.starting);
     entry.config.retries = 3;
-    checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
     try std.testing.expectEqual(HealthStatus.starting, entry.status);
     try std.testing.expectEqual(@as(u32, 1), entry.consecutive_failures);
 }
@@ -84,11 +91,11 @@ test "state machine — starting to unhealthy after retries exhausted" {
     var entry = testEntry(.starting);
     entry.config.retries = 3;
 
-    checker_runtime.updateState(&entry, false);
-    checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
     try std.testing.expectEqual(HealthStatus.starting, entry.status);
 
-    checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
     try std.testing.expectEqual(HealthStatus.unhealthy, entry.status);
     try std.testing.expectEqual(@as(u32, 3), entry.consecutive_failures);
 }
@@ -97,10 +104,10 @@ test "state machine — healthy to unhealthy after retries" {
     var entry = testEntry(.healthy);
     entry.config.retries = 2;
 
-    checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
     try std.testing.expectEqual(HealthStatus.healthy, entry.status);
 
-    checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
     try std.testing.expectEqual(HealthStatus.unhealthy, entry.status);
 }
 
@@ -108,7 +115,7 @@ test "state machine — unhealthy to healthy on single success" {
     var entry = testEntry(.unhealthy);
     entry.consecutive_failures = 5;
 
-    checker_runtime.updateState(&entry, true);
+    _ = checker_runtime.updateState(&entry, true);
     try std.testing.expectEqual(HealthStatus.healthy, entry.status);
     try std.testing.expectEqual(@as(u32, 0), entry.consecutive_failures);
     try std.testing.expectEqual(@as(u32, 1), entry.consecutive_successes);
@@ -118,7 +125,7 @@ test "state machine — healthy stays healthy on success" {
     var entry = testEntry(.healthy);
     entry.consecutive_successes = 10;
 
-    checker_runtime.updateState(&entry, true);
+    _ = checker_runtime.updateState(&entry, true);
     try std.testing.expectEqual(HealthStatus.healthy, entry.status);
     try std.testing.expectEqual(@as(u32, 11), entry.consecutive_successes);
 }
@@ -128,7 +135,7 @@ test "state machine — failure resets consecutive successes" {
     entry.consecutive_successes = 5;
     entry.config.retries = 10; // won't flip to unhealthy
 
-    checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
     try std.testing.expectEqual(@as(u32, 0), entry.consecutive_successes);
     try std.testing.expectEqual(@as(u32, 1), entry.consecutive_failures);
 }
@@ -137,7 +144,7 @@ test "state machine — success resets consecutive failures" {
     var entry = testEntry(.unhealthy);
     entry.consecutive_failures = 5;
 
-    checker_runtime.updateState(&entry, true);
+    _ = checker_runtime.updateState(&entry, true);
     try std.testing.expectEqual(@as(u32, 0), entry.consecutive_failures);
     try std.testing.expectEqual(@as(u32, 1), entry.consecutive_successes);
 }
@@ -146,11 +153,11 @@ test "state machine — intermittent failures don't trigger unhealthy" {
     var entry = testEntry(.healthy);
     entry.config.retries = 3;
 
-    checker_runtime.updateState(&entry, false);
-    checker_runtime.updateState(&entry, false);
-    checker_runtime.updateState(&entry, true);
-    checker_runtime.updateState(&entry, false);
-    checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, true);
+    _ = checker_runtime.updateState(&entry, false);
+    _ = checker_runtime.updateState(&entry, false);
 
     try std.testing.expectEqual(HealthStatus.healthy, entry.status);
 }
@@ -237,8 +244,11 @@ fn testEntry(status: HealthStatus) ServiceHealth {
             .check_type = .{ .tcp = .{ .port = 8080 } },
             .retries = 3,
         },
+        .generation = 1,
         .name_len = 8,
+        .endpoint_id_len = 14,
     };
     @memcpy(entry.name_buf[0..8], "test-svc");
+    @memcpy(entry.endpoint_id_buf[0..14], "abcdef123456:0");
     return entry;
 }

@@ -36,6 +36,11 @@ pub const ReconcileStatus = enum {
     }
 };
 
+pub const ProbeApply = enum {
+    applied,
+    stale_generation,
+};
+
 pub const ActionKind = enum {
     reconcile_service,
 };
@@ -92,6 +97,7 @@ pub const EndpointSnapshot = struct {
     last_seen_at: i64,
     observed_health: []const u8,
     eligible: bool,
+    readiness_required: bool,
     last_transition_at: ?i64,
 
     pub fn deinit(self: EndpointSnapshot, alloc: Allocator) void {
@@ -138,6 +144,7 @@ const EndpointState = struct {
     registered_at: i64,
     last_seen_at: i64,
     observed_health: ObservedHealth = .unknown,
+    readiness_required: bool = false,
     node_lost: bool = false,
     last_transition_at: ?i64 = null,
 
@@ -217,9 +224,12 @@ pub const Registry = struct {
         for (definitions) |definition| {
             var endpoint = try cloneEndpoint(self.alloc, definition);
             if (findEndpoint(service.endpoints.items, definition.endpoint_id)) |existing| {
-                endpoint.observed_health = existing.observed_health;
+                endpoint.readiness_required = existing.readiness_required;
                 endpoint.node_lost = existing.node_lost;
-                endpoint.last_transition_at = existing.last_transition_at;
+                if (existing.generation == definition.generation) {
+                    endpoint.observed_health = existing.observed_health;
+                    endpoint.last_transition_at = existing.last_transition_at;
+                }
             }
             try next_endpoints.append(self.alloc, endpoint);
         }
@@ -265,6 +275,29 @@ pub const Registry = struct {
         endpoint.observed_health = if (healthy) .healthy else .unhealthy;
         endpoint.last_transition_at = std.time.timestamp();
         return buildAction(service_name, .probe_result);
+    }
+
+    pub fn markEndpointPending(self: *Registry, service_name: []const u8, endpoint_id: []const u8, generation: i64) Error!ProbeApply {
+        const endpoint = try self.getEndpointMut(service_name, endpoint_id);
+        if (endpoint.generation != generation) return .stale_generation;
+        endpoint.readiness_required = true;
+        endpoint.observed_health = .unknown;
+        endpoint.last_transition_at = std.time.timestamp();
+        return .applied;
+    }
+
+    pub fn noteProbeResultForGeneration(
+        self: *Registry,
+        service_name: []const u8,
+        endpoint_id: []const u8,
+        generation: i64,
+        healthy: bool,
+    ) Error!ProbeApply {
+        const endpoint = try self.getEndpointMut(service_name, endpoint_id);
+        if (endpoint.generation != generation) return .stale_generation;
+        endpoint.observed_health = if (healthy) .healthy else .unhealthy;
+        endpoint.last_transition_at = std.time.timestamp();
+        return .applied;
     }
 
     pub fn requestReconcile(self: *Registry, service_name: []const u8) Error!Action {
@@ -421,6 +454,7 @@ fn cloneEndpointSnapshot(alloc: Allocator, endpoint: *const EndpointState) Error
         .last_seen_at = endpoint.last_seen_at,
         .observed_health = try alloc.dupe(u8, endpoint.observed_health.label()),
         .eligible = isEndpointEligible(endpoint),
+        .readiness_required = endpoint.readiness_required,
         .last_transition_at = endpoint.last_transition_at,
     };
 }
@@ -457,6 +491,7 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
 fn isEndpointEligible(endpoint: *const EndpointState) bool {
     if (!std.mem.eql(u8, endpoint.admin_state, "active")) return false;
     if (endpoint.node_lost) return false;
+    if (endpoint.readiness_required) return endpoint.observed_health == .healthy;
     return endpoint.observed_health != .unhealthy;
 }
 
@@ -537,6 +572,93 @@ test "replaceServiceEndpoints preserves observed health for matching endpoint id
     try std.testing.expectEqualStrings("healthy", endpoints.items[0].observed_health);
     try std.testing.expectEqualStrings("10.42.0.19", endpoints.items[0].ip_address);
     try std.testing.expect(endpoints.items[0].eligible);
+}
+
+test "markEndpointPending makes health-gated endpoints ineligible until healthy" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    try registry.upsertService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+    });
+    try registry.replaceServiceEndpoints("api", &.{
+        .{
+            .endpoint_id = "ctr-1:0",
+            .container_id = "ctr-1",
+            .node_id = null,
+            .ip_address = "10.42.0.9",
+            .port = 0,
+            .weight = 1,
+            .admin_state = "active",
+            .generation = 1,
+            .registered_at = 1000,
+            .last_seen_at = 1000,
+        },
+    });
+
+    try std.testing.expectEqual(ProbeApply.applied, try registry.markEndpointPending("api", "ctr-1:0", 1));
+
+    var pending = try registry.snapshotServiceEndpoints(std.testing.allocator, "api");
+    defer deinitEndpointSnapshots(std.testing.allocator, &pending);
+    try std.testing.expect(pending.items[0].readiness_required);
+    try std.testing.expect(!pending.items[0].eligible);
+
+    try std.testing.expectEqual(ProbeApply.applied, try registry.noteProbeResultForGeneration("api", "ctr-1:0", 1, true));
+
+    var healthy = try registry.snapshotServiceEndpoints(std.testing.allocator, "api");
+    defer deinitEndpointSnapshots(std.testing.allocator, &healthy);
+    try std.testing.expect(healthy.items[0].eligible);
+}
+
+test "generation changes reset observed health and reject stale probe results" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+
+    try registry.upsertService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+    });
+    try registry.replaceServiceEndpoints("api", &.{
+        .{
+            .endpoint_id = "ctr-1:0",
+            .container_id = "ctr-1",
+            .node_id = null,
+            .ip_address = "10.42.0.9",
+            .port = 0,
+            .weight = 1,
+            .admin_state = "active",
+            .generation = 1,
+            .registered_at = 1000,
+            .last_seen_at = 1000,
+        },
+    });
+    try std.testing.expectEqual(ProbeApply.applied, try registry.markEndpointPending("api", "ctr-1:0", 1));
+    try std.testing.expectEqual(ProbeApply.applied, try registry.noteProbeResultForGeneration("api", "ctr-1:0", 1, true));
+
+    try registry.replaceServiceEndpoints("api", &.{
+        .{
+            .endpoint_id = "ctr-1:0",
+            .container_id = "ctr-1",
+            .node_id = null,
+            .ip_address = "10.42.0.19",
+            .port = 0,
+            .weight = 1,
+            .admin_state = "active",
+            .generation = 2,
+            .registered_at = 1001,
+            .last_seen_at = 1002,
+        },
+    });
+
+    try std.testing.expectEqual(ProbeApply.stale_generation, try registry.noteProbeResultForGeneration("api", "ctr-1:0", 1, false));
+
+    var endpoints = try registry.snapshotServiceEndpoints(std.testing.allocator, "api");
+    defer deinitEndpointSnapshots(std.testing.allocator, &endpoints);
+    try std.testing.expectEqualStrings("unknown", endpoints.items[0].observed_health);
+    try std.testing.expect(!endpoints.items[0].eligible);
 }
 
 test "removeEndpointsByContainer removes matching endpoints from every service" {

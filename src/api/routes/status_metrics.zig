@@ -193,10 +193,12 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expectEqual(http.StatusCode.ok, response.status);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"mode\":\"shadow\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"service_registry_v2\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_registry_services\":256") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_bpf_services\":256") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_backends_per_vip\":16") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_registry_services\":1024") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_bpf_services\":1024") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_backends_per_vip\":64") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"recent_shadow_events\":32") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"health_workers\":4") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"health_queued_checks\":64") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"bridge_fault_injections\":{\"container_register\":1") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"bridge_fault_modes\":{\"container_register\":\"skip_legacy_apply\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"ebpf_map_update_fault\":{\"mode\":\"map_full\",\"injections\":0}") != null);
@@ -204,6 +206,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_interceptor_fault\":{\"mode\":\"unavailable\",\"injections\":0}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_fault\":{\"mode\":\"endpoint_overflow\",\"injections\":0}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"components\":{\"dns_resolver_running\":true,\"dns_interceptor_loaded\":false,\"load_balancer_loaded\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_quarantines_total\":0") != null);
@@ -382,7 +385,9 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_shadow_mode 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"service_registry_v2\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"dns_returns_vip\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"load_balancer_backends_per_vip\"} 16") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"load_balancer_backends_per_vip\"} 64") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_workers\"} 4") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_queued_checks\"} 64") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_injections_total{operation=\"container_register\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"container_register\",mode=\"skip_legacy_apply\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"endpoint_healthy\",mode=\"none\"} 1") != null);
@@ -405,6 +410,11 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_ready{component=\"dns_resolver\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_ready{component=\"dns_interceptor\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_full_resyncs_total 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_running 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_tracked_endpoints 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_queued_checks 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_checks_total{kind=\"scheduled\"} 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_stale_results_total 0") != null);
 }
 
 test "handleGpuMetrics returns valid JSON" {

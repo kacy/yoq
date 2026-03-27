@@ -12,6 +12,7 @@ const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
 const ebpf_map_support = @import("../../../network/ebpf/map_support.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
+const health = @import("../../../manifest/health.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
@@ -257,6 +258,7 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     defer audit.deinit(std.heap.page_allocator);
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
+    const checker = health.snapshotChecker();
 
     try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Service rollout mode, 1 when shadow mode is active\n");
     try writer.writeAll("# TYPE yoq_service_rollout_shadow_mode gauge\n");
@@ -278,6 +280,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_rollout_limit{{limit=\"load_balancer_backends_per_vip\"}} {d}\n", .{lb_runtime.max_backends});
     try writer.print("yoq_service_rollout_limit{{limit=\"conntrack_entries\"}} {d}\n", .{lb_prog.maps[1].max_entries});
     try writer.print("yoq_service_rollout_limit{{limit=\"recent_shadow_events\"}} {d}\n", .{service_reconciler.max_recent_events});
+    try writer.print("yoq_service_rollout_limit{{limit=\"health_workers\"}} {d}\n", .{health.max_worker_threads});
+    try writer.print("yoq_service_rollout_limit{{limit=\"health_queued_checks\"}} {d}\n", .{health.max_queued_checks});
 
     try writer.writeAll("# HELP yoq_service_registry_bridge_fault_injections_total Injected bridge faults by operation\n");
     try writer.writeAll("# TYPE yoq_service_registry_bridge_fault_injections_total counter\n");
@@ -388,6 +392,39 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_service_reconciler_component_full_resyncs_total Full resyncs triggered by component transitions\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_component_full_resyncs_total counter\n");
     try writer.print("yoq_service_reconciler_component_full_resyncs_total {d}\n", .{components.full_resyncs_total});
+
+    try writer.writeAll("# HELP yoq_health_checker_running Whether the health checker scheduler is running\n");
+    try writer.writeAll("# TYPE yoq_health_checker_running gauge\n");
+    try writer.print("yoq_health_checker_running {d}\n", .{@intFromBool(checker.running)});
+
+    try writer.writeAll("# HELP yoq_health_checker_tracked_endpoints Tracked health-checked endpoints\n");
+    try writer.writeAll("# TYPE yoq_health_checker_tracked_endpoints gauge\n");
+    try writer.print("yoq_health_checker_tracked_endpoints {d}\n", .{checker.tracked_endpoints});
+
+    try writer.writeAll("# HELP yoq_health_checker_in_flight_checks In-flight health checks\n");
+    try writer.writeAll("# TYPE yoq_health_checker_in_flight_checks gauge\n");
+    try writer.print("yoq_health_checker_in_flight_checks {d}\n", .{checker.in_flight_checks});
+
+    try writer.writeAll("# HELP yoq_health_checker_queued_checks Queued health checks\n");
+    try writer.writeAll("# TYPE yoq_health_checker_queued_checks gauge\n");
+    try writer.print("yoq_health_checker_queued_checks {d}\n", .{checker.queued_checks});
+
+    try writer.writeAll("# HELP yoq_health_checker_worker_threads Worker threads for health checks\n");
+    try writer.writeAll("# TYPE yoq_health_checker_worker_threads gauge\n");
+    try writer.print("yoq_health_checker_worker_threads {d}\n", .{checker.worker_threads});
+
+    try writer.writeAll("# HELP yoq_health_checker_checks_total Scheduled and completed health checks\n");
+    try writer.writeAll("# TYPE yoq_health_checker_checks_total counter\n");
+    try writer.print("yoq_health_checker_checks_total{{kind=\"scheduled\"}} {d}\n", .{checker.scheduled_total});
+    try writer.print("yoq_health_checker_checks_total{{kind=\"completed\"}} {d}\n", .{checker.completed_total});
+
+    try writer.writeAll("# HELP yoq_health_checker_stale_results_total Stale health check completions rejected by generation or registration epoch\n");
+    try writer.writeAll("# TYPE yoq_health_checker_stale_results_total counter\n");
+    try writer.print("yoq_health_checker_stale_results_total {d}\n", .{checker.stale_results_total});
+
+    try writer.writeAll("# HELP yoq_health_checker_queue_drops_total Health checks dropped because the queue is full\n");
+    try writer.writeAll("# TYPE yoq_health_checker_queue_drops_total counter\n");
+    try writer.print("yoq_health_checker_queue_drops_total {d}\n", .{checker.dropped_queue_full_total});
 }
 
 fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.BridgeOperation) !void {

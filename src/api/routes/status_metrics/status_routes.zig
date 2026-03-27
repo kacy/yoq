@@ -9,6 +9,7 @@ const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
 const ebpf_map_support = @import("../../../network/ebpf/map_support.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
+const health = @import("../../../manifest/health.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
@@ -51,6 +52,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer audit.deinit(alloc);
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
+    const checker = health.snapshotChecker();
 
     var events: [service_reconciler.max_recent_events]service_reconciler.Event = undefined;
     const event_count = service_reconciler.snapshotRecentEvents(&events);
@@ -76,7 +78,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     ) catch return common.internalError();
     writer.writeAll("},\"limits\":{") catch return common.internalError();
     writer.print(
-        "\"dns_registry_services\":{d},\"dns_name_length\":{d},\"dns_bpf_services\":{d},\"load_balancer_vips\":{d},\"load_balancer_backends_per_vip\":{d},\"conntrack_entries\":{d},\"recent_shadow_events\":{d}",
+        "\"dns_registry_services\":{d},\"dns_name_length\":{d},\"dns_bpf_services\":{d},\"load_balancer_vips\":{d},\"load_balancer_backends_per_vip\":{d},\"conntrack_entries\":{d},\"recent_shadow_events\":{d},\"health_workers\":{d},\"health_queued_checks\":{d}",
         .{
             dns_registry.max_services,
             dns_registry.max_name_len,
@@ -85,6 +87,8 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             lb_runtime.max_backends,
             lb_prog.maps[1].max_entries,
             service_reconciler.max_recent_events,
+            health.max_worker_threads,
+            health.max_queued_checks,
         },
     ) catch return common.internalError();
     writer.writeAll("},\"bridge_fault_injections\":{") catch return common.internalError();
@@ -156,6 +160,32 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         },
     ) catch return common.internalError();
     if (components.last_change_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll("},\"health_checker\":{") catch return common.internalError();
+    writer.print(
+        "\"running\":{},\"tracked_endpoints\":{d},\"in_flight_checks\":{d},\"queued_checks\":{d},\"worker_threads\":{d},\"scheduled_total\":{d},\"completed_total\":{d},\"stale_results_total\":{d},\"dropped_queue_full_total\":{d},\"last_scheduled_at\":",
+        .{
+            checker.running,
+            checker.tracked_endpoints,
+            checker.in_flight_checks,
+            checker.queued_checks,
+            checker.worker_threads,
+            checker.scheduled_total,
+            checker.completed_total,
+            checker.stale_results_total,
+            checker.dropped_queue_full_total,
+        },
+    ) catch return common.internalError();
+    if (checker.last_scheduled_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_completed_at\":") catch return common.internalError();
+    if (checker.last_completed_at) |timestamp| {
         writer.print("{d}", .{timestamp}) catch return common.internalError();
     } else {
         writer.writeAll("null") catch return common.internalError();

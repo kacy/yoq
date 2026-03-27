@@ -88,13 +88,6 @@ pub fn unregisterContainerService(container_id: []const u8) void {
 }
 
 pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
-    var endpoint_id_buf: [96]u8 = undefined;
-    const endpoint_id = activeEndpointId(container_id, &endpoint_id_buf);
-    persistEndpoint(service_name, endpoint_id, container_id, container_ip, null);
-    markPersistedEndpointState(service_name, endpoint_id, "active");
-    service_registry_runtime.syncServiceFromStore(service_name);
-    service_registry_runtime.noteProbeResult(service_name, endpoint_id, true);
-
     const operation: BridgeOperation = .endpoint_healthy;
     const mode = activeFaultMode(operation);
     if (!rollout.current().service_registry_reconciler) {
@@ -110,13 +103,6 @@ pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, c
 }
 
 pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
-    var endpoint_id_buf: [96]u8 = undefined;
-    const endpoint_id = activeEndpointId(container_id, &endpoint_id_buf);
-    persistEndpoint(service_name, endpoint_id, container_id, container_ip, null);
-    markPersistedEndpointState(service_name, endpoint_id, "draining");
-    service_registry_runtime.syncServiceFromStore(service_name);
-    service_registry_runtime.noteProbeResult(service_name, endpoint_id, false);
-
     const operation: BridgeOperation = .endpoint_unhealthy;
     const mode = activeFaultMode(operation);
     if (!rollout.current().service_registry_reconciler) {
@@ -186,6 +172,34 @@ fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_
     const ip_address = @import("ip.zig").formatIp(container_ip, &ip_buf);
     const now = std.time.timestamp();
     const persisted_node_id = resolveNodeId(service_name, endpoint_id, node_id);
+    const existing = store.getServiceEndpoint(alloc, service_name, endpoint_id) catch |err| switch (err) {
+        store.StoreError.NotFound => null,
+        else => {
+            log.warn("service registry bridge: failed to load existing endpoint {s} for service {s}: {}", .{ endpoint_id, service_name, err });
+            return;
+        },
+    };
+    defer if (existing) |record| record.deinit(alloc);
+
+    const generation = if (existing) |record|
+        if (std.mem.eql(u8, record.container_id, container_id) and
+            record.node_id == persisted_node_id and
+            std.mem.eql(u8, record.ip_address, ip_address) and
+            record.port == 0)
+            record.generation
+        else
+            record.generation + 1
+    else
+        1;
+    const registered_at = if (existing) |record|
+        if (generation == record.generation) record.registered_at else now
+    else
+        now;
+    const admin_state = if (existing) |record|
+        if (generation == record.generation or !std.mem.eql(u8, record.admin_state, "removed")) record.admin_state else "active"
+    else
+        "active";
+
     store.upsertServiceEndpoint(.{
         .service_name = service_name,
         .endpoint_id = endpoint_id,
@@ -194,9 +208,9 @@ fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_
         .ip_address = ip_address,
         .port = 0,
         .weight = 1,
-        .admin_state = "active",
-        .generation = 1,
-        .registered_at = now,
+        .admin_state = admin_state,
+        .generation = generation,
+        .registered_at = registered_at,
         .last_seen_at = now,
     }) catch |err| {
         log.warn("service registry bridge: failed to persist endpoint {s} for service {s}: {}", .{ endpoint_id, service_name, err });
@@ -218,14 +232,6 @@ fn resolveNodeId(service_name: []const u8, endpoint_id: []const u8, node_id: ?i6
         return endpoint.node_id;
     }
     return null;
-}
-
-fn markPersistedEndpointState(service_name: []const u8, endpoint_id: []const u8, admin_state: []const u8) void {
-    if (rollout.mode() == .legacy) return;
-
-    store.markServiceEndpointAdminState(service_name, endpoint_id, admin_state) catch |err| {
-        log.warn("service registry bridge: failed to mark endpoint {s} state={s} for service {s}: {}", .{ endpoint_id, admin_state, service_name, err });
-    };
 }
 
 fn activeEndpointId(container_id: []const u8, buf: []u8) []const u8 {
@@ -340,15 +346,6 @@ test "bridge can skip shadow record while preserving legacy apply" {
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 10 }), dns.lookupService("web"));
     try std.testing.expectEqual(@as(u64, 0), service_reconciler.eventCountBySource(.health_checker, .endpoint_healthy));
     try std.testing.expectEqual(@as(u64, 1), faultInjectionCount(.endpoint_healthy));
-
-    const alloc = std.testing.allocator;
-    var endpoints = try store.listServiceEndpoints(alloc, "web");
-    defer {
-        for (endpoints.items) |endpoint| endpoint.deinit(alloc);
-        endpoints.deinit(alloc);
-    }
-    try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
-    try std.testing.expectEqualStrings("active", endpoints.items[0].admin_state);
 }
 
 test "fault mode accessor returns configured mode" {
@@ -411,4 +408,25 @@ test "health bridge preserves existing node id for endpoint" {
     try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
     try std.testing.expectEqual(@as(?i64, 7), endpoints.items[0].node_id);
     try std.testing.expectEqualStrings("active", endpoints.items[0].admin_state);
+}
+
+test "health bridge does not overwrite persisted admin_state on probe transitions" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    resetFaultsForTest();
+    defer resetFaultsForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true });
+    defer rollout.resetForTest();
+    service_reconciler.resetForTest();
+
+    registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
+    try store.markServiceEndpointAdminState("api", "abc123:0", "draining");
+
+    markEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
+
+    const endpoint = try store.getServiceEndpoint(std.testing.allocator, "api", "abc123:0");
+    defer endpoint.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("draining", endpoint.admin_state);
 }
