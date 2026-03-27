@@ -406,6 +406,10 @@ fn proxyFailureResponse(err: anyerror) ProxyResponse {
             .status = .bad_gateway,
             .body = "{\"error\":\"upstream response too large\"}",
         },
+        error.ConnectTimedOut => .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"upstream connect timed out\"}",
+        },
         error.ConnectFailed => .{
             .status = .bad_gateway,
             .body = "{\"error\":\"upstream connect failed\"}",
@@ -427,7 +431,7 @@ fn proxyFailureResponse(err: anyerror) ProxyResponse {
 
 fn mapUpstreamFailure(err: anyerror) proxy_runtime.UpstreamFailureKind {
     return switch (err) {
-        error.ConnectFailed => .connect,
+        error.ConnectFailed, error.ConnectTimedOut => .connect,
         error.SendFailed => .send,
         error.ReceiveFailed => .receive,
         else => .other,
@@ -461,15 +465,46 @@ fn parseUpstreamStatusCode(response: []const u8) !u16 {
 fn connectToUpstream(route: proxy_runtime.RouteSnapshot, upstream: *const upstream_mod.Upstream) !posix.socket_t {
     const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
 
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch
+    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0) catch
         return error.ConnectFailed;
     errdefer posix.close(fd);
 
-    setSocketTimeoutMs(fd, route.connect_timeout_ms);
     const addr = std.net.Address.initIp4(upstream_ip, upstream.port);
-    posix.connect(fd, &addr.any, addr.getOsSockLen()) catch return error.ConnectFailed;
+    posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock, error.ConnectionPending => try waitForConnect(fd, route.connect_timeout_ms),
+        error.ConnectionTimedOut => return error.ConnectTimedOut,
+        else => return error.ConnectFailed,
+    };
+    try setSocketBlocking(fd);
     setSocketTimeoutMs(fd, route.request_timeout_ms);
     return fd;
+}
+
+fn waitForConnect(fd: posix.socket_t, timeout_ms: u32) !void {
+    var poll_fds = [_]posix.pollfd{
+        .{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 },
+    };
+    const timeout = clampPollTimeout(timeout_ms);
+    const ready = posix.poll(&poll_fds, timeout) catch return error.ConnectFailed;
+    if (ready == 0) return error.ConnectTimedOut;
+    if (poll_fds[0].revents & posix.POLL.OUT == 0 and poll_fds[0].revents & (posix.POLL.ERR | posix.POLL.HUP) == 0) {
+        return error.ConnectFailed;
+    }
+
+    posix.getsockoptError(fd) catch |err| switch (err) {
+        error.ConnectionTimedOut => return error.ConnectTimedOut,
+        else => return error.ConnectFailed,
+    };
+}
+
+fn setSocketBlocking(fd: posix.socket_t) !void {
+    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return error.ConnectFailed;
+    const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
+    _ = posix.fcntl(fd, posix.F.SETFL, flags & ~nonblock) catch return error.ConnectFailed;
+}
+
+fn clampPollTimeout(timeout_ms: u32) i32 {
+    return @intCast(@min(timeout_ms, @as(u32, @intCast(std.math.maxInt(i32)))));
 }
 
 fn setSocketTimeoutMs(fd: posix.socket_t, timeout_ms: u32) void {
@@ -925,6 +960,10 @@ test "buildForwardRequest preserves body and content length" {
 const TestUpstreamAction = union(enum) {
     close,
     respond: []const u8,
+    delayed_respond: struct {
+        delay_ms: u32,
+        response: []const u8,
+    },
 };
 
 const TestUpstreamServer = struct {
@@ -981,6 +1020,10 @@ const TestUpstreamServer = struct {
             switch (action) {
                 .close => {},
                 .respond => |response| _ = writeAll(client_fd, response) catch {},
+                .delayed_respond => |resp| {
+                    std.Thread.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
+                    _ = writeAll(client_fd, resp.response) catch {};
+                },
             }
             posix.close(client_fd);
         }
@@ -1277,6 +1320,83 @@ test "forwardRequest retries safe methods on upstream 5xx" {
 
     try std.testing.expectEqual(@as(usize, 2), upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
+}
+
+test "forwardRequest returns bad gateway after upstream request timeout" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const actions = [_]TestUpstreamAction{
+        .{ .delayed_respond = .{
+            .delay_ms = 50,
+            .response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        } },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .http_proxy_request_timeout_ms = 10,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .request_timeout_ms = 10,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const response = try proxy.forwardRequest(
+        "GET /users HTTP/1.1\r\nHost: api.internal\r\n\r\n",
+    );
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expectEqual(@as(usize, 1), upstream.accepted);
+    try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 502 Bad Gateway\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "{\"error\":\"upstream receive failed\"}") != null);
 }
 
 test "forwardRequest retries onto a different endpoint after circuit opens" {
