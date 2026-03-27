@@ -949,15 +949,21 @@ fn reconcileAllLocked() !void {
             continue;
         }
 
-        try applyDesiredStateLocked(name, &.{});
+        try applyDesiredStateLocked(name, null, &.{});
     }
 }
 
 fn reconcileServiceLocked(service_name: []const u8) !void {
     const alloc = std.heap.page_allocator;
 
+    const service_snapshot = service_registry_runtime.snapshotService(alloc, service_name) catch |err| switch (err) {
+        error.ServiceNotFound => return try applyDesiredStateLocked(service_name, null, &[_]AppliedEndpoint{}),
+        else => return err,
+    };
+    defer service_snapshot.deinit(alloc);
+
     var endpoint_snapshots = service_registry_runtime.snapshotServiceEndpoints(alloc, service_name) catch |err| switch (err) {
-        error.ServiceNotFound => return try applyDesiredStateLocked(service_name, &[_]AppliedEndpoint{}),
+        error.ServiceNotFound => return try applyDesiredStateLocked(service_name, null, &[_]AppliedEndpoint{}),
         else => return err,
     };
     defer {
@@ -980,22 +986,50 @@ fn reconcileServiceLocked(service_name: []const u8) !void {
         });
     }
 
-    try applyDesiredStateLocked(service_name, desired.items);
-}
-
-fn applyDesiredStateLocked(service_name: []const u8, desired: []const AppliedEndpoint) !void {
-    const alloc = std.heap.page_allocator;
-    const current = currentAppliedEndpoints(service_name);
-
-    for (current) |applied| {
-        if (!containsAppliedEndpoint(desired, applied.container_id, applied.ip)) {
-            dns.unregisterServiceEndpoint(service_name, applied.container_id);
-        }
+    const flags = rollout.current();
+    if (flags.dns_returns_vip and desired.items.len > dns_registry_support.max_backends_per_service) {
+        service_registry_runtime.markReconcileFailed(service_name, "eligible backends exceed load balancer capacity") catch {};
     }
 
-    for (desired) |endpoint| {
-        if (!containsAppliedEndpoint(current, endpoint.container_id, endpoint.ip)) {
-            dns.registerService(service_name, endpoint.container_id, endpoint.ip);
+    const vip = if (flags.dns_returns_vip)
+        (ip_mod.parseIp(service_snapshot.vip_address) orelse return error.StoreReadFailed)
+    else
+        null;
+
+    try applyDesiredStateLocked(service_name, vip, desired.items);
+}
+
+fn applyDesiredStateLocked(service_name: []const u8, vip: ?[4]u8, desired: []const AppliedEndpoint) !void {
+    const alloc = std.heap.page_allocator;
+    const flags = rollout.current();
+
+    if (flags.dns_returns_vip) {
+        if (vip) |service_vip| {
+            var backends: std.ArrayList(dns_registry_support.BackendBinding) = .empty;
+            defer backends.deinit(alloc);
+            for (desired) |endpoint| {
+                try backends.append(alloc, .{
+                    .container_id = endpoint.container_id,
+                    .ip = endpoint.ip,
+                });
+            }
+            dns_registry_support.replaceServiceState(service_name, service_vip, backends.items);
+        } else {
+            dns_registry_support.removeServiceState(service_name);
+        }
+    } else {
+        const current = currentAppliedEndpoints(service_name);
+
+        for (current) |applied| {
+            if (!containsAppliedEndpoint(desired, applied.container_id, applied.ip)) {
+                dns.unregisterServiceEndpoint(service_name, applied.container_id);
+            }
+        }
+
+        for (desired) |endpoint| {
+            if (!containsAppliedEndpoint(current, endpoint.container_id, endpoint.ip)) {
+                dns.registerService(service_name, endpoint.container_id, endpoint.ip);
+            }
         }
     }
 
@@ -1300,6 +1334,56 @@ test "authoritative bootstrap populates DNS and compatibility mirror" {
     bootstrapIfEnabled();
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
+    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
+}
+
+test "authoritative bootstrap returns vip when dns_returns_vip is enabled" {
+    const dns_registry = @import("dns/registry_support.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+    });
+    defer rollout.resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    bootstrapIfEnabled();
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
     var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
     defer {
         for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
@@ -1688,4 +1772,109 @@ test "bootstrap quarantines stale endpoint rows for missing local containers" {
     defer audit.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 1), audit.stale_endpoint_quarantines_total);
     try std.testing.expect(audit.last_stale_quarantine_at != null);
+}
+
+test "vip dns keeps service visible with zero eligible backends" {
+    const dns_registry = @import("dns/registry_support.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+    });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "draining",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
+    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 0), mirrored.items.len);
+}
+
+test "vip dns marks services degraded when eligible backends exceed capacity" {
+    const dns_registry = @import("dns/registry_support.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+    });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    for (0..dns_registry.max_backends_per_service + 1) |idx| {
+        var endpoint_id_buf: [32]u8 = undefined;
+        const endpoint_id = try std.fmt.bufPrint(&endpoint_id_buf, "ctr-{d}:0", .{idx});
+        var container_id_buf: [16]u8 = undefined;
+        const container_id = try std.fmt.bufPrint(&container_id_buf, "ctr-{d}", .{idx});
+        var ip_buf: [16]u8 = undefined;
+        const ip_text = try std.fmt.bufPrint(&ip_buf, "10.42.0.{d}", .{idx + 1});
+        try store.upsertServiceEndpoint(.{
+            .service_name = "api",
+            .endpoint_id = endpoint_id,
+            .container_id = container_id,
+            .node_id = null,
+            .ip_address = ip_text,
+            .port = 0,
+            .weight = 1,
+            .admin_state = "active",
+            .generation = 1,
+            .registered_at = 1000 + @as(i64, @intCast(idx)),
+            .last_seen_at = 1000 + @as(i64, @intCast(idx)),
+        });
+    }
+
+    bootstrapIfEnabled();
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
+    const snapshot = try service_registry_runtime.snapshotService(std.testing.allocator, "api");
+    defer snapshot.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("failed", snapshot.last_reconcile_status);
+    try std.testing.expect(snapshot.degraded);
 }
