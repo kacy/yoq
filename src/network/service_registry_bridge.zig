@@ -53,9 +53,11 @@ pub fn registerContainerService(service_name: []const u8, container_id: []const 
 
     const operation: BridgeOperation = .container_register;
     const mode = activeFaultMode(operation);
-    switch (mode) {
-        .none, .skip_shadow_record => dns.registerService(service_name, container_id, container_ip),
-        .skip_legacy_apply => noteFaultInjection(operation),
+    if (!rollout.current().service_registry_reconciler) {
+        switch (mode) {
+            .none, .skip_shadow_record => dns.registerService(service_name, container_id, container_ip),
+            .skip_legacy_apply => noteFaultInjection(operation),
+        }
     }
     switch (mode) {
         .none, .skip_legacy_apply => service_reconciler.noteContainerRegisteredFrom(.container_runtime, service_name, container_id, container_ip),
@@ -73,9 +75,11 @@ pub fn unregisterContainerService(container_id: []const u8) void {
 
     const operation: BridgeOperation = .container_unregister;
     const mode = activeFaultMode(operation);
-    switch (mode) {
-        .none, .skip_shadow_record => dns.unregisterService(container_id),
-        .skip_legacy_apply => noteFaultInjection(operation),
+    if (!rollout.current().service_registry_reconciler) {
+        switch (mode) {
+            .none, .skip_shadow_record => dns.unregisterService(container_id),
+            .skip_legacy_apply => noteFaultInjection(operation),
+        }
     }
     switch (mode) {
         .none, .skip_legacy_apply => service_reconciler.noteContainerUnregisteredFrom(.container_runtime, container_id),
@@ -93,9 +97,11 @@ pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, c
 
     const operation: BridgeOperation = .endpoint_healthy;
     const mode = activeFaultMode(operation);
-    switch (mode) {
-        .none, .skip_shadow_record => dns.registerService(service_name, container_id, container_ip),
-        .skip_legacy_apply => noteFaultInjection(operation),
+    if (!rollout.current().service_registry_reconciler) {
+        switch (mode) {
+            .none, .skip_shadow_record => dns.registerService(service_name, container_id, container_ip),
+            .skip_legacy_apply => noteFaultInjection(operation),
+        }
     }
     switch (mode) {
         .none, .skip_legacy_apply => service_reconciler.noteEndpointHealthyFrom(.health_checker, service_name, container_id, container_ip),
@@ -113,9 +119,11 @@ pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8,
 
     const operation: BridgeOperation = .endpoint_unhealthy;
     const mode = activeFaultMode(operation);
-    switch (mode) {
-        .none, .skip_shadow_record => dns.unregisterService(container_id),
-        .skip_legacy_apply => noteFaultInjection(operation),
+    if (!rollout.current().service_registry_reconciler) {
+        switch (mode) {
+            .none, .skip_shadow_record => dns.unregisterService(container_id),
+            .skip_legacy_apply => noteFaultInjection(operation),
+        }
     }
     switch (mode) {
         .none, .skip_legacy_apply => service_reconciler.noteEndpointUnhealthyFrom(.health_checker, service_name, container_id, container_ip),
@@ -332,4 +340,32 @@ test "fault mode accessor returns configured mode" {
     try std.testing.expectEqual(FaultMode.none, faultMode(.container_register));
     setFaultModeForTest(.container_register, .skip_legacy_apply);
     try std.testing.expectEqual(FaultMode.skip_legacy_apply, faultMode(.container_register));
+}
+
+test "authoritative reconciler owns legacy DNS writes when enabled" {
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    resetFaultsForTest();
+    defer resetFaultsForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer rollout.resetForTest();
+    service_reconciler.resetForTest();
+
+    setFaultModeForTest(.container_register, .skip_legacy_apply);
+    registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(u64, 0), faultInjectionCount(.container_register));
+
+    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
+    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
 }

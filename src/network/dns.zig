@@ -65,6 +65,10 @@ pub fn unregisterService(container_id: []const u8) void {
     registry_support.unregisterService(container_id);
 }
 
+pub fn unregisterServiceEndpoint(name: []const u8, container_id: []const u8) void {
+    registry_support.unregisterServiceEndpoint(name, container_id);
+}
+
 /// look up the IP for a service name. returns null if not found.
 /// checks the local in-memory registry first, then falls through to
 /// the cluster database if available (cross-node resolution).

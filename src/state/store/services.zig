@@ -327,6 +327,15 @@ pub fn unregisterServiceName(container_id: []const u8) StoreError!void {
     ) catch return StoreError.WriteFailed;
 }
 
+pub fn removeServiceNamesByName(name: []const u8) StoreError!void {
+    const db = try common.getDb();
+    db.exec(
+        "DELETE FROM service_names WHERE name = ?;",
+        .{},
+        .{name},
+    ) catch return StoreError.WriteFailed;
+}
+
 pub fn lookupServiceNames(alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
     const db = try common.getDb();
     var ips: std.ArrayList([]const u8) = .empty;

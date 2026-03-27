@@ -8,6 +8,7 @@ const orchestrator = @import("../../manifest/orchestrator.zig");
 const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const service_rollout = @import("../../network/service_rollout.zig");
+const service_reconciler = @import("../../network/service_reconciler.zig");
 
 const writeErr = cli.writeErr;
 const readApiToken = cli.readApiToken;
@@ -52,6 +53,7 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     log.setFormat(log_fmt);
     service_rollout.logStartupSummary();
+    service_reconciler.bootstrapIfEnabled();
 
     var token_buf: [64]u8 = undefined;
     const token: ?[]const u8 = readApiToken(&token_buf) orelse generateAndSaveToken(&token_buf);
@@ -148,6 +150,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
 
     log.setFormat(log_fmt);
     service_rollout.logStartupSummary();
+    service_reconciler.bootstrapIfEnabled();
 
     var data_dir_buf: [paths.max_path]u8 = undefined;
     const data_dir = cluster_config.defaultDataDir(&data_dir_buf) catch |err| {

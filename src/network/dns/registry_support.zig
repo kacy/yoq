@@ -263,6 +263,39 @@ pub fn unregisterService(container_id: []const u8) void {
     }
 }
 
+pub fn unregisterServiceEndpoint(name: []const u8, container_id: []const u8) void {
+    if (container_id.len == 0 or name.len == 0) {
+        log.warn("dns: unregisterServiceEndpoint called with empty name/container_id", .{});
+        return;
+    }
+
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+
+    const cid_len = @min(container_id.len, 12);
+    for (&registry) |*entry| {
+        if (entry.active and
+            entry.name_len == name.len and
+            std.mem.eql(u8, entry.name[0..entry.name_len], name) and
+            entry.container_id_len == cid_len and
+            std.mem.eql(u8, entry.container_id[0..entry.container_id_len], container_id[0..cid_len]))
+        {
+            const old_ip = entry.ip;
+            policy.removeForContainer(old_ip, std.heap.page_allocator);
+            deleteBpfBackend(name, old_ip);
+            entry.active = false;
+            registry_count -= 1;
+
+            if (findLatestActiveEntryLocked(name)) |survivor| {
+                updateBpfMap(survivor.name[0..survivor.name_len], survivor.ip);
+            } else {
+                deleteBpfMap(name);
+            }
+            return;
+        }
+    }
+}
+
 pub fn lookupService(name: []const u8) ?[4]u8 {
     {
         registry_mutex.lock();
