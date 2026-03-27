@@ -16,6 +16,7 @@ const service_cutover_readiness = @import("../../../network/service_cutover_read
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 const proxy_runtime = @import("../../../network/proxy/runtime.zig");
+const listener_runtime = @import("../../../network/proxy/listener_runtime.zig");
 
 const Response = common.Response;
 
@@ -59,6 +60,8 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer cutover.deinit(alloc);
     var l7_proxy = proxy_runtime.snapshot(alloc) catch return common.internalError();
     defer l7_proxy.deinit(alloc);
+    var l7_listener = listener_runtime.snapshot(alloc) catch return common.internalError();
+    defer l7_listener.deinit(alloc);
     var l7_routes = proxy_runtime.snapshotRoutes(alloc) catch return common.internalError();
     defer {
         for (l7_routes.items) |route| route.deinit(alloc);
@@ -290,6 +293,24 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         ) catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
+    writer.writeAll("},\"listener\":{") catch return common.internalError();
+    writer.print(
+        "\"enabled\":{},\"running\":{},\"port\":{d},\"accepted_connections_total\":{d},\"active_connections\":{d},\"last_error\":",
+        .{
+            l7_listener.enabled,
+            l7_listener.running,
+            l7_listener.port,
+            l7_listener.accepted_connections_total,
+            l7_listener.active_connections,
+        },
+    ) catch return common.internalError();
+    if (l7_listener.last_error) |message| {
+        writer.writeByte('"') catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, message) catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
     writer.writeAll("},\"audit\":{") catch return common.internalError();
     writer.print(
         "\"enabled\":{},\"running\":{},\"passes_total\":{d},\"mismatch_services_total\":{d},\"vip_mismatches_total\":{d},\"endpoint_count_mismatches_total\":{d},\"stale_endpoint_mismatches_total\":{d},\"eligibility_mismatches_total\":{d},\"repairs_total\":{d},\"stale_endpoint_quarantines_total\":{d},\"last_audit_at\":",

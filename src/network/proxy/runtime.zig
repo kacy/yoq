@@ -281,6 +281,44 @@ pub fn snapshotRoutes(alloc: std.mem.Allocator) !std.ArrayList(RouteSnapshot) {
     return routes_snapshot;
 }
 
+pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Route) {
+    mutex.lock();
+    defer mutex.unlock();
+
+    var routes_snapshot: std.ArrayList(router.Route) = .empty;
+    errdefer {
+        for (routes_snapshot.items) |route| {
+            alloc.free(route.name);
+            alloc.free(route.service);
+            alloc.free(route.vip_address);
+            if (route.match.host) |host| alloc.free(host);
+            alloc.free(route.match.path_prefix);
+        }
+        routes_snapshot.deinit(alloc);
+    }
+
+    for (materialized_routes.items) |route| {
+        try routes_snapshot.append(alloc, .{
+            .name = try alloc.dupe(u8, route.name),
+            .service = try alloc.dupe(u8, route.service),
+            .vip_address = try alloc.dupe(u8, route.vip_address),
+            .match = .{
+                .host = if (route.match.host) |host| try alloc.dupe(u8, host) else null,
+                .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
+            },
+            .eligible_endpoints = route.eligible_endpoints,
+            .healthy_endpoints = route.healthy_endpoints,
+            .degraded = route.degraded,
+            .retries = route.retries,
+            .connect_timeout_ms = route.connect_timeout_ms,
+            .request_timeout_ms = route.request_timeout_ms,
+            .preserve_host = route.preserve_host,
+        });
+    }
+
+    return routes_snapshot;
+}
+
 pub fn snapshotServiceRoutes(alloc: std.mem.Allocator, service_name: []const u8) !std.ArrayList(RouteSnapshot) {
     {
         const service = try service_registry_runtime.snapshotService(alloc, service_name);
