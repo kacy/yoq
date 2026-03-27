@@ -7,8 +7,28 @@ const vip_allocator = @import("../../network/vip_allocator.zig");
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
 
-const ServiceNameRow = struct {
+const ServiceNameIpRow = struct {
     ip_address: sqlite.Text,
+};
+
+const ServiceNameRow = struct {
+    name: sqlite.Text,
+    container_id: sqlite.Text,
+    ip_address: sqlite.Text,
+    registered_at: i64,
+};
+
+pub const ServiceNameRecord = struct {
+    name: []const u8,
+    container_id: []const u8,
+    ip_address: []const u8,
+    registered_at: i64,
+
+    pub fn deinit(self: ServiceNameRecord, alloc: Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.container_id);
+        alloc.free(self.ip_address);
+    }
 };
 
 pub const ServiceRecord = struct {
@@ -118,6 +138,15 @@ fn rowToServiceEndpointRecord(row: ServiceEndpointRow) ServiceEndpointRecord {
         .generation = row.generation,
         .registered_at = row.registered_at,
         .last_seen_at = row.last_seen_at,
+    };
+}
+
+fn rowToServiceNameRecord(row: ServiceNameRow) ServiceNameRecord {
+    return .{
+        .name = row.name.data,
+        .container_id = row.container_id.data,
+        .ip_address = row.ip_address.data,
+        .registered_at = row.registered_at,
     };
 }
 
@@ -355,11 +384,25 @@ pub fn lookupServiceNames(alloc: Allocator, name: []const u8) StoreError!std.Arr
         "SELECT ip_address FROM service_names WHERE name = ? ORDER BY registered_at DESC;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
-    var iter = stmt.iterator(ServiceNameRow, .{name}) catch return StoreError.ReadFailed;
+    var iter = stmt.iterator(ServiceNameIpRow, .{name}) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
         ips.append(alloc, row.ip_address.data) catch return StoreError.ReadFailed;
     }
     return ips;
+}
+
+pub fn listServiceNames(alloc: Allocator) StoreError!std.ArrayList(ServiceNameRecord) {
+    const db = try common.getDb();
+    var names: std.ArrayList(ServiceNameRecord) = .empty;
+    var stmt = db.prepare(
+        "SELECT name, container_id, ip_address, registered_at FROM service_names ORDER BY name, registered_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(ServiceNameRow, .{}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        names.append(alloc, rowToServiceNameRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return names;
 }
 
 pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const u8) StoreError!void {

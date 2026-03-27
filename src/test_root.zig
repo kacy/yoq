@@ -49,6 +49,7 @@ comptime {
     _ = @import("network/service_rollout.zig");
     _ = @import("network/service_reconciler.zig");
     _ = @import("network/service_registry.zig");
+    _ = @import("network/service_registry_backfill.zig");
     _ = @import("network/service_registry_bridge.zig");
     _ = @import("network/service_registry_runtime.zig");
     _ = @import("build/dockerfile.zig");
