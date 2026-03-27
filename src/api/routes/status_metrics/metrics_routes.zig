@@ -255,6 +255,7 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     const is_shadow = service_rollout.mode() == .shadow;
     var audit = try service_reconciler.snapshotAuditState(std.heap.page_allocator);
     defer audit.deinit(std.heap.page_allocator);
+    const node_signals = service_reconciler.snapshotNodeSignalState();
 
     try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Service rollout mode, 1 when shadow mode is active\n");
     try writer.writeAll("# TYPE yoq_service_rollout_shadow_mode gauge\n");
@@ -359,6 +360,15 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_service_reconciler_degraded_services Current degraded services tracked by audits\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_degraded_services gauge\n");
     try writer.print("yoq_service_reconciler_degraded_services {d}\n", .{audit.degraded_services.items.len});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_node_signals_total Node loss and recovery signals processed by the reconciler\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_node_signals_total counter\n");
+    try writer.print("yoq_service_reconciler_node_signals_total{{kind=\"lost\"}} {d}\n", .{node_signals.lost_total});
+    try writer.print("yoq_service_reconciler_node_signals_total{{kind=\"recovered\"}} {d}\n", .{node_signals.recovered_total});
+
+    try writer.writeAll("# HELP yoq_service_reconciler_node_signal_endpoints_changed_total Endpoint eligibility changes from node signals\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_node_signal_endpoints_changed_total counter\n");
+    try writer.print("yoq_service_reconciler_node_signal_endpoints_changed_total {d}\n", .{node_signals.endpoints_changed_total});
 }
 
 fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.BridgeOperation) !void {

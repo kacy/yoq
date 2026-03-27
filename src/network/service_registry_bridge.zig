@@ -45,10 +45,10 @@ var fault_mutex: std.Thread.Mutex = .{};
 var fault_modes: [@typeInfo(BridgeOperation).@"enum".fields.len]FaultMode = [_]FaultMode{.none} ** @typeInfo(BridgeOperation).@"enum".fields.len;
 var fault_counts: [@typeInfo(BridgeOperation).@"enum".fields.len]u64 = [_]u64{0} ** @typeInfo(BridgeOperation).@"enum".fields.len;
 
-pub fn registerContainerService(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
+pub fn registerContainerService(service_name: []const u8, container_id: []const u8, container_ip: [4]u8, node_id: ?i64) void {
     var endpoint_id_buf: [96]u8 = undefined;
     const endpoint_id = activeEndpointId(container_id, &endpoint_id_buf);
-    persistEndpoint(service_name, endpoint_id, container_id, container_ip);
+    persistEndpoint(service_name, endpoint_id, container_id, container_ip, node_id);
     service_registry_runtime.syncServiceFromStore(service_name);
 
     const operation: BridgeOperation = .container_register;
@@ -90,7 +90,7 @@ pub fn unregisterContainerService(container_id: []const u8) void {
 pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     var endpoint_id_buf: [96]u8 = undefined;
     const endpoint_id = activeEndpointId(container_id, &endpoint_id_buf);
-    persistEndpoint(service_name, endpoint_id, container_id, container_ip);
+    persistEndpoint(service_name, endpoint_id, container_id, container_ip, null);
     markPersistedEndpointState(service_name, endpoint_id, "active");
     service_registry_runtime.syncServiceFromStore(service_name);
     service_registry_runtime.noteProbeResult(service_name, endpoint_id, true);
@@ -112,7 +112,7 @@ pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, c
 pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     var endpoint_id_buf: [96]u8 = undefined;
     const endpoint_id = activeEndpointId(container_id, &endpoint_id_buf);
-    persistEndpoint(service_name, endpoint_id, container_id, container_ip);
+    persistEndpoint(service_name, endpoint_id, container_id, container_ip, null);
     markPersistedEndpointState(service_name, endpoint_id, "draining");
     service_registry_runtime.syncServiceFromStore(service_name);
     service_registry_runtime.noteProbeResult(service_name, endpoint_id, false);
@@ -172,7 +172,7 @@ fn noteFaultInjection(operation: BridgeOperation) void {
     });
 }
 
-fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_id: []const u8, container_ip: [4]u8) void {
+fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_id: []const u8, container_ip: [4]u8, node_id: ?i64) void {
     if (rollout.mode() == .legacy) return;
 
     const alloc = std.heap.page_allocator;
@@ -185,11 +185,12 @@ fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_
     var ip_buf: [16]u8 = undefined;
     const ip_address = @import("ip.zig").formatIp(container_ip, &ip_buf);
     const now = std.time.timestamp();
+    const persisted_node_id = resolveNodeId(service_name, endpoint_id, node_id);
     store.upsertServiceEndpoint(.{
         .service_name = service_name,
         .endpoint_id = endpoint_id,
         .container_id = container_id,
-        .node_id = null,
+        .node_id = persisted_node_id,
         .ip_address = ip_address,
         .port = 0,
         .weight = 1,
@@ -200,6 +201,23 @@ fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_
     }) catch |err| {
         log.warn("service registry bridge: failed to persist endpoint {s} for service {s}: {}", .{ endpoint_id, service_name, err });
     };
+}
+
+fn resolveNodeId(service_name: []const u8, endpoint_id: []const u8, node_id: ?i64) ?i64 {
+    if (node_id) |resolved| return resolved;
+
+    const alloc = std.heap.page_allocator;
+    var endpoints = store.listServiceEndpoints(alloc, service_name) catch return null;
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+        endpoints.deinit(alloc);
+    }
+
+    for (endpoints.items) |endpoint| {
+        if (!std.mem.eql(u8, endpoint.endpoint_id, endpoint_id)) continue;
+        return endpoint.node_id;
+    }
+    return null;
 }
 
 fn markPersistedEndpointState(service_name: []const u8, endpoint_id: []const u8, admin_state: []const u8) void {
@@ -225,7 +243,7 @@ test "container bridge preserves legacy DNS and shadow events" {
     defer rollout.resetForTest();
     service_reconciler.resetForTest();
 
-    registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
+    registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCount(.container_registered));
@@ -296,7 +314,7 @@ test "bridge can skip legacy apply while preserving shadow event" {
     service_reconciler.resetForTest();
 
     setFaultModeForTest(.container_register, .skip_legacy_apply);
-    registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
+    registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
 
     try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCountBySource(.container_runtime, .container_registered));
@@ -356,7 +374,7 @@ test "authoritative reconciler owns legacy DNS writes when enabled" {
     service_reconciler.resetForTest();
 
     setFaultModeForTest(.container_register, .skip_legacy_apply);
-    registerContainerService("api", "abc123", .{ 10, 42, 0, 9 });
+    registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 0), faultInjectionCount(.container_register));
@@ -368,4 +386,29 @@ test "authoritative reconciler owns legacy DNS writes when enabled" {
     }
     try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
     try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
+}
+
+test "health bridge preserves existing node id for endpoint" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    resetFaultsForTest();
+    defer resetFaultsForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true });
+    defer rollout.resetForTest();
+    service_reconciler.resetForTest();
+
+    registerContainerService("api", "abc123", .{ 10, 42, 7, 9 }, 7);
+    markEndpointHealthy("api", "abc123", .{ 10, 42, 7, 9 });
+
+    var endpoints = try store.listServiceEndpoints(std.testing.allocator, "api");
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(std.testing.allocator);
+        endpoints.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
+    try std.testing.expectEqual(@as(?i64, 7), endpoints.items[0].node_id);
+    try std.testing.expectEqualStrings("active", endpoints.items[0].admin_state);
 }
