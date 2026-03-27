@@ -1,6 +1,7 @@
 const std = @import("std");
 const cluster_registry = @import("../cluster/registry.zig");
 const dns = @import("dns.zig");
+const dns_registry_support = @import("dns/registry_support.zig");
 const ip_mod = @import("ip.zig");
 const log = @import("../lib/log.zig");
 const bridge = @import("bridge.zig");
@@ -62,6 +63,7 @@ pub const Event = struct {
 
 pub const max_recent_events = 32;
 pub const audit_interval_secs: u64 = 30;
+const max_retry_backoff_secs: i64 = 300;
 
 const AppliedEndpoint = struct {
     container_id: []const u8,
@@ -80,6 +82,16 @@ const AppliedService = struct {
         alloc.free(self.service_name);
         for (self.endpoints.items) |endpoint| endpoint.deinit(alloc);
         self.endpoints.deinit(alloc);
+    }
+};
+
+const RetryState = struct {
+    service_name: []const u8,
+    failures: u32,
+    next_retry_at: i64,
+
+    fn deinit(self: RetryState, alloc: std.mem.Allocator) void {
+        alloc.free(self.service_name);
     }
 };
 
@@ -136,6 +148,7 @@ var logged_authoritative_flag_notice: bool = false;
 var authoritative_bootstrapped: bool = false;
 var applied_services: std.ArrayList(AppliedService) = .empty;
 var degraded_services: std.ArrayList([]const u8) = .empty;
+var retry_states: std.ArrayList(RetryState) = .empty;
 var audit_passes_total: u64 = 0;
 var audit_mismatch_services_total: u64 = 0;
 var audit_repairs_total: u64 = 0;
@@ -237,6 +250,7 @@ pub fn resetForTest() void {
     authoritative_bootstrapped = false;
     deinitAppliedServicesLocked();
     deinitDegradedServicesLocked();
+    deinitRetryStatesLocked();
     audit_passes_total = 0;
     audit_mismatch_services_total = 0;
     audit_repairs_total = 0;
@@ -562,6 +576,7 @@ fn auditOnceLocked() !void {
 
 fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.ArrayList(service_registry_runtime.ServiceSnapshot)) !void {
     const alloc = std.heap.page_allocator;
+    const now = std.time.timestamp();
 
     const runtime_service = findRuntimeService(runtime_services.items, service_name);
     const db_service = store.getService(alloc, service_name) catch |err| switch (err) {
@@ -575,10 +590,13 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
 
     if (mismatch_reason) |reason| {
         audit_mismatch_services_total += 1;
-        last_mismatch_at = std.time.timestamp();
+        last_mismatch_at = now;
         log.warn("service reconciler: audit mismatch service={s} reason={s}", .{ service_name, reason });
-        try degraded_services.append(alloc, try alloc.dupe(u8, service_name));
         service_registry_runtime.markReconcileFailed(service_name, reason) catch {};
+        try ensureDegradedServiceLocked(service_name);
+
+        if (!retryDueLocked(service_name, now)) return;
+
         service_registry_runtime.syncServiceFromStore(service_name);
         try reconcileServiceLocked(service_name);
 
@@ -594,25 +612,45 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
         if (repaired_reason == null) {
             audit_repairs_total += 1;
             removeDegradedServiceLocked(service_name);
+            clearRetryStateLocked(service_name);
             service_registry_runtime.markReconcileSucceeded(service_name) catch {};
+        } else {
+            noteRetryFailureLocked(service_name, now) catch |err| {
+                log.warn("service reconciler: failed to track retry backoff for {s}: {}", .{ service_name, err });
+            };
         }
         return;
     }
 
+    removeDegradedServiceLocked(service_name);
+    clearRetryStateLocked(service_name);
     service_registry_runtime.markReconcileSucceeded(service_name) catch {};
 }
 
 fn quarantineStaleEndpointsLocked() void {
-    const cluster_db = dns.currentClusterDb() orelse return;
     const alloc = std.heap.page_allocator;
 
-    const agents = cluster_registry.listAgents(alloc, cluster_db) catch |err| {
-        log.warn("service reconciler: failed to load cluster agents for stale endpoint scan: {}", .{err});
+    const agents = blk: {
+        const cluster_db = dns.currentClusterDb() orelse break :blk null;
+        break :blk cluster_registry.listAgents(alloc, cluster_db) catch |err| {
+            log.warn("service reconciler: failed to load cluster agents for stale endpoint scan: {}", .{err});
+            break :blk null;
+        };
+    };
+    defer {
+        if (agents) |records| {
+            for (records) |agent| agent.deinit(alloc);
+            alloc.free(records);
+        }
+    }
+
+    var containers = store.listAll(alloc) catch |err| {
+        log.warn("service reconciler: failed to list local containers for stale endpoint scan: {}", .{err});
         return;
     };
     defer {
-        for (agents) |agent| agent.deinit(alloc);
-        alloc.free(agents);
+        for (containers.items) |container| container.deinit(alloc);
+        containers.deinit(alloc);
     }
 
     var services = store.listServices(alloc) catch |err| {
@@ -642,14 +680,29 @@ fn quarantineStaleEndpointsLocked() void {
         }
 
         for (endpoints.items) |endpoint| {
-            const node_id = endpoint.node_id orelse continue;
             if (std.mem.eql(u8, endpoint.admin_state, "draining")) continue;
-            if (agentExistsForNodeId(agents, node_id)) continue;
 
-            log.warn(
-                "service reconciler: quarantining stale endpoint service={s} endpoint={s} node_id={}",
-                .{ service.service_name, endpoint.endpoint_id, node_id },
-            );
+            var should_quarantine = false;
+            if (endpoint.node_id) |node_id| {
+                if (agents) |records| {
+                    if (!agentExistsForNodeId(records, node_id)) {
+                        log.warn(
+                            "service reconciler: quarantining stale endpoint service={s} endpoint={s} node_id={}",
+                            .{ service.service_name, endpoint.endpoint_id, node_id },
+                        );
+                        should_quarantine = true;
+                    }
+                }
+            } else if (!containerExistsForId(containers.items, endpoint.container_id)) {
+                log.warn(
+                    "service reconciler: quarantining stale endpoint service={s} endpoint={s} missing local container={s}",
+                    .{ service.service_name, endpoint.endpoint_id, endpoint.container_id },
+                );
+                should_quarantine = true;
+            }
+
+            if (!should_quarantine) continue;
+
             store.markServiceEndpointAdminState(service.service_name, endpoint.endpoint_id, "draining") catch |err| {
                 log.warn(
                     "service reconciler: failed to quarantine stale endpoint service={s} endpoint={s}: {}",
@@ -719,10 +772,64 @@ fn computeAuditMismatchReason(
 
     var desired_ips: std.ArrayList([4]u8) = .empty;
     defer desired_ips.deinit(alloc);
+    var desired_endpoints: std.ArrayList(AppliedEndpoint) = .empty;
+    defer {
+        for (desired_endpoints.items) |endpoint| endpoint.deinit(alloc);
+        desired_endpoints.deinit(alloc);
+    }
     for (runtime_endpoints.items) |endpoint| {
         if (!endpoint.eligible) continue;
         const endpoint_ip = ip_mod.parseIp(endpoint.ip_address) orelse continue;
         if (!containsIp(desired_ips.items, endpoint_ip)) try desired_ips.append(alloc, endpoint_ip);
+        try desired_endpoints.append(alloc, .{
+            .container_id = try alloc.dupe(u8, endpoint.container_id),
+            .ip = endpoint_ip,
+        });
+    }
+
+    var registry_endpoints = dns_registry_support.snapshotServiceEntries(alloc, service_name) catch return error.StoreReadFailed;
+    defer {
+        for (registry_endpoints.items) |endpoint| endpoint.deinit(alloc);
+        registry_endpoints.deinit(alloc);
+    }
+    if (registry_endpoints.items.len != desired_endpoints.items.len) {
+        return try std.fmt.allocPrint(alloc, "dns registry endpoint count drift registry={d} desired={d}", .{
+            registry_endpoints.items.len,
+            desired_endpoints.items.len,
+        });
+    }
+    for (registry_endpoints.items) |endpoint| {
+        if (!containsAppliedEndpoint(desired_endpoints.items, endpoint.container_id, endpoint.ip)) {
+            return try alloc.dupe(u8, "dns registry endpoints differ from eligible set");
+        }
+    }
+
+    if (component_state.dns_interceptor_loaded) {
+        const expected_dns_ip = dns_registry_support.lookupLocalService(service_name);
+        const actual_dns_ip = dns_registry_support.lookupDnsInterceptorService(service_name);
+        if (!optionalIpEqual(expected_dns_ip, actual_dns_ip)) {
+            return try alloc.dupe(u8, "dns interceptor map differs from registry");
+        }
+    }
+
+    if (component_state.load_balancer_loaded) {
+        var maybe_lb_backends = dns_registry_support.snapshotLoadBalancerBackends(alloc, service_name) catch return error.StoreReadFailed;
+        if (maybe_lb_backends) |backends_value| {
+            var backends = backends_value;
+            defer backends.deinit(alloc);
+
+            if (backends.items.len != desired_ips.items.len) {
+                return try std.fmt.allocPrint(alloc, "load balancer backend count drift backends={d} desired={d}", .{
+                    backends.items.len,
+                    desired_ips.items.len,
+                });
+            }
+            for (backends.items) |backend_ip| {
+                if (!containsIp(desired_ips.items, backend_ip)) {
+                    return try alloc.dupe(u8, "load balancer backends differ from eligible set");
+                }
+            }
+        }
     }
 
     if (mirror_ips.items.len != desired_ips.items.len) {
@@ -803,6 +910,13 @@ fn agentExistsForNodeId(agents: []const cluster_registry.AgentRecord, node_id: i
     for (agents) |agent| {
         const candidate = agent.node_id orelse continue;
         if (candidate == node_id) return true;
+    }
+    return false;
+}
+
+fn containerExistsForId(containers: []const store.ContainerRecord, container_id: []const u8) bool {
+    for (containers) |container| {
+        if (std.mem.eql(u8, container.id, container_id)) return true;
     }
     return false;
 }
@@ -976,6 +1090,12 @@ fn containsIp(ips: []const [4]u8, candidate: [4]u8) bool {
     return false;
 }
 
+fn optionalIpEqual(lhs: ?[4]u8, rhs: ?[4]u8) bool {
+    if (lhs == null and rhs == null) return true;
+    if (lhs == null or rhs == null) return false;
+    return std.mem.eql(u8, lhs.?[0..], rhs.?[0..]);
+}
+
 fn findRuntimeService(services: []const service_registry_runtime.ServiceSnapshot, service_name: []const u8) ?service_registry_runtime.ServiceSnapshot {
     for (services) |service| {
         if (std.mem.eql(u8, service.service_name, service_name)) return service;
@@ -997,6 +1117,18 @@ fn deinitDegradedServicesLocked() void {
     degraded_services = .empty;
 }
 
+fn deinitRetryStatesLocked() void {
+    const alloc = std.heap.page_allocator;
+    for (retry_states.items) |state| state.deinit(alloc);
+    retry_states.deinit(alloc);
+    retry_states = .empty;
+}
+
+fn ensureDegradedServiceLocked(service_name: []const u8) !void {
+    if (containsServiceName(degraded_services.items, service_name)) return;
+    try degraded_services.append(std.heap.page_allocator, try std.heap.page_allocator.dupe(u8, service_name));
+}
+
 fn removeDegradedServiceLocked(service_name: []const u8) void {
     var idx: usize = 0;
     while (idx < degraded_services.items.len) {
@@ -1009,6 +1141,46 @@ fn removeDegradedServiceLocked(service_name: []const u8) void {
     }
 }
 
+fn retryDueLocked(service_name: []const u8, now: i64) bool {
+    const idx = findRetryStateIndex(service_name) orelse return true;
+    return retry_states.items[idx].next_retry_at <= now;
+}
+
+fn noteRetryFailureLocked(service_name: []const u8, now: i64) !void {
+    const idx = findRetryStateIndex(service_name) orelse {
+        const service_name_copy = try std.heap.page_allocator.dupe(u8, service_name);
+        errdefer std.heap.page_allocator.free(service_name_copy);
+        try retry_states.append(std.heap.page_allocator, .{
+            .service_name = service_name_copy,
+            .failures = 1,
+            .next_retry_at = nextRetryAt(now, 1),
+        });
+        return;
+    };
+
+    retry_states.items[idx].failures +|= 1;
+    retry_states.items[idx].next_retry_at = nextRetryAt(now, retry_states.items[idx].failures);
+}
+
+fn clearRetryStateLocked(service_name: []const u8) void {
+    const idx = findRetryStateIndex(service_name) orelse return;
+    const state = retry_states.orderedRemove(idx);
+    state.deinit(std.heap.page_allocator);
+}
+
+fn findRetryStateIndex(service_name: []const u8) ?usize {
+    for (retry_states.items, 0..) |state, idx| {
+        if (std.mem.eql(u8, state.service_name, service_name)) return idx;
+    }
+    return null;
+}
+
+fn nextRetryAt(now: i64, failures: u32) i64 {
+    const shifts = @min(failures -| 1, 4);
+    const interval = @as(i64, @intCast(audit_interval_secs)) << @as(u6, @intCast(shifts));
+    return now + @min(interval, max_retry_backoff_secs);
+}
+
 fn clearLastAuditErrorLocked() void {
     if (last_audit_error) |message| std.heap.page_allocator.free(message);
     last_audit_error = null;
@@ -1017,6 +1189,24 @@ fn clearLastAuditErrorLocked() void {
 fn setLastAuditErrorLocked(message: []const u8) void {
     clearLastAuditErrorLocked();
     last_audit_error = std.heap.page_allocator.dupe(u8, message) catch null;
+}
+
+test "retry backoff grows and clears" {
+    resetForTest();
+    defer resetForTest();
+
+    mutex.lock();
+    defer mutex.unlock();
+
+    try noteRetryFailureLocked("api", 100);
+    try std.testing.expect(!retryDueLocked("api", 100));
+    try std.testing.expectEqual(@as(i64, 130), retry_states.items[0].next_retry_at);
+
+    try noteRetryFailureLocked("api", 130);
+    try std.testing.expectEqual(@as(i64, 190), retry_states.items[0].next_retry_at);
+
+    clearRetryStateLocked("api");
+    try std.testing.expect(findRetryStateIndex("api") == null);
 }
 
 test "legacy mode does not record events" {
@@ -1172,6 +1362,54 @@ test "audit pass repairs compatibility mirror drift" {
     }
     try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
     try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
+}
+
+test "audit pass repairs live dns registry drift" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry_support.resetRegistryForTest();
+    defer dns_registry_support.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+    dns_registry_support.resetRegistryForTest();
+    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+
+    runAuditPassIfEnabled();
+
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    var audit = try snapshotAuditState(std.testing.allocator);
+    defer audit.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), audit.passes_total);
+    try std.testing.expectEqual(@as(u64, 1), audit.mismatch_services_total);
+    try std.testing.expectEqual(@as(u64, 1), audit.repairs_total);
+    try std.testing.expectEqual(@as(usize, 0), audit.degraded_services.items.len);
 }
 
 test "node loss and recovery reconcile authoritative DNS immediately" {
@@ -1363,6 +1601,63 @@ test "bootstrap quarantines stale endpoint rows for missing nodes" {
         .container_id = "ctr-1",
         .node_id = 7,
         .ip_address = "10.42.7.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+
+    var endpoints = try store.listServiceEndpoints(std.testing.allocator, "api");
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(std.testing.allocator);
+        endpoints.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
+    try std.testing.expectEqualStrings("draining", endpoints.items[0].admin_state);
+    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+
+    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
+    defer {
+        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
+        mirrored.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 0), mirrored.items.len);
+
+    var audit = try snapshotAuditState(std.testing.allocator);
+    defer audit.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), audit.stale_endpoint_quarantines_total);
+    try std.testing.expect(audit.last_stale_quarantine_at != null);
+}
+
+test "bootstrap quarantines stale endpoint rows for missing local containers" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    dns_registry_support.resetRegistryForTest();
+    defer dns_registry_support.resetRegistryForTest();
+    resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
         .port = 0,
         .weight = 1,
         .admin_state = "active",

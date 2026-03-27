@@ -82,6 +82,13 @@ pub const LoadBalancer = struct {
         }
     }
 
+    pub fn lookupBackends(self: *const LoadBalancer, vip: [4]u8) ?ServiceBackends {
+        const vip_net = ipToNetworkOrder(vip);
+        var backends: ServiceBackends = std.mem.zeroes(ServiceBackends);
+        if (!map_support.mapLookup(self.backends_fd, std.mem.asBytes(&vip_net), std.mem.asBytes(&backends))) return null;
+        return backends;
+    }
+
     pub fn deinit(self: *LoadBalancer) void {
         attach_support.detachTC(self.if_index) catch |e| {
             log.debug("ebpf: failed to detach load balancer: {}", .{e});
