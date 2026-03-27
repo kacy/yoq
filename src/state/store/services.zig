@@ -249,6 +249,41 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
     };
 }
 
+pub fn syncServiceConfig(
+    alloc: Allocator,
+    service_name: []const u8,
+    lb_policy: []const u8,
+    http_proxy_host: ?[]const u8,
+    http_proxy_path_prefix: ?[]const u8,
+    http_proxy_retries: ?i64,
+    http_proxy_connect_timeout_ms: ?i64,
+    http_proxy_request_timeout_ms: ?i64,
+    http_proxy_preserve_host: ?bool,
+) StoreError!ServiceRecord {
+    var existing = try ensureService(alloc, service_name, lb_policy);
+    defer existing.deinit(alloc);
+
+    const db = try common.getDb();
+    const now = std.time.timestamp();
+    db.exec(
+        "UPDATE services SET lb_policy = ?, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
+        .{},
+        .{
+            lb_policy,
+            http_proxy_host,
+            http_proxy_path_prefix,
+            http_proxy_retries,
+            http_proxy_connect_timeout_ms,
+            http_proxy_request_timeout_ms,
+            if (http_proxy_preserve_host) |preserve_host| @as(?i64, @intFromBool(preserve_host)) else null,
+            now,
+            service_name,
+        },
+    ) catch return StoreError.WriteFailed;
+
+    return getService(alloc, service_name);
+}
+
 pub fn getService(alloc: Allocator, service_name: []const u8) StoreError!ServiceRecord {
     const db = try common.getDb();
     const row = (db.oneAlloc(
@@ -573,6 +608,34 @@ test "ensureService allocates once and returns the existing VIP thereafter" {
         services.deinit(alloc);
     }
     try std.testing.expectEqual(@as(usize, 1), services.items.len);
+}
+
+test "syncServiceConfig updates proxy policy without changing vip" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    const alloc = std.testing.allocator;
+
+    const first = try ensureService(alloc, "api", "consistent_hash");
+    defer first.deinit(alloc);
+
+    const updated = try syncServiceConfig(
+        alloc,
+        "api",
+        "consistent_hash",
+        "api.internal",
+        "/v1",
+        2,
+        1500,
+        5000,
+        false,
+    );
+    defer updated.deinit(alloc);
+
+    try std.testing.expectEqualStrings(first.vip_address, updated.vip_address);
+    try std.testing.expectEqualStrings("api.internal", updated.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/v1", updated.http_proxy_path_prefix.?);
+    try std.testing.expectEqual(@as(?bool, false), updated.http_proxy_preserve_host);
 }
 
 test "upsertServiceEndpoint updates an existing endpoint" {
