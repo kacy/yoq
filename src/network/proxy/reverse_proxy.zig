@@ -7,6 +7,8 @@ const proxy_runtime = @import("runtime.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
 
+const proxy_loop_header = "X-Yoq-Proxy";
+
 pub const ProxyResponse = struct {
     status: http.StatusCode,
     body: []const u8,
@@ -85,6 +87,12 @@ pub const ReverseProxy = struct {
             .status = .bad_request,
             .body = "{\"error\":\"missing host header\"}",
         } };
+        if (http.findHeaderValue(request.headers_raw, proxy_loop_header) != null) {
+            return .{ .response = .{
+                .status = .bad_gateway,
+                .body = "{\"error\":\"proxy loop detected\"}",
+            } };
+        }
         const host = normalizeHost(host_header);
 
         const matched_route = router.matchRoute(self.routes, host, request.path_only) orelse return .{ .response = .{
@@ -150,12 +158,14 @@ pub const ReverseProxy = struct {
             if (startsWithHeaderName(line, "Host")) continue;
             if (startsWithHeaderName(line, "Connection")) continue;
             if (startsWithHeaderName(line, "Content-Length")) continue;
+            if (startsWithHeaderName(line, proxy_loop_header)) continue;
 
             try writer.writeAll(line);
             try writer.writeAll("\r\n");
         }
 
         try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
+        try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
         try writer.writeAll("Connection: close\r\n\r\n");
         try writer.writeAll(parsed.body);
 
@@ -640,6 +650,7 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "GET /v1/users HTTP/1.1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "Host: api\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Test: 1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Yoq-Proxy: 1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: close\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: keep-alive\r\n") == null);
 }
@@ -861,6 +872,21 @@ test "forwardRequest formats local error responses" {
 
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 400 Bad Request\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "{\"error\":\"missing host header\"}") != null);
+}
+
+test "forwardRequest rejects looped proxy requests" {
+    const routes = [_]router.Route{};
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const response = try proxy.forwardRequest(
+        "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n",
+    );
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 502 Bad Gateway\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "{\"error\":\"proxy loop detected\"}") != null);
 }
 
 test "forwardRequest retries safe methods after upstream receive failure" {
