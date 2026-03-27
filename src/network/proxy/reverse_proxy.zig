@@ -135,6 +135,52 @@ pub const ReverseProxy = struct {
         }
     }
 
+    pub fn handleConnection(self: *const ReverseProxy, client_fd: posix.fd_t) void {
+        defer posix.close(client_fd);
+        setSocketTimeoutMs(client_fd, 5000);
+
+        var request_buf: [64 * 1024]u8 = undefined;
+        const request = readRequestBytes(client_fd, &request_buf) catch |err| {
+            const response = switch (err) {
+                error.MalformedRequest => formatProxyResponse(self.allocator, .{
+                    .status = .bad_request,
+                    .body = "{\"error\":\"malformed request\"}",
+                }),
+                error.UriTooLong => formatProxyResponse(self.allocator, .{
+                    .status = .bad_request,
+                    .body = "{\"error\":\"request uri too long\"}",
+                }),
+                error.HeadersTooLarge => formatProxyResponse(self.allocator, .{
+                    .status = .request_header_fields_too_large,
+                    .body = "{\"error\":\"headers too large\"}",
+                }),
+                error.BodyTooLarge => formatProxyResponse(self.allocator, .{
+                    .status = .content_too_large,
+                    .body = "{\"error\":\"request body too large\"}",
+                }),
+                error.ReadIncomplete => formatProxyResponse(self.allocator, .{
+                    .status = .bad_request,
+                    .body = "{\"error\":\"request incomplete\"}",
+                }),
+            } catch return;
+            defer self.allocator.free(response);
+            _ = writeAll(client_fd, response) catch {};
+            return;
+        };
+
+        const response = self.forwardRequest(request) catch {
+            const internal = formatProxyResponse(self.allocator, .{
+                .status = .internal_server_error,
+                .body = "{\"error\":\"proxy request failed\"}",
+            }) catch return;
+            defer self.allocator.free(internal);
+            _ = writeAll(client_fd, internal) catch {};
+            return;
+        };
+        defer self.allocator.free(response);
+        _ = writeAll(client_fd, response) catch {};
+    }
+
     pub fn buildForwardRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
         const parsed = (http.parseRequest(raw_request) catch return error.BadRequest) orelse return error.BadRequest;
 
@@ -338,6 +384,45 @@ fn readResponse(alloc: std.mem.Allocator, fd: posix.socket_t, max_bytes: usize) 
         response = response[0..total];
     }
     return response[0..total];
+}
+
+const ReadRequestError = error{
+    MalformedRequest,
+    UriTooLong,
+    HeadersTooLarge,
+    BodyTooLarge,
+    ReadIncomplete,
+};
+
+fn readRequestBytes(fd: posix.socket_t, buf: []u8) ReadRequestError![]const u8 {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const bytes_read = posix.read(fd, buf[total..]) catch break;
+        if (bytes_read == 0) break;
+        total += bytes_read;
+
+        if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") == null and total > http.max_header_bytes) {
+            return error.HeadersTooLarge;
+        }
+
+        const parsed = http.parseRequest(buf[0..total]) catch |err| return switch (err) {
+            error.UriTooLong => error.UriTooLong,
+            error.HeadersTooLarge => error.HeadersTooLarge,
+            error.BodyTooLarge => error.BodyTooLarge,
+            else => error.MalformedRequest,
+        };
+        if (parsed) |request| {
+            return buf[0..requestEndOffset(buf[0..total], request)];
+        }
+    }
+
+    return error.ReadIncomplete;
+}
+
+fn requestEndOffset(buf: []const u8, request: http.Request) usize {
+    const base = @intFromPtr(buf.ptr);
+    const body_start = @intFromPtr(request.body.ptr) - base;
+    return body_start + request.body.len;
 }
 
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !proxy_runtime.RouteSnapshot {
@@ -761,8 +846,6 @@ const TestUpstreamServer = struct {
     fn acceptOne(self: *TestUpstreamServer) void {
         for (self.actions, 0..) |action, index| {
             const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
-            defer posix.close(client_fd);
-
             setSocketTimeoutMs(client_fd, 1000);
             self.request_lens[index] = posix.read(client_fd, &self.request_bufs[index]) catch 0;
             self.accepted = index + 1;
@@ -771,7 +854,38 @@ const TestUpstreamServer = struct {
                 .close => {},
                 .respond => |response| _ = writeAll(client_fd, response) catch {},
             }
+            posix.close(client_fd);
         }
+    }
+};
+
+const TestListener = struct {
+    fd: posix.socket_t,
+    port: u16,
+
+    fn init() !TestListener {
+        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        errdefer posix.close(fd);
+
+        const reuseaddr: i32 = 1;
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
+
+        const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+        try posix.bind(fd, &addr.any, addr.getOsSockLen());
+        try posix.listen(fd, 1);
+
+        var bound_addr: posix.sockaddr.in = undefined;
+        var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+        try posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len);
+
+        return .{
+            .fd = fd,
+            .port = std.mem.bigToNative(u16, bound_addr.port),
+        };
+    }
+
+    fn deinit(self: *TestListener) void {
+        posix.close(self.fd);
     }
 };
 
@@ -1035,4 +1149,91 @@ test "forwardRequest retries safe methods on upstream 5xx" {
 
     try std.testing.expectEqual(@as(usize, 2), upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
+}
+
+test "handleConnection proxies a client socket request" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const actions = [_]TestUpstreamAction{
+        .{ .respond = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello" },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(client_fd);
+    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+    var response_buf: [1024]u8 = undefined;
+    const bytes_read = try posix.read(client_fd, &response_buf);
+    try std.testing.expect(bytes_read > 0);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 200 OK\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\nhello") != null);
 }
