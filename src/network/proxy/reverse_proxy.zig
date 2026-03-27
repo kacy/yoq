@@ -111,6 +111,41 @@ pub const ReverseProxy = struct {
             .upstream = upstream,
         } };
     }
+
+    pub fn buildForwardRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
+        const parsed = (http.parseRequest(raw_request) catch return error.BadRequest) orelse return error.BadRequest;
+
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+        const writer = buf.writer(self.allocator);
+
+        try writer.print("{s} {s} HTTP/1.1\r\n", .{
+            methodString(parsed.method),
+            parsed.path,
+        });
+        try writer.print("Host: {s}\r\n", .{plan.outbound_host});
+
+        var pos: usize = 0;
+        while (pos < parsed.headers_raw.len) {
+            const line_end = std.mem.indexOfPos(u8, parsed.headers_raw, pos, "\r\n") orelse parsed.headers_raw.len;
+            const line = parsed.headers_raw[pos..line_end];
+            pos = if (line_end + 2 <= parsed.headers_raw.len) line_end + 2 else parsed.headers_raw.len;
+
+            if (line.len == 0) continue;
+            if (startsWithHeaderName(line, "Host")) continue;
+            if (startsWithHeaderName(line, "Connection")) continue;
+            if (startsWithHeaderName(line, "Content-Length")) continue;
+
+            try writer.writeAll(line);
+            try writer.writeAll("\r\n");
+        }
+
+        try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
+        try writer.writeAll("Connection: close\r\n\r\n");
+        try writer.writeAll(parsed.body);
+
+        return buf.toOwnedSlice(self.allocator);
+    }
 };
 
 fn normalizeHost(host_header: []const u8) []const u8 {
@@ -118,6 +153,24 @@ fn normalizeHost(host_header: []const u8) []const u8 {
         return host_header[0..port_sep];
     }
     return host_header;
+}
+
+fn methodString(method: http.Method) []const u8 {
+    return switch (method) {
+        .GET => "GET",
+        .HEAD => "HEAD",
+        .POST => "POST",
+        .PUT => "PUT",
+        .DELETE => "DELETE",
+    };
+}
+
+fn startsWithHeaderName(line: []const u8, name: []const u8) bool {
+    if (line.len <= name.len or line[name.len] != ':') return false;
+    for (line[0..name.len], name) |a, b| {
+        if (std.ascii.toLower(a) != std.ascii.toLower(b)) return false;
+    }
+    return true;
 }
 
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !proxy_runtime.RouteSnapshot {
@@ -376,4 +429,114 @@ test "handleRequest returns service unavailable when route has no eligible upstr
         .response => |resp| try std.testing.expectEqual(http.StatusCode.service_unavailable, resp.status),
         .forward => return error.TestUnexpectedResult,
     }
+}
+
+test "buildForwardRequest rewrites Host when preserve_host is false" {
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/v1",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+            .preserve_host = false,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var plan = ForwardPlan{
+        .method = .GET,
+        .path = try std.testing.allocator.dupe(u8, "/v1/users"),
+        .host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .outbound_host = try std.testing.allocator.dupe(u8, "api"),
+        .route = .{
+            .name = try std.testing.allocator.dupe(u8, "api:/v1"),
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .vip_address = try std.testing.allocator.dupe(u8, "10.43.0.2"),
+            .host = try std.testing.allocator.dupe(u8, "api.internal"),
+            .path_prefix = try std.testing.allocator.dupe(u8, "/v1"),
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .degraded = false,
+            .retries = 0,
+            .connect_timeout_ms = 1000,
+            .request_timeout_ms = 5000,
+            .preserve_host = false,
+        },
+        .upstream = .{
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .endpoint_id = try std.testing.allocator.dupe(u8, "api-1"),
+            .address = try std.testing.allocator.dupe(u8, "10.42.0.9"),
+            .port = 8080,
+            .eligible = true,
+        },
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    const forwarded = try proxy.buildForwardRequest(
+        "GET /v1/users HTTP/1.1\r\nHost: api.internal\r\nConnection: keep-alive\r\nX-Test: 1\r\n\r\n",
+        &plan,
+    );
+    defer std.testing.allocator.free(forwarded);
+
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "GET /v1/users HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Host: api\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Test: 1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: close\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: keep-alive\r\n") == null);
+}
+
+test "buildForwardRequest preserves body and content length" {
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .preserve_host = true,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var plan = ForwardPlan{
+        .method = .POST,
+        .path = try std.testing.allocator.dupe(u8, "/submit"),
+        .host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .route = .{
+            .name = try std.testing.allocator.dupe(u8, "api:/"),
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .vip_address = try std.testing.allocator.dupe(u8, "10.43.0.2"),
+            .host = try std.testing.allocator.dupe(u8, "api.internal"),
+            .path_prefix = try std.testing.allocator.dupe(u8, "/"),
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .degraded = false,
+            .retries = 0,
+            .connect_timeout_ms = 1000,
+            .request_timeout_ms = 5000,
+            .preserve_host = true,
+        },
+        .upstream = .{
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .endpoint_id = try std.testing.allocator.dupe(u8, "api-1"),
+            .address = try std.testing.allocator.dupe(u8, "10.42.0.9"),
+            .port = 8080,
+            .eligible = true,
+        },
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    const forwarded = try proxy.buildForwardRequest(
+        "POST /submit HTTP/1.1\r\nHost: api.internal\r\nContent-Length: 999\r\n\r\nhello",
+        &plan,
+    );
+    defer std.testing.allocator.free(forwarded);
+
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Host: api.internal\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Content-Length: 5\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, forwarded, "hello"));
 }
