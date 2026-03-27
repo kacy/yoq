@@ -2,6 +2,7 @@ const std = @import("std");
 const http = @import("../http.zig");
 const common = @import("common.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
+const proxy_runtime = @import("../../network/proxy/runtime.zig");
 const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 const store = @import("../../state/store.zig");
 
@@ -32,6 +33,11 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
     if (std.mem.eql(u8, after, "/endpoints")) {
         if (request.method != .GET) return common.methodNotAllowed();
         return handleListServiceEndpoints(alloc, service_name);
+    }
+
+    if (std.mem.eql(u8, after, "/proxy-routes")) {
+        if (request.method != .GET) return common.methodNotAllowed();
+        return handleListServiceProxyRoutes(alloc, service_name);
     }
 
     if (std.mem.eql(u8, after, "/reconcile")) {
@@ -117,6 +123,31 @@ fn handleListServiceEndpoints(alloc: std.mem.Allocator, service_name: []const u8
     for (endpoints.items, 0..) |endpoint, idx| {
         if (idx > 0) writer.writeByte(',') catch return common.internalError();
         writeEndpointJson(writer, endpoint) catch return common.internalError();
+    }
+    writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const u8) Response {
+    var proxy_routes = proxy_runtime.snapshotServiceRoutes(alloc, service_name) catch |err| switch (err) {
+        error.ServiceNotFound => return common.notFound(),
+        else => return common.internalError(),
+    };
+    defer {
+        for (proxy_routes.items) |proxy_route| proxy_route.deinit(alloc);
+        proxy_routes.deinit(alloc);
+    }
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    writer.writeByte('[') catch return common.internalError();
+    for (proxy_routes.items, 0..) |proxy_route, idx| {
+        if (idx > 0) writer.writeByte(',') catch return common.internalError();
+        writeProxyRouteJson(writer, proxy_route) catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
 
@@ -238,6 +269,28 @@ fn writeEndpointJson(writer: anytype, endpoint: service_registry_runtime.Endpoin
     try writer.writeByte('}');
 }
 
+fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot) !void {
+    try writer.writeAll("{\"name\":\"");
+    try json_helpers.writeJsonEscaped(writer, proxy_route.name);
+    try writer.writeAll("\",\"service\":\"");
+    try json_helpers.writeJsonEscaped(writer, proxy_route.service);
+    try writer.writeAll("\",\"vip_address\":\"");
+    try json_helpers.writeJsonEscaped(writer, proxy_route.vip_address);
+    try writer.writeAll("\",\"host\":\"");
+    try json_helpers.writeJsonEscaped(writer, proxy_route.host);
+    try writer.writeAll("\",\"path_prefix\":\"");
+    try json_helpers.writeJsonEscaped(writer, proxy_route.path_prefix);
+    try writer.print(
+        "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+        .{
+            proxy_route.retries,
+            proxy_route.connect_timeout_ms,
+            proxy_route.request_timeout_ms,
+            proxy_route.preserve_host,
+        },
+    );
+}
+
 fn isValidSegment(value: []const u8) bool {
     if (value.len == 0) return false;
     if (std.mem.indexOfScalar(u8, value, '/')) |_| return false;
@@ -354,6 +407,46 @@ test "route handles GET /v1/services/{name}/endpoints" {
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"endpoint_id\":\"ctr-1:0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"observed_health\":\"unknown\"") != null);
+}
+
+test "route handles GET /v1/services/{name}/proxy-routes" {
+    const service_rollout = @import("../../network/service_rollout.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_retries = 2,
+        .http_proxy_connect_timeout_ms = 1500,
+        .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_preserve_host = false,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
+    defer if (response.allocated) std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service\":\"api\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"host\":\"api.internal\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"path_prefix\":\"/v1\"") != null);
 }
 
 test "route handles POST drain and DELETE endpoint" {
