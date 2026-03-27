@@ -88,6 +88,7 @@ pub const ReverseProxy = struct {
             .body = "{\"error\":\"missing host header\"}",
         } };
         if (http.findHeaderValue(request.headers_raw, proxy_loop_header) != null) {
+            proxy_runtime.recordLoopRejection();
             return .{ .response = .{
                 .status = .bad_gateway,
                 .body = "{\"error\":\"proxy loop detected\"}",
@@ -125,12 +126,22 @@ pub const ReverseProxy = struct {
     }
 
     pub fn forwardRequest(self: *const ReverseProxy, raw_request: []const u8) ![]u8 {
+        proxy_runtime.recordRequestStart();
         const handled = try self.handleRequest(raw_request);
         switch (handled) {
-            .response => |resp| return formatProxyResponse(self.allocator, resp),
+            .response => |resp| {
+                proxy_runtime.recordResponse(resp.status);
+                return formatProxyResponse(self.allocator, resp);
+            },
             .forward => |plan| {
                 defer plan.deinit(self.allocator);
-                return self.forwardPlan(raw_request, &plan);
+                const response = try self.forwardPlan(raw_request, &plan);
+                if (parseUpstreamStatusCode(response)) |status_code| {
+                    proxy_runtime.recordResponseCode(status_code);
+                } else |_| {
+                    proxy_runtime.recordResponse(.bad_gateway);
+                }
+                return response;
             },
         }
     }
@@ -169,6 +180,7 @@ pub const ReverseProxy = struct {
         };
 
         const response = self.forwardRequest(request) catch {
+            proxy_runtime.recordResponse(.internal_server_error);
             const internal = formatProxyResponse(self.allocator, .{
                 .status = .internal_server_error,
                 .body = "{\"error\":\"proxy request failed\"}",
@@ -227,13 +239,16 @@ pub const ReverseProxy = struct {
         while (true) : (attempt += 1) {
             const response = self.forwardSingleAttempt(raw_request, plan) catch |err| {
                 if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
+                    proxy_runtime.recordRetry();
                     continue;
                 }
+                proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
                 return formatProxyResponse(self.allocator, proxyFailureResponse(err));
             };
 
             const status_code = parseUpstreamStatusCode(response) catch null;
             if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, status_code, false)) {
+                proxy_runtime.recordRetry();
                 self.allocator.free(response);
                 continue;
             }
@@ -317,6 +332,15 @@ fn proxyFailureResponse(err: anyerror) ProxyResponse {
             .status = .bad_gateway,
             .body = "{\"error\":\"upstream request failed\"}",
         },
+    };
+}
+
+fn mapUpstreamFailure(err: anyerror) proxy_runtime.UpstreamFailureKind {
+    return switch (err) {
+        error.ConnectFailed => .connect,
+        error.SendFailed => .send,
+        error.ReceiveFailed => .receive,
+        else => .other,
     };
 }
 

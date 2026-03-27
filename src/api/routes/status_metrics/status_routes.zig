@@ -229,12 +229,22 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"l7_proxy\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"routes\":{d},\"last_sync_at\":",
+        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"routes\":{d},\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"loop_rejections_total\":{d},\"upstream_connect_failures_total\":{d},\"upstream_send_failures_total\":{d},\"upstream_receive_failures_total\":{d},\"upstream_other_failures_total\":{d},\"last_sync_at\":",
         .{
             l7_proxy.enabled,
             l7_proxy.running,
             l7_proxy.configured_services,
             l7_proxy.routes,
+            l7_proxy.requests_total,
+            l7_proxy.responses_2xx_total,
+            l7_proxy.responses_4xx_total,
+            l7_proxy.responses_5xx_total,
+            l7_proxy.retries_total,
+            l7_proxy.loop_rejections_total,
+            l7_proxy.upstream_connect_failures_total,
+            l7_proxy.upstream_send_failures_total,
+            l7_proxy.upstream_receive_failures_total,
+            l7_proxy.upstream_other_failures_total,
         },
     ) catch return common.internalError();
     if (l7_proxy.last_sync_at) |timestamp| {

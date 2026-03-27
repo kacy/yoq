@@ -1,4 +1,5 @@
 const std = @import("std");
+const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
@@ -35,6 +36,16 @@ pub const Snapshot = struct {
     running: bool,
     configured_services: u32,
     routes: u32,
+    requests_total: u64,
+    responses_2xx_total: u64,
+    responses_4xx_total: u64,
+    responses_5xx_total: u64,
+    retries_total: u64,
+    loop_rejections_total: u64,
+    upstream_connect_failures_total: u64,
+    upstream_send_failures_total: u64,
+    upstream_receive_failures_total: u64,
+    upstream_other_failures_total: u64,
     last_sync_at: ?i64,
     last_error: ?[]const u8,
 
@@ -48,8 +59,25 @@ var materialized_routes: std.ArrayList(router.Route) = .empty;
 var running: bool = false;
 var configured_services: u32 = 0;
 var routes: u32 = 0;
+var requests_total: u64 = 0;
+var responses_2xx_total: u64 = 0;
+var responses_4xx_total: u64 = 0;
+var responses_5xx_total: u64 = 0;
+var retries_total: u64 = 0;
+var loop_rejections_total: u64 = 0;
+var upstream_connect_failures_total: u64 = 0;
+var upstream_send_failures_total: u64 = 0;
+var upstream_receive_failures_total: u64 = 0;
+var upstream_other_failures_total: u64 = 0;
 var last_sync_at: ?i64 = null;
 var last_error: ?[]u8 = null;
+
+pub const UpstreamFailureKind = enum {
+    connect,
+    send,
+    receive,
+    other,
+};
 
 pub fn resetForTest() void {
     mutex.lock();
@@ -58,6 +86,16 @@ pub fn resetForTest() void {
     running = false;
     configured_services = 0;
     routes = 0;
+    requests_total = 0;
+    responses_2xx_total = 0;
+    responses_4xx_total = 0;
+    responses_5xx_total = 0;
+    retries_total = 0;
+    loop_rejections_total = 0;
+    upstream_connect_failures_total = 0;
+    upstream_send_failures_total = 0;
+    upstream_receive_failures_total = 0;
+    upstream_other_failures_total = 0;
     last_sync_at = null;
     deinitRoutesLocked();
     clearLastErrorLocked();
@@ -84,9 +122,65 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .running = running,
         .configured_services = configured_services,
         .routes = routes,
+        .requests_total = requests_total,
+        .responses_2xx_total = responses_2xx_total,
+        .responses_4xx_total = responses_4xx_total,
+        .responses_5xx_total = responses_5xx_total,
+        .retries_total = retries_total,
+        .loop_rejections_total = loop_rejections_total,
+        .upstream_connect_failures_total = upstream_connect_failures_total,
+        .upstream_send_failures_total = upstream_send_failures_total,
+        .upstream_receive_failures_total = upstream_receive_failures_total,
+        .upstream_other_failures_total = upstream_other_failures_total,
         .last_sync_at = last_sync_at,
         .last_error = if (last_error) |message| try alloc.dupe(u8, message) else null,
     };
+}
+
+pub fn recordRequestStart() void {
+    mutex.lock();
+    defer mutex.unlock();
+    requests_total += 1;
+}
+
+pub fn recordResponse(status: http.StatusCode) void {
+    recordResponseCode(@intFromEnum(status));
+}
+
+pub fn recordResponseCode(status_code: u16) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    switch (status_code) {
+        200...299 => responses_2xx_total += 1,
+        400...499 => responses_4xx_total += 1,
+        500...599 => responses_5xx_total += 1,
+        else => {},
+    }
+}
+
+pub fn recordRetry() void {
+    mutex.lock();
+    defer mutex.unlock();
+    retries_total += 1;
+}
+
+pub fn recordLoopRejection() void {
+    mutex.lock();
+    defer mutex.unlock();
+    loop_rejections_total += 1;
+}
+
+pub fn recordUpstreamFailure(kind: UpstreamFailureKind) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    switch (kind) {
+        .connect => upstream_connect_failures_total += 1,
+        .send => upstream_send_failures_total += 1,
+        .receive => upstream_receive_failures_total += 1,
+        .other => upstream_other_failures_total += 1,
+    }
 }
 
 pub fn snapshotRoutes(alloc: std.mem.Allocator) !std.ArrayList(RouteSnapshot) {
@@ -555,4 +649,34 @@ test "resolveUpstream returns the first eligible endpoint" {
     try std.testing.expectEqualStrings("api-2", upstream.endpoint_id);
     try std.testing.expectEqualStrings("10.42.0.10", upstream.address);
     try std.testing.expectEqual(@as(u16, 8081), upstream.port);
+}
+
+test "snapshot exposes L7 proxy observability counters" {
+    resetForTest();
+    defer resetForTest();
+
+    recordRequestStart();
+    recordRequestStart();
+    recordResponse(.ok);
+    recordResponse(.bad_request);
+    recordResponse(.bad_gateway);
+    recordRetry();
+    recordLoopRejection();
+    recordUpstreamFailure(.connect);
+    recordUpstreamFailure(.receive);
+    recordUpstreamFailure(.other);
+
+    const state = try snapshot(std.testing.allocator);
+    defer state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 2), state.requests_total);
+    try std.testing.expectEqual(@as(u64, 1), state.responses_2xx_total);
+    try std.testing.expectEqual(@as(u64, 1), state.responses_4xx_total);
+    try std.testing.expectEqual(@as(u64, 1), state.responses_5xx_total);
+    try std.testing.expectEqual(@as(u64, 1), state.retries_total);
+    try std.testing.expectEqual(@as(u64, 1), state.loop_rejections_total);
+    try std.testing.expectEqual(@as(u64, 1), state.upstream_connect_failures_total);
+    try std.testing.expectEqual(@as(u64, 0), state.upstream_send_failures_total);
+    try std.testing.expectEqual(@as(u64, 1), state.upstream_receive_failures_total);
+    try std.testing.expectEqual(@as(u64, 1), state.upstream_other_failures_total);
 }
