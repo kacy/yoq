@@ -47,6 +47,7 @@ comptime {
     _ = @import("network/commands.zig");
     _ = @import("network/vip_allocator.zig");
     _ = @import("network/service_rollout.zig");
+    _ = @import("network/service_cutover_readiness.zig");
     _ = @import("network/service_reconciler.zig");
     _ = @import("network/service_registry.zig");
     _ = @import("network/service_registry_backfill.zig");
