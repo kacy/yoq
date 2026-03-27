@@ -214,6 +214,18 @@ pub fn listServices(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
     return services;
 }
 
+pub fn getServiceEndpoint(alloc: Allocator, service_name: []const u8, endpoint_id: []const u8) StoreError!ServiceEndpointRecord {
+    const db = try common.getDb();
+    const row = (db.oneAlloc(
+        ServiceEndpointRow,
+        alloc,
+        "SELECT " ++ endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
+        .{},
+        .{ service_name, endpoint_id },
+    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+    return rowToServiceEndpointRecord(row);
+}
+
 pub fn upsertServiceEndpoint(record: ServiceEndpointRecord) StoreError!void {
     const db = try common.getDb();
     db.exec(

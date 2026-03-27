@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 
 pub const ServiceSnapshot = service_registry.ServiceSnapshot;
 pub const EndpointSnapshot = service_registry.EndpointSnapshot;
+pub const ProbeOutcome = service_registry.ProbeApply;
 pub const RuntimeError = service_registry.Error || error{
     StoreReadFailed,
     StoreWriteFailed,
@@ -71,6 +72,40 @@ pub fn noteProbeResult(service_name: []const u8, endpoint_id: []const u8, health
     _ = registry.noteProbeResult(service_name, endpoint_id, healthy) catch |err| {
         log.warn("service registry runtime: failed to apply probe result for {s}/{s}: {}", .{ service_name, endpoint_id, err });
         return;
+    };
+}
+
+pub fn markEndpointPending(service_name: []const u8, endpoint_id: []const u8, generation: i64) ProbeOutcome {
+    if (rollout.mode() == .legacy) return .applied;
+
+    mutex.lock();
+    defer mutex.unlock();
+
+    ensureInitializedLocked() catch |err| {
+        log.warn("service registry runtime: failed to initialize before pending health gate for {s}: {}", .{ service_name, err });
+        return .stale_generation;
+    };
+
+    return registry.markEndpointPending(service_name, endpoint_id, generation) catch |err| {
+        log.warn("service registry runtime: failed to apply pending health gate for {s}/{s}: {}", .{ service_name, endpoint_id, err });
+        return .stale_generation;
+    };
+}
+
+pub fn noteProbeResultForGeneration(service_name: []const u8, endpoint_id: []const u8, generation: i64, healthy: bool) ProbeOutcome {
+    if (rollout.mode() == .legacy) return .applied;
+
+    mutex.lock();
+    defer mutex.unlock();
+
+    ensureInitializedLocked() catch |err| {
+        log.warn("service registry runtime: failed to initialize before probe result for {s}: {}", .{ service_name, err });
+        return .stale_generation;
+    };
+
+    return registry.noteProbeResultForGeneration(service_name, endpoint_id, generation, healthy) catch |err| {
+        log.warn("service registry runtime: failed to apply probe result for {s}/{s} generation={}: {}", .{ service_name, endpoint_id, generation, err });
+        return .stale_generation;
     };
 }
 
@@ -380,4 +415,47 @@ test "runtime can mark reconcile failure and recovery" {
     defer recovered.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("idle", recovered.last_reconcile_status);
     try std.testing.expect(recovered.last_reconcile_error == null);
+}
+
+test "runtime pending gate requires a matching generation" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    resetForTest();
+    defer resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true });
+    defer rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 2,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    syncServiceFromStore("api");
+    try std.testing.expectEqual(ProbeOutcome.stale_generation, markEndpointPending("api", "ctr-1:0", 1));
+    try std.testing.expectEqual(ProbeOutcome.applied, markEndpointPending("api", "ctr-1:0", 2));
+
+    var endpoints = try snapshotServiceEndpoints(std.testing.allocator, "api");
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(std.testing.allocator);
+        endpoints.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expect(endpoints.items[0].readiness_required);
+    try std.testing.expect(!endpoints.items[0].eligible);
 }

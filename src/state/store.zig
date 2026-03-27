@@ -47,6 +47,7 @@ pub const listBuildCacheDigests = @import("store/cache.zig").listBuildCacheDiges
 pub const createService = @import("store/services.zig").createService;
 pub const ensureService = @import("store/services.zig").ensureService;
 pub const getService = @import("store/services.zig").getService;
+pub const getServiceEndpoint = @import("store/services.zig").getServiceEndpoint;
 pub const listServices = @import("store/services.zig").listServices;
 pub const upsertServiceEndpoint = @import("store/services.zig").upsertServiceEndpoint;
 pub const removeServiceEndpoint = @import("store/services.zig").removeServiceEndpoint;
