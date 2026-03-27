@@ -280,17 +280,30 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeAll("\",\"path_prefix\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, route.path_prefix) catch return common.internalError();
         writer.print(
-            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"last_failure_kind\":",
             .{
                 route.eligible_endpoints,
                 route.healthy_endpoints,
                 route.degraded,
+                route.degraded_reason.label(),
                 route.retries,
                 route.connect_timeout_ms,
                 route.request_timeout_ms,
                 route.preserve_host,
             },
         ) catch return common.internalError();
+        if (route.last_failure_kind) |kind| {
+            writer.print("\"{s}\"", .{kind.label()}) catch return common.internalError();
+        } else {
+            writer.writeAll("null") catch return common.internalError();
+        }
+        writer.writeAll(",\"last_failure_at\":") catch return common.internalError();
+        if (route.last_failure_at) |timestamp| {
+            writer.print("{d}", .{timestamp}) catch return common.internalError();
+        } else {
+            writer.writeAll("null") catch return common.internalError();
+        }
+        writer.writeByte('}') catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
     writer.writeAll("},\"listener\":{") catch return common.internalError();

@@ -118,6 +118,7 @@ pub const ReverseProxy = struct {
 
         const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
             error.NoHealthyUpstream => {
+                proxy_runtime.recordRouteFailure(matched_route.name, .no_eligible_upstream);
                 log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
                     methodString(request.method),
                     host,
@@ -289,6 +290,7 @@ pub const ReverseProxy = struct {
                     retries_used += 1;
                     continue;
                 }
+                proxy_runtime.recordRouteFailure(plan.route.name, mapRouteFailureKind(err));
                 log.warn("l7 proxy upstream failure method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d} error={}", .{
                     methodString(plan.method),
                     plan.host,
@@ -315,6 +317,7 @@ pub const ReverseProxy = struct {
                     retries_used,
                 });
                 self.allocator.free(response);
+                proxy_runtime.recordRouteFailure(plan.route.name, .invalid_response);
                 return formatProxyResponse(self.allocator, .{
                     .status = .bad_gateway,
                     .body = "{\"error\":\"invalid upstream response\"}",
@@ -342,6 +345,7 @@ pub const ReverseProxy = struct {
                 status_code,
                 retries_used,
             });
+            proxy_runtime.recordRouteRecovered(plan.route.name);
             return response;
         }
     }
@@ -435,6 +439,15 @@ fn mapUpstreamFailure(err: anyerror) proxy_runtime.UpstreamFailureKind {
         error.SendFailed => .send,
         error.ReceiveFailed => .receive,
         else => .other,
+    };
+}
+
+fn mapRouteFailureKind(err: anyerror) proxy_runtime.RouteFailureKind {
+    return switch (err) {
+        error.ConnectFailed, error.ConnectTimedOut => .connect,
+        error.SendFailed => .send,
+        error.ReceiveFailed => .receive,
+        else => .invalid_response,
     };
 }
 
@@ -598,6 +611,9 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !proxy_runt
         .eligible_endpoints = route.eligible_endpoints,
         .healthy_endpoints = route.healthy_endpoints,
         .degraded = route.degraded,
+        .degraded_reason = if (route.degraded) .service_state else .none,
+        .last_failure_kind = null,
+        .last_failure_at = null,
         .retries = route.retries,
         .connect_timeout_ms = route.connect_timeout_ms,
         .request_timeout_ms = route.request_timeout_ms,
@@ -874,6 +890,9 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
             .eligible_endpoints = 1,
             .healthy_endpoints = 1,
             .degraded = false,
+            .degraded_reason = .none,
+            .last_failure_kind = null,
+            .last_failure_at = null,
             .retries = 0,
             .connect_timeout_ms = 1000,
             .request_timeout_ms = 5000,
@@ -931,6 +950,9 @@ test "buildForwardRequest preserves body and content length" {
             .eligible_endpoints = 1,
             .healthy_endpoints = 1,
             .degraded = false,
+            .degraded_reason = .none,
+            .last_failure_kind = null,
+            .last_failure_at = null,
             .retries = 0,
             .connect_timeout_ms = 1000,
             .request_timeout_ms = 5000,

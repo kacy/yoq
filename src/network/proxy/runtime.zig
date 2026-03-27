@@ -9,6 +9,46 @@ const service_rollout = @import("../service_rollout.zig");
 
 pub const max_routes_in_status = 16;
 
+pub const RouteDegradedReason = enum {
+    none,
+    service_state,
+    no_eligible_upstream,
+    connect_failure,
+    send_failure,
+    receive_failure,
+    invalid_response,
+
+    pub fn label(self: RouteDegradedReason) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .service_state => "service_state",
+            .no_eligible_upstream => "no_eligible_upstream",
+            .connect_failure => "connect_failure",
+            .send_failure => "send_failure",
+            .receive_failure => "receive_failure",
+            .invalid_response => "invalid_response",
+        };
+    }
+};
+
+pub const RouteFailureKind = enum {
+    no_eligible_upstream,
+    connect,
+    send,
+    receive,
+    invalid_response,
+
+    pub fn label(self: RouteFailureKind) []const u8 {
+        return switch (self) {
+            .no_eligible_upstream => "no_eligible_upstream",
+            .connect => "connect",
+            .send => "send",
+            .receive => "receive",
+            .invalid_response => "invalid_response",
+        };
+    }
+};
+
 pub const RouteSnapshot = struct {
     name: []const u8,
     service: []const u8,
@@ -18,6 +58,9 @@ pub const RouteSnapshot = struct {
     eligible_endpoints: u32,
     healthy_endpoints: u32,
     degraded: bool,
+    degraded_reason: RouteDegradedReason,
+    last_failure_kind: ?RouteFailureKind,
+    last_failure_at: ?i64,
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
@@ -77,6 +120,7 @@ var circuit_trips_total: u64 = 0;
 var last_sync_at: ?i64 = null;
 var last_error: ?[]u8 = null;
 var endpoint_circuits: std.StringHashMapUnmanaged(EndpointCircuit) = .{};
+var route_statuses: std.StringHashMapUnmanaged(RouteStatusState) = .{};
 
 pub const UpstreamFailureKind = enum {
     connect,
@@ -92,6 +136,12 @@ const EndpointCircuit = struct {
     consecutive_failures: u8 = 0,
     opened_at_ms: ?i64 = null,
     half_open_in_flight: bool = false,
+};
+
+const RouteStatusState = struct {
+    degraded_reason: RouteDegradedReason = .none,
+    last_failure_kind: ?RouteFailureKind = null,
+    last_failure_at: ?i64 = null,
 };
 
 pub fn resetForTest() void {
@@ -115,6 +165,7 @@ pub fn resetForTest() void {
     last_sync_at = null;
     deinitRoutesLocked();
     deinitCircuitsLocked();
+    deinitRouteStatusesLocked();
     clearLastErrorLocked();
 }
 
@@ -260,6 +311,24 @@ pub fn recordEndpointFailure(endpoint_id: []const u8) void {
             circuit.half_open_in_flight = false;
         },
     }
+}
+
+pub fn recordRouteFailure(route_name: []const u8, kind: RouteFailureKind) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const state = ensureRouteStatusLocked(route_name) orelse return;
+    state.degraded_reason = degradedReasonForFailure(kind);
+    state.last_failure_kind = kind;
+    state.last_failure_at = std.time.timestamp();
+}
+
+pub fn recordRouteRecovered(route_name: []const u8) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const state = route_statuses.getPtr(route_name) orelse return;
+    state.degraded_reason = .none;
 }
 
 pub fn snapshotRoutes(alloc: std.mem.Allocator) !std.ArrayList(RouteSnapshot) {
@@ -413,6 +482,14 @@ fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64) bool {
 }
 
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnapshot {
+    const route_state = route_statuses.get(route.name);
+    const degraded_reason: RouteDegradedReason = if (route_state) |state|
+        if (state.degraded_reason != .none) state.degraded_reason else if (route.degraded) .service_state else .none
+    else if (route.degraded)
+        .service_state
+    else
+        .none;
+
     return .{
         .name = try alloc.dupe(u8, route.name),
         .service = try alloc.dupe(u8, route.service),
@@ -421,7 +498,10 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
         .eligible_endpoints = route.eligible_endpoints,
         .healthy_endpoints = route.healthy_endpoints,
-        .degraded = route.degraded,
+        .degraded = degraded_reason != .none,
+        .degraded_reason = degraded_reason,
+        .last_failure_kind = if (route_state) |state| state.last_failure_kind else null,
+        .last_failure_at = if (route_state) |state| state.last_failure_at else null,
         .retries = route.retries,
         .connect_timeout_ms = route.connect_timeout_ms,
         .request_timeout_ms = route.request_timeout_ms,
@@ -482,6 +562,7 @@ fn syncLocked() !void {
 
     configured_services = next_configured_services;
     routes = next_routes;
+    pruneRouteStatusesLocked();
     running = true;
     last_sync_at = std.time.timestamp();
 }
@@ -503,6 +584,57 @@ fn deinitCircuitsLocked() void {
         std.heap.page_allocator.free(entry.key_ptr.*);
     }
     endpoint_circuits.clearAndFree(std.heap.page_allocator);
+}
+
+fn ensureRouteStatusLocked(route_name: []const u8) ?*RouteStatusState {
+    if (route_statuses.getPtr(route_name)) |state| return state;
+
+    const key_copy = std.heap.page_allocator.dupe(u8, route_name) catch return null;
+    errdefer std.heap.page_allocator.free(key_copy);
+
+    route_statuses.put(std.heap.page_allocator, key_copy, .{}) catch return null;
+    return route_statuses.getPtr(key_copy).?;
+}
+
+fn pruneRouteStatusesLocked() void {
+    var next_statuses: std.StringHashMapUnmanaged(RouteStatusState) = .{};
+    var it = route_statuses.iterator();
+    while (it.next()) |entry| {
+        if (!routeExistsLocked(entry.key_ptr.*)) continue;
+
+        const key_copy = std.heap.page_allocator.dupe(u8, entry.key_ptr.*) catch continue;
+        next_statuses.put(std.heap.page_allocator, key_copy, entry.value_ptr.*) catch {
+            std.heap.page_allocator.free(key_copy);
+        };
+    }
+
+    deinitRouteStatusesLocked();
+    route_statuses = next_statuses;
+}
+
+fn routeExistsLocked(route_name: []const u8) bool {
+    for (materialized_routes.items) |route| {
+        if (std.mem.eql(u8, route.name, route_name)) return true;
+    }
+    return false;
+}
+
+fn deinitRouteStatusesLocked() void {
+    var it = route_statuses.iterator();
+    while (it.next()) |entry| {
+        std.heap.page_allocator.free(entry.key_ptr.*);
+    }
+    route_statuses.clearAndFree(std.heap.page_allocator);
+}
+
+fn degradedReasonForFailure(kind: RouteFailureKind) RouteDegradedReason {
+    return switch (kind) {
+        .no_eligible_upstream => .no_eligible_upstream,
+        .connect => .connect_failure,
+        .send => .send_failure,
+        .receive => .receive_failure,
+        .invalid_response => .invalid_response,
+    };
 }
 
 fn clearLastErrorLocked() void {
@@ -706,6 +838,9 @@ test "materialized routes include service endpoint readiness counts" {
     try std.testing.expectEqual(@as(u32, 1), routes_snapshot.items[0].eligible_endpoints);
     try std.testing.expectEqual(@as(u32, 0), routes_snapshot.items[0].healthy_endpoints);
     try std.testing.expect(!routes_snapshot.items[0].degraded);
+    try std.testing.expectEqual(RouteDegradedReason.none, routes_snapshot.items[0].degraded_reason);
+    try std.testing.expect(routes_snapshot.items[0].last_failure_kind == null);
+    try std.testing.expect(routes_snapshot.items[0].last_failure_at == null);
 }
 
 test "resolveRoute matches by host and path" {
@@ -900,4 +1035,63 @@ test "resolveUpstream skips endpoints with open circuits" {
     try std.testing.expectEqual(@as(u64, 1), state.circuit_trips_total);
     try std.testing.expectEqual(@as(u32, 1), state.circuit_open_endpoints);
     try std.testing.expectEqual(@as(u32, 0), state.circuit_half_open_endpoints);
+}
+
+test "route snapshots retain runtime failure details after recovery" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+    recordRouteFailure("api:/", .receive);
+
+    {
+        var routes_snapshot = try snapshotServiceRoutes(std.testing.allocator, "api");
+        defer {
+            for (routes_snapshot.items) |route| route.deinit(std.testing.allocator);
+            routes_snapshot.deinit(std.testing.allocator);
+        }
+
+        try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
+        try std.testing.expect(routes_snapshot.items[0].degraded);
+        try std.testing.expectEqual(RouteDegradedReason.receive_failure, routes_snapshot.items[0].degraded_reason);
+        try std.testing.expectEqual(RouteFailureKind.receive, routes_snapshot.items[0].last_failure_kind.?);
+        try std.testing.expect(routes_snapshot.items[0].last_failure_at != null);
+    }
+
+    recordRouteRecovered("api:/");
+
+    {
+        var routes_snapshot = try snapshotServiceRoutes(std.testing.allocator, "api");
+        defer {
+            for (routes_snapshot.items) |route| route.deinit(std.testing.allocator);
+            routes_snapshot.deinit(std.testing.allocator);
+        }
+
+        try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
+        try std.testing.expect(!routes_snapshot.items[0].degraded);
+        try std.testing.expectEqual(RouteDegradedReason.none, routes_snapshot.items[0].degraded_reason);
+        try std.testing.expectEqual(RouteFailureKind.receive, routes_snapshot.items[0].last_failure_kind.?);
+        try std.testing.expect(routes_snapshot.items[0].last_failure_at != null);
+    }
 }

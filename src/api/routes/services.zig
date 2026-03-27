@@ -281,17 +281,30 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     try writer.writeAll("\",\"path_prefix\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.path_prefix);
     try writer.print(
-        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"last_failure_kind\":",
         .{
             proxy_route.eligible_endpoints,
             proxy_route.healthy_endpoints,
             proxy_route.degraded,
+            proxy_route.degraded_reason.label(),
             proxy_route.retries,
             proxy_route.connect_timeout_ms,
             proxy_route.request_timeout_ms,
             proxy_route.preserve_host,
         },
     );
+    if (proxy_route.last_failure_kind) |kind| {
+        try writer.print("\"{s}\"", .{kind.label()});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"last_failure_at\":");
+    if (proxy_route.last_failure_at) |timestamp| {
+        try writer.print("{d}", .{timestamp});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeByte('}');
 }
 
 fn isValidSegment(value: []const u8) bool {
@@ -452,6 +465,8 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"path_prefix\":\"/v1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded_reason\":\"service_state\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"last_failure_kind\":null") != null);
 }
 
 test "route handles POST drain and DELETE endpoint" {
