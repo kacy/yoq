@@ -29,6 +29,7 @@ pub const StatusCode = enum(u16) {
     too_many_requests = 429,
     request_header_fields_too_large = 431,
     internal_server_error = 500,
+    bad_gateway = 502,
     service_unavailable = 503,
 
     pub fn phrase(self: StatusCode) []const u8 {
@@ -44,6 +45,7 @@ pub const StatusCode = enum(u16) {
             .too_many_requests => "Too Many Requests",
             .request_header_fields_too_large => "Request Header Fields Too Large",
             .internal_server_error => "Internal Server Error",
+            .bad_gateway => "Bad Gateway",
             .service_unavailable => "Service Unavailable",
         };
     }
