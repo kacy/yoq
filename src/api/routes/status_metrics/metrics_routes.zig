@@ -376,6 +376,16 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_running gauge\n");
     try writer.print("yoq_service_l7_proxy_steering_running {d}\n", .{@intFromBool(l7_steering.running)});
 
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_blocked_reason Active VIP steering blocked reason by label\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_blocked_reason gauge\n");
+    inline for (comptime std.meta.fields(steering_runtime.BlockedReason)) |field| {
+        const reason = @field(steering_runtime.BlockedReason, field.name);
+        try writer.print(
+            "yoq_service_l7_proxy_steering_blocked_reason{{reason=\"{s}\"}} {d}\n",
+            .{ reason.label(), @intFromBool(l7_steering.blocked_reason == reason) },
+        );
+    }
+
     try writer.writeAll("# HELP yoq_service_l7_proxy_steering_configured_services Services eligible for VIP steering\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_configured_services gauge\n");
     try writer.print("yoq_service_l7_proxy_steering_configured_services {d}\n", .{l7_steering.configured_services});
