@@ -6,6 +6,7 @@ const router = @import("router.zig");
 const service_rollout = @import("../service_rollout.zig");
 
 pub const default_listen_port: u16 = 17080;
+pub const StateChangeHook = *const fn () void;
 
 pub const Snapshot = struct {
     enabled: bool,
@@ -29,6 +30,7 @@ var listen_port: u16 = default_listen_port;
 var accepted_connections_total: u64 = 0;
 var active_connections: u32 = 0;
 var last_error: ?[]u8 = null;
+var state_change_hook: ?StateChangeHook = null;
 
 pub fn resetForTest() void {
     stop();
@@ -39,6 +41,13 @@ pub fn resetForTest() void {
     accepted_connections_total = 0;
     active_connections = 0;
     clearLastErrorLocked();
+    state_change_hook = null;
+}
+
+pub fn setStateChangeHook(hook: ?StateChangeHook) void {
+    mutex.lock();
+    defer mutex.unlock();
+    state_change_hook = hook;
 }
 
 pub fn startIfEnabled(alloc: std.mem.Allocator) void {
@@ -54,9 +63,11 @@ pub fn stop() void {
     var thread_to_join: ?std.Thread = null;
     var fd_to_close: ?posix.fd_t = null;
     var port_to_wake: ?u16 = null;
+    var hook_to_call: ?StateChangeHook = null;
 
     mutex.lock();
     stop_requested = true;
+    if (running or listen_fd != null or listener_thread != null) hook_to_call = state_change_hook;
     running = false;
     if (listen_fd) |fd| {
         fd_to_close = fd;
@@ -72,6 +83,7 @@ pub fn stop() void {
     if (port_to_wake) |port| wakeAccept(port);
     if (fd_to_close) |fd| posix.close(fd);
     if (thread_to_join) |thread| thread.join();
+    if (hook_to_call) |hook| hook();
 }
 
 pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
@@ -98,9 +110,10 @@ pub fn portIfRunning() ?u16 {
 
 fn start(alloc: std.mem.Allocator, port: u16) void {
     mutex.lock();
-    defer mutex.unlock();
-
-    if (listener_thread != null) return;
+    if (listener_thread != null) {
+        mutex.unlock();
+        return;
+    }
     stop_requested = false;
     accepted_connections_total = 0;
     active_connections = 0;
@@ -109,6 +122,9 @@ fn start(alloc: std.mem.Allocator, port: u16) void {
 
     const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
         setLastErrorLocked(error.SocketFailed);
+        const hook = state_change_hook;
+        mutex.unlock();
+        if (hook) |callback| callback();
         return;
     };
 
@@ -118,12 +134,18 @@ fn start(alloc: std.mem.Allocator, port: u16) void {
     const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
     posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
         setLastErrorLocked(error.BindFailed);
+        const hook = state_change_hook;
+        mutex.unlock();
         posix.close(fd);
+        if (hook) |callback| callback();
         return;
     };
     posix.listen(fd, 128) catch {
         setLastErrorLocked(error.ListenFailed);
+        const hook = state_change_hook;
+        mutex.unlock();
         posix.close(fd);
+        if (hook) |callback| callback();
         return;
     };
 
@@ -132,7 +154,10 @@ fn start(alloc: std.mem.Allocator, port: u16) void {
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
         posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
             setLastErrorLocked(error.BindFailed);
+            const hook = state_change_hook;
+            mutex.unlock();
             posix.close(fd);
+            if (hook) |callback| callback();
             return;
         };
         listen_port = std.mem.bigToNative(u16, bound_addr.port);
@@ -144,9 +169,15 @@ fn start(alloc: std.mem.Allocator, port: u16) void {
         setLastErrorLocked(error.ThreadSpawnFailed);
         running = false;
         listen_fd = null;
+        const hook = state_change_hook;
+        mutex.unlock();
         posix.close(fd);
+        if (hook) |callback| callback();
         return;
     };
+    const hook = state_change_hook;
+    mutex.unlock();
+    if (hook) |callback| callback();
 }
 
 fn acceptLoop(alloc: std.mem.Allocator) void {
@@ -159,11 +190,15 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
         };
 
         const client_fd = posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch {
-            mutex.lock();
-            defer mutex.unlock();
-            if (stop_requested or listen_fd == null) break;
-            setLastErrorLocked(error.AcceptFailed);
-            running = false;
+            const hook = blk: {
+                mutex.lock();
+                defer mutex.unlock();
+                if (stop_requested or listen_fd == null) break :blk null;
+                setLastErrorLocked(error.AcceptFailed);
+                running = false;
+                break :blk state_change_hook;
+            };
+            if (hook) |callback| callback();
             break;
         };
 
@@ -173,11 +208,11 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
         mutex.unlock();
 
         const thread = std.Thread.spawn(.{}, connectionWorker, .{ alloc, client_fd }) catch {
-            posix.close(client_fd);
             mutex.lock();
             if (active_connections > 0) active_connections -= 1;
             setLastErrorLocked(error.ThreadSpawnFailed);
             mutex.unlock();
+            posix.close(client_fd);
             continue;
         };
         thread.detach();
