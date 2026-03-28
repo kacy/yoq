@@ -229,7 +229,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"endpoint_count_mismatches_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_mismatches_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"eligibility_mismatches_total\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":false,\"audit_fresh\":false,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":false,\"downgrade_safe\":false,\"ready_for_reconciler_cutover\":false,\"ready_for_vip_cutover\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":false,\"audit_fresh\":false,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":false,\"downgrade_safe\":false,\"steering_ready\":true,\"steering_blocked_services\":0,\"steering_no_port_services\":0,\"ready_for_reconciler_cutover\":false,\"ready_for_vip_cutover\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"backfill_incomplete\",\"audit_never_ran\",\"fault_mode_active\",\"components_not_ready\"]") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_quarantines_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"node_signals\":{\"lost_total\":0,\"recovered_total\":0,\"endpoints_changed_total\":0") != null);
@@ -307,8 +307,83 @@ test "route rollout status reports reconciler cutover ready after clean backfill
     const response = route(req, testing.allocator).?;
     defer if (response.allocated) testing.allocator.free(response.body);
 
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":true,\"audit_fresh\":true,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":true,\"downgrade_safe\":true,\"ready_for_reconciler_cutover\":true,\"ready_for_vip_cutover\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":true,\"audit_fresh\":true,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":true,\"downgrade_safe\":true,\"steering_ready\":true,\"steering_blocked_services\":0,\"steering_no_port_services\":0,\"ready_for_reconciler_cutover\":true,\"ready_for_vip_cutover\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"components_not_ready\"]") != null);
+}
+
+test "route rollout status reports steering blocker for VIP cutover readiness" {
+    const service_registry_backfill = @import("../../network/service_registry_backfill.zig");
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const dns_registry = @import("../../network/dns/registry_support.zig");
+    const service_reconciler = @import("../../network/service_reconciler.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    service_registry_backfill.resetForTest();
+    defer service_registry_backfill.resetForTest();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    dns_registry.resetClusterLookupFaultsForTest();
+    defer dns_registry.resetClusterLookupFaultsForTest();
+    dns_registry.resetDnsInterceptorFaultsForTest();
+    defer dns_registry.resetDnsInterceptorFaultsForTest();
+    dns_registry.resetLoadBalancerFaultsForTest();
+    defer dns_registry.resetLoadBalancerFaultsForTest();
+    service_reconciler.resetForTest();
+    defer service_reconciler.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.registerServiceName("api", "abc123", "10.42.0.9");
+    try store.save(.{
+        .id = "abc123",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "api",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = "10.42.0.9",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1000,
+    });
+
+    service_registry_backfill.runIfEnabled();
+    service_reconciler.bootstrapIfEnabled();
+    service_reconciler.runAuditPassIfEnabled();
+
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/status?mode=service_rollout",
+        .path_only = "/v1/status",
+        .query = "mode=service_rollout",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":true,\"audit_fresh\":true,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":true,\"downgrade_safe\":true,\"steering_ready\":false,\"steering_blocked_services\":1,\"steering_no_port_services\":1,\"ready_for_reconciler_cutover\":true,\"ready_for_vip_cutover\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"components_not_ready\",\"steering_not_ready\"]") != null);
 }
 
 test "resolveIpToService returns unknown for empty records" {
@@ -567,8 +642,11 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_full_resyncs_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"backfill_complete\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"shadow_clean\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"steering_ready\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"reconciler_cutover\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"vip_cutover\"} 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"blocked\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"missing_ports\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_running 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_tracked_endpoints 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_queued_checks 0") != null);

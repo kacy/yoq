@@ -71,6 +71,14 @@ pub const ReadinessSummary = struct {
     drifted_services: u32,
 };
 
+pub const VipCutoverReadiness = struct {
+    enabled: bool,
+    ready: bool,
+    configured_services: u32,
+    blocked_services: u32,
+    no_port_services: u32,
+};
+
 pub const MappingApplyHook = *const fn (destination_ip: ?[4]u8, host_port: u16, protocol: u8, target_ip: [4]u8, target_port: u16) void;
 pub const MappingRemoveHook = *const fn (destination_ip: ?[4]u8, host_port: u16, protocol: u8) void;
 
@@ -173,6 +181,13 @@ pub fn snapshotServiceStatus(alloc: std.mem.Allocator, service_name: []const u8)
     defer mutex.unlock();
 
     return buildServiceStatusLocked(alloc, service_name);
+}
+
+pub fn snapshotVipCutoverReadiness(alloc: std.mem.Allocator) !VipCutoverReadiness {
+    mutex.lock();
+    defer mutex.unlock();
+
+    return summarizeVipCutoverReadinessLocked(alloc);
 }
 
 pub fn syncIfEnabled() void {
@@ -379,8 +394,71 @@ fn summarizeServiceReadinessLocked(alloc: std.mem.Allocator) !ReadinessSummary {
     return summary;
 }
 
+fn summarizeVipCutoverReadinessLocked(alloc: std.mem.Allocator) !VipCutoverReadiness {
+    var summary: VipCutoverReadiness = .{
+        .enabled = service_rollout.current().l7_proxy_http,
+        .ready = true,
+        .configured_services = 0,
+        .blocked_services = 0,
+        .no_port_services = 0,
+    };
+
+    if (!summary.enabled) return summary;
+
+    var services = try service_registry_runtime.snapshotServices(alloc);
+    defer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
+
+    const prerequisite_reason = currentVipCutoverPrerequisiteBlockedReasonLocked();
+
+    for (services.items) |service| {
+        if (service.http_proxy_host == null) continue;
+        summary.configured_services += 1;
+
+        var endpoints = try service_registry_runtime.snapshotServiceEndpoints(alloc, service.service_name);
+        defer {
+            for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+            endpoints.deinit(alloc);
+        }
+
+        var has_port = false;
+        for (endpoints.items) |endpoint| {
+            if (endpoint.port > 0 and endpoint.port <= std.math.maxInt(u16)) {
+                has_port = true;
+                break;
+            }
+        }
+
+        if (!has_port) {
+            summary.blocked_services += 1;
+            summary.no_port_services += 1;
+            continue;
+        }
+
+        if (prerequisite_reason != .none) {
+            summary.blocked_services += 1;
+        }
+    }
+
+    summary.ready = summary.blocked_services == 0;
+    return summary;
+}
+
 fn currentPrerequisiteBlockedReasonLocked() BlockedReason {
     if (!isEnabled()) return .rollout_disabled;
+    if (listener_runtime.portIfRunning() == null) return .listener_not_running;
+    if (!hasPortMapperLocked()) return .port_mapper_unavailable;
+    if (currentBridgeIpLocked()) |_| {
+        return .none;
+    } else |_| {
+        return .bridge_address_unavailable;
+    }
+}
+
+fn currentVipCutoverPrerequisiteBlockedReasonLocked() BlockedReason {
+    if (!service_rollout.current().l7_proxy_http) return .rollout_disabled;
     if (listener_runtime.portIfRunning() == null) return .listener_not_running;
     if (!hasPortMapperLocked()) return .port_mapper_unavailable;
     if (currentBridgeIpLocked()) |_| {
@@ -754,4 +832,57 @@ test "listener state changes resync steering" {
         try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), recorded_removes[0].destination_ip);
         try std.testing.expectEqual(@as(u16, 8080), recorded_removes[0].host_port);
     }
+}
+
+test "VIP cutover readiness ignores unapplied mappings before cutover" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    setPortMapperAvailableForTest(true);
+    listener_runtime.startForTest(std.testing.allocator, 0);
+
+    const readiness = try snapshotVipCutoverReadiness(std.testing.allocator);
+    try std.testing.expect(readiness.enabled);
+    try std.testing.expect(readiness.ready);
+    try std.testing.expectEqual(@as(u32, 1), readiness.configured_services);
+    try std.testing.expectEqual(@as(u32, 0), readiness.blocked_services);
+    try std.testing.expectEqual(@as(u32, 0), readiness.no_port_services);
 }

@@ -413,7 +413,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"cutover_readiness\":{") catch return common.internalError();
     writer.print(
-        "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
+        "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"steering_ready\":{},\"steering_blocked_services\":{d},\"steering_no_port_services\":{d},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
         .{
             cutover.backfill_complete,
             cutover.audit_fresh,
@@ -421,6 +421,9 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             cutover.components_ready,
             cutover.fault_modes_clear,
             cutover.downgrade_safe,
+            cutover.steering_ready,
+            cutover.steering_blocked_services,
+            cutover.steering_no_port_services,
             cutover.ready_for_reconciler_cutover,
             cutover.ready_for_vip_cutover,
         },
