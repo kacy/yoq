@@ -147,6 +147,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
     const proxy_runtime = @import("../../network/proxy/runtime.zig");
     const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
 
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -156,6 +157,8 @@ test "route handles /v1/status?mode=service_rollout GET" {
     defer proxy_runtime.resetForTest();
     listener_runtime.resetForTest();
     defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
     service_rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
     defer service_rollout.resetForTest();
     ebpf_map_support.resetFaultInjectionForTest();
@@ -219,6 +222,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"requests_total\":0,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"loop_rejections_total\":0,\"upstream_connect_failures_total\":0,\"upstream_send_failures_total\":0,\"upstream_receive_failures_total\":0,\"upstream_other_failures_total\":0,\"circuit_trips_total\":0,\"circuit_open_endpoints\":0,\"circuit_half_open_endpoints\":0,\"last_sync_at\":null,\"last_error\":null,\"sample_routes\":[]}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"listener\":{\"enabled\":false,\"running\":false,\"port\":17080,\"accepted_connections_total\":0,\"active_connections\":0,\"last_error\":null}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"desired_mappings\":0,\"applied_mappings\":0,\"last_sync_at\":null,\"last_error\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"vip_mismatches_total\":0") != null);
@@ -244,6 +248,7 @@ test "route rollout status reports reconciler cutover ready after clean backfill
     const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
     const proxy_runtime = @import("../../network/proxy/runtime.zig");
     const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
 
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -253,6 +258,8 @@ test "route rollout status reports reconciler cutover ready after clean backfill
     defer proxy_runtime.resetForTest();
     listener_runtime.resetForTest();
     defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
     service_registry_backfill.resetForTest();
     defer service_registry_backfill.resetForTest();
     dns_registry.resetRegistryForTest();
@@ -429,6 +436,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
     const proxy_runtime = @import("../../network/proxy/runtime.zig");
     const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
 
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -438,6 +446,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     defer proxy_runtime.resetForTest();
     listener_runtime.resetForTest();
     defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
     service_rollout.setForTest(.{
         .service_registry_v2 = true,
         .service_registry_reconciler = true,
@@ -516,6 +526,11 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_listener_port 17080") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_listener_accepted_connections_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_listener_active_connections 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_enabled 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_running 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_configured_services 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_mappings{state=\"desired\"} 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_mappings{state=\"applied\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_injections_total{operation=\"container_register\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"container_register\",mode=\"skip_legacy_apply\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"endpoint_healthy\",mode=\"none\"} 1") != null);

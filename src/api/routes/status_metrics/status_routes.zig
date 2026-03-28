@@ -17,6 +17,7 @@ const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 const proxy_runtime = @import("../../../network/proxy/runtime.zig");
 const listener_runtime = @import("../../../network/proxy/listener_runtime.zig");
+const steering_runtime = @import("../../../network/proxy/steering_runtime.zig");
 
 const Response = common.Response;
 
@@ -62,6 +63,8 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer l7_proxy.deinit(alloc);
     var l7_listener = listener_runtime.snapshot(alloc) catch return common.internalError();
     defer l7_listener.deinit(alloc);
+    var l7_steering = steering_runtime.snapshot(alloc) catch return common.internalError();
+    defer l7_steering.deinit(alloc);
     var l7_routes = proxy_runtime.snapshotRoutes(alloc) catch return common.internalError();
     defer {
         for (l7_routes.items) |route| route.deinit(alloc);
@@ -318,6 +321,30 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         },
     ) catch return common.internalError();
     if (l7_listener.last_error) |message| {
+        writer.writeByte('"') catch return common.internalError();
+        json_helpers.writeJsonEscaped(writer, message) catch return common.internalError();
+        writer.writeByte('"') catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll("},\"steering\":{") catch return common.internalError();
+    writer.print(
+        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"last_sync_at\":",
+        .{
+            l7_steering.enabled,
+            l7_steering.running,
+            l7_steering.configured_services,
+            l7_steering.desired_mappings,
+            l7_steering.applied_mappings,
+        },
+    ) catch return common.internalError();
+    if (l7_steering.last_sync_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_error\":") catch return common.internalError();
+    if (l7_steering.last_error) |message| {
         writer.writeByte('"') catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, message) catch return common.internalError();
         writer.writeByte('"') catch return common.internalError();

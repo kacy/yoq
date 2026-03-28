@@ -109,9 +109,15 @@ fn syncLocked() !void {
         return;
     }
 
-    const listener_port = listener_runtime.portIfRunning() orelse return error.ListenerNotRunning;
+    if (listener_runtime.portIfRunning() == null) {
+        if (ebpf.getPortMapper()) |mapper| removeAppliedMappingsLocked(mapper);
+        clearAppliedMappingsLocked();
+        desired_mappings = 0;
+        running = false;
+        return;
+    }
+
     const mapper = ebpf.getPortMapper() orelse return error.PortMapperUnavailable;
-    _ = listener_port;
 
     var desired = try buildDesiredMappingsLocked(std.heap.page_allocator);
     defer desired.deinit(std.heap.page_allocator);

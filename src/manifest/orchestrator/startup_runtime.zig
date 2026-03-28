@@ -9,6 +9,7 @@ const tls_proxy = @import("../../tls/proxy.zig");
 const tls_backend = @import("../../tls/backend.zig");
 const cert_store_mod = @import("../../tls/cert_store.zig");
 const acme_mod = @import("../../tls/acme.zig");
+const proxy_runtime = @import("../../network/proxy/runtime.zig");
 const sqlite = @import("sqlite");
 const cli = @import("../../lib/cli.zig");
 const tls_support = @import("tls_support.zig");
@@ -83,6 +84,8 @@ pub fn syncServiceDefinitions(
 
         @import("../../network/service_registry_runtime.zig").syncServiceFromStore(svc.name);
     }
+
+    proxy_runtime.bootstrapIfEnabled();
 }
 
 pub fn refreshServiceRuntimeBindings(

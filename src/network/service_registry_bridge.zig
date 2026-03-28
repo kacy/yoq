@@ -5,6 +5,8 @@ const log = @import("../lib/log.zig");
 const rollout = @import("service_rollout.zig");
 const service_reconciler = @import("service_reconciler.zig");
 const service_registry_runtime = @import("service_registry_runtime.zig");
+const proxy_runtime = @import("proxy/runtime.zig");
+const steering_runtime = @import("proxy/steering_runtime.zig");
 const store = @import("../state/store.zig");
 
 // Phase 0 bridge: preserve the current legacy DNS writes while routing all
@@ -63,6 +65,7 @@ pub fn registerContainerService(service_name: []const u8, container_id: []const 
         .none, .skip_legacy_apply => service_reconciler.noteContainerRegisteredFrom(.container_runtime, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
     }
+    refreshL7ControlPlane();
 }
 
 pub fn unregisterContainerService(container_id: []const u8) void {
@@ -85,6 +88,7 @@ pub fn unregisterContainerService(container_id: []const u8) void {
         .none, .skip_legacy_apply => service_reconciler.noteContainerUnregisteredFrom(.container_runtime, container_id),
         .skip_shadow_record => noteFaultInjection(operation),
     }
+    refreshL7ControlPlane();
 }
 
 pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
@@ -100,6 +104,7 @@ pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, c
         .none, .skip_legacy_apply => service_reconciler.noteEndpointHealthyFrom(.health_checker, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
     }
+    refreshL7ControlPlane();
 }
 
 pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
@@ -115,6 +120,7 @@ pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8,
         .none, .skip_legacy_apply => service_reconciler.noteEndpointUnhealthyFrom(.health_checker, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
     }
+    refreshL7ControlPlane();
 }
 
 pub fn faultInjectionCount(operation: BridgeOperation) u64 {
@@ -156,6 +162,11 @@ fn noteFaultInjection(operation: BridgeOperation) void {
         fault_modes[@intFromEnum(operation)].label(),
         operation.label(),
     });
+}
+
+fn refreshL7ControlPlane() void {
+    proxy_runtime.bootstrapIfEnabled();
+    steering_runtime.syncIfEnabled();
 }
 
 fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_id: []const u8, container_ip: [4]u8, node_id: ?i64) void {
