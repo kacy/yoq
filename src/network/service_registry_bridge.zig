@@ -2,11 +2,10 @@ const std = @import("std");
 const dns = @import("dns.zig");
 const dns_registry = @import("dns/registry_support.zig");
 const log = @import("../lib/log.zig");
+const proxy_control_plane = @import("proxy/control_plane.zig");
 const rollout = @import("service_rollout.zig");
 const service_reconciler = @import("service_reconciler.zig");
 const service_registry_runtime = @import("service_registry_runtime.zig");
-const proxy_runtime = @import("proxy/runtime.zig");
-const steering_runtime = @import("proxy/steering_runtime.zig");
 const store = @import("../state/store.zig");
 
 // Phase 0 bridge: preserve the current legacy DNS writes while routing all
@@ -165,8 +164,7 @@ fn noteFaultInjection(operation: BridgeOperation) void {
 }
 
 fn refreshL7ControlPlane() void {
-    proxy_runtime.bootstrapIfEnabled();
-    steering_runtime.syncIfEnabled();
+    proxy_control_plane.refreshIfEnabled();
 }
 
 fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_id: []const u8, container_ip: [4]u8, node_id: ?i64) void {

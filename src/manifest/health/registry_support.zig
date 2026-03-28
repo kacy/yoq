@@ -1,5 +1,6 @@
 const std = @import("std");
 const log = @import("../../lib/log.zig");
+const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 const store = @import("../../state/store.zig");
 const types = @import("types.zig");
@@ -33,6 +34,7 @@ pub fn registerService(
     const now = std.time.timestamp();
 
     service_registry_runtime.syncServiceFromStore(service_name);
+    proxy_control_plane.refreshIfEnabled();
     const pending_outcome = service_registry_runtime.markEndpointPending(service_name, endpoint_id, generation);
     if (pending_outcome == .stale_generation) {
         log.warn("health: pending gate rejected for {s}/{s} generation={}", .{ service_name, endpoint_id, generation });

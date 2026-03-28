@@ -6,6 +6,7 @@ const ip_mod = @import("ip.zig");
 const log = @import("../lib/log.zig");
 const bridge = @import("bridge.zig");
 const policy = @import("policy.zig");
+const proxy_control_plane = @import("proxy/control_plane.zig");
 const rollout = @import("service_rollout.zig");
 const service_registry_runtime = @import("service_registry_runtime.zig");
 const ebpf = @import("setup/ebpf_module.zig").ebpf;
@@ -522,6 +523,7 @@ fn noteNodeSignal(node_id: i64, is_loss: bool) void {
 
     if (!authoritative_bootstrapped) {
         bootstrapAuthoritativeLocked();
+        proxy_control_plane.refreshIfEnabled();
         return;
     }
 
@@ -530,6 +532,7 @@ fn noteNodeSignal(node_id: i64, is_loss: bool) void {
             log.warn("service reconciler: failed to reconcile service {s} after node signal for {}: {}", .{ service_name, node_id, err });
         };
     }
+    proxy_control_plane.refreshIfEnabled();
 }
 
 fn buildEvent(kind: EventKind, source: EventSource, service_name: []const u8, container_id: []const u8, endpoint_ip: ?[4]u8) Event {
@@ -643,6 +646,7 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
 
         service_registry_runtime.syncServiceFromStore(service_name);
         try reconcileServiceLocked(service_name);
+        proxy_control_plane.refreshIfEnabled();
 
         const refreshed_runtime = service_registry_runtime.snapshotService(alloc, service_name) catch |err| switch (err) {
             error.ServiceNotFound => null,
@@ -778,6 +782,7 @@ fn quarantineStaleEndpointsLocked() void {
     for (changed_services.items) |service_name| {
         service_registry_runtime.syncServiceFromStore(service_name);
     }
+    proxy_control_plane.refreshIfEnabled();
 }
 
 fn computeAuditMismatch(
@@ -1777,6 +1782,88 @@ test "node loss and recovery reconcile authoritative DNS immediately" {
     try std.testing.expectEqual(@as(u64, 1), after_recovery.recovered_total);
     try std.testing.expectEqual(@as(u64, 2), after_recovery.endpoints_changed_total);
     try std.testing.expectEqual(@as(?i64, 7), after_recovery.last_recovered_node_id);
+}
+
+test "node loss refreshes l7 proxy route counts" {
+    const proxy_runtime = @import("proxy/runtime.zig");
+    const steering_runtime = @import("proxy/steering_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    resetForTest();
+    rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .l7_proxy_http = true,
+    });
+    defer rollout.resetForTest();
+    defer resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = 7,
+        .ip_address = "10.42.7.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+    proxy_runtime.bootstrapIfEnabled();
+
+    {
+        var routes_before = try proxy_runtime.snapshotServiceRoutes(std.testing.allocator, "api");
+        defer {
+            for (routes_before.items) |route_snapshot| route_snapshot.deinit(std.testing.allocator);
+            routes_before.deinit(std.testing.allocator);
+        }
+        try std.testing.expectEqual(@as(usize, 1), routes_before.items.len);
+        try std.testing.expectEqual(@as(u32, 1), routes_before.items[0].eligible_endpoints);
+    }
+
+    noteNodeLost(7);
+
+    {
+        var routes_after_loss = try proxy_runtime.snapshotServiceRoutes(std.testing.allocator, "api");
+        defer {
+            for (routes_after_loss.items) |route_snapshot| route_snapshot.deinit(std.testing.allocator);
+            routes_after_loss.deinit(std.testing.allocator);
+        }
+        try std.testing.expectEqual(@as(usize, 1), routes_after_loss.items.len);
+        try std.testing.expectEqual(@as(u32, 0), routes_after_loss.items[0].eligible_endpoints);
+    }
+
+    noteNodeRecovered(7);
+
+    {
+        var routes_after_recovery = try proxy_runtime.snapshotServiceRoutes(std.testing.allocator, "api");
+        defer {
+            for (routes_after_recovery.items) |route_snapshot| route_snapshot.deinit(std.testing.allocator);
+            routes_after_recovery.deinit(std.testing.allocator);
+        }
+        try std.testing.expectEqual(@as(usize, 1), routes_after_recovery.items.len);
+        try std.testing.expectEqual(@as(u32, 1), routes_after_recovery.items[0].eligible_endpoints);
+    }
 }
 
 test "component state change triggers full resync" {

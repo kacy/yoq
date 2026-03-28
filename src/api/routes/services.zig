@@ -2,6 +2,7 @@ const std = @import("std");
 const http = @import("../http.zig");
 const common = @import("common.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
+const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const proxy_runtime = @import("../../network/proxy/runtime.zig");
 const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 const store = @import("../../state/store.zig");
@@ -168,6 +169,7 @@ fn handleDrainEndpoint(service_name: []const u8, endpoint_id: []const u8) Respon
         error.ServiceNotFound, error.EndpointNotFound => return common.notFound(),
         else => return common.internalError(),
     };
+    proxy_control_plane.refreshIfEnabled();
     return .{ .status = .ok, .body = "{\"status\":\"draining\"}", .allocated = false };
 }
 
@@ -176,6 +178,7 @@ fn handleDeleteEndpoint(service_name: []const u8, endpoint_id: []const u8) Respo
         error.ServiceNotFound, error.EndpointNotFound => return common.notFound(),
         else => return common.internalError(),
     };
+    proxy_control_plane.refreshIfEnabled();
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
 }
 
@@ -470,15 +473,29 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
 }
 
 test "route handles POST drain and DELETE endpoint" {
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
+
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
 
     try store.createService(.{
         .service_name = "api",
         .vip_address = "10.43.0.2",
         .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -488,13 +505,25 @@ test "route handles POST drain and DELETE endpoint" {
         .container_id = "ctr-1",
         .node_id = null,
         .ip_address = "10.42.0.9",
-        .port = 0,
+        .port = 8080,
         .weight = 1,
         .admin_state = "active",
         .generation = 1,
         .registered_at = 1000,
         .last_seen_at = 1000,
     });
+    service_registry_runtime.syncServiceFromStore("api");
+    proxy_runtime.bootstrapIfEnabled();
+
+    {
+        var routes_before = try proxy_runtime.snapshotServiceRoutes(std.testing.allocator, "api");
+        defer {
+            for (routes_before.items) |route_snapshot| route_snapshot.deinit(std.testing.allocator);
+            routes_before.deinit(std.testing.allocator);
+        }
+        try std.testing.expectEqual(@as(usize, 1), routes_before.items.len);
+        try std.testing.expectEqual(@as(u32, 1), routes_before.items[0].eligible_endpoints);
+    }
 
     const drain_response = route(testRequest(.POST, "/v1/services/api/endpoints/ctr-1:0/drain"), std.testing.allocator).?;
     try std.testing.expectEqual(http.StatusCode.ok, drain_response.status);
@@ -506,6 +535,15 @@ test "route handles POST drain and DELETE endpoint" {
         drained.deinit(std.testing.allocator);
     }
     try std.testing.expectEqualStrings("draining", drained.items[0].admin_state);
+    {
+        var routes_after_drain = try proxy_runtime.snapshotServiceRoutes(std.testing.allocator, "api");
+        defer {
+            for (routes_after_drain.items) |route_snapshot| route_snapshot.deinit(std.testing.allocator);
+            routes_after_drain.deinit(std.testing.allocator);
+        }
+        try std.testing.expectEqual(@as(usize, 1), routes_after_drain.items.len);
+        try std.testing.expectEqual(@as(u32, 0), routes_after_drain.items[0].eligible_endpoints);
+    }
 
     const delete_response = route(testRequest(.DELETE, "/v1/services/api/endpoints/ctr-1:0"), std.testing.allocator).?;
     try std.testing.expectEqual(http.StatusCode.ok, delete_response.status);
@@ -517,6 +555,15 @@ test "route handles POST drain and DELETE endpoint" {
         remaining.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 0), remaining.items.len);
+    {
+        var routes_after_delete = try proxy_runtime.snapshotServiceRoutes(std.testing.allocator, "api");
+        defer {
+            for (routes_after_delete.items) |route_snapshot| route_snapshot.deinit(std.testing.allocator);
+            routes_after_delete.deinit(std.testing.allocator);
+        }
+        try std.testing.expectEqual(@as(usize, 1), routes_after_delete.items.len);
+        try std.testing.expectEqual(@as(u32, 0), routes_after_delete.items[0].eligible_endpoints);
+    }
 }
 
 test "route handles POST /v1/services/{name}/reconcile" {
