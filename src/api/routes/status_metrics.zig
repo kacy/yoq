@@ -386,6 +386,79 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"components_not_ready\",\"steering_not_ready\"]") != null);
 }
 
+test "route rollout status sample routes expose steering drift details" {
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:8080",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    proxy_runtime.bootstrapIfEnabled();
+    steering_runtime.setPortMapperAvailableForTest(true);
+    steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    listener_runtime.startForTest(testing.allocator, 0);
+    try steering_runtime.setActualMappingsForTest(&.{});
+
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/status?mode=service_rollout",
+        .path_only = "/v1/status",
+        .query = "mode=service_rollout",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"sample_routes\":[{\"name\":\"api:/v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"none\"") != null);
+}
+
 test "resolveIpToService returns unknown for empty records" {
     const ip_net: u32 = 0x0A000001; // 10.0.0.1 in network order
     const records: []const store.ContainerRecord = &.{};
