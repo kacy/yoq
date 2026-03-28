@@ -4,6 +4,7 @@ const common = @import("common.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const proxy_runtime = @import("../../network/proxy/runtime.zig");
+const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
 const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 const store = @import("../../state/store.zig");
 
@@ -82,7 +83,7 @@ fn handleListServices(alloc: std.mem.Allocator) Response {
     writer.writeByte('[') catch return common.internalError();
     for (services.items, 0..) |service, idx| {
         if (idx > 0) writer.writeByte(',') catch return common.internalError();
-        writeServiceJson(writer, service) catch return common.internalError();
+        writeServiceJson(writer, alloc, service) catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
 
@@ -100,7 +101,7 @@ fn handleGetService(alloc: std.mem.Allocator, service_name: []const u8) Response
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
     const writer = json_buf.writer(alloc);
-    writeServiceJson(writer, service) catch return common.internalError();
+    writeServiceJson(writer, alloc, service) catch return common.internalError();
 
     const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
@@ -182,7 +183,9 @@ fn handleDeleteEndpoint(service_name: []const u8, endpoint_id: []const u8) Respo
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
 }
 
-fn writeServiceJson(writer: anytype, service: service_registry_runtime.ServiceSnapshot) !void {
+fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_registry_runtime.ServiceSnapshot) !void {
+    const steering = if (service.http_proxy_host != null) try steering_runtime.snapshotServiceStatus(alloc, service.service_name) else null;
+
     try writer.writeAll("{\"service_name\":\"");
     try json_helpers.writeJsonEscaped(writer, service.service_name);
     try writer.writeAll("\",\"vip_address\":\"");
@@ -228,6 +231,20 @@ fn writeServiceJson(writer: anytype, service: service_registry_runtime.ServiceSn
     try writer.writeAll(",\"last_reconcile_requested_at\":");
     if (service.last_reconcile_requested_at) |requested_at| {
         try writer.print("{d}", .{requested_at});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"steering\":");
+    if (steering) |state| {
+        try writer.print(
+            "{{\"desired_ports\":{d},\"applied_ports\":{d},\"ready\":{},\"blocked_reason\":\"{s}\"}}",
+            .{
+                state.desired_ports,
+                state.applied_ports,
+                state.ready,
+                state.blocked_reason.label(),
+            },
+        );
     } else {
         try writer.writeAll("null");
     }
@@ -372,6 +389,7 @@ test "route handles GET /v1/services" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":0,\"applied_ports\":0,\"ready\":false,\"blocked_reason\":\"rollout_disabled\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }
 
@@ -394,6 +412,7 @@ test "route handles GET /v1/services/{name}" {
 
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"web\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
 }
 
@@ -482,7 +501,6 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering degradation" {
     const service_rollout = @import("../../network/service_rollout.zig");
-    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
 
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -537,7 +555,6 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering degradati
 
 test "route handles POST drain and DELETE endpoint" {
     const service_rollout = @import("../../network/service_rollout.zig");
-    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
 
     try store.initTestDb();
     defer store.deinitTestDb();
