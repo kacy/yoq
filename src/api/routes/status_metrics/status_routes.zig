@@ -337,9 +337,10 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"control_plane\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"interval_secs\":{d},\"passes_total\":{d},\"event_passes_total\":{d},\"periodic_passes_total\":{d},\"last_trigger\":",
+        "\"enabled\":{},\"steering_enabled\":{},\"running\":{},\"interval_secs\":{d},\"passes_total\":{d},\"event_passes_total\":{d},\"periodic_passes_total\":{d},\"last_trigger\":",
         .{
             l7_control_plane.enabled,
+            l7_control_plane.steering_enabled,
             l7_control_plane.running,
             l7_control_plane.interval_secs,
             l7_control_plane.passes_total,

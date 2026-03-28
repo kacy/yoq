@@ -370,23 +370,27 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_listener_active_connections gauge\n");
     try writer.print("yoq_service_l7_proxy_listener_active_connections {d}\n", .{l7_listener.active_connections});
 
-    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_enabled Whether periodic steering resync is enabled\n");
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_enabled Whether periodic L7 control-plane repair is enabled\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_enabled gauge\n");
     try writer.print("yoq_service_l7_proxy_control_plane_enabled {d}\n", .{@intFromBool(l7_control_plane.enabled)});
 
-    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_running Whether the periodic steering resync loop is running\n");
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_steering_enabled Whether VIP steering repair is active within the L7 control plane\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_steering_enabled gauge\n");
+    try writer.print("yoq_service_l7_proxy_control_plane_steering_enabled {d}\n", .{@intFromBool(l7_control_plane.steering_enabled)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_running Whether the periodic L7 control-plane repair loop is running\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_running gauge\n");
     try writer.print("yoq_service_l7_proxy_control_plane_running {d}\n", .{@intFromBool(l7_control_plane.running)});
 
-    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_interval_seconds Periodic steering resync interval in seconds\n");
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_interval_seconds Periodic L7 control-plane repair interval in seconds\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_interval_seconds gauge\n");
     try writer.print("yoq_service_l7_proxy_control_plane_interval_seconds {d}\n", .{l7_control_plane.interval_secs});
 
-    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_passes_total Periodic steering resync passes executed\n");
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_passes_total Periodic L7 control-plane repair passes executed\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_passes_total counter\n");
     try writer.print("yoq_service_l7_proxy_control_plane_passes_total {d}\n", .{l7_control_plane.passes_total});
 
-    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_passes_by_trigger_total L7 steering control-plane sync passes by trigger\n");
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_passes_by_trigger_total L7 control-plane repair passes by trigger\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_passes_by_trigger_total counter\n");
     try writer.print("yoq_service_l7_proxy_control_plane_passes_by_trigger_total{{trigger=\"event\"}} {d}\n", .{l7_control_plane.event_passes_total});
     try writer.print("yoq_service_l7_proxy_control_plane_passes_by_trigger_total{{trigger=\"periodic\"}} {d}\n", .{l7_control_plane.periodic_passes_total});

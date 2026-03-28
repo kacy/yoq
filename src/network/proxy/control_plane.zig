@@ -2,6 +2,7 @@ const std = @import("std");
 const service_rollout = @import("../service_rollout.zig");
 const proxy_runtime = @import("runtime.zig");
 const steering_runtime = @import("steering_runtime.zig");
+const posix = std.posix;
 
 pub const sync_interval_secs: u64 = 15;
 
@@ -19,6 +20,7 @@ pub const SyncTrigger = enum {
 
 pub const Snapshot = struct {
     enabled: bool,
+    steering_enabled: bool,
     running: bool,
     interval_secs: u64,
     passes_total: u64,
@@ -39,13 +41,12 @@ var last_sync_trigger: ?SyncTrigger = null;
 var last_sync_pass_at: ?i64 = null;
 
 pub fn refreshIfEnabled() void {
-    proxy_runtime.bootstrapIfEnabled();
-    if (!syncEnabled()) return;
+    if (!controlPlaneEnabled()) return;
     runSyncPass(.event);
 }
 
 pub fn startSyncLoopIfEnabled() void {
-    if (!syncEnabled()) return;
+    if (!controlPlaneEnabled()) return;
     if (sync_running.load(.acquire)) return;
 
     sync_running.store(true, .release);
@@ -68,7 +69,8 @@ pub fn snapshot() Snapshot {
     defer mutex.unlock();
 
     return .{
-        .enabled = syncEnabled(),
+        .enabled = controlPlaneEnabled(),
+        .steering_enabled = vipSteeringEnabled(),
         .running = sync_running.load(.acquire),
         .interval_secs = if (sync_interval_override_ms) |ms| @max(@divTrunc(ms, 1000), 1) else sync_interval_secs,
         .passes_total = sync_passes_total,
@@ -97,12 +99,17 @@ pub fn setSyncIntervalMsForTest(interval_ms: ?u64) void {
     sync_interval_override_ms = interval_ms;
 }
 
-fn syncEnabled() bool {
+fn controlPlaneEnabled() bool {
+    return service_rollout.current().l7_proxy_http;
+}
+
+fn vipSteeringEnabled() bool {
     const flags = service_rollout.current();
     return flags.l7_proxy_http and flags.dns_returns_vip;
 }
 
 fn runSyncPass(trigger: SyncTrigger) void {
+    proxy_runtime.bootstrapIfEnabled();
     steering_runtime.syncIfEnabled();
     mutex.lock();
     defer mutex.unlock();
@@ -116,7 +123,7 @@ fn runSyncPass(trigger: SyncTrigger) void {
 }
 
 fn syncLoop() void {
-    if (syncEnabled()) runSyncPass(.periodic);
+    if (controlPlaneEnabled()) runSyncPass(.periodic);
 
     while (sync_running.load(.acquire)) {
         const interval_ms = blk: {
@@ -126,7 +133,7 @@ fn syncLoop() void {
         };
         std.Thread.sleep(interval_ms * std.time.ns_per_ms);
         if (!sync_running.load(.acquire)) break;
-        if (!syncEnabled()) continue;
+        if (!controlPlaneEnabled()) continue;
         runSyncPass(.periodic);
     }
 }
@@ -221,6 +228,74 @@ test "refreshIfEnabled records event-triggered sync pass" {
     try std.testing.expect(state.last_pass_at != null);
 }
 
+test "periodic control plane repairs routes without vip steering" {
+    const store = @import("../../state/store.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = false,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    setSyncIntervalMsForTest(10);
+
+    startSyncLoopIfEnabled();
+    defer stopSyncLoop();
+
+    std.Thread.sleep(40 * std.time.ns_per_ms);
+
+    const proxy_state = try proxy_runtime.snapshot(std.testing.allocator);
+    defer proxy_state.deinit(std.testing.allocator);
+    try std.testing.expect(proxy_state.running);
+    try std.testing.expectEqual(@as(u32, 1), proxy_state.configured_services);
+    try std.testing.expectEqual(@as(u32, 1), proxy_state.routes);
+
+    const loop_state = snapshot();
+    try std.testing.expect(loop_state.enabled);
+    try std.testing.expect(!loop_state.steering_enabled);
+    try std.testing.expect(loop_state.running);
+    try std.testing.expect(loop_state.passes_total > 0);
+    try std.testing.expectEqual(@as(u64, 0), loop_state.event_passes_total);
+    try std.testing.expect(loop_state.periodic_passes_total > 0);
+    try std.testing.expectEqual(SyncTrigger.periodic, loop_state.last_trigger.?);
+}
+
 test "listener state changes trigger event-driven steering repair" {
     const store = @import("../../state/store.zig");
     const listener_runtime = @import("listener_runtime.zig");
@@ -279,6 +354,7 @@ test "listener state changes trigger event-driven steering repair" {
     try std.testing.expectEqual(@as(u32, 1), service_state.applied_ports);
 
     var loop_state = snapshot();
+    try std.testing.expect(loop_state.steering_enabled);
     try std.testing.expectEqual(@as(u64, 1), loop_state.passes_total);
     try std.testing.expectEqual(@as(u64, 1), loop_state.event_passes_total);
     try std.testing.expectEqual(@as(u64, 0), loop_state.periodic_passes_total);
@@ -296,4 +372,236 @@ test "listener state changes trigger event-driven steering repair" {
     try std.testing.expectEqual(@as(u64, 2), loop_state.event_passes_total);
     try std.testing.expectEqual(@as(u64, 0), loop_state.periodic_passes_total);
     try std.testing.expectEqual(SyncTrigger.event, loop_state.last_trigger.?);
+}
+
+const TestUpstreamServer = struct {
+    listen_fd: posix.socket_t,
+    port: u16,
+    thread: ?std.Thread = null,
+    request_buf: [2048]u8 = undefined,
+    request_len: usize = 0,
+    response: []const u8,
+
+    fn init(response: []const u8) !TestUpstreamServer {
+        const listen_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        errdefer posix.close(listen_fd);
+
+        const reuseaddr: i32 = 1;
+        posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
+
+        const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+        try posix.bind(listen_fd, &addr.any, addr.getOsSockLen());
+        try posix.listen(listen_fd, 1);
+
+        var bound_addr: posix.sockaddr.in = undefined;
+        var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+        try posix.getsockname(listen_fd, @ptrCast(&bound_addr), &bound_len);
+
+        return .{
+            .listen_fd = listen_fd,
+            .port = std.mem.bigToNative(u16, bound_addr.port),
+            .response = response,
+        };
+    }
+
+    fn deinit(self: *TestUpstreamServer) void {
+        if (self.thread) |thread| thread.join();
+        posix.close(self.listen_fd);
+    }
+
+    fn start(self: *TestUpstreamServer) !void {
+        self.thread = try std.Thread.spawn(.{}, acceptOne, .{self});
+    }
+
+    fn request(self: *const TestUpstreamServer) []const u8 {
+        return self.request_buf[0..self.request_len];
+    }
+
+    fn acceptOne(self: *TestUpstreamServer) void {
+        const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+        defer posix.close(client_fd);
+        self.request_len = posix.read(client_fd, &self.request_buf) catch 0;
+        _ = writeAll(client_fd, self.response) catch {};
+    }
+};
+
+var recorded_target_port: u16 = 0;
+
+fn recordMappedTarget(_: ?[4]u8, _: u16, _: u8, target_ip: [4]u8, target_port: u16) void {
+    std.debug.assert(std.mem.eql(u8, target_ip[0..], &[_]u8{ 127, 0, 0, 1 }));
+    recorded_target_port = target_port;
+}
+
+fn writeAll(fd: posix.socket_t, data: []const u8) !void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const bytes_written = posix.write(fd, data[written..]) catch return error.WriteFailed;
+        if (bytes_written == 0) return error.WriteFailed;
+        written += bytes_written;
+    }
+}
+
+test "mapped listener target serves proxied HTTP after event-driven repair" {
+    const store = @import("../../state/store.zig");
+    const listener_runtime = @import("listener_runtime.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    var upstream = try TestUpstreamServer.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    steering_runtime.setPortMapperAvailableForTest(true);
+    steering_runtime.setBridgeIpForTest(.{ 127, 0, 0, 1 });
+    try steering_runtime.setActualMappingsForTest(&.{});
+    steering_runtime.setMappingHooksForTest(recordMappedTarget, null);
+    defer steering_runtime.setMappingHooksForTest(null, null);
+    listener_runtime.setStateChangeHook(refreshIfEnabled);
+    defer listener_runtime.setStateChangeHook(null);
+    recorded_target_port = 0;
+
+    listener_runtime.startForTest(std.testing.allocator, 0);
+    defer listener_runtime.stop();
+
+    try std.testing.expect(recorded_target_port != 0);
+
+    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(client_fd);
+    const listener_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
+    try posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
+    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+
+    var response_buf: [1024]u8 = undefined;
+    const bytes_read = try posix.read(client_fd, &response_buf);
+    try std.testing.expect(bytes_read > 0);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 200 OK\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\nhello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "GET / HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "Host: api.internal\r\n") != null);
+}
+
+test "periodic repair restores mapped listener target and serves proxied HTTP" {
+    const store = @import("../../state/store.zig");
+    const listener_runtime = @import("listener_runtime.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    var upstream = try TestUpstreamServer.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    steering_runtime.setPortMapperAvailableForTest(true);
+    steering_runtime.setBridgeIpForTest(.{ 127, 0, 0, 1 });
+    try steering_runtime.setActualMappingsForTest(&.{});
+    steering_runtime.setMappingHooksForTest(recordMappedTarget, null);
+    defer steering_runtime.setMappingHooksForTest(null, null);
+    recorded_target_port = 0;
+    setSyncIntervalMsForTest(10);
+
+    listener_runtime.startForTest(std.testing.allocator, 0);
+    defer listener_runtime.stop();
+
+    startSyncLoopIfEnabled();
+    defer stopSyncLoop();
+
+    std.Thread.sleep(40 * std.time.ns_per_ms);
+    try std.testing.expect(recorded_target_port != 0);
+
+    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(client_fd);
+    const listener_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
+    try posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
+    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+
+    var response_buf: [1024]u8 = undefined;
+    const bytes_read = try posix.read(client_fd, &response_buf);
+    try std.testing.expect(bytes_read > 0);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 200 OK\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\nhello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "GET / HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(), "Host: api.internal\r\n") != null);
 }
