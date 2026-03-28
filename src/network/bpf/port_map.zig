@@ -15,7 +15,7 @@ pub const MapDef = struct {
 };
 
 pub const maps = [_]MapDef{
-    .{ .name = "port_map", .map_type = 1, .key_size = 4, .value_size = 8, .max_entries = 1024 },
+    .{ .name = "port_map", .map_type = 1, .key_size = 8, .value_size = 8, .max_entries = 1024 },
 };
 
 pub const Reloc = struct {

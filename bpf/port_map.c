@@ -4,7 +4,11 @@
 // traffic based on a port mapping table. replaces iptables DNAT
 // rules for container port forwarding.
 //
-// key: {protocol, port} -> value: {dst_ip, dst_port}
+// key: {dst_ip, protocol, port} -> value: {dst_ip, dst_port}
+//
+// destination-specific keys allow steering only VIP traffic into the
+// HTTP proxy listener. wildcard entries with dst_ip=0 preserve the
+// existing host-port forwarding behavior.
 //
 // uses XDP_FLAGS_SKB_MODE for compatibility with virtual interfaces.
 // after rewriting, returns XDP_PASS to let the kernel route the
@@ -42,6 +46,7 @@ struct xdp_md {
 
 // port mapping key
 struct port_key {
+    __u32 dst_ip;    // destination IP to match (network byte order), 0 = wildcard
     __u16 port;      // host port (network byte order)
     __u8 protocol;   // IPPROTO_TCP or IPPROTO_UDP
     __u8 _pad;
@@ -141,8 +146,9 @@ int xdp_port_map(struct xdp_md *ctx)
     if (ihl != 5)
         return XDP_PASS;
 
-    // extract destination port and protocol
+    // extract destination IP, port, and protocol
     struct port_key key = {};
+    key.dst_ip = ip->daddr;
     key.protocol = ip->protocol;
 
     if (ip->protocol == IPPROTO_TCP) {
@@ -159,10 +165,14 @@ int xdp_port_map(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    // look up port mapping
+    // look up exact destination mapping first
     struct port_target *target = bpf_map_lookup_elem(&port_map, &key);
-    if (!target)
-        return XDP_PASS;
+    if (!target) {
+        key.dst_ip = 0;
+        target = bpf_map_lookup_elem(&port_map, &key);
+        if (!target)
+            return XDP_PASS;
+    }
 
     // SECURITY: Validate target IP is not 0.0.0.0 or broadcast
     if (target->dst_ip == 0 || target->dst_ip == 0xFFFFFFFF)
