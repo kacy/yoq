@@ -337,14 +337,22 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"control_plane\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"interval_secs\":{d},\"passes_total\":{d},\"last_pass_at\":",
+        "\"enabled\":{},\"running\":{},\"interval_secs\":{d},\"passes_total\":{d},\"event_passes_total\":{d},\"periodic_passes_total\":{d},\"last_trigger\":",
         .{
             l7_control_plane.enabled,
             l7_control_plane.running,
             l7_control_plane.interval_secs,
             l7_control_plane.passes_total,
+            l7_control_plane.event_passes_total,
+            l7_control_plane.periodic_passes_total,
         },
     ) catch return common.internalError();
+    if (l7_control_plane.last_trigger) |trigger| {
+        writer.print("\"{s}\"", .{trigger.label()}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_pass_at\":") catch return common.internalError();
     if (l7_control_plane.last_pass_at) |timestamp| {
         writer.print("{d}", .{timestamp}) catch return common.internalError();
     } else {

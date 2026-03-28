@@ -5,11 +5,26 @@ const steering_runtime = @import("steering_runtime.zig");
 
 pub const sync_interval_secs: u64 = 15;
 
+pub const SyncTrigger = enum {
+    event,
+    periodic,
+
+    pub fn label(self: SyncTrigger) []const u8 {
+        return switch (self) {
+            .event => "event",
+            .periodic => "periodic",
+        };
+    }
+};
+
 pub const Snapshot = struct {
     enabled: bool,
     running: bool,
     interval_secs: u64,
     passes_total: u64,
+    event_passes_total: u64,
+    periodic_passes_total: u64,
+    last_trigger: ?SyncTrigger,
     last_pass_at: ?i64,
 };
 
@@ -18,11 +33,15 @@ var sync_thread: ?std.Thread = null;
 var sync_interval_override_ms: ?u64 = null;
 var mutex: std.Thread.Mutex = .{};
 var sync_passes_total: u64 = 0;
+var event_sync_passes_total: u64 = 0;
+var periodic_sync_passes_total: u64 = 0;
+var last_sync_trigger: ?SyncTrigger = null;
 var last_sync_pass_at: ?i64 = null;
 
 pub fn refreshIfEnabled() void {
     proxy_runtime.bootstrapIfEnabled();
-    steering_runtime.syncIfEnabled();
+    if (!syncEnabled()) return;
+    runSyncPass(.event);
 }
 
 pub fn startSyncLoopIfEnabled() void {
@@ -53,6 +72,9 @@ pub fn snapshot() Snapshot {
         .running = sync_running.load(.acquire),
         .interval_secs = if (sync_interval_override_ms) |ms| @max(@divTrunc(ms, 1000), 1) else sync_interval_secs,
         .passes_total = sync_passes_total,
+        .event_passes_total = event_sync_passes_total,
+        .periodic_passes_total = periodic_sync_passes_total,
+        .last_trigger = last_sync_trigger,
         .last_pass_at = last_sync_pass_at,
     };
 }
@@ -63,6 +85,9 @@ pub fn resetForTest() void {
     defer mutex.unlock();
     sync_interval_override_ms = null;
     sync_passes_total = 0;
+    event_sync_passes_total = 0;
+    periodic_sync_passes_total = 0;
+    last_sync_trigger = null;
     last_sync_pass_at = null;
 }
 
@@ -77,15 +102,22 @@ fn syncEnabled() bool {
     return flags.l7_proxy_http and flags.dns_returns_vip;
 }
 
-fn runSyncPass() void {
+fn runSyncPass(trigger: SyncTrigger) void {
     steering_runtime.syncIfEnabled();
     mutex.lock();
     defer mutex.unlock();
     sync_passes_total += 1;
+    switch (trigger) {
+        .event => event_sync_passes_total += 1,
+        .periodic => periodic_sync_passes_total += 1,
+    }
+    last_sync_trigger = trigger;
     last_sync_pass_at = std.time.timestamp();
 }
 
 fn syncLoop() void {
+    if (syncEnabled()) runSyncPass(.periodic);
+
     while (sync_running.load(.acquire)) {
         const interval_ms = blk: {
             mutex.lock();
@@ -95,7 +127,7 @@ fn syncLoop() void {
         std.Thread.sleep(interval_ms * std.time.ns_per_ms);
         if (!sync_running.load(.acquire)) break;
         if (!syncEnabled()) continue;
-        runSyncPass();
+        runSyncPass(.periodic);
     }
 }
 
@@ -163,5 +195,105 @@ test "periodic steering sync loop repairs drifted mappings" {
     const loop_state = snapshot();
     try std.testing.expect(loop_state.running);
     try std.testing.expect(loop_state.passes_total > 0);
+    try std.testing.expectEqual(@as(u64, 0), loop_state.event_passes_total);
+    try std.testing.expect(loop_state.periodic_passes_total > 0);
+    try std.testing.expectEqual(SyncTrigger.periodic, loop_state.last_trigger.?);
     try std.testing.expect(loop_state.last_pass_at != null);
+}
+
+test "refreshIfEnabled records event-triggered sync pass" {
+    resetForTest();
+    defer resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    refreshIfEnabled();
+
+    const state = snapshot();
+    try std.testing.expectEqual(@as(u64, 1), state.passes_total);
+    try std.testing.expectEqual(@as(u64, 1), state.event_passes_total);
+    try std.testing.expectEqual(@as(u64, 0), state.periodic_passes_total);
+    try std.testing.expectEqual(SyncTrigger.event, state.last_trigger.?);
+    try std.testing.expect(state.last_pass_at != null);
+}
+
+test "listener state changes trigger event-driven steering repair" {
+    const store = @import("../../state/store.zig");
+    const listener_runtime = @import("listener_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:8080",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    @import("../service_registry_runtime.zig").syncServiceFromStore("api");
+    steering_runtime.setPortMapperAvailableForTest(true);
+    steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    try steering_runtime.setActualMappingsForTest(&.{});
+    listener_runtime.setStateChangeHook(refreshIfEnabled);
+    defer listener_runtime.setStateChangeHook(null);
+
+    listener_runtime.startForTest(std.testing.allocator, 0);
+
+    var service_state = try steering_runtime.snapshotServiceStatus(std.testing.allocator, "api");
+    try std.testing.expect(service_state.ready);
+    try std.testing.expectEqual(@as(u32, 1), service_state.applied_ports);
+
+    var loop_state = snapshot();
+    try std.testing.expectEqual(@as(u64, 1), loop_state.passes_total);
+    try std.testing.expectEqual(@as(u64, 1), loop_state.event_passes_total);
+    try std.testing.expectEqual(@as(u64, 0), loop_state.periodic_passes_total);
+    try std.testing.expectEqual(SyncTrigger.event, loop_state.last_trigger.?);
+
+    listener_runtime.stop();
+
+    service_state = try steering_runtime.snapshotServiceStatus(std.testing.allocator, "api");
+    try std.testing.expect(!service_state.ready);
+    try std.testing.expect(service_state.blocked);
+    try std.testing.expectEqual(steering_runtime.BlockedReason.listener_not_running, service_state.blocked_reason);
+
+    loop_state = snapshot();
+    try std.testing.expectEqual(@as(u64, 2), loop_state.passes_total);
+    try std.testing.expectEqual(@as(u64, 2), loop_state.event_passes_total);
+    try std.testing.expectEqual(@as(u64, 0), loop_state.periodic_passes_total);
+    try std.testing.expectEqual(SyncTrigger.event, loop_state.last_trigger.?);
 }

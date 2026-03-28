@@ -386,6 +386,21 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_passes_total counter\n");
     try writer.print("yoq_service_l7_proxy_control_plane_passes_total {d}\n", .{l7_control_plane.passes_total});
 
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_passes_by_trigger_total L7 steering control-plane sync passes by trigger\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_passes_by_trigger_total counter\n");
+    try writer.print("yoq_service_l7_proxy_control_plane_passes_by_trigger_total{{trigger=\"event\"}} {d}\n", .{l7_control_plane.event_passes_total});
+    try writer.print("yoq_service_l7_proxy_control_plane_passes_by_trigger_total{{trigger=\"periodic\"}} {d}\n", .{l7_control_plane.periodic_passes_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_last_trigger Active label for the most recent control-plane sync trigger\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_last_trigger gauge\n");
+    inline for (comptime std.meta.fields(proxy_control_plane.SyncTrigger)) |field| {
+        const trigger = @field(proxy_control_plane.SyncTrigger, field.name);
+        try writer.print(
+            "yoq_service_l7_proxy_control_plane_last_trigger{{trigger=\"{s}\"}} {d}\n",
+            .{ trigger.label(), @intFromBool(l7_control_plane.last_trigger == trigger) },
+        );
+    }
+
     try writer.writeAll("# HELP yoq_service_l7_proxy_steering_enabled Whether VIP steering into the L7 listener is enabled\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_enabled gauge\n");
     try writer.print("yoq_service_l7_proxy_steering_enabled {d}\n", .{@intFromBool(l7_steering.enabled)});
