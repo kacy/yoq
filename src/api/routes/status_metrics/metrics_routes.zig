@@ -15,9 +15,11 @@ const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
 const health = @import("../../../manifest/health.zig");
 const service_registry_backfill = @import("../../../network/service_registry_backfill.zig");
 const service_registry_bridge = @import("../../../network/service_registry_bridge.zig");
+const service_observability = @import("../../../network/service_observability.zig");
 const service_cutover_readiness = @import("../../../network/service_cutover_readiness.zig");
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
+const service_registry_runtime = @import("../../../network/service_registry_runtime.zig");
 const proxy_runtime = @import("../../../network/proxy/runtime.zig");
 const listener_runtime = @import("../../../network/proxy/listener_runtime.zig");
 const proxy_control_plane = @import("../../../network/proxy/control_plane.zig");
@@ -266,6 +268,13 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     defer audit.deinit(std.heap.page_allocator);
     var cutover = try service_cutover_readiness.snapshot(std.heap.page_allocator);
     defer cutover.deinit(std.heap.page_allocator);
+    var service_metrics = try service_observability.snapshot(std.heap.page_allocator);
+    defer service_metrics.deinit(std.heap.page_allocator);
+    var services = try service_registry_runtime.snapshotServices(std.heap.page_allocator);
+    defer {
+        for (services.items) |service| service.deinit(std.heap.page_allocator);
+        services.deinit(std.heap.page_allocator);
+    }
     var l7_proxy = try proxy_runtime.snapshot(std.heap.page_allocator);
     defer l7_proxy.deinit(std.heap.page_allocator);
     var l7_listener = try listener_runtime.snapshot(std.heap.page_allocator);
@@ -299,6 +308,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_rollout_limit{{limit=\"recent_shadow_events\"}} {d}\n", .{service_reconciler.max_recent_events});
     try writer.print("yoq_service_rollout_limit{{limit=\"health_workers\"}} {d}\n", .{health.max_worker_threads});
     try writer.print("yoq_service_rollout_limit{{limit=\"health_queued_checks\"}} {d}\n", .{health.max_queued_checks});
+
+    try writeServiceObservabilityPrometheus(writer, services.items, service_metrics.services.items, service_metrics.vip_alloc_failures_total);
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_enabled Whether the L7 proxy control plane is enabled\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_enabled gauge\n");
@@ -623,6 +634,85 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_health_checker_queue_drops_total Health checks dropped because the queue is full\n");
     try writer.writeAll("# TYPE yoq_health_checker_queue_drops_total counter\n");
     try writer.print("yoq_health_checker_queue_drops_total {d}\n", .{checker.dropped_queue_full_total});
+}
+
+fn writeServiceObservabilityPrometheus(
+    writer: anytype,
+    services: []const service_registry_runtime.ServiceSnapshot,
+    counters: []const service_observability.ServiceCounters,
+    vip_alloc_failures_total: u64,
+) !void {
+    try writer.writeAll("# HELP yoq_service_endpoints Service endpoint counts by state\n");
+    try writer.writeAll("# TYPE yoq_service_endpoints gauge\n");
+    try writer.writeAll("# HELP yoq_service_degraded Whether a service is currently degraded\n");
+    try writer.writeAll("# TYPE yoq_service_degraded gauge\n");
+    try writer.writeAll("# HELP yoq_service_zero_backends Whether a service currently has zero eligible backends\n");
+    try writer.writeAll("# TYPE yoq_service_zero_backends gauge\n");
+    try writer.writeAll("# HELP yoq_service_endpoint_overflow Whether a service has exceeded the backend capacity limit\n");
+    try writer.writeAll("# TYPE yoq_service_endpoint_overflow gauge\n");
+    try writer.writeAll("# HELP yoq_service_reconcile_runs_total Service reconcile requests and outcomes\n");
+    try writer.writeAll("# TYPE yoq_service_reconcile_runs_total counter\n");
+    try writer.writeAll("# HELP yoq_service_health_status Service health status by label\n");
+    try writer.writeAll("# TYPE yoq_service_health_status gauge\n");
+    try writer.writeAll("# HELP yoq_service_health_checks_total Service health check activity by kind\n");
+    try writer.writeAll("# TYPE yoq_service_health_checks_total counter\n");
+    try writer.writeAll("# HELP yoq_service_endpoint_flaps_total Service health status transitions\n");
+    try writer.writeAll("# TYPE yoq_service_endpoint_flaps_total counter\n");
+    try writer.writeAll("# HELP yoq_service_vip_alloc_failures_total Failed stable VIP allocations\n");
+    try writer.writeAll("# TYPE yoq_service_vip_alloc_failures_total counter\n");
+    try writer.print("yoq_service_vip_alloc_failures_total {d}\n", .{vip_alloc_failures_total});
+
+    for (services) |service| {
+        const service_counters = service_observability.findServiceCounters(counters, service.service_name);
+        const health_state = health.getServiceHealth(service.service_name);
+
+        try writer.print("yoq_service_endpoints{{service=\"{s}\",state=\"total\"}} {d}\n", .{ service.service_name, service.total_endpoints });
+        try writer.print("yoq_service_endpoints{{service=\"{s}\",state=\"eligible\"}} {d}\n", .{ service.service_name, service.eligible_endpoints });
+        try writer.print("yoq_service_endpoints{{service=\"{s}\",state=\"healthy\"}} {d}\n", .{ service.service_name, service.healthy_endpoints });
+        try writer.print("yoq_service_endpoints{{service=\"{s}\",state=\"draining\"}} {d}\n", .{ service.service_name, service.draining_endpoints });
+        try writer.print("yoq_service_degraded{{service=\"{s}\"}} {d}\n", .{ service.service_name, @intFromBool(service.degraded) });
+        try writer.print("yoq_service_zero_backends{{service=\"{s}\"}} {d}\n", .{ service.service_name, @intFromBool(service.eligible_endpoints == 0) });
+        try writer.print("yoq_service_endpoint_overflow{{service=\"{s}\"}} {d}\n", .{ service.service_name, @intFromBool(service.overflow) });
+        try writer.print(
+            "yoq_service_reconcile_runs_total{{service=\"{s}\",result=\"requested\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.reconcile_requested_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_reconcile_runs_total{{service=\"{s}\",result=\"succeeded\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.reconcile_succeeded_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_reconcile_runs_total{{service=\"{s}\",result=\"failed\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.reconcile_failed_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_health_checks_total{{service=\"{s}\",kind=\"scheduled\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.health_checks_scheduled_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_health_checks_total{{service=\"{s}\",kind=\"completed\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.health_checks_completed_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_health_checks_total{{service=\"{s}\",kind=\"stale\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.health_stale_results_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_endpoint_flaps_total{{service=\"{s}\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.endpoint_flaps_total else 0 },
+        );
+
+        inline for ([_][]const u8{ "healthy", "starting", "unhealthy", "untracked" }) |status| {
+            const active = if (health_state) |entry|
+                std.mem.eql(u8, status, @tagName(entry.status))
+            else
+                std.mem.eql(u8, status, "untracked");
+            try writer.print(
+                "yoq_service_health_status{{service=\"{s}\",status=\"{s}\"}} {d}\n",
+                .{ service.service_name, status, @intFromBool(active) },
+            );
+        }
+    }
 }
 
 fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.BridgeOperation) !void {

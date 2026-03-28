@@ -591,7 +591,10 @@ test "handleMetricsPrometheus returns text content type" {
 
 test "handleMetricsPrometheus exposes service rollout metrics" {
     const ebpf_map_support = @import("../../network/ebpf/map_support.zig");
+    const health = @import("../../manifest/health.zig");
+    const health_registry = @import("../../manifest/health/registry_support.zig");
     const service_rollout = @import("../../network/service_rollout.zig");
+    const service_observability = @import("../../network/service_observability.zig");
     const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
     const dns_registry = @import("../../network/dns/registry_support.zig");
     const service_reconciler = @import("../../network/service_reconciler.zig");
@@ -603,6 +606,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
 
     try store.initTestDb();
     defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
     proxy_control_plane.resetForTest();
@@ -646,6 +651,17 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
     service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
     service_registry_bridge.markEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
+    try service_registry_runtime.requestReconcile("api");
+    try service_registry_runtime.markReconcileFailed("api", "sync failed");
+    try service_registry_runtime.markReconcileSucceeded("api");
+    try health.registerService("api", "abcdef123456".*, .{ 10, 42, 0, 9 }, .{
+        .check_type = .{ .tcp = .{ .port = 8080 } },
+    });
+    service_observability.noteHealthCheckScheduled("api");
+    service_observability.noteHealthCheckCompleted("api", false);
+    service_observability.noteHealthCheckCompleted("api", true);
+    service_observability.noteEndpointFlap("api");
+    service_observability.noteVipAllocFailure();
     try store.createService(.{
         .service_name = "edge",
         .vip_address = "10.43.0.9",
@@ -675,6 +691,21 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"load_balancer_backends_per_vip\"} 64") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_workers\"} 4") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_queued_checks\"} 64") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints{service=\"api\",state=\"total\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints{service=\"api\",state=\"eligible\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints{service=\"api\",state=\"healthy\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_zero_backends{service=\"edge\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_degraded{service=\"edge\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"requested\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"succeeded\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"failed\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"api\",status=\"starting\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"edge\",status=\"untracked\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",kind=\"scheduled\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",kind=\"completed\"} 2") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",kind=\"stale\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoint_flaps_total{service=\"api\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_vip_alloc_failures_total 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_enabled 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_running 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_configured_services 1") != null);
