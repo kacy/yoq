@@ -530,9 +530,15 @@ What this means in practice now:
 Current behavior:
 
 - VIP steering is implemented through the XDP port-mapper path using exact `dst_ip + port + protocol` matches.
-- Non-HTTP traffic still uses the L4 data path.
+- Only TCP mappings are programmed for HTTP-enabled services, so non-HTTP traffic stays on the L4 data path.
+- If VIP steering is not ready, VIP traffic falls back to the L4 service path instead of being black-holed. Route status now reports that as `vip_traffic_mode = "l4_fallback"`.
 - Listener start, stop, and accept-loop failure now trigger steering resync so stale VIP mappings do not linger after the listener changes state.
 - Route and rollout status already surface whether steering is ready and why it is blocked when it is not.
+- The proxy now sets `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto` itself instead of trusting inbound values.
+- Source IP expectations are now explicit:
+  - the listener sees the original client source address on the steered TCP connection
+  - the upstream sees the proxy as the TCP peer
+  - HTTP backends must use the forwarded headers if they need original client identity
 
 ### 6d. Retry and circuit-breaker semantics
 
@@ -574,12 +580,9 @@ The shortest safe path from here:
    - keep listener state changes from leaving stale steering entries behind
    - add stronger drift checks between steering intent and applied state
 2. Finish the steering operational model.
-   - document source-IP expectations clearly
-   - make non-HTTP bypass guarantees explicit
    - define how steering should degrade when the listener is unhealthy but L4 is still available
 3. Extend L7 observability from counters into operator-facing failure detail.
    - per-route failure summaries
-   - steering failure detail beyond a single blocked reason
    - clearer degraded reasons in rollout status
 4. Add end-to-end coverage for the VIP path.
    - HTTP request reaches the listener through steering

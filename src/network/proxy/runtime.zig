@@ -52,6 +52,20 @@ pub const RouteFailureKind = enum {
     }
 };
 
+pub const VipTrafficMode = enum {
+    not_applicable,
+    l7_proxy,
+    l4_fallback,
+
+    pub fn label(self: VipTrafficMode) []const u8 {
+        return switch (self) {
+            .not_applicable => "not_applicable",
+            .l7_proxy => "l7_proxy",
+            .l4_fallback => "l4_fallback",
+        };
+    }
+};
+
 pub const RouteSnapshot = struct {
     name: []const u8,
     service: []const u8,
@@ -68,6 +82,7 @@ pub const RouteSnapshot = struct {
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
     preserve_host: bool,
+    vip_traffic_mode: VipTrafficMode = .not_applicable,
     steering_desired_ports: u32,
     steering_applied_ports: u32,
     steering_ready: bool,
@@ -494,6 +509,12 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
     const route_state = route_statuses.get(route.name);
     const steering_state = try steering_runtime.snapshotServiceStatus(alloc, route.service);
     const steering_required = service_rollout.current().dns_returns_vip;
+    const vip_traffic_mode: VipTrafficMode = if (!steering_required)
+        .not_applicable
+    else if (steering_state.ready)
+        .l7_proxy
+    else
+        .l4_fallback;
     const degraded_reason: RouteDegradedReason = if (route_state) |state|
         if (state.degraded_reason != .none)
             state.degraded_reason
@@ -526,6 +547,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .connect_timeout_ms = route.connect_timeout_ms,
         .request_timeout_ms = route.request_timeout_ms,
         .preserve_host = route.preserve_host,
+        .vip_traffic_mode = vip_traffic_mode,
         .steering_desired_ports = steering_state.desired_ports,
         .steering_applied_ports = steering_state.applied_ports,
         .steering_ready = steering_state.ready,
@@ -865,6 +887,7 @@ test "materialized routes include service endpoint readiness counts" {
     try std.testing.expectEqual(@as(u32, 0), routes_snapshot.items[0].healthy_endpoints);
     try std.testing.expect(!routes_snapshot.items[0].degraded);
     try std.testing.expectEqual(RouteDegradedReason.none, routes_snapshot.items[0].degraded_reason);
+    try std.testing.expectEqual(VipTrafficMode.not_applicable, routes_snapshot.items[0].vip_traffic_mode);
     try std.testing.expect(routes_snapshot.items[0].last_failure_kind == null);
     try std.testing.expect(routes_snapshot.items[0].last_failure_at == null);
 }
@@ -921,6 +944,7 @@ test "materialized routes mark steering as degraded when VIP cutover is enabled"
     try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
     try std.testing.expect(routes_snapshot.items[0].degraded);
     try std.testing.expectEqual(RouteDegradedReason.steering_not_ready, routes_snapshot.items[0].degraded_reason);
+    try std.testing.expectEqual(VipTrafficMode.l4_fallback, routes_snapshot.items[0].vip_traffic_mode);
     try std.testing.expect(!routes_snapshot.items[0].steering_ready);
     try std.testing.expect(routes_snapshot.items[0].steering_blocked);
     try std.testing.expect(!routes_snapshot.items[0].steering_drifted);

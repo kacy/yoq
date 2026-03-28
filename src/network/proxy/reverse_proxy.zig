@@ -9,6 +9,9 @@ const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
 
 const proxy_loop_header = "X-Yoq-Proxy";
+const x_forwarded_for_header = "X-Forwarded-For";
+const x_forwarded_host_header = "X-Forwarded-Host";
+const x_forwarded_proto_header = "X-Forwarded-Proto";
 
 pub const ProxyResponse = struct {
     status: http.StatusCode,
@@ -148,6 +151,10 @@ pub const ReverseProxy = struct {
     }
 
     pub fn forwardRequest(self: *const ReverseProxy, raw_request: []const u8) ![]u8 {
+        return self.forwardRequestWithClient(raw_request, null);
+    }
+
+    fn forwardRequestWithClient(self: *const ReverseProxy, raw_request: []const u8, client_ip: ?[4]u8) ![]u8 {
         proxy_runtime.recordRequestStart();
         const handled = try self.handleRequest(raw_request);
         switch (handled) {
@@ -157,7 +164,7 @@ pub const ReverseProxy = struct {
             },
             .forward => |plan| {
                 defer plan.deinit(self.allocator);
-                const response = try self.forwardPlan(raw_request, &plan);
+                const response = try self.forwardPlanWithClient(raw_request, &plan, client_ip);
                 if (parseUpstreamStatusCode(response)) |status_code| {
                     proxy_runtime.recordResponseCode(status_code);
                 } else |_| {
@@ -205,7 +212,7 @@ pub const ReverseProxy = struct {
             return;
         };
 
-        const response = self.forwardRequest(request) catch {
+        const response = self.forwardRequestWithClient(request, peerIpFromSocket(client_fd)) catch {
             proxy_runtime.recordResponse(.internal_server_error);
             const internal = formatProxyResponse(self.allocator, .{
                 .status = .internal_server_error,
@@ -220,7 +227,18 @@ pub const ReverseProxy = struct {
     }
 
     pub fn buildForwardRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
+        return self.buildForwardRequestWithClient(raw_request, plan, null);
+    }
+
+    fn buildForwardRequestWithClient(
+        self: *const ReverseProxy,
+        raw_request: []const u8,
+        plan: *const ForwardPlan,
+        client_ip: ?[4]u8,
+    ) ![]u8 {
         const parsed = (http.parseRequest(raw_request) catch return error.BadRequest) orelse return error.BadRequest;
+        const inbound_host = http.findHeaderValue(parsed.headers_raw, "Host") orelse plan.host;
+        const prior_forwarded_for = http.findHeaderValue(parsed.headers_raw, x_forwarded_for_header);
 
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(self.allocator);
@@ -243,11 +261,25 @@ pub const ReverseProxy = struct {
             if (startsWithHeaderName(line, "Connection")) continue;
             if (startsWithHeaderName(line, "Content-Length")) continue;
             if (startsWithHeaderName(line, proxy_loop_header)) continue;
+            if (startsWithHeaderName(line, x_forwarded_for_header)) continue;
+            if (startsWithHeaderName(line, x_forwarded_host_header)) continue;
+            if (startsWithHeaderName(line, x_forwarded_proto_header)) continue;
 
             try writer.writeAll(line);
             try writer.writeAll("\r\n");
         }
 
+        if (client_ip) |address| {
+            if (prior_forwarded_for) |existing| {
+                try writer.print("{s}: {s}, ", .{ x_forwarded_for_header, existing });
+            } else {
+                try writer.print("{s}: ", .{x_forwarded_for_header});
+            }
+            try writeIp4(&writer, address);
+            try writer.writeAll("\r\n");
+        }
+        try writer.print("{s}: {s}\r\n", .{ x_forwarded_host_header, inbound_host });
+        try writer.print("{s}: http\r\n", .{x_forwarded_proto_header});
         try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
         try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
         try writer.writeAll("Connection: close\r\n\r\n");
@@ -257,6 +289,15 @@ pub const ReverseProxy = struct {
     }
 
     fn forwardPlan(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
+        return self.forwardPlanWithClient(raw_request, plan, null);
+    }
+
+    fn forwardPlanWithClient(
+        self: *const ReverseProxy,
+        raw_request: []const u8,
+        plan: *const ForwardPlan,
+        client_ip: ?[4]u8,
+    ) ![]u8 {
         const policy = proxy_policy.RequestPolicy{
             .retries = plan.route.retries,
             .preserve_host = plan.route.preserve_host,
@@ -282,7 +323,7 @@ pub const ReverseProxy = struct {
             };
             defer upstream.deinit(self.allocator);
 
-            const response = self.forwardSingleAttempt(raw_request, plan, &upstream) catch |err| {
+            const response = self.forwardSingleAttempt(raw_request, plan, &upstream, client_ip) catch |err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
                 proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
                 if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
@@ -350,8 +391,14 @@ pub const ReverseProxy = struct {
         }
     }
 
-    fn forwardSingleAttempt(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, upstream: *const upstream_mod.Upstream) ![]u8 {
-        const request = try self.buildForwardRequest(raw_request, plan);
+    fn forwardSingleAttempt(
+        self: *const ReverseProxy,
+        raw_request: []const u8,
+        plan: *const ForwardPlan,
+        upstream: *const upstream_mod.Upstream,
+        client_ip: ?[4]u8,
+    ) ![]u8 {
+        const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
 
         const fd = try connectToUpstream(plan.route, upstream);
@@ -361,6 +408,18 @@ pub const ReverseProxy = struct {
         return readResponse(self.allocator, fd, self.max_response_bytes);
     }
 };
+
+fn peerIpFromSocket(fd: posix.socket_t) ?[4]u8 {
+    var peer_addr: posix.sockaddr.in = undefined;
+    var peer_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+    posix.getpeername(fd, @ptrCast(&peer_addr), &peer_len) catch return null;
+    const address = std.mem.toBytes(peer_addr.addr);
+    return .{ address[0], address[1], address[2], address[3] };
+}
+
+fn writeIp4(writer: anytype, address: [4]u8) !void {
+    try writer.print("{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
+}
 
 fn normalizeHost(host_header: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, host_header, ':')) |port_sep| {
@@ -997,6 +1056,72 @@ test "buildForwardRequest preserves body and content length" {
     try std.testing.expect(std.mem.endsWith(u8, forwarded, "hello"));
 }
 
+test "buildForwardRequest rewrites forwarded headers from client context" {
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .preserve_host = true,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var plan = ForwardPlan{
+        .method = .GET,
+        .path = try std.testing.allocator.dupe(u8, "/"),
+        .host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .route = .{
+            .name = try std.testing.allocator.dupe(u8, "api:/"),
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .vip_address = try std.testing.allocator.dupe(u8, "10.43.0.2"),
+            .host = try std.testing.allocator.dupe(u8, "api.internal"),
+            .path_prefix = try std.testing.allocator.dupe(u8, "/"),
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .degraded = false,
+            .degraded_reason = .none,
+            .last_failure_kind = null,
+            .last_failure_at = null,
+            .retries = 0,
+            .connect_timeout_ms = 1000,
+            .request_timeout_ms = 5000,
+            .preserve_host = true,
+            .steering_desired_ports = 0,
+            .steering_applied_ports = 0,
+            .steering_ready = false,
+            .steering_blocked = true,
+            .steering_drifted = false,
+            .steering_blocked_reason = .rollout_disabled,
+        },
+        .upstream = .{
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .endpoint_id = try std.testing.allocator.dupe(u8, "api-1"),
+            .address = try std.testing.allocator.dupe(u8, "10.42.0.9"),
+            .port = 8080,
+            .eligible = true,
+        },
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    const forwarded = try proxy.buildForwardRequestWithClient(
+        "GET / HTTP/1.1\r\nHost: api.internal:8080\r\nX-Forwarded-For: 10.0.0.1\r\nX-Forwarded-Host: forged\r\nX-Forwarded-Proto: https\r\n\r\n",
+        &plan,
+        .{ 10, 42, 0, 77 },
+    );
+    defer std.testing.allocator.free(forwarded);
+
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Forwarded-For: 10.0.0.1, 10.42.0.77\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Forwarded-Host: api.internal:8080\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Forwarded-Proto: http\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Forwarded-Host: forged\r\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Forwarded-Proto: https\r\n") == null);
+}
+
 const TestUpstreamAction = union(enum) {
     close,
     respond: []const u8,
@@ -1618,4 +1743,7 @@ test "handleConnection proxies a client socket request" {
     try std.testing.expect(bytes_read > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 200 OK\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\nhello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-For: 127.0.0.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Host: api.internal\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Proto: http\r\n") != null);
 }

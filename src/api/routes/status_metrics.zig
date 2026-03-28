@@ -467,6 +467,7 @@ test "route rollout status sample routes expose steering drift details" {
     defer if (response.allocated) testing.allocator.free(response.body);
 
     try testing.expect(std.mem.indexOf(u8, response.body, "\"sample_routes\":[{\"name\":\"api:/v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"vip_traffic_mode\":\"l4_fallback\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"none\"") != null);

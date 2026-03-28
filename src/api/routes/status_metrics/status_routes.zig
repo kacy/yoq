@@ -285,7 +285,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeAll("\",\"path_prefix\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, route.path_prefix) catch return common.internalError();
         writer.print(
-            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
+            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
             .{
                 route.eligible_endpoints,
                 route.healthy_endpoints,
@@ -295,6 +295,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
                 route.connect_timeout_ms,
                 route.request_timeout_ms,
                 route.preserve_host,
+                route.vip_traffic_mode.label(),
                 route.steering_desired_ports,
                 route.steering_applied_ports,
                 route.steering_ready,

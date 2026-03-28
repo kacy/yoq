@@ -4,6 +4,7 @@ const common = @import("common.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const proxy_runtime = @import("../../network/proxy/runtime.zig");
+const service_rollout = @import("../../network/service_rollout.zig");
 const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
 const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 const store = @import("../../state/store.zig");
@@ -236,8 +237,14 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
     }
     try writer.writeAll(",\"steering\":");
     if (steering) |state| {
+        const vip_traffic_mode: proxy_runtime.VipTrafficMode = if (!service_rollout.current().dns_returns_vip)
+            .not_applicable
+        else if (state.ready)
+            .l7_proxy
+        else
+            .l4_fallback;
         try writer.print(
-            "{{\"desired_ports\":{d},\"applied_ports\":{d},\"ready\":{},\"blocked\":{},\"drifted\":{},\"blocked_reason\":\"{s}\"}}",
+            "{{\"desired_ports\":{d},\"applied_ports\":{d},\"ready\":{},\"blocked\":{},\"drifted\":{},\"blocked_reason\":\"{s}\",\"vip_traffic_mode\":\"{s}\"}}",
             .{
                 state.desired_ports,
                 state.applied_ports,
@@ -245,6 +252,7 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
                 state.blocked,
                 state.drifted,
                 state.blocked_reason.label(),
+                vip_traffic_mode.label(),
             },
         );
     } else {
@@ -303,7 +311,7 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     try writer.writeAll("\",\"path_prefix\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.path_prefix);
     try writer.print(
-        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
+        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
         .{
             proxy_route.eligible_endpoints,
             proxy_route.healthy_endpoints,
@@ -313,6 +321,7 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
             proxy_route.connect_timeout_ms,
             proxy_route.request_timeout_ms,
             proxy_route.preserve_host,
+            proxy_route.vip_traffic_mode.label(),
             proxy_route.steering_desired_ports,
             proxy_route.steering_applied_ports,
             proxy_route.steering_ready,
@@ -393,7 +402,7 @@ test "route handles GET /v1/services" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":0,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"rollout_disabled\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":0,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"rollout_disabled\",\"vip_traffic_mode\":\"not_applicable\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }
 
@@ -496,6 +505,7 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded_reason\":\"service_state\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_traffic_mode\":\"not_applicable\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_desired_ports\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_applied_ports\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_ready\":false") != null);
@@ -553,6 +563,7 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering degradati
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded_reason\":\"steering_not_ready\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_traffic_mode\":\"l4_fallback\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_desired_ports\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_applied_ports\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_ready\":false") != null);
@@ -613,7 +624,7 @@ test "route handles GET /v1/services/{name} with steering drift details" {
     defer if (response.allocated) std.testing.allocator.free(response.body);
 
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":false,\"drifted\":true,\"blocked_reason\":\"none\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":false,\"drifted\":true,\"blocked_reason\":\"none\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering drift details" {
@@ -672,6 +683,7 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering drift det
 
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded_reason\":\"steering_not_ready\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_traffic_mode\":\"l4_fallback\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"none\"") != null);
