@@ -1071,6 +1071,76 @@ test "listener state changes resync steering" {
     }
 }
 
+test "listener restart reapplies steering mappings" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    resetRecordedMappings();
+    setPortMapperAvailableForTest(true);
+    setMappingHooksForTest(recordAppliedMapping, recordRemovedMapping);
+    defer setMappingHooksForTest(null, null);
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    listener_runtime.setStateChangeHook(syncIfEnabled);
+    defer listener_runtime.setStateChangeHook(null);
+
+    listener_runtime.startForTest(std.testing.allocator, 0);
+    listener_runtime.stop();
+    listener_runtime.startForTest(std.testing.allocator, 0);
+
+    {
+        const state = try snapshot(std.testing.allocator);
+        defer state.deinit(std.testing.allocator);
+        try std.testing.expect(state.running);
+        try std.testing.expectEqual(@as(u64, 3), state.sync_attempts_total);
+        try std.testing.expectEqual(@as(u64, 2), state.mappings_applied_total);
+        try std.testing.expectEqual(@as(u64, 1), state.mappings_removed_total);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), recorded_apply_count);
+    try std.testing.expectEqual(@as(usize, 1), recorded_remove_count);
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), recorded_applies[1].destination_ip);
+    try std.testing.expectEqual(@as(u16, 8080), recorded_applies[1].host_port);
+    try std.testing.expectEqual(@as(u8, tcp_protocol), recorded_applies[1].protocol);
+}
+
 test "VIP cutover readiness ignores unapplied mappings before cutover" {
     const store = @import("../../state/store.zig");
 
