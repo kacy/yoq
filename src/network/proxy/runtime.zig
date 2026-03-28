@@ -13,6 +13,7 @@ pub const max_routes_in_status = 16;
 pub const RouteDegradedReason = enum {
     none,
     service_state,
+    steering_not_ready,
     no_eligible_upstream,
     connect_failure,
     send_failure,
@@ -23,6 +24,7 @@ pub const RouteDegradedReason = enum {
         return switch (self) {
             .none => "none",
             .service_state => "service_state",
+            .steering_not_ready => "steering_not_ready",
             .no_eligible_upstream => "no_eligible_upstream",
             .connect_failure => "connect_failure",
             .send_failure => "send_failure",
@@ -489,10 +491,20 @@ fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64) bool {
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnapshot {
     const route_state = route_statuses.get(route.name);
     const steering_state = try steering_runtime.snapshotServiceStatus(alloc, route.service);
+    const steering_required = service_rollout.current().dns_returns_vip;
     const degraded_reason: RouteDegradedReason = if (route_state) |state|
-        if (state.degraded_reason != .none) state.degraded_reason else if (route.degraded) .service_state else .none
+        if (state.degraded_reason != .none)
+            state.degraded_reason
+        else if (route.degraded)
+            .service_state
+        else if (steering_required and !steering_state.ready)
+            .steering_not_ready
+        else
+            .none
     else if (route.degraded)
         .service_state
+    else if (steering_required and !steering_state.ready)
+        .steering_not_ready
     else
         .none;
 
@@ -851,6 +863,62 @@ test "materialized routes include service endpoint readiness counts" {
     try std.testing.expectEqual(RouteDegradedReason.none, routes_snapshot.items[0].degraded_reason);
     try std.testing.expect(routes_snapshot.items[0].last_failure_kind == null);
     try std.testing.expect(routes_snapshot.items[0].last_failure_at == null);
+}
+
+test "materialized routes mark steering as degraded when VIP cutover is enabled" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    bootstrapIfEnabled();
+
+    var routes_snapshot = try snapshotServiceRoutes(std.testing.allocator, "api");
+    defer {
+        for (routes_snapshot.items) |route| route.deinit(std.testing.allocator);
+        routes_snapshot.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
+    try std.testing.expect(routes_snapshot.items[0].degraded);
+    try std.testing.expectEqual(RouteDegradedReason.steering_not_ready, routes_snapshot.items[0].degraded_reason);
+    try std.testing.expect(!routes_snapshot.items[0].steering_ready);
+    try std.testing.expectEqual(steering_runtime.BlockedReason.listener_not_running, routes_snapshot.items[0].steering_blocked_reason);
 }
 
 test "resolveRoute matches by host and path" {

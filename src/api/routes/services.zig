@@ -480,6 +480,61 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"last_failure_kind\":null") != null);
 }
 
+test "route handles GET /v1/services/{name}/proxy-routes with steering degradation" {
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
+    defer if (response.allocated) std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded_reason\":\"steering_not_ready\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_desired_ports\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_applied_ports\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_ready\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"listener_not_running\"") != null);
+}
+
 test "route handles POST drain and DELETE endpoint" {
     const service_rollout = @import("../../network/service_rollout.zig");
     const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
