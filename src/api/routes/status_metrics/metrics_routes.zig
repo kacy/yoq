@@ -19,6 +19,8 @@ const service_cutover_readiness = @import("../../../network/service_cutover_read
 const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 const proxy_runtime = @import("../../../network/proxy/runtime.zig");
+const listener_runtime = @import("../../../network/proxy/listener_runtime.zig");
+const steering_runtime = @import("../../../network/proxy/steering_runtime.zig");
 
 const Response = common.Response;
 const ebpf = if (builtin.os.tag == .linux) @import("../../../network/ebpf.zig") else struct {
@@ -265,6 +267,10 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     defer cutover.deinit(std.heap.page_allocator);
     var l7_proxy = try proxy_runtime.snapshot(std.heap.page_allocator);
     defer l7_proxy.deinit(std.heap.page_allocator);
+    var l7_listener = try listener_runtime.snapshot(std.heap.page_allocator);
+    defer l7_listener.deinit(std.heap.page_allocator);
+    var l7_steering = try steering_runtime.snapshot(std.heap.page_allocator);
+    defer l7_steering.deinit(std.heap.page_allocator);
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
@@ -341,6 +347,53 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_circuit_endpoints gauge\n");
     try writer.print("yoq_service_l7_proxy_circuit_endpoints{{state=\"open\"}} {d}\n", .{l7_proxy.circuit_open_endpoints});
     try writer.print("yoq_service_l7_proxy_circuit_endpoints{{state=\"half_open\"}} {d}\n", .{l7_proxy.circuit_half_open_endpoints});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_listener_enabled Whether the L7 proxy listener is enabled\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_listener_enabled gauge\n");
+    try writer.print("yoq_service_l7_proxy_listener_enabled {d}\n", .{@intFromBool(l7_listener.enabled)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_listener_running Whether the L7 proxy listener is accepting connections\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_listener_running gauge\n");
+    try writer.print("yoq_service_l7_proxy_listener_running {d}\n", .{@intFromBool(l7_listener.running)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_listener_port Loopback port bound by the L7 proxy listener\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_listener_port gauge\n");
+    try writer.print("yoq_service_l7_proxy_listener_port {d}\n", .{l7_listener.port});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_listener_accepted_connections_total Total accepted L7 proxy listener connections\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_listener_accepted_connections_total counter\n");
+    try writer.print("yoq_service_l7_proxy_listener_accepted_connections_total {d}\n", .{l7_listener.accepted_connections_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_listener_active_connections Active L7 proxy listener connections\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_listener_active_connections gauge\n");
+    try writer.print("yoq_service_l7_proxy_listener_active_connections {d}\n", .{l7_listener.active_connections});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_enabled Whether VIP steering into the L7 listener is enabled\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_enabled gauge\n");
+    try writer.print("yoq_service_l7_proxy_steering_enabled {d}\n", .{@intFromBool(l7_steering.enabled)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_running Whether VIP steering currently has active applied mappings\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_running gauge\n");
+    try writer.print("yoq_service_l7_proxy_steering_running {d}\n", .{@intFromBool(l7_steering.running)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_configured_services Services eligible for VIP steering\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_configured_services gauge\n");
+    try writer.print("yoq_service_l7_proxy_steering_configured_services {d}\n", .{l7_steering.configured_services});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_mappings VIP steering mappings by state\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_mappings gauge\n");
+    try writer.print("yoq_service_l7_proxy_steering_mappings{{state=\"desired\"}} {d}\n", .{l7_steering.desired_mappings});
+    try writer.print("yoq_service_l7_proxy_steering_mappings{{state=\"applied\"}} {d}\n", .{l7_steering.applied_mappings});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_syncs_total Steering sync attempts by outcome\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_syncs_total counter\n");
+    try writer.print("yoq_service_l7_proxy_steering_syncs_total{{outcome=\"attempted\"}} {d}\n", .{l7_steering.sync_attempts_total});
+    try writer.print("yoq_service_l7_proxy_steering_syncs_total{{outcome=\"failed\"}} {d}\n", .{l7_steering.sync_failures_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_mapping_changes_total Steering mapping adds and removals\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_mapping_changes_total counter\n");
+    try writer.print("yoq_service_l7_proxy_steering_mapping_changes_total{{action=\"applied\"}} {d}\n", .{l7_steering.mappings_applied_total});
+    try writer.print("yoq_service_l7_proxy_steering_mapping_changes_total{{action=\"removed\"}} {d}\n", .{l7_steering.mappings_removed_total});
 
     try writer.writeAll("# HELP yoq_service_registry_bridge_fault_injections_total Injected bridge faults by operation\n");
     try writer.writeAll("# TYPE yoq_service_registry_bridge_fault_injections_total counter\n");

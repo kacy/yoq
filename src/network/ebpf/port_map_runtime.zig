@@ -11,6 +11,7 @@ const resource_support = @import("resource_support.zig");
 const port_map_prog = @import("../bpf/port_map.zig");
 
 pub const PortKey = extern struct {
+    dst_ip: u32,
     port: u16,
     protocol: u8,
     _pad: u8 = 0,
@@ -28,26 +29,57 @@ pub const PortMapper = struct {
     if_index: u32,
 
     pub fn addMapping(self: *const PortMapper, host_port: u16, protocol: u8, container_ip: [4]u8, container_port: u16) void {
+        self.addMappingForDestination(null, host_port, protocol, container_ip, container_port);
+    }
+
+    pub fn addMappingForDestination(
+        self: *const PortMapper,
+        destination_ip: ?[4]u8,
+        host_port: u16,
+        protocol: u8,
+        target_ip: [4]u8,
+        target_port: u16,
+    ) void {
         var key = PortKey{
+            .dst_ip = if (destination_ip) |ip| lb_runtime.ipToNetworkOrder(ip) else 0,
             .port = std.mem.nativeToBig(u16, host_port),
             .protocol = protocol,
         };
         var target = PortTarget{
-            .dst_ip = lb_runtime.ipToNetworkOrder(container_ip),
-            .dst_port = std.mem.nativeToBig(u16, container_port),
+            .dst_ip = lb_runtime.ipToNetworkOrder(target_ip),
+            .dst_port = std.mem.nativeToBig(u16, target_port),
         };
         map_support.mapUpdate(self.map_fd, std.mem.asBytes(&key), std.mem.asBytes(&target)) catch |e| {
-            log.warn("ebpf: failed to add port mapping {d}/{d} -> {d}.{d}.{d}.{d}:{d}: {}", .{
-                host_port,       protocol,
-                container_ip[0], container_ip[1],
-                container_ip[2], container_ip[3],
-                container_port,  e,
-            });
+            if (destination_ip) |ip| {
+                log.warn(
+                    "ebpf: failed to add port mapping {d}.{d}.{d}.{d}:{d}/{d} -> {d}.{d}.{d}.{d}:{d}: {}",
+                    .{
+                        ip[0],        ip[1],
+                        ip[2],        ip[3],
+                        host_port,    protocol,
+                        target_ip[0], target_ip[1],
+                        target_ip[2], target_ip[3],
+                        target_port,  e,
+                    },
+                );
+            } else {
+                log.warn("ebpf: failed to add wildcard port mapping *:{d}/{d} -> {d}.{d}.{d}.{d}:{d}: {}", .{
+                    host_port,    protocol,
+                    target_ip[0], target_ip[1],
+                    target_ip[2], target_ip[3],
+                    target_port,  e,
+                });
+            }
         };
     }
 
     pub fn removeMapping(self: *const PortMapper, host_port: u16, protocol: u8) void {
+        self.removeMappingForDestination(null, host_port, protocol);
+    }
+
+    pub fn removeMappingForDestination(self: *const PortMapper, destination_ip: ?[4]u8, host_port: u16, protocol: u8) void {
         var key = PortKey{
+            .dst_ip = if (destination_ip) |ip| lb_runtime.ipToNetworkOrder(ip) else 0,
             .port = std.mem.nativeToBig(u16, host_port),
             .protocol = protocol,
         };

@@ -54,6 +54,8 @@ comptime {
     _ = @import("network/service_registry_bridge.zig");
     _ = @import("network/service_registry_runtime.zig");
     _ = @import("network/proxy/runtime.zig");
+    _ = @import("network/proxy/listener_runtime.zig");
+    _ = @import("network/proxy/steering_runtime.zig");
     _ = @import("network/proxy/router.zig");
     _ = @import("network/proxy/policy.zig");
     _ = @import("network/proxy/upstream.zig");

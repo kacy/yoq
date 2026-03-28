@@ -3,7 +3,9 @@ const builtin = @import("builtin");
 pub const ebpf = if (builtin.os.tag == .linux) @import("../ebpf.zig") else struct {
     pub const PortMapper = struct {
         pub fn addMapping(_: *@This(), _: u16, _: u8, _: [4]u8, _: u16) void {}
+        pub fn addMappingForDestination(_: *@This(), _: ?[4]u8, _: u16, _: u8, _: [4]u8, _: u16) void {}
         pub fn removeMapping(_: *@This(), _: u16, _: u8) void {}
+        pub fn removeMappingForDestination(_: *@This(), _: ?[4]u8, _: u16, _: u8) void {}
     };
 
     var port_mapper: PortMapper = .{};

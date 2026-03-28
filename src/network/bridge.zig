@@ -63,6 +63,17 @@ pub fn ensureBridge(name: []const u8) BridgeError!void {
     return ensureBridgeWithConfig(.{ .name = name });
 }
 
+pub fn currentGatewayIp(name: []const u8) BridgeError![4]u8 {
+    const fd = nl.openSocket() catch return BridgeError.AddressFailed;
+    defer posix.close(fd);
+
+    const bridge_idx = nl.getIfIndex(fd, name) catch return BridgeError.InterfaceNotFound;
+    if (bridge_idx == 0) return BridgeError.InterfaceNotFound;
+
+    const address = nl.getFirstIpv4Address(fd, bridge_idx) catch return BridgeError.AddressFailed;
+    return address orelse BridgeError.AddressFailed;
+}
+
 /// create a bridge with explicit gateway and prefix configuration.
 /// used in cluster mode where each node has a different subnet.
 pub fn ensureBridgeWithConfig(config: BridgeConfig) BridgeError!void {

@@ -62,6 +62,7 @@ pub const deleteLink = link_ops.deleteLink;
 
 pub const addAddress = route_ops.addAddress;
 pub const hasAddress = route_ops.hasAddress;
+pub const getFirstIpv4Address = route_ops.getFirstIpv4Address;
 pub const addRoute = route_ops.addRoute;
 pub const removeRoute = route_ops.removeRoute;
 

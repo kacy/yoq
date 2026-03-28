@@ -13,6 +13,8 @@ const container_cmds = @import("../../runtime/container_commands.zig");
 const service_rollout = @import("../../network/service_rollout.zig");
 const service_reconciler = @import("../../network/service_reconciler.zig");
 const proxy_runtime = @import("../../network/proxy/runtime.zig");
+const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -114,6 +116,9 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
     proxy_runtime.bootstrapIfEnabled();
+    listener_runtime.startIfEnabled(alloc);
+    steering_runtime.syncIfEnabled();
+    defer listener_runtime.stop();
     orchestrator.installSignalHandlers();
 
     orch.startAll() catch |err| {
