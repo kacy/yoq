@@ -618,6 +618,10 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !proxy_runt
         .connect_timeout_ms = route.connect_timeout_ms,
         .request_timeout_ms = route.request_timeout_ms,
         .preserve_host = route.preserve_host,
+        .steering_desired_ports = 0,
+        .steering_applied_ports = 0,
+        .steering_ready = false,
+        .steering_blocked_reason = .rollout_disabled,
     };
 }
 
@@ -897,6 +901,10 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
             .connect_timeout_ms = 1000,
             .request_timeout_ms = 5000,
             .preserve_host = false,
+            .steering_desired_ports = 0,
+            .steering_applied_ports = 0,
+            .steering_ready = false,
+            .steering_blocked_reason = .rollout_disabled,
         },
         .upstream = .{
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -957,6 +965,10 @@ test "buildForwardRequest preserves body and content length" {
             .connect_timeout_ms = 1000,
             .request_timeout_ms = 5000,
             .preserve_host = true,
+            .steering_desired_ports = 0,
+            .steering_applied_ports = 0,
+            .steering_ready = false,
+            .steering_blocked_reason = .rollout_disabled,
         },
         .upstream = .{
             .service = try std.testing.allocator.dupe(u8, "api"),

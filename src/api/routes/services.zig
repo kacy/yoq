@@ -284,7 +284,7 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     try writer.writeAll("\",\"path_prefix\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.path_prefix);
     try writer.print(
-        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"last_failure_kind\":",
+        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
         .{
             proxy_route.eligible_endpoints,
             proxy_route.healthy_endpoints,
@@ -294,6 +294,10 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
             proxy_route.connect_timeout_ms,
             proxy_route.request_timeout_ms,
             proxy_route.preserve_host,
+            proxy_route.steering_desired_ports,
+            proxy_route.steering_applied_ports,
+            proxy_route.steering_ready,
+            proxy_route.steering_blocked_reason.label(),
         },
     );
     if (proxy_route.last_failure_kind) |kind| {
@@ -469,6 +473,10 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded_reason\":\"service_state\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_desired_ports\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_applied_ports\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_ready\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"rollout_disabled\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"last_failure_kind\":null") != null);
 }
 

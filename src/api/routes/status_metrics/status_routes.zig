@@ -283,7 +283,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeAll("\",\"path_prefix\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, route.path_prefix) catch return common.internalError();
         writer.print(
-            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"last_failure_kind\":",
+            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
             .{
                 route.eligible_endpoints,
                 route.healthy_endpoints,
@@ -293,6 +293,10 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
                 route.connect_timeout_ms,
                 route.request_timeout_ms,
                 route.preserve_host,
+                route.steering_desired_ports,
+                route.steering_applied_ports,
+                route.steering_ready,
+                route.steering_blocked_reason.label(),
             },
         ) catch return common.internalError();
         if (route.last_failure_kind) |kind| {
@@ -329,13 +333,14 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"steering\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"sync_attempts_total\":{d},\"sync_failures_total\":{d},\"mappings_applied_total\":{d},\"mappings_removed_total\":{d},\"last_sync_at\":",
+        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"blocked_reason\":\"{s}\",\"sync_attempts_total\":{d},\"sync_failures_total\":{d},\"mappings_applied_total\":{d},\"mappings_removed_total\":{d},\"last_sync_at\":",
         .{
             l7_steering.enabled,
             l7_steering.running,
             l7_steering.configured_services,
             l7_steering.desired_mappings,
             l7_steering.applied_mappings,
+            l7_steering.blocked_reason.label(),
             l7_steering.sync_attempts_total,
             l7_steering.sync_failures_total,
             l7_steering.mappings_applied_total,

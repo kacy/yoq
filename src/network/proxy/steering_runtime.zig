@@ -9,12 +9,33 @@ const ebpf = @import("../setup/ebpf_module.zig").ebpf;
 
 const tcp_protocol: u8 = 6;
 
+pub const BlockedReason = enum {
+    none,
+    rollout_disabled,
+    listener_not_running,
+    port_mapper_unavailable,
+    bridge_address_unavailable,
+    no_service_ports,
+
+    pub fn label(self: BlockedReason) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .rollout_disabled => "rollout_disabled",
+            .listener_not_running => "listener_not_running",
+            .port_mapper_unavailable => "port_mapper_unavailable",
+            .bridge_address_unavailable => "bridge_address_unavailable",
+            .no_service_ports => "no_service_ports",
+        };
+    }
+};
+
 pub const Snapshot = struct {
     enabled: bool,
     running: bool,
     configured_services: u32,
     desired_mappings: u32,
     applied_mappings: u32,
+    blocked_reason: BlockedReason,
     sync_attempts_total: u64,
     sync_failures_total: u64,
     mappings_applied_total: u64,
@@ -34,6 +55,13 @@ pub const DesiredMapping = struct {
     listener_port: u16,
 };
 
+pub const ServiceStatus = struct {
+    desired_ports: u32,
+    applied_ports: u32,
+    ready: bool,
+    blocked_reason: BlockedReason,
+};
+
 const AppliedMapping = struct {
     vip: [4]u8,
     port: u16,
@@ -44,6 +72,7 @@ var applied_mappings: std.ArrayList(AppliedMapping) = .empty;
 var running: bool = false;
 var configured_services: u32 = 0;
 var desired_mappings: u32 = 0;
+var blocked_reason: BlockedReason = .none;
 var sync_attempts_total: u64 = 0;
 var sync_failures_total: u64 = 0;
 var mappings_applied_total: u64 = 0;
@@ -60,6 +89,7 @@ pub fn resetForTest() void {
     running = false;
     configured_services = 0;
     desired_mappings = 0;
+    blocked_reason = .none;
     sync_attempts_total = 0;
     sync_failures_total = 0;
     mappings_applied_total = 0;
@@ -85,6 +115,7 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .configured_services = configured_services,
         .desired_mappings = desired_mappings,
         .applied_mappings = @intCast(applied_mappings.items.len),
+        .blocked_reason = blocked_reason,
         .sync_attempts_total = sync_attempts_total,
         .sync_failures_total = sync_failures_total,
         .mappings_applied_total = mappings_applied_total,
@@ -99,6 +130,13 @@ pub fn previewDesiredMappings(alloc: std.mem.Allocator) !std.ArrayList(DesiredMa
     defer mutex.unlock();
 
     return buildDesiredMappingsLocked(alloc);
+}
+
+pub fn snapshotServiceStatus(alloc: std.mem.Allocator, service_name: []const u8) !ServiceStatus {
+    mutex.lock();
+    defer mutex.unlock();
+
+    return buildServiceStatusLocked(alloc, service_name);
 }
 
 pub fn syncIfEnabled() void {
@@ -118,6 +156,7 @@ fn syncLocked() !void {
     clearLastErrorLocked();
 
     if (!isEnabled()) {
+        blocked_reason = .rollout_disabled;
         if (ebpf.getPortMapper()) |mapper| mappings_removed_total += removeAppliedMappingsLocked(mapper);
         clearAppliedMappingsLocked();
         configured_services = 0;
@@ -128,6 +167,7 @@ fn syncLocked() !void {
     }
 
     if (listener_runtime.portIfRunning() == null) {
+        blocked_reason = .listener_not_running;
         if (ebpf.getPortMapper()) |mapper| mappings_removed_total += removeAppliedMappingsLocked(mapper);
         clearAppliedMappingsLocked();
         desired_mappings = 0;
@@ -135,10 +175,15 @@ fn syncLocked() !void {
         return;
     }
 
-    const mapper = ebpf.getPortMapper() orelse return error.PortMapperUnavailable;
+    const mapper = ebpf.getPortMapper() orelse {
+        blocked_reason = .port_mapper_unavailable;
+        return error.PortMapperUnavailable;
+    };
 
     var desired = try buildDesiredMappingsLocked(std.heap.page_allocator);
     defer desired.deinit(std.heap.page_allocator);
+
+    blocked_reason = if (desired.items.len == 0) .no_service_ports else .none;
 
     for (applied_mappings.items) |mapping| {
         if (containsDesiredMapping(desired.items, mapping.vip, mapping.port)) continue;
@@ -176,7 +221,10 @@ fn buildDesiredMappingsLocked(alloc: std.mem.Allocator) !std.ArrayList(DesiredMa
     if (!isEnabled()) return mappings;
 
     const listener_port = listener_runtime.portIfRunning() orelse return error.ListenerNotRunning;
-    const listener_ip = try currentBridgeIpLocked();
+    const listener_ip = currentBridgeIpLocked() catch |err| {
+        blocked_reason = .bridge_address_unavailable;
+        return err;
+    };
     var services = try service_registry_runtime.snapshotServices(alloc);
     defer {
         for (services.items) |service| service.deinit(alloc);
@@ -211,6 +259,73 @@ fn buildDesiredMappingsLocked(alloc: std.mem.Allocator) !std.ArrayList(DesiredMa
     return mappings;
 }
 
+fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) !ServiceStatus {
+    const service = try service_registry_runtime.snapshotService(alloc, service_name);
+    defer service.deinit(alloc);
+
+    if (!isEnabled()) {
+        return .{
+            .desired_ports = 0,
+            .applied_ports = 0,
+            .ready = false,
+            .blocked_reason = .rollout_disabled,
+        };
+    }
+
+    var endpoints = try service_registry_runtime.snapshotServiceEndpoints(alloc, service_name);
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+        endpoints.deinit(alloc);
+    }
+
+    var ports: std.ArrayList(u16) = .empty;
+    defer ports.deinit(alloc);
+
+    for (endpoints.items) |endpoint| {
+        if (endpoint.port <= 0 or endpoint.port > std.math.maxInt(u16)) continue;
+        const port: u16 = @intCast(endpoint.port);
+        if (containsPort(ports.items, port)) continue;
+        try ports.append(alloc, port);
+    }
+
+    if (ports.items.len == 0) {
+        return .{
+            .desired_ports = 0,
+            .applied_ports = 0,
+            .ready = false,
+            .blocked_reason = .no_service_ports,
+        };
+    }
+
+    const vip = ip.parseIp(service.vip_address) orelse [4]u8{ 0, 0, 0, 0 };
+    var applied_ports: u32 = 0;
+    for (ports.items) |port| {
+        if (containsAppliedMapping(vip, port)) applied_ports += 1;
+    }
+
+    var reason = blocked_reason;
+    if (applied_ports == ports.items.len) {
+        reason = .none;
+    } else if (reason == .none) {
+        if (listener_runtime.portIfRunning() == null) {
+            reason = .listener_not_running;
+        } else if (ebpf.getPortMapper() == null) {
+            reason = .port_mapper_unavailable;
+        } else if (currentBridgeIpLocked()) |_| {
+            reason = .none;
+        } else |_| {
+            reason = .bridge_address_unavailable;
+        }
+    }
+
+    return .{
+        .desired_ports = @intCast(ports.items.len),
+        .applied_ports = applied_ports,
+        .ready = applied_ports == ports.items.len,
+        .blocked_reason = reason,
+    };
+}
+
 fn currentBridgeIpLocked() ![4]u8 {
     if (test_bridge_ip) |address| return address;
     return bridge.currentGatewayIp(bridge.default_bridge);
@@ -231,6 +346,13 @@ fn containsDesiredMapping(mappings: []const DesiredMapping, vip: [4]u8, port: u1
 fn containsAppliedMapping(vip: [4]u8, port: u16) bool {
     for (applied_mappings.items) |mapping| {
         if (std.mem.eql(u8, mapping.vip[0..], vip[0..]) and mapping.port == port) return true;
+    }
+    return false;
+}
+
+fn containsPort(ports: []const u16, port: u16) bool {
+    for (ports) |existing| {
+        if (existing == port) return true;
     }
     return false;
 }

@@ -3,6 +3,7 @@ const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
 const proxy_policy = @import("policy.zig");
 const router = @import("router.zig");
+const steering_runtime = @import("steering_runtime.zig");
 const upstream_mod = @import("upstream.zig");
 const service_registry_runtime = @import("../service_registry_runtime.zig");
 const service_rollout = @import("../service_rollout.zig");
@@ -65,6 +66,10 @@ pub const RouteSnapshot = struct {
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
     preserve_host: bool,
+    steering_desired_ports: u32,
+    steering_applied_ports: u32,
+    steering_ready: bool,
+    steering_blocked_reason: steering_runtime.BlockedReason,
 
     pub fn deinit(self: RouteSnapshot, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
@@ -483,6 +488,7 @@ fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64) bool {
 
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnapshot {
     const route_state = route_statuses.get(route.name);
+    const steering_state = try steering_runtime.snapshotServiceStatus(alloc, route.service);
     const degraded_reason: RouteDegradedReason = if (route_state) |state|
         if (state.degraded_reason != .none) state.degraded_reason else if (route.degraded) .service_state else .none
     else if (route.degraded)
@@ -506,6 +512,10 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .connect_timeout_ms = route.connect_timeout_ms,
         .request_timeout_ms = route.request_timeout_ms,
         .preserve_host = route.preserve_host,
+        .steering_desired_ports = steering_state.desired_ports,
+        .steering_applied_ports = steering_state.applied_ports,
+        .steering_ready = steering_state.ready,
+        .steering_blocked_reason = steering_state.blocked_reason,
     };
 }
 
