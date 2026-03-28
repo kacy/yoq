@@ -329,13 +329,17 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"steering\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"last_sync_at\":",
+        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"sync_attempts_total\":{d},\"sync_failures_total\":{d},\"mappings_applied_total\":{d},\"mappings_removed_total\":{d},\"last_sync_at\":",
         .{
             l7_steering.enabled,
             l7_steering.running,
             l7_steering.configured_services,
             l7_steering.desired_mappings,
             l7_steering.applied_mappings,
+            l7_steering.sync_attempts_total,
+            l7_steering.sync_failures_total,
+            l7_steering.mappings_applied_total,
+            l7_steering.mappings_removed_total,
         },
     ) catch return common.internalError();
     if (l7_steering.last_sync_at) |timestamp| {

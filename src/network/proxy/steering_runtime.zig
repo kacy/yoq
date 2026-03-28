@@ -15,6 +15,10 @@ pub const Snapshot = struct {
     configured_services: u32,
     desired_mappings: u32,
     applied_mappings: u32,
+    sync_attempts_total: u64,
+    sync_failures_total: u64,
+    mappings_applied_total: u64,
+    mappings_removed_total: u64,
     last_sync_at: ?i64,
     last_error: ?[]const u8,
 
@@ -40,6 +44,10 @@ var applied_mappings: std.ArrayList(AppliedMapping) = .empty;
 var running: bool = false;
 var configured_services: u32 = 0;
 var desired_mappings: u32 = 0;
+var sync_attempts_total: u64 = 0;
+var sync_failures_total: u64 = 0;
+var mappings_applied_total: u64 = 0;
+var mappings_removed_total: u64 = 0;
 var last_sync_at: ?i64 = null;
 var last_error: ?[]u8 = null;
 var test_bridge_ip: ?[4]u8 = null;
@@ -52,6 +60,10 @@ pub fn resetForTest() void {
     running = false;
     configured_services = 0;
     desired_mappings = 0;
+    sync_attempts_total = 0;
+    sync_failures_total = 0;
+    mappings_applied_total = 0;
+    mappings_removed_total = 0;
     last_sync_at = null;
     clearLastErrorLocked();
     test_bridge_ip = null;
@@ -73,6 +85,10 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .configured_services = configured_services,
         .desired_mappings = desired_mappings,
         .applied_mappings = @intCast(applied_mappings.items.len),
+        .sync_attempts_total = sync_attempts_total,
+        .sync_failures_total = sync_failures_total,
+        .mappings_applied_total = mappings_applied_total,
+        .mappings_removed_total = mappings_removed_total,
         .last_sync_at = last_sync_at,
         .last_error = if (last_error) |message| try alloc.dupe(u8, message) else null,
     };
@@ -89,7 +105,9 @@ pub fn syncIfEnabled() void {
     mutex.lock();
     defer mutex.unlock();
 
+    sync_attempts_total += 1;
     syncLocked() catch |err| {
+        sync_failures_total += 1;
         setLastErrorLocked(err);
         running = false;
         log.warn("l7 proxy steering: sync failed: {}", .{err});
@@ -100,7 +118,7 @@ fn syncLocked() !void {
     clearLastErrorLocked();
 
     if (!isEnabled()) {
-        if (ebpf.getPortMapper()) |mapper| removeAppliedMappingsLocked(mapper);
+        if (ebpf.getPortMapper()) |mapper| mappings_removed_total += removeAppliedMappingsLocked(mapper);
         clearAppliedMappingsLocked();
         configured_services = 0;
         desired_mappings = 0;
@@ -110,7 +128,7 @@ fn syncLocked() !void {
     }
 
     if (listener_runtime.portIfRunning() == null) {
-        if (ebpf.getPortMapper()) |mapper| removeAppliedMappingsLocked(mapper);
+        if (ebpf.getPortMapper()) |mapper| mappings_removed_total += removeAppliedMappingsLocked(mapper);
         clearAppliedMappingsLocked();
         desired_mappings = 0;
         running = false;
@@ -125,11 +143,13 @@ fn syncLocked() !void {
     for (applied_mappings.items) |mapping| {
         if (containsDesiredMapping(desired.items, mapping.vip, mapping.port)) continue;
         mapper.removeMappingForDestination(mapping.vip, mapping.port, tcp_protocol);
+        mappings_removed_total += 1;
     }
 
     for (desired.items) |mapping| {
         if (containsAppliedMapping(mapping.vip, mapping.port)) continue;
         mapper.addMappingForDestination(mapping.vip, mapping.port, tcp_protocol, mapping.listener_ip, mapping.listener_port);
+        mappings_applied_total += 1;
     }
 
     clearAppliedMappingsLocked();
@@ -215,10 +235,13 @@ fn containsAppliedMapping(vip: [4]u8, port: u16) bool {
     return false;
 }
 
-fn removeAppliedMappingsLocked(mapper: anytype) void {
+fn removeAppliedMappingsLocked(mapper: anytype) u64 {
+    var removed: u64 = 0;
     for (applied_mappings.items) |mapping| {
         mapper.removeMappingForDestination(mapping.vip, mapping.port, tcp_protocol);
+        removed += 1;
     }
+    return removed;
 }
 
 fn clearAppliedMappingsLocked() void {
@@ -316,4 +339,8 @@ test "previewDesiredMappings materializes unique vip port mappings" {
     try std.testing.expect(!state.running);
     try std.testing.expectEqual(@as(u32, 1), state.configured_services);
     try std.testing.expectEqual(@as(u32, 1), state.desired_mappings);
+    try std.testing.expectEqual(@as(u64, 0), state.sync_attempts_total);
+    try std.testing.expectEqual(@as(u64, 0), state.sync_failures_total);
+    try std.testing.expectEqual(@as(u64, 0), state.mappings_applied_total);
+    try std.testing.expectEqual(@as(u64, 0), state.mappings_removed_total);
 }

@@ -385,6 +385,16 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_l7_proxy_steering_mappings{{state=\"desired\"}} {d}\n", .{l7_steering.desired_mappings});
     try writer.print("yoq_service_l7_proxy_steering_mappings{{state=\"applied\"}} {d}\n", .{l7_steering.applied_mappings});
 
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_syncs_total Steering sync attempts by outcome\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_syncs_total counter\n");
+    try writer.print("yoq_service_l7_proxy_steering_syncs_total{{outcome=\"attempted\"}} {d}\n", .{l7_steering.sync_attempts_total});
+    try writer.print("yoq_service_l7_proxy_steering_syncs_total{{outcome=\"failed\"}} {d}\n", .{l7_steering.sync_failures_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_mapping_changes_total Steering mapping adds and removals\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_mapping_changes_total counter\n");
+    try writer.print("yoq_service_l7_proxy_steering_mapping_changes_total{{action=\"applied\"}} {d}\n", .{l7_steering.mappings_applied_total});
+    try writer.print("yoq_service_l7_proxy_steering_mapping_changes_total{{action=\"removed\"}} {d}\n", .{l7_steering.mappings_removed_total});
+
     try writer.writeAll("# HELP yoq_service_registry_bridge_fault_injections_total Injected bridge faults by operation\n");
     try writer.writeAll("# TYPE yoq_service_registry_bridge_fault_injections_total counter\n");
     try writer.print(
