@@ -658,8 +658,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
         .check_type = .{ .tcp = .{ .port = 8080 } },
     });
     service_observability.noteHealthCheckScheduled("api");
-    service_observability.noteHealthCheckCompleted("api", false);
-    service_observability.noteHealthCheckCompleted("api", true);
+    service_observability.noteHealthCheckCompleted("api", false, 0.125);
+    service_observability.noteHealthCheckCompleted("api", true, 0.25);
     service_observability.noteEndpointFlap("api");
     service_observability.noteVipAllocFailure();
     try store.createService(.{
@@ -700,11 +700,14 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"succeeded\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"failed\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_duration_seconds{service=\"api\"} 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_bpf_sync_failures_total{service=\"api\",component=\"dns_interceptor\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_bpf_sync_failures_total{service=\"api\",component=\"load_balancer\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"api\",status=\"starting\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"edge\",status=\"untracked\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",result=\"scheduled\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",result=\"completed\"} 2") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",result=\"stale\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_check_latency_seconds{service=\"api\"} 0.250000") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoint_flaps_total{service=\"api\",endpoint=\"abcdef123456:0\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_vip_alloc_failures_total 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_enabled 1") != null);

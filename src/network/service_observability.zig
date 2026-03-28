@@ -8,9 +8,12 @@ pub const ServiceCounters = struct {
     reconcile_succeeded_total: u64,
     reconcile_failed_total: u64,
     reconcile_duration_seconds: f64,
+    dns_interceptor_sync_failures_total: u64,
+    load_balancer_sync_failures_total: u64,
     health_checks_scheduled_total: u64,
     health_checks_completed_total: u64,
     health_stale_results_total: u64,
+    health_check_latency_seconds: f64,
     endpoint_flaps_total: u64,
 
     pub fn deinit(self: ServiceCounters, alloc: Allocator) void {
@@ -35,9 +38,12 @@ const MutableServiceCounters = struct {
     reconcile_failed_total: u64 = 0,
     reconcile_requested_at: ?i64 = null,
     reconcile_duration_seconds: f64 = 0,
+    dns_interceptor_sync_failures_total: u64 = 0,
+    load_balancer_sync_failures_total: u64 = 0,
     health_checks_scheduled_total: u64 = 0,
     health_checks_completed_total: u64 = 0,
     health_stale_results_total: u64 = 0,
+    health_check_latency_seconds: f64 = 0,
     endpoint_flaps_total: u64 = 0,
 
     fn deinit(self: MutableServiceCounters, alloc: Allocator) void {
@@ -74,13 +80,14 @@ pub fn noteHealthCheckScheduled(service_name: []const u8) void {
     noteServiceCounter(service_name, .health_scheduled);
 }
 
-pub fn noteHealthCheckCompleted(service_name: []const u8, stale: bool) void {
+pub fn noteHealthCheckCompleted(service_name: []const u8, stale: bool, latency_seconds: f64) void {
     mutex.lock();
     defer mutex.unlock();
 
     var counters = ensureServiceCountersLocked(service_name) catch return;
     counters.health_checks_completed_total += 1;
     if (stale) counters.health_stale_results_total += 1;
+    counters.health_check_latency_seconds = latency_seconds;
 }
 
 pub fn noteEndpointFlap(service_name: []const u8) void {
@@ -91,6 +98,22 @@ pub fn noteVipAllocFailure() void {
     mutex.lock();
     defer mutex.unlock();
     vip_alloc_failures_total += 1;
+}
+
+pub const BpfComponent = enum {
+    dns_interceptor,
+    load_balancer,
+};
+
+pub fn noteBpfSyncFailure(service_name: []const u8, component: BpfComponent) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    var counters = ensureServiceCountersLocked(service_name) catch return;
+    switch (component) {
+        .dns_interceptor => counters.dns_interceptor_sync_failures_total += 1,
+        .load_balancer => counters.load_balancer_sync_failures_total += 1,
+    }
 }
 
 pub fn snapshot(alloc: Allocator) !Snapshot {
@@ -110,9 +133,12 @@ pub fn snapshot(alloc: Allocator) !Snapshot {
             .reconcile_succeeded_total = entry.reconcile_succeeded_total,
             .reconcile_failed_total = entry.reconcile_failed_total,
             .reconcile_duration_seconds = entry.reconcile_duration_seconds,
+            .dns_interceptor_sync_failures_total = entry.dns_interceptor_sync_failures_total,
+            .load_balancer_sync_failures_total = entry.load_balancer_sync_failures_total,
             .health_checks_scheduled_total = entry.health_checks_scheduled_total,
             .health_checks_completed_total = entry.health_checks_completed_total,
             .health_stale_results_total = entry.health_stale_results_total,
+            .health_check_latency_seconds = entry.health_check_latency_seconds,
             .endpoint_flaps_total = entry.endpoint_flaps_total,
         });
     }
@@ -182,8 +208,10 @@ test "snapshot includes recorded service counters" {
     noteReconcileSucceeded("api");
     noteReconcileFailed("api");
     noteHealthCheckScheduled("api");
-    noteHealthCheckCompleted("api", false);
-    noteHealthCheckCompleted("api", true);
+    noteHealthCheckCompleted("api", false, 0.125);
+    noteHealthCheckCompleted("api", true, 0.25);
+    noteBpfSyncFailure("api", .dns_interceptor);
+    noteBpfSyncFailure("api", .load_balancer);
     noteEndpointFlap("api");
     noteVipAllocFailure();
 
@@ -196,8 +224,11 @@ test "snapshot includes recorded service counters" {
     try std.testing.expectEqual(@as(u64, 1), service.reconcile_succeeded_total);
     try std.testing.expectEqual(@as(u64, 1), service.reconcile_failed_total);
     try std.testing.expect(service.reconcile_duration_seconds >= 0);
+    try std.testing.expectEqual(@as(u64, 1), service.dns_interceptor_sync_failures_total);
+    try std.testing.expectEqual(@as(u64, 1), service.load_balancer_sync_failures_total);
     try std.testing.expectEqual(@as(u64, 1), service.health_checks_scheduled_total);
     try std.testing.expectEqual(@as(u64, 2), service.health_checks_completed_total);
     try std.testing.expectEqual(@as(u64, 1), service.health_stale_results_total);
+    try std.testing.expectEqual(@as(f64, 0.25), service.health_check_latency_seconds);
     try std.testing.expectEqual(@as(u64, 1), service.endpoint_flaps_total);
 }

@@ -664,10 +664,14 @@ fn writeServiceObservabilityPrometheus(
     try writer.writeAll("# TYPE yoq_service_reconcile_runs_total counter\n");
     try writer.writeAll("# HELP yoq_service_reconcile_duration_seconds Most recent service reconcile duration in seconds\n");
     try writer.writeAll("# TYPE yoq_service_reconcile_duration_seconds gauge\n");
+    try writer.writeAll("# HELP yoq_service_bpf_sync_failures_total Service data-plane sync failures by component\n");
+    try writer.writeAll("# TYPE yoq_service_bpf_sync_failures_total counter\n");
     try writer.writeAll("# HELP yoq_service_health_status Service health status by label\n");
     try writer.writeAll("# TYPE yoq_service_health_status gauge\n");
     try writer.writeAll("# HELP yoq_service_health_checks_total Service health check activity by result\n");
     try writer.writeAll("# TYPE yoq_service_health_checks_total counter\n");
+    try writer.writeAll("# HELP yoq_service_health_check_latency_seconds Most recent service health check latency in seconds\n");
+    try writer.writeAll("# TYPE yoq_service_health_check_latency_seconds gauge\n");
     try writer.writeAll("# HELP yoq_service_endpoint_flaps_total Service health status transitions by endpoint\n");
     try writer.writeAll("# TYPE yoq_service_endpoint_flaps_total counter\n");
     try writer.writeAll("# HELP yoq_service_vip_alloc_failures_total Failed stable VIP allocations\n");
@@ -703,6 +707,14 @@ fn writeServiceObservabilityPrometheus(
             .{ service.service_name, if (service_counters) |entry| @as(u64, @intFromFloat(entry.reconcile_duration_seconds)) else 0 },
         );
         try writer.print(
+            "yoq_service_bpf_sync_failures_total{{service=\"{s}\",component=\"dns_interceptor\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.dns_interceptor_sync_failures_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_bpf_sync_failures_total{{service=\"{s}\",component=\"load_balancer\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.load_balancer_sync_failures_total else 0 },
+        );
+        try writer.print(
             "yoq_service_health_checks_total{{service=\"{s}\",result=\"scheduled\"}} {d}\n",
             .{ service.service_name, if (service_counters) |entry| entry.health_checks_scheduled_total else 0 },
         );
@@ -713,6 +725,10 @@ fn writeServiceObservabilityPrometheus(
         try writer.print(
             "yoq_service_health_checks_total{{service=\"{s}\",result=\"stale\"}} {d}\n",
             .{ service.service_name, if (service_counters) |entry| entry.health_stale_results_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_health_check_latency_seconds{{service=\"{s}\"}} {d:.6}\n",
+            .{ service.service_name, if (service_counters) |entry| entry.health_check_latency_seconds else 0 },
         );
         try writer.print(
             "yoq_service_endpoint_flaps_total{{service=\"{s}\",endpoint=\"{s}\"}} {d}\n",
