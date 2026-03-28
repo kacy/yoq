@@ -20,6 +20,7 @@ const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 const proxy_runtime = @import("../../../network/proxy/runtime.zig");
 const listener_runtime = @import("../../../network/proxy/listener_runtime.zig");
+const proxy_control_plane = @import("../../../network/proxy/control_plane.zig");
 const steering_runtime = @import("../../../network/proxy/steering_runtime.zig");
 
 const Response = common.Response;
@@ -269,6 +270,7 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     defer l7_proxy.deinit(std.heap.page_allocator);
     var l7_listener = try listener_runtime.snapshot(std.heap.page_allocator);
     defer l7_listener.deinit(std.heap.page_allocator);
+    const l7_control_plane = proxy_control_plane.snapshot();
     var l7_steering = try steering_runtime.snapshot(std.heap.page_allocator);
     defer l7_steering.deinit(std.heap.page_allocator);
     const node_signals = service_reconciler.snapshotNodeSignalState();
@@ -367,6 +369,22 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_service_l7_proxy_listener_active_connections Active L7 proxy listener connections\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_listener_active_connections gauge\n");
     try writer.print("yoq_service_l7_proxy_listener_active_connections {d}\n", .{l7_listener.active_connections});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_enabled Whether periodic steering resync is enabled\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_enabled gauge\n");
+    try writer.print("yoq_service_l7_proxy_control_plane_enabled {d}\n", .{@intFromBool(l7_control_plane.enabled)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_running Whether the periodic steering resync loop is running\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_running gauge\n");
+    try writer.print("yoq_service_l7_proxy_control_plane_running {d}\n", .{@intFromBool(l7_control_plane.running)});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_interval_seconds Periodic steering resync interval in seconds\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_interval_seconds gauge\n");
+    try writer.print("yoq_service_l7_proxy_control_plane_interval_seconds {d}\n", .{l7_control_plane.interval_secs});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_passes_total Periodic steering resync passes executed\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_passes_total counter\n");
+    try writer.print("yoq_service_l7_proxy_control_plane_passes_total {d}\n", .{l7_control_plane.passes_total});
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_steering_enabled Whether VIP steering into the L7 listener is enabled\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_enabled gauge\n");

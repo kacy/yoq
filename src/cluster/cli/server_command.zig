@@ -62,6 +62,8 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
     defer listener_runtime.stop();
+    proxy_control_plane.startSyncLoopIfEnabled();
+    defer proxy_control_plane.stopSyncLoop();
 
     var token_buf: [64]u8 = undefined;
     const token: ?[]const u8 = readApiToken(&token_buf) orelse generateAndSaveToken(&token_buf);
@@ -165,6 +167,8 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
     defer listener_runtime.stop();
+    proxy_control_plane.startSyncLoopIfEnabled();
+    defer proxy_control_plane.stopSyncLoop();
 
     var data_dir_buf: [paths.max_path]u8 = undefined;
     const data_dir = cluster_config.defaultDataDir(&data_dir_buf) catch |err| {
