@@ -118,6 +118,8 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
     defer listener_runtime.stop();
+    proxy_control_plane.startSyncLoopIfEnabled();
+    defer proxy_control_plane.stopSyncLoop();
     orchestrator.installSignalHandlers();
 
     orch.startAll() catch |err| {

@@ -17,6 +17,7 @@ const service_rollout = @import("../../../network/service_rollout.zig");
 const service_reconciler = @import("../../../network/service_reconciler.zig");
 const proxy_runtime = @import("../../../network/proxy/runtime.zig");
 const listener_runtime = @import("../../../network/proxy/listener_runtime.zig");
+const proxy_control_plane = @import("../../../network/proxy/control_plane.zig");
 const steering_runtime = @import("../../../network/proxy/steering_runtime.zig");
 
 const Response = common.Response;
@@ -63,6 +64,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer l7_proxy.deinit(alloc);
     var l7_listener = listener_runtime.snapshot(alloc) catch return common.internalError();
     defer l7_listener.deinit(alloc);
+    const l7_control_plane = proxy_control_plane.snapshot();
     var l7_steering = steering_runtime.snapshot(alloc) catch return common.internalError();
     defer l7_steering.deinit(alloc);
     var l7_routes = proxy_runtime.snapshotRoutes(alloc) catch return common.internalError();
@@ -283,7 +285,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeAll("\",\"path_prefix\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, route.path_prefix) catch return common.internalError();
         writer.print(
-            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
+            "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
             .{
                 route.eligible_endpoints,
                 route.healthy_endpoints,
@@ -296,6 +298,8 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
                 route.steering_desired_ports,
                 route.steering_applied_ports,
                 route.steering_ready,
+                route.steering_blocked,
+                route.steering_drifted,
                 route.steering_blocked_reason.label(),
             },
         ) catch return common.internalError();
@@ -328,6 +332,30 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeByte('"') catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, message) catch return common.internalError();
         writer.writeByte('"') catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll("},\"control_plane\":{") catch return common.internalError();
+    writer.print(
+        "\"enabled\":{},\"steering_enabled\":{},\"running\":{},\"interval_secs\":{d},\"passes_total\":{d},\"event_passes_total\":{d},\"periodic_passes_total\":{d},\"last_trigger\":",
+        .{
+            l7_control_plane.enabled,
+            l7_control_plane.steering_enabled,
+            l7_control_plane.running,
+            l7_control_plane.interval_secs,
+            l7_control_plane.passes_total,
+            l7_control_plane.event_passes_total,
+            l7_control_plane.periodic_passes_total,
+        },
+    ) catch return common.internalError();
+    if (l7_control_plane.last_trigger) |trigger| {
+        writer.print("\"{s}\"", .{trigger.label()}) catch return common.internalError();
+    } else {
+        writer.writeAll("null") catch return common.internalError();
+    }
+    writer.writeAll(",\"last_pass_at\":") catch return common.internalError();
+    if (l7_control_plane.last_pass_at) |timestamp| {
+        writer.print("{d}", .{timestamp}) catch return common.internalError();
     } else {
         writer.writeAll("null") catch return common.internalError();
     }

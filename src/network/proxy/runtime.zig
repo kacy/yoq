@@ -71,6 +71,8 @@ pub const RouteSnapshot = struct {
     steering_desired_ports: u32,
     steering_applied_ports: u32,
     steering_ready: bool,
+    steering_blocked: bool,
+    steering_drifted: bool,
     steering_blocked_reason: steering_runtime.BlockedReason,
 
     pub fn deinit(self: RouteSnapshot, alloc: std.mem.Allocator) void {
@@ -527,6 +529,8 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .steering_desired_ports = steering_state.desired_ports,
         .steering_applied_ports = steering_state.applied_ports,
         .steering_ready = steering_state.ready,
+        .steering_blocked = steering_state.blocked,
+        .steering_drifted = steering_state.drifted,
         .steering_blocked_reason = steering_state.blocked_reason,
     };
 }
@@ -918,6 +922,8 @@ test "materialized routes mark steering as degraded when VIP cutover is enabled"
     try std.testing.expect(routes_snapshot.items[0].degraded);
     try std.testing.expectEqual(RouteDegradedReason.steering_not_ready, routes_snapshot.items[0].degraded_reason);
     try std.testing.expect(!routes_snapshot.items[0].steering_ready);
+    try std.testing.expect(routes_snapshot.items[0].steering_blocked);
+    try std.testing.expect(!routes_snapshot.items[0].steering_drifted);
     try std.testing.expectEqual(steering_runtime.BlockedReason.listener_not_running, routes_snapshot.items[0].steering_blocked_reason);
 }
 

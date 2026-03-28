@@ -621,6 +621,8 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !proxy_runt
         .steering_desired_ports = 0,
         .steering_applied_ports = 0,
         .steering_ready = false,
+        .steering_blocked = true,
+        .steering_drifted = false,
         .steering_blocked_reason = .rollout_disabled,
     };
 }
@@ -904,6 +906,8 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
             .steering_desired_ports = 0,
             .steering_applied_ports = 0,
             .steering_ready = false,
+            .steering_blocked = true,
+            .steering_drifted = false,
             .steering_blocked_reason = .rollout_disabled,
         },
         .upstream = .{
@@ -968,6 +972,8 @@ test "buildForwardRequest preserves body and content length" {
             .steering_desired_ports = 0,
             .steering_applied_ports = 0,
             .steering_ready = false,
+            .steering_blocked = true,
+            .steering_drifted = false,
             .steering_blocked_reason = .rollout_disabled,
         },
         .upstream = .{

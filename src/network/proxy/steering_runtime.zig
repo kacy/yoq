@@ -62,6 +62,8 @@ pub const ServiceStatus = struct {
     desired_ports: u32,
     applied_ports: u32,
     ready: bool,
+    blocked: bool,
+    drifted: bool,
     blocked_reason: BlockedReason,
 };
 
@@ -341,6 +343,8 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
             .desired_ports = 0,
             .applied_ports = 0,
             .ready = false,
+            .blocked = true,
+            .drifted = false,
             .blocked_reason = .rollout_disabled,
         };
     }
@@ -366,6 +370,8 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
             .desired_ports = 0,
             .applied_ports = 0,
             .ready = false,
+            .blocked = true,
+            .drifted = false,
             .blocked_reason = .no_service_ports,
         };
     }
@@ -387,12 +393,17 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
         }
     }
 
-    const reason = if (applied_ports == ports.items.len) .none else prerequisite_reason;
+    const ready = applied_ports == ports.items.len;
+    const reason = if (ready) .none else prerequisite_reason;
+    const blocked = !ready and prerequisite_reason != .none;
+    const drifted = !ready and prerequisite_reason == .none and ports.items.len > applied_ports;
 
     return .{
         .desired_ports = @intCast(ports.items.len),
         .applied_ports = applied_ports,
-        .ready = applied_ports == ports.items.len,
+        .ready = ready,
+        .blocked = blocked,
+        .drifted = drifted,
         .blocked_reason = reason,
     };
 }
