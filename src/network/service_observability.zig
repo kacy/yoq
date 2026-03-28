@@ -7,6 +7,7 @@ pub const ServiceCounters = struct {
     reconcile_requested_total: u64,
     reconcile_succeeded_total: u64,
     reconcile_failed_total: u64,
+    reconcile_duration_seconds: f64,
     health_checks_scheduled_total: u64,
     health_checks_completed_total: u64,
     health_stale_results_total: u64,
@@ -32,6 +33,8 @@ const MutableServiceCounters = struct {
     reconcile_requested_total: u64 = 0,
     reconcile_succeeded_total: u64 = 0,
     reconcile_failed_total: u64 = 0,
+    reconcile_requested_at: ?i64 = null,
+    reconcile_duration_seconds: f64 = 0,
     health_checks_scheduled_total: u64 = 0,
     health_checks_completed_total: u64 = 0,
     health_stale_results_total: u64 = 0,
@@ -106,6 +109,7 @@ pub fn snapshot(alloc: Allocator) !Snapshot {
             .reconcile_requested_total = entry.reconcile_requested_total,
             .reconcile_succeeded_total = entry.reconcile_succeeded_total,
             .reconcile_failed_total = entry.reconcile_failed_total,
+            .reconcile_duration_seconds = entry.reconcile_duration_seconds,
             .health_checks_scheduled_total = entry.health_checks_scheduled_total,
             .health_checks_completed_total = entry.health_checks_completed_total,
             .health_stale_results_total = entry.health_stale_results_total,
@@ -146,6 +150,17 @@ fn noteServiceCounter(service_name: []const u8, kind: CounterKind) void {
         .health_scheduled => counters.health_checks_scheduled_total += 1,
         .endpoint_flap => counters.endpoint_flaps_total += 1,
     }
+    switch (kind) {
+        .reconcile_requested => counters.reconcile_requested_at = std.time.timestamp(),
+        .reconcile_succeeded, .reconcile_failed => {
+            if (counters.reconcile_requested_at) |started_at| {
+                const now = std.time.timestamp();
+                counters.reconcile_duration_seconds = @floatFromInt(@max(now - started_at, 0));
+                counters.reconcile_requested_at = null;
+            }
+        },
+        else => {},
+    }
 }
 
 fn ensureServiceCountersLocked(service_name: []const u8) !*MutableServiceCounters {
@@ -180,6 +195,7 @@ test "snapshot includes recorded service counters" {
     try std.testing.expectEqual(@as(u64, 1), service.reconcile_requested_total);
     try std.testing.expectEqual(@as(u64, 1), service.reconcile_succeeded_total);
     try std.testing.expectEqual(@as(u64, 1), service.reconcile_failed_total);
+    try std.testing.expect(service.reconcile_duration_seconds >= 0);
     try std.testing.expectEqual(@as(u64, 1), service.health_checks_scheduled_total);
     try std.testing.expectEqual(@as(u64, 2), service.health_checks_completed_total);
     try std.testing.expectEqual(@as(u64, 1), service.health_stale_results_total);

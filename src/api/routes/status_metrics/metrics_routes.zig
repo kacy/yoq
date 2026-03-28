@@ -662,6 +662,8 @@ fn writeServiceObservabilityPrometheus(
     try writer.writeAll("# TYPE yoq_service_endpoint_overflow_total gauge\n");
     try writer.writeAll("# HELP yoq_service_reconcile_runs_total Service reconcile requests and outcomes\n");
     try writer.writeAll("# TYPE yoq_service_reconcile_runs_total counter\n");
+    try writer.writeAll("# HELP yoq_service_reconcile_duration_seconds Most recent service reconcile duration in seconds\n");
+    try writer.writeAll("# TYPE yoq_service_reconcile_duration_seconds gauge\n");
     try writer.writeAll("# HELP yoq_service_health_status Service health status by label\n");
     try writer.writeAll("# TYPE yoq_service_health_status gauge\n");
     try writer.writeAll("# HELP yoq_service_health_checks_total Service health check activity by result\n");
@@ -695,6 +697,10 @@ fn writeServiceObservabilityPrometheus(
         try writer.print(
             "yoq_service_reconcile_runs_total{{service=\"{s}\",result=\"failed\"}} {d}\n",
             .{ service.service_name, if (service_counters) |entry| entry.reconcile_failed_total else 0 },
+        );
+        try writer.print(
+            "yoq_service_reconcile_duration_seconds{{service=\"{s}\"}} {d}\n",
+            .{ service.service_name, if (service_counters) |entry| @as(u64, @intFromFloat(entry.reconcile_duration_seconds)) else 0 },
         );
         try writer.print(
             "yoq_service_health_checks_total{{service=\"{s}\",result=\"scheduled\"}} {d}\n",

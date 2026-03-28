@@ -699,6 +699,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"requested\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"succeeded\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"failed\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_duration_seconds{service=\"api\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"api\",status=\"starting\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"edge\",status=\"untracked\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",result=\"scheduled\"} 1") != null);
