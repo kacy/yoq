@@ -58,8 +58,9 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
+    listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+    defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
-    proxy_control_plane.refreshIfEnabled();
     defer listener_runtime.stop();
 
     var token_buf: [64]u8 = undefined;
@@ -160,8 +161,9 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
+    listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+    defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
-    proxy_control_plane.refreshIfEnabled();
     defer listener_runtime.stop();
 
     var data_dir_buf: [paths.max_path]u8 = undefined;

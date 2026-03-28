@@ -114,8 +114,9 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
+    listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+    defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
-    proxy_control_plane.refreshIfEnabled();
     defer listener_runtime.stop();
     orchestrator.installSignalHandlers();
 
