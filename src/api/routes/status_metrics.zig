@@ -691,20 +691,20 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"load_balancer_backends_per_vip\"} 64") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_workers\"} 4") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_queued_checks\"} 64") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints{service=\"api\",state=\"total\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints{service=\"api\",state=\"eligible\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints{service=\"api\",state=\"healthy\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_zero_backends{service=\"edge\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints_total{service=\"api\",state=\"total\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_eligible_endpoints{service=\"api\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints_total{service=\"api\",state=\"healthy\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_zero_backends_total{service=\"edge\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_degraded{service=\"edge\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"requested\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"succeeded\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"failed\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"api\",status=\"starting\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"edge\",status=\"untracked\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",kind=\"scheduled\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",kind=\"completed\"} 2") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",kind=\"stale\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoint_flaps_total{service=\"api\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",result=\"scheduled\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",result=\"completed\"} 2") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",result=\"stale\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoint_flaps_total{service=\"api\",endpoint=\"abcdef123456:0\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_vip_alloc_failures_total 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_enabled 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_running 1") != null);
@@ -782,6 +782,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_queued_checks 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_checks_total{kind=\"scheduled\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_stale_results_total 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_checker_queue_depth 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_checker_workers_busy 0") != null);
 }
 
 test "handleGpuMetrics returns valid JSON" {

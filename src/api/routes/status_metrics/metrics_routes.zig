@@ -634,6 +634,14 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_health_checker_queue_drops_total Health checks dropped because the queue is full\n");
     try writer.writeAll("# TYPE yoq_health_checker_queue_drops_total counter\n");
     try writer.print("yoq_health_checker_queue_drops_total {d}\n", .{checker.dropped_queue_full_total});
+
+    try writer.writeAll("# HELP yoq_service_checker_queue_depth Health checker queue depth\n");
+    try writer.writeAll("# TYPE yoq_service_checker_queue_depth gauge\n");
+    try writer.print("yoq_service_checker_queue_depth {d}\n", .{checker.queued_checks});
+
+    try writer.writeAll("# HELP yoq_service_checker_workers_busy Health checker workers currently busy\n");
+    try writer.writeAll("# TYPE yoq_service_checker_workers_busy gauge\n");
+    try writer.print("yoq_service_checker_workers_busy {d}\n", .{@min(checker.in_flight_checks, checker.worker_threads)});
 }
 
 fn writeServiceObservabilityPrometheus(
@@ -642,21 +650,23 @@ fn writeServiceObservabilityPrometheus(
     counters: []const service_observability.ServiceCounters,
     vip_alloc_failures_total: u64,
 ) !void {
-    try writer.writeAll("# HELP yoq_service_endpoints Service endpoint counts by state\n");
-    try writer.writeAll("# TYPE yoq_service_endpoints gauge\n");
+    try writer.writeAll("# HELP yoq_service_endpoints_total Service endpoint counts by state\n");
+    try writer.writeAll("# TYPE yoq_service_endpoints_total gauge\n");
+    try writer.writeAll("# HELP yoq_service_eligible_endpoints Service endpoints currently eligible for load balancing\n");
+    try writer.writeAll("# TYPE yoq_service_eligible_endpoints gauge\n");
     try writer.writeAll("# HELP yoq_service_degraded Whether a service is currently degraded\n");
     try writer.writeAll("# TYPE yoq_service_degraded gauge\n");
-    try writer.writeAll("# HELP yoq_service_zero_backends Whether a service currently has zero eligible backends\n");
-    try writer.writeAll("# TYPE yoq_service_zero_backends gauge\n");
-    try writer.writeAll("# HELP yoq_service_endpoint_overflow Whether a service has exceeded the backend capacity limit\n");
-    try writer.writeAll("# TYPE yoq_service_endpoint_overflow gauge\n");
+    try writer.writeAll("# HELP yoq_service_zero_backends_total Services currently reporting zero eligible backends\n");
+    try writer.writeAll("# TYPE yoq_service_zero_backends_total gauge\n");
+    try writer.writeAll("# HELP yoq_service_endpoint_overflow_total Services currently exceeding backend capacity\n");
+    try writer.writeAll("# TYPE yoq_service_endpoint_overflow_total gauge\n");
     try writer.writeAll("# HELP yoq_service_reconcile_runs_total Service reconcile requests and outcomes\n");
     try writer.writeAll("# TYPE yoq_service_reconcile_runs_total counter\n");
     try writer.writeAll("# HELP yoq_service_health_status Service health status by label\n");
     try writer.writeAll("# TYPE yoq_service_health_status gauge\n");
-    try writer.writeAll("# HELP yoq_service_health_checks_total Service health check activity by kind\n");
+    try writer.writeAll("# HELP yoq_service_health_checks_total Service health check activity by result\n");
     try writer.writeAll("# TYPE yoq_service_health_checks_total counter\n");
-    try writer.writeAll("# HELP yoq_service_endpoint_flaps_total Service health status transitions\n");
+    try writer.writeAll("# HELP yoq_service_endpoint_flaps_total Service health status transitions by endpoint\n");
     try writer.writeAll("# TYPE yoq_service_endpoint_flaps_total counter\n");
     try writer.writeAll("# HELP yoq_service_vip_alloc_failures_total Failed stable VIP allocations\n");
     try writer.writeAll("# TYPE yoq_service_vip_alloc_failures_total counter\n");
@@ -665,14 +675,15 @@ fn writeServiceObservabilityPrometheus(
     for (services) |service| {
         const service_counters = service_observability.findServiceCounters(counters, service.service_name);
         const health_state = health.getServiceHealth(service.service_name);
+        const endpoint_label = if (health_state) |entry| entry.endpointId() else "unknown";
 
-        try writer.print("yoq_service_endpoints{{service=\"{s}\",state=\"total\"}} {d}\n", .{ service.service_name, service.total_endpoints });
-        try writer.print("yoq_service_endpoints{{service=\"{s}\",state=\"eligible\"}} {d}\n", .{ service.service_name, service.eligible_endpoints });
-        try writer.print("yoq_service_endpoints{{service=\"{s}\",state=\"healthy\"}} {d}\n", .{ service.service_name, service.healthy_endpoints });
-        try writer.print("yoq_service_endpoints{{service=\"{s}\",state=\"draining\"}} {d}\n", .{ service.service_name, service.draining_endpoints });
+        try writer.print("yoq_service_endpoints_total{{service=\"{s}\",state=\"total\"}} {d}\n", .{ service.service_name, service.total_endpoints });
+        try writer.print("yoq_service_endpoints_total{{service=\"{s}\",state=\"healthy\"}} {d}\n", .{ service.service_name, service.healthy_endpoints });
+        try writer.print("yoq_service_endpoints_total{{service=\"{s}\",state=\"draining\"}} {d}\n", .{ service.service_name, service.draining_endpoints });
+        try writer.print("yoq_service_eligible_endpoints{{service=\"{s}\"}} {d}\n", .{ service.service_name, service.eligible_endpoints });
         try writer.print("yoq_service_degraded{{service=\"{s}\"}} {d}\n", .{ service.service_name, @intFromBool(service.degraded) });
-        try writer.print("yoq_service_zero_backends{{service=\"{s}\"}} {d}\n", .{ service.service_name, @intFromBool(service.eligible_endpoints == 0) });
-        try writer.print("yoq_service_endpoint_overflow{{service=\"{s}\"}} {d}\n", .{ service.service_name, @intFromBool(service.overflow) });
+        try writer.print("yoq_service_zero_backends_total{{service=\"{s}\"}} {d}\n", .{ service.service_name, @intFromBool(service.eligible_endpoints == 0) });
+        try writer.print("yoq_service_endpoint_overflow_total{{service=\"{s}\"}} {d}\n", .{ service.service_name, @intFromBool(service.overflow) });
         try writer.print(
             "yoq_service_reconcile_runs_total{{service=\"{s}\",result=\"requested\"}} {d}\n",
             .{ service.service_name, if (service_counters) |entry| entry.reconcile_requested_total else 0 },
@@ -686,20 +697,20 @@ fn writeServiceObservabilityPrometheus(
             .{ service.service_name, if (service_counters) |entry| entry.reconcile_failed_total else 0 },
         );
         try writer.print(
-            "yoq_service_health_checks_total{{service=\"{s}\",kind=\"scheduled\"}} {d}\n",
+            "yoq_service_health_checks_total{{service=\"{s}\",result=\"scheduled\"}} {d}\n",
             .{ service.service_name, if (service_counters) |entry| entry.health_checks_scheduled_total else 0 },
         );
         try writer.print(
-            "yoq_service_health_checks_total{{service=\"{s}\",kind=\"completed\"}} {d}\n",
+            "yoq_service_health_checks_total{{service=\"{s}\",result=\"completed\"}} {d}\n",
             .{ service.service_name, if (service_counters) |entry| entry.health_checks_completed_total else 0 },
         );
         try writer.print(
-            "yoq_service_health_checks_total{{service=\"{s}\",kind=\"stale\"}} {d}\n",
+            "yoq_service_health_checks_total{{service=\"{s}\",result=\"stale\"}} {d}\n",
             .{ service.service_name, if (service_counters) |entry| entry.health_stale_results_total else 0 },
         );
         try writer.print(
-            "yoq_service_endpoint_flaps_total{{service=\"{s}\"}} {d}\n",
-            .{ service.service_name, if (service_counters) |entry| entry.endpoint_flaps_total else 0 },
+            "yoq_service_endpoint_flaps_total{{service=\"{s}\",endpoint=\"{s}\"}} {d}\n",
+            .{ service.service_name, endpoint_label, if (service_counters) |entry| entry.endpoint_flaps_total else 0 },
         );
 
         inline for ([_][]const u8{ "healthy", "starting", "unhealthy", "untracked" }) |status| {
