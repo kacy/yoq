@@ -1747,3 +1747,56 @@ test "handleConnection proxies a client socket request" {
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Host: api.internal\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Proto: http\r\n") != null);
 }
+
+test "handleConnection rejects looped request after listener restart" {
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const ConnectionHarness = struct {
+        fn serveOnce(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+    var server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serveOnce, .{ &proxy, listener.fd });
+
+    var client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n");
+
+    var response_buf: [1024]u8 = undefined;
+    var bytes_read = try posix.read(client_fd, &response_buf);
+    try std.testing.expect(bytes_read > 0);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 502 Bad Gateway\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "{\"error\":\"proxy loop detected\"}") != null);
+    posix.close(client_fd);
+    server_thread.join();
+
+    listener.deinit();
+    listener = try TestListener.init();
+    server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serveOnce, .{ &proxy, listener.fd });
+
+    client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const restarted_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try posix.connect(client_fd, &restarted_addr.any, restarted_addr.getOsSockLen());
+    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n");
+
+    bytes_read = try posix.read(client_fd, &response_buf);
+    try std.testing.expect(bytes_read > 0);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 502 Bad Gateway\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "{\"error\":\"proxy loop detected\"}") != null);
+    posix.close(client_fd);
+    server_thread.join();
+}

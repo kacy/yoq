@@ -494,7 +494,7 @@ The core path is in place:
 - VIP steering control plane that maps `VIP:port` traffic into the listener for HTTP-enabled services.
 - Steering readiness surfaced per route and in rollout status, including blocked reasons.
 
-What is still missing is not the proxy data path itself. The remaining gaps are around hardening the steering path, tightening the operational story, and making the docs match the code that already exists.
+For the first cut, the proxy data path and the steering model are both in place. What remains after this point is follow-on work, not a blocker for the service-discovery rollout itself.
 
 ### 6a. Scope the first version tightly
 
@@ -571,24 +571,25 @@ This is mostly done for the first cut:
 - Runtime changes already refresh the proxy and steering control plane.
 - The remaining gap is operational hardening, not config persistence.
 
-### 6f. Remaining work
+### 6f. First-Cut Exit Criteria On `main`
 
-The shortest safe path from here:
+The first-cut L7 feature is complete when all of the following are true:
 
-1. Tighten steering verification.
-   - prove the exact VIP mappings sent to the port-mapper layer
-   - keep listener state changes from leaving stale steering entries behind
-   - add stronger drift checks between steering intent and applied state
-2. Finish the steering operational model.
-   - define how steering should degrade when the listener is unhealthy but L4 is still available
-3. Extend L7 observability from counters into operator-facing failure detail.
-   - per-route failure summaries
-   - clearer degraded reasons in rollout status
-4. Add end-to-end coverage for the VIP path.
-   - HTTP request reaches the listener through steering
-   - non-HTTP still bypasses the proxy
-   - loop prevention survives retries and listener restarts
-5. Decide whether this phase should stop at one-request-per-connection or grow into connection reuse and pooling.
+1. HTTP-enabled services can steer VIP traffic into the loopback listener and proxy one HTTP/1.1 request end to end.
+2. If steering is blocked or drifted, route and service status make that visible and report whether traffic is using the L7 proxy or falling back to L4.
+3. Listener start, stop, restart, and periodic repair all converge steering state without leaving stale VIP mappings behind.
+4. Loop prevention is stateless and still rejects re-entered requests after retries and listener restarts.
+5. HTTP backends can recover original client identity from proxy-managed forwarded headers.
+6. Non-HTTP traffic stays on the L4 path because the steering layer only programs TCP VIP mappings.
+7. The implementation remains one-request-per-connection for now. Connection reuse and pooling are a later optimization, not part of first-cut correctness.
+
+### 6g. Follow-On Work
+
+Reasonable follow-ons after the first cut:
+
+1. Connection reuse and upstream pooling.
+2. More route-level metrics if per-service cardinality is acceptable.
+3. HTTP/2 or gRPC-specific behavior, if that ever becomes necessary.
 
 **Files:** new `src/network/proxy/reverse_proxy.zig`, `src/network/proxy/router.zig`, `src/network/proxy/policy.zig`, `src/network/proxy/upstream.zig`; modify `src/manifest/spec/shared_types.zig`, route storage/state-machine plumbing as needed
 
