@@ -23,6 +23,14 @@ pub const PortTarget = extern struct {
     _pad: u16 = 0,
 };
 
+pub const MappingEntry = struct {
+    destination_ip: ?[4]u8,
+    host_port: u16,
+    protocol: u8,
+    target_ip: [4]u8,
+    target_port: u16,
+};
+
 pub const PortMapper = struct {
     prog_fd: posix.fd_t,
     map_fd: posix.fd_t,
@@ -84,6 +92,30 @@ pub const PortMapper = struct {
             .protocol = protocol,
         };
         _ = map_support.mapDelete(self.map_fd, std.mem.asBytes(&key));
+    }
+
+    pub fn listMappings(self: *const PortMapper, alloc: std.mem.Allocator) !std.ArrayList(MappingEntry) {
+        var mappings: std.ArrayList(MappingEntry) = .empty;
+        errdefer mappings.deinit(alloc);
+
+        var key: PortKey = std.mem.zeroes(PortKey);
+        var next_key: PortKey = std.mem.zeroes(PortKey);
+
+        while (map_support.mapGetNextKey(self.map_fd, std.mem.asBytes(&key), std.mem.asBytes(&next_key))) {
+            var target: PortTarget = std.mem.zeroes(PortTarget);
+            if (map_support.mapLookup(self.map_fd, std.mem.asBytes(&next_key), std.mem.asBytes(&target))) {
+                try mappings.append(alloc, .{
+                    .destination_ip = if (next_key.dst_ip == 0) null else @as([4]u8, @bitCast(next_key.dst_ip)),
+                    .host_port = std.mem.bigToNative(u16, next_key.port),
+                    .protocol = next_key.protocol,
+                    .target_ip = @bitCast(target.dst_ip),
+                    .target_port = std.mem.bigToNative(u16, target.dst_port),
+                });
+            }
+            key = next_key;
+        }
+
+        return mappings;
     }
 
     pub fn deinit(self: *PortMapper) void {
