@@ -467,7 +467,7 @@ The first version should solve durability, correctness, and operability first. F
 
 ### Current status on `main`
 
-The foundation is in place:
+The core path is in place:
 
 - Manifest parsing and validation for opt-in `http_proxy` service config.
 - Durable proxy policy stored with canonical `services` state.
@@ -475,14 +475,26 @@ The foundation is in place:
 - Route inspection via:
   - `GET /v1/services/{name}/proxy-routes`
   - rollout status / metrics for the L7 control plane
-- Pure request-resolution path in `reverse_proxy.zig`:
+- End-to-end HTTP/1.1 handling in `reverse_proxy.zig`:
   - parse HTTP/1.1 request
   - require `Host`
   - match host + path
   - resolve an eligible upstream from canonical endpoint state
-  - return explicit `400`, `404`, or `503` decisions when forwarding is not possible
+  - rewrite and forward the request to an upstream TCP connection
+  - stream the upstream response back
+  - return explicit `400`, `404`, `502`, or `503` responses when forwarding is not possible
+- Conservative retry support:
+  - safe methods only
+  - transport failure retries
+  - upstream `5xx` retries
+  - bounded retry budget from persisted policy
+- Per-endpoint circuit breaking in the proxy runtime with open and half-open states.
+- Loop prevention via proxy marker headers and rejection of re-entered requests.
+- Loopback listener runtime for the L7 proxy on port `17080`.
+- VIP steering control plane that maps `VIP:port` traffic into the listener for HTTP-enabled services.
+- Steering readiness surfaced per route and in rollout status, including blocked reasons.
 
-What is still missing is the actual data path. The proxy can decide what it should do, but it does not yet open an upstream connection, forward the request, stream the response back, or steer VIP-bound HTTP traffic into the proxy.
+What is still missing is not the proxy data path itself. The remaining gaps are around hardening the steering path, tightening the operational story, and making the docs match the code that already exists.
 
 ### 6a. Scope the first version tightly
 
@@ -504,7 +516,8 @@ What this means in practice now:
 - `router.zig` exists and matches host/path with longest-prefix wins.
 - `upstream.zig` exists and selects eligible endpoints from canonical service state.
 - `runtime.zig` exists and materializes routes plus readiness counts from canonical service and endpoint state.
-- `reverse_proxy.zig` currently stops at request resolution. It does not yet proxy bytes.
+- `reverse_proxy.zig` now proxies one HTTP/1.1 request per connection, applies retries conservatively, and records route/runtime failure state.
+- `listener_runtime.zig` accepts loopback connections and hands them to the reverse proxy.
 
 ### 6c. Redirect/steering model
 
@@ -513,6 +526,13 @@ What this means in practice now:
   - loop prevention
   - source IP preservation expectations
   - how non-HTTP traffic bypasses the proxy
+
+Current behavior:
+
+- VIP steering is implemented through the XDP port-mapper path using exact `dst_ip + port + protocol` matches.
+- Non-HTTP traffic still uses the L4 data path.
+- Listener start, stop, and accept-loop failure now trigger steering resync so stale VIP mappings do not linger after the listener changes state.
+- Route and rollout status already surface whether steering is ready and why it is blocked when it is not.
 
 ### 6d. Retry and circuit-breaker semantics
 
@@ -528,9 +548,9 @@ What this means in practice now:
 
 Current behavior:
 
-- The request-resolution path already returns `503` when a route matches but no eligible upstream exists.
-- Retry policy is modeled in `policy.zig`, but retries are not yet exercised in the forwarding path.
-- Circuit breaking has not started yet.
+- Matching routes return `503` when no eligible upstream exists.
+- The forwarding path already applies safe-method retries for transport failures and upstream `5xx`.
+- Circuit breaking is active in the proxy runtime and affects later upstream selection.
 
 ### 6e. Persistent config and reconciliation
 
@@ -542,35 +562,30 @@ This is mostly done for the first cut:
 - Manifest `http_proxy` config is parsed and validated.
 - Proxy policy is persisted with canonical `services` state.
 - Local deploy syncs manifest proxy config into canonical service state before proxy bootstrap.
-- The remaining gap is runtime forwarding and steering, not config persistence.
+- Runtime changes already refresh the proxy and steering control plane.
+- The remaining gap is operational hardening, not config persistence.
 
 ### 6f. Remaining work
 
 The shortest safe path from here:
 
-1. Add real HTTP/1.1 forwarding.
-   - open upstream TCP connection
-   - write rewritten request
-   - stream upstream response back
-   - keep the first version one-request-per-connection
-2. Apply timeout policy in the real data path.
-   - connect timeout
-   - request timeout
-   - clear error handling on short reads / early closes
-3. Apply retry policy conservatively.
-   - opt-in only
-   - safe methods only
-   - bounded retry budget
-4. Add L7-specific observability before steering.
-   - request/result counters
-   - upstream connect failures
-   - retry counters
-   - structured access logs
-5. Define and implement steering.
-   - how VIP-bound HTTP reaches the proxy
-   - how non-HTTP bypasses it
-   - loop prevention and source-IP expectations
-6. Add circuit breaking only after the forwarding path and observability are stable.
+1. Tighten steering verification.
+   - prove the exact VIP mappings sent to the port-mapper layer
+   - keep listener state changes from leaving stale steering entries behind
+   - add stronger drift checks between steering intent and applied state
+2. Finish the steering operational model.
+   - document source-IP expectations clearly
+   - make non-HTTP bypass guarantees explicit
+   - define how steering should degrade when the listener is unhealthy but L4 is still available
+3. Extend L7 observability from counters into operator-facing failure detail.
+   - per-route failure summaries
+   - steering failure detail beyond a single blocked reason
+   - clearer degraded reasons in rollout status
+4. Add end-to-end coverage for the VIP path.
+   - HTTP request reaches the listener through steering
+   - non-HTTP still bypasses the proxy
+   - loop prevention survives retries and listener restarts
+5. Decide whether this phase should stop at one-request-per-connection or grow into connection reuse and pooling.
 
 **Files:** new `src/network/proxy/reverse_proxy.zig`, `src/network/proxy/router.zig`, `src/network/proxy/policy.zig`, `src/network/proxy/upstream.zig`; modify `src/manifest/spec/shared_types.zig`, route storage/state-machine plumbing as needed
 

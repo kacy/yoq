@@ -390,6 +390,12 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_configured_services gauge\n");
     try writer.print("yoq_service_l7_proxy_steering_configured_services {d}\n", .{l7_steering.configured_services});
 
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_services Steering readiness summary by state\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_services gauge\n");
+    try writer.print("yoq_service_l7_proxy_steering_services{{state=\"not_ready\"}} {d}\n", .{l7_steering.not_ready_services});
+    try writer.print("yoq_service_l7_proxy_steering_services{{state=\"blocked\"}} {d}\n", .{l7_steering.blocked_services});
+    try writer.print("yoq_service_l7_proxy_steering_services{{state=\"drifted\"}} {d}\n", .{l7_steering.drifted_services});
+
     try writer.writeAll("# HELP yoq_service_l7_proxy_steering_mappings VIP steering mappings by state\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_mappings gauge\n");
     try writer.print("yoq_service_l7_proxy_steering_mappings{{state=\"desired\"}} {d}\n", .{l7_steering.desired_mappings});
@@ -539,8 +545,14 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_rollout_cutover_ready{{check=\"components_ready\"}} {d}\n", .{@intFromBool(cutover.components_ready)});
     try writer.print("yoq_service_rollout_cutover_ready{{check=\"fault_modes_clear\"}} {d}\n", .{@intFromBool(cutover.fault_modes_clear)});
     try writer.print("yoq_service_rollout_cutover_ready{{check=\"downgrade_safe\"}} {d}\n", .{@intFromBool(cutover.downgrade_safe)});
+    try writer.print("yoq_service_rollout_cutover_ready{{check=\"steering_ready\"}} {d}\n", .{@intFromBool(cutover.steering_ready)});
     try writer.print("yoq_service_rollout_cutover_ready{{check=\"reconciler_cutover\"}} {d}\n", .{@intFromBool(cutover.ready_for_reconciler_cutover)});
     try writer.print("yoq_service_rollout_cutover_ready{{check=\"vip_cutover\"}} {d}\n", .{@intFromBool(cutover.ready_for_vip_cutover)});
+
+    try writer.writeAll("# HELP yoq_service_rollout_cutover_steering_services Steering preflight service counts for VIP cutover\n");
+    try writer.writeAll("# TYPE yoq_service_rollout_cutover_steering_services gauge\n");
+    try writer.print("yoq_service_rollout_cutover_steering_services{{state=\"blocked\"}} {d}\n", .{cutover.steering_blocked_services});
+    try writer.print("yoq_service_rollout_cutover_steering_services{{state=\"missing_ports\"}} {d}\n", .{cutover.steering_no_port_services});
 
     try writer.writeAll("# HELP yoq_health_checker_running Whether the health checker scheduler is running\n");
     try writer.writeAll("# TYPE yoq_health_checker_running gauge\n");

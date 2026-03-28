@@ -33,6 +33,9 @@ pub const Snapshot = struct {
     enabled: bool,
     running: bool,
     configured_services: u32,
+    not_ready_services: u32,
+    blocked_services: u32,
+    drifted_services: u32,
     desired_mappings: u32,
     applied_mappings: u32,
     blocked_reason: BlockedReason,
@@ -62,6 +65,23 @@ pub const ServiceStatus = struct {
     blocked_reason: BlockedReason,
 };
 
+pub const ReadinessSummary = struct {
+    not_ready_services: u32,
+    blocked_services: u32,
+    drifted_services: u32,
+};
+
+pub const VipCutoverReadiness = struct {
+    enabled: bool,
+    ready: bool,
+    configured_services: u32,
+    blocked_services: u32,
+    no_port_services: u32,
+};
+
+pub const MappingApplyHook = *const fn (destination_ip: ?[4]u8, host_port: u16, protocol: u8, target_ip: [4]u8, target_port: u16) void;
+pub const MappingRemoveHook = *const fn (destination_ip: ?[4]u8, host_port: u16, protocol: u8) void;
+
 const AppliedMapping = struct {
     vip: [4]u8,
     port: u16,
@@ -80,6 +100,9 @@ var mappings_removed_total: u64 = 0;
 var last_sync_at: ?i64 = null;
 var last_error: ?[]u8 = null;
 var test_bridge_ip: ?[4]u8 = null;
+var test_port_mapper_available: ?bool = null;
+var test_mapping_apply_hook: ?MappingApplyHook = null;
+var test_mapping_remove_hook: ?MappingRemoveHook = null;
 
 pub fn resetForTest() void {
     mutex.lock();
@@ -97,6 +120,9 @@ pub fn resetForTest() void {
     last_sync_at = null;
     clearLastErrorLocked();
     test_bridge_ip = null;
+    test_port_mapper_available = null;
+    test_mapping_apply_hook = null;
+    test_mapping_remove_hook = null;
 }
 
 pub fn setBridgeIpForTest(address: [4]u8) void {
@@ -105,14 +131,32 @@ pub fn setBridgeIpForTest(address: [4]u8) void {
     test_bridge_ip = address;
 }
 
+pub fn setPortMapperAvailableForTest(available: ?bool) void {
+    mutex.lock();
+    defer mutex.unlock();
+    test_port_mapper_available = available;
+}
+
+pub fn setMappingHooksForTest(apply_hook: ?MappingApplyHook, remove_hook: ?MappingRemoveHook) void {
+    mutex.lock();
+    defer mutex.unlock();
+    test_mapping_apply_hook = apply_hook;
+    test_mapping_remove_hook = remove_hook;
+}
+
 pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     mutex.lock();
     defer mutex.unlock();
+
+    const readiness = try summarizeServiceReadinessLocked(alloc);
 
     return .{
         .enabled = service_rollout.current().l7_proxy_http and service_rollout.current().dns_returns_vip,
         .running = running,
         .configured_services = configured_services,
+        .not_ready_services = readiness.not_ready_services,
+        .blocked_services = readiness.blocked_services,
+        .drifted_services = readiness.drifted_services,
         .desired_mappings = desired_mappings,
         .applied_mappings = @intCast(applied_mappings.items.len),
         .blocked_reason = blocked_reason,
@@ -139,6 +183,13 @@ pub fn snapshotServiceStatus(alloc: std.mem.Allocator, service_name: []const u8)
     return buildServiceStatusLocked(alloc, service_name);
 }
 
+pub fn snapshotVipCutoverReadiness(alloc: std.mem.Allocator) !VipCutoverReadiness {
+    mutex.lock();
+    defer mutex.unlock();
+
+    return summarizeVipCutoverReadinessLocked(alloc);
+}
+
 pub fn syncIfEnabled() void {
     mutex.lock();
     defer mutex.unlock();
@@ -157,7 +208,7 @@ fn syncLocked() !void {
 
     if (!isEnabled()) {
         blocked_reason = .rollout_disabled;
-        if (ebpf.getPortMapper()) |mapper| mappings_removed_total += removeAppliedMappingsLocked(mapper);
+        if (hasPortMapperLocked()) mappings_removed_total += removeAppliedMappingsLocked();
         clearAppliedMappingsLocked();
         configured_services = 0;
         desired_mappings = 0;
@@ -168,17 +219,17 @@ fn syncLocked() !void {
 
     if (listener_runtime.portIfRunning() == null) {
         blocked_reason = .listener_not_running;
-        if (ebpf.getPortMapper()) |mapper| mappings_removed_total += removeAppliedMappingsLocked(mapper);
+        if (hasPortMapperLocked()) mappings_removed_total += removeAppliedMappingsLocked();
         clearAppliedMappingsLocked();
         desired_mappings = 0;
         running = false;
         return;
     }
 
-    const mapper = ebpf.getPortMapper() orelse {
+    if (!hasPortMapperLocked()) {
         blocked_reason = .port_mapper_unavailable;
         return error.PortMapperUnavailable;
-    };
+    }
 
     var desired = try buildDesiredMappingsLocked(std.heap.page_allocator);
     defer desired.deinit(std.heap.page_allocator);
@@ -187,13 +238,13 @@ fn syncLocked() !void {
 
     for (applied_mappings.items) |mapping| {
         if (containsDesiredMapping(desired.items, mapping.vip, mapping.port)) continue;
-        mapper.removeMappingForDestination(mapping.vip, mapping.port, tcp_protocol);
+        removeMappingLocked(mapping.vip, mapping.port, tcp_protocol);
         mappings_removed_total += 1;
     }
 
     for (desired.items) |mapping| {
         if (containsAppliedMapping(mapping.vip, mapping.port)) continue;
-        mapper.addMappingForDestination(mapping.vip, mapping.port, tcp_protocol, mapping.listener_ip, mapping.listener_port);
+        addMappingLocked(mapping.vip, mapping.port, tcp_protocol, mapping.listener_ip, mapping.listener_port);
         mappings_applied_total += 1;
     }
 
@@ -303,20 +354,7 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
         if (containsAppliedMapping(vip, port)) applied_ports += 1;
     }
 
-    var reason = blocked_reason;
-    if (applied_ports == ports.items.len) {
-        reason = .none;
-    } else if (reason == .none) {
-        if (listener_runtime.portIfRunning() == null) {
-            reason = .listener_not_running;
-        } else if (ebpf.getPortMapper() == null) {
-            reason = .port_mapper_unavailable;
-        } else if (currentBridgeIpLocked()) |_| {
-            reason = .none;
-        } else |_| {
-            reason = .bridge_address_unavailable;
-        }
-    }
+    const reason = if (applied_ports == ports.items.len) .none else currentPrerequisiteBlockedReasonLocked();
 
     return .{
         .desired_ports = @intCast(ports.items.len),
@@ -324,6 +362,110 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
         .ready = applied_ports == ports.items.len,
         .blocked_reason = reason,
     };
+}
+
+fn summarizeServiceReadinessLocked(alloc: std.mem.Allocator) !ReadinessSummary {
+    var summary: ReadinessSummary = .{
+        .not_ready_services = @as(u32, 0),
+        .blocked_services = @as(u32, 0),
+        .drifted_services = @as(u32, 0),
+    };
+
+    if (!isEnabled()) return summary;
+
+    var services = try service_registry_runtime.snapshotServices(alloc);
+    defer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
+
+    for (services.items) |service| {
+        if (service.http_proxy_host == null) continue;
+        const status = try buildServiceStatusLocked(alloc, service.service_name);
+        if (status.ready) continue;
+        summary.not_ready_services += 1;
+        if (status.blocked_reason != .none) {
+            summary.blocked_services += 1;
+        } else if (status.desired_ports > status.applied_ports) {
+            summary.drifted_services += 1;
+        }
+    }
+
+    return summary;
+}
+
+fn summarizeVipCutoverReadinessLocked(alloc: std.mem.Allocator) !VipCutoverReadiness {
+    var summary: VipCutoverReadiness = .{
+        .enabled = service_rollout.current().l7_proxy_http,
+        .ready = true,
+        .configured_services = 0,
+        .blocked_services = 0,
+        .no_port_services = 0,
+    };
+
+    if (!summary.enabled) return summary;
+
+    var services = try service_registry_runtime.snapshotServices(alloc);
+    defer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
+
+    const prerequisite_reason = currentVipCutoverPrerequisiteBlockedReasonLocked();
+
+    for (services.items) |service| {
+        if (service.http_proxy_host == null) continue;
+        summary.configured_services += 1;
+
+        var endpoints = try service_registry_runtime.snapshotServiceEndpoints(alloc, service.service_name);
+        defer {
+            for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+            endpoints.deinit(alloc);
+        }
+
+        var has_port = false;
+        for (endpoints.items) |endpoint| {
+            if (endpoint.port > 0 and endpoint.port <= std.math.maxInt(u16)) {
+                has_port = true;
+                break;
+            }
+        }
+
+        if (!has_port) {
+            summary.blocked_services += 1;
+            summary.no_port_services += 1;
+            continue;
+        }
+
+        if (prerequisite_reason != .none) {
+            summary.blocked_services += 1;
+        }
+    }
+
+    summary.ready = summary.blocked_services == 0;
+    return summary;
+}
+
+fn currentPrerequisiteBlockedReasonLocked() BlockedReason {
+    if (!isEnabled()) return .rollout_disabled;
+    if (listener_runtime.portIfRunning() == null) return .listener_not_running;
+    if (!hasPortMapperLocked()) return .port_mapper_unavailable;
+    if (currentBridgeIpLocked()) |_| {
+        return .none;
+    } else |_| {
+        return .bridge_address_unavailable;
+    }
+}
+
+fn currentVipCutoverPrerequisiteBlockedReasonLocked() BlockedReason {
+    if (!service_rollout.current().l7_proxy_http) return .rollout_disabled;
+    if (listener_runtime.portIfRunning() == null) return .listener_not_running;
+    if (!hasPortMapperLocked()) return .port_mapper_unavailable;
+    if (currentBridgeIpLocked()) |_| {
+        return .none;
+    } else |_| {
+        return .bridge_address_unavailable;
+    }
 }
 
 fn currentBridgeIpLocked() ![4]u8 {
@@ -357,10 +499,31 @@ fn containsPort(ports: []const u16, port: u16) bool {
     return false;
 }
 
-fn removeAppliedMappingsLocked(mapper: anytype) u64 {
+fn hasPortMapperLocked() bool {
+    if (test_port_mapper_available) |available| return available;
+    return ebpf.getPortMapper() != null;
+}
+
+fn addMappingLocked(destination_ip: [4]u8, host_port: u16, protocol: u8, target_ip: [4]u8, target_port: u16) void {
+    if (test_mapping_apply_hook) |hook| hook(destination_ip, host_port, protocol, target_ip, target_port);
+    if (test_port_mapper_available != null) return;
+    if (ebpf.getPortMapper()) |mapper| {
+        mapper.addMappingForDestination(destination_ip, host_port, protocol, target_ip, target_port);
+    }
+}
+
+fn removeMappingLocked(destination_ip: [4]u8, host_port: u16, protocol: u8) void {
+    if (test_mapping_remove_hook) |hook| hook(destination_ip, host_port, protocol);
+    if (test_port_mapper_available != null) return;
+    if (ebpf.getPortMapper()) |mapper| {
+        mapper.removeMappingForDestination(destination_ip, host_port, protocol);
+    }
+}
+
+fn removeAppliedMappingsLocked() u64 {
     var removed: u64 = 0;
     for (applied_mappings.items) |mapping| {
-        mapper.removeMappingForDestination(mapping.vip, mapping.port, tcp_protocol);
+        removeMappingLocked(mapping.vip, mapping.port, tcp_protocol);
         removed += 1;
     }
     return removed;
@@ -378,6 +541,52 @@ fn clearLastErrorLocked() void {
 fn setLastErrorLocked(err: anyerror) void {
     clearLastErrorLocked();
     last_error = std.fmt.allocPrint(std.heap.page_allocator, "{}", .{err}) catch null;
+}
+
+const RecordedApply = struct {
+    destination_ip: ?[4]u8,
+    host_port: u16,
+    protocol: u8,
+    target_ip: [4]u8,
+    target_port: u16,
+};
+
+const RecordedRemove = struct {
+    destination_ip: ?[4]u8,
+    host_port: u16,
+    protocol: u8,
+};
+
+var recorded_applies: [8]RecordedApply = undefined;
+var recorded_apply_count: usize = 0;
+var recorded_removes: [8]RecordedRemove = undefined;
+var recorded_remove_count: usize = 0;
+
+fn resetRecordedMappings() void {
+    recorded_apply_count = 0;
+    recorded_remove_count = 0;
+}
+
+fn recordAppliedMapping(destination_ip: ?[4]u8, host_port: u16, protocol: u8, target_ip: [4]u8, target_port: u16) void {
+    std.debug.assert(recorded_apply_count < recorded_applies.len);
+    recorded_applies[recorded_apply_count] = .{
+        .destination_ip = destination_ip,
+        .host_port = host_port,
+        .protocol = protocol,
+        .target_ip = target_ip,
+        .target_port = target_port,
+    };
+    recorded_apply_count += 1;
+}
+
+fn recordRemovedMapping(destination_ip: ?[4]u8, host_port: u16, protocol: u8) void {
+    std.debug.assert(recorded_remove_count < recorded_removes.len);
+    recorded_removes[recorded_remove_count] = .{
+        .destination_ip = destination_ip,
+        .host_port = host_port,
+        .protocol = protocol,
+    };
+    recorded_remove_count += 1;
 }
 
 test "previewDesiredMappings materializes unique vip port mappings" {
@@ -460,11 +669,81 @@ test "previewDesiredMappings materializes unique vip port mappings" {
     try std.testing.expect(state.enabled);
     try std.testing.expect(!state.running);
     try std.testing.expectEqual(@as(u32, 1), state.configured_services);
+    try std.testing.expectEqual(@as(u32, 1), state.not_ready_services);
+    try std.testing.expectEqual(@as(u32, 1), state.blocked_services);
+    try std.testing.expectEqual(@as(u32, 0), state.drifted_services);
     try std.testing.expectEqual(@as(u32, 1), state.desired_mappings);
     try std.testing.expectEqual(@as(u64, 0), state.sync_attempts_total);
     try std.testing.expectEqual(@as(u64, 0), state.sync_failures_total);
     try std.testing.expectEqual(@as(u64, 0), state.mappings_applied_total);
     try std.testing.expectEqual(@as(u64, 0), state.mappings_removed_total);
+}
+
+test "syncIfEnabled programs desired VIP mappings" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    resetRecordedMappings();
+    setPortMapperAvailableForTest(true);
+    setMappingHooksForTest(recordAppliedMapping, recordRemovedMapping);
+    defer setMappingHooksForTest(null, null);
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    listener_runtime.startForTest(std.testing.allocator, 0);
+
+    syncIfEnabled();
+
+    const state = try snapshot(std.testing.allocator);
+    defer state.deinit(std.testing.allocator);
+    try std.testing.expect(state.running);
+    try std.testing.expectEqual(@as(u32, 1), state.applied_mappings);
+    try std.testing.expectEqual(@as(u32, 0), state.not_ready_services);
+    try std.testing.expectEqual(@as(u32, 0), state.blocked_services);
+    try std.testing.expectEqual(@as(u32, 0), state.drifted_services);
+    try std.testing.expectEqual(@as(usize, 1), recorded_apply_count);
+    try std.testing.expectEqual(@as(usize, 0), recorded_remove_count);
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), recorded_applies[0].destination_ip);
+    try std.testing.expectEqual(@as(u16, 8080), recorded_applies[0].host_port);
+    try std.testing.expectEqual(@as(u8, tcp_protocol), recorded_applies[0].protocol);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 1 }, recorded_applies[0].target_ip);
+    try std.testing.expect(recorded_applies[0].target_port != 0);
 }
 
 test "listener state changes resync steering" {
@@ -484,6 +763,10 @@ test "listener state changes resync steering" {
     defer listener_runtime.resetForTest();
     resetForTest();
     defer resetForTest();
+    resetRecordedMappings();
+    setPortMapperAvailableForTest(true);
+    setMappingHooksForTest(recordAppliedMapping, recordRemovedMapping);
+    defer setMappingHooksForTest(null, null);
 
     try store.createService(.{
         .service_name = "api",
@@ -521,9 +804,15 @@ test "listener state changes resync steering" {
         try std.testing.expect(state.running);
         try std.testing.expectEqual(@as(u32, 1), state.desired_mappings);
         try std.testing.expectEqual(@as(u32, 1), state.applied_mappings);
+        try std.testing.expectEqual(@as(u32, 0), state.not_ready_services);
+        try std.testing.expectEqual(@as(u32, 0), state.blocked_services);
+        try std.testing.expectEqual(@as(u32, 0), state.drifted_services);
         try std.testing.expectEqual(BlockedReason.none, state.blocked_reason);
         try std.testing.expectEqual(@as(u64, 1), state.sync_attempts_total);
         try std.testing.expectEqual(@as(u64, 1), state.mappings_applied_total);
+        try std.testing.expectEqual(@as(usize, 1), recorded_apply_count);
+        try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), recorded_applies[0].destination_ip);
+        try std.testing.expectEqual(@as(u16, 8080), recorded_applies[0].host_port);
     }
 
     listener_runtime.stop();
@@ -533,8 +822,67 @@ test "listener state changes resync steering" {
         defer state.deinit(std.testing.allocator);
         try std.testing.expect(!state.running);
         try std.testing.expectEqual(@as(u32, 0), state.applied_mappings);
+        try std.testing.expectEqual(@as(u32, 1), state.not_ready_services);
+        try std.testing.expectEqual(@as(u32, 1), state.blocked_services);
+        try std.testing.expectEqual(@as(u32, 0), state.drifted_services);
         try std.testing.expectEqual(BlockedReason.listener_not_running, state.blocked_reason);
         try std.testing.expectEqual(@as(u64, 2), state.sync_attempts_total);
         try std.testing.expectEqual(@as(u64, 1), state.mappings_removed_total);
+        try std.testing.expectEqual(@as(usize, 1), recorded_remove_count);
+        try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), recorded_removes[0].destination_ip);
+        try std.testing.expectEqual(@as(u16, 8080), recorded_removes[0].host_port);
     }
+}
+
+test "VIP cutover readiness ignores unapplied mappings before cutover" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    setPortMapperAvailableForTest(true);
+    listener_runtime.startForTest(std.testing.allocator, 0);
+
+    const readiness = try snapshotVipCutoverReadiness(std.testing.allocator);
+    try std.testing.expect(readiness.enabled);
+    try std.testing.expect(readiness.ready);
+    try std.testing.expectEqual(@as(u32, 1), readiness.configured_services);
+    try std.testing.expectEqual(@as(u32, 0), readiness.blocked_services);
+    try std.testing.expectEqual(@as(u32, 0), readiness.no_port_services);
 }

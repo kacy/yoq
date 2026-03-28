@@ -333,11 +333,14 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"steering\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"blocked_reason\":\"{s}\",\"sync_attempts_total\":{d},\"sync_failures_total\":{d},\"mappings_applied_total\":{d},\"mappings_removed_total\":{d},\"last_sync_at\":",
+        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"not_ready_services\":{d},\"blocked_services\":{d},\"drifted_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"blocked_reason\":\"{s}\",\"sync_attempts_total\":{d},\"sync_failures_total\":{d},\"mappings_applied_total\":{d},\"mappings_removed_total\":{d},\"last_sync_at\":",
         .{
             l7_steering.enabled,
             l7_steering.running,
             l7_steering.configured_services,
+            l7_steering.not_ready_services,
+            l7_steering.blocked_services,
+            l7_steering.drifted_services,
             l7_steering.desired_mappings,
             l7_steering.applied_mappings,
             l7_steering.blocked_reason.label(),
@@ -410,7 +413,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"cutover_readiness\":{") catch return common.internalError();
     writer.print(
-        "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
+        "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"steering_ready\":{},\"steering_blocked_services\":{d},\"steering_no_port_services\":{d},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
         .{
             cutover.backfill_complete,
             cutover.audit_fresh,
@@ -418,6 +421,9 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             cutover.components_ready,
             cutover.fault_modes_clear,
             cutover.downgrade_safe,
+            cutover.steering_ready,
+            cutover.steering_blocked_services,
+            cutover.steering_no_port_services,
             cutover.ready_for_reconciler_cutover,
             cutover.ready_for_vip_cutover,
         },

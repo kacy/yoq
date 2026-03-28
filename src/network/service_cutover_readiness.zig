@@ -3,6 +3,7 @@ const dns_registry = @import("dns/registry_support.zig");
 const ebpf_map_support = @import("ebpf/map_support.zig");
 const service_registry_backfill = @import("service_registry_backfill.zig");
 const service_registry_bridge = @import("service_registry_bridge.zig");
+const steering_runtime = @import("proxy/steering_runtime.zig");
 const service_reconciler = @import("service_reconciler.zig");
 const service_rollout = @import("service_rollout.zig");
 
@@ -13,6 +14,9 @@ pub const Snapshot = struct {
     components_ready: bool,
     fault_modes_clear: bool,
     downgrade_safe: bool,
+    steering_ready: bool,
+    steering_blocked_services: u32,
+    steering_no_port_services: u32,
     ready_for_reconciler_cutover: bool,
     ready_for_vip_cutover: bool,
     blockers: std.ArrayList([]const u8),
@@ -29,6 +33,7 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     defer backfill.deinit(alloc);
     var audit = try service_reconciler.snapshotAuditState(alloc);
     defer audit.deinit(alloc);
+    const steering = try steering_runtime.snapshotVipCutoverReadiness(alloc);
     const components = service_reconciler.snapshotComponentState();
     const now = std.time.timestamp();
 
@@ -53,10 +58,12 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         dns_registry.loadBalancerFaultMode() == .none;
     const downgrade_safe = audit_fresh and shadow_clean;
     const ready_for_reconciler_cutover = backfill_complete and audit_fresh and shadow_clean and fault_modes_clear;
+    const steering_ready = !steering.enabled or steering.ready;
     const ready_for_vip_cutover =
         ready_for_reconciler_cutover and
         flags.service_registry_reconciler and
-        components_ready;
+        components_ready and
+        steering_ready;
 
     var blockers: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -70,6 +77,7 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     if (!shadow_clean) try appendBlocker(alloc, &blockers, "shadow_mismatch_present");
     if (!fault_modes_clear) try appendBlocker(alloc, &blockers, "fault_mode_active");
     if (!components_ready) try appendBlocker(alloc, &blockers, "components_not_ready");
+    if (!steering_ready) try appendBlocker(alloc, &blockers, "steering_not_ready");
     if (!flags.service_registry_reconciler) try appendBlocker(alloc, &blockers, "reconciler_flag_disabled");
 
     return .{
@@ -79,6 +87,9 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .components_ready = components_ready,
         .fault_modes_clear = fault_modes_clear,
         .downgrade_safe = downgrade_safe,
+        .steering_ready = steering_ready,
+        .steering_blocked_services = steering.blocked_services,
+        .steering_no_port_services = steering.no_port_services,
         .ready_for_reconciler_cutover = ready_for_reconciler_cutover,
         .ready_for_vip_cutover = ready_for_vip_cutover,
         .blockers = blockers,
