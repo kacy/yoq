@@ -2,6 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
 const schema = @import("../schema.zig");
+const service_observability = @import("../../network/service_observability.zig");
 const vip_allocator = @import("../../network/vip_allocator.zig");
 
 const Allocator = std.mem.Allocator;
@@ -214,7 +215,10 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
         return record;
     }
 
-    const vip = vip_allocator.allocate(db) catch return StoreError.WriteFailed;
+    const vip = vip_allocator.allocate(db) catch {
+        service_observability.noteVipAllocFailure();
+        return StoreError.WriteFailed;
+    };
     var vip_buf: [16]u8 = undefined;
     const vip_address = @import("../../network/ip.zig").formatIp(vip, &vip_buf);
     const now = std.time.timestamp();

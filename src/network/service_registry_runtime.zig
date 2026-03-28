@@ -1,5 +1,6 @@
 const std = @import("std");
 const log = @import("../lib/log.zig");
+const service_observability = @import("service_observability.zig");
 const service_registry_backfill = @import("service_registry_backfill.zig");
 const rollout = @import("service_rollout.zig");
 const service_registry = @import("service_registry.zig");
@@ -28,6 +29,7 @@ pub fn resetForTest() void {
         initialized = false;
     }
     service_registry_backfill.resetForTest();
+    service_observability.resetForTest();
 }
 
 pub fn syncServiceFromStore(service_name: []const u8) void {
@@ -117,6 +119,7 @@ pub fn requestReconcile(service_name: []const u8) RuntimeError!void {
 
     try ensureInitializedLocked();
     _ = try registry.requestReconcile(service_name);
+    service_observability.noteReconcileRequested(service_name);
 }
 
 pub fn noteNodeLost(node_id: i64) !usize {
@@ -141,6 +144,7 @@ pub fn markReconcileSucceeded(service_name: []const u8) RuntimeError!void {
 
     try ensureInitializedLocked();
     try registry.markReconcileSucceeded(service_name);
+    service_observability.noteReconcileSucceeded(service_name);
 }
 
 pub fn markReconcileFailed(service_name: []const u8, message: []const u8) RuntimeError!void {
@@ -149,6 +153,7 @@ pub fn markReconcileFailed(service_name: []const u8, message: []const u8) Runtim
 
     try ensureInitializedLocked();
     try registry.markReconcileFailed(service_name, message);
+    service_observability.noteReconcileFailed(service_name);
 }
 
 pub fn snapshotServices(alloc: Allocator) !std.ArrayList(ServiceSnapshot) {
