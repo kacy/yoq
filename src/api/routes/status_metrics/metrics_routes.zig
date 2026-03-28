@@ -390,6 +390,12 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_configured_services gauge\n");
     try writer.print("yoq_service_l7_proxy_steering_configured_services {d}\n", .{l7_steering.configured_services});
 
+    try writer.writeAll("# HELP yoq_service_l7_proxy_steering_services Steering readiness summary by state\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_services gauge\n");
+    try writer.print("yoq_service_l7_proxy_steering_services{{state=\"not_ready\"}} {d}\n", .{l7_steering.not_ready_services});
+    try writer.print("yoq_service_l7_proxy_steering_services{{state=\"blocked\"}} {d}\n", .{l7_steering.blocked_services});
+    try writer.print("yoq_service_l7_proxy_steering_services{{state=\"drifted\"}} {d}\n", .{l7_steering.drifted_services});
+
     try writer.writeAll("# HELP yoq_service_l7_proxy_steering_mappings VIP steering mappings by state\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_mappings gauge\n");
     try writer.print("yoq_service_l7_proxy_steering_mappings{{state=\"desired\"}} {d}\n", .{l7_steering.desired_mappings});

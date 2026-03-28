@@ -222,7 +222,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"requests_total\":0,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"loop_rejections_total\":0,\"upstream_connect_failures_total\":0,\"upstream_send_failures_total\":0,\"upstream_receive_failures_total\":0,\"upstream_other_failures_total\":0,\"circuit_trips_total\":0,\"circuit_open_endpoints\":0,\"circuit_half_open_endpoints\":0,\"last_sync_at\":null,\"last_error\":null,\"sample_routes\":[]}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"listener\":{\"enabled\":false,\"running\":false,\"port\":17080,\"accepted_connections_total\":0,\"active_connections\":0,\"last_error\":null}") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"desired_mappings\":0,\"applied_mappings\":0,\"blocked_reason\":\"rollout_disabled\",\"sync_attempts_total\":0,\"sync_failures_total\":0,\"mappings_applied_total\":0,\"mappings_removed_total\":0,\"last_sync_at\":null,\"last_error\":null}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"not_ready_services\":0,\"blocked_services\":0,\"drifted_services\":0,\"desired_mappings\":0,\"applied_mappings\":0,\"blocked_reason\":\"rollout_disabled\",\"sync_attempts_total\":0,\"sync_failures_total\":0,\"mappings_applied_total\":0,\"mappings_removed_total\":0,\"last_sync_at\":null,\"last_error\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"vip_mismatches_total\":0") != null);
@@ -530,6 +530,9 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_running 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_blocked_reason{reason=\"listener_not_running\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_configured_services 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_services{state=\"not_ready\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_services{state=\"blocked\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_services{state=\"drifted\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_mappings{state=\"desired\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_mappings{state=\"applied\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_syncs_total{outcome=\"attempted\"} 2") != null);

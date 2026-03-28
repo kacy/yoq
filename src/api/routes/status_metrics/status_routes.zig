@@ -333,11 +333,14 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     }
     writer.writeAll("},\"steering\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"blocked_reason\":\"{s}\",\"sync_attempts_total\":{d},\"sync_failures_total\":{d},\"mappings_applied_total\":{d},\"mappings_removed_total\":{d},\"last_sync_at\":",
+        "\"enabled\":{},\"running\":{},\"configured_services\":{d},\"not_ready_services\":{d},\"blocked_services\":{d},\"drifted_services\":{d},\"desired_mappings\":{d},\"applied_mappings\":{d},\"blocked_reason\":\"{s}\",\"sync_attempts_total\":{d},\"sync_failures_total\":{d},\"mappings_applied_total\":{d},\"mappings_removed_total\":{d},\"last_sync_at\":",
         .{
             l7_steering.enabled,
             l7_steering.running,
             l7_steering.configured_services,
+            l7_steering.not_ready_services,
+            l7_steering.blocked_services,
+            l7_steering.drifted_services,
             l7_steering.desired_mappings,
             l7_steering.applied_mappings,
             l7_steering.blocked_reason.label(),

@@ -33,6 +33,9 @@ pub const Snapshot = struct {
     enabled: bool,
     running: bool,
     configured_services: u32,
+    not_ready_services: u32,
+    blocked_services: u32,
+    drifted_services: u32,
     desired_mappings: u32,
     applied_mappings: u32,
     blocked_reason: BlockedReason,
@@ -60,6 +63,12 @@ pub const ServiceStatus = struct {
     applied_ports: u32,
     ready: bool,
     blocked_reason: BlockedReason,
+};
+
+pub const ReadinessSummary = struct {
+    not_ready_services: u32,
+    blocked_services: u32,
+    drifted_services: u32,
 };
 
 pub const MappingApplyHook = *const fn (destination_ip: ?[4]u8, host_port: u16, protocol: u8, target_ip: [4]u8, target_port: u16) void;
@@ -131,10 +140,15 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     mutex.lock();
     defer mutex.unlock();
 
+    const readiness = try summarizeServiceReadinessLocked(alloc);
+
     return .{
         .enabled = service_rollout.current().l7_proxy_http and service_rollout.current().dns_returns_vip,
         .running = running,
         .configured_services = configured_services,
+        .not_ready_services = readiness.not_ready_services,
+        .blocked_services = readiness.blocked_services,
+        .drifted_services = readiness.drifted_services,
         .desired_mappings = desired_mappings,
         .applied_mappings = @intCast(applied_mappings.items.len),
         .blocked_reason = blocked_reason,
@@ -325,20 +339,7 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
         if (containsAppliedMapping(vip, port)) applied_ports += 1;
     }
 
-    var reason = blocked_reason;
-    if (applied_ports == ports.items.len) {
-        reason = .none;
-    } else if (reason == .none) {
-        if (listener_runtime.portIfRunning() == null) {
-            reason = .listener_not_running;
-        } else if (!hasPortMapperLocked()) {
-            reason = .port_mapper_unavailable;
-        } else if (currentBridgeIpLocked()) |_| {
-            reason = .none;
-        } else |_| {
-            reason = .bridge_address_unavailable;
-        }
-    }
+    const reason = if (applied_ports == ports.items.len) .none else currentPrerequisiteBlockedReasonLocked();
 
     return .{
         .desired_ports = @intCast(ports.items.len),
@@ -346,6 +347,47 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
         .ready = applied_ports == ports.items.len,
         .blocked_reason = reason,
     };
+}
+
+fn summarizeServiceReadinessLocked(alloc: std.mem.Allocator) !ReadinessSummary {
+    var summary: ReadinessSummary = .{
+        .not_ready_services = @as(u32, 0),
+        .blocked_services = @as(u32, 0),
+        .drifted_services = @as(u32, 0),
+    };
+
+    if (!isEnabled()) return summary;
+
+    var services = try service_registry_runtime.snapshotServices(alloc);
+    defer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
+
+    for (services.items) |service| {
+        if (service.http_proxy_host == null) continue;
+        const status = try buildServiceStatusLocked(alloc, service.service_name);
+        if (status.ready) continue;
+        summary.not_ready_services += 1;
+        if (status.blocked_reason != .none) {
+            summary.blocked_services += 1;
+        } else if (status.desired_ports > status.applied_ports) {
+            summary.drifted_services += 1;
+        }
+    }
+
+    return summary;
+}
+
+fn currentPrerequisiteBlockedReasonLocked() BlockedReason {
+    if (!isEnabled()) return .rollout_disabled;
+    if (listener_runtime.portIfRunning() == null) return .listener_not_running;
+    if (!hasPortMapperLocked()) return .port_mapper_unavailable;
+    if (currentBridgeIpLocked()) |_| {
+        return .none;
+    } else |_| {
+        return .bridge_address_unavailable;
+    }
 }
 
 fn currentBridgeIpLocked() ![4]u8 {
@@ -549,6 +591,9 @@ test "previewDesiredMappings materializes unique vip port mappings" {
     try std.testing.expect(state.enabled);
     try std.testing.expect(!state.running);
     try std.testing.expectEqual(@as(u32, 1), state.configured_services);
+    try std.testing.expectEqual(@as(u32, 1), state.not_ready_services);
+    try std.testing.expectEqual(@as(u32, 1), state.blocked_services);
+    try std.testing.expectEqual(@as(u32, 0), state.drifted_services);
     try std.testing.expectEqual(@as(u32, 1), state.desired_mappings);
     try std.testing.expectEqual(@as(u64, 0), state.sync_attempts_total);
     try std.testing.expectEqual(@as(u64, 0), state.sync_failures_total);
@@ -611,6 +656,9 @@ test "syncIfEnabled programs desired VIP mappings" {
     defer state.deinit(std.testing.allocator);
     try std.testing.expect(state.running);
     try std.testing.expectEqual(@as(u32, 1), state.applied_mappings);
+    try std.testing.expectEqual(@as(u32, 0), state.not_ready_services);
+    try std.testing.expectEqual(@as(u32, 0), state.blocked_services);
+    try std.testing.expectEqual(@as(u32, 0), state.drifted_services);
     try std.testing.expectEqual(@as(usize, 1), recorded_apply_count);
     try std.testing.expectEqual(@as(usize, 0), recorded_remove_count);
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), recorded_applies[0].destination_ip);
@@ -678,6 +726,9 @@ test "listener state changes resync steering" {
         try std.testing.expect(state.running);
         try std.testing.expectEqual(@as(u32, 1), state.desired_mappings);
         try std.testing.expectEqual(@as(u32, 1), state.applied_mappings);
+        try std.testing.expectEqual(@as(u32, 0), state.not_ready_services);
+        try std.testing.expectEqual(@as(u32, 0), state.blocked_services);
+        try std.testing.expectEqual(@as(u32, 0), state.drifted_services);
         try std.testing.expectEqual(BlockedReason.none, state.blocked_reason);
         try std.testing.expectEqual(@as(u64, 1), state.sync_attempts_total);
         try std.testing.expectEqual(@as(u64, 1), state.mappings_applied_total);
@@ -693,6 +744,9 @@ test "listener state changes resync steering" {
         defer state.deinit(std.testing.allocator);
         try std.testing.expect(!state.running);
         try std.testing.expectEqual(@as(u32, 0), state.applied_mappings);
+        try std.testing.expectEqual(@as(u32, 1), state.not_ready_services);
+        try std.testing.expectEqual(@as(u32, 1), state.blocked_services);
+        try std.testing.expectEqual(@as(u32, 0), state.drifted_services);
         try std.testing.expectEqual(BlockedReason.listener_not_running, state.blocked_reason);
         try std.testing.expectEqual(@as(u64, 2), state.sync_attempts_total);
         try std.testing.expectEqual(@as(u64, 1), state.mappings_removed_total);
