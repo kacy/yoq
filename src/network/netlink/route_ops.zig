@@ -124,6 +124,93 @@ pub fn hasAddress(fd: posix.fd_t, if_index: u32, ip: *const [4]u8, prefix_len: u
     }
 }
 
+pub fn getFirstIpv4Address(fd: posix.fd_t, if_index: u32) common.NetlinkError!?[4]u8 {
+    var buf_storage: [common.buf_size]u8 align(4) = undefined;
+    var mb = MessageBuilder.init(&buf_storage);
+
+    const hdr = try mb.putHeader(
+        .RTM_GETADDR,
+        common.NLM_F.REQUEST | common.NLM_F.DUMP,
+        common.IfAddrMsg,
+    );
+
+    const addr_msg = mb.getPayload(hdr, common.IfAddrMsg);
+    addr_msg.family = common.AF.INET;
+    addr_msg.prefixlen = 0;
+    addr_msg.flags = 0;
+    addr_msg.scope = 0;
+    addr_msg.index = 0;
+
+    try socket_ops.sendOnly(fd, mb.message());
+
+    var recv_buf: [common.buf_size]u8 align(4) = undefined;
+    while (true) {
+        const recv_len = posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
+        const parse_result = try parseFirstIpv4AddressMessage(recv_buf[0..recv_len], if_index);
+        switch (parse_result) {
+            .pending => continue,
+            .done => |address| return address,
+        }
+    }
+}
+
+const ParseResult = union(enum) {
+    pending,
+    done: ?[4]u8,
+};
+
+fn parseFirstIpv4AddressMessage(buf: []const u8, if_index: u32) common.NetlinkError!ParseResult {
+    if (buf.len < @sizeOf(std.os.linux.nlmsghdr)) return common.NetlinkError.InvalidResponse;
+
+    var offset: usize = 0;
+    while (offset + @sizeOf(std.os.linux.nlmsghdr) <= buf.len) {
+        const msg_hdr: *const std.os.linux.nlmsghdr = @ptrCast(@alignCast(&buf[offset]));
+        const msg_len: usize = msg_hdr.len;
+        if (msg_len < @sizeOf(std.os.linux.nlmsghdr) or offset + msg_len > buf.len) {
+            return common.NetlinkError.InvalidResponse;
+        }
+
+        if (msg_hdr.type == .DONE) return .{ .done = null };
+        if (msg_hdr.type == .ERROR) {
+            if (msg_len < @sizeOf(std.os.linux.nlmsghdr) + 4) return common.NetlinkError.InvalidResponse;
+            const err_code: *const i32 = @ptrCast(@alignCast(&buf[offset + @sizeOf(std.os.linux.nlmsghdr)]));
+            if (err_code.* == 0) return .{ .done = null };
+            return common.NetlinkError.KernelError;
+        }
+
+        if (msg_hdr.type == .RTM_NEWADDR) {
+            if (msg_len < @sizeOf(std.os.linux.nlmsghdr) + @sizeOf(common.IfAddrMsg)) {
+                return common.NetlinkError.InvalidResponse;
+            }
+
+            const msg_offset = offset + @sizeOf(std.os.linux.nlmsghdr);
+            const msg: *const common.IfAddrMsg = @ptrCast(@alignCast(&buf[msg_offset]));
+            if (msg.family == common.AF.INET and msg.index == if_index) {
+                var attr_offset = msg_offset + @sizeOf(common.IfAddrMsg);
+                const msg_end = offset + msg_len;
+                while (attr_offset + @sizeOf(common.RtAttr) <= msg_end) {
+                    const attr: *const common.RtAttr = @ptrCast(@alignCast(&buf[attr_offset]));
+                    const attr_len: usize = attr.len;
+                    if (attr_len < @sizeOf(common.RtAttr) or attr_offset + attr_len > msg_end) break;
+
+                    if ((attr.type == common.IFA.LOCAL or attr.type == common.IFA.ADDRESS) and
+                        attr_len >= @sizeOf(common.RtAttr) + @sizeOf([4]u8))
+                    {
+                        const attr_ip: *const [4]u8 = @ptrCast(@alignCast(&buf[attr_offset + @sizeOf(common.RtAttr)]));
+                        return .{ .done = attr_ip.* };
+                    }
+
+                    attr_offset += common.nlmsgAlign(attr_len);
+                }
+            }
+        }
+
+        offset += common.nlmsgAlign(msg_len);
+    }
+
+    return .pending;
+}
+
 pub fn removeRoute(fd: posix.fd_t, dest: *const [4]u8, dest_len: u8) common.NetlinkError!void {
     var buf_storage: [common.buf_size]u8 align(4) = undefined;
     var mb = MessageBuilder.init(&buf_storage);

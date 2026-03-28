@@ -88,6 +88,14 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     };
 }
 
+pub fn portIfRunning() ?u16 {
+    mutex.lock();
+    defer mutex.unlock();
+
+    if (!running) return null;
+    return listen_port;
+}
+
 fn start(alloc: std.mem.Allocator, port: u16) void {
     mutex.lock();
     defer mutex.unlock();
