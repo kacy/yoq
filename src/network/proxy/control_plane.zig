@@ -1,6 +1,8 @@
 const std = @import("std");
 const service_rollout = @import("../service_rollout.zig");
 const proxy_runtime = @import("runtime.zig");
+const service_registry_runtime_mod = @import("../service_registry_runtime.zig");
+const listener_runtime_mod = @import("listener_runtime.zig");
 const steering_runtime = @import("steering_runtime.zig");
 const posix = std.posix;
 
@@ -41,12 +43,10 @@ var last_sync_trigger: ?SyncTrigger = null;
 var last_sync_pass_at: ?i64 = null;
 
 pub fn refreshIfEnabled() void {
-    if (!controlPlaneEnabled()) return;
     runSyncPass(.event);
 }
 
 pub fn startSyncLoopIfEnabled() void {
-    if (!controlPlaneEnabled()) return;
     if (sync_running.load(.acquire)) return;
 
     sync_running.store(true, .release);
@@ -100,16 +100,15 @@ pub fn setSyncIntervalMsForTest(interval_ms: ?u64) void {
 }
 
 fn controlPlaneEnabled() bool {
-    return service_rollout.current().l7_proxy_http;
+    return service_registry_runtime_mod.hasProxyConfiguredServices();
 }
 
 fn vipSteeringEnabled() bool {
-    const flags = service_rollout.current();
-    return flags.l7_proxy_http and flags.dns_returns_vip;
+    return controlPlaneEnabled() and service_rollout.current().dns_returns_vip;
 }
 
 fn runSyncPass(trigger: SyncTrigger) void {
-    proxy_runtime.bootstrapIfEnabled();
+    listener_runtime_mod.startIfEnabled(std.heap.page_allocator);
     steering_runtime.syncIfEnabled();
     mutex.lock();
     defer mutex.unlock();
@@ -123,7 +122,7 @@ fn runSyncPass(trigger: SyncTrigger) void {
 }
 
 fn syncLoop() void {
-    if (controlPlaneEnabled()) runSyncPass(.periodic);
+    runSyncPass(.periodic);
 
     while (sync_running.load(.acquire)) {
         const interval_ms = blk: {
@@ -133,7 +132,6 @@ fn syncLoop() void {
         };
         std.Thread.sleep(interval_ms * std.time.ns_per_ms);
         if (!sync_running.load(.acquire)) break;
-        if (!controlPlaneEnabled()) continue;
         runSyncPass(.periodic);
     }
 }

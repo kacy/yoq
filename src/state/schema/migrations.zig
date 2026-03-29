@@ -34,6 +34,7 @@ fn migrateServices(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_retries INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_connect_timeout_ms INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_request_timeout_ms INTEGER;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_target_port INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_preserve_host INTEGER;") catch {};
 }
 
@@ -67,9 +68,9 @@ test "migrateServices adds http proxy columns" {
 
     db.exec(
         "INSERT INTO services (" ++
-            "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_preserve_host, created_at, updated_at" ++
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "api", "10.43.0.2", "consistent_hash", "api.internal", "/v1", @as(i64, 2), @as(i64, 1500), @as(i64, 5000), @as(i64, 1), @as(i64, 1000), @as(i64, 1000) },
+        .{ "api", "10.43.0.2", "consistent_hash", "api.internal", "/v1", @as(i64, 2), @as(i64, 1500), @as(i64, 5000), @as(i64, 8080), @as(i64, 1), @as(i64, 1000), @as(i64, 1000) },
     ) catch unreachable;
 }

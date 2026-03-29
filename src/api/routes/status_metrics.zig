@@ -224,7 +224,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"backfill\":{\"enabled\":true,\"runs_total\":1,\"services_created_total\":0,\"endpoints_created_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"requests_total\":0,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"loop_rejections_total\":0,\"upstream_connect_failures_total\":0,\"upstream_send_failures_total\":0,\"upstream_receive_failures_total\":0,\"upstream_other_failures_total\":0,\"circuit_trips_total\":0,\"circuit_open_endpoints\":0,\"circuit_half_open_endpoints\":0,\"last_sync_at\":null,\"last_error\":null,\"sample_routes\":[]}") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"listener\":{\"enabled\":false,\"running\":false,\"port\":17080,\"accepted_connections_total\":0,\"active_connections\":0,\"last_error\":null}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"listener\":{\"enabled\":false,\"running\":false,\"bind_addr\":\"127.0.0.1\",\"port\":17080,\"accepted_connections_total\":0,\"active_connections\":0,\"last_error\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"control_plane\":{\"enabled\":false,\"steering_enabled\":false,\"running\":false,\"interval_secs\":15,\"passes_total\":0,\"event_passes_total\":0,\"periodic_passes_total\":0,\"last_trigger\":null,\"last_pass_at\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"not_ready_services\":0,\"blocked_services\":0,\"drifted_services\":0,\"desired_mappings\":0,\"applied_mappings\":0,\"blocked_reason\":\"none\",\"sync_attempts_total\":0,\"sync_failures_total\":0,\"mappings_applied_total\":0,\"mappings_removed_total\":0,\"last_sync_at\":null,\"last_error\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
@@ -385,6 +385,7 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
         null,
         null,
         null,
+        8080,
         null,
     );
     defer service.deinit(testing.allocator);
@@ -404,8 +405,7 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
 
     const response = route(req, testing.allocator).?;
     defer if (response.allocated) testing.allocator.free(response.body);
-
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":true,\"audit_fresh\":true,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":true,\"downgrade_safe\":true,\"steering_ready\":false,\"steering_blocked_services\":1,\"steering_no_port_services\":1,\"ready_for_reconciler_cutover\":true,\"ready_for_vip_cutover\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":true,\"audit_fresh\":true,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":true,\"downgrade_safe\":true,\"steering_ready\":false,\"steering_blocked_services\":1,\"steering_no_port_services\":0,\"ready_for_reconciler_cutover\":true,\"ready_for_vip_cutover\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"components_not_ready\",\"steering_not_ready\"]") != null);
 }
 
@@ -442,6 +442,7 @@ test "route rollout status sample routes expose steering drift details" {
         .lb_policy = "consistent_hash",
         .http_proxy_host = "api.internal",
         .http_proxy_path_prefix = "/v1",
+        .http_proxy_target_port = 8080,
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -702,6 +703,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
         .lb_policy = "consistent_hash",
         .http_proxy_host = "edge.internal",
         .http_proxy_path_prefix = "/",
+        .http_proxy_target_port = 8080,
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -718,7 +720,6 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
 
     const resp = handleMetricsPrometheus(testing.allocator);
     defer if (resp.allocated) testing.allocator.free(resp.body);
-
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_shadow_mode 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"service_registry_v2\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"dns_returns_vip\"} 1") != null);
@@ -815,7 +816,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"reconciler_cutover\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"vip_cutover\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"blocked\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"missing_ports\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"missing_ports\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_running 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_tracked_endpoints 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_queued_checks 0") != null);

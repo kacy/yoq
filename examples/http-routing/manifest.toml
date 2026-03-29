@@ -1,0 +1,21 @@
+[service.web]
+image = "hashicorp/http-echo:1.0"
+command = ["-listen", ":8080", "-text", "web route"]
+ports = ["8080:8080"]
+
+[service.web.http_proxy]
+host = "demo.local"
+path_prefix = "/"
+
+[service.api]
+image = "hashicorp/http-echo:1.0"
+command = ["-listen", ":8080", "-text", "api route"]
+ports = ["8081:8080"]
+
+[service.api.http_proxy]
+host = "demo.local"
+path_prefix = "/api"
+preserve_host = false
+retries = 2
+connect_timeout_ms = 1500
+request_timeout_ms = 5000

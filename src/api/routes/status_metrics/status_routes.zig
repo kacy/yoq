@@ -320,10 +320,14 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     writer.writeByte(']') catch return common.internalError();
     writer.writeAll("},\"listener\":{") catch return common.internalError();
     writer.print(
-        "\"enabled\":{},\"running\":{},\"port\":{d},\"accepted_connections_total\":{d},\"active_connections\":{d},\"last_error\":",
+        "\"enabled\":{},\"running\":{},\"bind_addr\":\"{d}.{d}.{d}.{d}\",\"port\":{d},\"accepted_connections_total\":{d},\"active_connections\":{d},\"last_error\":",
         .{
             l7_listener.enabled,
             l7_listener.running,
+            l7_listener.bind_addr[0],
+            l7_listener.bind_addr[1],
+            l7_listener.bind_addr[2],
+            l7_listener.bind_addr[3],
             l7_listener.port,
             l7_listener.accepted_connections_total,
             l7_listener.active_connections,

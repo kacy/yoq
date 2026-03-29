@@ -4,13 +4,16 @@ const proxy_runtime = @import("runtime.zig");
 const reverse_proxy = @import("reverse_proxy.zig");
 const router = @import("router.zig");
 const service_rollout = @import("../service_rollout.zig");
+const service_registry_runtime = @import("../service_registry_runtime.zig");
 
 pub const default_listen_port: u16 = 17080;
+pub const default_bind_addr: [4]u8 = .{ 127, 0, 0, 1 };
 pub const StateChangeHook = *const fn () void;
 
 pub const Snapshot = struct {
     enabled: bool,
     running: bool,
+    bind_addr: [4]u8,
     port: u16,
     accepted_connections_total: u64,
     active_connections: u32,
@@ -26,6 +29,7 @@ var listen_fd: ?posix.fd_t = null;
 var listener_thread: ?std.Thread = null;
 var stop_requested: bool = false;
 var running: bool = false;
+var listen_bind_addr: [4]u8 = default_bind_addr;
 var listen_port: u16 = default_listen_port;
 var accepted_connections_total: u64 = 0;
 var active_connections: u32 = 0;
@@ -37,11 +41,19 @@ pub fn resetForTest() void {
 
     mutex.lock();
     defer mutex.unlock();
+    listen_bind_addr = default_bind_addr;
     listen_port = default_listen_port;
     accepted_connections_total = 0;
     active_connections = 0;
     clearLastErrorLocked();
     state_change_hook = null;
+}
+
+pub fn configure(bind_addr: [4]u8, port: u16) void {
+    mutex.lock();
+    defer mutex.unlock();
+    listen_bind_addr = bind_addr;
+    listen_port = port;
 }
 
 pub fn setStateChangeHook(hook: ?StateChangeHook) void {
@@ -51,16 +63,22 @@ pub fn setStateChangeHook(hook: ?StateChangeHook) void {
 }
 
 pub fn startIfEnabled(alloc: std.mem.Allocator) void {
-    if (!service_rollout.current().l7_proxy_http) return;
-    start(alloc, default_listen_port);
+    proxy_runtime.bootstrapIfEnabled();
+    if (!service_registry_runtime.hasProxyConfiguredServices()) {
+        stop();
+        return;
+    }
+    start(alloc);
 }
 
 pub fn startForTest(alloc: std.mem.Allocator, port: u16) void {
-    start(alloc, port);
+    configure(default_bind_addr, port);
+    start(alloc);
 }
 
 pub fn startOrSkipForTest(alloc: std.mem.Allocator, port: u16) !void {
-    start(alloc, port);
+    configure(default_bind_addr, port);
+    start(alloc);
     if (portIfRunning() != null) return;
 
     const state = try snapshot(std.testing.allocator);
@@ -110,8 +128,9 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     defer mutex.unlock();
 
     return .{
-        .enabled = service_rollout.current().l7_proxy_http,
+        .enabled = service_registry_runtime.hasProxyConfiguredServices(),
         .running = running,
+        .bind_addr = listen_bind_addr,
         .port = listen_port,
         .accepted_connections_total = accepted_connections_total,
         .active_connections = active_connections,
@@ -127,7 +146,7 @@ pub fn portIfRunning() ?u16 {
     return listen_port;
 }
 
-fn start(alloc: std.mem.Allocator, port: u16) void {
+fn start(alloc: std.mem.Allocator) void {
     mutex.lock();
     if (listener_thread != null) {
         mutex.unlock();
@@ -136,8 +155,10 @@ fn start(alloc: std.mem.Allocator, port: u16) void {
     stop_requested = false;
     accepted_connections_total = 0;
     active_connections = 0;
-    listen_port = port;
     clearLastErrorLocked();
+
+    const bind_addr = listen_bind_addr;
+    const requested_port = listen_port;
 
     const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
         setLastErrorLocked(error.SocketFailed);
@@ -150,7 +171,7 @@ fn start(alloc: std.mem.Allocator, port: u16) void {
     const reuseaddr: c_int = 1;
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+    const addr = std.net.Address.initIp4(bind_addr, requested_port);
     posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
         setLastErrorLocked(error.BindFailed);
         const hook = state_change_hook;
@@ -168,7 +189,7 @@ fn start(alloc: std.mem.Allocator, port: u16) void {
         return;
     };
 
-    if (port == 0) {
+    if (requested_port == 0) {
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
         posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
@@ -270,8 +291,13 @@ fn wakeAccept(port: u16) void {
     const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return;
     defer posix.close(fd);
 
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+    const addr = std.net.Address.initIp4(wakeBindAddr(), port);
     posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {};
+}
+
+fn wakeBindAddr() [4]u8 {
+    if (std.mem.eql(u8, listen_bind_addr[0..], &[_]u8{ 0, 0, 0, 0 })) return default_bind_addr;
+    return listen_bind_addr;
 }
 
 fn deinitRoutes(alloc: std.mem.Allocator, routes: *std.ArrayList(router.Route)) void {
@@ -309,6 +335,18 @@ test "listener runtime starts and stops on loopback" {
     defer service_rollout.resetForTest();
     resetForTest();
     defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .http_proxy_target_port = 8080,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    service_registry_runtime.syncServiceFromStore("api");
 
     try startOrSkipForTest(std.testing.allocator, 0);
 

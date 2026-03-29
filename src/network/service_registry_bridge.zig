@@ -68,12 +68,10 @@ pub fn registerContainerService(service_name: []const u8, container_id: []const 
 }
 
 pub fn unregisterContainerService(container_id: []const u8) void {
-    if (rollout.mode() == .shadow) {
-        store.removeServiceEndpointsByContainer(container_id) catch |err| {
-            log.warn("service registry bridge: failed to remove persisted endpoints for container {s}: {}", .{ container_id, err });
-        };
-        service_registry_runtime.removeContainer(container_id);
-    }
+    store.removeServiceEndpointsByContainer(container_id) catch |err| {
+        log.warn("service registry bridge: failed to remove persisted endpoints for container {s}: {}", .{ container_id, err });
+    };
+    service_registry_runtime.removeContainer(container_id);
 
     const operation: BridgeOperation = .container_unregister;
     const mode = activeFaultMode(operation);
@@ -168,8 +166,6 @@ fn refreshL7ControlPlane() void {
 }
 
 fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_id: []const u8, container_ip: [4]u8, node_id: ?i64) void {
-    if (rollout.mode() == .legacy) return;
-
     const alloc = std.heap.page_allocator;
     const service = store.ensureService(alloc, service_name, "consistent_hash") catch |err| {
         log.warn("service registry bridge: failed to ensure persisted service {s}: {}", .{ service_name, err });

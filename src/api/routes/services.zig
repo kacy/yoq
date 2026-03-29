@@ -377,6 +377,7 @@ test "route handles GET /v1/services" {
         .http_proxy_retries = 2,
         .http_proxy_connect_timeout_ms = 1500,
         .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_target_port = 8080,
         .http_proxy_preserve_host = false,
         .created_at = 1000,
         .updated_at = 1000,
@@ -486,6 +487,7 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
         .http_proxy_retries = 2,
         .http_proxy_connect_timeout_ms = 1500,
         .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_target_port = 8080,
         .http_proxy_preserve_host = false,
         .created_at = 1000,
         .updated_at = 1000,
@@ -592,6 +594,7 @@ test "route handles GET /v1/services/{name} with steering drift details" {
         .lb_policy = "consistent_hash",
         .http_proxy_host = "api.internal",
         .http_proxy_path_prefix = "/",
+        .http_proxy_target_port = 8080,
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -648,6 +651,7 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering drift det
         .lb_policy = "consistent_hash",
         .http_proxy_host = "api.internal",
         .http_proxy_path_prefix = "/v1",
+        .http_proxy_target_port = 8080,
         .created_at = 1000,
         .updated_at = 1000,
     });

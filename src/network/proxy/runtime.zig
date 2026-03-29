@@ -194,8 +194,6 @@ pub fn resetForTest() void {
 }
 
 pub fn bootstrapIfEnabled() void {
-    if (!service_rollout.current().l7_proxy_http) return;
-
     mutex.lock();
     defer mutex.unlock();
 
@@ -221,7 +219,7 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     }
 
     return .{
-        .enabled = service_rollout.current().l7_proxy_http,
+        .enabled = configured_services > 0,
         .running = running,
         .configured_services = configured_services,
         .routes = routes,
@@ -241,6 +239,12 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .last_sync_at = last_sync_at,
         .last_error = if (last_error) |message| try alloc.dupe(u8, message) else null,
     };
+}
+
+pub fn configuredServiceCount() u32 {
+    mutex.lock();
+    defer mutex.unlock();
+    return configured_services;
 }
 
 pub fn recordRequestStart() void {
@@ -447,6 +451,9 @@ pub fn resolveRoute(alloc: std.mem.Allocator, host: []const u8, path: []const u8
 }
 
 pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upstream_mod.Upstream {
+    const service = try service_registry_runtime.snapshotService(alloc, service_name);
+    defer service.deinit(alloc);
+
     var endpoints = try service_registry_runtime.snapshotServiceEndpoints(alloc, service_name);
     defer {
         for (endpoints.items) |endpoint| endpoint.deinit(alloc);
@@ -463,8 +470,9 @@ pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upst
     defer mutex.unlock();
 
     const now_ms = std.time.milliTimestamp();
+    const target_port = service.http_proxy_target_port;
     for (endpoints.items) |endpoint| {
-        const port: u16 = if (endpoint.port < 0) 0 else @intCast(endpoint.port);
+        const port: u16 = target_port orelse if (endpoint.port < 0) 0 else @intCast(endpoint.port);
         try candidates.append(alloc, .{
             .service = try alloc.dupe(u8, service_name),
             .endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id),
@@ -611,8 +619,8 @@ fn syncLocked() !void {
     configured_services = next_configured_services;
     routes = next_routes;
     pruneRouteStatusesLocked();
-    running = true;
-    last_sync_at = std.time.timestamp();
+    running = next_configured_services > 0;
+    last_sync_at = if (next_configured_services > 0) std.time.timestamp() else null;
 }
 
 fn deinitRoutesLocked() void {

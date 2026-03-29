@@ -170,7 +170,7 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     const applied_count = try appliedMappingCountLocked(alloc);
 
     return .{
-        .enabled = service_rollout.current().l7_proxy_http and service_rollout.current().dns_returns_vip,
+        .enabled = isEnabled(),
         .running = running,
         .configured_services = configured_services,
         .not_ready_services = readiness.not_ready_services,
@@ -311,23 +311,15 @@ fn buildDesiredMappingsLocked(alloc: std.mem.Allocator) !std.ArrayList(DesiredMa
         configured_services += 1;
 
         const vip = ip.parseIp(service.vip_address) orelse continue;
-        var endpoints = try service_registry_runtime.snapshotServiceEndpoints(alloc, service.service_name);
-        defer {
-            for (endpoints.items) |endpoint| endpoint.deinit(alloc);
-            endpoints.deinit(alloc);
-        }
+        const service_port = try resolveServiceProxyPortLocked(alloc, service);
+        if (service_port == null) continue;
 
-        for (endpoints.items) |endpoint| {
-            if (endpoint.port <= 0 or endpoint.port > std.math.maxInt(u16)) continue;
-            const endpoint_port: u16 = @intCast(endpoint.port);
-            if (containsDesiredMapping(mappings.items, vip, endpoint_port)) continue;
-            try mappings.append(alloc, .{
-                .vip = vip,
-                .port = endpoint_port,
-                .listener_ip = listener_ip,
-                .listener_port = listener_port,
-            });
-        }
+        try mappings.append(alloc, .{
+            .vip = vip,
+            .port = service_port.?,
+            .listener_ip = listener_ip,
+            .listener_port = listener_port,
+        });
     }
 
     desired_mappings = @intCast(mappings.items.len);
@@ -355,17 +347,15 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
         endpoints.deinit(alloc);
     }
 
-    var ports: std.ArrayList(u16) = .empty;
-    defer ports.deinit(alloc);
+    const desired_port = service.http_proxy_target_port orelse blk: {
+        for (endpoints.items) |endpoint| {
+            if (endpoint.port <= 0 or endpoint.port > std.math.maxInt(u16)) continue;
+            break :blk @as(?u16, @intCast(endpoint.port));
+        }
+        break :blk null;
+    };
 
-    for (endpoints.items) |endpoint| {
-        if (endpoint.port <= 0 or endpoint.port > std.math.maxInt(u16)) continue;
-        const port: u16 = @intCast(endpoint.port);
-        if (containsPort(ports.items, port)) continue;
-        try ports.append(alloc, port);
-    }
-
-    if (ports.items.len == 0) {
+    if (desired_port == null) {
         return .{
             .desired_ports = 0,
             .applied_ports = 0,
@@ -384,22 +374,18 @@ fn buildServiceStatusLocked(alloc: std.mem.Allocator, service_name: []const u8) 
         const listener_ip = try currentBridgeIpLocked();
         var observed = try listManagedMappingsForTargetLocked(alloc, listener_ip, listener_port);
         defer observed.deinit(alloc);
-        for (ports.items) |port| {
-            if (containsObservedMapping(observed.items, vip, port)) applied_ports += 1;
-        }
+        if (containsObservedMapping(observed.items, vip, desired_port.?)) applied_ports = 1;
     } else {
-        for (ports.items) |port| {
-            if (containsObservedMapping(applied_mappings.items, vip, port)) applied_ports += 1;
-        }
+        if (containsObservedMapping(applied_mappings.items, vip, desired_port.?)) applied_ports = 1;
     }
 
-    const ready = applied_ports == ports.items.len;
+    const ready = applied_ports == 1;
     const reason = if (ready) .none else prerequisite_reason;
     const blocked = !ready and prerequisite_reason != .none;
-    const drifted = !ready and prerequisite_reason == .none and ports.items.len > applied_ports;
+    const drifted = !ready and prerequisite_reason == .none;
 
     return .{
-        .desired_ports = @intCast(ports.items.len),
+        .desired_ports = 1,
         .applied_ports = applied_ports,
         .ready = ready,
         .blocked = blocked,
@@ -440,7 +426,7 @@ fn summarizeServiceReadinessLocked(alloc: std.mem.Allocator) !ReadinessSummary {
 
 fn summarizeVipCutoverReadinessLocked(alloc: std.mem.Allocator) !VipCutoverReadiness {
     var summary: VipCutoverReadiness = .{
-        .enabled = service_rollout.current().l7_proxy_http,
+        .enabled = isEnabled(),
         .ready = true,
         .configured_services = 0,
         .blocked_services = 0,
@@ -461,21 +447,7 @@ fn summarizeVipCutoverReadinessLocked(alloc: std.mem.Allocator) !VipCutoverReadi
         if (service.http_proxy_host == null) continue;
         summary.configured_services += 1;
 
-        var endpoints = try service_registry_runtime.snapshotServiceEndpoints(alloc, service.service_name);
-        defer {
-            for (endpoints.items) |endpoint| endpoint.deinit(alloc);
-            endpoints.deinit(alloc);
-        }
-
-        var has_port = false;
-        for (endpoints.items) |endpoint| {
-            if (endpoint.port > 0 and endpoint.port <= std.math.maxInt(u16)) {
-                has_port = true;
-                break;
-            }
-        }
-
-        if (!has_port) {
+        if ((try resolveServiceProxyPortLocked(alloc, service)) == null) {
             summary.blocked_services += 1;
             summary.no_port_services += 1;
             continue;
@@ -502,7 +474,7 @@ fn currentPrerequisiteBlockedReasonLocked() BlockedReason {
 }
 
 fn currentVipCutoverPrerequisiteBlockedReasonLocked() BlockedReason {
-    if (!service_rollout.current().l7_proxy_http) return .rollout_disabled;
+    if (!isEnabled()) return .rollout_disabled;
     if (listener_runtime.portIfRunning() == null) return .listener_not_running;
     if (!hasPortMapperLocked()) return .port_mapper_unavailable;
     if (currentBridgeIpLocked()) |_| {
@@ -517,9 +489,25 @@ fn currentBridgeIpLocked() ![4]u8 {
     return bridge.currentGatewayIp(bridge.default_bridge);
 }
 
+fn resolveServiceProxyPortLocked(alloc: std.mem.Allocator, service: service_registry_runtime.ServiceSnapshot) !?u16 {
+    if (service.http_proxy_target_port) |port| return port;
+
+    var endpoints = try service_registry_runtime.snapshotServiceEndpoints(alloc, service.service_name);
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+        endpoints.deinit(alloc);
+    }
+
+    for (endpoints.items) |endpoint| {
+        if (endpoint.port <= 0 or endpoint.port > std.math.maxInt(u16)) continue;
+        return @intCast(endpoint.port);
+    }
+
+    return null;
+}
+
 fn isEnabled() bool {
-    const flags = service_rollout.current();
-    return flags.l7_proxy_http and flags.dns_returns_vip;
+    return service_rollout.current().dns_returns_vip and service_registry_runtime.hasProxyConfiguredServices();
 }
 
 fn containsDesiredMapping(mappings: []const DesiredMapping, vip: [4]u8, port: u16) bool {
@@ -532,13 +520,6 @@ fn containsDesiredMapping(mappings: []const DesiredMapping, vip: [4]u8, port: u1
 fn containsObservedMapping(mappings: []const ObservedMapping, vip: [4]u8, port: u16) bool {
     for (mappings) |mapping| {
         if (std.mem.eql(u8, mapping.vip[0..], vip[0..]) and mapping.port == port) return true;
-    }
-    return false;
-}
-
-fn containsPort(ports: []const u16, port: u16) bool {
-    for (ports) |existing| {
-        if (existing == port) return true;
     }
     return false;
 }

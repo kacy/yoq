@@ -45,6 +45,7 @@ services are long-running processes. defined under `[service.<name>]`.
 | `working_dir` | string | no | image default | working directory inside container |
 | `volumes` | array of strings | no | `[]` | volume mounts (`"source:target"`) |
 | `health_check` | table | no | none | health probe configuration |
+| `http_proxy` | table | no | none | HTTP routing rule for the service |
 | `restart` | string | no | `"none"` | restart policy |
 | `tls` | table | no | none | TLS termination configuration |
 | `gpu` | table | no | none | GPU passthrough configuration |
@@ -102,6 +103,59 @@ volumes = [
 ```toml
 restart = "on_failure"
 ```
+
+---
+
+## HTTP routing
+
+defined under `[service.<name>.http_proxy]`. this enables HTTP host/path routing for the service.
+
+the upstream target is the first service port in `ports`. right now yoq supports one HTTP route per service.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `host` | string | yes | — | hostname to match |
+| `path_prefix` | string | no | `"/"` | path prefix to match |
+| `retries` | integer | no | `0` | upstream retries for failed requests |
+| `connect_timeout_ms` | integer | no | `1000` | upstream connect timeout in milliseconds |
+| `request_timeout_ms` | integer | no | `5000` | upstream request timeout in milliseconds |
+| `preserve_host` | boolean | no | `true` | forward the original `Host` header instead of the upstream host |
+
+```toml
+[service.web]
+image = "nginx:alpine"
+ports = ["8080:80"]
+
+[service.web.http_proxy]
+host = "demo.local"
+path_prefix = "/"
+
+[service.api]
+image = "mccutchen/go-httpbin:latest"
+ports = ["8081:8080"]
+
+[service.api.http_proxy]
+host = "demo.local"
+path_prefix = "/api"
+preserve_host = false
+retries = 2
+connect_timeout_ms = 1500
+request_timeout_ms = 5000
+```
+
+server-side listener defaults:
+
+- `yoq serve` listens on `127.0.0.1:17080`
+- `yoq init-server` listens on `0.0.0.0:17080`
+
+override them with:
+
+```text
+yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
+yoq init-server --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
+```
+
+use `GET /v1/status?mode=service_rollout` and `GET /v1/metrics?format=prometheus` to inspect listener, route, and steering state.
 
 ---
 
