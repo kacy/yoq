@@ -58,9 +58,9 @@ fn ensureInitialized() void {
     if (flags_initialized) return;
 
     flags = .{
-        .service_registry_v2 = readBoolEnv("YOQ_SERVICE_REGISTRY_V2"),
-        .service_registry_reconciler = readBoolEnv("YOQ_SERVICE_REGISTRY_RECONCILER"),
-        .dns_returns_vip = readBoolEnv("YOQ_DNS_RETURNS_VIP"),
+        .service_registry_v2 = readDeprecatedAlwaysOnBoolEnv("YOQ_SERVICE_REGISTRY_V2", "service registry v2 is always on"),
+        .service_registry_reconciler = readDeprecatedAlwaysOnBoolEnv("YOQ_SERVICE_REGISTRY_RECONCILER", "the reconciler is always authoritative"),
+        .dns_returns_vip = readDeprecatedAlwaysOnBoolEnv("YOQ_DNS_RETURNS_VIP", "DNS always returns the service VIP"),
         .l7_proxy_http = readAlwaysOnBoolEnv("YOQ_L7_PROXY_HTTP"),
     };
     flags_initialized = true;
@@ -94,9 +94,11 @@ fn modeLabel(current_mode: Mode) []const u8 {
     };
 }
 
-fn readBoolEnv(name: []const u8) bool {
-    const raw = std.posix.getenv(name) orelse return false;
-    return parseBool(name, raw);
+fn readDeprecatedAlwaysOnBoolEnv(name: []const u8, replacement: []const u8) bool {
+    const raw = std.posix.getenv(name) orelse return true;
+    _ = parseBool(name, raw);
+    log.warn("service rollout flag {s} is deprecated and ignored; {s}", .{ name, replacement });
+    return true;
 }
 
 fn readAlwaysOnBoolEnv(name: []const u8) bool {
@@ -123,9 +125,9 @@ fn parseBool(name: []const u8, raw: []const u8) bool {
     return false;
 }
 
-test "mode defaults to legacy" {
+test "mode defaults to shadow" {
     resetForTest();
-    try std.testing.expectEqual(Mode.legacy, mode());
+    try std.testing.expectEqual(Mode.shadow, mode());
 }
 
 test "mode becomes shadow when registry v2 is enabled" {
@@ -163,8 +165,8 @@ test "resetForTest clears overrides" {
     resetForTest();
 
     const current_flags = current();
-    try std.testing.expect(!current_flags.service_registry_v2);
-    try std.testing.expect(!current_flags.service_registry_reconciler);
-    try std.testing.expect(!current_flags.dns_returns_vip);
+    try std.testing.expect(current_flags.service_registry_v2);
+    try std.testing.expect(current_flags.service_registry_reconciler);
+    try std.testing.expect(current_flags.dns_returns_vip);
     try std.testing.expect(current_flags.l7_proxy_http);
 }

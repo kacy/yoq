@@ -8,9 +8,9 @@ const service_reconciler = @import("service_reconciler.zig");
 const service_registry_runtime = @import("service_registry_runtime.zig");
 const store = @import("../state/store.zig");
 
-// Phase 0 bridge: preserve the current legacy DNS writes while routing all
-// service discovery side effects through one module. Later phases can swap the
-// legacy apply step for reconciler intents without touching every caller again.
+// Service discovery bridge: route container and health events through one
+// module that persists endpoints, updates runtime state, and refreshes the
+// reconciler-driven DNS/L7 control plane.
 
 pub const BridgeOperation = enum {
     container_register,

@@ -83,11 +83,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer json_buf.deinit(alloc);
     var writer = json_buf.writer(alloc);
 
-    writer.writeAll("{\"mode\":\"") catch return common.internalError();
-    writer.writeAll(switch (service_rollout.mode()) {
-        .legacy => "legacy",
-        .shadow => "shadow",
-    }) catch return common.internalError();
+    writer.writeAll("{\"mode\":\"canonical") catch return common.internalError();
     writer.writeAll("\",\"flags\":{") catch return common.internalError();
     writer.print(
         "\"service_registry_v2\":{},\"service_registry_reconciler\":{},\"dns_returns_vip\":{},\"l7_proxy_http\":{}",
@@ -100,7 +96,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     ) catch return common.internalError();
     writer.writeAll("},\"limits\":{") catch return common.internalError();
     writer.print(
-        "\"dns_registry_services\":{d},\"dns_name_length\":{d},\"dns_bpf_services\":{d},\"load_balancer_vips\":{d},\"load_balancer_backends_per_vip\":{d},\"conntrack_entries\":{d},\"recent_shadow_events\":{d},\"health_workers\":{d},\"health_queued_checks\":{d}",
+        "\"dns_registry_services\":{d},\"dns_name_length\":{d},\"dns_bpf_services\":{d},\"load_balancer_vips\":{d},\"load_balancer_backends_per_vip\":{d},\"conntrack_entries\":{d},\"recent_reconciler_events\":{d},\"recent_shadow_events\":{d},\"health_workers\":{d},\"health_queued_checks\":{d}",
         .{
             dns_registry.max_services,
             dns_registry.max_name_len,
@@ -108,6 +104,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             lb_prog.maps[0].max_entries,
             lb_runtime.max_backends,
             lb_prog.maps[1].max_entries,
+            service_reconciler.max_recent_events,
             service_reconciler.max_recent_events,
             health.max_worker_threads,
             health.max_queued_checks,
@@ -444,30 +441,11 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         json_helpers.writeJsonEscaped(writer, service_name) catch return common.internalError();
         writer.writeByte('"') catch return common.internalError();
     }
-    writer.writeAll("],\"cutover_readiness\":{") catch return common.internalError();
-    writer.print(
-        "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"steering_ready\":{},\"steering_blocked_services\":{d},\"steering_no_port_services\":{d},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
-        .{
-            cutover.backfill_complete,
-            cutover.audit_fresh,
-            cutover.shadow_clean,
-            cutover.components_ready,
-            cutover.fault_modes_clear,
-            cutover.downgrade_safe,
-            cutover.steering_ready,
-            cutover.steering_blocked_services,
-            cutover.steering_no_port_services,
-            cutover.ready_for_reconciler_cutover,
-            cutover.ready_for_vip_cutover,
-        },
-    ) catch return common.internalError();
-    for (cutover.blockers.items, 0..) |blocker, idx| {
-        if (idx > 0) writer.writeByte(',') catch return common.internalError();
-        writer.writeByte('"') catch return common.internalError();
-        json_helpers.writeJsonEscaped(writer, blocker) catch return common.internalError();
-        writer.writeByte('"') catch return common.internalError();
-    }
-    writer.writeAll("],\"node_signals\":{") catch return common.internalError();
+    writer.writeAll("],\"discovery_readiness\":{") catch return common.internalError();
+    writeDiscoveryReadinessSnapshot(writer, cutover) catch return common.internalError();
+    writer.writeAll("},\"cutover_readiness\":{") catch return common.internalError();
+    writeCutoverReadinessSnapshot(writer, cutover) catch return common.internalError();
+    writer.writeAll("},\"node_signals\":{") catch return common.internalError();
     writer.print(
         "\"lost_total\":{d},\"recovered_total\":{d},\"endpoints_changed_total\":{d},\"last_lost_node_id\":",
         .{
@@ -543,4 +521,54 @@ fn writeSourceCounts(writer: anytype, source: service_reconciler.EventSource) !v
             service_reconciler.eventCountBySource(source, .endpoint_unhealthy),
         },
     );
+}
+
+fn writeDiscoveryReadinessSnapshot(writer: anytype, readiness: service_cutover_readiness.Snapshot) !void {
+    try writer.print(
+        "\"backfill_complete\":{},\"audit_fresh\":{},\"audit_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"steering_ready\":{},\"steering_blocked_services\":{d},\"steering_no_port_services\":{d},\"reconciler_ready\":{},\"vip_ready\":{},\"blockers\":[",
+        .{
+            readiness.backfill_complete,
+            readiness.audit_fresh,
+            readiness.shadow_clean,
+            readiness.components_ready,
+            readiness.fault_modes_clear,
+            readiness.downgrade_safe,
+            readiness.steering_ready,
+            readiness.steering_blocked_services,
+            readiness.steering_no_port_services,
+            readiness.ready_for_reconciler_cutover,
+            readiness.ready_for_vip_cutover,
+        },
+    );
+    for (readiness.blockers.items, 0..) |blocker, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try json_helpers.writeJsonEscaped(writer, blocker);
+        try writer.writeByte('"');
+    }
+}
+
+fn writeCutoverReadinessSnapshot(writer: anytype, readiness: service_cutover_readiness.Snapshot) !void {
+    try writer.print(
+        "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"steering_ready\":{},\"steering_blocked_services\":{d},\"steering_no_port_services\":{d},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
+        .{
+            readiness.backfill_complete,
+            readiness.audit_fresh,
+            readiness.shadow_clean,
+            readiness.components_ready,
+            readiness.fault_modes_clear,
+            readiness.downgrade_safe,
+            readiness.steering_ready,
+            readiness.steering_blocked_services,
+            readiness.steering_no_port_services,
+            readiness.ready_for_reconciler_cutover,
+            readiness.ready_for_vip_cutover,
+        },
+    );
+    for (readiness.blockers.items, 0..) |blocker, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try json_helpers.writeJsonEscaped(writer, blocker);
+        try writer.writeByte('"');
+    }
 }

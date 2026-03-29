@@ -261,7 +261,6 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
 
 fn writeServiceRolloutPrometheus(writer: anytype) !void {
     const flags = service_rollout.current();
-    const is_shadow = service_rollout.mode() == .shadow;
     var backfill = try service_registry_backfill.snapshot(std.heap.page_allocator);
     defer backfill.deinit(std.heap.page_allocator);
     var audit = try service_reconciler.snapshotAuditState(std.heap.page_allocator);
@@ -286,28 +285,29 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
 
-    try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Service rollout mode, 1 when shadow mode is active\n");
+    try writer.writeAll("# HELP yoq_service_discovery_mode Canonical service discovery mode, exposed as a compatibility-safe gauge\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_mode gauge\n");
+    try writer.print("yoq_service_discovery_mode{{mode=\"canonical\"}} 1\n", .{});
+
+    try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Compatibility gauge retained after service discovery rollout completion\n");
     try writer.writeAll("# TYPE yoq_service_rollout_shadow_mode gauge\n");
-    try writer.print("yoq_service_rollout_shadow_mode {d}\n", .{@intFromBool(is_shadow)});
+    try writer.print("yoq_service_rollout_shadow_mode 1\n", .{});
+
+    try writer.writeAll("# HELP yoq_service_discovery_flag Canonical service discovery feature flags\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_flag gauge\n");
+    try writeFlagMetrics(writer, "yoq_service_discovery_flag", flags);
 
     try writer.writeAll("# HELP yoq_service_rollout_flag Service rollout feature flags\n");
     try writer.writeAll("# TYPE yoq_service_rollout_flag gauge\n");
-    try writer.print("yoq_service_rollout_flag{{flag=\"service_registry_v2\"}} {d}\n", .{@intFromBool(flags.service_registry_v2)});
-    try writer.print("yoq_service_rollout_flag{{flag=\"service_registry_reconciler\"}} {d}\n", .{@intFromBool(flags.service_registry_reconciler)});
-    try writer.print("yoq_service_rollout_flag{{flag=\"dns_returns_vip\"}} {d}\n", .{@intFromBool(flags.dns_returns_vip)});
-    try writer.print("yoq_service_rollout_flag{{flag=\"l7_proxy_http\"}} {d}\n", .{@intFromBool(flags.l7_proxy_http)});
+    try writeFlagMetrics(writer, "yoq_service_rollout_flag", flags);
+
+    try writer.writeAll("# HELP yoq_service_discovery_limit Compile-time discovery and data-plane limits\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_limit gauge\n");
+    try writeLimitMetrics(writer, "yoq_service_discovery_limit", "recent_reconciler_events");
 
     try writer.writeAll("# HELP yoq_service_rollout_limit Compile-time rollout and data-plane limits\n");
     try writer.writeAll("# TYPE yoq_service_rollout_limit gauge\n");
-    try writer.print("yoq_service_rollout_limit{{limit=\"dns_registry_services\"}} {d}\n", .{dns_registry.max_services});
-    try writer.print("yoq_service_rollout_limit{{limit=\"dns_name_length\"}} {d}\n", .{dns_registry.max_name_len});
-    try writer.print("yoq_service_rollout_limit{{limit=\"dns_bpf_services\"}} {d}\n", .{dns_prog.maps[0].max_entries});
-    try writer.print("yoq_service_rollout_limit{{limit=\"load_balancer_vips\"}} {d}\n", .{lb_prog.maps[0].max_entries});
-    try writer.print("yoq_service_rollout_limit{{limit=\"load_balancer_backends_per_vip\"}} {d}\n", .{lb_runtime.max_backends});
-    try writer.print("yoq_service_rollout_limit{{limit=\"conntrack_entries\"}} {d}\n", .{lb_prog.maps[1].max_entries});
-    try writer.print("yoq_service_rollout_limit{{limit=\"recent_shadow_events\"}} {d}\n", .{service_reconciler.max_recent_events});
-    try writer.print("yoq_service_rollout_limit{{limit=\"health_workers\"}} {d}\n", .{health.max_worker_threads});
-    try writer.print("yoq_service_rollout_limit{{limit=\"health_queued_checks\"}} {d}\n", .{health.max_queued_checks});
+    try writeLimitMetrics(writer, "yoq_service_rollout_limit", "recent_shadow_events");
 
     try writeServiceObservabilityPrometheus(writer, services.items, service_metrics.services.items, service_metrics.vip_alloc_failures_total);
 
@@ -516,11 +516,17 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_load_balancer_fault_mode Active load balancer fault mode\n");
     try writer.writeAll("# TYPE yoq_load_balancer_fault_mode gauge\n");
     try writeLoadBalancerFaultMode(writer);
+    try writer.writeAll("# HELP yoq_service_reconciler_events_total Service reconciler events observed by kind\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_events_total counter\n");
+    try writeEventCounters(writer, "yoq_service_reconciler_events_total", .container_runtime);
+    try writeEventCounters(writer, "yoq_service_reconciler_events_total", .health_checker);
+    try writeEventCounters(writer, "yoq_service_reconciler_events_total", .unspecified);
+
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
-    try writeShadowEventCounters(writer, .container_runtime);
-    try writeShadowEventCounters(writer, .health_checker);
-    try writeShadowEventCounters(writer, .unspecified);
+    try writeEventCounters(writer, "yoq_service_reconciler_shadow_events_total", .container_runtime);
+    try writeEventCounters(writer, "yoq_service_reconciler_shadow_events_total", .health_checker);
+    try writeEventCounters(writer, "yoq_service_reconciler_shadow_events_total", .unspecified);
 
     try writer.writeAll("# HELP yoq_service_registry_backfill_runs_total Legacy service_names backfill runs\n");
     try writer.writeAll("# TYPE yoq_service_registry_backfill_runs_total counter\n");
@@ -601,6 +607,23 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_rollout_cutover_steering_services gauge\n");
     try writer.print("yoq_service_rollout_cutover_steering_services{{state=\"blocked\"}} {d}\n", .{cutover.steering_blocked_services});
     try writer.print("yoq_service_rollout_cutover_steering_services{{state=\"missing_ports\"}} {d}\n", .{cutover.steering_no_port_services});
+
+    try writer.writeAll("# HELP yoq_service_discovery_readiness Canonical service discovery readiness checks\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_readiness gauge\n");
+    try writer.print("yoq_service_discovery_readiness{{check=\"backfill_complete\"}} {d}\n", .{@intFromBool(cutover.backfill_complete)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"audit_fresh\"}} {d}\n", .{@intFromBool(cutover.audit_fresh)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"audit_clean\"}} {d}\n", .{@intFromBool(cutover.shadow_clean)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"components_ready\"}} {d}\n", .{@intFromBool(cutover.components_ready)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"fault_modes_clear\"}} {d}\n", .{@intFromBool(cutover.fault_modes_clear)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"downgrade_safe\"}} {d}\n", .{@intFromBool(cutover.downgrade_safe)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"steering_ready\"}} {d}\n", .{@intFromBool(cutover.steering_ready)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"reconciler_ready\"}} {d}\n", .{@intFromBool(cutover.ready_for_reconciler_cutover)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"vip_ready\"}} {d}\n", .{@intFromBool(cutover.ready_for_vip_cutover)});
+
+    try writer.writeAll("# HELP yoq_service_discovery_steering_services Service counts relevant to VIP-backed discovery steering\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_steering_services gauge\n");
+    try writer.print("yoq_service_discovery_steering_services{{state=\"blocked\"}} {d}\n", .{cutover.steering_blocked_services});
+    try writer.print("yoq_service_discovery_steering_services{{state=\"missing_ports\"}} {d}\n", .{cutover.steering_no_port_services});
 
     try writer.writeAll("# HELP yoq_health_checker_running Whether the health checker scheduler is running\n");
     try writer.writeAll("# TYPE yoq_health_checker_running gauge\n");
@@ -819,22 +842,42 @@ fn writeLoadBalancerFaultMode(writer: anytype) !void {
         .{@intFromBool(mode == .endpoint_overflow)},
     );
 }
-fn writeShadowEventCounters(writer: anytype, source: service_reconciler.EventSource) !void {
+
+fn writeFlagMetrics(writer: anytype, metric_name: []const u8, flags: service_rollout.Flags) !void {
+    try writer.print("{s}{{flag=\"service_registry_v2\"}} {d}\n", .{ metric_name, @intFromBool(flags.service_registry_v2) });
+    try writer.print("{s}{{flag=\"service_registry_reconciler\"}} {d}\n", .{ metric_name, @intFromBool(flags.service_registry_reconciler) });
+    try writer.print("{s}{{flag=\"dns_returns_vip\"}} {d}\n", .{ metric_name, @intFromBool(flags.dns_returns_vip) });
+    try writer.print("{s}{{flag=\"l7_proxy_http\"}} {d}\n", .{ metric_name, @intFromBool(flags.l7_proxy_http) });
+}
+
+fn writeLimitMetrics(writer: anytype, metric_name: []const u8, recent_events_label: []const u8) !void {
+    try writer.print("{s}{{limit=\"dns_registry_services\"}} {d}\n", .{ metric_name, dns_registry.max_services });
+    try writer.print("{s}{{limit=\"dns_name_length\"}} {d}\n", .{ metric_name, dns_registry.max_name_len });
+    try writer.print("{s}{{limit=\"dns_bpf_services\"}} {d}\n", .{ metric_name, dns_prog.maps[0].max_entries });
+    try writer.print("{s}{{limit=\"load_balancer_vips\"}} {d}\n", .{ metric_name, lb_prog.maps[0].max_entries });
+    try writer.print("{s}{{limit=\"load_balancer_backends_per_vip\"}} {d}\n", .{ metric_name, lb_runtime.max_backends });
+    try writer.print("{s}{{limit=\"conntrack_entries\"}} {d}\n", .{ metric_name, lb_prog.maps[1].max_entries });
+    try writer.print("{s}{{limit=\"{s}\"}} {d}\n", .{ metric_name, recent_events_label, service_reconciler.max_recent_events });
+    try writer.print("{s}{{limit=\"health_workers\"}} {d}\n", .{ metric_name, health.max_worker_threads });
+    try writer.print("{s}{{limit=\"health_queued_checks\"}} {d}\n", .{ metric_name, health.max_queued_checks });
+}
+
+fn writeEventCounters(writer: anytype, metric_name: []const u8, source: service_reconciler.EventSource) !void {
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"container_registered\"}} {d}\n",
-        .{ source.label(), service_reconciler.eventCountBySource(source, .container_registered) },
+        "{s}{{source=\"{s}\",kind=\"container_registered\"}} {d}\n",
+        .{ metric_name, source.label(), service_reconciler.eventCountBySource(source, .container_registered) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"container_unregistered\"}} {d}\n",
-        .{ source.label(), service_reconciler.eventCountBySource(source, .container_unregistered) },
+        "{s}{{source=\"{s}\",kind=\"container_unregistered\"}} {d}\n",
+        .{ metric_name, source.label(), service_reconciler.eventCountBySource(source, .container_unregistered) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"endpoint_healthy\"}} {d}\n",
-        .{ source.label(), service_reconciler.eventCountBySource(source, .endpoint_healthy) },
+        "{s}{{source=\"{s}\",kind=\"endpoint_healthy\"}} {d}\n",
+        .{ metric_name, source.label(), service_reconciler.eventCountBySource(source, .endpoint_healthy) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"endpoint_unhealthy\"}} {d}\n",
-        .{ source.label(), service_reconciler.eventCountBySource(source, .endpoint_unhealthy) },
+        "{s}{{source=\"{s}\",kind=\"endpoint_unhealthy\"}} {d}\n",
+        .{ metric_name, source.label(), service_reconciler.eventCountBySource(source, .endpoint_unhealthy) },
     );
 }
 

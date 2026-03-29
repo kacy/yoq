@@ -64,6 +64,7 @@ pub const registerServiceName = @import("store/services.zig").registerServiceNam
 pub const unregisterServiceName = @import("store/services.zig").unregisterServiceName;
 pub const removeServiceNamesByName = @import("store/services.zig").removeServiceNamesByName;
 pub const lookupServiceNames = @import("store/services.zig").lookupServiceNames;
+pub const lookupServiceAddresses = @import("store/services.zig").lookupServiceAddresses;
 pub const listServiceNames = @import("store/services.zig").listServiceNames;
 pub const addNetworkPolicy = @import("store/services.zig").addNetworkPolicy;
 pub const removeNetworkPolicy = @import("store/services.zig").removeNetworkPolicy;

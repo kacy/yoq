@@ -582,7 +582,31 @@ test "setClusterDb sets and clears the db reference" {
     try std.testing.expect(registry_support.currentClusterDb() == null);
 }
 
-test "lookupClusterService resolves from service_names table" {
+test "lookupClusterService resolves service VIP from services table" {
+    const schema = @import("../state/schema.zig");
+
+    var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;
+    defer db.deinit();
+    schema.init(&db) catch return;
+
+    db.exec(
+        "INSERT INTO services (service_name, vip_address, lb_policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "remote-db", "10.43.3.5", "consistent_hash", @as(i64, 1000), @as(i64, 1000) },
+    ) catch return;
+
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
+    registry_support.resetClusterLookupFaultsForTest();
+    defer registry_support.resetClusterLookupFaultsForTest();
+    setClusterDb(&db);
+
+    const result = lookupClusterService("remote-db");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual([4]u8{ 10, 43, 3, 5 }, result.?);
+}
+
+test "lookupClusterService falls back to service_names table" {
     const schema = @import("../state/schema.zig");
 
     var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;

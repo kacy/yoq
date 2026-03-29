@@ -199,6 +199,26 @@ pub fn lookupClusterService(name: []const u8) ?[4]u8 {
     }
 
     const db = cluster_db orelse return null;
+    return lookupClusterServiceVip(db, name) orelse lookupClusterLegacyName(db, name);
+}
+
+fn lookupClusterServiceVip(db: *sqlite.Db, name: []const u8) ?[4]u8 {
+    const Row = struct { vip_address: sqlite.Text };
+
+    var stmt = db.prepare(
+        "SELECT vip_address FROM services WHERE service_name = ? LIMIT 1;",
+    ) catch return null;
+    defer stmt.deinit();
+
+    const row = stmt.oneAlloc(Row, std.heap.page_allocator, .{}, .{name}) catch return null;
+    if (row) |r| {
+        defer std.heap.page_allocator.free(r.vip_address.data);
+        return ip_mod.parseIp(r.vip_address.data);
+    }
+    return null;
+}
+
+fn lookupClusterLegacyName(db: *sqlite.Db, name: []const u8) ?[4]u8 {
     const Row = struct { ip_address: sqlite.Text };
 
     var stmt = db.prepare(
