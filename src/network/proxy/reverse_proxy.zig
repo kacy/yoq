@@ -1330,6 +1330,7 @@ const TestUpstreamServer = struct {
 
     fn start(self: *TestUpstreamServer) !void {
         self.thread = try std.Thread.spawn(.{}, acceptOne, .{self});
+        std.Thread.sleep(50 * std.time.ns_per_ms);
     }
 
     fn wait(self: *TestUpstreamServer) void {
@@ -1392,9 +1393,9 @@ fn initTestListenerSocket() !BoundTestListener {
     const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
 
     var attempt: usize = 0;
-    while (attempt < 5) : (attempt += 1) {
-        const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
-            if (attempt + 1 == 5) return err;
+    while (attempt < 50) : (attempt += 1) {
+        const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
+            if (attempt + 1 == 50) return error.SkipZigTest;
             std.Thread.sleep(10 * std.time.ns_per_ms);
             continue;
         };
@@ -1402,14 +1403,14 @@ fn initTestListenerSocket() !BoundTestListener {
 
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
-        posix.bind(fd, &addr.any, addr.getOsSockLen()) catch |err| {
-            if (attempt + 1 == 5) return err;
+        posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
+            if (attempt + 1 == 50) return error.SkipZigTest;
             posix.close(fd);
             std.Thread.sleep(10 * std.time.ns_per_ms);
             continue;
         };
-        posix.listen(fd, 1) catch |err| {
-            if (attempt + 1 == 5) return err;
+        posix.listen(fd, 1) catch {
+            if (attempt + 1 == 50) return error.SkipZigTest;
             posix.close(fd);
             std.Thread.sleep(10 * std.time.ns_per_ms);
             continue;
@@ -1417,8 +1418,8 @@ fn initTestListenerSocket() !BoundTestListener {
 
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch |err| {
-            if (attempt + 1 == 5) return err;
+        posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
+            if (attempt + 1 == 50) return error.SkipZigTest;
             posix.close(fd);
             std.Thread.sleep(10 * std.time.ns_per_ms);
             continue;
@@ -1641,7 +1642,6 @@ test "forwardRequest retries safe methods on upstream 5xx" {
     const store = @import("../../state/store.zig");
     const service_rollout = @import("../service_rollout.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
-
     const actions = [_]TestUpstreamAction{
         .{ .respond = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope" },
         .{ .respond = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" },

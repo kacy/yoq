@@ -765,7 +765,7 @@ test "bootstrap tracks configured proxy routes from service state" {
     try std.testing.expect(routes_snapshot.items[0].degraded);
 }
 
-test "bootstrap is inert when l7 proxy flag is disabled" {
+test "bootstrap no longer depends on l7 proxy compatibility flag" {
     const store = @import("../../state/store.zig");
 
     try store.initTestDb();
@@ -791,11 +791,11 @@ test "bootstrap is inert when l7 proxy flag is disabled" {
     const state = try snapshot(std.testing.allocator);
     defer state.deinit(std.testing.allocator);
 
-    try std.testing.expect(!state.enabled);
-    try std.testing.expect(!state.running);
-    try std.testing.expectEqual(@as(u32, 0), state.configured_services);
-    try std.testing.expectEqual(@as(u32, 0), state.routes);
-    try std.testing.expect(state.last_sync_at == null);
+    try std.testing.expect(state.enabled);
+    try std.testing.expect(state.running);
+    try std.testing.expectEqual(@as(u32, 1), state.configured_services);
+    try std.testing.expectEqual(@as(u32, 1), state.routes);
+    try std.testing.expect(state.last_sync_at != null);
 }
 
 test "snapshotServiceRoutes filters routes by service" {
@@ -1191,7 +1191,7 @@ test "route snapshots retain runtime failure details after recovery" {
     });
 
     bootstrapIfEnabled();
-    recordRouteFailure("api:/", .receive);
+    recordRouteFailure("api:default", .receive);
 
     {
         var routes_snapshot = try snapshotServiceRoutes(std.testing.allocator, "api");
@@ -1207,7 +1207,7 @@ test "route snapshots retain runtime failure details after recovery" {
         try std.testing.expect(routes_snapshot.items[0].last_failure_at != null);
     }
 
-    recordRouteRecovered("api:/");
+    recordRouteRecovered("api:default");
 
     {
         var routes_snapshot = try snapshotServiceRoutes(std.testing.allocator, "api");
@@ -1217,8 +1217,8 @@ test "route snapshots retain runtime failure details after recovery" {
         }
 
         try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
-        try std.testing.expect(!routes_snapshot.items[0].degraded);
-        try std.testing.expectEqual(RouteDegradedReason.none, routes_snapshot.items[0].degraded_reason);
+        try std.testing.expect(routes_snapshot.items[0].degraded);
+        try std.testing.expectEqual(RouteDegradedReason.steering_not_ready, routes_snapshot.items[0].degraded_reason);
         try std.testing.expectEqual(RouteFailureKind.receive, routes_snapshot.items[0].last_failure_kind.?);
         try std.testing.expect(routes_snapshot.items[0].last_failure_at != null);
     }

@@ -251,7 +251,7 @@ test "container bridge feeds canonical service discovery and events" {
 
     unregisterContainerService("abc123");
 
-    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCount(.container_unregistered));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCountBySource(.container_runtime, .container_unregistered));
     var remaining = try store.listServiceEndpoints(alloc, "api");

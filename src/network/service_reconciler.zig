@@ -1436,6 +1436,7 @@ test "audit stays clean after canonical bridge registration" {
     defer resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    try saveLocalContainerFixture("abc123", "api", "10.42.0.9");
 
     service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
 
@@ -1586,7 +1587,7 @@ test "audit pass repairs live dns registry drift" {
 
     bootstrapIfEnabled();
     dns_registry_support.resetRegistryForTest();
-    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 
     runAuditPassIfEnabled();
 
@@ -1638,7 +1639,7 @@ test "node loss and recovery reconcile authoritative DNS immediately" {
 
     noteNodeLost(7);
 
-    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 
     var endpoints_after_loss = try service_registry_runtime.snapshotServiceEndpoints(std.testing.allocator, "api");
     defer {
@@ -1867,7 +1868,7 @@ test "bootstrap quarantines stale endpoint rows for missing nodes" {
     }
     try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
     try std.testing.expectEqualStrings("draining", endpoints.items[0].admin_state);
-    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 
     var audit = try snapshotAuditState(std.testing.allocator);
     defer audit.deinit(std.testing.allocator);
@@ -1917,7 +1918,7 @@ test "bootstrap quarantines stale endpoint rows for missing local containers" {
     }
     try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
     try std.testing.expectEqualStrings("draining", endpoints.items[0].admin_state);
-    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 
     var audit = try snapshotAuditState(std.testing.allocator);
     defer audit.deinit(std.testing.allocator);
