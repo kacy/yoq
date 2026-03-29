@@ -442,9 +442,9 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeByte('"') catch return common.internalError();
     }
     writer.writeAll("],\"discovery_readiness\":{") catch return common.internalError();
-    writeReadinessSnapshot(writer, cutover) catch return common.internalError();
+    writeDiscoveryReadinessSnapshot(writer, cutover) catch return common.internalError();
     writer.writeAll("},\"cutover_readiness\":{") catch return common.internalError();
-    writeReadinessSnapshot(writer, cutover) catch return common.internalError();
+    writeCutoverReadinessSnapshot(writer, cutover) catch return common.internalError();
     writer.writeAll("},\"node_signals\":{") catch return common.internalError();
     writer.print(
         "\"lost_total\":{d},\"recovered_total\":{d},\"endpoints_changed_total\":{d},\"last_lost_node_id\":",
@@ -523,7 +523,32 @@ fn writeSourceCounts(writer: anytype, source: service_reconciler.EventSource) !v
     );
 }
 
-fn writeReadinessSnapshot(writer: anytype, readiness: service_cutover_readiness.Snapshot) !void {
+fn writeDiscoveryReadinessSnapshot(writer: anytype, readiness: service_cutover_readiness.Snapshot) !void {
+    try writer.print(
+        "\"backfill_complete\":{},\"audit_fresh\":{},\"audit_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"steering_ready\":{},\"steering_blocked_services\":{d},\"steering_no_port_services\":{d},\"reconciler_ready\":{},\"vip_ready\":{},\"blockers\":[",
+        .{
+            readiness.backfill_complete,
+            readiness.audit_fresh,
+            readiness.shadow_clean,
+            readiness.components_ready,
+            readiness.fault_modes_clear,
+            readiness.downgrade_safe,
+            readiness.steering_ready,
+            readiness.steering_blocked_services,
+            readiness.steering_no_port_services,
+            readiness.ready_for_reconciler_cutover,
+            readiness.ready_for_vip_cutover,
+        },
+    );
+    for (readiness.blockers.items, 0..) |blocker, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try json_helpers.writeJsonEscaped(writer, blocker);
+        try writer.writeByte('"');
+    }
+}
+
+fn writeCutoverReadinessSnapshot(writer: anytype, readiness: service_cutover_readiness.Snapshot) !void {
     try writer.print(
         "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"steering_ready\":{},\"steering_blocked_services\":{d},\"steering_no_port_services\":{d},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
         .{

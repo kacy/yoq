@@ -612,13 +612,13 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_discovery_readiness gauge\n");
     try writer.print("yoq_service_discovery_readiness{{check=\"backfill_complete\"}} {d}\n", .{@intFromBool(cutover.backfill_complete)});
     try writer.print("yoq_service_discovery_readiness{{check=\"audit_fresh\"}} {d}\n", .{@intFromBool(cutover.audit_fresh)});
-    try writer.print("yoq_service_discovery_readiness{{check=\"shadow_clean\"}} {d}\n", .{@intFromBool(cutover.shadow_clean)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"audit_clean\"}} {d}\n", .{@intFromBool(cutover.shadow_clean)});
     try writer.print("yoq_service_discovery_readiness{{check=\"components_ready\"}} {d}\n", .{@intFromBool(cutover.components_ready)});
     try writer.print("yoq_service_discovery_readiness{{check=\"fault_modes_clear\"}} {d}\n", .{@intFromBool(cutover.fault_modes_clear)});
     try writer.print("yoq_service_discovery_readiness{{check=\"downgrade_safe\"}} {d}\n", .{@intFromBool(cutover.downgrade_safe)});
     try writer.print("yoq_service_discovery_readiness{{check=\"steering_ready\"}} {d}\n", .{@intFromBool(cutover.steering_ready)});
-    try writer.print("yoq_service_discovery_readiness{{check=\"reconciler_cutover\"}} {d}\n", .{@intFromBool(cutover.ready_for_reconciler_cutover)});
-    try writer.print("yoq_service_discovery_readiness{{check=\"vip_cutover\"}} {d}\n", .{@intFromBool(cutover.ready_for_vip_cutover)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"reconciler_ready\"}} {d}\n", .{@intFromBool(cutover.ready_for_reconciler_cutover)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"vip_ready\"}} {d}\n", .{@intFromBool(cutover.ready_for_vip_cutover)});
 
     try writer.writeAll("# HELP yoq_service_discovery_steering_services Service counts relevant to VIP-backed discovery steering\n");
     try writer.writeAll("# TYPE yoq_service_discovery_steering_services gauge\n");
