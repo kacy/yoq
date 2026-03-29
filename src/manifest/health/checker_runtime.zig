@@ -1,5 +1,6 @@
 const std = @import("std");
 const log = @import("../../lib/log.zig");
+const service_observability = @import("../../network/service_observability.zig");
 const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
 const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 const types = @import("types.zig");
@@ -83,10 +84,14 @@ fn workerLoop(_: usize) void {
             continue;
         };
 
+        const started_ns = std.time.nanoTimestamp();
         const success = checks.runCheck(item.container_ip, item.config);
         const completed_at = std.time.timestamp();
         const completion = applyCompletedCheck(item, success, completed_at);
         registry.noteCompletedCheck(completion == .stale, completed_at);
+        const elapsed_ns = std.time.nanoTimestamp() - started_ns;
+        const latency_seconds = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / @as(f64, std.time.ns_per_s);
+        service_observability.noteHealthCheckCompleted(item.serviceName(), completion == .stale, latency_seconds);
     }
 }
 
@@ -169,12 +174,14 @@ pub fn updateState(entry: *types.ServiceHealth, success: bool) Transition {
             .starting => {
                 entry.status = .healthy;
                 entry.flap_count += 1;
+                service_observability.noteEndpointFlap(entry.serviceName());
                 log.info("health: {s} is now healthy", .{entry.serviceName()});
                 return .became_healthy;
             },
             .unhealthy => {
                 entry.status = .healthy;
                 entry.flap_count += 1;
+                service_observability.noteEndpointFlap(entry.serviceName());
                 log.info("health: {s} recovered, now healthy", .{entry.serviceName()});
                 return .became_healthy;
             },
@@ -190,6 +197,7 @@ pub fn updateState(entry: *types.ServiceHealth, success: bool) Transition {
             if (entry.consecutive_failures >= entry.config.retries) {
                 entry.status = .unhealthy;
                 entry.flap_count += 1;
+                service_observability.noteEndpointFlap(entry.serviceName());
                 log.warn("health: {s} failed to start (after {d} retries)", .{
                     entry.serviceName(),
                     entry.config.retries,
@@ -201,6 +209,7 @@ pub fn updateState(entry: *types.ServiceHealth, success: bool) Transition {
             if (entry.consecutive_failures >= entry.config.retries) {
                 entry.status = .unhealthy;
                 entry.flap_count += 1;
+                service_observability.noteEndpointFlap(entry.serviceName());
                 log.warn("health: {s} is now unhealthy (after {d} consecutive failures)", .{
                     entry.serviceName(),
                     entry.config.retries,

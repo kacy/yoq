@@ -5,6 +5,7 @@ const log = @import("../../lib/log.zig");
 const ip_mod = @import("../ip.zig");
 const policy = @import("../policy.zig");
 const packet_support = @import("packet_support.zig");
+const service_observability = @import("../service_observability.zig");
 const rollout = @import("../service_rollout.zig");
 
 const ebpf = if (builtin.os.tag == .linux) @import("../ebpf.zig") else struct {
@@ -774,6 +775,7 @@ fn replaceBpfBackendsLocked(name: []const u8, dns_ip: [4]u8, backends: []const S
         var backend_ips: [max_backends_per_service][4]u8 = undefined;
         for (backends, 0..) |backend, idx| backend_ips[idx] = backend.ip;
         lb.replaceBackends(dns_ip, backend_ips[0..backends.len]) catch |err| {
+            service_observability.noteBpfSyncFailure(name, .load_balancer);
             log.warn("dns: failed to replace load balancer backends for {s}: {}", .{ name, err });
         };
     }
@@ -806,6 +808,7 @@ fn shouldSkipDnsInterceptorApply(operation: []const u8, name: []const u8) bool {
     if (dns_interceptor_fault_mode == .none) return false;
 
     dns_interceptor_fault_injections += 1;
+    service_observability.noteBpfSyncFailure(name, .dns_interceptor);
     log.warn("dns: injected interceptor fault mode={s} operation={s} name='{s}'", .{
         dns_interceptor_fault_mode.label(),
         operation,
@@ -821,6 +824,7 @@ fn shouldSkipLoadBalancerAdd(name: []const u8, vip: [4]u8, backend_ip: [4]u8) bo
     if (load_balancer_fault_mode == .none) return false;
 
     load_balancer_fault_injections += 1;
+    service_observability.noteBpfSyncFailure(name, .load_balancer);
     log.warn("dns: injected load balancer fault mode={s} service='{s}' vip={d}.{d}.{d}.{d} backend={d}.{d}.{d}.{d}", .{
         load_balancer_fault_mode.label(),
         name,

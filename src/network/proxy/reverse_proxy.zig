@@ -12,6 +12,8 @@ const proxy_loop_header = "X-Yoq-Proxy";
 const x_forwarded_for_header = "X-Forwarded-For";
 const x_forwarded_host_header = "X-Forwarded-Host";
 const x_forwarded_proto_header = "X-Forwarded-Proto";
+const traceparent_header = "traceparent";
+const tracestate_header = "tracestate";
 
 pub const ProxyResponse = struct {
     status: http.StatusCode,
@@ -126,8 +128,9 @@ pub const ReverseProxy = struct {
                     methodString(request.method),
                     host,
                     request.path_only,
-                    route.service,
+                    matched_route.service,
                 });
+                route.deinit(self.allocator);
                 return .{ .response = .{
                     .status = .service_unavailable,
                     .body = "{\"error\":\"no eligible upstream\"}",
@@ -239,6 +242,8 @@ pub const ReverseProxy = struct {
         const parsed = (http.parseRequest(raw_request) catch return error.BadRequest) orelse return error.BadRequest;
         const inbound_host = http.findHeaderValue(parsed.headers_raw, "Host") orelse plan.host;
         const prior_forwarded_for = http.findHeaderValue(parsed.headers_raw, x_forwarded_for_header);
+        const inbound_traceparent = http.findHeaderValue(parsed.headers_raw, traceparent_header);
+        const inbound_tracestate = http.findHeaderValue(parsed.headers_raw, tracestate_header);
 
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(self.allocator);
@@ -264,6 +269,8 @@ pub const ReverseProxy = struct {
             if (startsWithHeaderName(line, x_forwarded_for_header)) continue;
             if (startsWithHeaderName(line, x_forwarded_host_header)) continue;
             if (startsWithHeaderName(line, x_forwarded_proto_header)) continue;
+            if (startsWithHeaderName(line, traceparent_header)) continue;
+            if (startsWithHeaderName(line, tracestate_header)) continue;
 
             try writer.writeAll(line);
             try writer.writeAll("\r\n");
@@ -280,6 +287,18 @@ pub const ReverseProxy = struct {
         }
         try writer.print("{s}: {s}\r\n", .{ x_forwarded_host_header, inbound_host });
         try writer.print("{s}: http\r\n", .{x_forwarded_proto_header});
+        if (inbound_traceparent) |value| {
+            if (isValidTraceparent(value)) {
+                try writer.print("{s}: {s}\r\n", .{ traceparent_header, value });
+                if (inbound_tracestate) |state| {
+                    try writer.print("{s}: {s}\r\n", .{ tracestate_header, state });
+                }
+            } else {
+                try writeGeneratedTraceHeaders(writer);
+            }
+        } else {
+            try writeGeneratedTraceHeaders(writer);
+        }
         try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
         try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
         try writer.writeAll("Connection: close\r\n\r\n");
@@ -442,6 +461,35 @@ fn startsWithHeaderName(line: []const u8, name: []const u8) bool {
     if (line.len <= name.len or line[name.len] != ':') return false;
     for (line[0..name.len], name) |a, b| {
         if (std.ascii.toLower(a) != std.ascii.toLower(b)) return false;
+    }
+    return true;
+}
+
+fn writeGeneratedTraceHeaders(writer: anytype) !void {
+    var trace_hi: [16]u8 = undefined;
+    var trace_lo: [16]u8 = undefined;
+    var parent_id: [16]u8 = undefined;
+    log.generateTraceId(&trace_hi);
+    log.generateTraceId(&trace_lo);
+    log.generateTraceId(&parent_id);
+    try writer.print(
+        "{s}: 00-{s}{s}-{s}-01\r\n",
+        .{ traceparent_header, trace_hi, trace_lo, parent_id },
+    );
+}
+
+fn isValidTraceparent(value: []const u8) bool {
+    if (value.len != 55) return false;
+    if (value[2] != '-' or value[35] != '-' or value[52] != '-') return false;
+    return isLowerHex(value[0..2]) and
+        isLowerHex(value[3..35]) and
+        isLowerHex(value[36..52]) and
+        isLowerHex(value[53..55]);
+}
+
+fn isLowerHex(value: []const u8) bool {
+    for (value) |char| {
+        if (!std.ascii.isDigit(char) and (char < 'a' or char > 'f')) return false;
     }
     return true;
 }
@@ -615,10 +663,10 @@ fn readResponse(alloc: std.mem.Allocator, fd: posix.socket_t, max_bytes: usize) 
     }
     if (total == 0) return error.ReceiveFailed;
 
-    if (alloc.resize(response, total)) {
-        response = response[0..total];
+    if (total < response.len) {
+        response = try alloc.realloc(response, total);
     }
-    return response[0..total];
+    return response;
 }
 
 const ReadRequestError = error{
@@ -791,7 +839,7 @@ test "handleRequest returns forward plan for a routable request" {
             try std.testing.expectEqualStrings("/v1/users", plan.path);
             try std.testing.expectEqualStrings("api", plan.route.service);
             try std.testing.expectEqualStrings("10.42.0.9", plan.upstream.address);
-            try std.testing.expectEqualStrings("api", plan.outbound_host);
+            try std.testing.expectEqualStrings("api.internal", plan.outbound_host);
         },
         .response => return error.TestUnexpectedResult,
     }
@@ -1046,7 +1094,7 @@ test "buildForwardRequest preserves body and content length" {
     defer plan.deinit(std.testing.allocator);
 
     const forwarded = try proxy.buildForwardRequest(
-        "POST /submit HTTP/1.1\r\nHost: api.internal\r\nContent-Length: 999\r\n\r\nhello",
+        "POST /submit HTTP/1.1\r\nHost: api.internal\r\nContent-Length: 5\r\n\r\nhello",
         &plan,
     );
     defer std.testing.allocator.free(forwarded);
@@ -1120,6 +1168,131 @@ test "buildForwardRequest rewrites forwarded headers from client context" {
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Forwarded-Proto: http\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Forwarded-Host: forged\r\n") == null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Forwarded-Proto: https\r\n") == null);
+}
+
+test "buildForwardRequest preserves traceparent and tracestate" {
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .preserve_host = true,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var plan = ForwardPlan{
+        .method = .GET,
+        .path = try std.testing.allocator.dupe(u8, "/"),
+        .host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .route = .{
+            .name = try std.testing.allocator.dupe(u8, "api:/"),
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .vip_address = try std.testing.allocator.dupe(u8, "10.43.0.2"),
+            .host = try std.testing.allocator.dupe(u8, "api.internal"),
+            .path_prefix = try std.testing.allocator.dupe(u8, "/"),
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .degraded = false,
+            .degraded_reason = .none,
+            .last_failure_kind = null,
+            .last_failure_at = null,
+            .retries = 0,
+            .connect_timeout_ms = 1000,
+            .request_timeout_ms = 5000,
+            .preserve_host = true,
+            .steering_desired_ports = 0,
+            .steering_applied_ports = 0,
+            .steering_ready = false,
+            .steering_blocked = true,
+            .steering_drifted = false,
+            .steering_blocked_reason = .rollout_disabled,
+        },
+        .upstream = .{
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .endpoint_id = try std.testing.allocator.dupe(u8, "api-1"),
+            .address = try std.testing.allocator.dupe(u8, "10.42.0.9"),
+            .port = 8080,
+            .eligible = true,
+        },
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    const forwarded = try proxy.buildForwardRequest(
+        "GET / HTTP/1.1\r\nHost: api.internal\r\ntraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\ntracestate: vendor=value\r\n\r\n",
+        &plan,
+    );
+    defer std.testing.allocator.free(forwarded);
+
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "tracestate: vendor=value\r\n") != null);
+}
+
+test "buildForwardRequest generates traceparent when absent" {
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .preserve_host = true,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var plan = ForwardPlan{
+        .method = .GET,
+        .path = try std.testing.allocator.dupe(u8, "/"),
+        .host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .route = .{
+            .name = try std.testing.allocator.dupe(u8, "api:/"),
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .vip_address = try std.testing.allocator.dupe(u8, "10.43.0.2"),
+            .host = try std.testing.allocator.dupe(u8, "api.internal"),
+            .path_prefix = try std.testing.allocator.dupe(u8, "/"),
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .degraded = false,
+            .degraded_reason = .none,
+            .last_failure_kind = null,
+            .last_failure_at = null,
+            .retries = 0,
+            .connect_timeout_ms = 1000,
+            .request_timeout_ms = 5000,
+            .preserve_host = true,
+            .steering_desired_ports = 0,
+            .steering_applied_ports = 0,
+            .steering_ready = false,
+            .steering_blocked = true,
+            .steering_drifted = false,
+            .steering_blocked_reason = .rollout_disabled,
+        },
+        .upstream = .{
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .endpoint_id = try std.testing.allocator.dupe(u8, "api-1"),
+            .address = try std.testing.allocator.dupe(u8, "10.42.0.9"),
+            .port = 8080,
+            .eligible = true,
+        },
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    const forwarded = try proxy.buildForwardRequest(
+        "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n",
+        &plan,
+    );
+    defer std.testing.allocator.free(forwarded);
+
+    const traceparent = http.findHeaderValue(forwarded, "traceparent").?;
+    try std.testing.expect(isValidTraceparent(traceparent));
+    try std.testing.expect(http.findHeaderValue(forwarded, "tracestate") == null);
 }
 
 const TestUpstreamAction = union(enum) {
@@ -1613,8 +1786,8 @@ test "forwardRequest retries onto a different endpoint after circuit opens" {
         .weight = 1,
         .admin_state = "active",
         .generation = 1,
-        .registered_at = 1000,
-        .last_seen_at = 1000,
+        .registered_at = 1001,
+        .last_seen_at = 1001,
     });
     try store.upsertServiceEndpoint(.{
         .service_name = "api",
@@ -1626,8 +1799,8 @@ test "forwardRequest retries onto a different endpoint after circuit opens" {
         .weight = 1,
         .admin_state = "active",
         .generation = 1,
-        .registered_at = 1001,
-        .last_seen_at = 1001,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
     });
     proxy_runtime.recordEndpointFailure("api-1");
     proxy_runtime.recordEndpointFailure("api-1");

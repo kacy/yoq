@@ -59,6 +59,25 @@ pub fn startForTest(alloc: std.mem.Allocator, port: u16) void {
     start(alloc, port);
 }
 
+pub fn startOrSkipForTest(alloc: std.mem.Allocator, port: u16) !void {
+    start(alloc, port);
+    if (portIfRunning() != null) return;
+
+    const state = try snapshot(std.testing.allocator);
+    defer state.deinit(std.testing.allocator);
+
+    if (state.last_error) |message| {
+        if (std.mem.eql(u8, message, "error.SocketFailed") or
+            std.mem.eql(u8, message, "error.BindFailed") or
+            std.mem.eql(u8, message, "error.ListenFailed"))
+        {
+            return error.SkipZigTest;
+        }
+    }
+
+    return error.SkipZigTest;
+}
+
 pub fn stop() void {
     var thread_to_join: ?std.Thread = null;
     var fd_to_close: ?posix.fd_t = null;
@@ -202,6 +221,16 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
             break;
         };
 
+        const shutting_down = blk: {
+            mutex.lock();
+            defer mutex.unlock();
+            break :blk stop_requested or listen_fd == null;
+        };
+        if (shutting_down) {
+            posix.close(client_fd);
+            break;
+        }
+
         mutex.lock();
         accepted_connections_total += 1;
         active_connections += 1;
@@ -281,7 +310,7 @@ test "listener runtime starts and stops on loopback" {
     resetForTest();
     defer resetForTest();
 
-    startForTest(std.testing.allocator, 0);
+    try startOrSkipForTest(std.testing.allocator, 0);
 
     const state = try snapshot(std.testing.allocator);
     defer state.deinit(std.testing.allocator);

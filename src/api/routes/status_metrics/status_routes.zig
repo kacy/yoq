@@ -440,7 +440,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         json_helpers.writeJsonEscaped(writer, service_name) catch return common.internalError();
         writer.writeByte('"') catch return common.internalError();
     }
-    writer.writeAll("},\"cutover_readiness\":{") catch return common.internalError();
+    writer.writeAll("],\"cutover_readiness\":{") catch return common.internalError();
     writer.print(
         "\"backfill_complete\":{},\"audit_fresh\":{},\"shadow_clean\":{},\"components_ready\":{},\"fault_modes_clear\":{},\"downgrade_safe\":{},\"steering_ready\":{},\"steering_blocked_services\":{d},\"steering_no_port_services\":{d},\"ready_for_reconciler_cutover\":{},\"ready_for_vip_cutover\":{},\"blockers\":[",
         .{

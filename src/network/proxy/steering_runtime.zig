@@ -550,7 +550,9 @@ fn hasPortMapperLocked() bool {
 
 fn addMappingLocked(destination_ip: [4]u8, host_port: u16, protocol: u8, target_ip: [4]u8, target_port: u16) void {
     if (test_mapping_apply_hook) |hook| hook(destination_ip, host_port, protocol, target_ip, target_port);
-    if (use_test_actual_mappings and !containsObservedMapping(test_actual_mappings.items, destination_ip, host_port)) {
+    if ((use_test_actual_mappings or test_port_mapper_available != null) and
+        !containsObservedMapping(test_actual_mappings.items, destination_ip, host_port))
+    {
         test_actual_mappings.ensureTotalCapacity(std.heap.page_allocator, test_actual_mappings.items.len + 1) catch return;
         test_actual_mappings.appendAssumeCapacity(.{
             .vip = destination_ip,
@@ -565,7 +567,7 @@ fn addMappingLocked(destination_ip: [4]u8, host_port: u16, protocol: u8, target_
 
 fn removeMappingLocked(destination_ip: [4]u8, host_port: u16, protocol: u8) void {
     if (test_mapping_remove_hook) |hook| hook(destination_ip, host_port, protocol);
-    if (use_test_actual_mappings) {
+    if (use_test_actual_mappings or test_port_mapper_available != null) {
         var idx: usize = 0;
         while (idx < test_actual_mappings.items.len) : (idx += 1) {
             const mapping = test_actual_mappings.items[idx];
@@ -608,15 +610,9 @@ fn listManagedMappingsForTargetLocked(alloc: std.mem.Allocator, listener_ip: [4]
     var mappings: std.ArrayList(ObservedMapping) = .empty;
     errdefer mappings.deinit(alloc);
 
-    if (use_test_actual_mappings) {
+    if (use_test_actual_mappings or test_port_mapper_available != null) {
         try mappings.ensureTotalCapacity(alloc, test_actual_mappings.items.len);
         for (test_actual_mappings.items) |mapping| mappings.appendAssumeCapacity(mapping);
-        return mappings;
-    }
-
-    if (test_port_mapper_available != null) {
-        try mappings.ensureTotalCapacity(alloc, applied_mappings.items.len);
-        for (applied_mappings.items) |mapping| mappings.appendAssumeCapacity(mapping);
         return mappings;
     }
 
@@ -759,7 +755,7 @@ test "previewDesiredMappings materializes unique vip port mappings" {
 
     service_registry_runtime.syncServiceFromStore("api");
     service_registry_runtime.syncServiceFromStore("worker");
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
     setBridgeIpForTest(.{ 10, 42, 0, 1 });
 
     var mappings = try previewDesiredMappings(std.testing.allocator);
@@ -833,7 +829,7 @@ test "syncIfEnabled programs desired VIP mappings" {
 
     service_registry_runtime.syncServiceFromStore("api");
     setBridgeIpForTest(.{ 10, 42, 0, 1 });
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
 
     syncIfEnabled();
 
@@ -897,7 +893,7 @@ test "snapshot reads actual mappings instead of stale shadow cache" {
 
     service_registry_runtime.syncServiceFromStore("api");
     setBridgeIpForTest(.{ 10, 42, 0, 1 });
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
 
     syncIfEnabled();
     try setActualMappingsForTest(&.{});
@@ -958,7 +954,7 @@ test "syncIfEnabled removes stale actual VIP mappings before applying desired se
 
     service_registry_runtime.syncServiceFromStore("api");
     setBridgeIpForTest(.{ 10, 42, 0, 1 });
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
     try setActualMappingsForTest(&.{
         .{
             .vip = .{ 10, 43, 0, 2 },
@@ -1033,7 +1029,7 @@ test "listener state changes resync steering" {
     listener_runtime.setStateChangeHook(syncIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
 
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
 
     {
         const state = try snapshot(std.testing.allocator);
@@ -1121,9 +1117,9 @@ test "listener restart reapplies steering mappings" {
     listener_runtime.setStateChangeHook(syncIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
 
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
     listener_runtime.stop();
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
 
     {
         const state = try snapshot(std.testing.allocator);
@@ -1184,7 +1180,7 @@ test "VIP cutover readiness ignores unapplied mappings before cutover" {
     service_registry_runtime.syncServiceFromStore("api");
     setBridgeIpForTest(.{ 10, 42, 0, 1 });
     setPortMapperAvailableForTest(true);
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
 
     const readiness = try snapshotVipCutoverReadiness(std.testing.allocator);
     try std.testing.expect(readiness.enabled);

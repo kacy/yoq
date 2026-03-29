@@ -1,6 +1,7 @@
 const std = @import("std");
 const log = @import("../../lib/log.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
+const service_observability = @import("../../network/service_observability.zig");
 const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
 const store = @import("../../state/store.zig");
 const types = @import("types.zig");
@@ -170,6 +171,7 @@ pub fn resetForTest() void {
     dropped_queue_full_total = 0;
     last_scheduled_at = null;
     last_completed_at = null;
+    service_observability.resetForTest();
 }
 
 pub fn enqueueCheck(item: types.CheckItem, scheduled_at: i64) types.HealthError!bool {
@@ -184,6 +186,7 @@ pub fn enqueueCheck(item: types.CheckItem, scheduled_at: i64) types.HealthError!
     work_queue.append(std.heap.page_allocator, item) catch return types.HealthError.OutOfMemory;
     scheduled_total += 1;
     last_scheduled_at = scheduled_at;
+    service_observability.noteHealthCheckScheduled(item.serviceName());
     return true;
 }
 

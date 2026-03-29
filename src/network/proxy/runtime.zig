@@ -1169,6 +1169,19 @@ test "route snapshots retain runtime failure details after recovery" {
         .created_at = 1000,
         .updated_at = 1000,
     });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
 
     bootstrapIfEnabled();
     recordRouteFailure("api:/", .receive);
