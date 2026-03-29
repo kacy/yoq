@@ -832,18 +832,7 @@ fn computeAuditMismatch(
         runtime_endpoints.deinit(alloc);
     }
 
-    const expected_vip = ip_mod.parseIp(runtime_service.?.vip_address) orelse return error.StoreReadFailed;
     const actual_dns_ip = dns_registry_support.lookupLocalService(service_name);
-    if (!optionalIpEqual(actual_dns_ip, expected_vip)) {
-        return .{
-            .kind = .vip,
-            .reason = try std.fmt.allocPrint(
-                alloc,
-                "dns vip mismatch expected={d}.{d}.{d}.{d}",
-                .{ expected_vip[0], expected_vip[1], expected_vip[2], expected_vip[3] },
-            ),
-        };
-    }
 
     var desired_ips: std.ArrayList([4]u8) = .empty;
     defer desired_ips.deinit(alloc);
@@ -860,6 +849,26 @@ fn computeAuditMismatch(
             .container_id = try alloc.dupe(u8, endpoint.container_id),
             .ip = endpoint_ip,
         });
+    }
+
+    if (rollout.current().dns_returns_vip) {
+        const expected_vip = ip_mod.parseIp(runtime_service.?.vip_address) orelse return error.StoreReadFailed;
+        if (!optionalIpEqual(actual_dns_ip, expected_vip)) {
+            return .{
+                .kind = .vip,
+                .reason = try std.fmt.allocPrint(
+                    alloc,
+                    "dns vip mismatch expected={d}.{d}.{d}.{d}",
+                    .{ expected_vip[0], expected_vip[1], expected_vip[2], expected_vip[3] },
+                ),
+            };
+        }
+    } else if (desired_ips.items.len == 0) {
+        if (actual_dns_ip != null) {
+            return .{ .kind = .vip, .reason = try alloc.dupe(u8, "dns registry should be empty when no eligible endpoints remain") };
+        }
+    } else if (actual_dns_ip == null or !containsIp(desired_ips.items, actual_dns_ip.?)) {
+        return .{ .kind = .vip, .reason = try alloc.dupe(u8, "dns registry lookup does not match any eligible endpoint") };
     }
 
     var registry_endpoints = dns_registry_support.snapshotServiceEntries(alloc, service_name) catch return error.StoreReadFailed;

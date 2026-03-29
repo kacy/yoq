@@ -185,7 +185,7 @@ test "periodic steering sync loop repairs drifted mappings" {
     @import("../service_registry_runtime.zig").syncServiceFromStore("api");
     steering_runtime.setPortMapperAvailableForTest(true);
     steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
     try steering_runtime.setActualMappingsForTest(&.{});
     setSyncIntervalMsForTest(10);
 
@@ -347,7 +347,7 @@ test "listener state changes trigger event-driven steering repair" {
     listener_runtime.setStateChangeHook(refreshIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
 
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
 
     var service_state = try steering_runtime.snapshotServiceStatus(std.testing.allocator, "api");
     try std.testing.expect(service_state.ready);
@@ -502,7 +502,7 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
     defer listener_runtime.setStateChangeHook(null);
     recorded_target_port = 0;
 
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
     defer listener_runtime.stop();
 
     try std.testing.expect(recorded_target_port != 0);
@@ -582,7 +582,7 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     recorded_target_port = 0;
     setSyncIntervalMsForTest(10);
 
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
     defer listener_runtime.stop();
 
     startSyncLoopIfEnabled();

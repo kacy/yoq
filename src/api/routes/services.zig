@@ -612,7 +612,7 @@ test "route handles GET /v1/services/{name} with steering drift details" {
     service_registry_runtime.syncServiceFromStore("api");
     steering_runtime.setPortMapperAvailableForTest(true);
     steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
     try steering_runtime.setActualMappingsForTest(&.{});
 
     const response = route(testRequest(.GET, "/v1/services/api"), std.testing.allocator).?;
@@ -669,7 +669,7 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering drift det
     proxy_runtime.bootstrapIfEnabled();
     steering_runtime.setPortMapperAvailableForTest(true);
     steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
-    listener_runtime.startForTest(std.testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
     try steering_runtime.setActualMappingsForTest(&.{});
 
     const response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;

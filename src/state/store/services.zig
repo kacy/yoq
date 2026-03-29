@@ -224,7 +224,7 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
     const now = std.time.timestamp();
 
     db.exec(
-        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?);",
+        "INSERT INTO services (service_name, vip_address, lb_policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?);",
         .{},
         .{ service_name, vip_address, lb_policy, now, now },
     ) catch return StoreError.WriteFailed;

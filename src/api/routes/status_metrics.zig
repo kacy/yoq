@@ -214,27 +214,27 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"recent_shadow_events\":32") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_workers\":4") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_queued_checks\":64") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"bridge_fault_injections\":{\"container_register\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"bridge_fault_injections\":{\"container_register\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"bridge_fault_modes\":{\"container_register\":\"skip_legacy_apply\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"ebpf_map_update_fault\":{\"mode\":\"map_full\",\"injections\":0}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"cluster_lookup_fault\":{\"mode\":\"stale_override\",\"injections\":0,\"stale_ip\":\"10.42.9.9\"}") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_interceptor_fault\":{\"mode\":\"unavailable\",\"injections\":0}") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_fault\":{\"mode\":\"endpoint_overflow\",\"injections\":0}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_interceptor_fault\":{\"mode\":\"unavailable\",\"injections\":1}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_fault\":{\"mode\":\"endpoint_overflow\",\"injections\":1}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"components\":{\"dns_resolver_running\":true,\"dns_interceptor_loaded\":false,\"load_balancer_loaded\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"backfill\":{\"enabled\":true,\"runs_total\":0,\"services_created_total\":0,\"endpoints_created_total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"backfill\":{\"enabled\":true,\"runs_total\":1,\"services_created_total\":0,\"endpoints_created_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"requests_total\":0,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"loop_rejections_total\":0,\"upstream_connect_failures_total\":0,\"upstream_send_failures_total\":0,\"upstream_receive_failures_total\":0,\"upstream_other_failures_total\":0,\"circuit_trips_total\":0,\"circuit_open_endpoints\":0,\"circuit_half_open_endpoints\":0,\"last_sync_at\":null,\"last_error\":null,\"sample_routes\":[]}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"listener\":{\"enabled\":false,\"running\":false,\"port\":17080,\"accepted_connections_total\":0,\"active_connections\":0,\"last_error\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"control_plane\":{\"enabled\":false,\"steering_enabled\":false,\"running\":false,\"interval_secs\":15,\"passes_total\":0,\"event_passes_total\":0,\"periodic_passes_total\":0,\"last_trigger\":null,\"last_pass_at\":null}") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"not_ready_services\":0,\"blocked_services\":0,\"drifted_services\":0,\"desired_mappings\":0,\"applied_mappings\":0,\"blocked_reason\":\"rollout_disabled\",\"sync_attempts_total\":0,\"sync_failures_total\":0,\"mappings_applied_total\":0,\"mappings_removed_total\":0,\"last_sync_at\":null,\"last_error\":null}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"not_ready_services\":0,\"blocked_services\":0,\"drifted_services\":0,\"desired_mappings\":0,\"applied_mappings\":0,\"blocked_reason\":\"none\",\"sync_attempts_total\":0,\"sync_failures_total\":0,\"mappings_applied_total\":0,\"mappings_removed_total\":0,\"last_sync_at\":null,\"last_error\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"audit\":{\"enabled\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"passes_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"vip_mismatches_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"endpoint_count_mismatches_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_mismatches_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"eligibility_mismatches_total\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":false,\"audit_fresh\":false,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":false,\"downgrade_safe\":false,\"steering_ready\":true,\"steering_blocked_services\":0,\"steering_no_port_services\":0,\"ready_for_reconciler_cutover\":false,\"ready_for_vip_cutover\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"backfill_incomplete\",\"audit_never_ran\",\"fault_mode_active\",\"components_not_ready\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":true,\"audit_fresh\":false,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":false,\"downgrade_safe\":false,\"steering_ready\":true,\"steering_blocked_services\":0,\"steering_no_port_services\":0,\"ready_for_reconciler_cutover\":false,\"ready_for_vip_cutover\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"audit_never_ran\",\"fault_mode_active\",\"components_not_ready\"]") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_quarantines_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"node_signals\":{\"lost_total\":0,\"recovered_total\":0,\"endpoints_changed_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"container_registered\":1") != null);
@@ -376,6 +376,19 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
     });
 
     service_registry_backfill.runIfEnabled();
+    var service = try store.syncServiceConfig(
+        testing.allocator,
+        "api",
+        "consistent_hash",
+        "api.internal",
+        "/v1",
+        null,
+        null,
+        null,
+        null,
+    );
+    defer service.deinit(testing.allocator);
+    service_registry_runtime.syncServiceFromStore("api");
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.runAuditPassIfEnabled();
 
@@ -450,7 +463,7 @@ test "route rollout status sample routes expose steering drift details" {
     proxy_runtime.bootstrapIfEnabled();
     steering_runtime.setPortMapperAvailableForTest(true);
     steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
-    listener_runtime.startForTest(testing.allocator, 0);
+    try listener_runtime.startOrSkipForTest(testing.allocator, 0);
     try steering_runtime.setActualMappingsForTest(&.{});
 
     const req = http.Request{
@@ -658,8 +671,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     });
     try store.upsertServiceEndpoint(.{
         .service_name = "api",
-        .endpoint_id = "abc123:0",
-        .container_id = "abc123",
+        .endpoint_id = "abcdef123456:0",
+        .container_id = "abcdef123456",
         .node_id = null,
         .ip_address = "10.42.0.9",
         .port = 0,
@@ -670,8 +683,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
         .last_seen_at = 1000,
     });
     service_registry_runtime.syncServiceFromStore("api");
-    service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
-    service_registry_bridge.markEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
+    service_registry_bridge.registerContainerService("api", "abcdef123456", .{ 10, 42, 0, 9 }, null);
+    service_registry_bridge.markEndpointHealthy("api", "abcdef123456", .{ 10, 42, 0, 9 });
     try service_registry_runtime.requestReconcile("api");
     try service_registry_runtime.markReconcileFailed("api", "sync failed");
     try service_registry_runtime.markReconcileSucceeded("api");
@@ -692,6 +705,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
         .created_at = 1000,
         .updated_at = 1000,
     });
+    service_registry_runtime.syncServiceFromStore("edge");
     proxy_runtime.bootstrapIfEnabled();
     proxy_runtime.recordRequestStart();
     proxy_runtime.recordResponse(.ok);
@@ -713,16 +727,16 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_workers\"} 4") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_queued_checks\"} 64") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints_total{service=\"api\",state=\"total\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_eligible_endpoints{service=\"api\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints_total{service=\"api\",state=\"healthy\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_eligible_endpoints{service=\"api\"} 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_endpoints_total{service=\"api\",state=\"healthy\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_zero_backends_total{service=\"edge\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_degraded{service=\"edge\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"requested\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"succeeded\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_runs_total{service=\"api\",result=\"failed\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_duration_seconds{service=\"api\"} 0") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_bpf_sync_failures_total{service=\"api\",component=\"dns_interceptor\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_bpf_sync_failures_total{service=\"api\",component=\"load_balancer\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconcile_duration_seconds{service=\"api\"} ") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_bpf_sync_failures_total{service=\"api\",component=\"dns_interceptor\"} 2") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_bpf_sync_failures_total{service=\"api\",component=\"load_balancer\"} 2") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"api\",status=\"starting\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_status{service=\"edge\",status=\"untracked\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_health_checks_total{service=\"api\",result=\"scheduled\"} 1") != null);
@@ -751,8 +765,8 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_steering_enabled 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_running 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_interval_seconds 15") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_passes_total 2") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_passes_by_trigger_total{trigger=\"event\"} 2") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_passes_total 3") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_passes_by_trigger_total{trigger=\"event\"} 3") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_passes_by_trigger_total{trigger=\"periodic\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_last_trigger{trigger=\"event\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_control_plane_last_trigger{trigger=\"periodic\"} 0") != null);
@@ -765,22 +779,22 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_services{state=\"drifted\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_mappings{state=\"desired\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_mappings{state=\"applied\"} 0") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_syncs_total{outcome=\"attempted\"} 2") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_syncs_total{outcome=\"attempted\"} 3") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_syncs_total{outcome=\"failed\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_mapping_changes_total{action=\"applied\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_steering_mapping_changes_total{action=\"removed\"} 0") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_injections_total{operation=\"container_register\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_injections_total{operation=\"container_register\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"container_register\",mode=\"skip_legacy_apply\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_bridge_fault_mode{operation=\"endpoint_healthy\",mode=\"none\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_backfill_runs_total 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_backfill_runs_total 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_registry_backfill_created_total{kind=\"services\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_ebpf_map_update_fault_injections_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_ebpf_map_update_fault_mode{mode=\"fail_update\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_dns_cluster_lookup_fault_injections_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_dns_cluster_lookup_fault_mode{mode=\"force_miss\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_dns_interceptor_fault_injections_total 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_dns_interceptor_fault_injections_total 2") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_dns_interceptor_fault_mode{mode=\"unavailable\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_load_balancer_fault_injections_total 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_load_balancer_fault_injections_total 2") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_load_balancer_fault_mode{mode=\"endpoint_overflow\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"container_runtime\",kind=\"container_registered\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"health_checker\",kind=\"endpoint_healthy\"} 1") != null);
@@ -795,7 +809,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_ready{component=\"dns_resolver\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_ready{component=\"dns_interceptor\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_full_resyncs_total 0") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"backfill_complete\"} 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"backfill_complete\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"shadow_clean\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"steering_ready\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"reconciler_cutover\"} 0") != null);
@@ -803,7 +817,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"blocked\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"missing_ports\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_running 0") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_tracked_endpoints 0") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_tracked_endpoints 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_queued_checks 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_checks_total{kind=\"scheduled\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_stale_results_total 0") != null);

@@ -603,8 +603,8 @@ test "createMap returns fd or error" {
 }
 
 test "PortKey struct size matches BPF map key" {
-    try std.testing.expectEqual(@as(usize, 4), @sizeOf(PortKey));
-    try std.testing.expectEqual(@as(u32, 4), port_map_prog.maps[0].key_size);
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(PortKey));
+    try std.testing.expectEqual(@as(u32, 8), port_map_prog.maps[0].key_size);
 }
 
 test "PortTarget struct size matches BPF map value" {

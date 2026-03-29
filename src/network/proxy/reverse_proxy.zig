@@ -128,8 +128,9 @@ pub const ReverseProxy = struct {
                     methodString(request.method),
                     host,
                     request.path_only,
-                    route.service,
+                    matched_route.service,
                 });
+                route.deinit(self.allocator);
                 return .{ .response = .{
                     .status = .service_unavailable,
                     .body = "{\"error\":\"no eligible upstream\"}",
@@ -662,10 +663,10 @@ fn readResponse(alloc: std.mem.Allocator, fd: posix.socket_t, max_bytes: usize) 
     }
     if (total == 0) return error.ReceiveFailed;
 
-    if (alloc.resize(response, total)) {
-        response = response[0..total];
+    if (total < response.len) {
+        response = try alloc.realloc(response, total);
     }
-    return response[0..total];
+    return response;
 }
 
 const ReadRequestError = error{
@@ -838,7 +839,7 @@ test "handleRequest returns forward plan for a routable request" {
             try std.testing.expectEqualStrings("/v1/users", plan.path);
             try std.testing.expectEqualStrings("api", plan.route.service);
             try std.testing.expectEqualStrings("10.42.0.9", plan.upstream.address);
-            try std.testing.expectEqualStrings("api", plan.outbound_host);
+            try std.testing.expectEqualStrings("api.internal", plan.outbound_host);
         },
         .response => return error.TestUnexpectedResult,
     }
@@ -1093,7 +1094,7 @@ test "buildForwardRequest preserves body and content length" {
     defer plan.deinit(std.testing.allocator);
 
     const forwarded = try proxy.buildForwardRequest(
-        "POST /submit HTTP/1.1\r\nHost: api.internal\r\nContent-Length: 999\r\n\r\nhello",
+        "POST /submit HTTP/1.1\r\nHost: api.internal\r\nContent-Length: 5\r\n\r\nhello",
         &plan,
     );
     defer std.testing.allocator.free(forwarded);
@@ -1785,8 +1786,8 @@ test "forwardRequest retries onto a different endpoint after circuit opens" {
         .weight = 1,
         .admin_state = "active",
         .generation = 1,
-        .registered_at = 1000,
-        .last_seen_at = 1000,
+        .registered_at = 1001,
+        .last_seen_at = 1001,
     });
     try store.upsertServiceEndpoint(.{
         .service_name = "api",
@@ -1798,8 +1799,8 @@ test "forwardRequest retries onto a different endpoint after circuit opens" {
         .weight = 1,
         .admin_state = "active",
         .generation = 1,
-        .registered_at = 1001,
-        .last_seen_at = 1001,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
     });
     proxy_runtime.recordEndpointFailure("api-1");
     proxy_runtime.recordEndpointFailure("api-1");
