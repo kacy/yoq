@@ -719,21 +719,10 @@ fn isSafeIpForDns(ip: [4]u8) bool {
 }
 
 fn updateBpfMap(name: []const u8, ip_addr: [4]u8) void {
-    if (shouldSkipDnsInterceptorApply("update", name)) {
-        if (!rollout.current().dns_returns_vip) {
-            applyLoadBalancerBackend(name, ip_addr);
-            policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
-        }
-        return;
-    }
+    if (shouldSkipDnsInterceptorApply("update", name)) return;
 
     if (ebpf.getDnsInterceptor()) |interceptor| {
         interceptor.updateService(name, ip_addr);
-    }
-
-    if (!rollout.current().dns_returns_vip) {
-        applyLoadBalancerBackend(name, ip_addr);
-        policy.applyForContainer(name, ip_addr, std.heap.page_allocator);
     }
 }
 
@@ -775,15 +764,6 @@ fn getServiceVip(name: []const u8) ?[4]u8 {
         }
     }
     return null;
-}
-
-fn applyLoadBalancerBackend(name: []const u8, ip_addr: [4]u8) void {
-    const vip = getServiceVip(name) orelse ip_addr;
-    if (shouldSkipLoadBalancerAdd(name, vip, ip_addr)) return;
-
-    if (ebpf.getLoadBalancer()) |lb| {
-        lb.addBackend(vip, ip_addr);
-    }
 }
 
 fn replaceBpfBackendsLocked(name: []const u8, dns_ip: [4]u8, backends: []const ServiceBackend) void {

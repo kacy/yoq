@@ -53,7 +53,7 @@ pub fn handleStatus(alloc: std.mem.Allocator) Response {
 }
 
 pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
-    const flags = service_rollout.current();
+    const flags = service_rollout.canonicalFlags();
     var backfill = service_registry_backfill.snapshot(alloc) catch return common.internalError();
     defer backfill.deinit(alloc);
     var audit = service_reconciler.snapshotAuditState(alloc) catch return common.internalError();
@@ -546,6 +546,7 @@ fn writeDiscoveryReadinessSnapshot(writer: anytype, readiness: service_cutover_r
         try json_helpers.writeJsonEscaped(writer, blocker);
         try writer.writeByte('"');
     }
+    try writer.writeByte(']');
 }
 
 fn writeCutoverReadinessSnapshot(writer: anytype, readiness: service_cutover_readiness.Snapshot) !void {
@@ -571,4 +572,5 @@ fn writeCutoverReadinessSnapshot(writer: anytype, readiness: service_cutover_rea
         try json_helpers.writeJsonEscaped(writer, blocker);
         try writer.writeByte('"');
     }
+    try writer.writeByte(']');
 }

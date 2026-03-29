@@ -260,7 +260,8 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
 }
 
 fn writeServiceRolloutPrometheus(writer: anytype) !void {
-    const flags = service_rollout.current();
+    const rollout_flags = service_rollout.current();
+    const flags = service_rollout.canonicalFlags();
     var backfill = try service_registry_backfill.snapshot(std.heap.page_allocator);
     defer backfill.deinit(std.heap.page_allocator);
     var audit = try service_reconciler.snapshotAuditState(std.heap.page_allocator);
@@ -299,7 +300,7 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
 
     try writer.writeAll("# HELP yoq_service_rollout_flag Service rollout feature flags\n");
     try writer.writeAll("# TYPE yoq_service_rollout_flag gauge\n");
-    try writeFlagMetrics(writer, "yoq_service_rollout_flag", flags);
+    try writeFlagMetrics(writer, "yoq_service_rollout_flag", rollout_flags);
 
     try writer.writeAll("# HELP yoq_service_discovery_limit Compile-time discovery and data-plane limits\n");
     try writer.writeAll("# TYPE yoq_service_discovery_limit gauge\n");
