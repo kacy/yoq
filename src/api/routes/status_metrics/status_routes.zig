@@ -83,11 +83,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     defer json_buf.deinit(alloc);
     var writer = json_buf.writer(alloc);
 
-    writer.writeAll("{\"mode\":\"") catch return common.internalError();
-    writer.writeAll(switch (service_rollout.mode()) {
-        .legacy => "legacy",
-        .shadow => "shadow",
-    }) catch return common.internalError();
+    writer.writeAll("{\"mode\":\"canonical") catch return common.internalError();
     writer.writeAll("\",\"flags\":{") catch return common.internalError();
     writer.print(
         "\"service_registry_v2\":{},\"service_registry_reconciler\":{},\"dns_returns_vip\":{},\"l7_proxy_http\":{}",

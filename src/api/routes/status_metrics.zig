@@ -206,7 +206,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     defer if (response.allocated) testing.allocator.free(response.body);
 
     try testing.expectEqual(http.StatusCode.ok, response.status);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"mode\":\"shadow\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"mode\":\"canonical\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"service_registry_v2\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_registry_services\":1024") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_bpf_services\":1024") != null);
@@ -720,6 +720,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
 
     const resp = handleMetricsPrometheus(testing.allocator);
     defer if (resp.allocated) testing.allocator.free(resp.body);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_discovery_mode{mode=\"canonical\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_shadow_mode 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"service_registry_v2\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"dns_returns_vip\"} 1") != null);

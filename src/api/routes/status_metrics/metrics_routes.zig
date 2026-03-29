@@ -261,7 +261,6 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
 
 fn writeServiceRolloutPrometheus(writer: anytype) !void {
     const flags = service_rollout.current();
-    const is_shadow = service_rollout.mode() == .shadow;
     var backfill = try service_registry_backfill.snapshot(std.heap.page_allocator);
     defer backfill.deinit(std.heap.page_allocator);
     var audit = try service_reconciler.snapshotAuditState(std.heap.page_allocator);
@@ -286,9 +285,13 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
 
-    try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Service rollout mode, 1 when shadow mode is active\n");
+    try writer.writeAll("# HELP yoq_service_discovery_mode Canonical service discovery mode, exposed as a compatibility-safe gauge\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_mode gauge\n");
+    try writer.print("yoq_service_discovery_mode{{mode=\"canonical\"}} 1\n", .{});
+
+    try writer.writeAll("# HELP yoq_service_rollout_shadow_mode Compatibility gauge retained after service discovery rollout completion\n");
     try writer.writeAll("# TYPE yoq_service_rollout_shadow_mode gauge\n");
-    try writer.print("yoq_service_rollout_shadow_mode {d}\n", .{@intFromBool(is_shadow)});
+    try writer.print("yoq_service_rollout_shadow_mode 1\n", .{});
 
     try writer.writeAll("# HELP yoq_service_rollout_flag Service rollout feature flags\n");
     try writer.writeAll("# TYPE yoq_service_rollout_flag gauge\n");
