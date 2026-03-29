@@ -211,6 +211,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_registry_services\":1024") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"dns_bpf_services\":1024") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"load_balancer_backends_per_vip\":64") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"recent_reconciler_events\":32") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"recent_shadow_events\":32") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_workers\":4") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_queued_checks\":64") != null);
@@ -723,9 +724,13 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     defer if (resp.allocated) testing.allocator.free(resp.body);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_discovery_mode{mode=\"canonical\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_shadow_mode 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_discovery_flag{flag=\"service_registry_v2\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_discovery_flag{flag=\"dns_returns_vip\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"service_registry_v2\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"dns_returns_vip\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_flag{flag=\"l7_proxy_http\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_discovery_limit{limit=\"load_balancer_backends_per_vip\"} 64") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_discovery_limit{limit=\"recent_reconciler_events\"} 32") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"load_balancer_backends_per_vip\"} 64") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_workers\"} 4") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_limit{limit=\"health_queued_checks\"} 64") != null);

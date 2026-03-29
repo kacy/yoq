@@ -96,7 +96,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     ) catch return common.internalError();
     writer.writeAll("},\"limits\":{") catch return common.internalError();
     writer.print(
-        "\"dns_registry_services\":{d},\"dns_name_length\":{d},\"dns_bpf_services\":{d},\"load_balancer_vips\":{d},\"load_balancer_backends_per_vip\":{d},\"conntrack_entries\":{d},\"recent_shadow_events\":{d},\"health_workers\":{d},\"health_queued_checks\":{d}",
+        "\"dns_registry_services\":{d},\"dns_name_length\":{d},\"dns_bpf_services\":{d},\"load_balancer_vips\":{d},\"load_balancer_backends_per_vip\":{d},\"conntrack_entries\":{d},\"recent_reconciler_events\":{d},\"recent_shadow_events\":{d},\"health_workers\":{d},\"health_queued_checks\":{d}",
         .{
             dns_registry.max_services,
             dns_registry.max_name_len,
@@ -104,6 +104,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             lb_prog.maps[0].max_entries,
             lb_runtime.max_backends,
             lb_prog.maps[1].max_entries,
+            service_reconciler.max_recent_events,
             service_reconciler.max_recent_events,
             health.max_worker_threads,
             health.max_queued_checks,

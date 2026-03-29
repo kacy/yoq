@@ -293,24 +293,21 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_rollout_shadow_mode gauge\n");
     try writer.print("yoq_service_rollout_shadow_mode 1\n", .{});
 
+    try writer.writeAll("# HELP yoq_service_discovery_flag Canonical service discovery feature flags\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_flag gauge\n");
+    try writeFlagMetrics(writer, "yoq_service_discovery_flag", flags);
+
     try writer.writeAll("# HELP yoq_service_rollout_flag Service rollout feature flags\n");
     try writer.writeAll("# TYPE yoq_service_rollout_flag gauge\n");
-    try writer.print("yoq_service_rollout_flag{{flag=\"service_registry_v2\"}} {d}\n", .{@intFromBool(flags.service_registry_v2)});
-    try writer.print("yoq_service_rollout_flag{{flag=\"service_registry_reconciler\"}} {d}\n", .{@intFromBool(flags.service_registry_reconciler)});
-    try writer.print("yoq_service_rollout_flag{{flag=\"dns_returns_vip\"}} {d}\n", .{@intFromBool(flags.dns_returns_vip)});
-    try writer.print("yoq_service_rollout_flag{{flag=\"l7_proxy_http\"}} {d}\n", .{@intFromBool(flags.l7_proxy_http)});
+    try writeFlagMetrics(writer, "yoq_service_rollout_flag", flags);
+
+    try writer.writeAll("# HELP yoq_service_discovery_limit Compile-time discovery and data-plane limits\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_limit gauge\n");
+    try writeLimitMetrics(writer, "yoq_service_discovery_limit", "recent_reconciler_events");
 
     try writer.writeAll("# HELP yoq_service_rollout_limit Compile-time rollout and data-plane limits\n");
     try writer.writeAll("# TYPE yoq_service_rollout_limit gauge\n");
-    try writer.print("yoq_service_rollout_limit{{limit=\"dns_registry_services\"}} {d}\n", .{dns_registry.max_services});
-    try writer.print("yoq_service_rollout_limit{{limit=\"dns_name_length\"}} {d}\n", .{dns_registry.max_name_len});
-    try writer.print("yoq_service_rollout_limit{{limit=\"dns_bpf_services\"}} {d}\n", .{dns_prog.maps[0].max_entries});
-    try writer.print("yoq_service_rollout_limit{{limit=\"load_balancer_vips\"}} {d}\n", .{lb_prog.maps[0].max_entries});
-    try writer.print("yoq_service_rollout_limit{{limit=\"load_balancer_backends_per_vip\"}} {d}\n", .{lb_runtime.max_backends});
-    try writer.print("yoq_service_rollout_limit{{limit=\"conntrack_entries\"}} {d}\n", .{lb_prog.maps[1].max_entries});
-    try writer.print("yoq_service_rollout_limit{{limit=\"recent_shadow_events\"}} {d}\n", .{service_reconciler.max_recent_events});
-    try writer.print("yoq_service_rollout_limit{{limit=\"health_workers\"}} {d}\n", .{health.max_worker_threads});
-    try writer.print("yoq_service_rollout_limit{{limit=\"health_queued_checks\"}} {d}\n", .{health.max_queued_checks});
+    try writeLimitMetrics(writer, "yoq_service_rollout_limit", "recent_shadow_events");
 
     try writeServiceObservabilityPrometheus(writer, services.items, service_metrics.services.items, service_metrics.vip_alloc_failures_total);
 
@@ -845,6 +842,26 @@ fn writeLoadBalancerFaultMode(writer: anytype) !void {
         .{@intFromBool(mode == .endpoint_overflow)},
     );
 }
+
+fn writeFlagMetrics(writer: anytype, metric_name: []const u8, flags: service_rollout.Flags) !void {
+    try writer.print("{s}{{flag=\"service_registry_v2\"}} {d}\n", .{ metric_name, @intFromBool(flags.service_registry_v2) });
+    try writer.print("{s}{{flag=\"service_registry_reconciler\"}} {d}\n", .{ metric_name, @intFromBool(flags.service_registry_reconciler) });
+    try writer.print("{s}{{flag=\"dns_returns_vip\"}} {d}\n", .{ metric_name, @intFromBool(flags.dns_returns_vip) });
+    try writer.print("{s}{{flag=\"l7_proxy_http\"}} {d}\n", .{ metric_name, @intFromBool(flags.l7_proxy_http) });
+}
+
+fn writeLimitMetrics(writer: anytype, metric_name: []const u8, recent_events_label: []const u8) !void {
+    try writer.print("{s}{{limit=\"dns_registry_services\"}} {d}\n", .{ metric_name, dns_registry.max_services });
+    try writer.print("{s}{{limit=\"dns_name_length\"}} {d}\n", .{ metric_name, dns_registry.max_name_len });
+    try writer.print("{s}{{limit=\"dns_bpf_services\"}} {d}\n", .{ metric_name, dns_prog.maps[0].max_entries });
+    try writer.print("{s}{{limit=\"load_balancer_vips\"}} {d}\n", .{ metric_name, lb_prog.maps[0].max_entries });
+    try writer.print("{s}{{limit=\"load_balancer_backends_per_vip\"}} {d}\n", .{ metric_name, lb_runtime.max_backends });
+    try writer.print("{s}{{limit=\"conntrack_entries\"}} {d}\n", .{ metric_name, lb_prog.maps[1].max_entries });
+    try writer.print("{s}{{limit=\"{s}\"}} {d}\n", .{ metric_name, recent_events_label, service_reconciler.max_recent_events });
+    try writer.print("{s}{{limit=\"health_workers\"}} {d}\n", .{ metric_name, health.max_worker_threads });
+    try writer.print("{s}{{limit=\"health_queued_checks\"}} {d}\n", .{ metric_name, health.max_queued_checks });
+}
+
 fn writeEventCounters(writer: anytype, metric_name: []const u8, source: service_reconciler.EventSource) !void {
     try writer.print(
         "{s}{{source=\"{s}\",kind=\"container_registered\"}} {d}\n",
