@@ -104,7 +104,7 @@ fn controlPlaneEnabled() bool {
 }
 
 fn vipSteeringEnabled() bool {
-    return controlPlaneEnabled() and service_rollout.current().dns_returns_vip;
+    return controlPlaneEnabled();
 }
 
 fn runSyncPass(trigger: SyncTrigger) void {
@@ -226,7 +226,7 @@ test "refreshIfEnabled records event-triggered sync pass" {
     try std.testing.expect(state.last_pass_at != null);
 }
 
-test "periodic control plane repairs routes without vip steering" {
+test "periodic control plane repairs routes while steering waits on prerequisites" {
     const store = @import("../../state/store.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
 
@@ -242,7 +242,6 @@ test "periodic control plane repairs routes without vip steering" {
     defer resetForTest();
     service_rollout.setForTest(.{
         .service_registry_v2 = true,
-        .dns_returns_vip = false,
         .l7_proxy_http = true,
     });
     defer service_rollout.resetForTest();
@@ -286,7 +285,7 @@ test "periodic control plane repairs routes without vip steering" {
 
     const loop_state = snapshot();
     try std.testing.expect(loop_state.enabled);
-    try std.testing.expect(!loop_state.steering_enabled);
+    try std.testing.expect(loop_state.steering_enabled);
     try std.testing.expect(loop_state.running);
     try std.testing.expect(loop_state.passes_total > 0);
     try std.testing.expectEqual(@as(u64, 0), loop_state.event_passes_total);

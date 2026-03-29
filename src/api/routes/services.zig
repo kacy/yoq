@@ -257,9 +257,7 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
     }
     try writer.writeAll(",\"steering\":");
     if (steering) |state| {
-        const vip_traffic_mode: proxy_runtime.VipTrafficMode = if (!service_rollout.current().dns_returns_vip)
-            .not_applicable
-        else if (state.ready)
+        const vip_traffic_mode: proxy_runtime.VipTrafficMode = if (state.ready)
             .l7_proxy
         else
             .l4_fallback;
@@ -424,7 +422,7 @@ test "route handles GET /v1/services" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":0,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"rollout_disabled\",\"vip_traffic_mode\":\"not_applicable\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":0,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"rollout_disabled\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }
 
@@ -526,7 +524,7 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded_reason\":\"service_state\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_traffic_mode\":\"not_applicable\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_traffic_mode\":\"l4_fallback\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_desired_ports\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_applied_ports\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_ready\":false") != null);
