@@ -314,17 +314,6 @@ pub fn ensureDataPlaneReadyIfEnabled() void {
 pub fn bootstrapIfEnabled() void {
     const flags = rollout.current();
     if (!auditEnabled(flags)) return;
-    if (!flags.service_registry_reconciler) {
-        var services = service_registry_runtime.snapshotServices(std.heap.page_allocator) catch |err| {
-            log.warn("service reconciler: failed to initialize runtime state during shadow bootstrap: {}", .{err});
-            return;
-        };
-        defer {
-            for (services.items) |service| service.deinit(std.heap.page_allocator);
-            services.deinit(std.heap.page_allocator);
-        }
-        return;
-    }
 
     mutex.lock();
     defer mutex.unlock();
@@ -438,14 +427,12 @@ pub fn setComponentStateOverrideForTest(state: ComponentState) void {
 fn noteEvent(event: Event) void {
     if (rollout.mode() == .legacy) return;
 
-    const current_flags = rollout.current();
-
     mutex.lock();
     defer mutex.unlock();
 
-    if (current_flags.service_registry_reconciler and !logged_authoritative_flag_notice) {
+    if (!logged_authoritative_flag_notice) {
         logged_authoritative_flag_notice = true;
-        log.info("service reconciler flag enabled; authoritative reconciler owns canonical DNS state", .{});
+        log.info("service reconciler owns canonical DNS state", .{});
     }
 
     const write_idx = (recent_start + recent_len) % max_recent_events;
@@ -460,11 +447,9 @@ fn noteEvent(event: Event) void {
     event_counts_by_source[@intFromEnum(event.source)][@intFromEnum(event.kind)] += 1;
 
     log.debug(
-        "service reconciler: shadow event source={s} kind={s} service={s} container={s}",
+        "service reconciler: event source={s} kind={s} service={s} container={s}",
         .{ event.source.label(), event.kind.label(), event.serviceName(), event.containerId() },
     );
-
-    if (!current_flags.service_registry_reconciler) return;
 
     if (!authoritative_bootstrapped) {
         bootstrapAuthoritativeLocked();
@@ -519,7 +504,7 @@ fn noteNodeSignal(node_id: i64, is_loss: bool) void {
     }
     node_signal_endpoints_changed_total += changed_count;
 
-    if (changed_count == 0 or !rollout.current().service_registry_reconciler) return;
+    if (changed_count == 0) return;
 
     if (!authoritative_bootstrapped) {
         bootstrapAuthoritativeLocked();
@@ -620,7 +605,7 @@ fn auditOnceLocked() !void {
 fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.ArrayList(service_registry_runtime.ServiceSnapshot)) !void {
     const alloc = std.heap.page_allocator;
     const now = std.time.timestamp();
-    const authoritative = rollout.current().service_registry_reconciler;
+    const authoritative = auditEnabled(rollout.current());
 
     const runtime_service = findRuntimeService(runtime_services.items, service_name);
     const db_service = store.getService(alloc, service_name) catch |err| switch (err) {
@@ -845,24 +830,20 @@ fn computeAuditMismatch(
         });
     }
 
-    if (rollout.current().dns_returns_vip) {
-        const expected_vip = ip_mod.parseIp(runtime_service.?.vip_address) orelse return error.StoreReadFailed;
-        if (!optionalIpEqual(actual_dns_ip, expected_vip)) {
-            return .{
-                .kind = .vip,
-                .reason = try std.fmt.allocPrint(
-                    alloc,
-                    "dns vip mismatch expected={d}.{d}.{d}.{d}",
-                    .{ expected_vip[0], expected_vip[1], expected_vip[2], expected_vip[3] },
-                ),
-            };
-        }
-    } else if (desired_ips.items.len == 0) {
+    const expected_vip = ip_mod.parseIp(runtime_service.?.vip_address) orelse return error.StoreReadFailed;
+    if (desired_ips.items.len == 0) {
         if (actual_dns_ip != null) {
             return .{ .kind = .vip, .reason = try alloc.dupe(u8, "dns registry should be empty when no eligible endpoints remain") };
         }
-    } else if (actual_dns_ip == null or !containsIp(desired_ips.items, actual_dns_ip.?)) {
-        return .{ .kind = .vip, .reason = try alloc.dupe(u8, "dns registry lookup does not match any eligible endpoint") };
+    } else if (!optionalIpEqual(actual_dns_ip, expected_vip)) {
+        return .{
+            .kind = .vip,
+            .reason = try std.fmt.allocPrint(
+                alloc,
+                "dns vip mismatch expected={d}.{d}.{d}.{d}",
+                .{ expected_vip[0], expected_vip[1], expected_vip[2], expected_vip[3] },
+            ),
+        };
     }
 
     var registry_endpoints = dns_registry_support.snapshotServiceEntries(alloc, service_name) catch return error.StoreReadFailed;
@@ -957,8 +938,6 @@ fn refreshComponentStateLocked() void {
             component_state.load_balancer_loaded,
         },
     );
-
-    if (!rollout.current().service_registry_reconciler) return;
 
     component_full_resyncs_total += 1;
     if (!authoritative_bootstrapped) {
@@ -1081,65 +1060,34 @@ fn reconcileServiceLocked(service_name: []const u8) !void {
         });
     }
 
-    const flags = rollout.current();
-    if (flags.dns_returns_vip and desired.items.len > dns_registry_support.max_backends_per_service) {
+    if (desired.items.len > dns_registry_support.max_backends_per_service) {
         service_registry_runtime.markReconcileFailed(service_name, "eligible backends exceed load balancer capacity") catch {};
     }
 
-    const vip = if (flags.dns_returns_vip)
-        (ip_mod.parseIp(service_snapshot.vip_address) orelse return error.StoreReadFailed)
-    else
-        null;
-
+    const vip = ip_mod.parseIp(service_snapshot.vip_address) orelse return error.StoreReadFailed;
     try applyDesiredStateLocked(service_name, vip, desired.items);
 }
 
 fn applyDesiredStateLocked(service_name: []const u8, vip: ?[4]u8, desired: []const AppliedEndpoint) !void {
     const alloc = std.heap.page_allocator;
-    const flags = rollout.current();
 
-    if (flags.dns_returns_vip) {
-        if (vip) |service_vip| {
-            var backends: std.ArrayList(dns_registry_support.BackendBinding) = .empty;
-            defer backends.deinit(alloc);
-            for (desired) |endpoint| {
-                try backends.append(alloc, .{
-                    .container_id = endpoint.container_id,
-                    .ip = endpoint.ip,
-                });
-            }
-            dns_registry_support.replaceServiceState(service_name, service_vip, backends.items);
-        } else {
-            dns_registry_support.removeServiceState(service_name);
-        }
-    } else {
-        var current = try dns_registry_support.snapshotServiceEntries(alloc, service_name);
-        defer {
-            for (current.items) |entry| entry.deinit(alloc);
-            current.deinit(alloc);
-        }
-
-        for (current.items) |applied| {
-            if (!containsAppliedEndpoint(desired, applied.container_id, applied.ip)) {
-                dns.unregisterServiceEndpoint(service_name, applied.container_id);
-            }
-        }
-
+    if (vip) |service_vip| {
+        var backends: std.ArrayList(dns_registry_support.BackendBinding) = .empty;
+        defer backends.deinit(alloc);
         for (desired) |endpoint| {
-            if (!containsRegistryEntry(current.items, endpoint.container_id, endpoint.ip)) {
-                dns.registerService(service_name, endpoint.container_id, endpoint.ip);
-            }
+            try backends.append(alloc, .{
+                .container_id = endpoint.container_id,
+                .ip = endpoint.ip,
+            });
         }
+        dns_registry_support.replaceServiceState(service_name, service_vip, backends.items);
+    } else {
+        dns_registry_support.removeServiceState(service_name);
     }
 
     policy.syncPolicies(alloc);
 
     try replaceAppliedServiceLocked(service_name, desired);
-}
-
-fn currentAppliedEndpoints(service_name: []const u8) []const AppliedEndpoint {
-    const idx = findAppliedServiceIndex(service_name) orelse return &[_]AppliedEndpoint{};
-    return applied_services.items[idx].endpoints.items;
 }
 
 fn replaceAppliedServiceLocked(service_name: []const u8, desired: []const AppliedEndpoint) !void {
@@ -1198,15 +1146,6 @@ fn findAppliedServiceIndex(service_name: []const u8) ?usize {
 fn containsAppliedEndpoint(endpoints: []const AppliedEndpoint, container_id: []const u8, endpoint_ip: [4]u8) bool {
     for (endpoints) |endpoint| {
         if (std.mem.eql(u8, endpoint.container_id, container_id) and std.mem.eql(u8, endpoint.ip[0..], endpoint_ip[0..])) {
-            return true;
-        }
-    }
-    return false;
-}
-
-fn containsRegistryEntry(entries: []const dns_registry_support.RegistryEntrySnapshot, container_id: []const u8, endpoint_ip: [4]u8) bool {
-    for (entries) |entry| {
-        if (std.mem.eql(u8, entry.container_id, container_id) and std.mem.eql(u8, entry.ip[0..], endpoint_ip[0..])) {
             return true;
         }
     }
@@ -1400,7 +1339,7 @@ test "recent event buffer keeps only the newest events" {
     try std.testing.expectEqualStrings("svc4", events[0].serviceName());
 }
 
-test "authoritative bootstrap populates canonical DNS state" {
+test "authoritative bootstrap publishes service VIPs" {
     const dns_registry = @import("dns/registry_support.zig");
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -1437,10 +1376,10 @@ test "authoritative bootstrap populates canonical DNS state" {
 
     bootstrapIfEnabled();
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 }
 
-test "authoritative bootstrap returns vip when dns_returns_vip is enabled" {
+test "deprecated dns_returns_vip flag does not change authoritative bootstrap" {
     const dns_registry = @import("dns/registry_support.zig");
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -1484,7 +1423,7 @@ test "authoritative bootstrap returns vip when dns_returns_vip is enabled" {
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 }
 
-test "shadow audit surfaces vip mismatch without mutating legacy dns" {
+test "audit stays clean after canonical bridge registration" {
     const dns_registry = @import("dns/registry_support.zig");
     const service_registry_bridge = @import("service_registry_bridge.zig");
     try store.initTestDb();
@@ -1510,10 +1449,10 @@ test "shadow audit surfaces vip mismatch without mutating legacy dns" {
 
     try std.testing.expect(audit.enabled);
     try std.testing.expectEqual(@as(u64, 1), audit.passes_total);
-    try std.testing.expectEqual(@as(u64, 1), audit.mismatch_services_total);
-    try std.testing.expectEqual(@as(u64, 1), audit.vip_mismatches_total);
+    try std.testing.expectEqual(@as(u64, 0), audit.mismatch_services_total);
+    try std.testing.expectEqual(@as(u64, 0), audit.vip_mismatches_total);
     try std.testing.expectEqual(@as(u64, 0), audit.repairs_total);
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 }
 
 test "audit pass ignores legacy service_names drift" {
@@ -1564,7 +1503,7 @@ test "audit pass ignores legacy service_names drift" {
     try std.testing.expectEqual(@as(usize, 0), audit.degraded_services.items.len);
 }
 
-test "audit ignores legacy service_names drift in vip mode" {
+test "audit ignores legacy service_names drift in canonical vip mode" {
     const dns_registry = @import("dns/registry_support.zig");
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -1651,7 +1590,7 @@ test "audit pass repairs live dns registry drift" {
 
     runAuditPassIfEnabled();
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
     var audit = try snapshotAuditState(std.testing.allocator);
     defer audit.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 1), audit.passes_total);
@@ -1695,7 +1634,7 @@ test "node loss and recovery reconcile authoritative DNS immediately" {
     });
 
     bootstrapIfEnabled();
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 7, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 
     noteNodeLost(7);
 
@@ -1717,7 +1656,7 @@ test "node loss and recovery reconcile authoritative DNS immediately" {
 
     noteNodeRecovered(7);
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 7, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 
     const after_recovery = snapshotNodeSignalState();
     try std.testing.expectEqual(@as(u64, 1), after_recovery.lost_total);
@@ -1850,7 +1789,7 @@ test "component state change triggers full resync" {
     });
     bootstrapIfEnabled();
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 
     dns_registry.resetRegistryForTest();
     setComponentStateOverrideForTest(.{
@@ -1861,7 +1800,7 @@ test "component state change triggers full resync" {
 
     refreshComponentStateIfEnabled();
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 
     const snapshot = snapshotComponentState();
     try std.testing.expect(snapshot.state.dns_resolver_running);
