@@ -295,8 +295,10 @@ eBPF programs collect per-service and per-service-pair network metrics (packet c
 
 for service discovery and HTTP routing, the API also exposes two deeper observability surfaces:
 
-- `GET /v1/status?mode=service_rollout` — JSON snapshot of discovery state, audit and health checker state, L7 proxy status, listener/control-plane status, and steering readiness
+- `GET /v1/status?mode=service_discovery` — JSON snapshot of discovery state, audit and health checker state, L7 proxy status, listener/control-plane status, and steering readiness
 - `GET /v1/metrics?format=prometheus` — Prometheus text format for the same discovery surface plus per-service counters and gauges
+
+`mode=service_rollout` remains accepted as a compatibility alias.
 
 the Prometheus endpoint includes discovery-wide and per-service series such as:
 

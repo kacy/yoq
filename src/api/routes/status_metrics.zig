@@ -21,7 +21,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
     if (request.method == .GET and std.mem.eql(u8, path, "/v1/status")) {
         const mode = common.extractQueryParam(request.path, "mode");
         if (mode) |value| {
-            if (std.mem.eql(u8, value, "service_rollout")) {
+            if (std.mem.eql(u8, value, "service_rollout") or std.mem.eql(u8, value, "service_discovery")) {
                 return status_routes.handleServiceRolloutStatus(alloc);
             }
         }
@@ -244,6 +244,22 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"source\":\"container_runtime\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"kind\":\"container_registered\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"service\":\"api\"") != null);
+
+    const alias_req = http.Request{
+        .method = .GET,
+        .path = "/v1/status?mode=service_discovery",
+        .path_only = "/v1/status",
+        .query = "mode=service_discovery",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+    const alias_response = route(alias_req, testing.allocator).?;
+    defer if (alias_response.allocated) testing.allocator.free(alias_response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, alias_response.status);
+    try testing.expect(std.mem.indexOf(u8, alias_response.body, "\"mode\":\"canonical\"") != null);
+    try testing.expect(std.mem.indexOf(u8, alias_response.body, "\"discovery_readiness\":") != null);
 }
 
 test "route rollout status reports reconciler cutover ready after clean backfill and audit" {

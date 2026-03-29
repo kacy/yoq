@@ -155,7 +155,7 @@ yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
 yoq init-server --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
 ```
 
-use `GET /v1/status?mode=service_rollout` and `GET /v1/metrics?format=prometheus` to inspect listener, route, and steering state.
+use `GET /v1/status?mode=service_discovery` and `GET /v1/metrics?format=prometheus` to inspect listener, route, and steering state. `mode=service_rollout` remains accepted as a compatibility alias.
 
 ---
 
