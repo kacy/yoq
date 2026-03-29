@@ -623,7 +623,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
 }
 
 fn replaceRoutesFromDefinition(alloc: Allocator, current: *std.ArrayList(HttpRouteState), definition: ServiceDefinition) Error!void {
-    var next = try cloneRoutesFromDefinition(alloc, definition);
+    const next = try cloneRoutesFromDefinition(alloc, definition);
     deinitRoutes(alloc, current);
     current.* = next;
 }

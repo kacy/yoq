@@ -443,6 +443,7 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
     const store = @import("../../state/store.zig");
     const listener_runtime = @import("listener_runtime.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
+    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 
     var upstream = try TestUpstreamServer.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     defer upstream.deinit();
@@ -524,6 +525,7 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     const store = @import("../../state/store.zig");
     const listener_runtime = @import("listener_runtime.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
+    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 
     var upstream = try TestUpstreamServer.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     defer upstream.deinit();

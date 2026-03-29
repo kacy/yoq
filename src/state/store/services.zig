@@ -380,7 +380,8 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
         .{},
         .{service_name},
     ) catch return StoreError.ReadFailed) |row| {
-        const record = rowToServiceRecord(row);
+        const routes = try listServiceHttpRoutesForDb(alloc, db, service_name);
+        const record = rowToServiceRecord(row, routes);
         db.exec("COMMIT;", .{}, .{}) catch {
             record.deinit(alloc);
             return StoreError.WriteFailed;
@@ -416,7 +417,7 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
         .service_name = service_name_copy,
         .vip_address = vip_copy,
         .lb_policy = lb_policy_copy,
-        .http_routes = try alloc.alloc(ServiceHttpRouteRecord, 0),
+        .http_routes = alloc.alloc(ServiceHttpRouteRecord, 0) catch return StoreError.ReadFailed,
         .http_proxy_host = null,
         .http_proxy_path_prefix = null,
         .http_proxy_retries = null,

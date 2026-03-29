@@ -212,21 +212,21 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"http_routes\":[");
-    for (service.http_routes, 0..) |route, idx| {
+    for (service.http_routes, 0..) |http_route, idx| {
         if (idx > 0) try writer.writeByte(',');
         try writer.writeAll("{\"name\":\"");
-        try json_helpers.writeJsonEscaped(writer, route.route_name);
+        try json_helpers.writeJsonEscaped(writer, http_route.route_name);
         try writer.writeAll("\",\"host\":\"");
-        try json_helpers.writeJsonEscaped(writer, route.host);
+        try json_helpers.writeJsonEscaped(writer, http_route.host);
         try writer.writeAll("\",\"path_prefix\":\"");
-        try json_helpers.writeJsonEscaped(writer, route.path_prefix);
+        try json_helpers.writeJsonEscaped(writer, http_route.path_prefix);
         try writer.print(
             "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
             .{
-                route.retries,
-                route.connect_timeout_ms,
-                route.request_timeout_ms,
-                route.preserve_host,
+                http_route.retries,
+                http_route.connect_timeout_ms,
+                http_route.request_timeout_ms,
+                http_route.preserve_host,
             },
         );
     }
