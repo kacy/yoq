@@ -7,6 +7,7 @@ const http2 = @import("http2.zig");
 const http2_request = @import("http2_request.zig");
 const http2_response = @import("http2_response.zig");
 const proxy_policy = @import("policy.zig");
+const request_plan = @import("request_plan.zig");
 const proxy_runtime = @import("runtime.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
@@ -89,148 +90,27 @@ pub const ReverseProxy = struct {
     }
 
     pub fn handleRequest(self: *const ReverseProxy, raw_request: []const u8) !HandleResult {
-        if (http2.startsWithClientPreface(raw_request)) {
-            return self.handleHttp2Request(raw_request);
+        if (!http2.startsWithClientPreface(raw_request)) {
+            if (try http1LoopResponse(self, raw_request)) |response| {
+                return .{ .response = response };
+            }
         }
 
-        return self.handleHttp1Request(raw_request);
-    }
+        const planned = request_plan.planRequest(self.allocator, self.routes, raw_request) catch |err| {
+            return .{ .response = responseForPlanError(self, raw_request, err) };
+        };
+        defer planned.deinit(self.allocator);
 
-    fn handleHttp1Request(self: *const ReverseProxy, raw_request: []const u8) !HandleResult {
-        const request = http.parseRequest(raw_request) catch {
+        if (planned.protocol == .http2 and planned.method_enum == null) {
             return .{ .response = .{
+                .protocol = .http2,
+                .http2_stream_id = planned.http2_stream_id,
                 .status = .bad_request,
-                .body = "{\"error\":\"invalid request\"}",
-            } };
-        } orelse return .{ .response = .{
-            .status = .bad_request,
-            .body = "{\"error\":\"incomplete request\"}",
-        } };
-
-        const host_header = http.findHeaderValue(request.headers_raw, "Host") orelse return .{ .response = .{
-            .status = .bad_request,
-            .body = "{\"error\":\"missing host header\"}",
-        } };
-        const host = normalizeHost(host_header);
-        if (http.findHeaderValue(request.headers_raw, proxy_loop_header) != null) {
-            proxy_runtime.recordLoopRejection();
-            log.warn("l7 proxy loop rejected method={s} host={s} path={s}", .{
-                methodString(request.method),
-                host,
-                request.path_only,
-            });
-            return .{ .response = .{
-                .status = .bad_gateway,
-                .body = "{\"error\":\"proxy loop detected\"}",
+                .body = "{\"error\":\"unsupported http2 method\"}",
             } };
         }
 
-        const matched_route = router.matchRoute(self.routes, host, request.path_only) orelse {
-            log.info("l7 proxy no route method={s} host={s} path={s}", .{
-                methodString(request.method),
-                host,
-                request.path_only,
-            });
-            return .{ .response = .{
-                .status = .not_found,
-                .body = "{\"error\":\"route not found\"}",
-            } };
-        };
-        const route = try cloneRouteSnapshot(self.allocator, matched_route);
-        errdefer route.deinit(self.allocator);
-
-        const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
-            error.NoHealthyUpstream => {
-                proxy_runtime.recordRouteFailure(matched_route.name, .no_eligible_upstream);
-                log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
-                    methodString(request.method),
-                    host,
-                    request.path_only,
-                    matched_route.service,
-                });
-                route.deinit(self.allocator);
-                return .{ .response = .{
-                    .status = .service_unavailable,
-                    .body = "{\"error\":\"no eligible upstream\"}",
-                } };
-            },
-            else => return err,
-        };
-        errdefer upstream.deinit(self.allocator);
-
-        return .{ .forward = .{
-            .method = request.method,
-            .path = try self.allocator.dupe(u8, request.path),
-            .host = try self.allocator.dupe(u8, host),
-            .outbound_host = if (route.preserve_host)
-                try self.allocator.dupe(u8, host)
-            else
-                try self.allocator.dupe(u8, route.service),
-            .route = route,
-            .upstream = upstream,
-        } };
-    }
-
-    fn handleHttp2Request(self: *const ReverseProxy, raw_request: []const u8) !HandleResult {
-        const request = http2_request.parseClientConnectionPreface(self.allocator, raw_request) catch {
-            return .{ .response = .{
-                .protocol = .http2,
-                .status = .bad_request,
-                .body = "{\"error\":\"invalid http2 request\"}",
-            } };
-        };
-        defer request.deinit(self.allocator);
-
-        _ = parseMethodString(request.request.method) orelse return .{ .response = .{
-            .protocol = .http2,
-            .http2_stream_id = request.request.stream_id,
-            .status = .bad_request,
-            .body = "{\"error\":\"unsupported http2 method\"}",
-        } };
-
-        const host = normalizeHost(request.request.authority);
-        const matched_route = router.matchRoute(self.routes, host, request.request.path) orelse {
-            log.info("l7 proxy no route method={s} host={s} path={s}", .{
-                request.request.method,
-                host,
-                request.request.path,
-            });
-            return .{ .response = .{
-                .protocol = .http2,
-                .http2_stream_id = request.request.stream_id,
-                .status = .not_found,
-                .body = "{\"error\":\"route not found\"}",
-            } };
-        };
-        const route = try cloneRouteSnapshot(self.allocator, matched_route);
-        defer route.deinit(self.allocator);
-
-        const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
-            error.NoHealthyUpstream => {
-                proxy_runtime.recordRouteFailure(matched_route.name, .no_eligible_upstream);
-                log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
-                    request.request.method,
-                    host,
-                    request.request.path,
-                    matched_route.service,
-                });
-                return .{ .response = .{
-                    .protocol = .http2,
-                    .http2_stream_id = request.request.stream_id,
-                    .status = .service_unavailable,
-                    .body = "{\"error\":\"no eligible upstream\"}",
-                } };
-            },
-            else => return err,
-        };
-        upstream.deinit(self.allocator);
-
-        return .{ .response = .{
-            .protocol = .http2,
-            .http2_stream_id = request.request.stream_id,
-            .status = .bad_gateway,
-            .body = "{\"error\":\"http2 upstream forwarding not implemented\"}",
-        } };
+        return resolvePlannedRequest(self, &planned);
     }
 
     pub fn forwardRequest(self: *const ReverseProxy, raw_request: []const u8) ![]u8 {
@@ -537,15 +417,6 @@ fn methodString(method: http.Method) []const u8 {
     };
 }
 
-fn parseMethodString(method: []const u8) ?http.Method {
-    if (std.mem.eql(u8, method, "GET")) return .GET;
-    if (std.mem.eql(u8, method, "HEAD")) return .HEAD;
-    if (std.mem.eql(u8, method, "POST")) return .POST;
-    if (std.mem.eql(u8, method, "PUT")) return .PUT;
-    if (std.mem.eql(u8, method, "DELETE")) return .DELETE;
-    return null;
-}
-
 fn startsWithHeaderName(line: []const u8, name: []const u8) bool {
     if (line.len <= name.len or line[name.len] != ':') return false;
     for (line[0..name.len], name) |a, b| {
@@ -604,6 +475,130 @@ fn formatResponseForProtocol(alloc: std.mem.Allocator, response: ProxyResponse) 
         else
             alloc.dupe(u8, ""),
     };
+}
+
+fn responseForPlanError(self: *const ReverseProxy, raw_request: []const u8, err: anyerror) ProxyResponse {
+    _ = self;
+    const protocol: Protocol = if (http2.startsWithClientPreface(raw_request)) .http2 else .http1;
+    const http2_stream_id = if (protocol == .http2) peekHttp2StreamId(raw_request) else null;
+
+    return switch (err) {
+        error.InvalidHttp1Request => .{
+            .protocol = protocol,
+            .http2_stream_id = http2_stream_id,
+            .status = .bad_request,
+            .body = if (protocol == .http2) "{\"error\":\"invalid http2 request\"}" else "{\"error\":\"invalid request\"}",
+        },
+        error.IncompleteHttp1Request => .{
+            .protocol = .http1,
+            .status = .bad_request,
+            .body = "{\"error\":\"incomplete request\"}",
+        },
+        error.MissingHostHeader => .{
+            .protocol = .http1,
+            .status = .bad_request,
+            .body = "{\"error\":\"missing host header\"}",
+        },
+        error.RouteNotFound => .{
+            .protocol = protocol,
+            .http2_stream_id = http2_stream_id,
+            .status = .not_found,
+            .body = "{\"error\":\"route not found\"}",
+        },
+        else => .{
+            .protocol = protocol,
+            .http2_stream_id = http2_stream_id,
+            .status = .bad_request,
+            .body = if (protocol == .http2) "{\"error\":\"invalid http2 request\"}" else "{\"error\":\"invalid request\"}",
+        },
+    };
+}
+
+fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan.RequestPlan) !HandleResult {
+    const route = try cloneRouteSnapshot(self.allocator, planned.route);
+    errdefer route.deinit(self.allocator);
+
+    const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
+        error.NoHealthyUpstream => {
+            proxy_runtime.recordRouteFailure(planned.route.name, .no_eligible_upstream);
+            log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
+                planned.method,
+                planned.host,
+                planned.path,
+                planned.route.service,
+            });
+            route.deinit(self.allocator);
+            return .{ .response = .{
+                .protocol = switch (planned.protocol) {
+                    .http1 => .http1,
+                    .http2 => .http2,
+                },
+                .http2_stream_id = planned.http2_stream_id,
+                .status = .service_unavailable,
+                .body = "{\"error\":\"no eligible upstream\"}",
+            } };
+        },
+        else => return err,
+    };
+    errdefer upstream.deinit(self.allocator);
+
+    switch (planned.protocol) {
+        .http1 => return .{ .forward = .{
+            .method = planned.method_enum.?,
+            .path = try self.allocator.dupe(u8, planned.path),
+            .host = try self.allocator.dupe(u8, planned.host),
+            .outbound_host = if (route.preserve_host)
+                try self.allocator.dupe(u8, planned.host)
+            else
+                try self.allocator.dupe(u8, route.service),
+            .route = route,
+            .upstream = upstream,
+        } },
+        .http2 => {
+            upstream.deinit(self.allocator);
+            route.deinit(self.allocator);
+            return .{ .response = .{
+                .protocol = .http2,
+                .http2_stream_id = planned.http2_stream_id,
+                .status = .bad_gateway,
+                .body = "{\"error\":\"http2 upstream forwarding not implemented\"}",
+            } };
+        },
+    }
+}
+
+fn http1LoopResponse(self: *const ReverseProxy, raw_request: []const u8) !?ProxyResponse {
+    const request = (http.parseRequest(raw_request) catch return null) orelse return null;
+    if (http.findHeaderValue(request.headers_raw, proxy_loop_header) == null) return null;
+
+    const host_header = http.findHeaderValue(request.headers_raw, "Host") orelse "";
+    const host = normalizeHost(host_header);
+    proxy_runtime.recordLoopRejection();
+    log.warn("l7 proxy loop rejected method={s} host={s} path={s}", .{
+        methodString(request.method),
+        host,
+        request.path_only,
+    });
+    _ = self;
+    return .{
+        .status = .bad_gateway,
+        .body = "{\"error\":\"proxy loop detected\"}",
+    };
+}
+
+fn peekHttp2StreamId(raw_request: []const u8) ?u32 {
+    if (!http2.startsWithClientPreface(raw_request)) return null;
+
+    var pos: usize = http2.client_preface.len;
+    while (pos + http2.frame_header_len <= raw_request.len) {
+        const header = http2.parseFrameHeader(raw_request[pos .. pos + http2.frame_header_len]) orelse return null;
+        pos += http2.frame_header_len;
+        if (pos + header.length > raw_request.len) return null;
+        if (header.frame_type == .headers and header.stream_id != 0) return header.stream_id;
+        pos += header.length;
+    }
+
+    return null;
 }
 
 fn proxyFailureResponse(err: anyerror) ProxyResponse {

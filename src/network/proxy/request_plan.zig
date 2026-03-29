@@ -11,6 +11,7 @@ pub const Protocol = enum {
 
 pub const RequestPlan = struct {
     protocol: Protocol,
+    method_enum: ?http.Method,
     method: []u8,
     host: []u8,
     path: []u8,
@@ -27,6 +28,7 @@ pub const RequestPlan = struct {
 
 pub const PlanError = error{
     InvalidHttp1Request,
+    IncompleteHttp1Request,
     MissingHostHeader,
     RouteNotFound,
 } || http2_request.ParseError || std.mem.Allocator.Error;
@@ -39,13 +41,14 @@ pub fn planRequest(alloc: std.mem.Allocator, routes: []const router.Route, raw_r
 }
 
 fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_request: []const u8) PlanError!RequestPlan {
-    const parsed = (http.parseRequest(raw_request) catch return error.InvalidHttp1Request) orelse return error.InvalidHttp1Request;
+    const parsed = (http.parseRequest(raw_request) catch return error.InvalidHttp1Request) orelse return error.IncompleteHttp1Request;
     const host_header = http.findHeaderValue(parsed.headers_raw, "Host") orelse return error.MissingHostHeader;
     const host = normalizeHost(host_header);
     const route = router.matchRoute(routes, host, parsed.path_only) orelse return error.RouteNotFound;
 
     return .{
         .protocol = .http1,
+        .method_enum = parsed.method,
         .method = try alloc.dupe(u8, methodString(parsed.method)),
         .host = try alloc.dupe(u8, host),
         .path = try alloc.dupe(u8, parsed.path),
@@ -62,6 +65,7 @@ fn planHttp2Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
 
     return .{
         .protocol = .http2,
+        .method_enum = parseMethodString(parsed.request.method),
         .method = try alloc.dupe(u8, parsed.request.method),
         .host = try alloc.dupe(u8, host),
         .path = try alloc.dupe(u8, parsed.request.path),
@@ -86,6 +90,15 @@ fn methodString(method: http.Method) []const u8 {
         .PUT => "PUT",
         .DELETE => "DELETE",
     };
+}
+
+fn parseMethodString(method: []const u8) ?http.Method {
+    if (std.mem.eql(u8, method, "GET")) return .GET;
+    if (std.mem.eql(u8, method, "HEAD")) return .HEAD;
+    if (std.mem.eql(u8, method, "POST")) return .POST;
+    if (std.mem.eql(u8, method, "PUT")) return .PUT;
+    if (std.mem.eql(u8, method, "DELETE")) return .DELETE;
+    return null;
 }
 
 fn appendLiteralWithIndexedName(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name_index: u8, value: []const u8) !void {
@@ -121,6 +134,7 @@ test "planRequest matches HTTP/1 route and strips host port" {
     defer plan.deinit(alloc);
 
     try std.testing.expectEqual(.http1, plan.protocol);
+    try std.testing.expectEqual(http.Method.GET, plan.method_enum.?);
     try std.testing.expectEqualStrings("GET", plan.method);
     try std.testing.expectEqualStrings("api.internal", plan.host);
     try std.testing.expectEqualStrings("/v1/users", plan.path);
@@ -173,6 +187,7 @@ test "planRequest matches prior-knowledge HTTP/2 route" {
     defer plan.deinit(alloc);
 
     try std.testing.expectEqual(.http2, plan.protocol);
+    try std.testing.expectEqual(http.Method.POST, plan.method_enum.?);
     try std.testing.expectEqualStrings("POST", plan.method);
     try std.testing.expectEqualStrings("grpc.internal", plan.host);
     try std.testing.expectEqualStrings("/pkg.Service/Call", plan.path);
@@ -222,4 +237,52 @@ test "planRequest returns RouteNotFound for unmatched HTTP/2 request" {
     try request_bytes.appendSlice(alloc, headers);
 
     try std.testing.expectError(error.RouteNotFound, planRequest(alloc, &routes, request_bytes.items));
+}
+
+test "planRequest preserves unsupported HTTP/2 method as null method_enum" {
+    const alloc = std.testing.allocator;
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+        },
+    };
+
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x02, "PATCH");
+    try header_block.append(alloc, 0x86);
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "grpc.internal");
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call");
+
+    const settings = try buildFrame(alloc, .{
+        .length = 0,
+        .frame_type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+    defer alloc.free(settings);
+
+    const headers = try buildFrame(alloc, .{
+        .length = @intCast(header_block.items.len),
+        .frame_type = .headers,
+        .flags = 0x4,
+        .stream_id = 1,
+    }, header_block.items);
+    defer alloc.free(headers);
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(alloc);
+    try request_bytes.appendSlice(alloc, http2.client_preface);
+    try request_bytes.appendSlice(alloc, settings);
+    try request_bytes.appendSlice(alloc, headers);
+
+    const plan = try planRequest(alloc, &routes, request_bytes.items);
+    defer plan.deinit(alloc);
+
+    try std.testing.expectEqual(.http2, plan.protocol);
+    try std.testing.expectEqual(@as(?http.Method, null), plan.method_enum);
+    try std.testing.expectEqualStrings("PATCH", plan.method);
 }
