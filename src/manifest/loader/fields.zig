@@ -280,6 +280,7 @@ pub fn parseHttpProxyRoutes(
             },
         };
         const route = (try parseHttpProxyRoute(alloc, service_name, route_name, "http_routes", route_table)).?;
+        errdefer route.deinit(alloc);
         try validateHttpProxyRouteConflict(service_name, routes.items, route);
         routes.append(alloc, route) catch {
             route.deinit(alloc);
@@ -395,6 +396,16 @@ pub fn parseHealthCheck(
             return common.LoadError.InvalidHealthCheck;
         }
         break :blk .{ .tcp = .{ .port = @intCast(port) } };
+    } else if (std.mem.eql(u8, type_str, "grpc")) blk: {
+        const port = hc_table.getInt("port") orelse {
+            log.err("manifest: service '{s}' grpc health_check is missing 'port'", .{service_name});
+            return common.LoadError.InvalidHealthCheck;
+        };
+        if (port < 1 or port > 65535) {
+            log.err("manifest: service '{s}' health_check port out of range", .{service_name});
+            return common.LoadError.InvalidHealthCheck;
+        }
+        break :blk .{ .grpc = .{ .port = @intCast(port) } };
     } else if (std.mem.eql(u8, type_str, "exec")) blk: {
         const cmd = try parseStringArray(alloc, hc_table.getArray("command"));
         if (cmd.len == 0) {

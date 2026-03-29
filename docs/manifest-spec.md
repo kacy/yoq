@@ -191,7 +191,7 @@ defined under `[service.<name>.health_check]`.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
-| `type` | string | yes | — | `"http"`, `"tcp"`, or `"exec"` |
+| `type` | string | yes | — | `"http"`, `"tcp"`, `"grpc"`, or `"exec"` |
 | `interval` | integer | no | `10` | seconds between checks |
 | `timeout` | integer | no | `5` | seconds before check times out |
 | `retries` | integer | no | `3` | consecutive failures before unhealthy |
@@ -218,6 +218,18 @@ requires `port`. a successful TCP connection means healthy.
 [service.db.health_check]
 type = "tcp"
 port = 5432
+```
+
+### grpc checks
+
+requires `port`. a successful HTTP/2 preface exchange with the target port means healthy.
+
+```toml
+[service.api.health_check]
+type = "grpc"
+port = 50051
+interval = 5
+timeout = 2
 ```
 
 ### exec checks

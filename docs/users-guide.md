@@ -130,7 +130,7 @@ services start in dependency order (topological sort). `yoq validate` checks for
 
 ### health checks
 
-HTTP, TCP, or exec probes run at configurable intervals. health state is stored in a fixed-size registry (64 services, mutex-protected). the orchestrator and DNS resolver read health state to gate traffic.
+HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes currently validate the HTTP/2 preface exchange on the configured port. health state is stored in a fixed-size registry (64 services, mutex-protected). the orchestrator and DNS resolver read health state to gate traffic.
 
 ### rolling updates
 

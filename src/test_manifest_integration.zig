@@ -118,6 +118,28 @@ test "load manifest with http health check" {
     try std.testing.expectEqual(@as(u32, 3), hc.timeout);
 }
 
+test "load manifest with grpc health check" {
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.api]
+        \\image = "grpc-server:latest"
+        \\
+        \\[service.api.health_check]
+        \\type = "grpc"
+        \\port = 50051
+        \\interval = 5
+    );
+    defer manifest.deinit();
+
+    const hc = manifest.services[0].health_check orelse return error.ExpectedHealthCheck;
+    switch (hc.check_type) {
+        .grpc => |g| {
+            try std.testing.expectEqual(@as(u16, 50051), g.port);
+        },
+        else => return error.ExpectedHealthCheck,
+    }
+    try std.testing.expectEqual(@as(u32, 5), hc.interval);
+}
+
 test "load manifest with workers" {
     var manifest = try loader.loadFromString(alloc,
         \\[service.db]

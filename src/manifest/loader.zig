@@ -882,6 +882,30 @@ test "health check — tcp type" {
     try std.testing.expectEqual(@as(u32, 0), hc.start_period);
 }
 
+test "health check — grpc type" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.api]
+        \\image = "grpc-server:latest"
+        \\
+        \\[service.api.health_check]
+        \\type = "grpc"
+        \\port = 50051
+        \\interval = 5
+    );
+    defer manifest.deinit();
+
+    const hc = manifest.services[0].health_check.?;
+    switch (hc.check_type) {
+        .grpc => |g| {
+            try std.testing.expectEqual(@as(u16, 50051), g.port);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u32, 5), hc.interval);
+}
+
 test "health check — exec type" {
     const alloc = std.testing.allocator;
 
@@ -940,7 +964,7 @@ test "health check — unknown type returns error" {
         \\image = "nginx:latest"
         \\
         \\[service.web.health_check]
-        \\type = "grpc"
+        \\type = "udp"
         \\port = 50051
     );
     try std.testing.expectError(LoadError.InvalidHealthCheck, result);
@@ -980,6 +1004,18 @@ test "health check — tcp missing port returns error" {
         \\
         \\[service.web.health_check]
         \\type = "tcp"
+    );
+    try std.testing.expectError(LoadError.InvalidHealthCheck, result);
+}
+
+test "health check — grpc missing port returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.health_check]
+        \\type = "grpc"
     );
     try std.testing.expectError(LoadError.InvalidHealthCheck, result);
 }
