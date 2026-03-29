@@ -465,8 +465,6 @@ test "route handles GET /v1/services/{name}/endpoints" {
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes" {
-    const service_rollout = @import("../../network/service_rollout.zig");
-
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
@@ -516,8 +514,6 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering degradation" {
-    const service_rollout = @import("../../network/service_rollout.zig");
-
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
@@ -573,7 +569,6 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering degradati
 }
 
 test "route handles GET /v1/services/{name} with steering drift details" {
-    const service_rollout = @import("../../network/service_rollout.zig");
     const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
 
     try store.initTestDb();
@@ -628,7 +623,6 @@ test "route handles GET /v1/services/{name} with steering drift details" {
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering drift details" {
-    const service_rollout = @import("../../network/service_rollout.zig");
     const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
 
     try store.initTestDb();
@@ -690,8 +684,6 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering drift det
 }
 
 test "route handles POST drain and DELETE endpoint" {
-    const service_rollout = @import("../../network/service_rollout.zig");
-
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();

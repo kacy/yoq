@@ -649,6 +649,27 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     dns_registry.setDnsInterceptorFaultModeForTest(.unavailable);
     dns_registry.setLoadBalancerFaultModeForTest(.endpoint_overflow);
     service_registry_bridge.setFaultModeForTest(.container_register, .skip_legacy_apply);
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "abc123:0",
+        .container_id = "abc123",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    service_registry_runtime.syncServiceFromStore("api");
     service_registry_bridge.registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
     service_registry_bridge.markEndpointHealthy("api", "abc123", .{ 10, 42, 0, 9 });
     try service_registry_runtime.requestReconcile("api");
