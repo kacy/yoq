@@ -9,7 +9,8 @@
 // destinations are reachable. containers without any policy rules
 // can communicate freely with all other containers.
 //
-// service names are resolved to IPs via store.lookupServiceNames().
+// service names are resolved to canonical service VIPs via
+// store.lookupServiceAddresses().
 // BPF maps are updated when:
 //   - policies are added/removed (full sync from SQLite)
 //   - containers start (incremental — apply rules for new IP)
@@ -63,7 +64,7 @@ pub fn syncPolicies(alloc: std.mem.Allocator) void {
 
     // for each policy, resolve both service names to IPs and populate maps
     for (policies.items) |pol| {
-        var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch {
+        var src_ips = store.lookupServiceAddresses(alloc, pol.source_service) catch {
             log.warn("policy: failed to resolve source service '{s}' during sync", .{pol.source_service});
             continue;
         };
@@ -72,7 +73,7 @@ pub fn syncPolicies(alloc: std.mem.Allocator) void {
             src_ips.deinit(alloc);
         }
 
-        var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch {
+        var dst_ips = store.lookupServiceAddresses(alloc, pol.target_service) catch {
             log.warn("policy: failed to resolve target service '{s}' during sync", .{pol.target_service});
             continue;
         };
@@ -143,7 +144,7 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
                 enforcer.isolate(new_ip_net);
             }
 
-            var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch {
+            var dst_ips = store.lookupServiceAddresses(alloc, pol.target_service) catch {
                 log.warn("policy: failed to resolve target service '{s}' for container apply", .{pol.target_service});
                 continue;
             };
@@ -169,7 +170,7 @@ pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: s
 
         if (is_target) {
             // this container is the target — resolve source IPs
-            var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch {
+            var src_ips = store.lookupServiceAddresses(alloc, pol.source_service) catch {
                 log.warn("policy: failed to resolve source service '{s}' for container apply", .{pol.source_service});
                 continue;
             };
@@ -220,7 +221,7 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
         const is_allow = std.mem.eql(u8, pol.action, "allow");
 
         // check if this IP was a source
-        var src_ips = store.lookupServiceNames(alloc, pol.source_service) catch {
+        var src_ips = store.lookupServiceAddresses(alloc, pol.source_service) catch {
             log.warn("policy: failed to resolve source service '{s}' for container removal", .{pol.source_service});
             continue;
         };
@@ -233,7 +234,7 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
             const src_addr = ip_mod.parseIp(src_str) orelse continue;
             if (ebpf.ipToNetworkOrder(src_addr) == old_ip_net) {
                 // this IP was a source — remove all its entries for this policy's targets
-                var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch {
+                var dst_ips = store.lookupServiceAddresses(alloc, pol.target_service) catch {
                     log.warn("policy: failed to resolve target service '{s}' during removal", .{pol.target_service});
                     continue;
                 };
@@ -254,7 +255,7 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
         }
 
         // check if this IP was a target
-        var dst_ips = store.lookupServiceNames(alloc, pol.target_service) catch {
+        var dst_ips = store.lookupServiceAddresses(alloc, pol.target_service) catch {
             log.warn("policy: failed to resolve target service '{s}' during removal", .{pol.target_service});
             continue;
         };

@@ -293,12 +293,12 @@ eBPF programs collect per-service and per-service-pair network metrics (packet c
 - `yoq metrics [service]` — per-service metrics
 - `yoq metrics --pairs` — service-to-service metrics
 
-for service rollout work, the API also exposes two deeper observability surfaces:
+for service discovery and HTTP routing, the API also exposes two deeper observability surfaces:
 
-- `GET /v1/status?mode=service_rollout` — JSON snapshot of rollout flags, backfill/audit state, health checker state, recent shadow events, L7 proxy status, listener/control-plane status, steering readiness, and cutover blockers
-- `GET /v1/metrics?format=prometheus` — Prometheus text format for the same rollout surface plus per-service counters and gauges
+- `GET /v1/status?mode=service_rollout` — JSON snapshot of discovery state, audit and health checker state, L7 proxy status, listener/control-plane status, and steering readiness
+- `GET /v1/metrics?format=prometheus` — Prometheus text format for the same discovery surface plus per-service counters and gauges
 
-the Prometheus endpoint includes rollout-wide and per-service series such as:
+the Prometheus endpoint includes discovery-wide and per-service series such as:
 
 - reconcile requests, successes, failures, and most recent reconcile duration
 - DNS interceptor and load balancer sync failures
@@ -306,7 +306,7 @@ the Prometheus endpoint includes rollout-wide and per-service series such as:
 - endpoint flap totals and current service health status
 - L7 proxy request/response/retry/failure counters and listener/control-plane state
 
-the rollout status JSON is the better debugging view when you want to understand why cutover is blocked. the Prometheus endpoint is the better integration point for scraping, dashboards, and alerting.
+the status JSON is the better debugging view when you want to inspect discovery and routing state directly. the Prometheus endpoint is the better integration point for scraping, dashboards, and alerting.
 
 ### alerting
 

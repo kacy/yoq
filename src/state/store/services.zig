@@ -469,6 +469,23 @@ pub fn lookupServiceNames(alloc: Allocator, name: []const u8) StoreError!std.Arr
     return ips;
 }
 
+pub fn lookupServiceAddresses(alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
+    const db = try common.getDb();
+    var ips: std.ArrayList([]const u8) = .empty;
+
+    var stmt = db.prepare(
+        "SELECT vip_address FROM services WHERE service_name = ? LIMIT 1;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(struct { vip_address: sqlite.Text }, .{name}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        ips.append(alloc, row.vip_address.data) catch return StoreError.ReadFailed;
+    }
+
+    if (ips.items.len > 0) return ips;
+    return lookupServiceNames(alloc, name);
+}
+
 pub fn listServiceNames(alloc: Allocator) StoreError!std.ArrayList(ServiceNameRecord) {
     const db = try common.getDb();
     var names: std.ArrayList(ServiceNameRecord) = .empty;
@@ -784,6 +801,30 @@ test "service endpoint queries support service and node cleanup flows" {
         remaining.deinit(alloc);
     }
     try std.testing.expectEqual(@as(usize, 0), remaining.items.len);
+}
+
+test "lookupServiceAddresses prefers service VIPs over legacy name rows" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.10",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try registerServiceName("api", "ctr-1", "10.42.0.11");
+
+    const alloc = std.testing.allocator;
+    var addresses = try lookupServiceAddresses(alloc, "api");
+    defer {
+        for (addresses.items) |ip| alloc.free(ip);
+        addresses.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
+    try std.testing.expectEqualStrings("10.43.0.10", addresses.items[0]);
 }
 
 test "service name register and lookup" {

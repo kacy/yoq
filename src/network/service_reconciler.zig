@@ -445,7 +445,7 @@ fn noteEvent(event: Event) void {
 
     if (current_flags.service_registry_reconciler and !logged_authoritative_flag_notice) {
         logged_authoritative_flag_notice = true;
-        log.info("service reconciler flag enabled; authoritative reconciler owns legacy DNS and compatibility mirror writes", .{});
+        log.info("service reconciler flag enabled; authoritative reconciler owns canonical DNS state", .{});
     }
 
     const write_idx = (recent_start + recent_len) % max_recent_events;
@@ -814,12 +814,6 @@ fn computeAuditMismatch(
         };
     }
 
-    var mirror_ips = store.lookupServiceNames(alloc, service_name) catch return error.StoreReadFailed;
-    defer {
-        for (mirror_ips.items) |ip_text| alloc.free(ip_text);
-        mirror_ips.deinit(alloc);
-    }
-
     var runtime_endpoints = service_registry_runtime.snapshotServiceEndpoints(alloc, service_name) catch |err| switch (err) {
         error.ServiceNotFound => return .{
             .kind = .stale_endpoint,
@@ -919,20 +913,6 @@ fn computeAuditMismatch(
                     return .{ .kind = .eligibility, .reason = try alloc.dupe(u8, "load balancer backends differ from eligible set") };
                 }
             }
-        }
-    }
-
-    if (mirror_ips.items.len != desired_ips.items.len) {
-        return .{
-            .kind = .endpoint_count,
-            .reason = try std.fmt.allocPrint(alloc, "compatibility mirror count drift mirror={d} desired={d}", .{ mirror_ips.items.len, desired_ips.items.len }),
-        };
-    }
-
-    for (mirror_ips.items) |mirror_ip| {
-        const parsed = ip_mod.parseIp(mirror_ip) orelse return .{ .kind = .stale_endpoint, .reason = try alloc.dupe(u8, "compatibility mirror contains invalid ip") };
-        if (!containsIp(desired_ips.items, parsed)) {
-            return .{ .kind = .eligibility, .reason = try alloc.dupe(u8, "compatibility mirror endpoints differ from eligible set") };
         }
     }
 
@@ -1152,11 +1132,6 @@ fn applyDesiredStateLocked(service_name: []const u8, vip: ?[4]u8, desired: []con
         }
     }
 
-    store.removeServiceNamesByName(service_name) catch return error.StoreWriteFailed;
-    for (desired) |endpoint| {
-        var ip_buf: [16]u8 = undefined;
-        store.registerServiceName(service_name, endpoint.container_id, ip_mod.formatIp(endpoint.ip, &ip_buf)) catch return error.StoreWriteFailed;
-    }
     policy.syncPolicies(alloc);
 
     try replaceAppliedServiceLocked(service_name, desired);
@@ -1425,7 +1400,7 @@ test "recent event buffer keeps only the newest events" {
     try std.testing.expectEqualStrings("svc4", events[0].serviceName());
 }
 
-test "authoritative bootstrap populates DNS and compatibility mirror" {
+test "authoritative bootstrap populates canonical DNS state" {
     const dns_registry = @import("dns/registry_support.zig");
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -1463,13 +1438,6 @@ test "authoritative bootstrap populates DNS and compatibility mirror" {
     bootstrapIfEnabled();
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
-    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
 }
 
 test "authoritative bootstrap returns vip when dns_returns_vip is enabled" {
@@ -1514,13 +1482,6 @@ test "authoritative bootstrap returns vip when dns_returns_vip is enabled" {
     bootstrapIfEnabled();
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
-    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
 }
 
 test "shadow audit surfaces vip mismatch without mutating legacy dns" {
@@ -1555,7 +1516,7 @@ test "shadow audit surfaces vip mismatch without mutating legacy dns" {
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
 }
 
-test "audit pass repairs compatibility mirror drift" {
+test "audit pass ignores legacy service_names drift" {
     const dns_registry = @import("dns/registry_support.zig");
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -1598,20 +1559,12 @@ test "audit pass repairs compatibility mirror drift" {
     var audit = try snapshotAuditState(std.testing.allocator);
     defer audit.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 1), audit.passes_total);
-    try std.testing.expectEqual(@as(u64, 1), audit.mismatch_services_total);
-    try std.testing.expectEqual(@as(u64, 1), audit.repairs_total);
+    try std.testing.expectEqual(@as(u64, 0), audit.mismatch_services_total);
+    try std.testing.expectEqual(@as(u64, 0), audit.repairs_total);
     try std.testing.expectEqual(@as(usize, 0), audit.degraded_services.items.len);
-
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
-    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
 }
 
-test "audit repair preserves compatibility mirror for downgrade safety in vip mode" {
+test "audit ignores legacy service_names drift in vip mode" {
     const dns_registry = @import("dns/registry_support.zig");
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -1656,13 +1609,6 @@ test "audit repair preserves compatibility mirror for downgrade safety in vip mo
     runAuditPassIfEnabled();
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
-    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
 }
 
 test "audit pass repairs live dns registry drift" {
@@ -1754,12 +1700,6 @@ test "node loss and recovery reconcile authoritative DNS immediately" {
     noteNodeLost(7);
 
     try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
-    var mirrored_after_loss = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored_after_loss.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored_after_loss.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 0), mirrored_after_loss.items.len);
 
     var endpoints_after_loss = try service_registry_runtime.snapshotServiceEndpoints(std.testing.allocator, "api");
     defer {
@@ -1778,13 +1718,6 @@ test "node loss and recovery reconcile authoritative DNS immediately" {
     noteNodeRecovered(7);
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 7, 9 }), dns.lookupService("api"));
-    var mirrored_after_recovery = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored_after_recovery.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored_after_recovery.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 1), mirrored_after_recovery.items.len);
-    try std.testing.expectEqualStrings("10.42.7.9", mirrored_after_recovery.items[0]);
 
     const after_recovery = snapshotNodeSignalState();
     try std.testing.expectEqual(@as(u64, 1), after_recovery.lost_total);
@@ -1919,7 +1852,6 @@ test "component state change triggers full resync" {
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
 
-    try store.removeServiceNamesByName("api");
     dns_registry.resetRegistryForTest();
     setComponentStateOverrideForTest(.{
         .dns_resolver_running = true,
@@ -1929,13 +1861,6 @@ test "component state change triggers full resync" {
 
     refreshComponentStateIfEnabled();
 
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
-    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
 
     const snapshot = snapshotComponentState();
@@ -2005,13 +1930,6 @@ test "bootstrap quarantines stale endpoint rows for missing nodes" {
     try std.testing.expectEqualStrings("draining", endpoints.items[0].admin_state);
     try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
 
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 0), mirrored.items.len);
-
     var audit = try snapshotAuditState(std.testing.allocator);
     defer audit.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 1), audit.stale_endpoint_quarantines_total);
@@ -2062,13 +1980,6 @@ test "bootstrap quarantines stale endpoint rows for missing local containers" {
     try std.testing.expectEqualStrings("draining", endpoints.items[0].admin_state);
     try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
 
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 0), mirrored.items.len);
-
     var audit = try snapshotAuditState(std.testing.allocator);
     defer audit.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 1), audit.stale_endpoint_quarantines_total);
@@ -2116,12 +2027,6 @@ test "vip dns keeps service visible with zero eligible backends" {
     bootstrapIfEnabled();
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 0), mirrored.items.len);
 }
 
 test "vip dns marks services degraded when eligible backends exceed capacity" {
