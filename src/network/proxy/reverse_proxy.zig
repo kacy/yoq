@@ -1314,29 +1314,17 @@ const TestUpstreamServer = struct {
     accepted: usize = 0,
 
     fn init(actions: []const TestUpstreamAction) !TestUpstreamServer {
-        const listen_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-        errdefer posix.close(listen_fd);
-
-        const reuseaddr: i32 = 1;
-        posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
-
-        const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-        try posix.bind(listen_fd, &addr.any, addr.getOsSockLen());
-        try posix.listen(listen_fd, 1);
-
-        var bound_addr: posix.sockaddr.in = undefined;
-        var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        try posix.getsockname(listen_fd, @ptrCast(&bound_addr), &bound_len);
+        const listener = try initTestListenerSocket();
 
         return .{
-            .listen_fd = listen_fd,
-            .port = std.mem.bigToNative(u16, bound_addr.port),
+            .listen_fd = listener.fd,
+            .port = listener.port,
             .actions = actions,
         };
     }
 
     fn deinit(self: *TestUpstreamServer) void {
-        if (self.thread) |thread| thread.join();
+        self.wait();
         posix.close(self.listen_fd);
     }
 
@@ -1344,7 +1332,15 @@ const TestUpstreamServer = struct {
         self.thread = try std.Thread.spawn(.{}, acceptOne, .{self});
     }
 
-    fn request(self: *const TestUpstreamServer, index: usize) []const u8 {
+    fn wait(self: *TestUpstreamServer) void {
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+    }
+
+    fn request(self: *TestUpstreamServer, index: usize) []const u8 {
+        self.wait();
         return self.request_bufs[index][0..self.request_lens[index]];
     }
 
@@ -1352,7 +1348,7 @@ const TestUpstreamServer = struct {
         for (self.actions, 0..) |action, index| {
             const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             setSocketTimeoutMs(client_fd, 1000);
-            self.request_lens[index] = posix.read(client_fd, &self.request_bufs[index]) catch 0;
+            self.request_lens[index] = captureRequestBytes(client_fd, &self.request_bufs[index]);
             self.accepted = index + 1;
 
             switch (action) {
@@ -1373,23 +1369,11 @@ const TestListener = struct {
     port: u16,
 
     fn init() !TestListener {
-        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-        errdefer posix.close(fd);
-
-        const reuseaddr: i32 = 1;
-        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
-
-        const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-        try posix.bind(fd, &addr.any, addr.getOsSockLen());
-        try posix.listen(fd, 1);
-
-        var bound_addr: posix.sockaddr.in = undefined;
-        var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        try posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len);
+        const listener = try initTestListenerSocket();
 
         return .{
-            .fd = fd,
-            .port = std.mem.bigToNative(u16, bound_addr.port),
+            .fd = listener.fd,
+            .port = listener.port,
         };
     }
 
@@ -1397,6 +1381,72 @@ const TestListener = struct {
         posix.close(self.fd);
     }
 };
+
+const BoundTestListener = struct {
+    fd: posix.socket_t,
+    port: u16,
+};
+
+fn initTestListenerSocket() !BoundTestListener {
+    const reuseaddr: i32 = 1;
+    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+
+    var attempt: usize = 0;
+    while (attempt < 5) : (attempt += 1) {
+        const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch |err| {
+            if (attempt + 1 == 5) return err;
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        };
+        errdefer posix.close(fd);
+
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
+
+        posix.bind(fd, &addr.any, addr.getOsSockLen()) catch |err| {
+            if (attempt + 1 == 5) return err;
+            posix.close(fd);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        };
+        posix.listen(fd, 1) catch |err| {
+            if (attempt + 1 == 5) return err;
+            posix.close(fd);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        };
+
+        var bound_addr: posix.sockaddr.in = undefined;
+        var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+        posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch |err| {
+            if (attempt + 1 == 5) return err;
+            posix.close(fd);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        };
+
+        return .{
+            .fd = fd,
+            .port = std.mem.bigToNative(u16, bound_addr.port),
+        };
+    }
+
+    unreachable;
+}
+
+fn captureRequestBytes(fd: posix.socket_t, buf: []u8) usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const bytes_read = posix.read(fd, buf[total..]) catch break;
+        if (bytes_read == 0) break;
+        total += bytes_read;
+
+        const parsed = http.parseRequest(buf[0..total]) catch return total;
+        if (parsed) |request| {
+            return requestEndOffset(buf[0..total], request);
+        }
+    }
+    return total;
+}
 
 test "forwardRequest proxies upstream response bytes" {
     const store = @import("../../state/store.zig");
@@ -1582,6 +1632,7 @@ test "forwardRequest retries safe methods after upstream receive failure" {
     );
     defer std.testing.allocator.free(response);
 
+    upstream.wait();
     try std.testing.expectEqual(@as(usize, 2), upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
 }
@@ -1656,6 +1707,7 @@ test "forwardRequest retries safe methods on upstream 5xx" {
     );
     defer std.testing.allocator.free(response);
 
+    upstream.wait();
     try std.testing.expectEqual(@as(usize, 2), upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
 }
@@ -1732,6 +1784,7 @@ test "forwardRequest returns bad gateway after upstream request timeout" {
     );
     defer std.testing.allocator.free(response);
 
+    upstream.wait();
     try std.testing.expectEqual(@as(usize, 1), upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 502 Bad Gateway\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "{\"error\":\"upstream receive failed\"}") != null);
@@ -1826,6 +1879,8 @@ test "forwardRequest retries onto a different endpoint after circuit opens" {
     );
     defer std.testing.allocator.free(response);
 
+    failing_upstream.wait();
+    healthy_upstream.wait();
     try std.testing.expectEqual(@as(usize, 1), failing_upstream.accepted);
     try std.testing.expectEqual(@as(usize, 1), healthy_upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);

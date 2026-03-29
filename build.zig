@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     // Default to ReleaseSafe to work around Zig 0.15.2 segfault in Debug mode.
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode") orelse .ReleaseSafe;
+    const test_filter = b.option([]const u8, "test-filter", "Only compile unit tests matching this substring");
 
     const exe = b.addExecutable(.{
         .name = "yoq",
@@ -108,6 +109,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = test_mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
 
     // workaround for zig 0.15.2: --listen=- flag causes tests to hang

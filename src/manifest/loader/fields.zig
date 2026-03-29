@@ -280,6 +280,7 @@ pub fn parseHttpProxyRoutes(
             },
         };
         const route = (try parseHttpProxyRoute(alloc, service_name, route_name, "http_routes", route_table)).?;
+        errdefer route.deinit(alloc);
         try validateHttpProxyRouteConflict(service_name, routes.items, route);
         routes.append(alloc, route) catch {
             route.deinit(alloc);
