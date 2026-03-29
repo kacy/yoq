@@ -7,6 +7,7 @@ const cluster_config = @import("../config.zig");
 const orchestrator = @import("../../manifest/orchestrator.zig");
 const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
+const ip = @import("../../network/ip.zig");
 const service_rollout = @import("../../network/service_rollout.zig");
 const service_reconciler = @import("../../network/service_reconciler.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
@@ -25,6 +26,8 @@ const ServerCommandError = error{
 
 pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var port: u16 = 7700;
+    var http_proxy_bind: [4]u8 = listener_runtime.default_bind_addr;
+    var http_proxy_port: u16 = listener_runtime.default_listen_port;
     var log_fmt: log.LogFormat = .json;
 
     while (args.next()) |arg| {
@@ -35,6 +38,24 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
             };
             port = std.fmt.parseInt(u16, port_str, 10) catch {
                 writeErr("invalid port: {s}\n", .{port_str});
+                return ServerCommandError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--http-proxy-bind")) {
+            const bind_str = args.next() orelse {
+                writeErr("--http-proxy-bind requires an IPv4 address\n", .{});
+                return ServerCommandError.InvalidArgument;
+            };
+            http_proxy_bind = ip.parseIp(bind_str) orelse {
+                writeErr("invalid http proxy bind address: {s}\n", .{bind_str});
+                return ServerCommandError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--http-proxy-port")) {
+            const port_str = args.next() orelse {
+                writeErr("--http-proxy-port requires a port number\n", .{});
+                return ServerCommandError.InvalidArgument;
+            };
+            http_proxy_port = std.fmt.parseInt(u16, port_str, 10) catch {
+                writeErr("invalid http proxy port: {s}\n", .{port_str});
                 return ServerCommandError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--log-format")) {
@@ -54,6 +75,7 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 
     log.setFormat(log_fmt);
+    listener_runtime.configure(http_proxy_bind, http_proxy_port);
     service_rollout.logStartupSummary();
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
@@ -94,6 +116,8 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     var node_id: u64 = 1;
     var raft_port: u16 = 9700;
     var api_port: u16 = 7700;
+    var http_proxy_bind: [4]u8 = .{ 0, 0, 0, 0 };
+    var http_proxy_port: u16 = listener_runtime.default_listen_port;
     var peers_str: []const u8 = "";
     var join_token: ?[]const u8 = null;
     var api_token_arg: ?[]const u8 = null;
@@ -125,6 +149,24 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
             };
             api_port = std.fmt.parseInt(u16, port_str, 10) catch {
                 writeErr("invalid port: {s}\n", .{port_str});
+                return ServerCommandError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--http-proxy-bind")) {
+            const bind_str = args.next() orelse {
+                writeErr("--http-proxy-bind requires an IPv4 address\n", .{});
+                return ServerCommandError.InvalidArgument;
+            };
+            http_proxy_bind = ip.parseIp(bind_str) orelse {
+                writeErr("invalid http proxy bind address: {s}\n", .{bind_str});
+                return ServerCommandError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--http-proxy-port")) {
+            const port_str = args.next() orelse {
+                writeErr("--http-proxy-port requires a port number\n", .{});
+                return ServerCommandError.InvalidArgument;
+            };
+            http_proxy_port = std.fmt.parseInt(u16, port_str, 10) catch {
+                writeErr("invalid http proxy port: {s}\n", .{port_str});
                 return ServerCommandError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--peers")) {
@@ -159,6 +201,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     }
 
     log.setFormat(log_fmt);
+    listener_runtime.configure(http_proxy_bind, http_proxy_port);
     service_rollout.logStartupSummary();
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();

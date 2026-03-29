@@ -208,10 +208,12 @@ yoq cert rm <domain>                 remove a certificate
 ### server and cluster
 
 ```text
-yoq serve [--port PORT]              start the API server
+yoq serve [--port PORT] [--http-proxy-bind ADDR] [--http-proxy-port PORT]
+                                     start the API server
 yoq init-server [--id N] [--port P]  start a cluster server node
     [--api-port P] [--peers ...]
-    [--token TOKEN]
+    [--token TOKEN] [--http-proxy-bind ADDR]
+    [--http-proxy-port PORT]
 yoq join <host> --token <token>      join as an agent node
 yoq cluster status                   show cluster health
 yoq nodes [--server host:port]       list agent nodes
@@ -288,6 +290,7 @@ The [`examples/`](examples/) directory has ready-to-use manifests:
 - [`examples/redis/`](examples/redis/) for the simplest possible single-service setup
 - [`examples/web-app/`](examples/web-app/) for a multi-service app with postgres, redis, workers, and health checks
 - [`examples/cron/`](examples/cron/) for scheduled jobs with `every = "1h"`
+- [`examples/http-routing/`](examples/http-routing/) for host and path-based HTTP routing
 - [`examples/cluster/`](examples/cluster/) for a minimal multi-node cluster flow
 
 ```bash
@@ -296,7 +299,7 @@ yoq up -f examples/redis/manifest.toml
 
 ## what's next
 
-- L7 routing — HTTP-level routing and request-based load balancing (currently DNS-level only)
+- richer HTTP routing — multiple routes per service, rewrites, and traffic shaping
 - hardening — continued stability, edge-case testing, and operational polish
 - web UI remains intentionally deferred; the CLI is the primary interface
 - image signing is not built in; use cosign externally

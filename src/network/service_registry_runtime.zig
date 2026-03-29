@@ -33,8 +33,6 @@ pub fn resetForTest() void {
 }
 
 pub fn syncServiceFromStore(service_name: []const u8) void {
-    if (rollout.mode() == .legacy) return;
-
     mutex.lock();
     defer mutex.unlock();
 
@@ -49,8 +47,6 @@ pub fn syncServiceFromStore(service_name: []const u8) void {
 }
 
 pub fn removeContainer(container_id: []const u8) void {
-    if (rollout.mode() == .legacy) return;
-
     mutex.lock();
     defer mutex.unlock();
 
@@ -63,8 +59,6 @@ pub fn removeContainer(container_id: []const u8) void {
 }
 
 pub fn noteProbeResult(service_name: []const u8, endpoint_id: []const u8, healthy: bool) void {
-    if (rollout.mode() == .legacy) return;
-
     mutex.lock();
     defer mutex.unlock();
 
@@ -80,8 +74,6 @@ pub fn noteProbeResult(service_name: []const u8, endpoint_id: []const u8, health
 }
 
 pub fn markEndpointPending(service_name: []const u8, endpoint_id: []const u8, generation: i64) ProbeOutcome {
-    if (rollout.mode() == .legacy) return .applied;
-
     mutex.lock();
     defer mutex.unlock();
 
@@ -97,8 +89,6 @@ pub fn markEndpointPending(service_name: []const u8, endpoint_id: []const u8, ge
 }
 
 pub fn noteProbeResultForGeneration(service_name: []const u8, endpoint_id: []const u8, generation: i64, healthy: bool) ProbeOutcome {
-    if (rollout.mode() == .legacy) return .applied;
-
     mutex.lock();
     defer mutex.unlock();
 
@@ -180,6 +170,23 @@ pub fn snapshotServiceEndpoints(alloc: Allocator, service_name: []const u8) !std
     return registry.snapshotServiceEndpoints(alloc, service_name);
 }
 
+pub fn hasProxyConfiguredServices() bool {
+    return countProxyConfiguredServices() > 0;
+}
+
+pub fn countProxyConfiguredServices() usize {
+    mutex.lock();
+    defer mutex.unlock();
+
+    ensureInitializedLocked() catch return 0;
+
+    var count: usize = 0;
+    for (registry.services.items) |service| {
+        if (service.http_proxy_host != null) count += 1;
+    }
+    return count;
+}
+
 pub fn drainEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeError!void {
     mutex.lock();
     defer mutex.unlock();
@@ -233,6 +240,7 @@ fn loadSnapshotInto(next_registry: *service_registry.Registry) !void {
             .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
             .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
             .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+            .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
             .http_proxy_preserve_host = service.http_proxy_preserve_host,
         });
 
@@ -283,6 +291,7 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
         .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
         .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
         .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+        .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
         .http_proxy_preserve_host = service.http_proxy_preserve_host,
     });
 

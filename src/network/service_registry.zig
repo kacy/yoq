@@ -74,6 +74,7 @@ pub const ServiceDefinition = struct {
     http_proxy_retries: ?u8 = null,
     http_proxy_connect_timeout_ms: ?u32 = null,
     http_proxy_request_timeout_ms: ?u32 = null,
+    http_proxy_target_port: ?u16 = null,
     http_proxy_preserve_host: ?bool = null,
 };
 
@@ -124,6 +125,7 @@ pub const ServiceSnapshot = struct {
     http_proxy_retries: ?u8,
     http_proxy_connect_timeout_ms: ?u32,
     http_proxy_request_timeout_ms: ?u32,
+    http_proxy_target_port: ?u16,
     http_proxy_preserve_host: ?bool,
     total_endpoints: usize,
     eligible_endpoints: usize,
@@ -179,6 +181,7 @@ const ServiceState = struct {
     http_proxy_retries: ?u8 = null,
     http_proxy_connect_timeout_ms: ?u32 = null,
     http_proxy_request_timeout_ms: ?u32 = null,
+    http_proxy_target_port: ?u16 = null,
     http_proxy_preserve_host: ?bool = null,
     endpoints: std.ArrayList(EndpointState) = .empty,
     last_reconcile_status: ReconcileStatus = .idle,
@@ -224,6 +227,7 @@ pub const Registry = struct {
             service.http_proxy_retries = definition.http_proxy_retries;
             service.http_proxy_connect_timeout_ms = definition.http_proxy_connect_timeout_ms;
             service.http_proxy_request_timeout_ms = definition.http_proxy_request_timeout_ms;
+            service.http_proxy_target_port = definition.http_proxy_target_port;
             service.http_proxy_preserve_host = definition.http_proxy_preserve_host;
             return;
         }
@@ -237,6 +241,7 @@ pub const Registry = struct {
             .http_proxy_retries = definition.http_proxy_retries,
             .http_proxy_connect_timeout_ms = definition.http_proxy_connect_timeout_ms,
             .http_proxy_request_timeout_ms = definition.http_proxy_request_timeout_ms,
+            .http_proxy_target_port = definition.http_proxy_target_port,
             .http_proxy_preserve_host = definition.http_proxy_preserve_host,
         });
     }
@@ -515,6 +520,7 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .http_proxy_retries = service.http_proxy_retries,
         .http_proxy_connect_timeout_ms = service.http_proxy_connect_timeout_ms,
         .http_proxy_request_timeout_ms = service.http_proxy_request_timeout_ms,
+        .http_proxy_target_port = service.http_proxy_target_port,
         .http_proxy_preserve_host = service.http_proxy_preserve_host,
         .total_endpoints = total_endpoints,
         .eligible_endpoints = eligible_endpoints,

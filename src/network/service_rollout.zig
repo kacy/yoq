@@ -61,7 +61,7 @@ fn ensureInitialized() void {
         .service_registry_v2 = readBoolEnv("YOQ_SERVICE_REGISTRY_V2"),
         .service_registry_reconciler = readBoolEnv("YOQ_SERVICE_REGISTRY_RECONCILER"),
         .dns_returns_vip = readBoolEnv("YOQ_DNS_RETURNS_VIP"),
-        .l7_proxy_http = readBoolEnv("YOQ_L7_PROXY_HTTP"),
+        .l7_proxy_http = readAlwaysOnBoolEnv("YOQ_L7_PROXY_HTTP"),
     };
     flags_initialized = true;
 }
@@ -97,6 +97,13 @@ fn modeLabel(current_mode: Mode) []const u8 {
 fn readBoolEnv(name: []const u8) bool {
     const raw = std.posix.getenv(name) orelse return false;
     return parseBool(name, raw);
+}
+
+fn readAlwaysOnBoolEnv(name: []const u8) bool {
+    const raw = std.posix.getenv(name) orelse return true;
+    _ = parseBool(name, raw);
+    log.warn("service rollout flag {s} is deprecated and ignored; HTTP proxy routing is always on", .{name});
+    return true;
 }
 
 fn parseBool(name: []const u8, raw: []const u8) bool {
@@ -159,5 +166,5 @@ test "resetForTest clears overrides" {
     try std.testing.expect(!current_flags.service_registry_v2);
     try std.testing.expect(!current_flags.service_registry_reconciler);
     try std.testing.expect(!current_flags.dns_returns_vip);
-    try std.testing.expect(!current_flags.l7_proxy_http);
+    try std.testing.expect(current_flags.l7_proxy_http);
 }
