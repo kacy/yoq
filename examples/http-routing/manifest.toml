@@ -1,11 +1,16 @@
-[service.web]
+[service.gateway]
 image = "hashicorp/http-echo:1.0"
-command = ["-listen", ":8080", "-text", "web route"]
+command = ["-listen", ":8080", "-text", "gateway route"]
 ports = ["8080:8080"]
 
-[service.web.http_proxy]
+[service.gateway.http_routes.root]
 host = "demo.local"
 path_prefix = "/"
+
+[service.gateway.http_routes.admin]
+host = "demo.local"
+path_prefix = "/admin"
+preserve_host = false
 
 [service.api]
 image = "hashicorp/http-echo:1.0"
@@ -19,3 +24,12 @@ preserve_host = false
 retries = 2
 connect_timeout_ms = 1500
 request_timeout_ms = 5000
+
+[service.docs]
+image = "hashicorp/http-echo:1.0"
+command = ["-listen", ":8080", "-text", "docs route"]
+ports = ["8082:8080"]
+
+[service.docs.http_proxy]
+host = "docs.demo.local"
+path_prefix = "/"

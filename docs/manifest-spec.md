@@ -45,7 +45,8 @@ services are long-running processes. defined under `[service.<name>]`.
 | `working_dir` | string | no | image default | working directory inside container |
 | `volumes` | array of strings | no | `[]` | volume mounts (`"source:target"`) |
 | `health_check` | table | no | none | health probe configuration |
-| `http_proxy` | table | no | none | HTTP routing rule for the service |
+| `http_proxy` | table | no | none | shorthand for a single HTTP routing rule |
+| `http_routes` | table of tables | no | none | named HTTP routing rules for the service |
 | `restart` | string | no | `"none"` | restart policy |
 | `tls` | table | no | none | TLS termination configuration |
 | `gpu` | table | no | none | GPU passthrough configuration |
@@ -108,9 +109,11 @@ restart = "on_failure"
 
 ## HTTP routing
 
-defined under `[service.<name>.http_proxy]`. this enables HTTP host/path routing for the service.
+define either:
+- `[service.<name>.http_proxy]` for a single route
+- `[service.<name>.http_routes.<route_name>]` for multiple named routes on one service
 
-the upstream target is the first service port in `ports`. right now yoq supports one HTTP route per service.
+the upstream target is the first service port in `ports`. `http_proxy` is just shorthand for one route named `default`.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
@@ -142,6 +145,29 @@ retries = 2
 connect_timeout_ms = 1500
 request_timeout_ms = 5000
 ```
+
+multiple routes on one service:
+
+```toml
+[service.gateway]
+image = "ghcr.io/example/gateway:latest"
+ports = ["8080:8080"]
+
+[service.gateway.http_routes.api]
+host = "demo.local"
+path_prefix = "/api"
+
+[service.gateway.http_routes.admin]
+host = "demo.local"
+path_prefix = "/admin"
+preserve_host = false
+```
+
+validation rules:
+
+- each route name must be unique within the service
+- host + `path_prefix` pairs must be unique within the service
+- `http_proxy` and `http_routes` cannot be used together on the same service
 
 server-side listener defaults:
 

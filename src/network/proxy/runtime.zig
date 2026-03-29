@@ -584,36 +584,38 @@ fn syncLocked() !void {
     var next_configured_services: u32 = 0;
     var next_routes: u32 = 0;
     for (services.items) |service| {
-        const host = service.http_proxy_host orelse continue;
+        if (service.http_routes.len == 0) continue;
         next_configured_services += 1;
-        next_routes += 1;
-        const route = router.Route{
-            .name = try std.fmt.allocPrint(std.heap.page_allocator, "{s}:{s}", .{
-                service.service_name,
-                service.http_proxy_path_prefix orelse "/",
-            }),
-            .service = try std.heap.page_allocator.dupe(u8, service.service_name),
-            .vip_address = try std.heap.page_allocator.dupe(u8, service.vip_address),
-            .match = .{
-                .host = try std.heap.page_allocator.dupe(u8, host),
-                .path_prefix = try std.heap.page_allocator.dupe(u8, service.http_proxy_path_prefix orelse "/"),
-            },
-            .eligible_endpoints = @intCast(service.eligible_endpoints),
-            .healthy_endpoints = @intCast(service.healthy_endpoints),
-            .degraded = service.degraded,
-            .retries = service.http_proxy_retries orelse 0,
-            .connect_timeout_ms = service.http_proxy_connect_timeout_ms orelse 1000,
-            .request_timeout_ms = service.http_proxy_request_timeout_ms orelse 5000,
-            .preserve_host = service.http_proxy_preserve_host orelse true,
-        };
-        errdefer {
-            std.heap.page_allocator.free(route.name);
-            std.heap.page_allocator.free(route.service);
-            std.heap.page_allocator.free(route.vip_address);
-            if (route.match.host) |owned_host| std.heap.page_allocator.free(owned_host);
-            std.heap.page_allocator.free(route.match.path_prefix);
+        for (service.http_routes) |service_route| {
+            next_routes += 1;
+            const route = router.Route{
+                .name = try std.fmt.allocPrint(std.heap.page_allocator, "{s}:{s}", .{
+                    service.service_name,
+                    service_route.route_name,
+                }),
+                .service = try std.heap.page_allocator.dupe(u8, service.service_name),
+                .vip_address = try std.heap.page_allocator.dupe(u8, service.vip_address),
+                .match = .{
+                    .host = try std.heap.page_allocator.dupe(u8, service_route.host),
+                    .path_prefix = try std.heap.page_allocator.dupe(u8, service_route.path_prefix),
+                },
+                .eligible_endpoints = @intCast(service.eligible_endpoints),
+                .healthy_endpoints = @intCast(service.healthy_endpoints),
+                .degraded = service.degraded,
+                .retries = service_route.retries,
+                .connect_timeout_ms = service_route.connect_timeout_ms,
+                .request_timeout_ms = service_route.request_timeout_ms,
+                .preserve_host = service_route.preserve_host,
+            };
+            errdefer {
+                std.heap.page_allocator.free(route.name);
+                std.heap.page_allocator.free(route.service);
+                std.heap.page_allocator.free(route.vip_address);
+                if (route.match.host) |owned_host| std.heap.page_allocator.free(owned_host);
+                std.heap.page_allocator.free(route.match.path_prefix);
+            }
+            try materialized_routes.append(std.heap.page_allocator, route);
         }
-        try materialized_routes.append(std.heap.page_allocator, route);
     }
 
     configured_services = next_configured_services;

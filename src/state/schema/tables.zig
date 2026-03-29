@@ -98,6 +98,23 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\);
     );
     try exec(db,
+        \\CREATE TABLE IF NOT EXISTS service_http_routes (
+        \\    service_name TEXT NOT NULL,
+        \\    route_name TEXT NOT NULL,
+        \\    host TEXT NOT NULL,
+        \\    path_prefix TEXT NOT NULL DEFAULT '/',
+        \\    retries INTEGER NOT NULL DEFAULT 0,
+        \\    connect_timeout_ms INTEGER NOT NULL DEFAULT 1000,
+        \\    request_timeout_ms INTEGER NOT NULL DEFAULT 5000,
+        \\    target_port INTEGER,
+        \\    preserve_host INTEGER NOT NULL DEFAULT 1,
+        \\    route_order INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (service_name, route_name)
+        \\);
+    );
+    try exec(db,
         \\CREATE TABLE IF NOT EXISTS deployments (
         \\    id TEXT PRIMARY KEY,
         \\    service_name TEXT NOT NULL,

@@ -160,6 +160,21 @@ test "init creates service_endpoints table" {
     ) catch unreachable;
 }
 
+test "init creates service_http_routes table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO service_http_routes (" ++
+            "service_name, route_name, host, path_prefix, retries, connect_timeout_ms, request_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "api", "default", "api.internal", "/v1", @as(i64, 2), @as(i64, 1000), @as(i64, 5000), @as(i64, 8080), @as(i64, 1), @as(i64, 0), @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
 test "init creates agents table" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();

@@ -65,18 +65,31 @@ pub fn syncServiceDefinitions(
     for (services) |svc| {
         if (!shouldStart(start_set, svc.name)) continue;
 
-        const proxy = svc.http_proxy;
+        var route_inputs: std.ArrayList(store.ServiceHttpRouteInput) = .empty;
+        defer route_inputs.deinit(alloc);
+        var route_alloc_failed = false;
+        for (svc.http_routes) |route| {
+            route_inputs.append(alloc, .{
+                .route_name = route.name,
+                .host = route.host,
+                .path_prefix = route.path_prefix,
+                .retries = route.retries,
+                .connect_timeout_ms = route.connect_timeout_ms,
+                .request_timeout_ms = route.request_timeout_ms,
+                .target_port = if (svc.ports.len > 0) svc.ports[0].container_port else null,
+                .preserve_host = route.preserve_host,
+            }) catch {
+                log.warn("orchestrator: failed to allocate http routes for {s}", .{svc.name});
+                route_alloc_failed = true;
+                break;
+            };
+        }
+        if (route_alloc_failed) continue;
         const record = store.syncServiceConfig(
             alloc,
             svc.name,
             "consistent_hash",
-            if (proxy) |cfg| cfg.host else null,
-            if (proxy) |cfg| cfg.path_prefix else null,
-            if (proxy) |cfg| @as(i64, cfg.retries) else null,
-            if (proxy) |cfg| @as(i64, cfg.connect_timeout_ms) else null,
-            if (proxy) |cfg| @as(i64, cfg.request_timeout_ms) else null,
-            if (proxy != null and svc.ports.len > 0) @as(i64, svc.ports[0].container_port) else null,
-            if (proxy) |cfg| cfg.preserve_host else null,
+            route_inputs.items,
         ) catch |err| {
             log.warn("orchestrator: failed to sync service definition for {s}: {}", .{ svc.name, err });
             continue;
@@ -296,20 +309,24 @@ test "syncServiceDefinitions persists http proxy config for started services" {
     services[0] = try test_support.testService(alloc, "api");
     defer services[0].deinit(alloc);
     alloc.free(services[0].ports);
+    alloc.free(services[0].http_routes);
     services[0].ports = try alloc.dupe(shared_types.PortMapping, &.{
         .{
             .host_port = 18080,
             .container_port = 8080,
         },
     });
-    services[0].http_proxy = .{
-        .host = try alloc.dupe(u8, "api.internal"),
-        .path_prefix = try alloc.dupe(u8, "/v1"),
-        .retries = 2,
-        .connect_timeout_ms = 1500,
-        .request_timeout_ms = 5000,
-        .preserve_host = false,
-    };
+    services[0].http_routes = try alloc.dupe(shared_types.HttpProxyRoute, &.{
+        .{
+            .name = try alloc.dupe(u8, "default"),
+            .host = try alloc.dupe(u8, "api.internal"),
+            .path_prefix = try alloc.dupe(u8, "/v1"),
+            .retries = 2,
+            .connect_timeout_ms = 1500,
+            .request_timeout_ms = 5000,
+            .preserve_host = false,
+        },
+    });
 
     services[1] = try test_support.testService(alloc, "worker");
     defer services[1].deinit(alloc);
@@ -330,6 +347,7 @@ test "syncServiceDefinitions persists http proxy config for started services" {
     defer api_snapshot.deinit(alloc);
     try std.testing.expectEqualStrings("api.internal", api_snapshot.http_proxy_host.?);
     try std.testing.expectEqual(@as(?u16, 8080), api_snapshot.http_proxy_target_port);
+    try std.testing.expectEqual(@as(usize, 1), api_snapshot.http_routes.len);
 
     try std.testing.expectError(store.StoreError.NotFound, store.getService(alloc, "worker"));
 }

@@ -112,7 +112,8 @@ pub const TlsConfig = struct {
     }
 };
 
-pub const HttpProxyConfig = struct {
+pub const HttpProxyRoute = struct {
+    name: []const u8,
     host: []const u8,
     path_prefix: []const u8 = "/",
     retries: u8 = 0,
@@ -120,7 +121,8 @@ pub const HttpProxyConfig = struct {
     request_timeout_ms: u32 = 5000,
     preserve_host: bool = true,
 
-    pub fn deinit(self: HttpProxyConfig, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: HttpProxyRoute, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
         alloc.free(self.host);
         alloc.free(self.path_prefix);
     }

@@ -36,6 +36,33 @@ fn migrateServices(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_request_timeout_ms INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_target_port INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_preserve_host INTEGER;") catch {};
+    createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS service_http_routes (
+        \\    service_name TEXT NOT NULL,
+        \\    route_name TEXT NOT NULL,
+        \\    host TEXT NOT NULL,
+        \\    path_prefix TEXT NOT NULL DEFAULT '/',
+        \\    retries INTEGER NOT NULL DEFAULT 0,
+        \\    connect_timeout_ms INTEGER NOT NULL DEFAULT 1000,
+        \\    request_timeout_ms INTEGER NOT NULL DEFAULT 5000,
+        \\    target_port INTEGER,
+        \\    preserve_host INTEGER NOT NULL DEFAULT 1,
+        \\    route_order INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (service_name, route_name)
+        \\);
+    ) catch {};
+    db.exec(
+        "INSERT INTO service_http_routes (" ++
+            "service_name, route_name, host, path_prefix, retries, connect_timeout_ms, request_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at" ++
+            ") SELECT service_name, 'default', http_proxy_host, COALESCE(http_proxy_path_prefix, '/'), COALESCE(http_proxy_retries, 0), COALESCE(http_proxy_connect_timeout_ms, 1000), COALESCE(http_proxy_request_timeout_ms, 5000), http_proxy_target_port, COALESCE(http_proxy_preserve_host, 1), 0, created_at, updated_at" ++
+            " FROM services WHERE http_proxy_host IS NOT NULL AND NOT EXISTS (" ++
+            "SELECT 1 FROM service_http_routes routes WHERE routes.service_name = services.service_name AND routes.route_name = 'default'" ++
+            ");",
+        .{},
+        .{},
+    ) catch {};
 }
 
 fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {
@@ -44,6 +71,10 @@ fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {
         if (std.mem.indexOf(u8, err_msg, "duplicate column name") != null) return;
         return SchemaError.InitFailed;
     };
+}
+
+fn createTableIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {
+    db.execDynamic(sql, .{}, .{}) catch return SchemaError.InitFailed;
 }
 
 test "addColumnIfMissing ignores duplicate column errors" {
@@ -72,5 +103,11 @@ test "migrateServices adds http proxy columns" {
             ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{ "api", "10.43.0.2", "consistent_hash", "api.internal", "/v1", @as(i64, 2), @as(i64, 1500), @as(i64, 5000), @as(i64, 8080), @as(i64, 1), @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+
+    db.exec(
+        "SELECT service_name, route_name, host FROM service_http_routes WHERE service_name = ?;",
+        .{},
+        .{"api"},
     ) catch unreachable;
 }
