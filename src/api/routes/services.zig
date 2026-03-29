@@ -211,6 +211,26 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"http_routes\":[");
+    for (service.http_routes, 0..) |http_route, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"name\":\"");
+        try json_helpers.writeJsonEscaped(writer, http_route.route_name);
+        try writer.writeAll("\",\"host\":\"");
+        try json_helpers.writeJsonEscaped(writer, http_route.host);
+        try writer.writeAll("\",\"path_prefix\":\"");
+        try json_helpers.writeJsonEscaped(writer, http_route.path_prefix);
+        try writer.print(
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            .{
+                http_route.retries,
+                http_route.connect_timeout_ms,
+                http_route.request_timeout_ms,
+                http_route.preserve_host,
+            },
+        );
+    }
+    try writer.writeByte(']');
     try writer.print(
         "\",\"total_endpoints\":{d},\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"draining_endpoints\":{d},\"last_reconcile_status\":\"",
         .{
@@ -403,6 +423,7 @@ test "route handles GET /v1/services" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}]") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":0,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"rollout_disabled\",\"vip_traffic_mode\":\"not_applicable\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }

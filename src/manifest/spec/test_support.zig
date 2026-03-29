@@ -25,6 +25,6 @@ pub fn testService(alloc: std.mem.Allocator, name: []const u8) !workloads.Servic
         .working_dir = null,
         .volumes = try alloc.alloc(shared_types.VolumeMount, 0),
         .health_check = null,
-        .http_proxy = null,
+        .http_routes = try alloc.alloc(shared_types.HttpProxyRoute, 0),
     };
 }

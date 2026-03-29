@@ -380,13 +380,14 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
         testing.allocator,
         "api",
         "consistent_hash",
-        "api.internal",
-        "/v1",
-        null,
-        null,
-        null,
-        8080,
-        null,
+        &.{
+            .{
+                .route_name = "default",
+                .host = "api.internal",
+                .path_prefix = "/v1",
+                .target_port = 8080,
+            },
+        },
     );
     defer service.deinit(testing.allocator);
     service_registry_runtime.syncServiceFromStore("api");

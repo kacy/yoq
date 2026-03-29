@@ -179,38 +179,42 @@ pub fn parseTlsConfig(
     };
 }
 
-pub fn parseHttpProxyConfig(
+pub fn parseHttpProxyRoute(
     alloc: std.mem.Allocator,
     service_name: []const u8,
+    route_name: []const u8,
+    field_name: []const u8,
     table: ?*const toml.Table,
-) common.LoadError!?spec.HttpProxyConfig {
+) common.LoadError!?spec.HttpProxyRoute {
     const proxy_table = table orelse return null;
 
     const host = proxy_table.getString("host") orelse {
-        log.err("manifest: service '{s}' http_proxy is missing required field 'host'", .{service_name});
+        log.err("manifest: service '{s}' {s} route '{s}' is missing required field 'host'", .{ service_name, field_name, route_name });
         return common.LoadError.InvalidHttpProxyConfig;
     };
     if (host.len == 0) {
-        log.err("manifest: service '{s}' http_proxy host cannot be empty", .{service_name});
+        log.err("manifest: service '{s}' {s} route '{s}' host cannot be empty", .{ service_name, field_name, route_name });
         return common.LoadError.InvalidHttpProxyConfig;
     }
 
     const path_prefix = proxy_table.getString("path_prefix") orelse "/";
     if (path_prefix.len == 0 or path_prefix[0] != '/') {
-        log.err("manifest: service '{s}' http_proxy path_prefix must start with '/'", .{service_name});
+        log.err("manifest: service '{s}' {s} route '{s}' path_prefix must start with '/'", .{ service_name, field_name, route_name });
         return common.LoadError.InvalidHttpProxyConfig;
     }
 
     const retries_raw = proxy_table.getInt("retries") orelse 0;
     if (retries_raw < 0 or retries_raw > 5) {
-        log.err("manifest: service '{s}' http_proxy retries must be between 0 and 5", .{service_name});
+        log.err("manifest: service '{s}' {s} route '{s}' retries must be between 0 and 5", .{ service_name, field_name, route_name });
         return common.LoadError.InvalidHttpProxyConfig;
     }
 
     const connect_timeout_raw = proxy_table.getInt("connect_timeout_ms") orelse 1000;
     if (connect_timeout_raw < 1 or connect_timeout_raw > std.math.maxInt(u32)) {
-        log.err("manifest: service '{s}' http_proxy connect_timeout_ms must be between 1 and {d}", .{
+        log.err("manifest: service '{s}' {s} route '{s}' connect_timeout_ms must be between 1 and {d}", .{
             service_name,
+            field_name,
+            route_name,
             std.math.maxInt(u32),
         });
         return common.LoadError.InvalidHttpProxyConfig;
@@ -218,8 +222,10 @@ pub fn parseHttpProxyConfig(
 
     const request_timeout_raw = proxy_table.getInt("request_timeout_ms") orelse 5000;
     if (request_timeout_raw < 1 or request_timeout_raw > std.math.maxInt(u32)) {
-        log.err("manifest: service '{s}' http_proxy request_timeout_ms must be between 1 and {d}", .{
+        log.err("manifest: service '{s}' {s} route '{s}' request_timeout_ms must be between 1 and {d}", .{
             service_name,
+            field_name,
+            route_name,
             std.math.maxInt(u32),
         });
         return common.LoadError.InvalidHttpProxyConfig;
@@ -228,6 +234,7 @@ pub fn parseHttpProxyConfig(
     const preserve_host = proxy_table.getBool("preserve_host") orelse true;
 
     return .{
+        .name = alloc.dupe(u8, route_name) catch return common.LoadError.OutOfMemory,
         .host = alloc.dupe(u8, host) catch return common.LoadError.OutOfMemory,
         .path_prefix = alloc.dupe(u8, path_prefix) catch return common.LoadError.OutOfMemory,
         .retries = @intCast(retries_raw),
@@ -235,6 +242,74 @@ pub fn parseHttpProxyConfig(
         .request_timeout_ms = @intCast(request_timeout_raw),
         .preserve_host = preserve_host,
     };
+}
+
+pub fn parseHttpProxyRoutes(
+    alloc: std.mem.Allocator,
+    service_name: []const u8,
+    http_proxy_table: ?*const toml.Table,
+    http_routes_table: ?*const toml.Table,
+) common.LoadError![]const spec.HttpProxyRoute {
+    if (http_proxy_table != null and http_routes_table != null) {
+        log.err("manifest: service '{s}' cannot define both http_proxy and http_routes", .{service_name});
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    if (http_proxy_table) |table| {
+        const route = (try parseHttpProxyRoute(alloc, service_name, "default", "http_proxy", table)).?;
+        errdefer route.deinit(alloc);
+        const routes = try alloc.alloc(spec.HttpProxyRoute, 1);
+        routes[0] = route;
+        return routes;
+    }
+
+    const routes_table = http_routes_table orelse return alloc.alloc(spec.HttpProxyRoute, 0) catch return common.LoadError.OutOfMemory;
+
+    var routes: std.ArrayListUnmanaged(spec.HttpProxyRoute) = .empty;
+    errdefer {
+        for (routes.items) |route| route.deinit(alloc);
+        routes.deinit(alloc);
+    }
+
+    for (routes_table.entries.keys(), routes_table.entries.values()) |route_name, value| {
+        const route_table = switch (value) {
+            .table => |child| child,
+            else => {
+                log.err("manifest: service '{s}' http_routes entry '{s}' must be a table", .{ service_name, route_name });
+                return common.LoadError.InvalidHttpProxyConfig;
+            },
+        };
+        const route = (try parseHttpProxyRoute(alloc, service_name, route_name, "http_routes", route_table)).?;
+        try validateHttpProxyRouteConflict(service_name, routes.items, route);
+        routes.append(alloc, route) catch {
+            route.deinit(alloc);
+            return common.LoadError.OutOfMemory;
+        };
+    }
+
+    if (routes.items.len == 0) {
+        log.err("manifest: service '{s}' http_routes must define at least one named route table", .{service_name});
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    return routes.toOwnedSlice(alloc) catch return common.LoadError.OutOfMemory;
+}
+
+fn validateHttpProxyRouteConflict(
+    service_name: []const u8,
+    existing: []const spec.HttpProxyRoute,
+    candidate: spec.HttpProxyRoute,
+) common.LoadError!void {
+    for (existing) |route| {
+        if (!std.ascii.eqlIgnoreCase(route.host, candidate.host)) continue;
+        if (!std.mem.eql(u8, route.path_prefix, candidate.path_prefix)) continue;
+
+        log.err(
+            "manifest: service '{s}' defines duplicate http route match host='{s}' path_prefix='{s}'",
+            .{ service_name, candidate.host, candidate.path_prefix },
+        );
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
 }
 
 pub fn parseGpuSpec(

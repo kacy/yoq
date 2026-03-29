@@ -28,7 +28,7 @@ pub const RestartPolicy = shared_types.RestartPolicy;
 pub const CheckType = shared_types.CheckType;
 pub const HealthCheck = shared_types.HealthCheck;
 pub const TlsConfig = shared_types.TlsConfig;
-pub const HttpProxyConfig = shared_types.HttpProxyConfig;
+pub const HttpProxyRoute = shared_types.HttpProxyRoute;
 pub const PortMapping = shared_types.PortMapping;
 pub const VolumeMount = shared_types.VolumeMount;
 pub const VolumeDriver = shared_types.VolumeDriver;
@@ -175,14 +175,17 @@ test "deinit frees all memory" {
             .retries = 3,
             .start_period = 0,
         },
-        .http_proxy = .{
-            .host = try alloc.dupe(u8, "api.internal"),
-            .path_prefix = try alloc.dupe(u8, "/v1"),
-            .retries = 2,
-            .connect_timeout_ms = 1500,
-            .request_timeout_ms = 6000,
-            .preserve_host = false,
-        },
+        .http_routes = try alloc.dupe(shared_types.HttpProxyRoute, &.{
+            .{
+                .name = try alloc.dupe(u8, "default"),
+                .host = try alloc.dupe(u8, "api.internal"),
+                .path_prefix = try alloc.dupe(u8, "/v1"),
+                .retries = 2,
+                .connect_timeout_ms = 1500,
+                .request_timeout_ms = 6000,
+                .preserve_host = false,
+            },
+        }),
     };
 
     const volumes = try alloc.alloc(Volume, 1);

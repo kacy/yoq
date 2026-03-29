@@ -1320,7 +1320,9 @@ test "http proxy config — host and path prefix" {
     );
     defer manifest.deinit();
 
-    const proxy = manifest.services[0].http_proxy orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqual(@as(usize, 1), manifest.services[0].http_routes.len);
+    const proxy = manifest.services[0].http_routes[0];
+    try std.testing.expectEqualStrings("default", proxy.name);
     try std.testing.expectEqualStrings("api.internal", proxy.host);
     try std.testing.expectEqualStrings("/v1", proxy.path_prefix);
     try std.testing.expectEqual(@as(u8, 2), proxy.retries);
@@ -1341,7 +1343,8 @@ test "http proxy config — defaults" {
     );
     defer manifest.deinit();
 
-    const proxy = manifest.services[0].http_proxy orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqual(@as(usize, 1), manifest.services[0].http_routes.len);
+    const proxy = manifest.services[0].http_routes[0];
     try std.testing.expectEqualStrings("api.internal", proxy.host);
     try std.testing.expectEqualStrings("/", proxy.path_prefix);
     try std.testing.expectEqual(@as(u8, 0), proxy.retries);
@@ -1372,6 +1375,63 @@ test "http proxy config — invalid path prefix returns error" {
         \\[service.web.http_proxy]
         \\host = "api.internal"
         \\path_prefix = "v1"
+    ));
+}
+
+test "http routes config — parses named routes" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_routes.api]
+        \\host = "api.internal"
+        \\path_prefix = "/v1"
+        \\
+        \\[service.web.http_routes.admin]
+        \\host = "api.internal"
+        \\path_prefix = "/admin"
+        \\preserve_host = false
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), manifest.services[0].http_routes.len);
+    try std.testing.expectEqualStrings("api", manifest.services[0].http_routes[0].name);
+    try std.testing.expectEqualStrings("/v1", manifest.services[0].http_routes[0].path_prefix);
+    try std.testing.expectEqualStrings("admin", manifest.services[0].http_routes[1].name);
+    try std.testing.expect(!manifest.services[0].http_routes[1].preserve_host);
+}
+
+test "http routes config — mixed shorthand and route tables returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_proxy]
+        \\host = "api.internal"
+        \\
+        \\[service.web.http_routes.admin]
+        \\host = "admin.internal"
+    ));
+}
+
+test "http routes config — duplicate host path returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_routes.api]
+        \\host = "api.internal"
+        \\path_prefix = "/v1"
+        \\
+        \\[service.web.http_routes.again]
+        \\host = "api.internal"
+        \\path_prefix = "/v1"
     ));
 }
 

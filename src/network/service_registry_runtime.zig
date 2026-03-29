@@ -182,7 +182,7 @@ pub fn countProxyConfiguredServices() usize {
 
     var count: usize = 0;
     for (registry.services.items) |service| {
-        if (service.http_proxy_host != null) count += 1;
+        if (service.http_routes.items.len > 0) count += 1;
     }
     return count;
 }
@@ -231,10 +231,13 @@ fn loadSnapshotInto(next_registry: *service_registry.Registry) !void {
     }
 
     for (services.items) |service| {
+        const route_definitions = try cloneRouteDefinitions(alloc, service.http_routes);
+        defer deinitRouteDefinitions(alloc, route_definitions);
         try next_registry.upsertService(.{
             .service_name = service.service_name,
             .vip_address = service.vip_address,
             .lb_policy = service.lb_policy,
+            .http_routes = route_definitions,
             .http_proxy_host = service.http_proxy_host,
             .http_proxy_path_prefix = service.http_proxy_path_prefix,
             .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
@@ -282,10 +285,13 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
     };
     defer service.deinit(alloc);
 
+    const route_definitions = try cloneRouteDefinitions(alloc, service.http_routes);
+    defer deinitRouteDefinitions(alloc, route_definitions);
     try registry.upsertService(.{
         .service_name = service.service_name,
         .vip_address = service.vip_address,
         .lb_policy = service.lb_policy,
+        .http_routes = route_definitions,
         .http_proxy_host = service.http_proxy_host,
         .http_proxy_path_prefix = service.http_proxy_path_prefix,
         .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
@@ -319,6 +325,42 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
     }
 
     try registry.replaceServiceEndpoints(service_name, definitions.items);
+}
+
+fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRouteRecord) ![]const service_registry.HttpRouteDefinition {
+    var defs: std.ArrayList(service_registry.HttpRouteDefinition) = .empty;
+    errdefer {
+        for (defs.items) |route| {
+            alloc.free(route.route_name);
+            alloc.free(route.host);
+            alloc.free(route.path_prefix);
+        }
+        defs.deinit(alloc);
+    }
+
+    for (routes) |route| {
+        try defs.append(alloc, .{
+            .route_name = try alloc.dupe(u8, route.route_name),
+            .host = try alloc.dupe(u8, route.host),
+            .path_prefix = try alloc.dupe(u8, route.path_prefix),
+            .retries = @intCast(route.retries),
+            .connect_timeout_ms = @intCast(route.connect_timeout_ms),
+            .request_timeout_ms = @intCast(route.request_timeout_ms),
+            .target_port = if (route.target_port) |port| @intCast(port) else null,
+            .preserve_host = route.preserve_host,
+        });
+    }
+
+    return defs.toOwnedSlice(alloc);
+}
+
+fn deinitRouteDefinitions(alloc: Allocator, routes: []const service_registry.HttpRouteDefinition) void {
+    for (routes) |route| {
+        alloc.free(route.route_name);
+        alloc.free(route.host);
+        alloc.free(route.path_prefix);
+    }
+    alloc.free(routes);
 }
 
 test "runtime bootstraps from persisted services" {

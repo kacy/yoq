@@ -299,7 +299,7 @@ yoq up -f examples/redis/manifest.toml
 
 ## what's next
 
-- richer HTTP routing — multiple routes per service, rewrites, and traffic shaping
+- richer HTTP routing — rewrites, header matching, and traffic shaping
 - hardening — continued stability, edge-case testing, and operational polish
 - web UI remains intentionally deferred; the CLI is the primary interface
 - image signing is not built in; use cosign externally

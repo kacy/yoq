@@ -77,6 +77,7 @@ pub fn startForTest(alloc: std.mem.Allocator, port: u16) void {
 }
 
 pub fn startOrSkipForTest(alloc: std.mem.Allocator, port: u16) !void {
+    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
     configure(default_bind_addr, port);
     start(alloc);
     if (portIfRunning() != null) return;

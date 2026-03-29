@@ -36,6 +36,7 @@ pub const ServiceRecord = struct {
     service_name: []const u8,
     vip_address: []const u8,
     lb_policy: []const u8,
+    http_routes: []const ServiceHttpRouteRecord = &.{},
     http_proxy_host: ?[]const u8 = null,
     http_proxy_path_prefix: ?[]const u8 = null,
     http_proxy_retries: ?i64 = null,
@@ -50,9 +51,44 @@ pub const ServiceRecord = struct {
         alloc.free(self.service_name);
         alloc.free(self.vip_address);
         alloc.free(self.lb_policy);
+        for (self.http_routes) |route| route.deinit(alloc);
+        alloc.free(self.http_routes);
         if (self.http_proxy_host) |host| alloc.free(host);
         if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
     }
+};
+
+pub const ServiceHttpRouteRecord = struct {
+    service_name: []const u8,
+    route_name: []const u8,
+    host: []const u8,
+    path_prefix: []const u8,
+    retries: i64,
+    connect_timeout_ms: i64,
+    request_timeout_ms: i64,
+    target_port: ?i64 = null,
+    preserve_host: bool = true,
+    route_order: i64,
+    created_at: i64,
+    updated_at: i64,
+
+    pub fn deinit(self: ServiceHttpRouteRecord, alloc: Allocator) void {
+        alloc.free(self.service_name);
+        alloc.free(self.route_name);
+        alloc.free(self.host);
+        alloc.free(self.path_prefix);
+    }
+};
+
+pub const ServiceHttpRouteInput = struct {
+    route_name: []const u8,
+    host: []const u8,
+    path_prefix: []const u8 = "/",
+    retries: i64 = 0,
+    connect_timeout_ms: i64 = 1000,
+    request_timeout_ms: i64 = 5000,
+    target_port: ?i64 = null,
+    preserve_host: bool = true,
 };
 
 const service_columns =
@@ -69,6 +105,24 @@ const ServiceRow = struct {
     http_proxy_request_timeout_ms: ?i64,
     http_proxy_target_port: ?i64,
     http_proxy_preserve_host: ?i64,
+    created_at: i64,
+    updated_at: i64,
+};
+
+const service_http_route_columns =
+    "service_name, route_name, host, path_prefix, retries, connect_timeout_ms, request_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at";
+
+const ServiceHttpRouteRow = struct {
+    service_name: sqlite.Text,
+    route_name: sqlite.Text,
+    host: sqlite.Text,
+    path_prefix: sqlite.Text,
+    retries: i64,
+    connect_timeout_ms: i64,
+    request_timeout_ms: i64,
+    target_port: ?i64,
+    preserve_host: i64,
+    route_order: i64,
     created_at: i64,
     updated_at: i64,
 };
@@ -132,11 +186,12 @@ const NetworkPolicyRow = struct {
     created_at: i64,
 };
 
-fn rowToServiceRecord(row: ServiceRow) ServiceRecord {
+fn rowToServiceRecord(row: ServiceRow, http_routes: []const ServiceHttpRouteRecord) ServiceRecord {
     return .{
         .service_name = row.service_name.data,
         .vip_address = row.vip_address.data,
         .lb_policy = row.lb_policy.data,
+        .http_routes = http_routes,
         .http_proxy_host = if (row.http_proxy_host) |host| host.data else null,
         .http_proxy_path_prefix = if (row.http_proxy_path_prefix) |path_prefix| path_prefix.data else null,
         .http_proxy_retries = row.http_proxy_retries,
@@ -147,6 +202,98 @@ fn rowToServiceRecord(row: ServiceRow) ServiceRecord {
         .created_at = row.created_at,
         .updated_at = row.updated_at,
     };
+}
+
+fn rowToServiceHttpRouteRecord(row: ServiceHttpRouteRow) ServiceHttpRouteRecord {
+    return .{
+        .service_name = row.service_name.data,
+        .route_name = row.route_name.data,
+        .host = row.host.data,
+        .path_prefix = row.path_prefix.data,
+        .retries = row.retries,
+        .connect_timeout_ms = row.connect_timeout_ms,
+        .request_timeout_ms = row.request_timeout_ms,
+        .target_port = row.target_port,
+        .preserve_host = row.preserve_host != 0,
+        .route_order = row.route_order,
+        .created_at = row.created_at,
+        .updated_at = row.updated_at,
+    };
+}
+
+fn listServiceHttpRoutesForDb(alloc: Allocator, db: *sqlite.Db, service_name: []const u8) StoreError![]const ServiceHttpRouteRecord {
+    var routes: std.ArrayList(ServiceHttpRouteRecord) = .empty;
+    errdefer {
+        for (routes.items) |route| route.deinit(alloc);
+        routes.deinit(alloc);
+    }
+    var stmt = db.prepare(
+        "SELECT " ++ service_http_route_columns ++ " FROM service_http_routes WHERE service_name = ? ORDER BY route_order, route_name;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(ServiceHttpRouteRow, .{service_name}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        routes.append(alloc, rowToServiceHttpRouteRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return routes.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
+}
+
+fn syncDerivedServiceProxyFields(
+    db: *sqlite.Db,
+    service_name: []const u8,
+    now: i64,
+    routes: []const ServiceHttpRouteInput,
+) StoreError!void {
+    const primary = if (routes.len > 0) routes[0] else null;
+    db.exec(
+        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
+        .{},
+        .{
+            if (primary) |route| route.host else null,
+            if (primary) |route| route.path_prefix else null,
+            if (primary) |route| route.retries else null,
+            if (primary) |route| route.connect_timeout_ms else null,
+            if (primary) |route| route.request_timeout_ms else null,
+            if (primary) |route| route.target_port else null,
+            if (primary) |route| @as(i64, @intFromBool(route.preserve_host)) else null,
+            now,
+            service_name,
+        },
+    ) catch return StoreError.WriteFailed;
+}
+
+fn replaceServiceHttpRoutes(
+    db: *sqlite.Db,
+    service_name: []const u8,
+    now: i64,
+    routes: []const ServiceHttpRouteInput,
+) StoreError!void {
+    db.exec(
+        "DELETE FROM service_http_routes WHERE service_name = ?;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.WriteFailed;
+
+    for (routes, 0..) |route, idx| {
+        db.exec(
+            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            .{},
+            .{
+                service_name,
+                route.route_name,
+                route.host,
+                route.path_prefix,
+                route.retries,
+                route.connect_timeout_ms,
+                route.request_timeout_ms,
+                route.target_port,
+                @as(i64, @intFromBool(route.preserve_host)),
+                @as(i64, @intCast(idx)),
+                now,
+                now,
+            },
+        ) catch return StoreError.WriteFailed;
+    }
 }
 
 fn rowToServiceEndpointRecord(row: ServiceEndpointRow) ServiceEndpointRecord {
@@ -176,6 +323,9 @@ fn rowToServiceNameRecord(row: ServiceNameRow) ServiceNameRecord {
 
 pub fn createService(record: ServiceRecord) StoreError!void {
     const db = try common.getDb();
+    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
+    var committed = false;
+    errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
     db.exec(
         "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
@@ -194,6 +344,26 @@ pub fn createService(record: ServiceRecord) StoreError!void {
             record.updated_at,
         },
     ) catch return StoreError.WriteFailed;
+    if (record.http_routes.len > 0) {
+        var route_inputs: std.ArrayListUnmanaged(ServiceHttpRouteInput) = .empty;
+        defer route_inputs.deinit(std.heap.page_allocator);
+        for (record.http_routes) |route| {
+            route_inputs.append(std.heap.page_allocator, .{
+                .route_name = route.route_name,
+                .host = route.host,
+                .path_prefix = route.path_prefix,
+                .retries = route.retries,
+                .connect_timeout_ms = route.connect_timeout_ms,
+                .request_timeout_ms = route.request_timeout_ms,
+                .target_port = route.target_port,
+                .preserve_host = route.preserve_host,
+            }) catch return StoreError.WriteFailed;
+        }
+        try replaceServiceHttpRoutes(db, record.service_name, record.updated_at, route_inputs.items);
+        try syncDerivedServiceProxyFields(db, record.service_name, record.updated_at, route_inputs.items);
+    }
+    db.exec("COMMIT;", .{}, .{}) catch return StoreError.WriteFailed;
+    committed = true;
 }
 
 pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []const u8) StoreError!ServiceRecord {
@@ -210,7 +380,8 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
         .{},
         .{service_name},
     ) catch return StoreError.ReadFailed) |row| {
-        const record = rowToServiceRecord(row);
+        const routes = try listServiceHttpRoutesForDb(alloc, db, service_name);
+        const record = rowToServiceRecord(row, routes);
         db.exec("COMMIT;", .{}, .{}) catch {
             record.deinit(alloc);
             return StoreError.WriteFailed;
@@ -246,6 +417,7 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
         .service_name = service_name_copy,
         .vip_address = vip_copy,
         .lb_policy = lb_policy_copy,
+        .http_routes = alloc.alloc(ServiceHttpRouteRecord, 0) catch return StoreError.ReadFailed,
         .http_proxy_host = null,
         .http_proxy_path_prefix = null,
         .http_proxy_retries = null,
@@ -262,35 +434,29 @@ pub fn syncServiceConfig(
     alloc: Allocator,
     service_name: []const u8,
     lb_policy: []const u8,
-    http_proxy_host: ?[]const u8,
-    http_proxy_path_prefix: ?[]const u8,
-    http_proxy_retries: ?i64,
-    http_proxy_connect_timeout_ms: ?i64,
-    http_proxy_request_timeout_ms: ?i64,
-    http_proxy_target_port: ?i64,
-    http_proxy_preserve_host: ?bool,
+    routes: []const ServiceHttpRouteInput,
 ) StoreError!ServiceRecord {
     var existing = try ensureService(alloc, service_name, lb_policy);
     defer existing.deinit(alloc);
 
     const db = try common.getDb();
     const now = std.time.timestamp();
+    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
+    var committed = false;
+    errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
     db.exec(
-        "UPDATE services SET lb_policy = ?, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
+        "UPDATE services SET lb_policy = ?, updated_at = ? WHERE service_name = ?;",
         .{},
         .{
             lb_policy,
-            http_proxy_host,
-            http_proxy_path_prefix,
-            http_proxy_retries,
-            http_proxy_connect_timeout_ms,
-            http_proxy_request_timeout_ms,
-            http_proxy_target_port,
-            if (http_proxy_preserve_host) |preserve_host| @as(?i64, @intFromBool(preserve_host)) else null,
             now,
             service_name,
         },
     ) catch return StoreError.WriteFailed;
+    try replaceServiceHttpRoutes(db, service_name, now, routes);
+    try syncDerivedServiceProxyFields(db, service_name, now, routes);
+    db.exec("COMMIT;", .{}, .{}) catch return StoreError.WriteFailed;
+    committed = true;
 
     return getService(alloc, service_name);
 }
@@ -304,7 +470,8 @@ pub fn getService(alloc: Allocator, service_name: []const u8) StoreError!Service
         .{},
         .{service_name},
     ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
-    return rowToServiceRecord(row);
+    const routes = try listServiceHttpRoutesForDb(alloc, db, service_name);
+    return rowToServiceRecord(row, routes);
 }
 
 pub fn listServices(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
@@ -316,7 +483,8 @@ pub fn listServices(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
     defer stmt.deinit();
     var iter = stmt.iterator(ServiceRow, .{}) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        services.append(alloc, rowToServiceRecord(row)) catch return StoreError.ReadFailed;
+        const routes = try listServiceHttpRoutesForDb(alloc, db, row.service_name.data);
+        services.append(alloc, rowToServiceRecord(row, routes)) catch return StoreError.ReadFailed;
     }
     return services;
 }
@@ -636,13 +804,18 @@ test "syncServiceConfig updates proxy policy without changing vip" {
         alloc,
         "api",
         "consistent_hash",
-        "api.internal",
-        "/v1",
-        2,
-        1500,
-        5000,
-        8080,
-        false,
+        &.{
+            .{
+                .route_name = "default",
+                .host = "api.internal",
+                .path_prefix = "/v1",
+                .retries = 2,
+                .connect_timeout_ms = 1500,
+                .request_timeout_ms = 5000,
+                .target_port = 8080,
+                .preserve_host = false,
+            },
+        },
     );
     defer updated.deinit(alloc);
 
