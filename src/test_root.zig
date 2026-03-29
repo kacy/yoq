@@ -60,6 +60,7 @@ comptime {
     _ = @import("network/proxy/steering_runtime.zig");
     _ = @import("network/proxy/router.zig");
     _ = @import("network/proxy/policy.zig");
+    _ = @import("network/proxy/http2.zig");
     _ = @import("network/proxy/upstream.zig");
     _ = @import("network/proxy/reverse_proxy.zig");
     _ = @import("build/dockerfile.zig");
