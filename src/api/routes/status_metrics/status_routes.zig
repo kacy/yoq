@@ -546,6 +546,7 @@ fn writeDiscoveryReadinessSnapshot(writer: anytype, readiness: service_cutover_r
         try json_helpers.writeJsonEscaped(writer, blocker);
         try writer.writeByte('"');
     }
+    try writer.writeByte(']');
 }
 
 fn writeCutoverReadinessSnapshot(writer: anytype, readiness: service_cutover_readiness.Snapshot) !void {
@@ -571,4 +572,5 @@ fn writeCutoverReadinessSnapshot(writer: anytype, readiness: service_cutover_rea
         try json_helpers.writeJsonEscaped(writer, blocker);
         try writer.writeByte('"');
     }
+    try writer.writeByte(']');
 }

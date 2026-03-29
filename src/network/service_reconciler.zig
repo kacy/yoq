@@ -1587,7 +1587,7 @@ test "audit pass repairs live dns registry drift" {
 
     bootstrapIfEnabled();
     dns_registry_support.resetRegistryForTest();
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
 
     runAuditPassIfEnabled();
 

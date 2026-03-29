@@ -232,7 +232,7 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
     }
     try writer.writeByte(']');
     try writer.print(
-        "\",\"total_endpoints\":{d},\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"draining_endpoints\":{d},\"last_reconcile_status\":\"",
+        ",\"total_endpoints\":{d},\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"draining_endpoints\":{d},\"last_reconcile_status\":\"",
         .{
             service.total_endpoints,
             service.eligible_endpoints,
@@ -381,10 +381,23 @@ fn testRequest(method: http.Method, path: []const u8) http.Request {
 }
 
 test "route handles GET /v1/services" {
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
 
     try store.createService(.{
         .service_name = "api",
@@ -422,7 +435,7 @@ test "route handles GET /v1/services" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":0,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"rollout_disabled\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"listener_not_running\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }
 
@@ -485,12 +498,16 @@ test "route handles GET /v1/services/{name}/endpoints" {
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes" {
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
     proxy_runtime.resetForTest();
     defer proxy_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
     service_rollout.setForTest(.{
         .service_registry_v2 = true,
         .l7_proxy_http = true,
@@ -525,16 +542,18 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded_reason\":\"service_state\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_traffic_mode\":\"l4_fallback\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_desired_ports\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_desired_ports\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_applied_ports\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_ready\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"rollout_disabled\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"listener_not_running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"last_failure_kind\":null") != null);
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering degradation" {
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+
     try store.initTestDb();
     defer store.deinitTestDb();
     service_registry_runtime.resetForTest();
@@ -543,6 +562,8 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering degradati
     defer proxy_runtime.resetForTest();
     steering_runtime.resetForTest();
     defer steering_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
     service_rollout.setForTest(.{
         .service_registry_v2 = true,
         .dns_returns_vip = true,
