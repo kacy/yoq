@@ -2,6 +2,11 @@ const std = @import("std");
 
 pub const client_preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 pub const frame_header_len: usize = 9;
+pub const Error = error{
+    BufferTooSmall,
+    LengthTooLarge,
+    InvalidStreamId,
+};
 
 pub const FrameType = enum(u8) {
     data = 0x0,
@@ -49,6 +54,11 @@ pub fn hasClientPrefacePrefix(buf: []const u8) bool {
     return std.mem.eql(u8, client_preface[0..buf.len], buf);
 }
 
+pub fn startsWithClientPreface(buf: []const u8) bool {
+    if (buf.len < client_preface.len) return false;
+    return std.mem.eql(u8, buf[0..client_preface.len], client_preface);
+}
+
 pub fn parseFrameHeader(buf: []const u8) ?FrameHeader {
     if (buf.len < frame_header_len) return null;
 
@@ -62,7 +72,7 @@ pub fn parseFrameHeader(buf: []const u8) ?FrameHeader {
     };
 }
 
-pub fn writeFrameHeader(dest: []u8, header: FrameHeader) !void {
+pub fn writeFrameHeader(dest: []u8, header: FrameHeader) Error!void {
     if (dest.len < frame_header_len) return error.BufferTooSmall;
     if (header.length > 0x00ff_ffff) return error.LengthTooLarge;
     if ((header.stream_id & 0x8000_0000) != 0) return error.InvalidStreamId;
@@ -89,6 +99,14 @@ test "hasClientPrefacePrefix matches partial preface" {
 
 test "hasClientPrefacePrefix rejects wrong bytes" {
     try std.testing.expect(!hasClientPrefacePrefix("PRI * HTTP/1."));
+}
+
+test "startsWithClientPreface matches request buffer with full preface" {
+    try std.testing.expect(startsWithClientPreface(client_preface ++ "rest"));
+}
+
+test "startsWithClientPreface rejects partial preface" {
+    try std.testing.expect(!startsWithClientPreface(client_preface[0..8]));
 }
 
 test "parseFrameHeader parses settings header" {
