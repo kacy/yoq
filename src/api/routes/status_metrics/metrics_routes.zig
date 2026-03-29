@@ -519,11 +519,17 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_load_balancer_fault_mode Active load balancer fault mode\n");
     try writer.writeAll("# TYPE yoq_load_balancer_fault_mode gauge\n");
     try writeLoadBalancerFaultMode(writer);
+    try writer.writeAll("# HELP yoq_service_reconciler_events_total Service reconciler events observed by kind\n");
+    try writer.writeAll("# TYPE yoq_service_reconciler_events_total counter\n");
+    try writeEventCounters(writer, "yoq_service_reconciler_events_total", .container_runtime);
+    try writeEventCounters(writer, "yoq_service_reconciler_events_total", .health_checker);
+    try writeEventCounters(writer, "yoq_service_reconciler_events_total", .unspecified);
+
     try writer.writeAll("# HELP yoq_service_reconciler_shadow_events_total Shadow service reconciler events observed by kind\n");
     try writer.writeAll("# TYPE yoq_service_reconciler_shadow_events_total counter\n");
-    try writeShadowEventCounters(writer, .container_runtime);
-    try writeShadowEventCounters(writer, .health_checker);
-    try writeShadowEventCounters(writer, .unspecified);
+    try writeEventCounters(writer, "yoq_service_reconciler_shadow_events_total", .container_runtime);
+    try writeEventCounters(writer, "yoq_service_reconciler_shadow_events_total", .health_checker);
+    try writeEventCounters(writer, "yoq_service_reconciler_shadow_events_total", .unspecified);
 
     try writer.writeAll("# HELP yoq_service_registry_backfill_runs_total Legacy service_names backfill runs\n");
     try writer.writeAll("# TYPE yoq_service_registry_backfill_runs_total counter\n");
@@ -604,6 +610,23 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_rollout_cutover_steering_services gauge\n");
     try writer.print("yoq_service_rollout_cutover_steering_services{{state=\"blocked\"}} {d}\n", .{cutover.steering_blocked_services});
     try writer.print("yoq_service_rollout_cutover_steering_services{{state=\"missing_ports\"}} {d}\n", .{cutover.steering_no_port_services});
+
+    try writer.writeAll("# HELP yoq_service_discovery_readiness Canonical service discovery readiness checks\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_readiness gauge\n");
+    try writer.print("yoq_service_discovery_readiness{{check=\"backfill_complete\"}} {d}\n", .{@intFromBool(cutover.backfill_complete)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"audit_fresh\"}} {d}\n", .{@intFromBool(cutover.audit_fresh)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"shadow_clean\"}} {d}\n", .{@intFromBool(cutover.shadow_clean)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"components_ready\"}} {d}\n", .{@intFromBool(cutover.components_ready)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"fault_modes_clear\"}} {d}\n", .{@intFromBool(cutover.fault_modes_clear)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"downgrade_safe\"}} {d}\n", .{@intFromBool(cutover.downgrade_safe)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"steering_ready\"}} {d}\n", .{@intFromBool(cutover.steering_ready)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"reconciler_cutover\"}} {d}\n", .{@intFromBool(cutover.ready_for_reconciler_cutover)});
+    try writer.print("yoq_service_discovery_readiness{{check=\"vip_cutover\"}} {d}\n", .{@intFromBool(cutover.ready_for_vip_cutover)});
+
+    try writer.writeAll("# HELP yoq_service_discovery_steering_services Service counts relevant to VIP-backed discovery steering\n");
+    try writer.writeAll("# TYPE yoq_service_discovery_steering_services gauge\n");
+    try writer.print("yoq_service_discovery_steering_services{{state=\"blocked\"}} {d}\n", .{cutover.steering_blocked_services});
+    try writer.print("yoq_service_discovery_steering_services{{state=\"missing_ports\"}} {d}\n", .{cutover.steering_no_port_services});
 
     try writer.writeAll("# HELP yoq_health_checker_running Whether the health checker scheduler is running\n");
     try writer.writeAll("# TYPE yoq_health_checker_running gauge\n");
@@ -822,22 +845,22 @@ fn writeLoadBalancerFaultMode(writer: anytype) !void {
         .{@intFromBool(mode == .endpoint_overflow)},
     );
 }
-fn writeShadowEventCounters(writer: anytype, source: service_reconciler.EventSource) !void {
+fn writeEventCounters(writer: anytype, metric_name: []const u8, source: service_reconciler.EventSource) !void {
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"container_registered\"}} {d}\n",
-        .{ source.label(), service_reconciler.eventCountBySource(source, .container_registered) },
+        "{s}{{source=\"{s}\",kind=\"container_registered\"}} {d}\n",
+        .{ metric_name, source.label(), service_reconciler.eventCountBySource(source, .container_registered) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"container_unregistered\"}} {d}\n",
-        .{ source.label(), service_reconciler.eventCountBySource(source, .container_unregistered) },
+        "{s}{{source=\"{s}\",kind=\"container_unregistered\"}} {d}\n",
+        .{ metric_name, source.label(), service_reconciler.eventCountBySource(source, .container_unregistered) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"endpoint_healthy\"}} {d}\n",
-        .{ source.label(), service_reconciler.eventCountBySource(source, .endpoint_healthy) },
+        "{s}{{source=\"{s}\",kind=\"endpoint_healthy\"}} {d}\n",
+        .{ metric_name, source.label(), service_reconciler.eventCountBySource(source, .endpoint_healthy) },
     );
     try writer.print(
-        "yoq_service_reconciler_shadow_events_total{{source=\"{s}\",kind=\"endpoint_unhealthy\"}} {d}\n",
-        .{ source.label(), service_reconciler.eventCountBySource(source, .endpoint_unhealthy) },
+        "{s}{{source=\"{s}\",kind=\"endpoint_unhealthy\"}} {d}\n",
+        .{ metric_name, source.label(), service_reconciler.eventCountBySource(source, .endpoint_unhealthy) },
     );
 }
 

@@ -233,6 +233,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"endpoint_count_mismatches_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_mismatches_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"eligibility_mismatches_total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"discovery_readiness\":{\"backfill_complete\":true,\"audit_fresh\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":true,\"audit_fresh\":false,\"shadow_clean\":true,\"components_ready\":false,\"fault_modes_clear\":false,\"downgrade_safe\":false,\"steering_ready\":true,\"steering_blocked_services\":0,\"steering_no_port_services\":0,\"ready_for_reconciler_cutover\":false,\"ready_for_vip_cutover\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"audit_never_ran\",\"fault_mode_active\",\"components_not_ready\"]") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"stale_endpoint_quarantines_total\":0") != null);
@@ -799,7 +800,9 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_load_balancer_fault_injections_total 2") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_load_balancer_fault_mode{mode=\"endpoint_overflow\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"container_runtime\",kind=\"container_registered\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_events_total{source=\"container_runtime\",kind=\"container_registered\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_shadow_events_total{source=\"health_checker\",kind=\"endpoint_healthy\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_events_total{source=\"health_checker\",kind=\"endpoint_healthy\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_passes_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_mismatches_by_kind_total{kind=\"vip\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_audit_mismatches_by_kind_total{kind=\"eligibility\"} 0") != null);
@@ -812,11 +815,13 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_ready{component=\"dns_interceptor\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_reconciler_component_full_resyncs_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"backfill_complete\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_discovery_readiness{check=\"backfill_complete\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"shadow_clean\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"steering_ready\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"reconciler_cutover\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_ready{check=\"vip_cutover\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"blocked\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_discovery_steering_services{state=\"blocked\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_rollout_cutover_steering_services{state=\"missing_ports\"} 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_running 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_tracked_endpoints 1") != null);
