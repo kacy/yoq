@@ -53,7 +53,7 @@ pub fn handleStatus(alloc: std.mem.Allocator) Response {
 }
 
 pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
-    const flags = service_rollout.current();
+    const flags = service_rollout.canonicalFlags();
     var backfill = service_registry_backfill.snapshot(alloc) catch return common.internalError();
     defer backfill.deinit(alloc);
     var audit = service_reconciler.snapshotAuditState(alloc) catch return common.internalError();

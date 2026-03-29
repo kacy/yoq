@@ -23,6 +23,15 @@ pub fn current() Flags {
     return flags;
 }
 
+pub fn canonicalFlags() Flags {
+    return .{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    };
+}
+
 pub fn mode() Mode {
     return modeFromFlags(current());
 }
