@@ -327,8 +327,9 @@ the Prometheus endpoint includes discovery-wide and per-service series such as:
 - health check scheduled/completed/stale totals and most recent health check latency
 - endpoint flap totals and current service health status
 - L7 proxy request/response/retry/failure counters and listener/control-plane state
+- route/backend counters for weighted HTTP routing, exposed as `yoq_service_l7_proxy_route_*`
 
-the status JSON is the better debugging view when you want to inspect discovery and routing state directly. the Prometheus endpoint is the better integration point for scraping, dashboards, and alerting.
+the status JSON is the better debugging view when you want to inspect discovery and routing state directly. in particular, `l7_proxy.sample_routes` shows the active route definitions and `l7_proxy.sample_route_traffic` shows recent counters by route and selected backend service. the Prometheus endpoint is the better integration point for scraping, dashboards, and alerting.
 
 ### alerting
 

@@ -172,6 +172,7 @@ preserve_host = false
 host = "demo.local"
 path_prefix = "/api"
 match_headers = ["x-env=canary"]
+backend_services = ["api=90", "api-canary=10"]
 ```
 
 validation rules:
@@ -181,6 +182,7 @@ validation rules:
 - `http_proxy` and `http_routes` cannot be used together on the same service
 - route matching prefers the longest `path_prefix`, then the route with more exact header conditions, then the first defined route
 - `backend_services` weights must sum to `100`
+- weighted backend selection is deterministic per request key, and retry attempts can move to a different configured backend target
 
 server-side listener defaults:
 
@@ -195,6 +197,8 @@ yoq init-server --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
 ```
 
 use `GET /v1/status?mode=service_discovery` and `GET /v1/metrics?format=prometheus` to inspect listener, route, and steering state. `mode=service_rollout` remains accepted as a compatibility alias.
+
+for weighted routes, the JSON status payload includes `l7_proxy.sample_route_traffic`, and Prometheus exposes `yoq_service_l7_proxy_route_*` counters labeled by route, owning service, and selected backend service.
 
 current HTTP/2 and gRPC routing limits:
 

@@ -142,6 +142,11 @@ fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const 
         for (proxy_routes.items) |proxy_route| proxy_route.deinit(alloc);
         proxy_routes.deinit(alloc);
     }
+    var route_traffic = proxy_runtime.snapshotRouteTraffic(alloc) catch return common.internalError();
+    defer {
+        for (route_traffic.items) |entry| entry.deinit(alloc);
+        route_traffic.deinit(alloc);
+    }
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
@@ -150,7 +155,7 @@ fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const 
     writer.writeByte('[') catch return common.internalError();
     for (proxy_routes.items, 0..) |proxy_route, idx| {
         if (idx > 0) writer.writeByte(',') catch return common.internalError();
-        writeProxyRouteJson(writer, proxy_route) catch return common.internalError();
+        writeProxyRouteJson(writer, proxy_route, route_traffic.items) catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
 
@@ -343,7 +348,9 @@ fn writeEndpointJson(writer: anytype, endpoint: service_registry_runtime.Endpoin
     try writer.writeByte('}');
 }
 
-fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot) !void {
+fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) !void {
+    const traffic = findRouteTraffic(proxy_route.name, route_traffic);
+
     try writer.writeAll("{\"name\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.name);
     try writer.writeAll("\",\"service\":\"");
@@ -397,7 +404,36 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     } else {
         try writer.writeAll("null");
     }
+    try writer.print(
+        ",\"traffic\":{{\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"upstream_failures_total\":{d}}}",
+        .{
+            traffic.requests_total,
+            traffic.responses_2xx_total,
+            traffic.responses_4xx_total,
+            traffic.responses_5xx_total,
+            traffic.retries_total,
+            traffic.upstream_failures_total,
+        },
+    );
     try writer.writeByte('}');
+}
+
+fn findRouteTraffic(route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) proxy_runtime.RouteTrafficSnapshot {
+    for (route_traffic) |entry| {
+        if (std.mem.eql(u8, entry.route_name, route_name)) return entry;
+    }
+
+    return .{
+        .route_name = "",
+        .service_name = "",
+        .backend_service = "",
+        .requests_total = 0,
+        .responses_2xx_total = 0,
+        .responses_4xx_total = 0,
+        .responses_5xx_total = 0,
+        .retries_total = 0,
+        .upstream_failures_total = 0,
+    };
 }
 
 fn writeHeaderMatchesJson(writer: anytype, header_matches: anytype) !void {
@@ -591,6 +627,10 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
         .updated_at = 1000,
     });
     proxy_runtime.bootstrapIfEnabled();
+    proxy_runtime.recordRouteRequestStart("api:default", "api", "api");
+    proxy_runtime.recordRouteResponseCode("api:default", "api", "api", 200);
+    proxy_runtime.recordRouteRetry("api:default", "api", "api");
+    proxy_runtime.recordRouteUpstreamFailure("api:default", "api", "api");
 
     const response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
     defer if (response.allocated) std.testing.allocator.free(response.body);
@@ -611,6 +651,7 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"listener_not_running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"last_failure_kind\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}") != null);
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering degradation" {
