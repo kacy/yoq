@@ -83,27 +83,43 @@ infra/gcp/down.sh
 
 ## what `validate.sh` proves
 
-It performs five classes of checks:
+It performs eight classes of checks:
 
 1. cluster readiness
    - leader elected
    - both agents registered and active
 
-2. overlay networking
+2. control-plane failover
+   - the current leader is told to step down
+   - another server becomes leader
+   - the API remains reachable after the leadership change
+
+3. agent recovery
+   - one agent is restarted and rejoins the cluster
+   - the recovered agent returns to `active`
+   - overlay reachability still works after the restart
+
+4. routed workload recovery
+   - the HTTP routing example is deployed through the cluster API
+   - routed traffic succeeds through the server listener
+   - one non-leader server is restarted without wiping cluster state
+   - routed traffic and `/v1/status?mode=service_discovery` recover on that restarted server
+
+5. overlay networking
    - `wg-yoq` exists on all nodes
    - the two agents can reach each other over overlay IPs
 
-3. multi-node containers
+6. multi-node containers
    - several containers are started directly on the agent nodes
    - one agent can reach a container IP hosted on the other agent
 
-4. GPU host and container visibility
+7. GPU host and container visibility
    - only when `USE_GPU_AGENTS=true`
    - `nvidia-smi`
    - `yoq gpu topo --json`
    - `yoq run <cuda-image> nvidia-smi`
 
-5. cluster training smoke
+8. cluster training smoke
    - only when `USE_GPU_AGENTS=true`
    - a 2-rank GPU training job is submitted through `yoq train start --server`
    - both ranks are placed

@@ -1,7 +1,7 @@
 # multi-node cluster deployment
 #
 # this manifest works with a yoq cluster. deploy with:
-#   yoq up -f examples/cluster/manifest.toml
+#   yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
 #
 # the scheduler places containers across nodes. services discover each
 # other by name — networking works transparently across nodes via wireguard.
@@ -44,12 +44,6 @@ restart = "always"
 domain = "myapp.example.com"
 acme = true
 email = "ops@example.com"
-
-[worker.migrate]
-image = "myapp:latest"
-command = ["./manage.py", "migrate", "--noinput"]
-depends_on = ["postgres"]
-env = ["DATABASE_URL=postgres://postgres:${DB_PASSWORD:-changeme}@postgres:5432/app"]
 
 [cron.backup]
 image = "postgres:16"

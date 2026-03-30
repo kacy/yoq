@@ -19,6 +19,111 @@ HOME="${LOCAL_HOME}" "${LOCAL_YOQ}" nodes --server "${SERVER_1_EXTERNAL_IP}:${AP
 jq -e 'length == 2 and all(.[]; .status == "active" and .overlay_ip != null)' "${RUN_DIR}/nodes.json" >/dev/null || \
   die "cluster does not report two active agents"
 
+current_leader_id() {
+  local status_json="$1"
+  jq -r '.leader_id // empty' <<< "${status_json}"
+}
+
+server_name_by_id() {
+  local id="$1"
+  case "${id}" in
+    1) printf '%s\n' "${SERVER_1_NAME}" ;;
+    2) printf '%s\n' "${SERVER_2_NAME}" ;;
+    3) printf '%s\n' "${SERVER_3_NAME}" ;;
+    *) return 1 ;;
+  esac
+}
+
+leader_external_ip() {
+  local leader_id="$1"
+  case "${leader_id}" in
+    1) printf '%s\n' "${SERVER_1_EXTERNAL_IP}" ;;
+    2) printf '%s\n' "${SERVER_2_EXTERNAL_IP}" ;;
+    3) printf '%s\n' "${SERVER_3_EXTERNAL_IP}" ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_for_new_leader() {
+  local old_leader_id="$1"
+  local tries=0
+  while [ "${tries}" -lt 24 ]; do
+    local status_json
+    if status_json="$(http_get_json "${SERVER_1_EXTERNAL_IP}" "/cluster/status" 2>/dev/null)"; then
+      local new_leader_id
+      new_leader_id="$(current_leader_id "${status_json}")"
+      if [ -n "${new_leader_id}" ] && [ "${new_leader_id}" != "${old_leader_id}" ]; then
+        printf '%s\n' "${status_json}"
+        return 0
+      fi
+    fi
+    tries=$((tries + 1))
+    sleep 5
+  done
+  return 1
+}
+
+server_peer_arg() {
+  local id="$1"
+  case "${id}" in
+    1) printf '%s\n' "2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT} 3@${SERVER_3_INTERNAL_IP}:${RAFT_PORT}" ;;
+    2) printf '%s\n' "1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT} 3@${SERVER_3_INTERNAL_IP}:${RAFT_PORT}" ;;
+    3) printf '%s\n' "1@${SERVER_1_INTERNAL_IP}:${RAFT_PORT} 2@${SERVER_2_INTERNAL_IP}:${RAFT_PORT}" ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_for_server_api() {
+  local server_ip="$1"
+  local tries=0
+  while [ "${tries}" -lt 24 ]; do
+    if http_get_json "${server_ip}" "/cluster/status" >/dev/null 2>&1; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 5
+  done
+  return 1
+}
+
+wait_for_routed_response() {
+  local addr="$1"
+  local host="$2"
+  local path="$3"
+  local expected="$4"
+  local tries=0
+  while [ "${tries}" -lt 24 ]; do
+    local body
+    body="$(curl -fsS --max-time 10 -H "Host: ${host}" "http://${addr}:${HTTP_PROXY_PORT}${path}" 2>/dev/null || true)"
+    if printf '%s' "${body}" | grep -Fq "${expected}"; then
+      printf '%s\n' "${body}"
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 5
+  done
+  return 1
+}
+
+wait_for_agent_active() {
+  local overlay_ip="$1"
+  local tries=0
+  while [ "${tries}" -lt 24 ]; do
+    local nodes_json
+    if nodes_json="$(HOME="${LOCAL_HOME}" "${LOCAL_YOQ}" nodes --server "${SERVER_1_EXTERNAL_IP}:${API_PORT}" --json 2>/dev/null)"; then
+      if jq -e --arg overlay_ip "${overlay_ip}" '
+        any(.[]; .overlay_ip == $overlay_ip and .status == "active")
+      ' <<< "${nodes_json}" >/dev/null 2>&1; then
+        printf '%s\n' "${nodes_json}"
+        return 0
+      fi
+    fi
+    tries=$((tries + 1))
+    sleep 5
+  done
+  return 1
+}
+
 AGENT_1_OVERLAY_IP="$(jq -r '.[0].overlay_ip' "${RUN_DIR}/nodes.json")"
 AGENT_2_OVERLAY_IP="$(jq -r '.[1].overlay_ip' "${RUN_DIR}/nodes.json")"
 
@@ -37,6 +142,62 @@ done
 log "verifying overlay reachability between agents"
 gcloud_ssh "${AGENT_1_NAME}" "sudo ping -c 2 -W 2 ${AGENT_2_OVERLAY_IP} >/dev/null"
 gcloud_ssh "${AGENT_2_NAME}" "sudo ping -c 2 -W 2 ${AGENT_1_OVERLAY_IP} >/dev/null"
+
+log "verifying leader failover"
+INITIAL_CLUSTER_STATUS="$(cat "${RUN_DIR}/cluster-status.json")"
+INITIAL_LEADER_ID="$(current_leader_id "${INITIAL_CLUSTER_STATUS}")"
+[ -n "${INITIAL_LEADER_ID}" ] || die "cluster status did not include a leader id"
+INITIAL_LEADER_IP="$(leader_external_ip "${INITIAL_LEADER_ID}")" || die "unknown leader id ${INITIAL_LEADER_ID}"
+curl -fsS -X POST -H "Authorization: Bearer ${API_TOKEN}" "http://${INITIAL_LEADER_IP}:${API_PORT}/cluster/step-down" \
+  > "${RUN_DIR}/leader-step-down.json"
+wait_for_new_leader "${INITIAL_LEADER_ID}" > "${RUN_DIR}/cluster-status-after-step-down.json" || \
+  die "cluster did not elect a new leader after step-down"
+CURRENT_LEADER_ID="$(current_leader_id "$(cat "${RUN_DIR}/cluster-status-after-step-down.json")")"
+CURRENT_LEADER_IP="$(leader_external_ip "${CURRENT_LEADER_ID}")" || die "unknown leader id ${CURRENT_LEADER_ID}"
+
+log "verifying agent restart and recovery"
+gcloud_ssh "${AGENT_1_NAME}" "sudo bash /tmp/start-node.sh agent ${SERVER_1_INTERNAL_IP} ${CLUSTER_JOIN_TOKEN} ${API_PORT}"
+wait_for_agent_active "${AGENT_1_OVERLAY_IP}" > "${RUN_DIR}/nodes-after-agent-restart.json" || \
+  die "restarted agent did not return to active state"
+gcloud_ssh "${AGENT_2_NAME}" "sudo ping -c 2 -W 2 ${AGENT_1_OVERLAY_IP} >/dev/null"
+
+RESTART_SERVER_ID=1
+if [ "${CURRENT_LEADER_ID}" = "1" ]; then
+  RESTART_SERVER_ID=2
+fi
+RESTART_SERVER_NAME="$(server_name_by_id "${RESTART_SERVER_ID}")" || die "unknown restart server ${RESTART_SERVER_ID}"
+RESTART_SERVER_IP="$(leader_external_ip "${RESTART_SERVER_ID}")" || die "unknown restart server ip ${RESTART_SERVER_ID}"
+RESTART_SERVER_PEERS="$(server_peer_arg "${RESTART_SERVER_ID}")" || die "missing peers for restart server ${RESTART_SERVER_ID}"
+
+log "deploying routed workload and verifying server restart recovery"
+HOME="${LOCAL_HOME}" "${LOCAL_YOQ}" up \
+  --server "${CURRENT_LEADER_IP}:${API_PORT}" \
+  -f "${REPO_ROOT}/examples/http-routing/manifest.toml"
+wait_for_routed_response "${RESTART_SERVER_IP}" "demo.local" "/" "gateway route" > "${RUN_DIR}/routed-root-before-restart.txt" || \
+  die "routed gateway traffic did not become reachable"
+wait_for_routed_response "${RESTART_SERVER_IP}" "demo.local" "/api/get" "api route" > "${RUN_DIR}/routed-api-before-restart.txt" || \
+  die "routed API traffic did not become reachable"
+wait_for_routed_response "${RESTART_SERVER_IP}" "docs.demo.local" "/" "docs route" > "${RUN_DIR}/routed-docs-before-restart.txt" || \
+  die "routed docs traffic did not become reachable"
+http_get_json "${RESTART_SERVER_IP}" "/v1/status?mode=service_discovery" > "${RUN_DIR}/service-discovery-before-server-restart.json"
+jq -e '.listener.running == true and .l7_proxy.routes >= 4 and .control_plane.running == true' \
+  "${RUN_DIR}/service-discovery-before-server-restart.json" >/dev/null || \
+  die "service discovery status did not show a healthy routed listener before restart"
+
+gcloud_ssh "${RESTART_SERVER_NAME}" \
+  "sudo bash /tmp/start-node.sh server-restart ${RESTART_SERVER_ID} ${RAFT_PORT} ${API_PORT} ${HTTP_PROXY_PORT} ${CLUSTER_JOIN_TOKEN} ${API_TOKEN} ${RESTART_SERVER_PEERS}"
+wait_for_server_api "${RESTART_SERVER_IP}" || die "restarted server API never came back"
+wait_for_routed_response "${RESTART_SERVER_IP}" "demo.local" "/" "gateway route" > "${RUN_DIR}/routed-root-after-server-restart.txt" || \
+  die "routed gateway traffic did not recover after server restart"
+wait_for_routed_response "${RESTART_SERVER_IP}" "demo.local" "/api/get" "api route" > "${RUN_DIR}/routed-api-after-server-restart.txt" || \
+  die "routed API traffic did not recover after server restart"
+http_get_json "${RESTART_SERVER_IP}" "/v1/status?mode=service_discovery" > "${RUN_DIR}/service-discovery-after-server-restart.json"
+jq -e '.listener.running == true and .l7_proxy.routes >= 4 and .control_plane.running == true' \
+  "${RUN_DIR}/service-discovery-after-server-restart.json" >/dev/null || \
+  die "service discovery status did not recover after server restart"
+http_get_json "${RESTART_SERVER_IP}" "/v1/metrics?format=prometheus" > "${RUN_DIR}/service-discovery-after-server-restart.prom"
+grep -Fq 'yoq_service_l7_proxy_listener_running 1' "${RUN_DIR}/service-discovery-after-server-restart.prom" || \
+  die "listener metric did not recover after server restart"
 
 cleanup_container() {
   local instance="$1"

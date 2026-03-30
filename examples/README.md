@@ -32,7 +32,7 @@ yoq up -f examples/cron/manifest.toml
 
 ## http-routing
 
-two services behind the built-in HTTP router. requests for `demo.local/api` go to the API service, and everything else for `demo.local` goes to the web service.
+three services behind the built-in HTTP router. requests for `demo.local/api` go to the API service, `docs.demo.local` goes to the docs service, and everything else for `demo.local` goes to the gateway service.
 
 ```bash
 yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
@@ -41,19 +41,19 @@ curl -H 'Host: demo.local' http://127.0.0.1:17080/
 curl -H 'Host: demo.local' http://127.0.0.1:17080/api/get
 ```
 
+for the full restart-and-recovery drill, run `./scripts/http-routing-recovery-smoke.sh`.
+
+see [examples/http-routing/README.md](http-routing/README.md) for the complete walkthrough.
+
 ## cluster
 
-a multi-node deployment with postgres, API server, and nginx with automatic TLS. demonstrates service discovery across nodes, environment variable expansion, and a database backup cron.
+a multi-node deployment with postgres, API server, nginx with automatic TLS, and a database backup cron. this example now matches the canonical cluster workflow: bootstrap with `init-server`, join agents, then deploy with `yoq up --server`.
 
 ```bash
-# start the server node
-yoq serve --port 7700
-
-# join worker nodes
-yoq join <server-ip>:7700 --token <api-token>
-
-# deploy
-yoq up -f examples/cluster/manifest.toml
+TOKEN=$(openssl rand -hex 32)
+yoq init-server --id 1 --port 9700 --api-port 7700 --token "$TOKEN"
+yoq join 10.0.0.1:7700 --token "$TOKEN"
+yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
 ```
 
 see [examples/cluster/README.md](cluster/README.md) for full setup instructions.

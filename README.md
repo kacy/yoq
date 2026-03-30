@@ -116,6 +116,8 @@ make build
 
 For GPU-focused validation without running the full suite, use `zig build test-gpu`. For a real-host smoke checklist, see [docs/gpu-validation.md](docs/gpu-validation.md).
 For a temporary 5-node GCP validation rig that exercises cluster networking and GPU hosts, see [docs/gcp-cluster-validation.md](docs/gcp-cluster-validation.md).
+For the canonical operator evaluation flow across local runtime, HTTP routing, and clustered deployment, see [docs/golden-path.md](docs/golden-path.md).
+For cluster bootstrap, day-2 operations, and failure drills, see [docs/cluster-guide.md](docs/cluster-guide.md).
 
 ### one-liner
 ```bash
@@ -307,6 +309,7 @@ The [`examples/`](examples/) directory has ready-to-use manifests:
 - [`examples/cron/`](examples/cron/) for scheduled jobs with `every = "1h"`
 - [`examples/http-routing/`](examples/http-routing/) for host and path-based HTTP routing
 - [`examples/cluster/`](examples/cluster/) for a minimal multi-node cluster flow
+- [docs/golden-path.md](docs/golden-path.md) for the recommended end-to-end evaluation workflow
 
 ```bash
 yoq up -f examples/redis/manifest.toml
