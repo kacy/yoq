@@ -16,6 +16,27 @@ pub fn formatSimpleResponse(
     content_type: []const u8,
     body: []const u8,
 ) Error![]u8 {
+    return formatSimpleResponseWithSettings(alloc, stream_id, status_code, content_type, body, true);
+}
+
+pub fn formatSimpleStreamResponse(
+    alloc: std.mem.Allocator,
+    stream_id: u32,
+    status_code: u16,
+    content_type: []const u8,
+    body: []const u8,
+) Error![]u8 {
+    return formatSimpleResponseWithSettings(alloc, stream_id, status_code, content_type, body, false);
+}
+
+fn formatSimpleResponseWithSettings(
+    alloc: std.mem.Allocator,
+    stream_id: u32,
+    status_code: u16,
+    content_type: []const u8,
+    body: []const u8,
+    include_settings: bool,
+) Error![]u8 {
     var status_buf: [3]u8 = undefined;
     const status = std.fmt.bufPrint(&status_buf, "{d:0>3}", .{status_code}) catch unreachable;
 
@@ -44,18 +65,21 @@ pub fn formatSimpleResponse(
     }, body);
     defer if (data) |frame| alloc.free(frame);
 
-    const total_len = http2.frame_header_len + headers.len + if (data) |frame| frame.len else 0;
+    const settings_len: usize = if (include_settings) http2.frame_header_len else 0;
+    const total_len = settings_len + headers.len + if (data) |frame| frame.len else 0;
     var response = try alloc.alloc(u8, total_len);
     errdefer alloc.free(response);
 
     var pos: usize = 0;
-    try http2.writeFrameHeader(response[pos .. pos + http2.frame_header_len], .{
-        .length = 0,
-        .frame_type = .settings,
-        .flags = 0,
-        .stream_id = 0,
-    });
-    pos += http2.frame_header_len;
+    if (include_settings) {
+        try http2.writeFrameHeader(response[pos .. pos + http2.frame_header_len], .{
+            .length = 0,
+            .frame_type = .settings,
+            .flags = 0,
+            .stream_id = 0,
+        });
+        pos += http2.frame_header_len;
+    }
 
     @memcpy(response[pos .. pos + headers.len], headers);
     pos += headers.len;
@@ -173,4 +197,15 @@ test "formatSimpleResponse can end stream in headers without body" {
     try std.testing.expectEqual(@as(u32, 3), headers.header.stream_id);
     try std.testing.expectEqual(@as(u8, Flag.end_headers | Flag.end_stream), headers.header.flags);
     try std.testing.expectEqual(@as(usize, response.len), headers.next);
+}
+
+test "formatSimpleStreamResponse omits connection settings frame" {
+    const alloc = std.testing.allocator;
+
+    const response = try formatSimpleStreamResponse(alloc, 5, 200, "application/grpc", "ok");
+    defer alloc.free(response);
+
+    const first = parseNextFrame(response, 0).?;
+    try std.testing.expectEqual(http2.FrameType.headers, first.header.frame_type);
+    try std.testing.expectEqual(@as(u32, 5), first.header.stream_id);
 }

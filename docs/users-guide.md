@@ -132,6 +132,10 @@ services start in dependency order (topological sort). `yoq validate` checks for
 
 HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes currently validate the HTTP/2 preface exchange on the configured port. health state is stored in a fixed-size registry (64 services, mutex-protected). the orchestrator and DNS resolver read health state to gate traffic.
 
+### gRPC routing
+
+gRPC services can use the HTTP routing listener through prior-knowledge HTTP/2 (h2c) passthrough. unary requests and long-lived streaming RPCs are forwarded end to end, including client `DATA` frames, server `DATA` frames, and trailing `HEADERS`. one accepted client connection is pinned to the first matched service route for that connection, so additional RPC streams on the same channel must target that same routed service.
+
 ### rolling updates
 
 deployment history is tracked in SQLite. updates proceed incrementally — if health checks fail during a rollout, yoq automatically rolls back.

@@ -224,6 +224,8 @@ port = 5432
 
 requires `port`. a successful HTTP/2 preface exchange with the target port means healthy.
 
+when a service also uses `http_proxy` or `http_routes`, yoq forwards prior-knowledge HTTP/2 (h2c) traffic end to end for that routed service. this supports unary and streaming gRPC traffic on a single routed connection.
+
 ```toml
 [service.api.health_check]
 type = "grpc"
