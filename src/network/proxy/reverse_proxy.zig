@@ -1097,6 +1097,83 @@ test "handleRequest returns forward plan for a routable request" {
     }
 }
 
+test "handleRequest selects configured weighted backend service" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{
+        .service_name = "api-canary",
+        .vip_address = "10.43.0.3",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api-canary",
+        .endpoint_id = "api-canary-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.10",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/v1",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+            .backend_services = &.{
+                .{ .service_name = "api-canary", .weight = 100 },
+            },
+            .eligible_endpoints = 1,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const result = try proxy.handleRequest(
+        "GET /v1/users HTTP/1.1\r\nHost: api.internal\r\n\r\n",
+    );
+    defer result.deinit(std.testing.allocator);
+
+    switch (result) {
+        .forward => |plan| {
+            try std.testing.expectEqualStrings("api-canary", plan.backend_service);
+            try std.testing.expectEqualStrings("api-canary", plan.upstream.service);
+            try std.testing.expectEqualStrings("10.42.0.10", plan.upstream.address);
+        },
+        .response => return error.TestUnexpectedResult,
+    }
+}
+
 test "handleRequest returns bad request when Host is missing" {
     const routes = [_]router.Route{
         .{
@@ -2531,6 +2608,127 @@ test "forwardRequest retries onto a different endpoint after circuit opens" {
     try std.testing.expectEqual(@as(usize, 1), failing_upstream.accepted);
     try std.testing.expectEqual(@as(usize, 1), healthy_upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
+}
+
+test "resolveAttemptUpstream retries onto a different weighted backend service" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{
+        .service_name = "api-canary",
+        .vip_address = "10.43.0.3",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api-canary",
+        .endpoint_id = "api-canary-1",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "10.42.0.10",
+        .port = 8081,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    var path_buf: [32]u8 = undefined;
+    var request_path: []const u8 = undefined;
+    var candidate: usize = 0;
+    while (true) : (candidate += 1) {
+        request_path = try std.fmt.bufPrint(&path_buf, "/users/{d}", .{candidate});
+        const bucket = routeSelectionKey("GET", "api.internal", request_path) % 100;
+        if (bucket >= 31 and bucket < 50) break;
+    }
+
+    var plan = ForwardPlan{
+        .method = .GET,
+        .path = try std.testing.allocator.dupe(u8, request_path),
+        .outbound_path = try std.testing.allocator.dupe(u8, request_path),
+        .host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = routeSelectionKey("GET", "api.internal", request_path),
+        .route = .{
+            .name = try std.testing.allocator.dupe(u8, "api:/"),
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .vip_address = try std.testing.allocator.dupe(u8, "10.43.0.2"),
+            .host = try std.testing.allocator.dupe(u8, "api.internal"),
+            .path_prefix = try std.testing.allocator.dupe(u8, "/"),
+            .backend_services = try std.testing.allocator.dupe(router.BackendTarget, &.{
+                .{ .service_name = try std.testing.allocator.dupe(u8, "api"), .weight = 50 },
+                .{ .service_name = try std.testing.allocator.dupe(u8, "api-canary"), .weight = 50 },
+            }),
+            .eligible_endpoints = 2,
+            .healthy_endpoints = 2,
+            .degraded = false,
+            .degraded_reason = .none,
+            .last_failure_kind = null,
+            .last_failure_at = null,
+            .retries = 1,
+            .connect_timeout_ms = 1000,
+            .request_timeout_ms = 5000,
+            .preserve_host = true,
+            .steering_desired_ports = 0,
+            .steering_applied_ports = 0,
+            .steering_ready = false,
+            .steering_blocked = true,
+            .steering_drifted = false,
+            .steering_blocked_reason = .rollout_disabled,
+        },
+        .upstream = .{
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .endpoint_id = try std.testing.allocator.dupe(u8, "api-1"),
+            .address = try std.testing.allocator.dupe(u8, "10.42.0.9"),
+            .port = 8080,
+            .eligible = true,
+        },
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    var retry_upstream = try resolveAttemptUpstream(std.testing.allocator, &plan, 1);
+    defer retry_upstream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("api-canary", retry_upstream.service);
+    try std.testing.expectEqualStrings("10.42.0.10", retry_upstream.address);
+    try std.testing.expectEqual(@as(u16, 8081), retry_upstream.port);
 }
 
 test "handleConnection proxies a client socket request" {
