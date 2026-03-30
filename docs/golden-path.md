@@ -51,6 +51,12 @@ curl -H 'Host: demo.local' http://127.0.0.1:17080/
 curl -H 'Host: demo.local' http://127.0.0.1:17080/api/get
 ```
 
+or run the whole local routing drill, including listener restart and recovery:
+
+```bash
+./scripts/http-routing-recovery-smoke.sh
+```
+
 inspect the routing state:
 
 ```bash
@@ -63,6 +69,7 @@ what to verify:
 - host and path routing land on the correct service
 - route and listener state appear in `/v1/status?mode=service_discovery`
 - Prometheus metrics expose service and routing activity
+- the local recovery smoke succeeds without redeploying routes after the listener restart
 
 current limits:
 
@@ -146,6 +153,8 @@ what to verify:
 ### routing listener restart
 
 for a routed deployment, restart the API server or the HTTP routing listener process.
+
+the canonical local version of this drill is `./scripts/http-routing-recovery-smoke.sh`.
 
 what to verify:
 

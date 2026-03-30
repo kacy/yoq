@@ -370,6 +370,8 @@ do these on a healthy non-production cluster before you trust a new release:
 1. trigger a leader step-down and verify that another server becomes leader
 2. restart one agent and verify it returns to `active`
 3. for routed workloads, restart the listener path and verify traffic recovers
+
+use `./scripts/http-routing-recovery-smoke.sh` as the local reference drill before doing the same check on a cluster deployment.
 4. stop one workload unexpectedly and verify the reconciler restores healthy discovery state
 
 for a shorter end-to-end checklist, see [golden-path.md](golden-path.md).

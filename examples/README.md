@@ -32,7 +32,7 @@ yoq up -f examples/cron/manifest.toml
 
 ## http-routing
 
-two services behind the built-in HTTP router. requests for `demo.local/api` go to the API service, and everything else for `demo.local` goes to the web service.
+three services behind the built-in HTTP router. requests for `demo.local/api` go to the API service, `docs.demo.local` goes to the docs service, and everything else for `demo.local` goes to the gateway service.
 
 ```bash
 yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
@@ -40,6 +40,10 @@ yoq up -f examples/http-routing/manifest.toml
 curl -H 'Host: demo.local' http://127.0.0.1:17080/
 curl -H 'Host: demo.local' http://127.0.0.1:17080/api/get
 ```
+
+for the full restart-and-recovery drill, run `./scripts/http-routing-recovery-smoke.sh`.
+
+see [examples/http-routing/README.md](http-routing/README.md) for the complete walkthrough.
 
 ## cluster
 

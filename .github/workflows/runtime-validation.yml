@@ -35,6 +35,7 @@ jobs:
         run: |
           ./zig-out/bin/yoq version
           ./zig-out/bin/yoq help > /dev/null
+          bash -n scripts/http-routing-recovery-smoke.sh
           ./zig-out/bin/yoq validate -f examples/redis/manifest.toml
           ./zig-out/bin/yoq validate -f examples/web-app/manifest.toml
           ./zig-out/bin/yoq validate -f examples/cron/manifest.toml
