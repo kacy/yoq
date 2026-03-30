@@ -136,6 +136,7 @@ pub const ReverseProxy = struct {
             },
             .forward => |plan| {
                 defer plan.deinit(self.allocator);
+                proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
                 const response = try self.forwardPlanWithClient(raw_request, &plan, client_ip);
                 if (parseForwardedStatusCode(self.allocator, plan.protocol, response)) |status_code| {
                     proxy_runtime.recordResponseCode(status_code);
@@ -351,8 +352,10 @@ pub const ReverseProxy = struct {
             const response = self.forwardSingleAttempt(raw_request, plan, &upstream, client_ip) catch |err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
                 proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
+                proxy_runtime.recordRouteUpstreamFailure(plan.route.name, plan.route.service, upstream.service);
                 if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
                     proxy_runtime.recordRetry();
+                    proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
                     retries_used += 1;
                     continue;
                 }
@@ -378,6 +381,7 @@ pub const ReverseProxy = struct {
 
             const status_code = parseUpstreamStatusCode(response) catch {
                 proxy_runtime.recordUpstreamFailure(.other);
+                proxy_runtime.recordRouteUpstreamFailure(plan.route.name, plan.route.service, upstream.service);
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
                 log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
                     methodString(plan.method),
@@ -403,6 +407,7 @@ pub const ReverseProxy = struct {
             }
             if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, status_code, false)) {
                 proxy_runtime.recordRetry();
+                proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
                 retries_used += 1;
                 self.allocator.free(response);
                 continue;
@@ -417,6 +422,7 @@ pub const ReverseProxy = struct {
                 status_code,
                 retries_used,
             });
+            proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status_code);
             proxy_runtime.recordRouteRecovered(plan.route.name);
             return response;
         }

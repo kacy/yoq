@@ -133,6 +133,24 @@ pub const Snapshot = struct {
     }
 };
 
+pub const RouteTrafficSnapshot = struct {
+    route_name: []const u8,
+    service_name: []const u8,
+    backend_service: []const u8,
+    requests_total: u64,
+    responses_2xx_total: u64,
+    responses_4xx_total: u64,
+    responses_5xx_total: u64,
+    retries_total: u64,
+    upstream_failures_total: u64,
+
+    pub fn deinit(self: RouteTrafficSnapshot, alloc: std.mem.Allocator) void {
+        alloc.free(self.route_name);
+        alloc.free(self.service_name);
+        alloc.free(self.backend_service);
+    }
+};
+
 var mutex: std.Thread.Mutex = .{};
 var materialized_routes: std.ArrayList(router.Route) = .empty;
 var running: bool = false;
@@ -153,6 +171,7 @@ var last_sync_at: ?i64 = null;
 var last_error: ?[]u8 = null;
 var endpoint_circuits: std.StringHashMapUnmanaged(EndpointCircuit) = .{};
 var route_statuses: std.StringHashMapUnmanaged(RouteStatusState) = .{};
+var route_traffic: std.StringHashMapUnmanaged(RouteTrafficState) = .{};
 
 pub const UpstreamFailureKind = enum {
     connect,
@@ -174,6 +193,18 @@ const RouteStatusState = struct {
     degraded_reason: RouteDegradedReason = .none,
     last_failure_kind: ?RouteFailureKind = null,
     last_failure_at: ?i64 = null,
+};
+
+const RouteTrafficState = struct {
+    route_name: []const u8,
+    service_name: []const u8,
+    backend_service: []const u8,
+    requests_total: u64 = 0,
+    responses_2xx_total: u64 = 0,
+    responses_4xx_total: u64 = 0,
+    responses_5xx_total: u64 = 0,
+    retries_total: u64 = 0,
+    upstream_failures_total: u64 = 0,
 };
 
 pub fn resetForTest() void {
@@ -198,6 +229,7 @@ pub fn resetForTest() void {
     deinitRoutesLocked();
     deinitCircuitsLocked();
     deinitRouteStatusesLocked();
+    deinitRouteTrafficLocked();
     clearLastErrorLocked();
 }
 
@@ -261,6 +293,14 @@ pub fn recordRequestStart() void {
     requests_total += 1;
 }
 
+pub fn recordRouteRequestStart(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const state = ensureRouteTrafficLocked(route_name, service_name, backend_service) orelse return;
+    state.requests_total += 1;
+}
+
 pub fn recordResponse(status: http.StatusCode) void {
     recordResponseCode(@intFromEnum(status));
 }
@@ -277,10 +317,31 @@ pub fn recordResponseCode(status_code: u16) void {
     }
 }
 
+pub fn recordRouteResponseCode(route_name: []const u8, service_name: []const u8, backend_service: []const u8, status_code: u16) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const state = ensureRouteTrafficLocked(route_name, service_name, backend_service) orelse return;
+    switch (status_code) {
+        200...299 => state.responses_2xx_total += 1,
+        400...499 => state.responses_4xx_total += 1,
+        500...599 => state.responses_5xx_total += 1,
+        else => {},
+    }
+}
+
 pub fn recordRetry() void {
     mutex.lock();
     defer mutex.unlock();
     retries_total += 1;
+}
+
+pub fn recordRouteRetry(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const state = ensureRouteTrafficLocked(route_name, service_name, backend_service) orelse return;
+    state.retries_total += 1;
 }
 
 pub fn recordLoopRejection() void {
@@ -299,6 +360,14 @@ pub fn recordUpstreamFailure(kind: UpstreamFailureKind) void {
         .receive => upstream_receive_failures_total += 1,
         .other => upstream_other_failures_total += 1,
     }
+}
+
+pub fn recordRouteUpstreamFailure(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    mutex.lock();
+    defer mutex.unlock();
+
+    const state = ensureRouteTrafficLocked(route_name, service_name, backend_service) orelse return;
+    state.upstream_failures_total += 1;
 }
 
 pub fn recordEndpointSuccess(endpoint_id: []const u8) void {
@@ -384,6 +453,34 @@ pub fn snapshotRoutes(alloc: std.mem.Allocator) !std.ArrayList(RouteSnapshot) {
     }
 
     return routes_snapshot;
+}
+
+pub fn snapshotRouteTraffic(alloc: std.mem.Allocator) !std.ArrayList(RouteTrafficSnapshot) {
+    mutex.lock();
+    defer mutex.unlock();
+
+    var traffic_snapshot: std.ArrayList(RouteTrafficSnapshot) = .empty;
+    errdefer {
+        for (traffic_snapshot.items) |entry| entry.deinit(alloc);
+        traffic_snapshot.deinit(alloc);
+    }
+
+    var it = route_traffic.iterator();
+    while (it.next()) |entry| {
+        try traffic_snapshot.append(alloc, .{
+            .route_name = try alloc.dupe(u8, entry.value_ptr.route_name),
+            .service_name = try alloc.dupe(u8, entry.value_ptr.service_name),
+            .backend_service = try alloc.dupe(u8, entry.value_ptr.backend_service),
+            .requests_total = entry.value_ptr.requests_total,
+            .responses_2xx_total = entry.value_ptr.responses_2xx_total,
+            .responses_4xx_total = entry.value_ptr.responses_4xx_total,
+            .responses_5xx_total = entry.value_ptr.responses_5xx_total,
+            .retries_total = entry.value_ptr.retries_total,
+            .upstream_failures_total = entry.value_ptr.upstream_failures_total,
+        });
+    }
+
+    return traffic_snapshot;
 }
 
 pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Route) {
@@ -794,6 +891,49 @@ fn deinitRouteStatusesLocked() void {
     route_statuses.clearAndFree(std.heap.page_allocator);
 }
 
+fn deinitRouteTrafficLocked() void {
+    var it = route_traffic.iterator();
+    while (it.next()) |entry| {
+        std.heap.page_allocator.free(entry.key_ptr.*);
+        std.heap.page_allocator.free(entry.value_ptr.route_name);
+        std.heap.page_allocator.free(entry.value_ptr.service_name);
+        std.heap.page_allocator.free(entry.value_ptr.backend_service);
+    }
+    route_traffic.clearAndFree(std.heap.page_allocator);
+}
+
+fn ensureRouteTrafficLocked(route_name: []const u8, service_name: []const u8, backend_service: []const u8) ?*RouteTrafficState {
+    const key = std.fmt.allocPrint(std.heap.page_allocator, "{s}\x1f{s}", .{ route_name, backend_service }) catch return null;
+    errdefer std.heap.page_allocator.free(key);
+
+    const result = route_traffic.getOrPut(std.heap.page_allocator, key) catch return null;
+    if (!result.found_existing) {
+        result.value_ptr.* = .{
+            .route_name = std.heap.page_allocator.dupe(u8, route_name) catch {
+                std.heap.page_allocator.free(result.key_ptr.*);
+                _ = route_traffic.remove(key);
+                return null;
+            },
+            .service_name = std.heap.page_allocator.dupe(u8, service_name) catch {
+                std.heap.page_allocator.free(result.value_ptr.route_name);
+                std.heap.page_allocator.free(result.key_ptr.*);
+                _ = route_traffic.remove(key);
+                return null;
+            },
+            .backend_service = std.heap.page_allocator.dupe(u8, backend_service) catch {
+                std.heap.page_allocator.free(result.value_ptr.route_name);
+                std.heap.page_allocator.free(result.value_ptr.service_name);
+                std.heap.page_allocator.free(result.key_ptr.*);
+                _ = route_traffic.remove(key);
+                return null;
+            },
+        };
+    } else {
+        std.heap.page_allocator.free(key);
+    }
+    return result.value_ptr;
+}
+
 fn degradedReasonForFailure(kind: RouteFailureKind) RouteDegradedReason {
     return switch (kind) {
         .no_eligible_upstream => .no_eligible_upstream,
@@ -1169,12 +1309,16 @@ test "snapshot exposes L7 proxy observability counters" {
 
     recordRequestStart();
     recordRequestStart();
+    recordRouteRequestStart("edge:default", "edge", "edge");
     recordResponse(.ok);
+    recordRouteResponseCode("edge:default", "edge", "edge", 200);
     recordResponse(.bad_request);
     recordResponse(.bad_gateway);
     recordRetry();
+    recordRouteRetry("edge:default", "edge", "edge");
     recordLoopRejection();
     recordUpstreamFailure(.connect);
+    recordRouteUpstreamFailure("edge:default", "edge", "edge");
     recordUpstreamFailure(.receive);
     recordUpstreamFailure(.other);
 
@@ -1194,6 +1338,21 @@ test "snapshot exposes L7 proxy observability counters" {
     try std.testing.expectEqual(@as(u64, 0), state.circuit_trips_total);
     try std.testing.expectEqual(@as(u32, 0), state.circuit_open_endpoints);
     try std.testing.expectEqual(@as(u32, 0), state.circuit_half_open_endpoints);
+
+    var route_traffic_snapshot = try snapshotRouteTraffic(std.testing.allocator);
+    defer {
+        for (route_traffic_snapshot.items) |entry| entry.deinit(std.testing.allocator);
+        route_traffic_snapshot.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), route_traffic_snapshot.items.len);
+    try std.testing.expectEqualStrings("edge:default", route_traffic_snapshot.items[0].route_name);
+    try std.testing.expectEqualStrings("edge", route_traffic_snapshot.items[0].service_name);
+    try std.testing.expectEqualStrings("edge", route_traffic_snapshot.items[0].backend_service);
+    try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[0].requests_total);
+    try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[0].responses_2xx_total);
+    try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[0].retries_total);
+    try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[0].upstream_failures_total);
 }
 
 test "resolveUpstream skips endpoints with open circuits" {
