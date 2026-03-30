@@ -277,6 +277,11 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     }
     var l7_proxy = try proxy_runtime.snapshot(std.heap.page_allocator);
     defer l7_proxy.deinit(std.heap.page_allocator);
+    var l7_proxy_route_traffic = try proxy_runtime.snapshotRouteTraffic(std.heap.page_allocator);
+    defer {
+        for (l7_proxy_route_traffic.items) |entry| entry.deinit(std.heap.page_allocator);
+        l7_proxy_route_traffic.deinit(std.heap.page_allocator);
+    }
     var l7_listener = try listener_runtime.snapshot(std.heap.page_allocator);
     defer l7_listener.deinit(std.heap.page_allocator);
     const l7_control_plane = proxy_control_plane.snapshot();
@@ -332,15 +337,46 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_requests_total counter\n");
     try writer.print("yoq_service_l7_proxy_requests_total {d}\n", .{l7_proxy.requests_total});
 
+    try writer.writeAll("# HELP yoq_service_l7_proxy_route_requests_total L7 proxy requests by route and selected backend\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_route_requests_total counter\n");
+    for (l7_proxy_route_traffic.items) |entry| {
+        try writer.print(
+            "yoq_service_l7_proxy_route_requests_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.requests_total },
+        );
+    }
+
     try writer.writeAll("# HELP yoq_service_l7_proxy_responses_total L7 proxy responses by class\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_responses_total counter\n");
     try writer.print("yoq_service_l7_proxy_responses_total{{class=\"2xx\"}} {d}\n", .{l7_proxy.responses_2xx_total});
     try writer.print("yoq_service_l7_proxy_responses_total{{class=\"4xx\"}} {d}\n", .{l7_proxy.responses_4xx_total});
     try writer.print("yoq_service_l7_proxy_responses_total{{class=\"5xx\"}} {d}\n", .{l7_proxy.responses_5xx_total});
+    for (l7_proxy_route_traffic.items) |entry| {
+        try writer.print(
+            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",class=\"2xx\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.responses_2xx_total },
+        );
+        try writer.print(
+            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",class=\"4xx\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.responses_4xx_total },
+        );
+        try writer.print(
+            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",class=\"5xx\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.responses_5xx_total },
+        );
+    }
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_retries_total L7 proxy retry attempts\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_retries_total counter\n");
     try writer.print("yoq_service_l7_proxy_retries_total {d}\n", .{l7_proxy.retries_total});
+    try writer.writeAll("# HELP yoq_service_l7_proxy_route_retries_total L7 proxy retries by route and selected backend\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_route_retries_total counter\n");
+    for (l7_proxy_route_traffic.items) |entry| {
+        try writer.print(
+            "yoq_service_l7_proxy_route_retries_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.retries_total },
+        );
+    }
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_loop_rejections_total L7 proxy requests rejected to prevent loops\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_loop_rejections_total counter\n");
@@ -352,6 +388,14 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"send\"}} {d}\n", .{l7_proxy.upstream_send_failures_total});
     try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"receive\"}} {d}\n", .{l7_proxy.upstream_receive_failures_total});
     try writer.print("yoq_service_l7_proxy_upstream_failures_total{{kind=\"other\"}} {d}\n", .{l7_proxy.upstream_other_failures_total});
+    try writer.writeAll("# HELP yoq_service_l7_proxy_route_upstream_failures_total L7 proxy upstream failures by route and selected backend\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_route_upstream_failures_total counter\n");
+    for (l7_proxy_route_traffic.items) |entry| {
+        try writer.print(
+            "yoq_service_l7_proxy_route_upstream_failures_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.upstream_failures_total },
+        );
+    }
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_circuit_trips_total L7 proxy endpoint circuit breaker trips\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_circuit_trips_total counter\n");

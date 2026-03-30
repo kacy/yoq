@@ -240,6 +240,7 @@ fn loadSnapshotInto(next_registry: *service_registry.Registry) !void {
             .http_routes = route_definitions,
             .http_proxy_host = service.http_proxy_host,
             .http_proxy_path_prefix = service.http_proxy_path_prefix,
+            .http_proxy_rewrite_prefix = service.http_proxy_rewrite_prefix,
             .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
             .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
             .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
@@ -294,6 +295,7 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
         .http_routes = route_definitions,
         .http_proxy_host = service.http_proxy_host,
         .http_proxy_path_prefix = service.http_proxy_path_prefix,
+        .http_proxy_rewrite_prefix = service.http_proxy_rewrite_prefix,
         .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
         .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
         .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
@@ -334,15 +336,45 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             alloc.free(route.route_name);
             alloc.free(route.host);
             alloc.free(route.path_prefix);
+            if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+            for (route.match_headers) |header_match| header_match.deinit(alloc);
+            if (route.match_headers.len > 0) alloc.free(route.match_headers);
+            for (route.backend_services) |backend| backend.deinit(alloc);
+            if (route.backend_services.len > 0) alloc.free(route.backend_services);
         }
         defs.deinit(alloc);
     }
 
     for (routes) |route| {
+        var header_matches: std.ArrayList(service_registry.HttpHeaderMatch) = .empty;
+        errdefer {
+            for (header_matches.items) |header_match| header_match.deinit(alloc);
+            header_matches.deinit(alloc);
+        }
+        for (route.match_headers) |header_match| {
+            try header_matches.append(alloc, .{
+                .name = try alloc.dupe(u8, header_match.header_name),
+                .value = try alloc.dupe(u8, header_match.header_value),
+            });
+        }
+        var backend_services: std.ArrayList(service_registry.HttpRouteBackend) = .empty;
+        errdefer {
+            for (backend_services.items) |backend| backend.deinit(alloc);
+            backend_services.deinit(alloc);
+        }
+        for (route.backend_services) |backend| {
+            try backend_services.append(alloc, .{
+                .service_name = try alloc.dupe(u8, backend.backend_service),
+                .weight = @intCast(backend.weight),
+            });
+        }
         try defs.append(alloc, .{
             .route_name = try alloc.dupe(u8, route.route_name),
             .host = try alloc.dupe(u8, route.host),
             .path_prefix = try alloc.dupe(u8, route.path_prefix),
+            .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+            .match_headers = try header_matches.toOwnedSlice(alloc),
+            .backend_services = try backend_services.toOwnedSlice(alloc),
             .retries = @intCast(route.retries),
             .connect_timeout_ms = @intCast(route.connect_timeout_ms),
             .request_timeout_ms = @intCast(route.request_timeout_ms),
@@ -359,6 +391,11 @@ fn deinitRouteDefinitions(alloc: Allocator, routes: []const service_registry.Htt
         alloc.free(route.route_name);
         alloc.free(route.host);
         alloc.free(route.path_prefix);
+        if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (route.match_headers) |header_match| header_match.deinit(alloc);
+        if (route.match_headers.len > 0) alloc.free(route.match_headers);
+        for (route.backend_services) |backend| backend.deinit(alloc);
+        if (route.backend_services.len > 0) alloc.free(route.backend_services);
     }
     alloc.free(routes);
 }

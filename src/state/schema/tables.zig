@@ -72,6 +72,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    lb_policy TEXT NOT NULL DEFAULT 'consistent_hash',
         \\    http_proxy_host TEXT,
         \\    http_proxy_path_prefix TEXT,
+        \\    http_proxy_rewrite_prefix TEXT,
         \\    http_proxy_retries INTEGER,
         \\    http_proxy_connect_timeout_ms INTEGER,
         \\    http_proxy_request_timeout_ms INTEGER,
@@ -103,6 +104,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    route_name TEXT NOT NULL,
         \\    host TEXT NOT NULL,
         \\    path_prefix TEXT NOT NULL DEFAULT '/',
+        \\    rewrite_prefix TEXT,
         \\    retries INTEGER NOT NULL DEFAULT 0,
         \\    connect_timeout_ms INTEGER NOT NULL DEFAULT 1000,
         \\    request_timeout_ms INTEGER NOT NULL DEFAULT 5000,
@@ -112,6 +114,30 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    created_at INTEGER NOT NULL,
         \\    updated_at INTEGER NOT NULL,
         \\    PRIMARY KEY (service_name, route_name)
+        \\);
+    );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS service_http_route_headers (
+        \\    service_name TEXT NOT NULL,
+        \\    route_name TEXT NOT NULL,
+        \\    header_name TEXT NOT NULL,
+        \\    header_value TEXT NOT NULL,
+        \\    match_order INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (service_name, route_name, match_order)
+        \\);
+    );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS service_http_route_backends (
+        \\    service_name TEXT NOT NULL,
+        \\    route_name TEXT NOT NULL,
+        \\    backend_service TEXT NOT NULL,
+        \\    weight INTEGER NOT NULL,
+        \\    backend_order INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (service_name, route_name, backend_order)
         \\);
     );
     try exec(db,

@@ -205,6 +205,28 @@ pub fn decodeHeaderBlock(alloc: std.mem.Allocator, block: []const u8) Error!std.
     return headers;
 }
 
+pub fn encodeHeaderBlockLiteral(alloc: std.mem.Allocator, headers: []const HeaderField) ![]u8 {
+    var block: std.ArrayList(u8) = .empty;
+    errdefer block.deinit(alloc);
+
+    for (headers) |header| {
+        if (findStaticHeaderIndex(header.name, header.value)) |exact_index| {
+            try appendInteger(&block, alloc, exact_index, 7, 0x80);
+            continue;
+        }
+
+        if (findStaticHeaderNameIndex(header.name)) |name_index| {
+            try appendInteger(&block, alloc, name_index, 4, 0x00);
+        } else {
+            try block.append(alloc, 0x00);
+            try appendStringLiteral(&block, alloc, header.name);
+        }
+        try appendStringLiteral(&block, alloc, header.value);
+    }
+
+    return block.toOwnedSlice(alloc);
+}
+
 const HeaderLookup = struct {
     name: []const u8,
     value: []const u8,
@@ -270,6 +292,47 @@ fn lookupHeader(index: usize, dynamic_table: *const DynamicTable) ?HeaderLookup 
         return .{ .name = field.name, .value = field.value };
     }
     return dynamic_table.lookup(index - static_table.len);
+}
+
+fn findStaticHeaderIndex(name: []const u8, value: []const u8) ?usize {
+    for (static_table, 0..) |field, idx| {
+        if (std.mem.eql(u8, field.name, name) and std.mem.eql(u8, field.value, value)) return idx + 1;
+    }
+    return null;
+}
+
+fn findStaticHeaderNameIndex(name: []const u8) ?usize {
+    for (static_table, 0..) |field, idx| {
+        if (std.mem.eql(u8, field.name, name)) return idx + 1;
+    }
+    return null;
+}
+
+fn appendStringLiteral(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, value: []const u8) !void {
+    try appendInteger(buf, alloc, value.len, 7, 0x00);
+    try buf.appendSlice(alloc, value);
+}
+
+fn appendInteger(
+    buf: *std.ArrayList(u8),
+    alloc: std.mem.Allocator,
+    value: usize,
+    prefix_bits: u3,
+    prefix_mask: u8,
+) !void {
+    const max_prefix_value = (@as(usize, 1) << prefix_bits) - 1;
+    if (value < max_prefix_value) {
+        try buf.append(alloc, prefix_mask | @as(u8, @intCast(value)));
+        return;
+    }
+
+    try buf.append(alloc, prefix_mask | @as(u8, @intCast(max_prefix_value)));
+    var remaining = value - max_prefix_value;
+    while (remaining >= 128) {
+        try buf.append(alloc, @as(u8, @intCast((remaining & 0x7f) | 0x80)));
+        remaining >>= 7;
+    }
+    try buf.append(alloc, @as(u8, @intCast(remaining)));
 }
 
 fn fieldSize(name: []const u8, value: []const u8) usize {

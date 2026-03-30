@@ -115,10 +115,32 @@ pub const TlsConfig = struct {
     }
 };
 
+pub const HttpHeaderMatch = struct {
+    name: []const u8,
+    value: []const u8,
+
+    pub fn deinit(self: HttpHeaderMatch, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.value);
+    }
+};
+
+pub const HttpRouteBackend = struct {
+    service_name: []const u8,
+    weight: u8,
+
+    pub fn deinit(self: HttpRouteBackend, alloc: std.mem.Allocator) void {
+        alloc.free(self.service_name);
+    }
+};
+
 pub const HttpProxyRoute = struct {
     name: []const u8,
     host: []const u8,
     path_prefix: []const u8 = "/",
+    rewrite_prefix: ?[]const u8 = null,
+    match_headers: []const HttpHeaderMatch = &.{},
+    backend_services: []const HttpRouteBackend = &.{},
     retries: u8 = 0,
     connect_timeout_ms: u32 = 1000,
     request_timeout_ms: u32 = 5000,
@@ -128,6 +150,11 @@ pub const HttpProxyRoute = struct {
         alloc.free(self.name);
         alloc.free(self.host);
         alloc.free(self.path_prefix);
+        if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (self.match_headers) |header_match| header_match.deinit(alloc);
+        if (self.match_headers.len > 0) alloc.free(self.match_headers);
+        for (self.backend_services) |backend| backend.deinit(alloc);
+        if (self.backend_services.len > 0) alloc.free(self.backend_services);
     }
 };
 

@@ -28,10 +28,13 @@ pub const RequestHead = struct {
 
 pub const ParseResult = struct {
     request: RequestHead,
+    headers: []const hpack.HeaderField,
     consumed: usize,
 
     pub fn deinit(self: ParseResult, alloc: std.mem.Allocator) void {
         self.request.deinit(alloc);
+        for (self.headers) |header| header.deinit(alloc);
+        alloc.free(self.headers);
     }
 };
 
@@ -88,7 +91,7 @@ pub fn parseClientConnectionPreface(alloc: std.mem.Allocator, buf: []const u8) P
     if (request_stream_id == null or header_block.items.len == 0) return error.MissingHeaders;
 
     var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
-    defer {
+    errdefer {
         for (headers.items) |header| header.deinit(alloc);
         headers.deinit(alloc);
     }
@@ -113,16 +116,116 @@ pub fn parseClientConnectionPreface(alloc: std.mem.Allocator, buf: []const u8) P
         if (path) |value| alloc.free(value);
     }
 
+    const method_value = method orelse return error.MissingMethod;
+    const authority_value = authority orelse return error.MissingAuthority;
+    const path_value = path orelse return error.MissingPath;
+    const owned_headers = try headers.toOwnedSlice(alloc);
+
     return .{
         .request = .{
             .stream_id = request_stream_id.?,
-            .method = method orelse return error.MissingMethod,
-            .authority = authority orelse return error.MissingAuthority,
-            .path = path orelse return error.MissingPath,
+            .method = method_value,
+            .authority = authority_value,
+            .path = path_value,
             .end_stream = request_end_stream,
         },
+        .headers = owned_headers,
         .consumed = pos,
     };
+}
+
+pub fn rewriteClientConnectionPreface(
+    alloc: std.mem.Allocator,
+    buf: []const u8,
+    outbound_authority: ?[]const u8,
+    outbound_path: ?[]const u8,
+) (ParseError || hpack.Error)![]u8 {
+    if (outbound_authority == null and outbound_path == null) return alloc.dupe(u8, buf);
+    if (buf.len < http2.client_preface.len or !std.mem.eql(u8, buf[0..http2.client_preface.len], http2.client_preface)) {
+        return error.MissingClientPreface;
+    }
+
+    var pos: usize = http2.client_preface.len;
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, http2.client_preface);
+
+    var request_stream_id: ?u32 = null;
+    var request_flags: u8 = 0;
+
+    while (pos + http2.frame_header_len <= buf.len) {
+        const frame_start = pos;
+        const frame = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+        pos += http2.frame_header_len;
+
+        if (pos + frame.length > buf.len) return error.BufferTooShort;
+        const payload = buf[pos .. pos + frame.length];
+        pos += frame.length;
+        const frame_end = pos;
+
+        switch (frame.frame_type) {
+            .settings, .window_update, .ping => {
+                if (request_stream_id == null) try out.appendSlice(alloc, buf[frame_start..frame_end]);
+            },
+            .headers => {
+                if (frame.stream_id == 0) return error.InvalidHeadersFrame;
+                if (request_stream_id != null) return error.InvalidFrameSequence;
+                request_stream_id = frame.stream_id;
+                request_flags = frame.flags;
+                const fragment = try headerBlockFragment(payload, frame.flags);
+                try header_block.appendSlice(alloc, fragment);
+                if ((frame.flags & Flag.end_headers) != 0) break;
+            },
+            .continuation => {
+                if (request_stream_id == null or frame.stream_id != request_stream_id.?) return error.InvalidFrameSequence;
+                try header_block.appendSlice(alloc, payload);
+                if ((frame.flags & Flag.end_headers) != 0) break;
+            },
+            else => {
+                if (request_stream_id == null) {
+                    try out.appendSlice(alloc, buf[frame_start..frame_end]);
+                } else {
+                    return error.InvalidFrameSequence;
+                }
+            },
+        }
+    }
+
+    if (request_stream_id == null or header_block.items.len == 0) return error.MissingHeaders;
+
+    var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
+    defer {
+        for (headers.items) |header| header.deinit(alloc);
+        headers.deinit(alloc);
+    }
+
+    for (headers.items) |*header| {
+        if (outbound_authority != null and std.mem.eql(u8, header.name, ":authority")) {
+            alloc.free(header.value);
+            header.value = try alloc.dupe(u8, outbound_authority.?);
+        } else if (outbound_path != null and std.mem.eql(u8, header.name, ":path")) {
+            alloc.free(header.value);
+            header.value = try alloc.dupe(u8, outbound_path.?);
+        }
+    }
+
+    const rewritten_block = try hpack.encodeHeaderBlockLiteral(alloc, headers.items);
+    defer alloc.free(rewritten_block);
+
+    const rewritten_headers = try buildFrame(alloc, .{
+        .length = @intCast(rewritten_block.len),
+        .frame_type = .headers,
+        .flags = (request_flags & Flag.end_stream) | Flag.end_headers,
+        .stream_id = request_stream_id.?,
+    }, rewritten_block);
+    defer alloc.free(rewritten_headers);
+
+    try out.appendSlice(alloc, rewritten_headers);
+    try out.appendSlice(alloc, buf[pos..]);
+    return out.toOwnedSlice(alloc);
 }
 
 fn headerBlockFragment(payload: []const u8, flags: u8) ParseError![]const u8 {
@@ -305,6 +408,48 @@ test "parseClientConnectionPreface parses HEADERS plus CONTINUATION" {
     try std.testing.expectEqualStrings("api.internal", parsed.request.authority);
     try std.testing.expectEqualStrings("/v1/users", parsed.request.path);
     try std.testing.expect(!parsed.request.end_stream);
+}
+
+test "rewriteClientConnectionPreface rewrites authority and path" {
+    const alloc = std.testing.allocator;
+
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+    try header_block.append(alloc, 0x83);
+    try header_block.append(alloc, 0x86);
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "api.internal");
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/api/users?id=7");
+
+    const settings = try buildFrame(alloc, .{
+        .length = 0,
+        .frame_type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+    defer alloc.free(settings);
+
+    const headers = try buildFrame(alloc, .{
+        .length = @intCast(header_block.items.len),
+        .frame_type = .headers,
+        .flags = Flag.end_headers | Flag.end_stream,
+        .stream_id = 1,
+    }, header_block.items);
+    defer alloc.free(headers);
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(alloc);
+    try request_bytes.appendSlice(alloc, http2.client_preface);
+    try request_bytes.appendSlice(alloc, settings);
+    try request_bytes.appendSlice(alloc, headers);
+
+    const rewritten = try rewriteClientConnectionPreface(alloc, request_bytes.items, "api", "/users?id=7");
+    defer alloc.free(rewritten);
+
+    const parsed = try parseClientConnectionPreface(alloc, rewritten);
+    defer parsed.deinit(alloc);
+
+    try std.testing.expectEqualStrings("api", parsed.request.authority);
+    try std.testing.expectEqualStrings("/users?id=7", parsed.request.path);
 }
 
 test "parseClientConnectionPreface rejects missing preface" {

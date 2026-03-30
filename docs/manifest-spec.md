@@ -119,6 +119,9 @@ the upstream target is the first service port in `ports`. `http_proxy` is just s
 |-------|------|----------|---------|-------------|
 | `host` | string | yes | — | hostname to match |
 | `path_prefix` | string | no | `"/"` | path prefix to match |
+| `rewrite_prefix` | string | no | none | replace the matched prefix before forwarding upstream |
+| `match_headers` | array of strings | no | `[]` | exact header matches in `name=value` form |
+| `backend_services` | array of strings | no | owning service at `100` | weighted backend targets in `service=weight` form |
 | `retries` | integer | no | `0` | upstream retries for failed requests |
 | `connect_timeout_ms` | integer | no | `1000` | upstream connect timeout in milliseconds |
 | `request_timeout_ms` | integer | no | `5000` | upstream request timeout in milliseconds |
@@ -140,6 +143,9 @@ ports = ["8081:8080"]
 [service.api.http_proxy]
 host = "demo.local"
 path_prefix = "/api"
+rewrite_prefix = "/"
+match_headers = ["x-env=canary"]
+backend_services = ["api=90", "api-canary=10"]
 preserve_host = false
 retries = 2
 connect_timeout_ms = 1500
@@ -161,13 +167,22 @@ path_prefix = "/api"
 host = "demo.local"
 path_prefix = "/admin"
 preserve_host = false
+
+[service.gateway.http_routes.canary]
+host = "demo.local"
+path_prefix = "/api"
+match_headers = ["x-env=canary"]
+backend_services = ["api=90", "api-canary=10"]
 ```
 
 validation rules:
 
 - each route name must be unique within the service
-- host + `path_prefix` pairs must be unique within the service
+- exact route matches are deduplicated by `host` + `path_prefix` + the full `match_headers` set
 - `http_proxy` and `http_routes` cannot be used together on the same service
+- route matching prefers the longest `path_prefix`, then the route with more exact header conditions, then the first defined route
+- `backend_services` weights must sum to `100`
+- weighted backend selection is deterministic per request key, and retry attempts can move to a different configured backend target
 
 server-side listener defaults:
 
@@ -182,6 +197,8 @@ yoq init-server --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
 ```
 
 use `GET /v1/status?mode=service_discovery` and `GET /v1/metrics?format=prometheus` to inspect listener, route, and steering state. `mode=service_rollout` remains accepted as a compatibility alias.
+
+for weighted routes, the JSON status payload includes `l7_proxy.sample_route_traffic`, and Prometheus exposes `yoq_service_l7_proxy_route_*` counters labeled by route, owning service, and selected backend service.
 
 current HTTP/2 and gRPC routing limits:
 

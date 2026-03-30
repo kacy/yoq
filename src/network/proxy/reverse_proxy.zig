@@ -38,15 +38,20 @@ pub const ForwardPlan = struct {
     http2_request_end_stream: bool = false,
     method: http.Method,
     path: []const u8,
+    outbound_path: []const u8,
     host: []const u8,
     outbound_host: []const u8,
+    backend_service: []const u8,
+    selection_key: u64,
     route: proxy_runtime.RouteSnapshot,
     upstream: upstream_mod.Upstream,
 
     pub fn deinit(self: ForwardPlan, alloc: std.mem.Allocator) void {
         alloc.free(self.path);
+        alloc.free(self.outbound_path);
         alloc.free(self.host);
         alloc.free(self.outbound_host);
+        alloc.free(self.backend_service);
         self.route.deinit(alloc);
         self.upstream.deinit(alloc);
     }
@@ -131,6 +136,7 @@ pub const ReverseProxy = struct {
             },
             .forward => |plan| {
                 defer plan.deinit(self.allocator);
+                proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
                 const response = try self.forwardPlanWithClient(raw_request, &plan, client_ip);
                 if (parseForwardedStatusCode(self.allocator, plan.protocol, response)) |status_code| {
                     proxy_runtime.recordResponseCode(status_code);
@@ -252,7 +258,7 @@ pub const ReverseProxy = struct {
 
         try writer.print("{s} {s} HTTP/1.1\r\n", .{
             methodString(parsed.method),
-            parsed.path,
+            plan.outbound_path,
         });
         try writer.print("Host: {s}\r\n", .{plan.outbound_host});
 
@@ -346,8 +352,10 @@ pub const ReverseProxy = struct {
             const response = self.forwardSingleAttempt(raw_request, plan, &upstream, client_ip) catch |err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
                 proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
+                proxy_runtime.recordRouteUpstreamFailure(plan.route.name, plan.route.service, upstream.service);
                 if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
                     proxy_runtime.recordRetry();
+                    proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
                     retries_used += 1;
                     continue;
                 }
@@ -373,6 +381,7 @@ pub const ReverseProxy = struct {
 
             const status_code = parseUpstreamStatusCode(response) catch {
                 proxy_runtime.recordUpstreamFailure(.other);
+                proxy_runtime.recordRouteUpstreamFailure(plan.route.name, plan.route.service, upstream.service);
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
                 log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
                     methodString(plan.method),
@@ -398,6 +407,7 @@ pub const ReverseProxy = struct {
             }
             if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, status_code, false)) {
                 proxy_runtime.recordRetry();
+                proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
                 retries_used += 1;
                 self.allocator.free(response);
                 continue;
@@ -412,6 +422,7 @@ pub const ReverseProxy = struct {
                 status_code,
                 retries_used,
             });
+            proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status_code);
             proxy_runtime.recordRouteRecovered(plan.route.name);
             return response;
         }
@@ -428,7 +439,12 @@ pub const ReverseProxy = struct {
         defer posix.close(fd);
         const request = switch (plan.protocol) {
             .http1 => try self.buildForwardRequestWithClient(raw_request, plan, client_ip),
-            .http2 => try self.allocator.dupe(u8, raw_request),
+            .http2 => try http2_request.rewriteClientConnectionPreface(
+                self.allocator,
+                raw_request,
+                if (std.mem.eql(u8, plan.outbound_host, plan.host)) null else plan.outbound_host,
+                if (std.mem.eql(u8, plan.outbound_path, plan.path)) null else plan.outbound_path,
+            ),
         };
         defer self.allocator.free(request);
 
@@ -454,6 +470,43 @@ fn normalizeHost(host_header: []const u8) []const u8 {
         return host_header[0..port_sep];
     }
     return host_header;
+}
+
+fn buildOutboundPath(
+    alloc: std.mem.Allocator,
+    original_path: []const u8,
+    matched_prefix: []const u8,
+    rewrite_prefix: ?[]const u8,
+) ![]u8 {
+    const replacement = rewrite_prefix orelse return alloc.dupe(u8, original_path);
+    const query_start = std.mem.indexOfScalar(u8, original_path, '?');
+    const path_only = if (query_start) |start| original_path[0..start] else original_path;
+    const query = if (query_start) |start| original_path[start..] else "";
+    const suffix = if (std.mem.eql(u8, matched_prefix, "/"))
+        path_only
+    else if (path_only.len >= matched_prefix.len)
+        path_only[matched_prefix.len..]
+    else
+        "";
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, replacement);
+    if (suffix.len > 0) {
+        if (std.mem.eql(u8, replacement, "/")) {
+            if (suffix[0] == '/') {
+                try out.appendSlice(alloc, suffix[1..]);
+            } else {
+                try out.appendSlice(alloc, suffix);
+            }
+        } else {
+            if (suffix[0] != '/') try out.append(alloc, '/');
+            try out.appendSlice(alloc, suffix);
+        }
+    }
+    if (out.items.len == 0) try out.append(alloc, '/');
+    try out.appendSlice(alloc, query);
+    return out.toOwnedSlice(alloc);
 }
 
 fn methodString(method: http.Method) []const u8 {
@@ -566,15 +619,16 @@ fn responseForPlanError(self: *const ReverseProxy, raw_request: []const u8, err:
 fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan.RequestPlan) !HandleResult {
     const route = try cloneRouteSnapshot(self.allocator, planned.route);
     errdefer route.deinit(self.allocator);
-
-    const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
+    const selection_key = routeSelectionKey(planned.method, planned.host, planned.path);
+    const backend_service = proxy_runtime.selectBackendService(planned.route, selection_key, 0);
+    const upstream = proxy_runtime.resolveUpstream(self.allocator, backend_service) catch |err| switch (err) {
         error.NoHealthyUpstream => {
             proxy_runtime.recordRouteFailure(planned.route.name, .no_eligible_upstream);
             log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
                 planned.method,
                 planned.host,
                 planned.path,
-                planned.route.service,
+                backend_service,
             });
             route.deinit(self.allocator);
             return .{ .response = .{
@@ -596,11 +650,14 @@ fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan
             .protocol = .http1,
             .method = planned.method_enum.?,
             .path = try self.allocator.dupe(u8, planned.path),
+            .outbound_path = try buildOutboundPath(self.allocator, planned.path, planned.route.match.path_prefix, planned.route.rewrite_prefix),
             .host = try self.allocator.dupe(u8, planned.host),
             .outbound_host = if (route.preserve_host)
                 try self.allocator.dupe(u8, planned.host)
             else
-                try self.allocator.dupe(u8, route.service),
+                try self.allocator.dupe(u8, backend_service),
+            .backend_service = try self.allocator.dupe(u8, backend_service),
+            .selection_key = selection_key,
             .route = route,
             .upstream = upstream,
         } },
@@ -610,8 +667,14 @@ fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan
             .http2_request_end_stream = planned.end_stream,
             .method = planned.method_enum.?,
             .path = try self.allocator.dupe(u8, planned.path),
+            .outbound_path = try buildOutboundPath(self.allocator, planned.path, planned.route.match.path_prefix, planned.route.rewrite_prefix),
             .host = try self.allocator.dupe(u8, planned.host),
-            .outbound_host = try self.allocator.dupe(u8, planned.host),
+            .outbound_host = if (route.preserve_host)
+                try self.allocator.dupe(u8, planned.host)
+            else
+                try self.allocator.dupe(u8, backend_service),
+            .backend_service = try self.allocator.dupe(u8, backend_service),
+            .selection_key = selection_key,
             .route = route,
             .upstream = upstream,
         } },
@@ -706,7 +769,7 @@ fn mapRouteFailureKind(err: anyerror) proxy_runtime.RouteFailureKind {
 fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, attempt: u8) !upstream_mod.Upstream {
     if (attempt == 0) {
         return .{
-            .service = try alloc.dupe(u8, plan.upstream.service),
+            .service = try alloc.dupe(u8, plan.backend_service),
             .endpoint_id = try alloc.dupe(u8, plan.upstream.endpoint_id),
             .address = try alloc.dupe(u8, plan.upstream.address),
             .port = plan.upstream.port,
@@ -714,7 +777,16 @@ fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, at
         };
     }
 
-    return proxy_runtime.resolveUpstream(alloc, plan.route.service);
+    const backend_service = proxy_runtime.selectSnapshotBackendService(plan.route, plan.selection_key, attempt);
+    return proxy_runtime.resolveUpstream(alloc, backend_service);
+}
+
+fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(method);
+    hasher.update(host);
+    hasher.update(path);
+    return hasher.final();
 }
 
 fn parseUpstreamStatusCode(response: []const u8) !u16 {
@@ -900,6 +972,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !proxy_runt
         .vip_address = try alloc.dupe(u8, route.vip_address),
         .host = try alloc.dupe(u8, route.match.host orelse ""),
         .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
+        .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
         .eligible_endpoints = route.eligible_endpoints,
         .healthy_endpoints = route.healthy_endpoints,
         .degraded = route.degraded,
@@ -1025,6 +1098,83 @@ test "handleRequest returns forward plan for a routable request" {
             try std.testing.expectEqualStrings("api", plan.route.service);
             try std.testing.expectEqualStrings("10.42.0.9", plan.upstream.address);
             try std.testing.expectEqualStrings("api.internal", plan.outbound_host);
+        },
+        .response => return error.TestUnexpectedResult,
+    }
+}
+
+test "handleRequest selects configured weighted backend service" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{
+        .service_name = "api-canary",
+        .vip_address = "10.43.0.3",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api-canary",
+        .endpoint_id = "api-canary-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.10",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/v1",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+            .backend_services = &.{
+                .{ .service_name = "api-canary", .weight = 100 },
+            },
+            .eligible_endpoints = 1,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const result = try proxy.handleRequest(
+        "GET /v1/users HTTP/1.1\r\nHost: api.internal\r\n\r\n",
+    );
+    defer result.deinit(std.testing.allocator);
+
+    switch (result) {
+        .forward => |plan| {
+            try std.testing.expectEqualStrings("api-canary", plan.backend_service);
+            try std.testing.expectEqualStrings("api-canary", plan.upstream.service);
+            try std.testing.expectEqualStrings("10.42.0.10", plan.upstream.address);
         },
         .response => return error.TestUnexpectedResult,
     }
@@ -1248,8 +1398,11 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
     var plan = ForwardPlan{
         .method = .GET,
         .path = try std.testing.allocator.dupe(u8, "/v1/users"),
+        .outbound_path = try std.testing.allocator.dupe(u8, "/v1/users"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/v1"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1297,6 +1450,71 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: keep-alive\r\n") == null);
 }
 
+test "buildForwardRequest rewrites request path with preserved query" {
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/api",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/api" },
+            .rewrite_prefix = "/",
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var plan = ForwardPlan{
+        .method = .GET,
+        .path = try std.testing.allocator.dupe(u8, "/api/users?id=7"),
+        .outbound_path = try std.testing.allocator.dupe(u8, "/users?id=7"),
+        .host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
+        .route = .{
+            .name = try std.testing.allocator.dupe(u8, "api:/api"),
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .vip_address = try std.testing.allocator.dupe(u8, "10.43.0.2"),
+            .host = try std.testing.allocator.dupe(u8, "api.internal"),
+            .path_prefix = try std.testing.allocator.dupe(u8, "/api"),
+            .rewrite_prefix = try std.testing.allocator.dupe(u8, "/"),
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .degraded = false,
+            .degraded_reason = .none,
+            .last_failure_kind = null,
+            .last_failure_at = null,
+            .retries = 0,
+            .connect_timeout_ms = 1000,
+            .request_timeout_ms = 5000,
+            .preserve_host = true,
+            .steering_desired_ports = 0,
+            .steering_applied_ports = 0,
+            .steering_ready = false,
+            .steering_blocked = true,
+            .steering_drifted = false,
+            .steering_blocked_reason = .rollout_disabled,
+        },
+        .upstream = .{
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .endpoint_id = try std.testing.allocator.dupe(u8, "api-1"),
+            .address = try std.testing.allocator.dupe(u8, "10.42.0.9"),
+            .port = 8080,
+            .eligible = true,
+        },
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    const forwarded = try proxy.buildForwardRequest(
+        "GET /api/users?id=7 HTTP/1.1\r\nHost: api.internal\r\n\r\n",
+        &plan,
+    );
+    defer std.testing.allocator.free(forwarded);
+
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "GET /users?id=7 HTTP/1.1\r\n") != null);
+}
+
 test "buildForwardRequest preserves body and content length" {
     const routes = [_]router.Route{
         .{
@@ -1314,8 +1532,11 @@ test "buildForwardRequest preserves body and content length" {
     var plan = ForwardPlan{
         .method = .POST,
         .path = try std.testing.allocator.dupe(u8, "/submit"),
+        .outbound_path = try std.testing.allocator.dupe(u8, "/submit"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1377,8 +1598,11 @@ test "buildForwardRequest rewrites forwarded headers from client context" {
     var plan = ForwardPlan{
         .method = .GET,
         .path = try std.testing.allocator.dupe(u8, "/"),
+        .outbound_path = try std.testing.allocator.dupe(u8, "/"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1443,8 +1667,11 @@ test "buildForwardRequest preserves traceparent and tracestate" {
     var plan = ForwardPlan{
         .method = .GET,
         .path = try std.testing.allocator.dupe(u8, "/"),
+        .outbound_path = try std.testing.allocator.dupe(u8, "/"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1505,8 +1732,11 @@ test "buildForwardRequest generates traceparent when absent" {
     var plan = ForwardPlan{
         .method = .GET,
         .path = try std.testing.allocator.dupe(u8, "/"),
+        .outbound_path = try std.testing.allocator.dupe(u8, "/"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -2396,6 +2626,127 @@ test "forwardRequest retries onto a different endpoint after circuit opens" {
     try std.testing.expectEqual(@as(usize, 1), failing_upstream.accepted);
     try std.testing.expectEqual(@as(usize, 1), healthy_upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
+}
+
+test "resolveAttemptUpstream retries onto a different weighted backend service" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{
+        .service_name = "api-canary",
+        .vip_address = "10.43.0.3",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api-canary",
+        .endpoint_id = "api-canary-1",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "10.42.0.10",
+        .port = 8081,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    var path_buf: [32]u8 = undefined;
+    var request_path: []const u8 = undefined;
+    var candidate: usize = 0;
+    while (true) : (candidate += 1) {
+        request_path = try std.fmt.bufPrint(&path_buf, "/users/{d}", .{candidate});
+        const bucket = routeSelectionKey("GET", "api.internal", request_path) % 100;
+        if (bucket >= 31 and bucket < 50) break;
+    }
+
+    var plan = ForwardPlan{
+        .method = .GET,
+        .path = try std.testing.allocator.dupe(u8, request_path),
+        .outbound_path = try std.testing.allocator.dupe(u8, request_path),
+        .host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = routeSelectionKey("GET", "api.internal", request_path),
+        .route = .{
+            .name = try std.testing.allocator.dupe(u8, "api:/"),
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .vip_address = try std.testing.allocator.dupe(u8, "10.43.0.2"),
+            .host = try std.testing.allocator.dupe(u8, "api.internal"),
+            .path_prefix = try std.testing.allocator.dupe(u8, "/"),
+            .backend_services = try std.testing.allocator.dupe(router.BackendTarget, &.{
+                .{ .service_name = try std.testing.allocator.dupe(u8, "api"), .weight = 50 },
+                .{ .service_name = try std.testing.allocator.dupe(u8, "api-canary"), .weight = 50 },
+            }),
+            .eligible_endpoints = 2,
+            .healthy_endpoints = 2,
+            .degraded = false,
+            .degraded_reason = .none,
+            .last_failure_kind = null,
+            .last_failure_at = null,
+            .retries = 1,
+            .connect_timeout_ms = 1000,
+            .request_timeout_ms = 5000,
+            .preserve_host = true,
+            .steering_desired_ports = 0,
+            .steering_applied_ports = 0,
+            .steering_ready = false,
+            .steering_blocked = true,
+            .steering_drifted = false,
+            .steering_blocked_reason = .rollout_disabled,
+        },
+        .upstream = .{
+            .service = try std.testing.allocator.dupe(u8, "api"),
+            .endpoint_id = try std.testing.allocator.dupe(u8, "api-1"),
+            .address = try std.testing.allocator.dupe(u8, "10.42.0.9"),
+            .port = 8080,
+            .eligible = true,
+        },
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    var retry_upstream = try resolveAttemptUpstream(std.testing.allocator, &plan, 1);
+    defer retry_upstream.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("api-canary", retry_upstream.service);
+    try std.testing.expectEqualStrings("10.42.0.10", retry_upstream.address);
+    try std.testing.expectEqual(@as(u16, 8081), retry_upstream.port);
 }
 
 test "handleConnection proxies a client socket request" {

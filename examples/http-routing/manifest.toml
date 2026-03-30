@@ -20,10 +20,18 @@ ports = ["8081:8080"]
 [service.api.http_proxy]
 host = "demo.local"
 path_prefix = "/api"
+rewrite_prefix = "/"
+match_headers = ["x-env=canary"]
+backend_services = ["api=90", "api-canary=10"]
 preserve_host = false
 retries = 2
 connect_timeout_ms = 1500
 request_timeout_ms = 5000
+
+[service.api-canary]
+image = "hashicorp/http-echo:1.0"
+command = ["-listen", ":8080", "-text", "api canary route"]
+ports = ["8083:8080"]
 
 [service.docs]
 image = "hashicorp/http-echo:1.0"

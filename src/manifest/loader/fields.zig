@@ -203,6 +203,26 @@ pub fn parseHttpProxyRoute(
         return common.LoadError.InvalidHttpProxyConfig;
     }
 
+    const rewrite_prefix = proxy_table.getString("rewrite_prefix");
+    if (rewrite_prefix) |value| {
+        if (value.len == 0 or value[0] != '/') {
+            log.err("manifest: service '{s}' {s} route '{s}' rewrite_prefix must start with '/'", .{ service_name, field_name, route_name });
+            return common.LoadError.InvalidHttpProxyConfig;
+        }
+    }
+
+    const match_headers = try parseHttpRouteHeaderMatches(alloc, service_name, field_name, route_name, proxy_table.getArray("match_headers"));
+    errdefer {
+        for (match_headers) |header_match| header_match.deinit(alloc);
+        alloc.free(match_headers);
+    }
+
+    const backend_services = try parseHttpRouteBackends(alloc, service_name, field_name, route_name, proxy_table.getArray("backend_services"));
+    errdefer {
+        for (backend_services) |backend| backend.deinit(alloc);
+        alloc.free(backend_services);
+    }
+
     const retries_raw = proxy_table.getInt("retries") orelse 0;
     if (retries_raw < 0 or retries_raw > 5) {
         log.err("manifest: service '{s}' {s} route '{s}' retries must be between 0 and 5", .{ service_name, field_name, route_name });
@@ -237,6 +257,9 @@ pub fn parseHttpProxyRoute(
         .name = alloc.dupe(u8, route_name) catch return common.LoadError.OutOfMemory,
         .host = alloc.dupe(u8, host) catch return common.LoadError.OutOfMemory,
         .path_prefix = alloc.dupe(u8, path_prefix) catch return common.LoadError.OutOfMemory,
+        .rewrite_prefix = if (rewrite_prefix) |value| alloc.dupe(u8, value) catch return common.LoadError.OutOfMemory else null,
+        .match_headers = match_headers,
+        .backend_services = backend_services,
         .retries = @intCast(retries_raw),
         .connect_timeout_ms = @intCast(connect_timeout_raw),
         .request_timeout_ms = @intCast(request_timeout_raw),
@@ -304,13 +327,230 @@ fn validateHttpProxyRouteConflict(
     for (existing) |route| {
         if (!std.ascii.eqlIgnoreCase(route.host, candidate.host)) continue;
         if (!std.mem.eql(u8, route.path_prefix, candidate.path_prefix)) continue;
+        if (!sameHeaderMatches(route.match_headers, candidate.match_headers)) continue;
 
         log.err(
-            "manifest: service '{s}' defines duplicate http route match host='{s}' path_prefix='{s}'",
+            "manifest: service '{s}' defines duplicate http route match host='{s}' path_prefix='{s}' with the same header conditions",
             .{ service_name, candidate.host, candidate.path_prefix },
         );
         return common.LoadError.InvalidHttpProxyConfig;
     }
+}
+
+fn parseHttpRouteHeaderMatches(
+    alloc: std.mem.Allocator,
+    service_name: []const u8,
+    field_name: []const u8,
+    route_name: []const u8,
+    raw_headers: ?[]const []const u8,
+) common.LoadError![]const spec.HttpHeaderMatch {
+    const items = raw_headers orelse return alloc.alloc(spec.HttpHeaderMatch, 0) catch return common.LoadError.OutOfMemory;
+
+    var result: std.ArrayListUnmanaged(spec.HttpHeaderMatch) = .empty;
+    errdefer {
+        for (result.items) |item| item.deinit(alloc);
+        result.deinit(alloc);
+    }
+
+    for (items) |item| {
+        const eq_idx = std.mem.indexOfScalar(u8, item, '=') orelse {
+            log.err("manifest: service '{s}' {s} route '{s}' match_headers entry '{s}' must use name=value syntax", .{
+                service_name,
+                field_name,
+                route_name,
+                item,
+            });
+            return common.LoadError.InvalidHttpProxyConfig;
+        };
+
+        const raw_name = std.mem.trim(u8, item[0..eq_idx], " \t");
+        const raw_value = std.mem.trim(u8, item[eq_idx + 1 ..], " \t");
+        if (!isValidHttpHeaderName(raw_name)) {
+            log.err("manifest: service '{s}' {s} route '{s}' match_headers entry '{s}' has an invalid header name", .{
+                service_name,
+                field_name,
+                route_name,
+                item,
+            });
+            return common.LoadError.InvalidHttpProxyConfig;
+        }
+
+        const lower_name = try alloc.alloc(u8, raw_name.len);
+        for (raw_name, 0..) |ch, idx| lower_name[idx] = std.ascii.toLower(ch);
+
+        for (result.items) |existing| {
+            if (std.mem.eql(u8, existing.name, lower_name)) {
+                log.err("manifest: service '{s}' {s} route '{s}' cannot repeat match header '{s}'", .{
+                    service_name,
+                    field_name,
+                    route_name,
+                    raw_name,
+                });
+                alloc.free(lower_name);
+                return common.LoadError.InvalidHttpProxyConfig;
+            }
+        }
+
+        const value_copy = alloc.dupe(u8, raw_value) catch {
+            alloc.free(lower_name);
+            return common.LoadError.OutOfMemory;
+        };
+        result.append(alloc, .{
+            .name = lower_name,
+            .value = value_copy,
+        }) catch {
+            alloc.free(lower_name);
+            alloc.free(value_copy);
+            return common.LoadError.OutOfMemory;
+        };
+    }
+
+    return result.toOwnedSlice(alloc) catch return common.LoadError.OutOfMemory;
+}
+
+fn isValidHttpHeaderName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |ch| {
+        switch (ch) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn sameHeaderMatches(a: []const spec.HttpHeaderMatch, b: []const spec.HttpHeaderMatch) bool {
+    if (a.len != b.len) return false;
+    for (a) |left| {
+        var found = false;
+        for (b) |right| {
+            if (!std.mem.eql(u8, left.name, right.name)) continue;
+            if (!std.mem.eql(u8, left.value, right.value)) continue;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+fn parseHttpRouteBackends(
+    alloc: std.mem.Allocator,
+    service_name: []const u8,
+    field_name: []const u8,
+    route_name: []const u8,
+    raw_backends: ?[]const []const u8,
+) common.LoadError![]const spec.HttpRouteBackend {
+    const items = raw_backends orelse {
+        const defaults = try alloc.alloc(spec.HttpRouteBackend, 1);
+        defaults[0] = .{
+            .service_name = alloc.dupe(u8, service_name) catch return common.LoadError.OutOfMemory,
+            .weight = 100,
+        };
+        return defaults;
+    };
+
+    if (items.len == 0) {
+        log.err("manifest: service '{s}' {s} route '{s}' backend_services must include at least one target", .{
+            service_name,
+            field_name,
+            route_name,
+        });
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    var result: std.ArrayListUnmanaged(spec.HttpRouteBackend) = .empty;
+    errdefer {
+        for (result.items) |backend| backend.deinit(alloc);
+        result.deinit(alloc);
+    }
+
+    var total_weight: u32 = 0;
+    for (items) |item| {
+        const eq_idx = std.mem.indexOfScalar(u8, item, '=') orelse {
+            log.err("manifest: service '{s}' {s} route '{s}' backend_services entry '{s}' must use service=weight syntax", .{
+                service_name,
+                field_name,
+                route_name,
+                item,
+            });
+            return common.LoadError.InvalidHttpProxyConfig;
+        };
+
+        const backend_name = std.mem.trim(u8, item[0..eq_idx], " \t");
+        const weight_raw = std.mem.trim(u8, item[eq_idx + 1 ..], " \t");
+        if (!isValidBackendServiceName(backend_name)) {
+            log.err("manifest: service '{s}' {s} route '{s}' backend target '{s}' is invalid", .{
+                service_name,
+                field_name,
+                route_name,
+                backend_name,
+            });
+            return common.LoadError.InvalidHttpProxyConfig;
+        }
+        const weight = std.fmt.parseInt(u8, weight_raw, 10) catch {
+            log.err("manifest: service '{s}' {s} route '{s}' backend weight '{s}' is invalid", .{
+                service_name,
+                field_name,
+                route_name,
+                weight_raw,
+            });
+            return common.LoadError.InvalidHttpProxyConfig;
+        };
+        if (weight == 0) {
+            log.err("manifest: service '{s}' {s} route '{s}' backend target '{s}' must have weight >= 1", .{
+                service_name,
+                field_name,
+                route_name,
+                backend_name,
+            });
+            return common.LoadError.InvalidHttpProxyConfig;
+        }
+
+        for (result.items) |existing| {
+            if (std.mem.eql(u8, existing.service_name, backend_name)) {
+                log.err("manifest: service '{s}' {s} route '{s}' cannot repeat backend target '{s}'", .{
+                    service_name,
+                    field_name,
+                    route_name,
+                    backend_name,
+                });
+                return common.LoadError.InvalidHttpProxyConfig;
+            }
+        }
+
+        total_weight += weight;
+        const backend_name_copy = alloc.dupe(u8, backend_name) catch return common.LoadError.OutOfMemory;
+        result.append(alloc, .{
+            .service_name = backend_name_copy,
+            .weight = weight,
+        }) catch {
+            alloc.free(backend_name_copy);
+            return common.LoadError.OutOfMemory;
+        };
+    }
+
+    if (total_weight != 100) {
+        log.err("manifest: service '{s}' {s} route '{s}' backend_services weights must sum to 100", .{
+            service_name,
+            field_name,
+            route_name,
+        });
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    return result.toOwnedSlice(alloc) catch return common.LoadError.OutOfMemory;
+}
+
+fn isValidBackendServiceName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |ch| {
+        switch (ch) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
+            else => return false,
+        }
+    }
+    return true;
 }
 
 pub fn parseGpuSpec(

@@ -142,6 +142,11 @@ fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const 
         for (proxy_routes.items) |proxy_route| proxy_route.deinit(alloc);
         proxy_routes.deinit(alloc);
     }
+    var route_traffic = proxy_runtime.snapshotRouteTraffic(alloc) catch return common.internalError();
+    defer {
+        for (route_traffic.items) |entry| entry.deinit(alloc);
+        route_traffic.deinit(alloc);
+    }
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
@@ -150,7 +155,7 @@ fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const 
     writer.writeByte('[') catch return common.internalError();
     for (proxy_routes.items, 0..) |proxy_route, idx| {
         if (idx > 0) writer.writeByte(',') catch return common.internalError();
-        writeProxyRouteJson(writer, proxy_route) catch return common.internalError();
+        writeProxyRouteJson(writer, proxy_route, route_traffic.items) catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
 
@@ -199,8 +204,12 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
         try json_helpers.writeJsonEscaped(writer, host);
         try writer.writeAll("\",\"path_prefix\":\"");
         try json_helpers.writeJsonEscaped(writer, service.http_proxy_path_prefix orelse "/");
+        if (service.http_proxy_rewrite_prefix) |rewrite_prefix| {
+            try writer.writeAll("\",\"rewrite_prefix\":\"");
+            try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
+        }
         try writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}",
             .{
                 service.http_proxy_retries orelse 0,
                 service.http_proxy_connect_timeout_ms orelse 1000,
@@ -208,6 +217,15 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
                 service.http_proxy_preserve_host orelse true,
             },
         );
+        if (service.http_routes.len > 0 and service.http_routes[0].match_headers.len > 0) {
+            try writer.writeAll(",\"match_headers\":");
+            try writeHeaderMatchesJson(writer, service.http_routes[0].match_headers);
+        }
+        if (service.http_routes.len > 0 and service.http_routes[0].backend_services.len > 0) {
+            try writer.writeAll(",\"backend_services\":");
+            try writeBackendServicesJson(writer, service.http_routes[0].backend_services);
+        }
+        try writer.writeByte('}');
     } else {
         try writer.writeAll("null");
     }
@@ -220,8 +238,12 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
         try json_helpers.writeJsonEscaped(writer, http_route.host);
         try writer.writeAll("\",\"path_prefix\":\"");
         try json_helpers.writeJsonEscaped(writer, http_route.path_prefix);
+        if (http_route.rewrite_prefix) |rewrite_prefix| {
+            try writer.writeAll("\",\"rewrite_prefix\":\"");
+            try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
+        }
         try writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}",
             .{
                 http_route.retries,
                 http_route.connect_timeout_ms,
@@ -229,6 +251,15 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
                 http_route.preserve_host,
             },
         );
+        if (http_route.match_headers.len > 0) {
+            try writer.writeAll(",\"match_headers\":");
+            try writeHeaderMatchesJson(writer, http_route.match_headers);
+        }
+        if (http_route.backend_services.len > 0) {
+            try writer.writeAll(",\"backend_services\":");
+            try writeBackendServicesJson(writer, http_route.backend_services);
+        }
+        try writer.writeByte('}');
     }
     try writer.writeByte(']');
     try writer.print(
@@ -317,7 +348,9 @@ fn writeEndpointJson(writer: anytype, endpoint: service_registry_runtime.Endpoin
     try writer.writeByte('}');
 }
 
-fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot) !void {
+fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) !void {
+    const traffic = findRouteTraffic(proxy_route.name, route_traffic);
+
     try writer.writeAll("{\"name\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.name);
     try writer.writeAll("\",\"service\":\"");
@@ -328,6 +361,10 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     try json_helpers.writeJsonEscaped(writer, proxy_route.host);
     try writer.writeAll("\",\"path_prefix\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.path_prefix);
+    if (proxy_route.rewrite_prefix) |rewrite_prefix| {
+        try writer.writeAll("\",\"rewrite_prefix\":\"");
+        try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
+    }
     try writer.print(
         "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
         .{
@@ -353,13 +390,74 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     } else {
         try writer.writeAll("null");
     }
+    if (proxy_route.header_matches.len > 0) {
+        try writer.writeAll(",\"match_headers\":");
+        try writeHeaderMatchesJson(writer, proxy_route.header_matches);
+    }
+    if (proxy_route.backend_services.len > 0) {
+        try writer.writeAll(",\"backend_services\":");
+        try writeBackendServicesJson(writer, proxy_route.backend_services);
+    }
     try writer.writeAll(",\"last_failure_at\":");
     if (proxy_route.last_failure_at) |timestamp| {
         try writer.print("{d}", .{timestamp});
     } else {
         try writer.writeAll("null");
     }
+    try writer.print(
+        ",\"traffic\":{{\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"upstream_failures_total\":{d}}}",
+        .{
+            traffic.requests_total,
+            traffic.responses_2xx_total,
+            traffic.responses_4xx_total,
+            traffic.responses_5xx_total,
+            traffic.retries_total,
+            traffic.upstream_failures_total,
+        },
+    );
     try writer.writeByte('}');
+}
+
+fn findRouteTraffic(route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) proxy_runtime.RouteTrafficSnapshot {
+    for (route_traffic) |entry| {
+        if (std.mem.eql(u8, entry.route_name, route_name)) return entry;
+    }
+
+    return .{
+        .route_name = "",
+        .service_name = "",
+        .backend_service = "",
+        .requests_total = 0,
+        .responses_2xx_total = 0,
+        .responses_4xx_total = 0,
+        .responses_5xx_total = 0,
+        .retries_total = 0,
+        .upstream_failures_total = 0,
+    };
+}
+
+fn writeHeaderMatchesJson(writer: anytype, header_matches: anytype) !void {
+    try writer.writeByte('[');
+    for (header_matches, 0..) |header_match, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"name\":\"");
+        try json_helpers.writeJsonEscaped(writer, header_match.name);
+        try writer.writeAll("\",\"value\":\"");
+        try json_helpers.writeJsonEscaped(writer, header_match.value);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
+}
+
+fn writeBackendServicesJson(writer: anytype, backend_services: anytype) !void {
+    try writer.writeByte('[');
+    for (backend_services, 0..) |backend, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"service\":\"");
+        try json_helpers.writeJsonEscaped(writer, backend.service_name);
+        try writer.print("\",\"weight\":{d}}}", .{backend.weight});
+    }
+    try writer.writeByte(']');
 }
 
 fn isValidSegment(value: []const u8) bool {
@@ -433,8 +531,8 @@ test "route handles GET /v1/services" {
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}]") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"listener_not_running\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }
@@ -529,6 +627,10 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
         .updated_at = 1000,
     });
     proxy_runtime.bootstrapIfEnabled();
+    proxy_runtime.recordRouteRequestStart("api:default", "api", "api");
+    proxy_runtime.recordRouteResponseCode("api:default", "api", "api", 200);
+    proxy_runtime.recordRouteRetry("api:default", "api", "api");
+    proxy_runtime.recordRouteUpstreamFailure("api:default", "api", "api");
 
     const response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
     defer if (response.allocated) std.testing.allocator.free(response.body);
@@ -549,6 +651,7 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"listener_not_running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"last_failure_kind\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}") != null);
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering degradation" {

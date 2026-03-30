@@ -126,10 +126,10 @@ test "init creates services table" {
 
     db.exec(
         "INSERT INTO services (" ++
-            "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, created_at, updated_at" ++
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "api", "10.43.0.10", "consistent_hash", "api.internal", "/v1", @as(i64, 2), @as(i64, 1000), @as(i64, 5000), @as(i64, 8080), @as(i64, 1), @as(i64, 1000), @as(i64, 1000) },
+        .{ "api", "10.43.0.10", "consistent_hash", "api.internal", "/v1", "/internal", @as(i64, 2), @as(i64, 1000), @as(i64, 5000), @as(i64, 8080), @as(i64, 1), @as(i64, 1000), @as(i64, 1000) },
     ) catch unreachable;
 }
 
@@ -168,10 +168,40 @@ test "init creates service_http_routes table" {
 
     db.exec(
         "INSERT INTO service_http_routes (" ++
-            "service_name, route_name, host, path_prefix, retries, connect_timeout_ms, request_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at" ++
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "service_name, route_name, host, path_prefix, rewrite_prefix, retries, connect_timeout_ms, request_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "api", "default", "api.internal", "/v1", @as(i64, 2), @as(i64, 1000), @as(i64, 5000), @as(i64, 8080), @as(i64, 1), @as(i64, 0), @as(i64, 1000), @as(i64, 1000) },
+        .{ "api", "default", "api.internal", "/v1", "/internal", @as(i64, 2), @as(i64, 1000), @as(i64, 5000), @as(i64, 8080), @as(i64, 1), @as(i64, 0), @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
+test "init creates service_http_route_headers table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO service_http_route_headers (" ++
+            "service_name, route_name, header_name, header_value, match_order, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "api", "default", "x-env", "canary", @as(i64, 0), @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
+test "init creates service_http_route_backends table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO service_http_route_backends (" ++
+            "service_name, route_name, backend_service, weight, backend_order, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "api", "default", "api-canary", @as(i64, 10), @as(i64, 0), @as(i64, 1000), @as(i64, 1000) },
     ) catch unreachable;
 }
 
