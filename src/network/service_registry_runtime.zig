@@ -339,6 +339,8 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
             for (route.match_headers) |header_match| header_match.deinit(alloc);
             if (route.match_headers.len > 0) alloc.free(route.match_headers);
+            for (route.backend_services) |backend| backend.deinit(alloc);
+            if (route.backend_services.len > 0) alloc.free(route.backend_services);
         }
         defs.deinit(alloc);
     }
@@ -355,12 +357,24 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
                 .value = try alloc.dupe(u8, header_match.header_value),
             });
         }
+        var backend_services: std.ArrayList(service_registry.HttpRouteBackend) = .empty;
+        errdefer {
+            for (backend_services.items) |backend| backend.deinit(alloc);
+            backend_services.deinit(alloc);
+        }
+        for (route.backend_services) |backend| {
+            try backend_services.append(alloc, .{
+                .service_name = try alloc.dupe(u8, backend.backend_service),
+                .weight = @intCast(backend.weight),
+            });
+        }
         try defs.append(alloc, .{
             .route_name = try alloc.dupe(u8, route.route_name),
             .host = try alloc.dupe(u8, route.host),
             .path_prefix = try alloc.dupe(u8, route.path_prefix),
             .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
             .match_headers = try header_matches.toOwnedSlice(alloc),
+            .backend_services = try backend_services.toOwnedSlice(alloc),
             .retries = @intCast(route.retries),
             .connect_timeout_ms = @intCast(route.connect_timeout_ms),
             .request_timeout_ms = @intCast(route.request_timeout_ms),
@@ -380,6 +394,8 @@ fn deinitRouteDefinitions(alloc: Allocator, routes: []const service_registry.Htt
         if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         for (route.match_headers) |header_match| header_match.deinit(alloc);
         if (route.match_headers.len > 0) alloc.free(route.match_headers);
+        for (route.backend_services) |backend| backend.deinit(alloc);
+        if (route.backend_services.len > 0) alloc.free(route.backend_services);
     }
     alloc.free(routes);
 }

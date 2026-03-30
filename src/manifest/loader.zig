@@ -1481,6 +1481,26 @@ test "http routes config — exact header matches" {
     try std.testing.expectEqualStrings("us-east", manifest.services[0].http_routes[0].match_headers[1].value);
 }
 
+test "http routes config — weighted backends" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.api]
+        \\image = "nginx:latest"
+        \\
+        \\[service.api.http_proxy]
+        \\host = "api.internal"
+        \\backend_services = ["api=90", "api-canary=10"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), manifest.services[0].http_routes[0].backend_services.len);
+    try std.testing.expectEqualStrings("api", manifest.services[0].http_routes[0].backend_services[0].service_name);
+    try std.testing.expectEqual(@as(u8, 90), manifest.services[0].http_routes[0].backend_services[0].weight);
+    try std.testing.expectEqualStrings("api-canary", manifest.services[0].http_routes[0].backend_services[1].service_name);
+    try std.testing.expectEqual(@as(u8, 10), manifest.services[0].http_routes[0].backend_services[1].weight);
+}
+
 test "http proxy config — invalid rewrite prefix returns error" {
     const alloc = std.testing.allocator;
 
@@ -1538,6 +1558,19 @@ test "http routes config — duplicate route header name returns error" {
         \\host = "api.internal"
         \\path_prefix = "/v1"
         \\match_headers = ["x-env=canary", "X-Env=stable"]
+    ));
+}
+
+test "http routes config — backend weights must sum to 100" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.api]
+        \\image = "nginx:latest"
+        \\
+        \\[service.api.http_proxy]
+        \\host = "api.internal"
+        \\backend_services = ["api=80", "api-canary=10"]
     ));
 }
 

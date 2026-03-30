@@ -20,6 +20,15 @@ pub const RequestHeader = struct {
     value: []const u8,
 };
 
+pub const BackendTarget = struct {
+    service_name: []const u8,
+    weight: u8,
+
+    pub fn deinit(self: BackendTarget, alloc: std.mem.Allocator) void {
+        alloc.free(self.service_name);
+    }
+};
+
 pub const Route = struct {
     name: []const u8,
     service: []const u8,
@@ -27,6 +36,7 @@ pub const Route = struct {
     match: Match,
     rewrite_prefix: ?[]const u8 = null,
     header_matches: []const HeaderMatch = &.{},
+    backend_services: []const BackendTarget = &.{},
     eligible_endpoints: u32 = 0,
     healthy_endpoints: u32 = 0,
     degraded: bool = false,

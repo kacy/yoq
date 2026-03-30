@@ -74,6 +74,7 @@ pub const RouteSnapshot = struct {
     path_prefix: []const u8,
     rewrite_prefix: ?[]const u8 = null,
     header_matches: []const router.HeaderMatch = &.{},
+    backend_services: []const router.BackendTarget = &.{},
     eligible_endpoints: u32,
     healthy_endpoints: u32,
     degraded: bool,
@@ -101,6 +102,8 @@ pub const RouteSnapshot = struct {
         if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         for (self.header_matches) |header_match| header_match.deinit(alloc);
         if (self.header_matches.len > 0) alloc.free(self.header_matches);
+        for (self.backend_services) |backend| backend.deinit(alloc);
+        if (self.backend_services.len > 0) alloc.free(self.backend_services);
     }
 };
 
@@ -398,6 +401,8 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
             if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
             for (route.header_matches) |header_match| header_match.deinit(alloc);
             if (route.header_matches.len > 0) alloc.free(route.header_matches);
+            for (route.backend_services) |backend| backend.deinit(alloc);
+            if (route.backend_services.len > 0) alloc.free(route.backend_services);
         }
         routes_snapshot.deinit(alloc);
     }
@@ -413,6 +418,7 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
             },
             .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
             .header_matches = try cloneHeaderMatches(alloc, route.header_matches),
+            .backend_services = try cloneBackendTargets(alloc, route.backend_services),
             .eligible_endpoints = route.eligible_endpoints,
             .healthy_endpoints = route.healthy_endpoints,
             .degraded = route.degraded,
@@ -502,6 +508,14 @@ pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upst
     };
 }
 
+pub fn selectBackendService(route: router.Route, request_key: u64, attempt: u8) []const u8 {
+    return selectBackendServiceFromTargets(route.service, route.backend_services, request_key, attempt);
+}
+
+pub fn selectSnapshotBackendService(route: RouteSnapshot, request_key: u64, attempt: u8) []const u8 {
+    return selectBackendServiceFromTargets(route.service, route.backend_services, request_key, attempt);
+}
+
 fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64) bool {
     const circuit = endpoint_circuits.getPtr(endpoint_id) orelse return true;
 
@@ -521,6 +535,46 @@ fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64) bool {
             return true;
         },
     }
+}
+
+fn selectBackendServiceFromTargets(
+    default_service: []const u8,
+    backends: []const router.BackendTarget,
+    request_key: u64,
+    attempt: u8,
+) []const u8 {
+    if (backends.len == 0) return default_service;
+
+    var total_weight: u64 = 0;
+    for (backends) |backend| total_weight += backend.weight;
+    if (total_weight == 0) return default_service;
+
+    const bucket = (request_key +% (@as(u64, attempt) *% 7919)) % total_weight;
+    var cursor: u64 = 0;
+    for (backends) |backend| {
+        cursor += backend.weight;
+        if (bucket < cursor) return backend.service_name;
+    }
+
+    return backends[backends.len - 1].service_name;
+}
+
+test "selectBackendService uses weighted backend targets" {
+    const route = router.Route{
+        .name = "api:default",
+        .service = "api",
+        .vip_address = "10.43.0.2",
+        .match = .{ .host = "api.internal", .path_prefix = "/" },
+        .backend_services = &.{
+            .{ .service_name = "api", .weight = 90 },
+            .{ .service_name = "api-canary", .weight = 10 },
+        },
+    };
+
+    try std.testing.expectEqualStrings("api", selectBackendService(route, 0, 0));
+    try std.testing.expectEqualStrings("api", selectBackendService(route, 89, 0));
+    try std.testing.expectEqualStrings("api-canary", selectBackendService(route, 90, 0));
+    try std.testing.expectEqualStrings("api-canary", selectBackendService(route, 99, 0));
 }
 
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnapshot {
@@ -554,6 +608,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
         .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
         .header_matches = try cloneHeaderMatches(alloc, route.header_matches),
+        .backend_services = try cloneBackendTargets(alloc, route.backend_services),
         .eligible_endpoints = route.eligible_endpoints,
         .healthy_endpoints = route.healthy_endpoints,
         .degraded = degraded_reason != .none,
@@ -574,7 +629,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
     };
 }
 
-fn cloneHeaderMatches(alloc: std.mem.Allocator, matches: []const router.HeaderMatch) ![]const router.HeaderMatch {
+fn cloneHeaderMatches(alloc: std.mem.Allocator, matches: anytype) ![]const router.HeaderMatch {
     var cloned: std.ArrayList(router.HeaderMatch) = .empty;
     errdefer {
         for (cloned.items) |header_match| header_match.deinit(alloc);
@@ -585,6 +640,22 @@ fn cloneHeaderMatches(alloc: std.mem.Allocator, matches: []const router.HeaderMa
         try cloned.append(alloc, .{
             .name = try alloc.dupe(u8, header_match.name),
             .value = try alloc.dupe(u8, header_match.value),
+        });
+    }
+    return cloned.toOwnedSlice(alloc);
+}
+
+fn cloneBackendTargets(alloc: std.mem.Allocator, backends: anytype) ![]const router.BackendTarget {
+    var cloned: std.ArrayList(router.BackendTarget) = .empty;
+    errdefer {
+        for (cloned.items) |backend| backend.deinit(alloc);
+        cloned.deinit(alloc);
+    }
+
+    for (backends) |backend| {
+        try cloned.append(alloc, .{
+            .service_name = try alloc.dupe(u8, backend.service_name),
+            .weight = backend.weight,
         });
     }
     return cloned.toOwnedSlice(alloc);
@@ -626,6 +697,7 @@ fn syncLocked() !void {
                 },
                 .rewrite_prefix = if (service_route.rewrite_prefix) |rewrite_prefix| try std.heap.page_allocator.dupe(u8, rewrite_prefix) else null,
                 .header_matches = try cloneHeaderMatches(std.heap.page_allocator, service_route.match_headers),
+                .backend_services = try cloneBackendTargets(std.heap.page_allocator, service_route.backend_services),
                 .eligible_endpoints = @intCast(service.eligible_endpoints),
                 .healthy_endpoints = @intCast(service.healthy_endpoints),
                 .degraded = service.degraded,
@@ -643,6 +715,8 @@ fn syncLocked() !void {
                 if (route.rewrite_prefix) |rewrite_prefix| std.heap.page_allocator.free(rewrite_prefix);
                 for (route.header_matches) |header_match| header_match.deinit(std.heap.page_allocator);
                 if (route.header_matches.len > 0) std.heap.page_allocator.free(route.header_matches);
+                for (route.backend_services) |backend| backend.deinit(std.heap.page_allocator);
+                if (route.backend_services.len > 0) std.heap.page_allocator.free(route.backend_services);
             }
             try materialized_routes.append(std.heap.page_allocator, route);
         }
@@ -665,6 +739,8 @@ fn deinitRoutesLocked() void {
         if (route.rewrite_prefix) |rewrite_prefix| std.heap.page_allocator.free(rewrite_prefix);
         for (route.header_matches) |header_match| header_match.deinit(std.heap.page_allocator);
         if (route.header_matches.len > 0) std.heap.page_allocator.free(route.header_matches);
+        for (route.backend_services) |backend| backend.deinit(std.heap.page_allocator);
+        if (route.backend_services.len > 0) std.heap.page_allocator.free(route.backend_services);
     }
     materialized_routes.clearAndFree(std.heap.page_allocator);
 }

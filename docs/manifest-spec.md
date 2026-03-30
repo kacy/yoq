@@ -121,6 +121,7 @@ the upstream target is the first service port in `ports`. `http_proxy` is just s
 | `path_prefix` | string | no | `"/"` | path prefix to match |
 | `rewrite_prefix` | string | no | none | replace the matched prefix before forwarding upstream |
 | `match_headers` | array of strings | no | `[]` | exact header matches in `name=value` form |
+| `backend_services` | array of strings | no | owning service at `100` | weighted backend targets in `service=weight` form |
 | `retries` | integer | no | `0` | upstream retries for failed requests |
 | `connect_timeout_ms` | integer | no | `1000` | upstream connect timeout in milliseconds |
 | `request_timeout_ms` | integer | no | `5000` | upstream request timeout in milliseconds |
@@ -144,6 +145,7 @@ host = "demo.local"
 path_prefix = "/api"
 rewrite_prefix = "/"
 match_headers = ["x-env=canary"]
+backend_services = ["api=90", "api-canary=10"]
 preserve_host = false
 retries = 2
 connect_timeout_ms = 1500
@@ -178,6 +180,7 @@ validation rules:
 - exact route matches are deduplicated by `host` + `path_prefix` + the full `match_headers` set
 - `http_proxy` and `http_routes` cannot be used together on the same service
 - route matching prefers the longest `path_prefix`, then the route with more exact header conditions, then the first defined route
+- `backend_services` weights must sum to `100`
 
 server-side listener defaults:
 

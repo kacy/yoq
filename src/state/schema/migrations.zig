@@ -67,6 +67,18 @@ fn migrateServices(db: *sqlite.Db) void {
         \\    PRIMARY KEY (service_name, route_name, match_order)
         \\);
     ) catch {};
+    createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS service_http_route_backends (
+        \\    service_name TEXT NOT NULL,
+        \\    route_name TEXT NOT NULL,
+        \\    backend_service TEXT NOT NULL,
+        \\    weight INTEGER NOT NULL,
+        \\    backend_order INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (service_name, route_name, backend_order)
+        \\);
+    ) catch {};
     addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN rewrite_prefix TEXT;") catch {};
     db.exec(
         "INSERT INTO service_http_routes (" ++
@@ -74,6 +86,16 @@ fn migrateServices(db: *sqlite.Db) void {
             ") SELECT service_name, 'default', http_proxy_host, COALESCE(http_proxy_path_prefix, '/'), http_proxy_rewrite_prefix, COALESCE(http_proxy_retries, 0), COALESCE(http_proxy_connect_timeout_ms, 1000), COALESCE(http_proxy_request_timeout_ms, 5000), http_proxy_target_port, COALESCE(http_proxy_preserve_host, 1), 0, created_at, updated_at" ++
             " FROM services WHERE http_proxy_host IS NOT NULL AND NOT EXISTS (" ++
             "SELECT 1 FROM service_http_routes routes WHERE routes.service_name = services.service_name AND routes.route_name = 'default'" ++
+            ");",
+        .{},
+        .{},
+    ) catch {};
+    db.exec(
+        "INSERT INTO service_http_route_backends (" ++
+            "service_name, route_name, backend_service, weight, backend_order, created_at, updated_at" ++
+            ") SELECT service_name, 'default', service_name, 100, 0, created_at, updated_at" ++
+            " FROM services WHERE http_proxy_host IS NOT NULL AND NOT EXISTS (" ++
+            "SELECT 1 FROM service_http_route_backends backends WHERE backends.service_name = services.service_name AND backends.route_name = 'default'" ++
             ");",
         .{},
         .{},

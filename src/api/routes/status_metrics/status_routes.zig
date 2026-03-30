@@ -285,10 +285,6 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             writer.writeAll("\",\"rewrite_prefix\":\"") catch return common.internalError();
             json_helpers.writeJsonEscaped(writer, rewrite_prefix) catch return common.internalError();
         }
-        if (route.header_matches.len > 0) {
-            writer.writeAll("\",\"match_headers\":") catch return common.internalError();
-            writeHeaderMatchesJson(writer, route.header_matches) catch return common.internalError();
-        }
         writer.print(
             "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
             .{
@@ -313,6 +309,14 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             writer.print("\"{s}\"", .{kind.label()}) catch return common.internalError();
         } else {
             writer.writeAll("null") catch return common.internalError();
+        }
+        if (route.header_matches.len > 0) {
+            writer.writeAll(",\"match_headers\":") catch return common.internalError();
+            writeHeaderMatchesJson(writer, route.header_matches) catch return common.internalError();
+        }
+        if (route.backend_services.len > 0) {
+            writer.writeAll(",\"backend_services\":") catch return common.internalError();
+            writeBackendServicesJson(writer, route.backend_services) catch return common.internalError();
         }
         writer.writeAll(",\"last_failure_at\":") catch return common.internalError();
         if (route.last_failure_at) |timestamp| {
@@ -527,6 +531,17 @@ fn writeHeaderMatchesJson(writer: anytype, header_matches: anytype) !void {
         try writer.writeAll("\",\"value\":\"");
         try json_helpers.writeJsonEscaped(writer, header_match.value);
         try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
+}
+
+fn writeBackendServicesJson(writer: anytype, backend_services: anytype) !void {
+    try writer.writeByte('[');
+    for (backend_services, 0..) |backend, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"service\":\"");
+        try json_helpers.writeJsonEscaped(writer, backend.service_name);
+        try writer.print("\",\"weight\":{d}}", .{backend.weight});
     }
     try writer.writeByte(']');
 }

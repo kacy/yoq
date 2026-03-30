@@ -203,12 +203,8 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
             try writer.writeAll("\",\"rewrite_prefix\":\"");
             try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
         }
-        if (service.http_routes.len > 0 and service.http_routes[0].match_headers.len > 0) {
-            try writer.writeAll("\",\"match_headers\":");
-            try writeHeaderMatchesJson(writer, service.http_routes[0].match_headers);
-        }
         try writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}",
             .{
                 service.http_proxy_retries orelse 0,
                 service.http_proxy_connect_timeout_ms orelse 1000,
@@ -216,6 +212,15 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
                 service.http_proxy_preserve_host orelse true,
             },
         );
+        if (service.http_routes.len > 0 and service.http_routes[0].match_headers.len > 0) {
+            try writer.writeAll(",\"match_headers\":");
+            try writeHeaderMatchesJson(writer, service.http_routes[0].match_headers);
+        }
+        if (service.http_routes.len > 0 and service.http_routes[0].backend_services.len > 0) {
+            try writer.writeAll(",\"backend_services\":");
+            try writeBackendServicesJson(writer, service.http_routes[0].backend_services);
+        }
+        try writer.writeByte('}');
     } else {
         try writer.writeAll("null");
     }
@@ -232,12 +237,8 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
             try writer.writeAll("\",\"rewrite_prefix\":\"");
             try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
         }
-        if (http_route.match_headers.len > 0) {
-            try writer.writeAll("\",\"match_headers\":");
-            try writeHeaderMatchesJson(writer, http_route.match_headers);
-        }
         try writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}",
             .{
                 http_route.retries,
                 http_route.connect_timeout_ms,
@@ -245,6 +246,15 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
                 http_route.preserve_host,
             },
         );
+        if (http_route.match_headers.len > 0) {
+            try writer.writeAll(",\"match_headers\":");
+            try writeHeaderMatchesJson(writer, http_route.match_headers);
+        }
+        if (http_route.backend_services.len > 0) {
+            try writer.writeAll(",\"backend_services\":");
+            try writeBackendServicesJson(writer, http_route.backend_services);
+        }
+        try writer.writeByte('}');
     }
     try writer.writeByte(']');
     try writer.print(
@@ -348,10 +358,6 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
         try writer.writeAll("\",\"rewrite_prefix\":\"");
         try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
     }
-    if (proxy_route.header_matches.len > 0) {
-        try writer.writeAll("\",\"match_headers\":");
-        try writeHeaderMatchesJson(writer, proxy_route.header_matches);
-    }
     try writer.print(
         "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
         .{
@@ -377,6 +383,14 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     } else {
         try writer.writeAll("null");
     }
+    if (proxy_route.header_matches.len > 0) {
+        try writer.writeAll(",\"match_headers\":");
+        try writeHeaderMatchesJson(writer, proxy_route.header_matches);
+    }
+    if (proxy_route.backend_services.len > 0) {
+        try writer.writeAll(",\"backend_services\":");
+        try writeBackendServicesJson(writer, proxy_route.backend_services);
+    }
     try writer.writeAll(",\"last_failure_at\":");
     if (proxy_route.last_failure_at) |timestamp| {
         try writer.print("{d}", .{timestamp});
@@ -395,6 +409,17 @@ fn writeHeaderMatchesJson(writer: anytype, header_matches: anytype) !void {
         try writer.writeAll("\",\"value\":\"");
         try json_helpers.writeJsonEscaped(writer, header_match.value);
         try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
+}
+
+fn writeBackendServicesJson(writer: anytype, backend_services: anytype) !void {
+    try writer.writeByte('[');
+    for (backend_services, 0..) |backend, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"service\":\"");
+        try json_helpers.writeJsonEscaped(writer, backend.service_name);
+        try writer.print("\",\"weight\":{d}}", .{backend.weight});
     }
     try writer.writeByte(']');
 }

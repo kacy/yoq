@@ -47,7 +47,7 @@ Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't t
 - built-in DNS-based service discovery
 - port mapping, outbound NAT, and eBPF-based load balancing and policy enforcement where available
 - WireGuard-based cluster networking for multi-node deployments
-- HTTP routing for HTTP/1.1 and prior-knowledge HTTP/2 (`h2c`), including path rewrites, exact header matching, and basic gRPC passthrough
+- HTTP routing for HTTP/1.1 and prior-knowledge HTTP/2 (`h2c`), including path rewrites, exact header matching, weighted backend splits, and basic gRPC passthrough
 
 current gRPC routing limits:
 
@@ -317,7 +317,7 @@ yoq up -f examples/redis/manifest.toml
 
 ## what's next
 
-- richer HTTP routing — traffic shaping and broader ingress policy
+- richer HTTP routing — broader ingress policy and more advanced traffic shaping
 - hardening — continued stability, edge-case testing, and operational polish
 - web UI remains intentionally deferred; the CLI is the primary interface
 - image signing is not built in; use cosign externally

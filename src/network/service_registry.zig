@@ -86,6 +86,7 @@ pub const HttpRouteDefinition = struct {
     path_prefix: []const u8 = "/",
     rewrite_prefix: ?[]const u8 = null,
     match_headers: []const HttpHeaderMatch = &.{},
+    backend_services: []const HttpRouteBackend = &.{},
     retries: u8 = 0,
     connect_timeout_ms: u32 = 1000,
     request_timeout_ms: u32 = 5000,
@@ -100,6 +101,15 @@ pub const HttpHeaderMatch = struct {
     pub fn deinit(self: HttpHeaderMatch, alloc: Allocator) void {
         alloc.free(self.name);
         alloc.free(self.value);
+    }
+};
+
+pub const HttpRouteBackend = struct {
+    service_name: []const u8,
+    weight: u8,
+
+    pub fn deinit(self: HttpRouteBackend, alloc: Allocator) void {
+        alloc.free(self.service_name);
     }
 };
 
@@ -184,6 +194,7 @@ pub const HttpRouteSnapshot = struct {
     path_prefix: []const u8,
     rewrite_prefix: ?[]const u8,
     match_headers: []const HttpHeaderMatch,
+    backend_services: []const HttpRouteBackend,
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
@@ -197,6 +208,8 @@ pub const HttpRouteSnapshot = struct {
         if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         for (self.match_headers) |header_match| header_match.deinit(alloc);
         if (self.match_headers.len > 0) alloc.free(self.match_headers);
+        for (self.backend_services) |backend| backend.deinit(alloc);
+        if (self.backend_services.len > 0) alloc.free(self.backend_services);
     }
 };
 
@@ -264,6 +277,7 @@ const HttpRouteState = struct {
     path_prefix: []const u8,
     rewrite_prefix: ?[]const u8,
     match_headers: []const HttpHeaderMatch,
+    backend_services: []const HttpRouteBackend,
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
@@ -277,6 +291,8 @@ const HttpRouteState = struct {
         if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         for (self.match_headers) |header_match| header_match.deinit(alloc);
         if (self.match_headers.len > 0) alloc.free(self.match_headers);
+        for (self.backend_services) |backend| backend.deinit(alloc);
+        if (self.backend_services.len > 0) alloc.free(self.backend_services);
     }
 };
 
@@ -626,6 +642,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
                 .path_prefix = try alloc.dupe(u8, route.path_prefix),
                 .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
                 .match_headers = try cloneHeaderMatches(alloc, route.match_headers),
+                .backend_services = try cloneRouteBackends(alloc, route.backend_services),
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
@@ -643,6 +660,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
             .path_prefix = try alloc.dupe(u8, definition.http_proxy_path_prefix orelse "/"),
             .rewrite_prefix = if (definition.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
             .match_headers = &.{},
+            .backend_services = try defaultRouteBackends(alloc, definition.service_name),
             .retries = definition.http_proxy_retries orelse 0,
             .connect_timeout_ms = definition.http_proxy_connect_timeout_ms orelse 1000,
             .request_timeout_ms = definition.http_proxy_request_timeout_ms orelse 5000,
@@ -674,6 +692,7 @@ fn cloneRouteSnapshots(alloc: Allocator, routes: []const HttpRouteState) Error![
             .path_prefix = try alloc.dupe(u8, route.path_prefix),
             .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
             .match_headers = try cloneHeaderMatches(alloc, route.match_headers),
+            .backend_services = try cloneRouteBackends(alloc, route.backend_services),
             .retries = route.retries,
             .connect_timeout_ms = route.connect_timeout_ms,
             .request_timeout_ms = route.request_timeout_ms,
@@ -730,6 +749,32 @@ fn cloneHeaderMatches(alloc: Allocator, matches: []const HttpHeaderMatch) Error!
         });
     }
     return cloned.toOwnedSlice(alloc);
+}
+
+fn cloneRouteBackends(alloc: Allocator, backends: []const HttpRouteBackend) Error![]const HttpRouteBackend {
+    var cloned: std.ArrayList(HttpRouteBackend) = .empty;
+    errdefer {
+        for (cloned.items) |backend| backend.deinit(alloc);
+        cloned.deinit(alloc);
+    }
+
+    for (backends) |backend| {
+        try cloned.append(alloc, .{
+            .service_name = try alloc.dupe(u8, backend.service_name),
+            .weight = backend.weight,
+        });
+    }
+    return cloned.toOwnedSlice(alloc);
+}
+
+fn defaultRouteBackends(alloc: Allocator, service_name: []const u8) Error![]const HttpRouteBackend {
+    const backends = try alloc.alloc(HttpRouteBackend, 1);
+    errdefer alloc.free(backends);
+    backends[0] = .{
+        .service_name = try alloc.dupe(u8, service_name),
+        .weight = 100,
+    };
+    return backends;
 }
 
 fn replaceOwned(alloc: Allocator, current: *[]const u8, next: []const u8) Error!void {

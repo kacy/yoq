@@ -41,6 +41,8 @@ pub const ForwardPlan = struct {
     outbound_path: []const u8,
     host: []const u8,
     outbound_host: []const u8,
+    backend_service: []const u8,
+    selection_key: u64,
     route: proxy_runtime.RouteSnapshot,
     upstream: upstream_mod.Upstream,
 
@@ -49,6 +51,7 @@ pub const ForwardPlan = struct {
         alloc.free(self.outbound_path);
         alloc.free(self.host);
         alloc.free(self.outbound_host);
+        alloc.free(self.backend_service);
         self.route.deinit(alloc);
         self.upstream.deinit(alloc);
     }
@@ -610,15 +613,16 @@ fn responseForPlanError(self: *const ReverseProxy, raw_request: []const u8, err:
 fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan.RequestPlan) !HandleResult {
     const route = try cloneRouteSnapshot(self.allocator, planned.route);
     errdefer route.deinit(self.allocator);
-
-    const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
+    const selection_key = routeSelectionKey(planned.method, planned.host, planned.path);
+    const backend_service = proxy_runtime.selectBackendService(planned.route, selection_key, 0);
+    const upstream = proxy_runtime.resolveUpstream(self.allocator, backend_service) catch |err| switch (err) {
         error.NoHealthyUpstream => {
             proxy_runtime.recordRouteFailure(planned.route.name, .no_eligible_upstream);
             log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
                 planned.method,
                 planned.host,
                 planned.path,
-                planned.route.service,
+                backend_service,
             });
             route.deinit(self.allocator);
             return .{ .response = .{
@@ -645,7 +649,9 @@ fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan
             .outbound_host = if (route.preserve_host)
                 try self.allocator.dupe(u8, planned.host)
             else
-                try self.allocator.dupe(u8, route.service),
+                try self.allocator.dupe(u8, backend_service),
+            .backend_service = try self.allocator.dupe(u8, backend_service),
+            .selection_key = selection_key,
             .route = route,
             .upstream = upstream,
         } },
@@ -660,7 +666,9 @@ fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan
             .outbound_host = if (route.preserve_host)
                 try self.allocator.dupe(u8, planned.host)
             else
-                try self.allocator.dupe(u8, route.service),
+                try self.allocator.dupe(u8, backend_service),
+            .backend_service = try self.allocator.dupe(u8, backend_service),
+            .selection_key = selection_key,
             .route = route,
             .upstream = upstream,
         } },
@@ -755,7 +763,7 @@ fn mapRouteFailureKind(err: anyerror) proxy_runtime.RouteFailureKind {
 fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, attempt: u8) !upstream_mod.Upstream {
     if (attempt == 0) {
         return .{
-            .service = try alloc.dupe(u8, plan.upstream.service),
+            .service = try alloc.dupe(u8, plan.backend_service),
             .endpoint_id = try alloc.dupe(u8, plan.upstream.endpoint_id),
             .address = try alloc.dupe(u8, plan.upstream.address),
             .port = plan.upstream.port,
@@ -763,7 +771,16 @@ fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, at
         };
     }
 
-    return proxy_runtime.resolveUpstream(alloc, plan.route.service);
+    const backend_service = proxy_runtime.selectSnapshotBackendService(plan.route, plan.selection_key, attempt);
+    return proxy_runtime.resolveUpstream(alloc, backend_service);
+}
+
+fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(method);
+    hasher.update(host);
+    hasher.update(path);
+    return hasher.final();
 }
 
 fn parseUpstreamStatusCode(response: []const u8) !u16 {

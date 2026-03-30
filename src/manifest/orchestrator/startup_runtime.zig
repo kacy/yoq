@@ -85,6 +85,23 @@ pub fn syncServiceDefinitions(
                 match_headers.deinit(alloc);
                 break;
             }
+            var backend_services: std.ArrayList(store.ServiceHttpRouteBackendInput) = .empty;
+            errdefer backend_services.deinit(alloc);
+            for (route.backend_services) |backend| {
+                backend_services.append(alloc, .{
+                    .backend_service = backend.service_name,
+                    .weight = backend.weight,
+                }) catch {
+                    log.warn("orchestrator: failed to allocate http route backends for {s}", .{svc.name});
+                    route_alloc_failed = true;
+                    break;
+                };
+            }
+            if (route_alloc_failed) {
+                match_headers.deinit(alloc);
+                backend_services.deinit(alloc);
+                break;
+            }
             route_inputs.append(alloc, .{
                 .route_name = route.name,
                 .host = route.host,
@@ -95,6 +112,11 @@ pub fn syncServiceDefinitions(
                     route_alloc_failed = true;
                     break;
                 },
+                .backend_services = backend_services.toOwnedSlice(alloc) catch {
+                    log.warn("orchestrator: failed to allocate http route backends for {s}", .{svc.name});
+                    route_alloc_failed = true;
+                    break;
+                },
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
@@ -102,6 +124,7 @@ pub fn syncServiceDefinitions(
                 .preserve_host = route.preserve_host,
             }) catch {
                 alloc.free(match_headers.items);
+                alloc.free(backend_services.items);
                 log.warn("orchestrator: failed to allocate http routes for {s}", .{svc.name});
                 route_alloc_failed = true;
                 break;
@@ -109,6 +132,7 @@ pub fn syncServiceDefinitions(
         }
         defer {
             for (route_inputs.items) |route| if (route.match_headers.len > 0) alloc.free(route.match_headers);
+            for (route_inputs.items) |route| if (route.backend_services.len > 0) alloc.free(route.backend_services);
         }
         if (route_alloc_failed) continue;
         const record = store.syncServiceConfig(

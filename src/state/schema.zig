@@ -190,6 +190,21 @@ test "init creates service_http_route_headers table" {
     ) catch unreachable;
 }
 
+test "init creates service_http_route_backends table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO service_http_route_backends (" ++
+            "service_name, route_name, backend_service, weight, backend_order, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "api", "default", "api-canary", @as(i64, 10), @as(i64, 0), @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
 test "init creates agents table" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
