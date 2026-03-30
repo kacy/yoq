@@ -5,6 +5,7 @@ const store = @import("../../state/store.zig");
 const log = @import("../../lib/log.zig");
 const ip_mod = @import("../../network/ip.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
+const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
 const health = @import("../health.zig");
 const tls_proxy = @import("../../tls/proxy.zig");
 const tls_backend = @import("../../tls/backend.zig");
@@ -181,12 +182,9 @@ pub fn refreshServiceRuntimeBindings(
 
     if (svc.tls) |tls| {
         const reg = backend_registry orelse return;
-        const ip = record.ip_address orelse {
-            log.warn("no IP for {s}, skipping TLS backend refresh", .{svc.name});
-            return;
-        };
-        const port: u16 = if (svc.ports.len > 0) svc.ports[0].container_port else 80;
-        reg.register(tls.domain, ip, port) catch {
+        const target = tlsBackendTargetForService(alloc, svc, tls.domain, record.ip_address) orelse return;
+        defer alloc.free(target.ip);
+        reg.register(tls.domain, target.ip, target.port) catch {
             log.warn("failed to refresh backend for {s}", .{tls.domain});
             return;
         };
@@ -294,18 +292,59 @@ fn registerTlsBackends(
         };
         defer record.deinit(alloc);
 
-        const ip = record.ip_address orelse {
-            log.warn("no IP for {s}, skipping TLS backend", .{svc.name});
-            continue;
-        };
+        const target = tlsBackendTargetForService(alloc, svc, tls.domain, record.ip_address) orelse continue;
+        defer alloc.free(target.ip);
 
-        const port: u16 = if (svc.ports.len > 0) svc.ports[0].container_port else 80;
-        reg.register(tls.domain, ip, port) catch {
+        reg.register(tls.domain, target.ip, target.port) catch {
             log.warn("failed to register backend for {s}", .{tls.domain});
             continue;
         };
-        writeErr("  tls: {s} -> {s}:{d}\n", .{ tls.domain, ip, port });
+        writeErr("  tls: {s} -> {s}:{d}\n", .{ tls.domain, target.ip, target.port });
     }
+}
+
+const TlsBackendTarget = struct {
+    ip: []u8,
+    port: u16,
+};
+
+fn tlsBackendTargetForService(
+    alloc: std.mem.Allocator,
+    svc: spec.Service,
+    tls_domain: []const u8,
+    container_ip: ?[]const u8,
+) ?TlsBackendTarget {
+    if (serviceUsesTlsRoutedListener(svc, tls_domain)) {
+        if (listener_runtime.connectTargetIfRunning()) |target| {
+            return .{
+                .ip = std.fmt.allocPrint(alloc, "{d}.{d}.{d}.{d}", .{
+                    target.addr[0],
+                    target.addr[1],
+                    target.addr[2],
+                    target.addr[3],
+                }) catch return null,
+                .port = target.port,
+            };
+        }
+        log.warn("http listener not running for routed TLS domain {s}; falling back to direct backend", .{tls_domain});
+    }
+
+    const ip = container_ip orelse {
+        log.warn("no IP for {s}, skipping TLS backend", .{svc.name});
+        return null;
+    };
+    return .{
+        .ip = alloc.dupe(u8, ip) catch return null,
+        .port = if (svc.ports.len > 0) svc.ports[0].container_port else 80,
+    };
+}
+
+fn serviceUsesTlsRoutedListener(svc: spec.Service, tls_domain: []const u8) bool {
+    if (svc.http_routes.len == 0) return false;
+    for (svc.http_routes) |route| {
+        if (std.mem.eql(u8, route.host, tls_domain)) return true;
+    }
+    return false;
 }
 
 fn provisionAcmeCerts(
@@ -414,4 +453,31 @@ test "syncServiceDefinitions persists http proxy config for started services" {
     try std.testing.expectEqual(@as(usize, 1), api_snapshot.http_routes.len);
 
     try std.testing.expectError(store.StoreError.NotFound, store.getService(alloc, "worker"));
+}
+
+test "tls backend target uses local listener for routed domains" {
+    const shared_types = @import("../spec/shared_types.zig");
+    const test_support = @import("../spec/test_support.zig");
+
+    const alloc = std.testing.allocator;
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    try listener_runtime.startOrSkipForTest(alloc, 0);
+
+    var svc = try test_support.testService(alloc, "api");
+    defer svc.deinit(alloc);
+    alloc.free(svc.http_routes);
+    svc.http_routes = try alloc.dupe(shared_types.HttpProxyRoute, &.{
+        .{
+            .name = try alloc.dupe(u8, "default"),
+            .host = try alloc.dupe(u8, "api.example.test"),
+            .path_prefix = try alloc.dupe(u8, "/"),
+        },
+    });
+
+    const listener_target = listener_runtime.connectTargetIfRunning().?;
+    const target = tlsBackendTargetForService(alloc, svc, "api.example.test", "10.42.0.9").?;
+    defer alloc.free(target.ip);
+    try std.testing.expectEqualStrings("127.0.0.1", target.ip);
+    try std.testing.expectEqual(listener_target.port, target.port);
 }

@@ -24,6 +24,11 @@ pub const Snapshot = struct {
     }
 };
 
+pub const ConnectTarget = struct {
+    addr: [4]u8,
+    port: u16,
+};
+
 var mutex: std.Thread.Mutex = .{};
 var listen_fd: ?posix.fd_t = null;
 var listener_thread: ?std.Thread = null;
@@ -145,6 +150,20 @@ pub fn portIfRunning() ?u16 {
 
     if (!running) return null;
     return listen_port;
+}
+
+pub fn connectTargetIfRunning() ?ConnectTarget {
+    mutex.lock();
+    defer mutex.unlock();
+
+    if (!running) return null;
+    return .{
+        .addr = if (std.mem.eql(u8, listen_bind_addr[0..], &[_]u8{ 0, 0, 0, 0 }))
+            default_bind_addr
+        else
+            listen_bind_addr,
+        .port = listen_port,
+    };
 }
 
 fn start(alloc: std.mem.Allocator) void {

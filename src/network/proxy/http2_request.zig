@@ -139,8 +139,9 @@ pub fn rewriteClientConnectionPreface(
     buf: []const u8,
     outbound_authority: ?[]const u8,
     outbound_path: ?[]const u8,
+    forwarded_proto: ?[]const u8,
 ) (ParseError || hpack.Error)![]u8 {
-    if (outbound_authority == null and outbound_path == null) return alloc.dupe(u8, buf);
+    if (outbound_authority == null and outbound_path == null and forwarded_proto == null) return alloc.dupe(u8, buf);
     if (buf.len < http2.client_preface.len or !std.mem.eql(u8, buf[0..http2.client_preface.len], http2.client_preface)) {
         return error.MissingClientPreface;
     }
@@ -202,6 +203,7 @@ pub fn rewriteClientConnectionPreface(
         headers.deinit(alloc);
     }
 
+    var saw_forwarded_proto = false;
     for (headers.items) |*header| {
         if (outbound_authority != null and std.mem.eql(u8, header.name, ":authority")) {
             alloc.free(header.value);
@@ -209,7 +211,18 @@ pub fn rewriteClientConnectionPreface(
         } else if (outbound_path != null and std.mem.eql(u8, header.name, ":path")) {
             alloc.free(header.value);
             header.value = try alloc.dupe(u8, outbound_path.?);
+        } else if (forwarded_proto != null and std.mem.eql(u8, header.name, "x-forwarded-proto")) {
+            alloc.free(header.value);
+            header.value = try alloc.dupe(u8, forwarded_proto.?);
+            saw_forwarded_proto = true;
         }
+    }
+
+    if (forwarded_proto != null and !saw_forwarded_proto) {
+        try headers.append(alloc, .{
+            .name = try alloc.dupe(u8, "x-forwarded-proto"),
+            .value = try alloc.dupe(u8, forwarded_proto.?),
+        });
     }
 
     const rewritten_block = try hpack.encodeHeaderBlockLiteral(alloc, headers.items);
@@ -442,7 +455,7 @@ test "rewriteClientConnectionPreface rewrites authority and path" {
     try request_bytes.appendSlice(alloc, settings);
     try request_bytes.appendSlice(alloc, headers);
 
-    const rewritten = try rewriteClientConnectionPreface(alloc, request_bytes.items, "api", "/users?id=7");
+    const rewritten = try rewriteClientConnectionPreface(alloc, request_bytes.items, "api", "/users?id=7", null);
     defer alloc.free(rewritten);
 
     const parsed = try parseClientConnectionPreface(alloc, rewritten);
@@ -450,6 +463,54 @@ test "rewriteClientConnectionPreface rewrites authority and path" {
 
     try std.testing.expectEqualStrings("api", parsed.request.authority);
     try std.testing.expectEqualStrings("/users?id=7", parsed.request.path);
+}
+
+test "rewriteClientConnectionPreface injects forwarded proto header" {
+    const alloc = std.testing.allocator;
+
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+    try header_block.append(alloc, 0x83);
+    try header_block.append(alloc, 0x86);
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "api.internal");
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call");
+
+    const settings = try buildFrame(alloc, .{
+        .length = 0,
+        .frame_type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+    defer alloc.free(settings);
+
+    const headers = try buildFrame(alloc, .{
+        .length = @intCast(header_block.items.len),
+        .frame_type = .headers,
+        .flags = Flag.end_headers | Flag.end_stream,
+        .stream_id = 1,
+    }, header_block.items);
+    defer alloc.free(headers);
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(alloc);
+    try request_bytes.appendSlice(alloc, http2.client_preface);
+    try request_bytes.appendSlice(alloc, settings);
+    try request_bytes.appendSlice(alloc, headers);
+
+    const rewritten = try rewriteClientConnectionPreface(alloc, request_bytes.items, null, null, "https");
+    defer alloc.free(rewritten);
+
+    const parsed = try parseClientConnectionPreface(alloc, rewritten);
+    defer parsed.deinit(alloc);
+
+    var found = false;
+    for (parsed.headers) |header| {
+        if (std.mem.eql(u8, header.name, "x-forwarded-proto")) {
+            try std.testing.expectEqualStrings("https", header.value);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "parseClientConnectionPreface rejects missing preface" {
