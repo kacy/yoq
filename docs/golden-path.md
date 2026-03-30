@@ -114,6 +114,59 @@ what to verify:
 - service discovery works across nodes
 - the clustered manifest deploys through `yoq up --server`
 
+## 4. failure drills
+
+run these before calling the cluster path healthy.
+
+### leader failover
+
+force the current leader to step down:
+
+```bash
+curl -X POST http://10.0.0.1:7700/cluster/step-down \
+  -H "Authorization: Bearer $(cat ~/.local/share/yoq/api_token)"
+```
+
+what to verify:
+
+- another server becomes leader
+- `yoq nodes --server ...` and `yoq status --server ...` still work
+- joined agents keep heartbeating without manual reconfiguration
+
+### agent restart and recovery
+
+restart one agent process or reboot one agent node.
+
+what to verify:
+
+- the agent returns to `active`
+- cross-node service discovery still works after recovery
+- workloads either stay reachable or reconcile back to healthy state
+
+### routing listener restart
+
+for a routed deployment, restart the API server or the HTTP routing listener process.
+
+what to verify:
+
+- the listener comes back on the configured bind and port
+- `/v1/status?mode=service_discovery` shows listener and steering state recovering
+- routed traffic succeeds again without manual route repair
+
+### reconcile and drift recovery
+
+introduce one controlled mismatch, then verify recovery:
+
+- stop one service container unexpectedly
+- remove one endpoint manually
+- restart a node that owns routed workloads
+
+what to verify:
+
+- reconcile counters increase
+- discovery and route state converge again
+- `/v1/metrics?format=prometheus` exposes the recovery rather than hiding it
+
 ## TLS and ACME check
 
 if you want to validate automatic certificates on the cluster example:

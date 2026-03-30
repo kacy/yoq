@@ -117,6 +117,7 @@ make build
 For GPU-focused validation without running the full suite, use `zig build test-gpu`. For a real-host smoke checklist, see [docs/gpu-validation.md](docs/gpu-validation.md).
 For a temporary 5-node GCP validation rig that exercises cluster networking and GPU hosts, see [docs/gcp-cluster-validation.md](docs/gcp-cluster-validation.md).
 For the canonical operator evaluation flow across local runtime, HTTP routing, and clustered deployment, see [docs/golden-path.md](docs/golden-path.md).
+For cluster bootstrap, day-2 operations, and failure drills, see [docs/cluster-guide.md](docs/cluster-guide.md).
 
 ### one-liner
 ```bash

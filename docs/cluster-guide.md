@@ -363,6 +363,17 @@ curl -X POST http://10.0.0.1:7700/cluster/step-down \
 
 this gracefully transfers leadership to another server. if the node is not the leader, the response includes a `"leader"` field pointing to the current leader. the old leader can then be drained and upgraded. agents automatically follow the new leader via heartbeat responses.
 
+### routine failure drills
+
+do these on a healthy non-production cluster before you trust a new release:
+
+1. trigger a leader step-down and verify that another server becomes leader
+2. restart one agent and verify it returns to `active`
+3. for routed workloads, restart the listener path and verify traffic recovers
+4. stop one workload unexpectedly and verify the reconciler restores healthy discovery state
+
+for a shorter end-to-end checklist, see [golden-path.md](golden-path.md).
+
 ---
 
 ## troubleshooting

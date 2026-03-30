@@ -19,6 +19,59 @@ HOME="${LOCAL_HOME}" "${LOCAL_YOQ}" nodes --server "${SERVER_1_EXTERNAL_IP}:${AP
 jq -e 'length == 2 and all(.[]; .status == "active" and .overlay_ip != null)' "${RUN_DIR}/nodes.json" >/dev/null || \
   die "cluster does not report two active agents"
 
+current_leader_id() {
+  local status_json="$1"
+  jq -r '.leader_id // empty' <<< "${status_json}"
+}
+
+leader_external_ip() {
+  local leader_id="$1"
+  case "${leader_id}" in
+    1) printf '%s\n' "${SERVER_1_EXTERNAL_IP}" ;;
+    2) printf '%s\n' "${SERVER_2_EXTERNAL_IP}" ;;
+    3) printf '%s\n' "${SERVER_3_EXTERNAL_IP}" ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_for_new_leader() {
+  local old_leader_id="$1"
+  local tries=0
+  while [ "${tries}" -lt 24 ]; do
+    local status_json
+    if status_json="$(http_get_json "${SERVER_1_EXTERNAL_IP}" "/cluster/status" 2>/dev/null)"; then
+      local new_leader_id
+      new_leader_id="$(current_leader_id "${status_json}")"
+      if [ -n "${new_leader_id}" ] && [ "${new_leader_id}" != "${old_leader_id}" ]; then
+        printf '%s\n' "${status_json}"
+        return 0
+      fi
+    fi
+    tries=$((tries + 1))
+    sleep 5
+  done
+  return 1
+}
+
+wait_for_agent_active() {
+  local overlay_ip="$1"
+  local tries=0
+  while [ "${tries}" -lt 24 ]; do
+    local nodes_json
+    if nodes_json="$(HOME="${LOCAL_HOME}" "${LOCAL_YOQ}" nodes --server "${SERVER_1_EXTERNAL_IP}:${API_PORT}" --json 2>/dev/null)"; then
+      if jq -e --arg overlay_ip "${overlay_ip}" '
+        any(.[]; .overlay_ip == $overlay_ip and .status == "active")
+      ' <<< "${nodes_json}" >/dev/null 2>&1; then
+        printf '%s\n' "${nodes_json}"
+        return 0
+      fi
+    fi
+    tries=$((tries + 1))
+    sleep 5
+  done
+  return 1
+}
+
 AGENT_1_OVERLAY_IP="$(jq -r '.[0].overlay_ip' "${RUN_DIR}/nodes.json")"
 AGENT_2_OVERLAY_IP="$(jq -r '.[1].overlay_ip' "${RUN_DIR}/nodes.json")"
 
@@ -36,6 +89,22 @@ done
 
 log "verifying overlay reachability between agents"
 gcloud_ssh "${AGENT_1_NAME}" "sudo ping -c 2 -W 2 ${AGENT_2_OVERLAY_IP} >/dev/null"
+gcloud_ssh "${AGENT_2_NAME}" "sudo ping -c 2 -W 2 ${AGENT_1_OVERLAY_IP} >/dev/null"
+
+log "verifying leader failover"
+INITIAL_CLUSTER_STATUS="$(cat "${RUN_DIR}/cluster-status.json")"
+INITIAL_LEADER_ID="$(current_leader_id "${INITIAL_CLUSTER_STATUS}")"
+[ -n "${INITIAL_LEADER_ID}" ] || die "cluster status did not include a leader id"
+INITIAL_LEADER_IP="$(leader_external_ip "${INITIAL_LEADER_ID}")" || die "unknown leader id ${INITIAL_LEADER_ID}"
+curl -fsS -X POST -H "Authorization: Bearer ${API_TOKEN}" "http://${INITIAL_LEADER_IP}:${API_PORT}/cluster/step-down" \
+  > "${RUN_DIR}/leader-step-down.json"
+wait_for_new_leader "${INITIAL_LEADER_ID}" > "${RUN_DIR}/cluster-status-after-step-down.json" || \
+  die "cluster did not elect a new leader after step-down"
+
+log "verifying agent restart and recovery"
+gcloud_ssh "${AGENT_1_NAME}" "sudo bash /tmp/start-node.sh agent ${SERVER_1_INTERNAL_IP} ${CLUSTER_JOIN_TOKEN} ${API_PORT}"
+wait_for_agent_active "${AGENT_1_OVERLAY_IP}" > "${RUN_DIR}/nodes-after-agent-restart.json" || \
+  die "restarted agent did not return to active state"
 gcloud_ssh "${AGENT_2_NAME}" "sudo ping -c 2 -W 2 ${AGENT_1_OVERLAY_IP} >/dev/null"
 
 cleanup_container() {
