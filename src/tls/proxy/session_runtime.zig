@@ -171,6 +171,7 @@ pub fn handleTlsSession(
     var initial_plaintext: std.ArrayList(u8) = .empty;
     defer initial_plaintext.deinit(std.heap.page_allocator);
     var initial_request_forwarded = false;
+    var h2_rewrite_state = http2_request.StreamRewriteState{};
 
     var poll_fds = [_]posix.pollfd{
         .{ .fd = client_fd, .events = posix.POLL.IN, .revents = 0 },
@@ -207,7 +208,23 @@ pub fn handleTlsSession(
             if (decrypted.content_type == .alert) break;
 
             if (decrypted.plaintext.len > 0) {
-                if (!initial_request_forwarded) {
+                if (selected_alpn != null and std.mem.eql(u8, selected_alpn.?, "h2")) {
+                    initial_plaintext.appendSlice(std.heap.page_allocator, decrypted.plaintext) catch break;
+                    while (true) {
+                        const rewritten_chunk = http2_request.rewriteClientStreamChunk(
+                            std.heap.page_allocator,
+                            initial_plaintext.items,
+                            &h2_rewrite_state,
+                            "https",
+                        ) catch break;
+                        if (rewritten_chunk == null) break;
+                        defer rewritten_chunk.?.deinit(std.heap.page_allocator);
+                        if (rewritten_chunk.?.bytes.len > 0) {
+                            _ = posix.write(backend_fd, rewritten_chunk.?.bytes) catch break;
+                        }
+                        initial_plaintext.replaceRange(std.heap.page_allocator, 0, rewritten_chunk.?.consumed, "") catch break;
+                    }
+                } else if (!initial_request_forwarded) {
                     initial_plaintext.appendSlice(std.heap.page_allocator, decrypted.plaintext) catch break;
                     const first_request = prepareInitialRequest(std.heap.page_allocator, selected_alpn, initial_plaintext.items) catch |err| switch (err) {
                         error.BufferTooShort, error.MissingHeaders, error.IncompleteRequest, error.MissingClientPreface => null,
