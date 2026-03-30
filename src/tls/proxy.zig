@@ -452,8 +452,10 @@ pub const TlsProxy = struct {
         };
 
         // redirect to HTTPS
-        var redirect_buf: [512]u8 = undefined;
-        const location = std.fmt.bufPrint(&redirect_buf, "https://{s}/", .{host}) catch {
+        const target = http_support.extractRequestTarget(request) orelse "/";
+
+        var redirect_buf: [1024]u8 = undefined;
+        const location = std.fmt.bufPrint(&redirect_buf, "https://{s}{s}", .{ host, target }) catch {
             http_support.sendHttpResponse(client_fd, "500 Internal Server Error", "redirect failed");
             return;
         };
@@ -540,6 +542,18 @@ test "extractAcmeChallengeToken parses request line only" {
 test "extractAcmeChallengeToken ignores body text" {
     const req = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 37\r\n\r\nGET /.well-known/acme-challenge/token";
     try std.testing.expect(http_support.extractAcmeChallengeToken(req) == null);
+}
+
+test "extractRequestTarget preserves path and query" {
+    const req = "GET /grpc.Service/Call?debug=1 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    const target = http_support.extractRequestTarget(req);
+    try std.testing.expect(target != null);
+    try std.testing.expectEqualStrings("/grpc.Service/Call?debug=1", target.?);
+}
+
+test "extractRequestTarget rejects absolute-form target" {
+    const req = "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    try std.testing.expect(http_support.extractRequestTarget(req) == null);
 }
 
 test "ChallengeStore round-trip" {

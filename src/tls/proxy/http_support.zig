@@ -34,6 +34,20 @@ pub fn extractAcmeChallengeToken(request: []const u8) ?[]const u8 {
     return token;
 }
 
+pub fn extractRequestTarget(request: []const u8) ?[]const u8 {
+    const line_end = std.mem.indexOf(u8, request, "\r\n") orelse return null;
+    const line = request[0..line_end];
+    const first_space = std.mem.indexOfScalar(u8, line, ' ') orelse return null;
+    const method = line[0..first_space];
+    if (!isSupportedMethod(method)) return null;
+
+    const target_start = first_space + 1;
+    const target_end = std.mem.indexOfScalarPos(u8, line, target_start, ' ') orelse return null;
+    const target = line[target_start..target_end];
+    if (target.len == 0 or target[0] != '/') return null;
+    return target;
+}
+
 fn headerBlock(request: []const u8) ?[]const u8 {
     const first_line_end = std.mem.indexOf(u8, request, "\r\n") orelse return null;
     const header_end = std.mem.indexOfPos(u8, request, first_line_end + 2, "\r\n\r\n") orelse return null;
@@ -47,6 +61,16 @@ fn isSafeHost(host: []const u8) bool {
         if (c == '/' or c == '\\') return false;
     }
     return true;
+}
+
+fn isSupportedMethod(method: []const u8) bool {
+    return std.mem.eql(u8, method, "GET") or
+        std.mem.eql(u8, method, "HEAD") or
+        std.mem.eql(u8, method, "POST") or
+        std.mem.eql(u8, method, "PUT") or
+        std.mem.eql(u8, method, "DELETE") or
+        std.mem.eql(u8, method, "PATCH") or
+        std.mem.eql(u8, method, "OPTIONS");
 }
 
 pub fn sendCloseNotify(fd: posix.fd_t) void {
