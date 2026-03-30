@@ -4,6 +4,7 @@ const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
 const ip = @import("../ip.zig");
 const http2 = @import("http2.zig");
+const http2_passthrough = @import("http2_passthrough.zig");
 const http2_request = @import("http2_request.zig");
 const http2_response = @import("http2_response.zig");
 const proxy_policy = @import("policy.zig");
@@ -729,51 +730,8 @@ fn parseUpstreamStatusCode(response: []const u8) !u16 {
 fn parseForwardedStatusCode(alloc: std.mem.Allocator, protocol: Protocol, response: []const u8) !u16 {
     return switch (protocol) {
         .http1 => parseUpstreamStatusCode(response),
-        .http2 => parseHttp2StatusCode(alloc, response),
+        .http2 => http2_passthrough.parseStatusCode(alloc, response),
     };
-}
-
-fn parseHttp2StatusCode(alloc: std.mem.Allocator, response: []const u8) !u16 {
-    var pos: usize = 0;
-    while (pos + http2.frame_header_len <= response.len) {
-        const header = http2.parseFrameHeader(response[pos .. pos + http2.frame_header_len]) orelse return error.InvalidResponse;
-        pos += http2.frame_header_len;
-        if (pos + header.length > response.len) return error.InvalidResponse;
-        const payload = response[pos .. pos + header.length];
-        pos += header.length;
-
-        if (header.frame_type != .headers) continue;
-        var decoded = try @import("hpack.zig").decodeHeaderBlock(alloc, payload);
-        defer {
-            for (decoded.items) |field| field.deinit(alloc);
-            decoded.deinit(alloc);
-        }
-
-        for (decoded.items) |field| {
-            if (std.mem.eql(u8, field.name, ":status")) {
-                return std.fmt.parseInt(u16, field.value, 10) catch error.InvalidResponse;
-            }
-        }
-    }
-
-    return error.InvalidResponse;
-}
-
-fn http2StreamEndSeen(buf: []const u8, target_stream_id: u32) bool {
-    if (!http2.startsWithClientPreface(buf)) return false;
-
-    var pos: usize = http2.client_preface.len;
-    while (pos + http2.frame_header_len <= buf.len) {
-        const header = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]) orelse return false;
-        if (pos + http2.frame_header_len + header.length > buf.len) return false;
-
-        if (header.stream_id == target_stream_id and ((header.flags & 0x1) != 0 or header.frame_type == .rst_stream)) {
-            return true;
-        }
-        pos += http2.frame_header_len + header.length;
-    }
-
-    return false;
 }
 
 fn connectToUpstream(route: proxy_runtime.RouteSnapshot, upstream: *const upstream_mod.Upstream) !posix.socket_t {
@@ -863,58 +821,6 @@ fn readResponse(alloc: std.mem.Allocator, fd: posix.socket_t, max_bytes: usize) 
     return response;
 }
 
-fn relayHttp2SocketConnection(
-    client_fd: posix.socket_t,
-    upstream_fd: posix.socket_t,
-    timeout_ms: u32,
-) !void {
-    var client_open = true;
-    var upstream_open = true;
-
-    var client_buf: [16 * 1024]u8 = undefined;
-    var upstream_buf: [16 * 1024]u8 = undefined;
-
-    while (client_open and upstream_open) {
-        var poll_fds = [_]posix.pollfd{
-            .{
-                .fd = if (client_open) client_fd else -1,
-                .events = if (client_open) posix.POLL.IN else 0,
-                .revents = 0,
-            },
-            .{
-                .fd = if (upstream_open) upstream_fd else -1,
-                .events = if (upstream_open) posix.POLL.IN else 0,
-                .revents = 0,
-            },
-        };
-
-        const ready = posix.poll(&poll_fds, clampPollTimeout(timeout_ms)) catch return error.ReceiveFailed;
-        if (ready == 0) return;
-
-        if (client_open and poll_fds[0].revents & posix.POLL.IN != 0) {
-            const bytes_read = posix.read(client_fd, &client_buf) catch return error.ReceiveFailed;
-            if (bytes_read == 0) {
-                client_open = false;
-            } else {
-                try writeAll(upstream_fd, client_buf[0..bytes_read]);
-            }
-        } else if (client_open and (poll_fds[0].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0) {
-            client_open = false;
-        }
-
-        if (upstream_open and poll_fds[1].revents & posix.POLL.IN != 0) {
-            const bytes_read = posix.read(upstream_fd, &upstream_buf) catch return error.ReceiveFailed;
-            if (bytes_read == 0) {
-                upstream_open = false;
-            } else {
-                try writeAll(client_fd, upstream_buf[0..bytes_read]);
-            }
-        } else if (upstream_open and (poll_fds[1].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0) {
-            upstream_open = false;
-        }
-    }
-}
-
 fn proxyHttp2Connection(
     self: *const ReverseProxy,
     client_fd: posix.socket_t,
@@ -928,7 +834,7 @@ fn proxyHttp2Connection(
     defer posix.close(upstream_fd);
 
     try writeAll(upstream_fd, raw_request);
-    try relayHttp2SocketConnection(
+    try http2_passthrough.relaySocketConnection(
         client_fd,
         upstream_fd,
         plan.route.request_timeout_ms,
@@ -1808,7 +1714,7 @@ fn captureRequestBytes(fd: posix.socket_t, buf: []u8) usize {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             const parsed = http2_request.parseClientConnectionPreface(arena.allocator(), buf[0..total]) catch continue;
-            if (http2StreamEndSeen(buf[0..total], parsed.request.stream_id)) {
+            if (http2_passthrough.streamEndSeen(buf[0..total], parsed.request.stream_id)) {
                 return total;
             }
             continue;
@@ -2102,7 +2008,7 @@ test "forwardRequest proxies HTTP/2 upstream response bytes" {
         "ok",
     );
     defer std.testing.allocator.free(upstream_response);
-    try std.testing.expectEqual(@as(u16, 200), try parseHttp2StatusCode(std.testing.allocator, upstream_response));
+    try std.testing.expectEqual(@as(u16, 200), try http2_passthrough.parseStatusCode(std.testing.allocator, upstream_response));
 
     const actions = [_]TestUpstreamAction{
         .{ .respond = upstream_response },
@@ -2958,7 +2864,7 @@ test "handleConnection relays HTTP/2 client data frames upstream" {
     upstream.wait();
     try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream.request(0)[0..http2.client_preface.len]));
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "hello") != null);
-    try std.testing.expect(http2StreamEndSeen(upstream.request(0), 11));
+    try std.testing.expect(http2_passthrough.streamEndSeen(upstream.request(0), 11));
 }
 
 test "handleConnection supports multiple HTTP/2 streams on one client connection" {
@@ -3032,7 +2938,7 @@ test "handleConnection supports multiple HTTP/2 streams on one client connection
                 const bytes_read = posix.read(client_fd, self.request_buf[self.request_len..]) catch break;
                 if (bytes_read == 0) break;
                 self.request_len += bytes_read;
-                if (http2StreamEndSeen(self.request_buf[0..self.request_len], 15)) break;
+                if (http2_passthrough.streamEndSeen(self.request_buf[0..self.request_len], 15)) break;
             }
 
             _ = writeAll(client_fd, self.response) catch {};
@@ -3129,8 +3035,8 @@ test "handleConnection supports multiple HTTP/2 streams on one client connection
 
     upstream.wait();
     const captured = upstream.request();
-    try std.testing.expect(http2StreamEndSeen(captured, 13));
-    try std.testing.expect(http2StreamEndSeen(captured, 15));
+    try std.testing.expect(http2_passthrough.streamEndSeen(captured, 13));
+    try std.testing.expect(http2_passthrough.streamEndSeen(captured, 15));
     try std.testing.expect(std.mem.indexOf(u8, captured, "/pkg.Service/First") != null);
     try std.testing.expect(std.mem.indexOf(u8, captured, "/pkg.Service/Second") != null);
 }
