@@ -1,3 +1,4 @@
+const std = @import("std");
 const common = @import("common.zig");
 
 pub const ClientHelloInfo = struct {
@@ -6,6 +7,8 @@ pub const ClientHelloInfo = struct {
     has_aes_256_gcm: bool,
     x25519_key_share: ?[32]u8,
     supported_versions_has_tls13: bool,
+    offers_h2_alpn: bool,
+    offers_http11_alpn: bool,
 };
 
 pub fn parseClientHelloFields(msg: []const u8) common.HandshakeError!ClientHelloInfo {
@@ -47,6 +50,8 @@ pub fn parseClientHelloFields(msg: []const u8) common.HandshakeError!ClientHello
 
     var x25519_key_share: ?[32]u8 = null;
     var has_tls13 = false;
+    var offers_h2_alpn = false;
+    var offers_http11_alpn = false;
 
     if (pos + 2 <= msg.len) {
         const ext_len = common.readU16(msg[pos..]);
@@ -63,6 +68,10 @@ pub fn parseClientHelloFields(msg: []const u8) common.HandshakeError!ClientHello
                 has_tls13 = parseSupportedVersions(msg[pos .. pos + ext_data_len]);
             } else if (ext_type == 0x0033) {
                 x25519_key_share = parseKeyShare(msg[pos .. pos + ext_data_len]);
+            } else if (ext_type == 0x0010) {
+                const alpn = parseAlpn(msg[pos .. pos + ext_data_len]);
+                offers_h2_alpn = alpn.h2;
+                offers_http11_alpn = alpn.http11;
             }
 
             pos += ext_data_len;
@@ -75,6 +84,8 @@ pub fn parseClientHelloFields(msg: []const u8) common.HandshakeError!ClientHello
         .has_aes_256_gcm = has_aes_256_gcm,
         .x25519_key_share = x25519_key_share,
         .supported_versions_has_tls13 = has_tls13,
+        .offers_h2_alpn = offers_h2_alpn,
+        .offers_http11_alpn = offers_http11_alpn,
     };
 }
 
@@ -106,4 +117,26 @@ fn parseKeyShare(data: []const u8) ?[32]u8 {
         pos += key_len;
     }
     return null;
+}
+
+fn parseAlpn(data: []const u8) struct { h2: bool, http11: bool } {
+    if (data.len < 2) return .{ .h2 = false, .http11 = false };
+
+    const list_len = common.readU16(data[0..]);
+    var pos: usize = 2;
+    const end = @min(2 + list_len, data.len);
+    var offers_h2 = false;
+    var offers_http11 = false;
+
+    while (pos < end) {
+        const proto_len = data[pos];
+        pos += 1;
+        if (pos + proto_len > end) break;
+        const proto = data[pos .. pos + proto_len];
+        if (std.mem.eql(u8, proto, "h2")) offers_h2 = true;
+        if (std.mem.eql(u8, proto, "http/1.1")) offers_http11 = true;
+        pos += proto_len;
+    }
+
+    return .{ .h2 = offers_h2, .http11 = offers_http11 };
 }

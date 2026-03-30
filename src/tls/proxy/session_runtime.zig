@@ -29,6 +29,12 @@ pub fn handleTlsSession(
     if (!hello_info.has_aes_256_gcm) return error.UnsupportedCipher;
     if (!hello_info.supported_versions_has_tls13) return error.UnsupportedVersion;
     const client_x25519_key = hello_info.x25519_key_share orelse return error.MissingKeyShare;
+    const selected_alpn: ?[]const u8 = if (hello_info.offers_h2_alpn)
+        "h2"
+    else if (hello_info.offers_http11_alpn)
+        "http/1.1"
+    else
+        null;
 
     const server_kp = X25519.KeyPair.generate();
     const shared_secret = X25519.scalarmult(server_kp.secret_key, client_x25519_key) catch
@@ -73,7 +79,7 @@ pub fn handleTlsSession(
     var server_seq: u64 = 0;
 
     var ee_buf: [64]u8 = undefined;
-    const ee_len = handshake.buildEncryptedExtensions(&ee_buf) catch return error.HandshakeFailed;
+    const ee_len = handshake.buildEncryptedExtensions(&ee_buf, selected_alpn) catch return error.HandshakeFailed;
     transcript.update(ee_buf[0..ee_len]);
     try sendEncryptedHandshake(client_fd, ee_buf[0..ee_len], server_hs_traffic, &server_seq);
 
