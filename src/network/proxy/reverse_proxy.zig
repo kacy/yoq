@@ -1719,7 +1719,6 @@ fn captureRequestBytes(fd: posix.socket_t, buf: []u8) usize {
             }
             continue;
         }
-
         const parsed = http.parseRequest(buf[0..total]) catch return total;
         if (parsed) |request| {
             return requestEndOffset(buf[0..total], request);
@@ -1849,7 +1848,6 @@ fn buildHttp2Frame(alloc: std.mem.Allocator, header: http2.FrameHeader, payload:
     @memcpy(buf[http2.frame_header_len..], payload);
     return buf;
 }
-
 test "forwardRequest proxies upstream response bytes" {
     const store = @import("../../state/store.zig");
     const service_rollout = @import("../service_rollout.zig");

@@ -516,10 +516,7 @@ fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64) bool {
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnapshot {
     const route_state = route_statuses.get(route.name);
     const steering_state = try steering_runtime.snapshotServiceStatus(alloc, route.service);
-    const steering_required = service_rollout.current().dns_returns_vip;
-    const vip_traffic_mode: VipTrafficMode = if (!steering_required)
-        .not_applicable
-    else if (steering_state.ready)
+    const vip_traffic_mode: VipTrafficMode = if (steering_state.ready)
         .l7_proxy
     else
         .l4_fallback;
@@ -528,13 +525,13 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
             state.degraded_reason
         else if (route.degraded)
             .service_state
-        else if (steering_required and !steering_state.ready)
+        else if (!steering_state.ready)
             .steering_not_ready
         else
             .none
     else if (route.degraded)
         .service_state
-    else if (steering_required and !steering_state.ready)
+    else if (!steering_state.ready)
         .steering_not_ready
     else
         .none;
@@ -768,7 +765,7 @@ test "bootstrap tracks configured proxy routes from service state" {
     try std.testing.expect(routes_snapshot.items[0].degraded);
 }
 
-test "bootstrap is inert when l7 proxy flag is disabled" {
+test "bootstrap no longer depends on l7 proxy compatibility flag" {
     const store = @import("../../state/store.zig");
 
     try store.initTestDb();
@@ -794,11 +791,11 @@ test "bootstrap is inert when l7 proxy flag is disabled" {
     const state = try snapshot(std.testing.allocator);
     defer state.deinit(std.testing.allocator);
 
-    try std.testing.expect(!state.enabled);
-    try std.testing.expect(!state.running);
-    try std.testing.expectEqual(@as(u32, 0), state.configured_services);
-    try std.testing.expectEqual(@as(u32, 0), state.routes);
-    try std.testing.expect(state.last_sync_at == null);
+    try std.testing.expect(state.enabled);
+    try std.testing.expect(state.running);
+    try std.testing.expectEqual(@as(u32, 1), state.configured_services);
+    try std.testing.expectEqual(@as(u32, 1), state.routes);
+    try std.testing.expect(state.last_sync_at != null);
 }
 
 test "snapshotServiceRoutes filters routes by service" {
@@ -895,9 +892,9 @@ test "materialized routes include service endpoint readiness counts" {
     try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
     try std.testing.expectEqual(@as(u32, 1), routes_snapshot.items[0].eligible_endpoints);
     try std.testing.expectEqual(@as(u32, 0), routes_snapshot.items[0].healthy_endpoints);
-    try std.testing.expect(!routes_snapshot.items[0].degraded);
-    try std.testing.expectEqual(RouteDegradedReason.none, routes_snapshot.items[0].degraded_reason);
-    try std.testing.expectEqual(VipTrafficMode.not_applicable, routes_snapshot.items[0].vip_traffic_mode);
+    try std.testing.expect(routes_snapshot.items[0].degraded);
+    try std.testing.expectEqual(RouteDegradedReason.steering_not_ready, routes_snapshot.items[0].degraded_reason);
+    try std.testing.expectEqual(VipTrafficMode.l4_fallback, routes_snapshot.items[0].vip_traffic_mode);
     try std.testing.expect(routes_snapshot.items[0].last_failure_kind == null);
     try std.testing.expect(routes_snapshot.items[0].last_failure_at == null);
 }
@@ -1194,7 +1191,7 @@ test "route snapshots retain runtime failure details after recovery" {
     });
 
     bootstrapIfEnabled();
-    recordRouteFailure("api:/", .receive);
+    recordRouteFailure("api:default", .receive);
 
     {
         var routes_snapshot = try snapshotServiceRoutes(std.testing.allocator, "api");
@@ -1210,7 +1207,7 @@ test "route snapshots retain runtime failure details after recovery" {
         try std.testing.expect(routes_snapshot.items[0].last_failure_at != null);
     }
 
-    recordRouteRecovered("api:/");
+    recordRouteRecovered("api:default");
 
     {
         var routes_snapshot = try snapshotServiceRoutes(std.testing.allocator, "api");
@@ -1220,8 +1217,8 @@ test "route snapshots retain runtime failure details after recovery" {
         }
 
         try std.testing.expectEqual(@as(usize, 1), routes_snapshot.items.len);
-        try std.testing.expect(!routes_snapshot.items[0].degraded);
-        try std.testing.expectEqual(RouteDegradedReason.none, routes_snapshot.items[0].degraded_reason);
+        try std.testing.expect(routes_snapshot.items[0].degraded);
+        try std.testing.expectEqual(RouteDegradedReason.steering_not_ready, routes_snapshot.items[0].degraded_reason);
         try std.testing.expectEqual(RouteFailureKind.receive, routes_snapshot.items[0].last_failure_kind.?);
         try std.testing.expect(routes_snapshot.items[0].last_failure_at != null);
     }

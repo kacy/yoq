@@ -23,6 +23,15 @@ pub fn current() Flags {
     return flags;
 }
 
+pub fn canonicalFlags() Flags {
+    return .{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    };
+}
+
 pub fn mode() Mode {
     return modeFromFlags(current());
 }
@@ -71,7 +80,7 @@ fn logRolloutStateLocked() void {
     logged_rollout_state = true;
 
     log.info(
-        "service rollout: mode={s}, registry_v2={}, reconciler={}, dns_returns_vip={}, l7_proxy_http={}",
+        "service discovery: mode={s}, registry_v2={}, reconciler={}, dns_returns_vip={}, l7_proxy_http={}",
         .{
             modeLabel(modeFromFlags(flags)),
             flags.service_registry_v2,
@@ -90,21 +99,21 @@ fn modeFromFlags(current_flags: Flags) Mode {
 fn modeLabel(current_mode: Mode) []const u8 {
     return switch (current_mode) {
         .legacy => "legacy",
-        .shadow => "shadow",
+        .shadow => "canonical",
     };
 }
 
 fn readDeprecatedAlwaysOnBoolEnv(name: []const u8, replacement: []const u8) bool {
     const raw = std.posix.getenv(name) orelse return true;
     _ = parseBool(name, raw);
-    log.warn("service rollout flag {s} is deprecated and ignored; {s}", .{ name, replacement });
+    log.warn("service discovery compatibility flag {s} is deprecated and ignored; {s}", .{ name, replacement });
     return true;
 }
 
 fn readAlwaysOnBoolEnv(name: []const u8) bool {
     const raw = std.posix.getenv(name) orelse return true;
     _ = parseBool(name, raw);
-    log.warn("service rollout flag {s} is deprecated and ignored; HTTP proxy routing is always on", .{name});
+    log.warn("service discovery compatibility flag {s} is deprecated and ignored; HTTP proxy routing is always on", .{name});
     return true;
 }
 
@@ -121,7 +130,7 @@ fn parseBool(name: []const u8, raw: []const u8) bool {
         return false;
     }
 
-    log.warn("service rollout flag {s} has invalid value '{s}', defaulting to false", .{ name, raw });
+    log.warn("service discovery compatibility flag {s} has invalid value '{s}', defaulting to false", .{ name, raw });
     return false;
 }
 

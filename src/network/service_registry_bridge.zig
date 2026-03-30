@@ -54,12 +54,6 @@ pub fn registerContainerService(service_name: []const u8, container_id: []const 
 
     const operation: BridgeOperation = .container_register;
     const mode = activeFaultMode(operation);
-    if (!rollout.current().service_registry_reconciler) {
-        switch (mode) {
-            .none, .skip_shadow_record => dns.registerService(service_name, container_id, container_ip),
-            .skip_legacy_apply => noteFaultInjection(operation),
-        }
-    }
     switch (mode) {
         .none, .skip_legacy_apply => service_reconciler.noteContainerRegisteredFrom(.container_runtime, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
@@ -75,12 +69,6 @@ pub fn unregisterContainerService(container_id: []const u8) void {
 
     const operation: BridgeOperation = .container_unregister;
     const mode = activeFaultMode(operation);
-    if (!rollout.current().service_registry_reconciler) {
-        switch (mode) {
-            .none, .skip_shadow_record => dns.unregisterService(container_id),
-            .skip_legacy_apply => noteFaultInjection(operation),
-        }
-    }
     switch (mode) {
         .none, .skip_legacy_apply => service_reconciler.noteContainerUnregisteredFrom(.container_runtime, container_id),
         .skip_shadow_record => noteFaultInjection(operation),
@@ -91,12 +79,6 @@ pub fn unregisterContainerService(container_id: []const u8) void {
 pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     const operation: BridgeOperation = .endpoint_healthy;
     const mode = activeFaultMode(operation);
-    if (!rollout.current().service_registry_reconciler) {
-        switch (mode) {
-            .none, .skip_shadow_record => dns.registerService(service_name, container_id, container_ip),
-            .skip_legacy_apply => noteFaultInjection(operation),
-        }
-    }
     switch (mode) {
         .none, .skip_legacy_apply => service_reconciler.noteEndpointHealthyFrom(.health_checker, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
@@ -107,12 +89,6 @@ pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, c
 pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
     const operation: BridgeOperation = .endpoint_unhealthy;
     const mode = activeFaultMode(operation);
-    if (!rollout.current().service_registry_reconciler) {
-        switch (mode) {
-            .none, .skip_shadow_record => dns.unregisterService(container_id),
-            .skip_legacy_apply => noteFaultInjection(operation),
-        }
-    }
     switch (mode) {
         .none, .skip_legacy_apply => service_reconciler.noteEndpointUnhealthyFrom(.health_checker, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
@@ -243,7 +219,7 @@ fn activeEndpointId(container_id: []const u8, buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}:0", .{container_id}) catch container_id;
 }
 
-test "container bridge preserves legacy DNS and shadow events" {
+test "container bridge feeds canonical service discovery and events" {
     dns_registry.resetRegistryForTest();
     defer dns_registry.resetRegistryForTest();
     try store.initTestDb();
@@ -256,7 +232,7 @@ test "container bridge preserves legacy DNS and shadow events" {
 
     registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCount(.container_registered));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCountBySource(.container_runtime, .container_registered));
     const alloc = std.testing.allocator;
@@ -275,7 +251,7 @@ test "container bridge preserves legacy DNS and shadow events" {
 
     unregisterContainerService("abc123");
 
-    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCount(.container_unregistered));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCountBySource(.container_runtime, .container_unregistered));
     var remaining = try store.listServiceEndpoints(alloc, "api");
@@ -286,7 +262,7 @@ test "container bridge preserves legacy DNS and shadow events" {
     try std.testing.expectEqual(@as(usize, 0), remaining.items.len);
 }
 
-test "endpoint bridge keeps legacy DNS in legacy rollout mode" {
+test "endpoint bridge is inert in legacy rollout mode" {
     dns_registry.resetRegistryForTest();
     defer dns_registry.resetRegistryForTest();
     try store.initTestDb();
@@ -301,7 +277,7 @@ test "endpoint bridge keeps legacy DNS in legacy rollout mode" {
 
     markEndpointHealthy("web", "def456", .{ 10, 42, 0, 10 });
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 10 }), dns.lookupService("web"));
+    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("web"));
     try std.testing.expectEqual(@as(u64, 0), service_reconciler.eventCount(.endpoint_healthy));
     try std.testing.expectError(store.StoreError.NotFound, store.getService(std.testing.allocator, "web"));
 
@@ -327,12 +303,12 @@ test "bridge can skip legacy apply while preserving shadow event" {
     setFaultModeForTest(.container_register, .skip_legacy_apply);
     registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
 
-    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 1), service_reconciler.eventCountBySource(.container_runtime, .container_registered));
-    try std.testing.expectEqual(@as(u64, 1), faultInjectionCount(.container_register));
+    try std.testing.expectEqual(@as(u64, 0), faultInjectionCount(.container_register));
 }
 
-test "bridge can skip shadow record while preserving legacy apply" {
+test "bridge can skip shadow record and suppress canonical DNS updates" {
     dns_registry.resetRegistryForTest();
     defer dns_registry.resetRegistryForTest();
     try store.initTestDb();
@@ -348,7 +324,7 @@ test "bridge can skip shadow record while preserving legacy apply" {
     setFaultModeForTest(.endpoint_healthy, .skip_shadow_record);
     markEndpointHealthy("web", "def456", .{ 10, 42, 0, 10 });
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 10 }), dns.lookupService("web"));
+    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("web"));
     try std.testing.expectEqual(@as(u64, 0), service_reconciler.eventCountBySource(.health_checker, .endpoint_healthy));
     try std.testing.expectEqual(@as(u64, 1), faultInjectionCount(.endpoint_healthy));
 }
@@ -362,7 +338,7 @@ test "fault mode accessor returns configured mode" {
     try std.testing.expectEqual(FaultMode.skip_legacy_apply, faultMode(.container_register));
 }
 
-test "authoritative reconciler owns legacy DNS writes when enabled" {
+test "bridge uses canonical VIP discovery when reconciler is enabled" {
     dns_registry.resetRegistryForTest();
     defer dns_registry.resetRegistryForTest();
     try store.initTestDb();
@@ -378,16 +354,8 @@ test "authoritative reconciler owns legacy DNS writes when enabled" {
     setFaultModeForTest(.container_register, .skip_legacy_apply);
     registerContainerService("api", "abc123", .{ 10, 42, 0, 9 }, null);
 
-    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 42, 0, 9 }), dns.lookupService("api"));
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
     try std.testing.expectEqual(@as(u64, 0), faultInjectionCount(.container_register));
-
-    var mirrored = try store.lookupServiceNames(std.testing.allocator, "api");
-    defer {
-        for (mirrored.items) |ip_text| std.testing.allocator.free(ip_text);
-        mirrored.deinit(std.testing.allocator);
-    }
-    try std.testing.expectEqual(@as(usize, 1), mirrored.items.len);
-    try std.testing.expectEqualStrings("10.42.0.9", mirrored.items[0]);
 }
 
 test "health bridge preserves existing node id for endpoint" {

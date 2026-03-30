@@ -5,7 +5,6 @@ const service_registry_backfill = @import("service_registry_backfill.zig");
 const service_registry_bridge = @import("service_registry_bridge.zig");
 const steering_runtime = @import("proxy/steering_runtime.zig");
 const service_reconciler = @import("service_reconciler.zig");
-const service_rollout = @import("service_rollout.zig");
 
 pub const Snapshot = struct {
     backfill_complete: bool,
@@ -28,7 +27,6 @@ pub const Snapshot = struct {
 };
 
 pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
-    const flags = service_rollout.current();
     var backfill = try service_registry_backfill.snapshot(alloc);
     defer backfill.deinit(alloc);
     var audit = try service_reconciler.snapshotAuditState(alloc);
@@ -61,7 +59,6 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     const steering_ready = !steering.enabled or steering.ready;
     const ready_for_vip_cutover =
         ready_for_reconciler_cutover and
-        flags.service_registry_reconciler and
         components_ready and
         steering_ready;
 
@@ -78,7 +75,6 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     if (!fault_modes_clear) try appendBlocker(alloc, &blockers, "fault_mode_active");
     if (!components_ready) try appendBlocker(alloc, &blockers, "components_not_ready");
     if (!steering_ready) try appendBlocker(alloc, &blockers, "steering_not_ready");
-    if (!flags.service_registry_reconciler) try appendBlocker(alloc, &blockers, "reconciler_flag_disabled");
 
     return .{
         .backfill_complete = backfill_complete,

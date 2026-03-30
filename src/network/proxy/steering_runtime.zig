@@ -507,7 +507,7 @@ fn resolveServiceProxyPortLocked(alloc: std.mem.Allocator, service: service_regi
 }
 
 fn isEnabled() bool {
-    return service_rollout.current().dns_returns_vip and service_registry_runtime.hasProxyConfiguredServices();
+    return service_registry_runtime.hasProxyConfiguredServices();
 }
 
 fn containsDesiredMapping(mappings: []const DesiredMapping, vip: [4]u8, port: u16) bool {
