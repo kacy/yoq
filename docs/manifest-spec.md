@@ -188,7 +188,6 @@ current HTTP/2 and gRPC routing limits:
 - the routing listener accepts prior-knowledge HTTP/2 (`h2c`) only; it does not terminate TLS/ALPN HTTP/2 sessions
 - one accepted client connection is pinned to the first matched routed service, so additional streams on that connection must target the same service
 - `request_timeout_ms` applies to HTTP/2 connection inactivity as well as unary request handling
-- request-header decoding is intentionally partial today and does not yet cover the full HPACK feature set
 
 ---
 

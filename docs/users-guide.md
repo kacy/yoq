@@ -141,7 +141,6 @@ current limits:
 - the listener currently supports prior-knowledge `h2c`, not TLS/ALPN HTTP/2 termination
 - one accepted client connection is pinned to the first matched service route, so later RPC streams on the same channel must target that same routed service
 - `request_timeout_ms` currently acts as the idle timeout for that routed HTTP/2 connection
-- request-header parsing is not yet a full HPACK implementation, so some HTTP/2 clients may not interoperate yet
 
 ### rolling updates
 

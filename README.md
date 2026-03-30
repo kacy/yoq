@@ -54,7 +54,6 @@ current gRPC routing limits:
 - prior-knowledge `h2c` only; no TLS/ALPN HTTP/2 termination at the routing listener
 - one accepted client connection stays pinned to the first matched routed service
 - `request_timeout_ms` currently acts as the idle timeout for routed HTTP/2 connections
-- request-header decoding is not yet a full HPACK implementation
 
 ### production features
 

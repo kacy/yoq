@@ -201,6 +201,62 @@ test "parseClientConnectionPreface parses initial HEADERS request" {
     try std.testing.expectEqual(@as(usize, request_bytes.items.len), parsed.consumed);
 }
 
+test "parseClientConnectionPreface parses huffman-encoded authority" {
+    const alloc = std.testing.allocator;
+
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+    try header_block.append(alloc, 0x83); // :method POST
+    try header_block.append(alloc, 0x86); // :scheme http
+    try header_block.append(alloc, 0x01); // literal :authority without indexing
+    try header_block.appendSlice(alloc, &[_]u8{
+        0x8c,
+        0xf1,
+        0xe3,
+        0xc2,
+        0xe5,
+        0xf2,
+        0x3a,
+        0x6b,
+        0xa0,
+        0xab,
+        0x90,
+        0xf4,
+        0xff,
+    });
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call"); // :path
+
+    const settings = try buildFrame(alloc, .{
+        .length = 0,
+        .frame_type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+    defer alloc.free(settings);
+
+    const headers = try buildFrame(alloc, .{
+        .length = @intCast(header_block.items.len),
+        .frame_type = .headers,
+        .flags = Flag.end_headers | Flag.end_stream,
+        .stream_id = 1,
+    }, header_block.items);
+    defer alloc.free(headers);
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(alloc);
+    try request_bytes.appendSlice(alloc, http2.client_preface);
+    try request_bytes.appendSlice(alloc, settings);
+    try request_bytes.appendSlice(alloc, headers);
+
+    const parsed = try parseClientConnectionPreface(alloc, request_bytes.items);
+    defer parsed.deinit(alloc);
+
+    try std.testing.expectEqualStrings("POST", parsed.request.method);
+    try std.testing.expectEqualStrings("www.example.com", parsed.request.authority);
+    try std.testing.expectEqualStrings("/pkg.Service/Call", parsed.request.path);
+    try std.testing.expect(parsed.request.end_stream);
+}
+
 test "parseClientConnectionPreface parses HEADERS plus CONTINUATION" {
     const alloc = std.testing.allocator;
 
