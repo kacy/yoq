@@ -72,6 +72,11 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         for (l7_routes.items) |route| route.deinit(alloc);
         l7_routes.deinit(alloc);
     }
+    var l7_route_traffic = proxy_runtime.snapshotRouteTraffic(alloc) catch return common.internalError();
+    defer {
+        for (l7_route_traffic.items) |entry| entry.deinit(alloc);
+        l7_route_traffic.deinit(alloc);
+    }
     const node_signals = service_reconciler.snapshotNodeSignalState();
     const components = service_reconciler.snapshotComponentState();
     const checker = health.snapshotChecker();
@@ -327,6 +332,8 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         writer.writeByte('}') catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
+    writer.writeAll(",\"sample_route_traffic\":") catch return common.internalError();
+    writeRouteTrafficJson(writer, l7_route_traffic.items) catch return common.internalError();
     writer.writeAll("},\"listener\":{") catch return common.internalError();
     writer.print(
         "\"enabled\":{},\"running\":{},\"bind_addr\":\"{d}.{d}.{d}.{d}\",\"port\":{d},\"accepted_connections_total\":{d},\"active_connections\":{d},\"last_error\":",
@@ -542,6 +549,31 @@ fn writeBackendServicesJson(writer: anytype, backend_services: anytype) !void {
         try writer.writeAll("{\"service\":\"");
         try json_helpers.writeJsonEscaped(writer, backend.service_name);
         try writer.print("\",\"weight\":{d}}}", .{backend.weight});
+    }
+    try writer.writeByte(']');
+}
+
+fn writeRouteTrafficJson(writer: anytype, route_traffic: anytype) !void {
+    try writer.writeByte('[');
+    for (route_traffic[0..@min(route_traffic.len, proxy_runtime.max_routes_in_status)], 0..) |entry, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"route\":\"");
+        try json_helpers.writeJsonEscaped(writer, entry.route_name);
+        try writer.writeAll("\",\"service\":\"");
+        try json_helpers.writeJsonEscaped(writer, entry.service_name);
+        try writer.writeAll("\",\"backend_service\":\"");
+        try json_helpers.writeJsonEscaped(writer, entry.backend_service);
+        try writer.print(
+            "\",\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"upstream_failures_total\":{d}}}",
+            .{
+                entry.requests_total,
+                entry.responses_2xx_total,
+                entry.responses_4xx_total,
+                entry.responses_5xx_total,
+                entry.retries_total,
+                entry.upstream_failures_total,
+            },
+        );
     }
     try writer.writeByte(']');
 }

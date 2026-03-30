@@ -225,7 +225,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"components\":{\"dns_resolver_running\":true,\"dns_interceptor_loaded\":false,\"load_balancer_loaded\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"backfill\":{\"enabled\":true,\"runs_total\":1,\"services_created_total\":0,\"endpoints_created_total\":0") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"health_checker\":{\"running\":false,\"tracked_endpoints\":0,\"in_flight_checks\":0,\"queued_checks\":0,\"worker_threads\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"requests_total\":0,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"loop_rejections_total\":0,\"upstream_connect_failures_total\":0,\"upstream_send_failures_total\":0,\"upstream_receive_failures_total\":0,\"upstream_other_failures_total\":0,\"circuit_trips_total\":0,\"circuit_open_endpoints\":0,\"circuit_half_open_endpoints\":0,\"last_sync_at\":null,\"last_error\":null,\"sample_routes\":[]}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"l7_proxy\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"routes\":0,\"requests_total\":0,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"loop_rejections_total\":0,\"upstream_connect_failures_total\":0,\"upstream_send_failures_total\":0,\"upstream_receive_failures_total\":0,\"upstream_other_failures_total\":0,\"circuit_trips_total\":0,\"circuit_open_endpoints\":0,\"circuit_half_open_endpoints\":0,\"last_sync_at\":null,\"last_error\":null,\"sample_routes\":[],\"sample_route_traffic\":[]}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"listener\":{\"enabled\":false,\"running\":false,\"bind_addr\":\"127.0.0.1\",\"port\":17080,\"accepted_connections_total\":0,\"active_connections\":0,\"last_error\":null}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"control_plane\":{\"enabled\":false,\"steering_enabled\":false,\"running\":false,\"interval_secs\":15,\"passes_total\":1,\"event_passes_total\":1,\"periodic_passes_total\":0,\"last_trigger\":\"event\",\"last_pass_at\":") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"enabled\":false,\"running\":false,\"configured_services\":0,\"not_ready_services\":0,\"blocked_services\":0,\"drifted_services\":0,\"desired_mappings\":0,\"applied_mappings\":0,\"blocked_reason\":\"rollout_disabled\",\"sync_attempts_total\":1,\"sync_failures_total\":0,\"mappings_applied_total\":0,\"mappings_removed_total\":0,\"last_sync_at\":null,\"last_error\":null}") != null);
@@ -485,6 +485,10 @@ test "route rollout status sample routes expose steering drift details" {
     steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
     try listener_runtime.startOrSkipForTest(testing.allocator, 0);
     try steering_runtime.setActualMappingsForTest(&.{});
+    proxy_runtime.recordRouteRequestStart("api:default", "api", "api");
+    proxy_runtime.recordRouteResponseCode("api:default", "api", "api", 200);
+    proxy_runtime.recordRouteRetry("api:default", "api", "api");
+    proxy_runtime.recordRouteUpstreamFailure("api:default", "api", "api");
 
     const req = http.Request{
         .method = .GET,
@@ -504,6 +508,7 @@ test "route rollout status sample routes expose steering drift details" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"none\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"sample_route_traffic\":[{\"route\":\"api:default\",\"service\":\"api\",\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
 }
 
 test "resolveIpToService returns unknown for empty records" {
