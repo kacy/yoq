@@ -419,7 +419,7 @@ fn writeBackendServicesJson(writer: anytype, backend_services: anytype) !void {
         if (idx > 0) try writer.writeByte(',');
         try writer.writeAll("{\"service\":\"");
         try json_helpers.writeJsonEscaped(writer, backend.service_name);
-        try writer.print("\",\"weight\":{d}}", .{backend.weight});
+        try writer.print("\",\"weight\":{d}}}", .{backend.weight});
     }
     try writer.writeByte(']');
 }
@@ -495,8 +495,8 @@ test "route handles GET /v1/services" {
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}]") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"listener_not_running\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }

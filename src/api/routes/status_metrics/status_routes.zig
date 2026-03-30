@@ -541,7 +541,7 @@ fn writeBackendServicesJson(writer: anytype, backend_services: anytype) !void {
         if (idx > 0) try writer.writeByte(',');
         try writer.writeAll("{\"service\":\"");
         try json_helpers.writeJsonEscaped(writer, backend.service_name);
-        try writer.print("\",\"weight\":{d}}", .{backend.weight});
+        try writer.print("\",\"weight\":{d}}}", .{backend.weight});
     }
     try writer.writeByte(']');
 }

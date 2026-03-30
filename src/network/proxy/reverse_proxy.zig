@@ -1395,6 +1395,8 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
         .outbound_path = try std.testing.allocator.dupe(u8, "/v1/users"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/v1"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1462,6 +1464,8 @@ test "buildForwardRequest rewrites request path with preserved query" {
         .outbound_path = try std.testing.allocator.dupe(u8, "/users?id=7"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/api"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1525,6 +1529,8 @@ test "buildForwardRequest preserves body and content length" {
         .outbound_path = try std.testing.allocator.dupe(u8, "/submit"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1589,6 +1595,8 @@ test "buildForwardRequest rewrites forwarded headers from client context" {
         .outbound_path = try std.testing.allocator.dupe(u8, "/"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1656,6 +1664,8 @@ test "buildForwardRequest preserves traceparent and tracestate" {
         .outbound_path = try std.testing.allocator.dupe(u8, "/"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/"),
             .service = try std.testing.allocator.dupe(u8, "api"),
@@ -1719,6 +1729,8 @@ test "buildForwardRequest generates traceparent when absent" {
         .outbound_path = try std.testing.allocator.dupe(u8, "/"),
         .host = try std.testing.allocator.dupe(u8, "api.internal"),
         .outbound_host = try std.testing.allocator.dupe(u8, "api.internal"),
+        .backend_service = try std.testing.allocator.dupe(u8, "api"),
+        .selection_key = 0,
         .route = .{
             .name = try std.testing.allocator.dupe(u8, "api:/"),
             .service = try std.testing.allocator.dupe(u8, "api"),
