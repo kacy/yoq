@@ -461,7 +461,7 @@ pub const TlsProxy = struct {
         };
 
         var response_buf: [1024]u8 = undefined;
-        const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 301 Moved Permanently\r\nLocation: {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{location}) catch return;
+        const response = http_support.formatRedirectResponse(&response_buf, location) catch return;
         _ = posix.write(client_fd, response) catch {};
     }
 
@@ -554,6 +554,13 @@ test "extractRequestTarget preserves path and query" {
 test "extractRequestTarget rejects absolute-form target" {
     const req = "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n";
     try std.testing.expect(http_support.extractRequestTarget(req) == null);
+}
+
+test "formatRedirectResponse preserves method-safe redirect semantics" {
+    var buf: [1024]u8 = undefined;
+    const response = try http_support.formatRedirectResponse(&buf, "https://example.com/upload?id=7");
+    try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 308 Permanent Redirect\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "Location: https://example.com/upload?id=7\r\n") != null);
 }
 
 test "ChallengeStore round-trip" {

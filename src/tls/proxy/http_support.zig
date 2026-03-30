@@ -91,3 +91,14 @@ pub fn sendHttpResponse(fd: posix.fd_t, status: []const u8, body: []const u8) vo
     const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, body.len, body }) catch return;
     _ = posix.write(fd, response) catch {};
 }
+
+pub fn formatRedirectResponse(
+    buf: []u8,
+    location: []const u8,
+) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "HTTP/1.1 308 Permanent Redirect\r\nLocation: {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        .{location},
+    );
+}
