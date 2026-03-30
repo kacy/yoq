@@ -98,9 +98,9 @@ const command_meta = [_]CommandMeta{
         .{ .name = "list" },
     } },
     .{ .name = "cert", .subcommands = &.{
-        .{ .name = "install", .flags = &.{ "--cert-file", "--key-file" } },
+        .{ .name = "install", .flags = &.{ "--cert", "--key" } },
         .{ .name = "provision", .flags = &.{ "--email", "--staging" } },
-        .{ .name = "renew" },
+        .{ .name = "renew", .flags = &.{ "--email", "--staging" } },
         .{ .name = "list" },
         .{ .name = "rm" },
     } },

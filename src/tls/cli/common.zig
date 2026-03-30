@@ -3,6 +3,8 @@ pub const TlsCommandsError = error{
     CertificateNotFound,
     StoreFailed,
     ReadFailed,
+    AcmeFailed,
+    NetworkFailed,
     NotSupported,
     OutOfMemory,
 };

@@ -185,8 +185,6 @@ pub fn startTlsProxy(
     };
     errdefer std.crypto.secureZero(u8, &certs.key);
 
-    const acme_email = provisionAcmeCerts(alloc, certs, services, start_set);
-
     const proxy = alloc.create(tls_proxy.TlsProxy) catch {
         writeErr("failed to allocate TLS proxy\n", .{});
         return null;
@@ -197,6 +195,7 @@ pub fn startTlsProxy(
         return null;
     };
 
+    const acme_email = findAcmeEmail(services, start_set);
     if (acme_email) |email| {
         proxy.setRenewalConfig(.{
             .email = email,
@@ -205,6 +204,7 @@ pub fn startTlsProxy(
     }
 
     proxy.start();
+    provisionAcmeCerts(alloc, certs, &proxy.challenges, services, start_set);
     return .{
         .backend_registry = reg,
         .proxy = proxy,
@@ -261,17 +261,14 @@ fn registerTlsBackends(
 fn provisionAcmeCerts(
     alloc: std.mem.Allocator,
     certs: *cert_store_mod.CertStore,
+    challenges: *tls_proxy.ChallengeStore,
     services: []const spec.Service,
     start_set: ?std.StringHashMapUnmanaged(void),
-) ?[]const u8 {
-    var acme_email: ?[]const u8 = null;
-
+) void {
     for (services) |svc| {
         if (!shouldStart(start_set, svc.name)) continue;
         const tls = svc.tls orelse continue;
         if (!tls.acme) continue;
-
-        if (acme_email == null) acme_email = tls.email;
 
         const needs = certs.needsRenewal(tls.domain, 30) catch |err| blk: {
             if (err == cert_store_mod.CertError.NotFound) break :blk true;
@@ -283,10 +280,27 @@ fn provisionAcmeCerts(
         }
 
         writeErr("  tls: provisioning certificate for {s}...\n", .{tls.domain});
-        tls_support.provisionAcmeCert(alloc, certs, tls.domain, tls.email orelse "admin@localhost");
+        tls_support.provisionAcmeCert(
+            alloc,
+            certs,
+            challenges,
+            tls.domain,
+            tls.email orelse "admin@localhost",
+        );
     }
+}
 
-    return acme_email;
+fn findAcmeEmail(
+    services: []const spec.Service,
+    start_set: ?std.StringHashMapUnmanaged(void),
+) ?[]const u8 {
+    for (services) |svc| {
+        if (!shouldStart(start_set, svc.name)) continue;
+        const tls = svc.tls orelse continue;
+        if (!tls.acme) continue;
+        return tls.email;
+    }
+    return null;
 }
 
 test "syncServiceDefinitions persists http proxy config for started services" {

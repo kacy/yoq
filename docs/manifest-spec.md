@@ -269,12 +269,27 @@ acme = true
 email = "admin@example.com"
 ```
 
+automatic certificate management uses ACME HTTP-01 validation. the host running the TLS proxy must be reachable on port 80 while the certificate is being issued or renewed.
+
 for manual certificates, use `yoq cert install` first:
 
 ```toml
 [service.web.tls]
 domain = "example.com"
 ```
+
+standalone certificate commands:
+
+```text
+yoq cert provision example.com --email admin@example.com
+yoq cert renew example.com --email admin@example.com
+```
+
+current limits:
+
+- ACME uses HTTP-01 only
+- `yoq cert provision` and `yoq cert renew` require `--email`
+- the standalone CLI flow can only complete when this host can bind port 80 and serve the challenge path
 
 ---
 

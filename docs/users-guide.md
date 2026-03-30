@@ -142,6 +142,16 @@ current limits:
 - one accepted client connection is pinned to the first matched service route, so later RPC streams on the same channel must target that same routed service
 - `request_timeout_ms` currently acts as the idle timeout for that routed HTTP/2 connection
 
+### TLS and ACME
+
+services can enable TLS termination with `[service.<name>.tls]`. when `acme = true`, yoq provisions and renews certificates with ACME HTTP-01 validation through the built-in TLS proxy on ports 443 and 80.
+
+current limits:
+
+- ACME currently uses HTTP-01 only
+- the target host must be reachable on port 80 during provision and renewal
+- standalone `yoq cert provision` and `yoq cert renew` currently require `--email`
+
 ### rolling updates
 
 deployment history is tracked in SQLite. updates proceed incrementally — if health checks fail during a rollout, yoq automatically rolls back.
