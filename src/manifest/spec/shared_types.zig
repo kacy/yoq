@@ -119,6 +119,7 @@ pub const HttpProxyRoute = struct {
     name: []const u8,
     host: []const u8,
     path_prefix: []const u8 = "/",
+    rewrite_prefix: ?[]const u8 = null,
     retries: u8 = 0,
     connect_timeout_ms: u32 = 1000,
     request_timeout_ms: u32 = 5000,
@@ -128,6 +129,7 @@ pub const HttpProxyRoute = struct {
         alloc.free(self.name);
         alloc.free(self.host);
         alloc.free(self.path_prefix);
+        if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
     }
 };
 

@@ -10,6 +10,7 @@ pub const Route = struct {
     service: []const u8,
     vip_address: []const u8,
     match: Match,
+    rewrite_prefix: ?[]const u8 = null,
     eligible_endpoints: u32 = 0,
     healthy_endpoints: u32 = 0,
     degraded: bool = false,

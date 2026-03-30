@@ -240,6 +240,7 @@ fn loadSnapshotInto(next_registry: *service_registry.Registry) !void {
             .http_routes = route_definitions,
             .http_proxy_host = service.http_proxy_host,
             .http_proxy_path_prefix = service.http_proxy_path_prefix,
+            .http_proxy_rewrite_prefix = service.http_proxy_rewrite_prefix,
             .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
             .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
             .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
@@ -294,6 +295,7 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
         .http_routes = route_definitions,
         .http_proxy_host = service.http_proxy_host,
         .http_proxy_path_prefix = service.http_proxy_path_prefix,
+        .http_proxy_rewrite_prefix = service.http_proxy_rewrite_prefix,
         .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
         .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
         .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
@@ -334,6 +336,7 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             alloc.free(route.route_name);
             alloc.free(route.host);
             alloc.free(route.path_prefix);
+            if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         }
         defs.deinit(alloc);
     }
@@ -343,6 +346,7 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             .route_name = try alloc.dupe(u8, route.route_name),
             .host = try alloc.dupe(u8, route.host),
             .path_prefix = try alloc.dupe(u8, route.path_prefix),
+            .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
             .retries = @intCast(route.retries),
             .connect_timeout_ms = @intCast(route.connect_timeout_ms),
             .request_timeout_ms = @intCast(route.request_timeout_ms),
@@ -359,6 +363,7 @@ fn deinitRouteDefinitions(alloc: Allocator, routes: []const service_registry.Htt
         alloc.free(route.route_name);
         alloc.free(route.host);
         alloc.free(route.path_prefix);
+        if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
     }
     alloc.free(routes);
 }

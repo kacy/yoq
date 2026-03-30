@@ -39,6 +39,7 @@ pub const ServiceRecord = struct {
     http_routes: []const ServiceHttpRouteRecord = &.{},
     http_proxy_host: ?[]const u8 = null,
     http_proxy_path_prefix: ?[]const u8 = null,
+    http_proxy_rewrite_prefix: ?[]const u8 = null,
     http_proxy_retries: ?i64 = null,
     http_proxy_connect_timeout_ms: ?i64 = null,
     http_proxy_request_timeout_ms: ?i64 = null,
@@ -55,6 +56,7 @@ pub const ServiceRecord = struct {
         alloc.free(self.http_routes);
         if (self.http_proxy_host) |host| alloc.free(host);
         if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
+        if (self.http_proxy_rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
     }
 };
 
@@ -63,6 +65,7 @@ pub const ServiceHttpRouteRecord = struct {
     route_name: []const u8,
     host: []const u8,
     path_prefix: []const u8,
+    rewrite_prefix: ?[]const u8 = null,
     retries: i64,
     connect_timeout_ms: i64,
     request_timeout_ms: i64,
@@ -77,6 +80,7 @@ pub const ServiceHttpRouteRecord = struct {
         alloc.free(self.route_name);
         alloc.free(self.host);
         alloc.free(self.path_prefix);
+        if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
     }
 };
 
@@ -84,6 +88,7 @@ pub const ServiceHttpRouteInput = struct {
     route_name: []const u8,
     host: []const u8,
     path_prefix: []const u8 = "/",
+    rewrite_prefix: ?[]const u8 = null,
     retries: i64 = 0,
     connect_timeout_ms: i64 = 1000,
     request_timeout_ms: i64 = 5000,
@@ -92,7 +97,7 @@ pub const ServiceHttpRouteInput = struct {
 };
 
 const service_columns =
-    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, created_at, updated_at";
+    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, created_at, updated_at";
 
 const ServiceRow = struct {
     service_name: sqlite.Text,
@@ -100,6 +105,7 @@ const ServiceRow = struct {
     lb_policy: sqlite.Text,
     http_proxy_host: ?sqlite.Text,
     http_proxy_path_prefix: ?sqlite.Text,
+    http_proxy_rewrite_prefix: ?sqlite.Text,
     http_proxy_retries: ?i64,
     http_proxy_connect_timeout_ms: ?i64,
     http_proxy_request_timeout_ms: ?i64,
@@ -110,13 +116,14 @@ const ServiceRow = struct {
 };
 
 const service_http_route_columns =
-    "service_name, route_name, host, path_prefix, retries, connect_timeout_ms, request_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at";
+    "service_name, route_name, host, path_prefix, rewrite_prefix, retries, connect_timeout_ms, request_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at";
 
 const ServiceHttpRouteRow = struct {
     service_name: sqlite.Text,
     route_name: sqlite.Text,
     host: sqlite.Text,
     path_prefix: sqlite.Text,
+    rewrite_prefix: ?sqlite.Text,
     retries: i64,
     connect_timeout_ms: i64,
     request_timeout_ms: i64,
@@ -194,6 +201,7 @@ fn rowToServiceRecord(row: ServiceRow, http_routes: []const ServiceHttpRouteReco
         .http_routes = http_routes,
         .http_proxy_host = if (row.http_proxy_host) |host| host.data else null,
         .http_proxy_path_prefix = if (row.http_proxy_path_prefix) |path_prefix| path_prefix.data else null,
+        .http_proxy_rewrite_prefix = if (row.http_proxy_rewrite_prefix) |rewrite_prefix| rewrite_prefix.data else null,
         .http_proxy_retries = row.http_proxy_retries,
         .http_proxy_connect_timeout_ms = row.http_proxy_connect_timeout_ms,
         .http_proxy_request_timeout_ms = row.http_proxy_request_timeout_ms,
@@ -210,6 +218,7 @@ fn rowToServiceHttpRouteRecord(row: ServiceHttpRouteRow) ServiceHttpRouteRecord 
         .route_name = row.route_name.data,
         .host = row.host.data,
         .path_prefix = row.path_prefix.data,
+        .rewrite_prefix = if (row.rewrite_prefix) |rewrite_prefix| rewrite_prefix.data else null,
         .retries = row.retries,
         .connect_timeout_ms = row.connect_timeout_ms,
         .request_timeout_ms = row.request_timeout_ms,
@@ -246,11 +255,12 @@ fn syncDerivedServiceProxyFields(
 ) StoreError!void {
     const primary = if (routes.len > 0) routes[0] else null;
     db.exec(
-        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
+        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_rewrite_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
         .{},
         .{
             if (primary) |route| route.host else null,
             if (primary) |route| route.path_prefix else null,
+            if (primary) |route| route.rewrite_prefix else null,
             if (primary) |route| route.retries else null,
             if (primary) |route| route.connect_timeout_ms else null,
             if (primary) |route| route.request_timeout_ms else null,
@@ -276,13 +286,14 @@ fn replaceServiceHttpRoutes(
 
     for (routes, 0..) |route, idx| {
         db.exec(
-            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             .{},
             .{
                 service_name,
                 route.route_name,
                 route.host,
                 route.path_prefix,
+                route.rewrite_prefix,
                 route.retries,
                 route.connect_timeout_ms,
                 route.request_timeout_ms,
@@ -327,7 +338,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
     var committed = false;
     errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
     db.exec(
-        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.service_name,
@@ -335,6 +346,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
             record.lb_policy,
             record.http_proxy_host,
             record.http_proxy_path_prefix,
+            record.http_proxy_rewrite_prefix,
             record.http_proxy_retries,
             record.http_proxy_connect_timeout_ms,
             record.http_proxy_request_timeout_ms,
@@ -352,6 +364,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
                 .route_name = route.route_name,
                 .host = route.host,
                 .path_prefix = route.path_prefix,
+                .rewrite_prefix = route.rewrite_prefix,
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
@@ -420,6 +433,7 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
         .http_routes = alloc.alloc(ServiceHttpRouteRecord, 0) catch return StoreError.ReadFailed,
         .http_proxy_host = null,
         .http_proxy_path_prefix = null,
+        .http_proxy_rewrite_prefix = null,
         .http_proxy_retries = null,
         .http_proxy_connect_timeout_ms = null,
         .http_proxy_request_timeout_ms = null,

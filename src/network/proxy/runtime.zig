@@ -72,6 +72,7 @@ pub const RouteSnapshot = struct {
     vip_address: []const u8,
     host: []const u8,
     path_prefix: []const u8,
+    rewrite_prefix: ?[]const u8 = null,
     eligible_endpoints: u32,
     healthy_endpoints: u32,
     degraded: bool,
@@ -96,6 +97,7 @@ pub const RouteSnapshot = struct {
         alloc.free(self.vip_address);
         alloc.free(self.host);
         alloc.free(self.path_prefix);
+        if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
     }
 };
 
@@ -390,6 +392,7 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
             alloc.free(route.vip_address);
             if (route.match.host) |host| alloc.free(host);
             alloc.free(route.match.path_prefix);
+            if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         }
         routes_snapshot.deinit(alloc);
     }
@@ -403,6 +406,7 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
                 .host = if (route.match.host) |host| try alloc.dupe(u8, host) else null,
                 .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
             },
+            .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
             .eligible_endpoints = route.eligible_endpoints,
             .healthy_endpoints = route.healthy_endpoints,
             .degraded = route.degraded,
@@ -542,6 +546,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .vip_address = try alloc.dupe(u8, route.vip_address),
         .host = try alloc.dupe(u8, route.match.host orelse ""),
         .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
+        .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
         .eligible_endpoints = route.eligible_endpoints,
         .healthy_endpoints = route.healthy_endpoints,
         .degraded = degraded_reason != .none,
@@ -596,6 +601,7 @@ fn syncLocked() !void {
                     .host = try std.heap.page_allocator.dupe(u8, service_route.host),
                     .path_prefix = try std.heap.page_allocator.dupe(u8, service_route.path_prefix),
                 },
+                .rewrite_prefix = if (service_route.rewrite_prefix) |rewrite_prefix| try std.heap.page_allocator.dupe(u8, rewrite_prefix) else null,
                 .eligible_endpoints = @intCast(service.eligible_endpoints),
                 .healthy_endpoints = @intCast(service.healthy_endpoints),
                 .degraded = service.degraded,
@@ -610,6 +616,7 @@ fn syncLocked() !void {
                 std.heap.page_allocator.free(route.vip_address);
                 if (route.match.host) |owned_host| std.heap.page_allocator.free(owned_host);
                 std.heap.page_allocator.free(route.match.path_prefix);
+                if (route.rewrite_prefix) |rewrite_prefix| std.heap.page_allocator.free(rewrite_prefix);
             }
             try materialized_routes.append(std.heap.page_allocator, route);
         }
@@ -629,6 +636,7 @@ fn deinitRoutesLocked() void {
         std.heap.page_allocator.free(route.vip_address);
         if (route.match.host) |host| std.heap.page_allocator.free(host);
         std.heap.page_allocator.free(route.match.path_prefix);
+        if (route.rewrite_prefix) |rewrite_prefix| std.heap.page_allocator.free(rewrite_prefix);
     }
     materialized_routes.clearAndFree(std.heap.page_allocator);
 }

@@ -203,6 +203,14 @@ pub fn parseHttpProxyRoute(
         return common.LoadError.InvalidHttpProxyConfig;
     }
 
+    const rewrite_prefix = proxy_table.getString("rewrite_prefix");
+    if (rewrite_prefix) |value| {
+        if (value.len == 0 or value[0] != '/') {
+            log.err("manifest: service '{s}' {s} route '{s}' rewrite_prefix must start with '/'", .{ service_name, field_name, route_name });
+            return common.LoadError.InvalidHttpProxyConfig;
+        }
+    }
+
     const retries_raw = proxy_table.getInt("retries") orelse 0;
     if (retries_raw < 0 or retries_raw > 5) {
         log.err("manifest: service '{s}' {s} route '{s}' retries must be between 0 and 5", .{ service_name, field_name, route_name });
@@ -237,6 +245,7 @@ pub fn parseHttpProxyRoute(
         .name = alloc.dupe(u8, route_name) catch return common.LoadError.OutOfMemory,
         .host = alloc.dupe(u8, host) catch return common.LoadError.OutOfMemory,
         .path_prefix = alloc.dupe(u8, path_prefix) catch return common.LoadError.OutOfMemory,
+        .rewrite_prefix = if (rewrite_prefix) |value| alloc.dupe(u8, value) catch return common.LoadError.OutOfMemory else null,
         .retries = @intCast(retries_raw),
         .connect_timeout_ms = @intCast(connect_timeout_raw),
         .request_timeout_ms = @intCast(request_timeout_raw),

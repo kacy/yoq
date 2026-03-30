@@ -199,6 +199,10 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
         try json_helpers.writeJsonEscaped(writer, host);
         try writer.writeAll("\",\"path_prefix\":\"");
         try json_helpers.writeJsonEscaped(writer, service.http_proxy_path_prefix orelse "/");
+        if (service.http_proxy_rewrite_prefix) |rewrite_prefix| {
+            try writer.writeAll("\",\"rewrite_prefix\":\"");
+            try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
+        }
         try writer.print(
             "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
             .{
@@ -220,6 +224,10 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
         try json_helpers.writeJsonEscaped(writer, http_route.host);
         try writer.writeAll("\",\"path_prefix\":\"");
         try json_helpers.writeJsonEscaped(writer, http_route.path_prefix);
+        if (http_route.rewrite_prefix) |rewrite_prefix| {
+            try writer.writeAll("\",\"rewrite_prefix\":\"");
+            try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
+        }
         try writer.print(
             "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
             .{
@@ -328,6 +336,10 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     try json_helpers.writeJsonEscaped(writer, proxy_route.host);
     try writer.writeAll("\",\"path_prefix\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.path_prefix);
+    if (proxy_route.rewrite_prefix) |rewrite_prefix| {
+        try writer.writeAll("\",\"rewrite_prefix\":\"");
+        try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
+    }
     try writer.print(
         "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
         .{

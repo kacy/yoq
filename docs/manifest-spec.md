@@ -119,6 +119,7 @@ the upstream target is the first service port in `ports`. `http_proxy` is just s
 |-------|------|----------|---------|-------------|
 | `host` | string | yes | — | hostname to match |
 | `path_prefix` | string | no | `"/"` | path prefix to match |
+| `rewrite_prefix` | string | no | none | replace the matched prefix before forwarding upstream |
 | `retries` | integer | no | `0` | upstream retries for failed requests |
 | `connect_timeout_ms` | integer | no | `1000` | upstream connect timeout in milliseconds |
 | `request_timeout_ms` | integer | no | `5000` | upstream request timeout in milliseconds |
@@ -140,6 +141,7 @@ ports = ["8081:8080"]
 [service.api.http_proxy]
 host = "demo.local"
 path_prefix = "/api"
+rewrite_prefix = "/"
 preserve_host = false
 retries = 2
 connect_timeout_ms = 1500

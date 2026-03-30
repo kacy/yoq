@@ -72,6 +72,7 @@ pub const ServiceDefinition = struct {
     http_routes: []const HttpRouteDefinition = &.{},
     http_proxy_host: ?[]const u8 = null,
     http_proxy_path_prefix: ?[]const u8 = null,
+    http_proxy_rewrite_prefix: ?[]const u8 = null,
     http_proxy_retries: ?u8 = null,
     http_proxy_connect_timeout_ms: ?u32 = null,
     http_proxy_request_timeout_ms: ?u32 = null,
@@ -83,6 +84,7 @@ pub const HttpRouteDefinition = struct {
     route_name: []const u8,
     host: []const u8,
     path_prefix: []const u8 = "/",
+    rewrite_prefix: ?[]const u8 = null,
     retries: u8 = 0,
     connect_timeout_ms: u32 = 1000,
     request_timeout_ms: u32 = 5000,
@@ -135,6 +137,7 @@ pub const ServiceSnapshot = struct {
     http_routes: []const HttpRouteSnapshot,
     http_proxy_host: ?[]const u8,
     http_proxy_path_prefix: ?[]const u8,
+    http_proxy_rewrite_prefix: ?[]const u8,
     http_proxy_retries: ?u8,
     http_proxy_connect_timeout_ms: ?u32,
     http_proxy_request_timeout_ms: ?u32,
@@ -158,6 +161,7 @@ pub const ServiceSnapshot = struct {
         alloc.free(self.http_routes);
         if (self.http_proxy_host) |host| alloc.free(host);
         if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
+        if (self.http_proxy_rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         alloc.free(self.last_reconcile_status);
         if (self.last_reconcile_error) |message| alloc.free(message);
     }
@@ -167,6 +171,7 @@ pub const HttpRouteSnapshot = struct {
     route_name: []const u8,
     host: []const u8,
     path_prefix: []const u8,
+    rewrite_prefix: ?[]const u8,
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
@@ -177,6 +182,7 @@ pub const HttpRouteSnapshot = struct {
         alloc.free(self.route_name);
         alloc.free(self.host);
         alloc.free(self.path_prefix);
+        if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
     }
 };
 
@@ -211,6 +217,7 @@ const ServiceState = struct {
     http_routes: std.ArrayList(HttpRouteState) = .empty,
     http_proxy_host: ?[]const u8 = null,
     http_proxy_path_prefix: ?[]const u8 = null,
+    http_proxy_rewrite_prefix: ?[]const u8 = null,
     http_proxy_retries: ?u8 = null,
     http_proxy_connect_timeout_ms: ?u32 = null,
     http_proxy_request_timeout_ms: ?u32 = null,
@@ -230,6 +237,7 @@ const ServiceState = struct {
         self.http_routes.deinit(alloc);
         if (self.http_proxy_host) |host| alloc.free(host);
         if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
+        if (self.http_proxy_rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         if (self.last_reconcile_error) |message| alloc.free(message);
         for (self.endpoints.items) |endpoint| endpoint.deinit(alloc);
         self.endpoints.deinit(alloc);
@@ -240,6 +248,7 @@ const HttpRouteState = struct {
     route_name: []const u8,
     host: []const u8,
     path_prefix: []const u8,
+    rewrite_prefix: ?[]const u8,
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
@@ -250,6 +259,7 @@ const HttpRouteState = struct {
         alloc.free(self.route_name);
         alloc.free(self.host);
         alloc.free(self.path_prefix);
+        if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
     }
 };
 
@@ -566,6 +576,7 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .http_routes = routes,
         .http_proxy_host = if (service.http_proxy_host) |host| try alloc.dupe(u8, host) else null,
         .http_proxy_path_prefix = if (service.http_proxy_path_prefix) |path_prefix| try alloc.dupe(u8, path_prefix) else null,
+        .http_proxy_rewrite_prefix = if (service.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
         .http_proxy_retries = service.http_proxy_retries,
         .http_proxy_connect_timeout_ms = service.http_proxy_connect_timeout_ms,
         .http_proxy_request_timeout_ms = service.http_proxy_request_timeout_ms,
@@ -596,6 +607,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
                 .route_name = try alloc.dupe(u8, route.route_name),
                 .host = try alloc.dupe(u8, route.host),
                 .path_prefix = try alloc.dupe(u8, route.path_prefix),
+                .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
@@ -611,6 +623,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
             .route_name = try alloc.dupe(u8, "default"),
             .host = try alloc.dupe(u8, host),
             .path_prefix = try alloc.dupe(u8, definition.http_proxy_path_prefix orelse "/"),
+            .rewrite_prefix = if (definition.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
             .retries = definition.http_proxy_retries orelse 0,
             .connect_timeout_ms = definition.http_proxy_connect_timeout_ms orelse 1000,
             .request_timeout_ms = definition.http_proxy_request_timeout_ms orelse 5000,
@@ -640,6 +653,7 @@ fn cloneRouteSnapshots(alloc: Allocator, routes: []const HttpRouteState) Error![
             .route_name = try alloc.dupe(u8, route.route_name),
             .host = try alloc.dupe(u8, route.host),
             .path_prefix = try alloc.dupe(u8, route.path_prefix),
+            .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
             .retries = route.retries,
             .connect_timeout_ms = route.connect_timeout_ms,
             .request_timeout_ms = route.request_timeout_ms,
@@ -656,6 +670,7 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
         const primary = service.http_routes.items[0];
         try replaceOptionalOwned(alloc, &service.http_proxy_host, primary.host);
         try replaceOptionalOwned(alloc, &service.http_proxy_path_prefix, primary.path_prefix);
+        try replaceOptionalOwned(alloc, &service.http_proxy_rewrite_prefix, primary.rewrite_prefix);
         service.http_proxy_retries = primary.retries;
         service.http_proxy_connect_timeout_ms = primary.connect_timeout_ms;
         service.http_proxy_request_timeout_ms = primary.request_timeout_ms;
@@ -666,6 +681,7 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
 
     try replaceOptionalOwned(alloc, &service.http_proxy_host, definition.http_proxy_host);
     try replaceOptionalOwned(alloc, &service.http_proxy_path_prefix, definition.http_proxy_path_prefix);
+    try replaceOptionalOwned(alloc, &service.http_proxy_rewrite_prefix, definition.http_proxy_rewrite_prefix);
     service.http_proxy_retries = definition.http_proxy_retries;
     service.http_proxy_connect_timeout_ms = definition.http_proxy_connect_timeout_ms;
     service.http_proxy_request_timeout_ms = definition.http_proxy_request_timeout_ms;

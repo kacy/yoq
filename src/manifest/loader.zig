@@ -1361,6 +1361,7 @@ test "http proxy config — host and path prefix" {
     try std.testing.expectEqualStrings("default", proxy.name);
     try std.testing.expectEqualStrings("api.internal", proxy.host);
     try std.testing.expectEqualStrings("/v1", proxy.path_prefix);
+    try std.testing.expectEqual(@as(?[]const u8, null), proxy.rewrite_prefix);
     try std.testing.expectEqual(@as(u8, 2), proxy.retries);
     try std.testing.expectEqual(@as(u32, 1500), proxy.connect_timeout_ms);
     try std.testing.expectEqual(@as(u32, 9000), proxy.request_timeout_ms);
@@ -1437,6 +1438,39 @@ test "http routes config — parses named routes" {
     try std.testing.expectEqualStrings("/v1", manifest.services[0].http_routes[0].path_prefix);
     try std.testing.expectEqualStrings("admin", manifest.services[0].http_routes[1].name);
     try std.testing.expect(!manifest.services[0].http_routes[1].preserve_host);
+}
+
+test "http proxy config — rewrite prefix" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_proxy]
+        \\host = "api.internal"
+        \\path_prefix = "/api"
+        \\rewrite_prefix = "/"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.services[0].http_routes.len);
+    try std.testing.expectEqualStrings("/api", manifest.services[0].http_routes[0].path_prefix);
+    try std.testing.expectEqualStrings("/", manifest.services[0].http_routes[0].rewrite_prefix.?);
+}
+
+test "http proxy config — invalid rewrite prefix returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_proxy]
+        \\host = "api.internal"
+        \\path_prefix = "/api"
+        \\rewrite_prefix = "internal"
+    ));
 }
 
 test "http routes config — mixed shorthand and route tables returns error" {
