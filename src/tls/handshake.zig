@@ -158,11 +158,22 @@ test "buildServerHello produces valid structure" {
     try std.testing.expectEqual(len - 4, body_len);
 }
 
-test "buildEncryptedExtensions" {
+test "buildEncryptedExtensions without ALPN" {
     var buf: [16]u8 = undefined;
-    const len = try buildEncryptedExtensions(&buf);
+    const len = try buildEncryptedExtensions(&buf, null);
     try std.testing.expectEqual(@as(usize, 6), len);
     try std.testing.expectEqual(@as(u8, 0x08), buf[0]);
+}
+
+test "buildEncryptedExtensions with ALPN" {
+    var buf: [32]u8 = undefined;
+    const len = try buildEncryptedExtensions(&buf, "h2");
+    try std.testing.expectEqual(@as(usize, 15), len);
+    try std.testing.expectEqual(@as(u8, 0x08), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x00), buf[6]);
+    try std.testing.expectEqual(@as(u8, 0x10), buf[7]);
+    try std.testing.expectEqual(@as(u8, 0x02), buf[12]);
+    try std.testing.expectEqualStrings("h2", buf[13..15]);
 }
 
 test "buildFinished size" {
@@ -223,12 +234,29 @@ test "parseClientHelloFields with X25519 and TLS 1.3" {
     @memset(msg[pos .. pos + 32], 0xBB);
     pos += 32;
 
+    writeU16(msg[pos..], 0x0010);
+    pos += 2;
+    writeU16(msg[pos..], 14);
+    pos += 2;
+    writeU16(msg[pos..], 12);
+    pos += 2;
+    msg[pos] = 2;
+    pos += 1;
+    @memcpy(msg[pos .. pos + 2], "h2");
+    pos += 2;
+    msg[pos] = 8;
+    pos += 1;
+    @memcpy(msg[pos .. pos + 8], "http/1.1");
+    pos += 8;
+
     writeU16(msg[ext_start..], @intCast(pos - ext_start - 2));
 
     const info = try parseClientHelloFields(msg[0..pos]);
     try std.testing.expect(info.has_aes_256_gcm);
     try std.testing.expect(info.supported_versions_has_tls13);
     try std.testing.expect(info.x25519_key_share != null);
+    try std.testing.expect(info.offers_h2_alpn);
+    try std.testing.expect(info.offers_http11_alpn);
 
     const expected_random = [_]u8{0xAA} ** 32;
     try std.testing.expectEqualSlices(u8, &expected_random, &info.client_random);

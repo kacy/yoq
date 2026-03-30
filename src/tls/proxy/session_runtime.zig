@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const http2_request = @import("../../network/proxy/http2_request.zig");
 const backend_mod = @import("../backend.zig");
 const handshake = @import("../handshake.zig");
 const pem = @import("../pem.zig");
@@ -29,6 +30,12 @@ pub fn handleTlsSession(
     if (!hello_info.has_aes_256_gcm) return error.UnsupportedCipher;
     if (!hello_info.supported_versions_has_tls13) return error.UnsupportedVersion;
     const client_x25519_key = hello_info.x25519_key_share orelse return error.MissingKeyShare;
+    const selected_alpn: ?[]const u8 = if (hello_info.offers_h2_alpn)
+        "h2"
+    else if (hello_info.offers_http11_alpn)
+        "http/1.1"
+    else
+        null;
 
     const server_kp = X25519.KeyPair.generate();
     const shared_secret = X25519.scalarmult(server_kp.secret_key, client_x25519_key) catch
@@ -73,7 +80,7 @@ pub fn handleTlsSession(
     var server_seq: u64 = 0;
 
     var ee_buf: [64]u8 = undefined;
-    const ee_len = handshake.buildEncryptedExtensions(&ee_buf) catch return error.HandshakeFailed;
+    const ee_len = handshake.buildEncryptedExtensions(&ee_buf, selected_alpn) catch return error.HandshakeFailed;
     transcript.update(ee_buf[0..ee_len]);
     try sendEncryptedHandshake(client_fd, ee_buf[0..ee_len], server_hs_traffic, &server_seq);
 
@@ -161,6 +168,9 @@ pub fn handleTlsSession(
 
     var client_app_seq: u64 = 0;
     var server_app_seq: u64 = 0;
+    var initial_plaintext: std.ArrayList(u8) = .empty;
+    defer initial_plaintext.deinit(std.heap.page_allocator);
+    var initial_request_forwarded = false;
 
     var poll_fds = [_]posix.pollfd{
         .{ .fd = client_fd, .events = posix.POLL.IN, .revents = 0 },
@@ -197,7 +207,20 @@ pub fn handleTlsSession(
             if (decrypted.content_type == .alert) break;
 
             if (decrypted.plaintext.len > 0) {
-                _ = posix.write(backend_fd, decrypted.plaintext) catch break;
+                if (!initial_request_forwarded) {
+                    initial_plaintext.appendSlice(std.heap.page_allocator, decrypted.plaintext) catch break;
+                    const first_request = prepareInitialRequest(std.heap.page_allocator, selected_alpn, initial_plaintext.items) catch |err| switch (err) {
+                        error.BufferTooShort, error.MissingHeaders, error.IncompleteRequest, error.MissingClientPreface => null,
+                        else => break,
+                    };
+                    if (first_request) |request| {
+                        defer std.heap.page_allocator.free(request);
+                        _ = posix.write(backend_fd, request) catch break;
+                        initial_request_forwarded = true;
+                    }
+                } else {
+                    _ = posix.write(backend_fd, decrypted.plaintext) catch break;
+                }
             }
         }
 
@@ -225,6 +248,40 @@ pub fn handleTlsSession(
     }
 
     sendEncryptedCloseNotify(client_fd, app_keys.server, &server_app_seq);
+}
+
+const InitialRequestError = error{IncompleteRequest} || http2_request.ParseError;
+
+fn prepareInitialRequest(alloc: std.mem.Allocator, selected_alpn: ?[]const u8, plaintext: []const u8) InitialRequestError!?[]u8 {
+    if (selected_alpn != null and std.mem.eql(u8, selected_alpn.?, "h2")) {
+        return try http2_request.rewriteClientConnectionPreface(alloc, plaintext, null, null, "https");
+    }
+
+    if (std.mem.indexOf(u8, plaintext, "\r\n\r\n") == null) return error.IncompleteRequest;
+    return try injectForwardedProtoHttp1(alloc, plaintext, "https");
+}
+
+fn injectForwardedProtoHttp1(alloc: std.mem.Allocator, request: []const u8, proto: []const u8) ![]u8 {
+    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return error.IncompleteRequest;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var line_start: usize = 0;
+    while (line_start < header_end) {
+        const line_end = std.mem.indexOfPos(u8, request, line_start, "\r\n") orelse header_end;
+        const line = request[line_start..line_end];
+        if (line.len > 0 and !std.ascii.startsWithIgnoreCase(line, "X-Forwarded-Proto:")) {
+            try out.appendSlice(alloc, line);
+            try out.appendSlice(alloc, "\r\n");
+        }
+        line_start = if (line_end + 2 <= header_end) line_end + 2 else header_end;
+    }
+
+    try out.appendSlice(alloc, "X-Forwarded-Proto: ");
+    try out.appendSlice(alloc, proto);
+    try out.appendSlice(alloc, "\r\n\r\n");
+    try out.appendSlice(alloc, request[header_end + 4 ..]);
+    return out.toOwnedSlice(alloc);
 }
 
 pub fn sendEncryptedHandshake(fd: posix.fd_t, msg: []const u8, keys: handshake.TrafficKeys, seq: *u64) !void {
@@ -262,4 +319,17 @@ pub fn sendEncryptedCloseNotify(fd: posix.fd_t, keys: handshake.TrafficKeys, seq
     @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
     _ = posix.write(fd, out[0 .. 5 + ct_len]) catch {};
     seq.* += 1;
+}
+
+test "injectForwardedProtoHttp1 rewrites the first request headers" {
+    const request =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: demo.local\r\n" ++
+        "X-Forwarded-Proto: http\r\n" ++
+        "\r\n";
+    const rewritten = try injectForwardedProtoHttp1(std.testing.allocator, request, "https");
+    defer std.testing.allocator.free(rewritten);
+
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "X-Forwarded-Proto: https\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "X-Forwarded-Proto: http\r\n") == null);
 }

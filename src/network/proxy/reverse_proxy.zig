@@ -19,6 +19,7 @@ const x_forwarded_host_header = "X-Forwarded-Host";
 const x_forwarded_proto_header = "X-Forwarded-Proto";
 const traceparent_header = "traceparent";
 const tracestate_header = "tracestate";
+const trusted_forwarded_proto_ip: [4]u8 = .{ 127, 0, 0, 1 };
 
 const Protocol = enum {
     http1,
@@ -251,6 +252,7 @@ pub const ReverseProxy = struct {
         const prior_forwarded_for = http.findHeaderValue(parsed.headers_raw, x_forwarded_for_header);
         const inbound_traceparent = http.findHeaderValue(parsed.headers_raw, traceparent_header);
         const inbound_tracestate = http.findHeaderValue(parsed.headers_raw, tracestate_header);
+        const forwarded_proto = trustedForwardedProto(parsed.headers_raw, client_ip) orelse "http";
 
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(self.allocator);
@@ -293,7 +295,7 @@ pub const ReverseProxy = struct {
             try writer.writeAll("\r\n");
         }
         try writer.print("{s}: {s}\r\n", .{ x_forwarded_host_header, inbound_host });
-        try writer.print("{s}: http\r\n", .{x_forwarded_proto_header});
+        try writer.print("{s}: {s}\r\n", .{ x_forwarded_proto_header, forwarded_proto });
         if (inbound_traceparent) |value| {
             if (isValidTraceparent(value)) {
                 try writer.print("{s}: {s}\r\n", .{ traceparent_header, value });
@@ -444,6 +446,7 @@ pub const ReverseProxy = struct {
                 raw_request,
                 if (std.mem.eql(u8, plan.outbound_host, plan.host)) null else plan.outbound_host,
                 if (std.mem.eql(u8, plan.outbound_path, plan.path)) null else plan.outbound_path,
+                trustedForwardedProtoFromRawRequest(raw_request, client_ip),
             ),
         };
         defer self.allocator.free(request);
@@ -459,6 +462,23 @@ fn peerIpFromSocket(fd: posix.socket_t) ?[4]u8 {
     posix.getpeername(fd, @ptrCast(&peer_addr), &peer_len) catch return null;
     const address = std.mem.toBytes(peer_addr.addr);
     return .{ address[0], address[1], address[2], address[3] };
+}
+
+fn trustedForwardedProto(headers_raw: []const u8, client_ip: ?[4]u8) ?[]const u8 {
+    if (client_ip == null or !std.mem.eql(u8, &client_ip.?, &trusted_forwarded_proto_ip)) return null;
+    return http.findHeaderValue(headers_raw, x_forwarded_proto_header);
+}
+
+fn trustedForwardedProtoFromRawRequest(raw_request: []const u8, client_ip: ?[4]u8) ?[]const u8 {
+    if (client_ip == null or !std.mem.eql(u8, &client_ip.?, &trusted_forwarded_proto_ip)) return null;
+    if (!http2.startsWithClientPreface(raw_request)) return null;
+
+    var parsed = http2_request.parseClientConnectionPreface(std.heap.page_allocator, raw_request) catch return null;
+    defer parsed.deinit(std.heap.page_allocator);
+    for (parsed.headers) |header| {
+        if (std.mem.eql(u8, header.name, "x-forwarded-proto")) return "https";
+    }
+    return null;
 }
 
 fn writeIp4(writer: anytype, address: [4]u8) !void {

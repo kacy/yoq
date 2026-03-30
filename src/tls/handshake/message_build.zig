@@ -64,14 +64,30 @@ pub fn buildServerHello(
     return pos;
 }
 
-pub fn buildEncryptedExtensions(buf: []u8) common.HandshakeError!usize {
-    if (buf.len < 6) return common.HandshakeError.BufferTooSmall;
+pub fn buildEncryptedExtensions(buf: []u8, selected_alpn: ?[]const u8) common.HandshakeError!usize {
+    const extensions_len: usize = if (selected_alpn) |protocol| 7 + protocol.len else 0;
+    const body_len: usize = 2 + extensions_len;
+    if (buf.len < 4 + body_len) return common.HandshakeError.BufferTooSmall;
 
     buf[0] = 0x08;
-    common.writeU24(buf[1..], 2);
-    common.writeU16(buf[4..], 0);
+    common.writeU24(buf[1..], @intCast(body_len));
+    common.writeU16(buf[4..], @intCast(extensions_len));
 
-    return 6;
+    var pos: usize = 6;
+    if (selected_alpn) |protocol| {
+        common.writeU16(buf[pos..], 0x0010);
+        pos += 2;
+        common.writeU16(buf[pos..], @intCast(3 + protocol.len));
+        pos += 2;
+        common.writeU16(buf[pos..], @intCast(1 + protocol.len));
+        pos += 2;
+        buf[pos] = @intCast(protocol.len);
+        pos += 1;
+        @memcpy(buf[pos .. pos + protocol.len], protocol);
+        pos += protocol.len;
+    }
+
+    return pos;
 }
 
 pub fn buildCertificate(buf: []u8, cert_der: []const u8) common.HandshakeError!usize {

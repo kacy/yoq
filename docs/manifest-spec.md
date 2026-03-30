@@ -202,7 +202,7 @@ for weighted routes, the JSON status payload includes `l7_proxy.sample_route_tra
 
 current HTTP/2 and gRPC routing limits:
 
-- the routing listener accepts prior-knowledge HTTP/2 (`h2c`) only; it does not terminate TLS/ALPN HTTP/2 sessions
+- the routing listener itself still accepts prior-knowledge HTTP/2 (`h2c`) only; TLS/ALPN HTTP/2 routing works through the TLS terminator when the routed host matches `service.<name>.tls.domain`
 - one accepted client connection is pinned to the first matched routed service, so additional streams on that connection must target the same service
 - `request_timeout_ms` applies to HTTP/2 connection inactivity as well as unary request handling
 
@@ -247,7 +247,7 @@ port = 5432
 
 requires `port`. a successful HTTP/2 preface exchange with the target port means healthy.
 
-when a service also uses `http_proxy` or `http_routes`, yoq forwards prior-knowledge HTTP/2 (h2c) traffic end to end for that routed service. this supports unary and streaming gRPC traffic on a single routed connection, subject to the HTTP/2 routing limits above.
+when a service also uses `http_proxy` or `http_routes`, yoq forwards prior-knowledge HTTP/2 (h2c) traffic end to end for that routed service. if the same host is also declared under `[service.<name>.tls]`, the TLS proxy can terminate HTTPS, negotiate ALPN `h2`, and forward the decrypted traffic into that routed service. this supports unary and streaming gRPC traffic on a single routed connection, subject to the HTTP/2 routing limits above.
 
 ```toml
 [service.api.health_check]
