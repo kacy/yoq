@@ -43,17 +43,13 @@ curl -H 'Host: demo.local' http://127.0.0.1:17080/api/get
 
 ## cluster
 
-a multi-node deployment with postgres, API server, and nginx with automatic TLS. demonstrates service discovery across nodes, environment variable expansion, and a database backup cron.
+a multi-node deployment with postgres, API server, nginx with automatic TLS, and a database backup cron. this example now matches the canonical cluster workflow: bootstrap with `init-server`, join agents, then deploy with `yoq up --server`.
 
 ```bash
-# start the server node
-yoq serve --port 7700
-
-# join worker nodes
-yoq join <server-ip>:7700 --token <api-token>
-
-# deploy
-yoq up -f examples/cluster/manifest.toml
+TOKEN=$(openssl rand -hex 32)
+yoq init-server --id 1 --port 9700 --api-port 7700 --token "$TOKEN"
+yoq join 10.0.0.1:7700 --token "$TOKEN"
+yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
 ```
 
 see [examples/cluster/README.md](cluster/README.md) for full setup instructions.
