@@ -1,6 +1,7 @@
 const std = @import("std");
 const cli = @import("../lib/cli.zig");
 const common = @import("cli/common.zig");
+const acme_command = @import("cli/acme_command.zig");
 const install_command = @import("cli/install_command.zig");
 const list_command = @import("cli/list_command.zig");
 const remove_command = @import("cli/remove_command.zig");
@@ -28,7 +29,7 @@ pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
             \\commands:
             \\  install <domain> --cert <path> --key <path>   store a certificate
             \\  provision <domain> --email <email> [--staging] obtain via ACME
-            \\  renew <domain>                                 renew via ACME
+            \\  renew <domain> --email <email> [--staging]     renew via ACME
             \\  list                                           list certificates
             \\  rm <domain>                                    remove a certificate
             \\
@@ -60,15 +61,9 @@ pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 }
 
 fn cmdCertProvision(args: *std.process.ArgIterator, alloc: std.mem.Allocator) TlsCommandsError!void {
-    _ = args;
-    _ = alloc;
-    writeErr("acme provisioning is not yet production-safe; use 'yoq cert install' for now\n", .{});
-    return TlsCommandsError.NotSupported;
+    return acme_command.provision(args, alloc);
 }
 
 fn cmdCertRenew(args: *std.process.ArgIterator, alloc: std.mem.Allocator) TlsCommandsError!void {
-    _ = args;
-    _ = alloc;
-    writeErr("acme renewal is not yet production-safe; renew manually with 'yoq cert install'\n", .{});
-    return TlsCommandsError.NotSupported;
+    return acme_command.renew(args, alloc);
 }

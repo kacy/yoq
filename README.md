@@ -63,6 +63,12 @@ current gRPC routing limits:
 - policy controls between services
 - status and resource reporting
 
+current ACME/TLS limits:
+
+- HTTP-01 challenge validation only
+- port 80 on the target host must be reachable during provision and renewal
+- the standalone CLI flow currently requires `--email` for both `yoq cert provision` and `yoq cert renew`
+
 ### GPU & training
 
 - GPU detection and passthrough into containers
@@ -205,8 +211,10 @@ yoq secret get <name>                read a secret
 yoq secret rm <name>                 delete a secret
 yoq secret list                      list secrets
 yoq secret rotate <name>             rotate a secret
-yoq cert provision <domain>          provision a TLS certificate
-yoq cert renew <domain>              renew a certificate
+yoq cert provision <domain> --email <email> [--staging]
+                                     provision a TLS certificate via ACME
+yoq cert renew <domain> --email <email> [--staging]
+                                     renew a TLS certificate via ACME
 yoq cert install <domain> --cert <path> --key <path>
 yoq cert list                        list certificates
 yoq cert rm <domain>                 remove a certificate

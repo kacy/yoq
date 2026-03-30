@@ -24,11 +24,13 @@ const std = @import("std");
 const http = std.http;
 
 const client_runtime = @import("acme/client_runtime.zig");
+const issuance_runtime = @import("acme/issuance_runtime.zig");
 const json_support = @import("acme/json_support.zig");
 const types = @import("acme/types.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const extractJsonString = json_support.extractJsonString;
+const extractJsonStringView = json_support.extractJsonStringView;
 const extractJsonArray = json_support.extractJsonArray;
 const extractHttpChallengeToken = json_support.extractHttpChallengeToken;
 const extractHttpChallengeUrl = json_support.extractHttpChallengeUrl;
@@ -56,6 +58,9 @@ pub const FinalizeResult = types.FinalizeResult;
 /// result of finalizing and exporting an ACME order as PEM.
 /// both cert and key are PEM-encoded strings ready for storage.
 pub const ExportResult = types.ExportResult;
+
+pub const ChallengeRegistrar = types.ChallengeRegistrar;
+pub const IssuanceOptions = types.IssuanceOptions;
 
 pub const AcmeClient = struct {
     allocator: std.mem.Allocator,
@@ -109,14 +114,22 @@ pub const AcmeClient = struct {
         return client_runtime.respondToChallenge(self, challenge_url);
     }
 
+    pub fn waitForAuthorizationValid(self: *AcmeClient, auth_url: []const u8) AcmeError!void {
+        return client_runtime.waitForAuthorizationValid(self, auth_url);
+    }
+
+    pub fn waitForOrderReady(self: *AcmeClient, order: *Order) AcmeError!void {
+        return client_runtime.waitForOrderReady(self, order);
+    }
+
     /// finalize the order with a CSR and download the certificate.
     /// returns the PEM certificate chain and DER-encoded private key.
     pub fn finalize(
         self: *AcmeClient,
-        finalize_url: []const u8,
+        order: *Order,
         domain: []const u8,
     ) AcmeError!FinalizeResult {
-        return client_runtime.finalize(self, finalize_url, domain);
+        return client_runtime.finalize(self, order, domain);
     }
 
     /// finalize the order and export as PEM-encoded cert + key.
@@ -125,10 +138,14 @@ pub const AcmeClient = struct {
     /// and auto-renewal — all need PEM output for the cert store.
     pub fn finalizeAndExport(
         self: *AcmeClient,
-        finalize_url: []const u8,
+        order: *Order,
         domain: []const u8,
     ) AcmeError!ExportResult {
-        return client_runtime.finalizeAndExport(self, finalize_url, domain);
+        return client_runtime.finalizeAndExport(self, order, domain);
+    }
+
+    pub fn issueAndExport(self: *AcmeClient, options: IssuanceOptions) AcmeError!ExportResult {
+        return issuance_runtime.issueAndExport(self, options);
     }
 
     // -- HTTP helpers --
@@ -158,6 +175,11 @@ test "extractJsonString missing key" {
 
     const json = "{\"foo\":\"bar\"}";
     try std.testing.expectError(error.KeyNotFound, extractJsonString(alloc, json, "missing"));
+}
+
+test "extractJsonStringView" {
+    const json = "{\"status\":\"ready\",\"certificate\":\"https://acme.example.com/cert/1\"}";
+    try std.testing.expectEqualStrings("ready", extractJsonStringView(json, "status").?);
 }
 
 test "extractJsonArray" {
@@ -218,6 +240,21 @@ test "Challenge deinit" {
         .allocator = alloc,
     };
     ch.deinit();
+}
+
+test "Order deinit frees order url" {
+    const alloc = std.testing.allocator;
+
+    var order = Order{
+        .order_url = try alloc.dupe(u8, "https://example.com/order/1"),
+        .finalize_url = try alloc.dupe(u8, "https://example.com/order/1/finalize"),
+        .cert_url = try alloc.dupe(u8, "https://example.com/cert/1"),
+        .authorization_urls = try alloc.dupe([]const u8, &[_][]const u8{
+            try alloc.dupe(u8, "https://example.com/auth/1"),
+        }),
+        .allocator = alloc,
+    };
+    order.deinit();
 }
 
 test "AcmeClient init and deinit" {

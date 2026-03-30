@@ -1,14 +1,17 @@
 const std = @import("std");
 
+pub fn extractJsonStringView(json: []const u8, key: []const u8) ?[]const u8 {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;
+
+    const start = (std.mem.indexOf(u8, json, needle) orelse return null) + needle.len;
+    const end = std.mem.indexOfPos(u8, json, start, "\"") orelse return null;
+    return json[start..end];
+}
+
 pub fn extractJsonString(allocator: std.mem.Allocator, json: []const u8, key: []const u8) ![]u8 {
-    const needle = std.fmt.allocPrint(allocator, "\"{s}\":\"", .{key}) catch
-        return error.OutOfMemory;
-    defer allocator.free(needle);
-
-    const start = (std.mem.indexOf(u8, json, needle) orelse return error.KeyNotFound) + needle.len;
-    const end = std.mem.indexOfPos(u8, json, start, "\"") orelse return error.KeyNotFound;
-
-    return allocator.dupe(u8, json[start..end]) catch return error.OutOfMemory;
+    const value = extractJsonStringView(json, key) orelse return error.KeyNotFound;
+    return allocator.dupe(u8, value) catch return error.OutOfMemory;
 }
 
 pub fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {

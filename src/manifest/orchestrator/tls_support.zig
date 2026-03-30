@@ -3,50 +3,26 @@ const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const cert_store_mod = @import("../../tls/cert_store.zig");
 const acme_mod = @import("../../tls/acme.zig");
+const tls_proxy = @import("../../tls/proxy.zig");
 
 const writeErr = cli.writeErr;
 
 pub fn provisionAcmeCert(
     alloc: std.mem.Allocator,
     certs: *cert_store_mod.CertStore,
+    challenges: *tls_proxy.ChallengeStore,
     domain: []const u8,
     email: []const u8,
 ) void {
     var client = acme_mod.AcmeClient.init(alloc, acme_mod.letsencrypt_production);
     defer client.deinit();
 
-    client.fetchDirectory() catch {
-        writeErr("    failed to fetch ACME directory\n", .{});
-        return;
-    };
-
-    client.createAccount(email) catch {
-        writeErr("    failed to create ACME account\n", .{});
-        return;
-    };
-
-    var order = client.createOrder(domain) catch {
-        writeErr("    failed to create certificate order\n", .{});
-        return;
-    };
-    defer order.deinit();
-
-    if (order.authorization_urls.len > 0) {
-        var challenge = client.getHttpChallenge(order.authorization_urls[0]) catch {
-            writeErr("    failed to get HTTP-01 challenge (is DNS configured?)\n", .{});
-            return;
-        };
-        defer challenge.deinit();
-
-        client.respondToChallenge(challenge.url) catch {
-            writeErr("    failed to respond to challenge\n", .{});
-            return;
-        };
-
-        std.Thread.sleep(5 * std.time.ns_per_s);
-    }
-
-    var exported = client.finalizeAndExport(order.finalize_url, domain) catch {
+    var exported = client.issueAndExport(.{
+        .domain = domain,
+        .email = email,
+        .directory_url = acme_mod.letsencrypt_production,
+        .challenge_registrar = challengeRegistrar(challenges),
+    }) catch {
         writeErr("    failed to finalize certificate order\n", .{});
         return;
     };
@@ -58,4 +34,22 @@ pub fn provisionAcmeCert(
     };
 
     writeErr("    provisioned certificate for {s}\n", .{domain});
+}
+
+fn challengeRegistrar(store: *tls_proxy.ChallengeStore) acme_mod.ChallengeRegistrar {
+    return .{
+        .ctx = store,
+        .set_fn = registerChallenge,
+        .remove_fn = removeChallenge,
+    };
+}
+
+fn registerChallenge(ctx: *anyopaque, token: []const u8, key_authorization: []const u8) acme_mod.AcmeError!void {
+    const store: *tls_proxy.ChallengeStore = @ptrCast(@alignCast(ctx));
+    store.set(token, key_authorization) catch return acme_mod.AcmeError.AllocFailed;
+}
+
+fn removeChallenge(ctx: *anyopaque, token: []const u8) void {
+    const store: *tls_proxy.ChallengeStore = @ptrCast(@alignCast(ctx));
+    store.remove(token);
 }

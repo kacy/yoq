@@ -24,7 +24,6 @@ const sni = @import("sni.zig");
 const cert_store = @import("cert_store.zig");
 const backend_mod = @import("backend.zig");
 const acme_mod = @import("acme.zig");
-const jws = @import("jws.zig");
 
 const max_connections: u32 = 256;
 var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
@@ -335,58 +334,12 @@ pub const TlsProxy = struct {
         var client = acme_mod.AcmeClient.init(self.allocator, config.directory_url);
         defer client.deinit();
 
-        client.fetchDirectory() catch {
-            log.warn("  renewal: failed to fetch ACME directory", .{});
-            return RenewError.AcmeFailed;
-        };
-
-        client.createAccount(config.email) catch {
-            log.warn("  renewal: failed to create/find ACME account", .{});
-            return RenewError.AcmeFailed;
-        };
-
-        var order = client.createOrder(domain) catch {
-            log.warn("  renewal: failed to create order for {s}", .{domain});
-            return RenewError.AcmeFailed;
-        };
-        defer order.deinit();
-
-        // handle HTTP-01 challenge — register token with our challenge store
-        if (order.authorization_urls.len > 0) {
-            var challenge = client.getHttpChallenge(order.authorization_urls[0]) catch {
-                log.warn("  renewal: failed to get HTTP-01 challenge", .{});
-                return RenewError.AcmeFailed;
-            };
-            defer challenge.deinit();
-
-            // compute key authorization: token + "." + jwk_thumbprint
-            const account_key = client.account_key orelse return RenewError.AcmeFailed;
-            const thumbprint = jws.jwkThumbprint(self.allocator, account_key.public_key) catch
-                return RenewError.AllocFailed;
-            defer self.allocator.free(thumbprint);
-
-            const key_auth = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{
-                challenge.token, thumbprint,
-            }) catch return RenewError.AllocFailed;
-            defer self.allocator.free(key_auth);
-
-            // register the challenge token so port 80 handler can serve it
-            self.challenges.set(challenge.token, key_auth) catch
-                return RenewError.AllocFailed;
-            defer self.challenges.remove(challenge.token);
-
-            // tell the CA we're ready
-            client.respondToChallenge(challenge.url) catch {
-                log.warn("  renewal: failed to respond to challenge", .{});
-                return RenewError.AcmeFailed;
-            };
-
-            // brief wait for CA to validate (the CA will hit our port 80)
-            std.Thread.sleep(5 * std.time.ns_per_s);
-        }
-
-        // finalize — generates CSR, gets signed cert, exports as PEM
-        var exported = client.finalizeAndExport(order.finalize_url, domain) catch {
+        var exported = client.issueAndExport(.{
+            .domain = domain,
+            .email = config.email,
+            .directory_url = config.directory_url,
+            .challenge_registrar = challengeRegistrar(&self.challenges),
+        }) catch {
             log.warn("  renewal: failed to finalize order", .{});
             return RenewError.AcmeFailed;
         };
@@ -401,6 +354,24 @@ pub const TlsProxy = struct {
         // no in-memory cache to swap — cert_store.get() is called per-connection,
         // so the new cert will be used automatically on the next TLS handshake.
         log.info("  renewed certificate for {s}", .{domain});
+    }
+
+    fn challengeRegistrar(store: *ChallengeStore) acme_mod.ChallengeRegistrar {
+        return .{
+            .ctx = store,
+            .set_fn = registerChallenge,
+            .remove_fn = removeChallenge,
+        };
+    }
+
+    fn registerChallenge(ctx: *anyopaque, token: []const u8, key_authorization: []const u8) acme_mod.AcmeError!void {
+        const store: *ChallengeStore = @ptrCast(@alignCast(ctx));
+        store.set(token, key_authorization) catch return acme_mod.AcmeError.AllocFailed;
+    }
+
+    fn removeChallenge(ctx: *anyopaque, token: []const u8) void {
+        const store: *ChallengeStore = @ptrCast(@alignCast(ctx));
+        store.remove(token);
     }
 
     // -- connection handlers --
