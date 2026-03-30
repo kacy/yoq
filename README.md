@@ -47,6 +47,14 @@ Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't t
 - built-in DNS-based service discovery
 - port mapping, outbound NAT, and eBPF-based load balancing and policy enforcement where available
 - WireGuard-based cluster networking for multi-node deployments
+- HTTP routing for HTTP/1.1 and prior-knowledge HTTP/2 (`h2c`), including basic gRPC passthrough
+
+current gRPC routing limits:
+
+- prior-knowledge `h2c` only; no TLS/ALPN HTTP/2 termination at the routing listener
+- one accepted client connection stays pinned to the first matched routed service
+- `request_timeout_ms` currently acts as the idle timeout for routed HTTP/2 connections
+- request-header decoding is not yet a full HPACK implementation
 
 ### production features
 
