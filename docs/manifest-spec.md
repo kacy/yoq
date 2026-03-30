@@ -183,6 +183,12 @@ yoq init-server --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
 
 use `GET /v1/status?mode=service_discovery` and `GET /v1/metrics?format=prometheus` to inspect listener, route, and steering state. `mode=service_rollout` remains accepted as a compatibility alias.
 
+current HTTP/2 and gRPC routing limits:
+
+- the routing listener accepts prior-knowledge HTTP/2 (`h2c`) only; it does not terminate TLS/ALPN HTTP/2 sessions
+- one accepted client connection is pinned to the first matched routed service, so additional streams on that connection must target the same service
+- `request_timeout_ms` applies to HTTP/2 connection inactivity as well as unary request handling
+
 ---
 
 ## health checks
@@ -191,7 +197,7 @@ defined under `[service.<name>.health_check]`.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
-| `type` | string | yes | — | `"http"`, `"tcp"`, or `"exec"` |
+| `type` | string | yes | — | `"http"`, `"tcp"`, `"grpc"`, or `"exec"` |
 | `interval` | integer | no | `10` | seconds between checks |
 | `timeout` | integer | no | `5` | seconds before check times out |
 | `retries` | integer | no | `3` | consecutive failures before unhealthy |
@@ -218,6 +224,20 @@ requires `port`. a successful TCP connection means healthy.
 [service.db.health_check]
 type = "tcp"
 port = 5432
+```
+
+### grpc checks
+
+requires `port`. a successful HTTP/2 preface exchange with the target port means healthy.
+
+when a service also uses `http_proxy` or `http_routes`, yoq forwards prior-knowledge HTTP/2 (h2c) traffic end to end for that routed service. this supports unary and streaming gRPC traffic on a single routed connection, subject to the HTTP/2 routing limits above.
+
+```toml
+[service.api.health_check]
+type = "grpc"
+port = 50051
+interval = 5
+timeout = 2
 ```
 
 ### exec checks

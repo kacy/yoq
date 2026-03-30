@@ -3,7 +3,12 @@ const posix = std.posix;
 const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
 const ip = @import("../ip.zig");
+const http2 = @import("http2.zig");
+const http2_passthrough = @import("http2_passthrough.zig");
+const http2_request = @import("http2_request.zig");
+const http2_response = @import("http2_response.zig");
 const proxy_policy = @import("policy.zig");
+const request_plan = @import("request_plan.zig");
 const proxy_runtime = @import("runtime.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
@@ -15,12 +20,22 @@ const x_forwarded_proto_header = "X-Forwarded-Proto";
 const traceparent_header = "traceparent";
 const tracestate_header = "tracestate";
 
+const Protocol = enum {
+    http1,
+    http2,
+};
+
 pub const ProxyResponse = struct {
+    protocol: Protocol = .http1,
+    http2_stream_id: ?u32 = null,
     status: http.StatusCode,
     body: []const u8,
 };
 
 pub const ForwardPlan = struct {
+    protocol: Protocol = .http1,
+    http2_stream_id: ?u32 = null,
+    http2_request_end_stream: bool = false,
     method: http.Method,
     path: []const u8,
     host: []const u8,
@@ -79,78 +94,27 @@ pub const ReverseProxy = struct {
     }
 
     pub fn handleRequest(self: *const ReverseProxy, raw_request: []const u8) !HandleResult {
-        const request = http.parseRequest(raw_request) catch {
-            return .{ .response = .{
-                .status = .bad_request,
-                .body = "{\"error\":\"invalid request\"}",
-            } };
-        } orelse return .{ .response = .{
-            .status = .bad_request,
-            .body = "{\"error\":\"incomplete request\"}",
-        } };
+        if (!http2.startsWithClientPreface(raw_request)) {
+            if (try http1LoopResponse(self, raw_request)) |response| {
+                return .{ .response = response };
+            }
+        }
 
-        const host_header = http.findHeaderValue(request.headers_raw, "Host") orelse return .{ .response = .{
-            .status = .bad_request,
-            .body = "{\"error\":\"missing host header\"}",
-        } };
-        const host = normalizeHost(host_header);
-        if (http.findHeaderValue(request.headers_raw, proxy_loop_header) != null) {
-            proxy_runtime.recordLoopRejection();
-            log.warn("l7 proxy loop rejected method={s} host={s} path={s}", .{
-                methodString(request.method),
-                host,
-                request.path_only,
-            });
+        const planned = request_plan.planRequest(self.allocator, self.routes, raw_request) catch |err| {
+            return .{ .response = responseForPlanError(self, raw_request, err) };
+        };
+        defer planned.deinit(self.allocator);
+
+        if (planned.protocol == .http2 and planned.method_enum == null) {
             return .{ .response = .{
-                .status = .bad_gateway,
-                .body = "{\"error\":\"proxy loop detected\"}",
+                .protocol = .http2,
+                .http2_stream_id = planned.http2_stream_id,
+                .status = .bad_request,
+                .body = "{\"error\":\"unsupported http2 method\"}",
             } };
         }
 
-        const matched_route = router.matchRoute(self.routes, host, request.path_only) orelse {
-            log.info("l7 proxy no route method={s} host={s} path={s}", .{
-                methodString(request.method),
-                host,
-                request.path_only,
-            });
-            return .{ .response = .{
-                .status = .not_found,
-                .body = "{\"error\":\"route not found\"}",
-            } };
-        };
-        const route = try cloneRouteSnapshot(self.allocator, matched_route);
-        errdefer route.deinit(self.allocator);
-
-        const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
-            error.NoHealthyUpstream => {
-                proxy_runtime.recordRouteFailure(matched_route.name, .no_eligible_upstream);
-                log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
-                    methodString(request.method),
-                    host,
-                    request.path_only,
-                    matched_route.service,
-                });
-                route.deinit(self.allocator);
-                return .{ .response = .{
-                    .status = .service_unavailable,
-                    .body = "{\"error\":\"no eligible upstream\"}",
-                } };
-            },
-            else => return err,
-        };
-        errdefer upstream.deinit(self.allocator);
-
-        return .{ .forward = .{
-            .method = request.method,
-            .path = try self.allocator.dupe(u8, request.path),
-            .host = try self.allocator.dupe(u8, host),
-            .outbound_host = if (route.preserve_host)
-                try self.allocator.dupe(u8, host)
-            else
-                try self.allocator.dupe(u8, route.service),
-            .route = route,
-            .upstream = upstream,
-        } };
+        return resolvePlannedRequest(self, &planned);
     }
 
     pub fn forwardRequest(self: *const ReverseProxy, raw_request: []const u8) ![]u8 {
@@ -163,14 +127,14 @@ pub const ReverseProxy = struct {
         switch (handled) {
             .response => |resp| {
                 proxy_runtime.recordResponse(resp.status);
-                return formatProxyResponse(self.allocator, resp);
+                return formatResponseForProtocol(self.allocator, resp);
             },
             .forward => |plan| {
                 defer plan.deinit(self.allocator);
                 const response = try self.forwardPlanWithClient(raw_request, &plan, client_ip);
-                if (parseUpstreamStatusCode(response)) |status_code| {
+                if (parseForwardedStatusCode(self.allocator, plan.protocol, response)) |status_code| {
                     proxy_runtime.recordResponseCode(status_code);
-                } else |_| {
+                } else |_| if (plan.protocol == .http1) {
                     proxy_runtime.recordResponse(.bad_gateway);
                 }
                 return response;
@@ -215,7 +179,7 @@ pub const ReverseProxy = struct {
             return;
         };
 
-        const response = self.forwardRequestWithClient(request, peerIpFromSocket(client_fd)) catch {
+        const handled = self.handleRequest(request) catch {
             proxy_runtime.recordResponse(.internal_server_error);
             const internal = formatProxyResponse(self.allocator, .{
                 .status = .internal_server_error,
@@ -225,8 +189,45 @@ pub const ReverseProxy = struct {
             _ = writeAll(client_fd, internal) catch {};
             return;
         };
-        defer self.allocator.free(response);
-        _ = writeAll(client_fd, response) catch {};
+        switch (handled) {
+            .response => |resp| {
+                proxy_runtime.recordResponse(resp.status);
+                const response = formatResponseForProtocol(self.allocator, resp) catch return;
+                defer self.allocator.free(response);
+                _ = writeAll(client_fd, response) catch {};
+            },
+            .forward => |plan| {
+                defer plan.deinit(self.allocator);
+                if (plan.protocol == .http2) {
+                    proxyHttp2Connection(self, client_fd, request, &plan, peerIpFromSocket(client_fd)) catch {
+                        proxy_runtime.recordResponse(.internal_server_error);
+                        const internal = http2_response.formatSimpleResponse(
+                            self.allocator,
+                            plan.http2_stream_id orelse 1,
+                            @intFromEnum(http.StatusCode.internal_server_error),
+                            "application/json",
+                            "{\"error\":\"proxy request failed\"}",
+                        ) catch return;
+                        defer self.allocator.free(internal);
+                        _ = writeAll(client_fd, internal) catch {};
+                    };
+                    return;
+                }
+
+                const response = self.forwardPlanWithClient(request, &plan, peerIpFromSocket(client_fd)) catch {
+                    proxy_runtime.recordResponse(.internal_server_error);
+                    const internal = formatProxyResponse(self.allocator, .{
+                        .status = .internal_server_error,
+                        .body = "{\"error\":\"proxy request failed\"}",
+                    }) catch return;
+                    defer self.allocator.free(internal);
+                    _ = writeAll(client_fd, internal) catch {};
+                    return;
+                };
+                defer self.allocator.free(response);
+                _ = writeAll(client_fd, response) catch {};
+            },
+        }
     }
 
     pub fn buildForwardRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
@@ -364,6 +365,12 @@ pub const ReverseProxy = struct {
                 return formatProxyResponse(self.allocator, proxyFailureResponse(err));
             };
 
+            if (plan.protocol == .http2) {
+                proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
+                proxy_runtime.recordRouteRecovered(plan.route.name);
+                return response;
+            }
+
             const status_code = parseUpstreamStatusCode(response) catch {
                 proxy_runtime.recordUpstreamFailure(.other);
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
@@ -417,11 +424,13 @@ pub const ReverseProxy = struct {
         upstream: *const upstream_mod.Upstream,
         client_ip: ?[4]u8,
     ) ![]u8 {
-        const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
-        defer self.allocator.free(request);
-
         const fd = try connectToUpstream(plan.route, upstream);
         defer posix.close(fd);
+        const request = switch (plan.protocol) {
+            .http1 => try self.buildForwardRequestWithClient(raw_request, plan, client_ip),
+            .http2 => try self.allocator.dupe(u8, raw_request),
+        };
+        defer self.allocator.free(request);
 
         writeAll(fd, request) catch return error.SendFailed;
         return readResponse(self.allocator, fd, self.max_response_bytes);
@@ -507,6 +516,142 @@ fn formatProxyResponse(alloc: std.mem.Allocator, response: ProxyResponse) ![]u8 
     );
 }
 
+fn formatResponseForProtocol(alloc: std.mem.Allocator, response: ProxyResponse) ![]u8 {
+    return switch (response.protocol) {
+        .http1 => formatProxyResponse(alloc, response),
+        .http2 => if (response.http2_stream_id) |stream_id|
+            http2_response.formatSimpleResponse(alloc, stream_id, @intFromEnum(response.status), "application/json", response.body)
+        else
+            alloc.dupe(u8, ""),
+    };
+}
+
+fn responseForPlanError(self: *const ReverseProxy, raw_request: []const u8, err: anyerror) ProxyResponse {
+    _ = self;
+    const protocol: Protocol = if (http2.startsWithClientPreface(raw_request)) .http2 else .http1;
+    const http2_stream_id = if (protocol == .http2) peekHttp2StreamId(raw_request) else null;
+
+    return switch (err) {
+        error.InvalidHttp1Request => .{
+            .protocol = protocol,
+            .http2_stream_id = http2_stream_id,
+            .status = .bad_request,
+            .body = if (protocol == .http2) "{\"error\":\"invalid http2 request\"}" else "{\"error\":\"invalid request\"}",
+        },
+        error.IncompleteHttp1Request => .{
+            .protocol = .http1,
+            .status = .bad_request,
+            .body = "{\"error\":\"incomplete request\"}",
+        },
+        error.MissingHostHeader => .{
+            .protocol = .http1,
+            .status = .bad_request,
+            .body = "{\"error\":\"missing host header\"}",
+        },
+        error.RouteNotFound => .{
+            .protocol = protocol,
+            .http2_stream_id = http2_stream_id,
+            .status = .not_found,
+            .body = "{\"error\":\"route not found\"}",
+        },
+        else => .{
+            .protocol = protocol,
+            .http2_stream_id = http2_stream_id,
+            .status = .bad_request,
+            .body = if (protocol == .http2) "{\"error\":\"invalid http2 request\"}" else "{\"error\":\"invalid request\"}",
+        },
+    };
+}
+
+fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan.RequestPlan) !HandleResult {
+    const route = try cloneRouteSnapshot(self.allocator, planned.route);
+    errdefer route.deinit(self.allocator);
+
+    const upstream = proxy_runtime.resolveUpstream(self.allocator, route.service) catch |err| switch (err) {
+        error.NoHealthyUpstream => {
+            proxy_runtime.recordRouteFailure(planned.route.name, .no_eligible_upstream);
+            log.warn("l7 proxy no eligible upstream method={s} host={s} path={s} service={s}", .{
+                planned.method,
+                planned.host,
+                planned.path,
+                planned.route.service,
+            });
+            route.deinit(self.allocator);
+            return .{ .response = .{
+                .protocol = switch (planned.protocol) {
+                    .http1 => .http1,
+                    .http2 => .http2,
+                },
+                .http2_stream_id = planned.http2_stream_id,
+                .status = .service_unavailable,
+                .body = "{\"error\":\"no eligible upstream\"}",
+            } };
+        },
+        else => return err,
+    };
+    errdefer upstream.deinit(self.allocator);
+
+    switch (planned.protocol) {
+        .http1 => return .{ .forward = .{
+            .protocol = .http1,
+            .method = planned.method_enum.?,
+            .path = try self.allocator.dupe(u8, planned.path),
+            .host = try self.allocator.dupe(u8, planned.host),
+            .outbound_host = if (route.preserve_host)
+                try self.allocator.dupe(u8, planned.host)
+            else
+                try self.allocator.dupe(u8, route.service),
+            .route = route,
+            .upstream = upstream,
+        } },
+        .http2 => return .{ .forward = .{
+            .protocol = .http2,
+            .http2_stream_id = planned.http2_stream_id,
+            .http2_request_end_stream = planned.end_stream,
+            .method = planned.method_enum.?,
+            .path = try self.allocator.dupe(u8, planned.path),
+            .host = try self.allocator.dupe(u8, planned.host),
+            .outbound_host = try self.allocator.dupe(u8, planned.host),
+            .route = route,
+            .upstream = upstream,
+        } },
+    }
+}
+
+fn http1LoopResponse(self: *const ReverseProxy, raw_request: []const u8) !?ProxyResponse {
+    const request = (http.parseRequest(raw_request) catch return null) orelse return null;
+    if (http.findHeaderValue(request.headers_raw, proxy_loop_header) == null) return null;
+
+    const host_header = http.findHeaderValue(request.headers_raw, "Host") orelse "";
+    const host = normalizeHost(host_header);
+    proxy_runtime.recordLoopRejection();
+    log.warn("l7 proxy loop rejected method={s} host={s} path={s}", .{
+        methodString(request.method),
+        host,
+        request.path_only,
+    });
+    _ = self;
+    return .{
+        .status = .bad_gateway,
+        .body = "{\"error\":\"proxy loop detected\"}",
+    };
+}
+
+fn peekHttp2StreamId(raw_request: []const u8) ?u32 {
+    if (!http2.startsWithClientPreface(raw_request)) return null;
+
+    var pos: usize = http2.client_preface.len;
+    while (pos + http2.frame_header_len <= raw_request.len) {
+        const header = http2.parseFrameHeader(raw_request[pos .. pos + http2.frame_header_len]) orelse return null;
+        pos += http2.frame_header_len;
+        if (pos + header.length > raw_request.len) return null;
+        if (header.frame_type == .headers and header.stream_id != 0) return header.stream_id;
+        pos += header.length;
+    }
+
+    return null;
+}
+
 fn proxyFailureResponse(err: anyerror) ProxyResponse {
     return switch (err) {
         error.InvalidUpstreamAddress => .{
@@ -580,6 +725,13 @@ fn parseUpstreamStatusCode(response: []const u8) !u16 {
     const status_start = first_space + 1;
     if (status_start + 3 > response.len) return error.InvalidResponse;
     return std.fmt.parseInt(u16, response[status_start .. status_start + 3], 10) catch error.InvalidResponse;
+}
+
+fn parseForwardedStatusCode(alloc: std.mem.Allocator, protocol: Protocol, response: []const u8) !u16 {
+    return switch (protocol) {
+        .http1 => parseUpstreamStatusCode(response),
+        .http2 => http2_passthrough.parseStatusCode(alloc, response),
+    };
 }
 
 fn connectToUpstream(route: proxy_runtime.RouteSnapshot, upstream: *const upstream_mod.Upstream) !posix.socket_t {
@@ -669,6 +821,26 @@ fn readResponse(alloc: std.mem.Allocator, fd: posix.socket_t, max_bytes: usize) 
     return response;
 }
 
+fn proxyHttp2Connection(
+    self: *const ReverseProxy,
+    client_fd: posix.socket_t,
+    raw_request: []const u8,
+    plan: *const ForwardPlan,
+    client_ip: ?[4]u8,
+) !void {
+    _ = self;
+    _ = client_ip;
+    const upstream_fd = try connectToUpstream(plan.route, &plan.upstream);
+    defer posix.close(upstream_fd);
+
+    try writeAll(upstream_fd, raw_request);
+    try http2_passthrough.relaySocketConnection(
+        client_fd,
+        upstream_fd,
+        plan.route.request_timeout_ms,
+    );
+}
+
 const ReadRequestError = error{
     MalformedRequest,
     UriTooLong,
@@ -683,6 +855,19 @@ fn readRequestBytes(fd: posix.socket_t, buf: []u8) ReadRequestError![]const u8 {
         const bytes_read = posix.read(fd, buf[total..]) catch break;
         if (bytes_read == 0) break;
         total += bytes_read;
+
+        const preface_probe_len = @min(total, http2.client_preface.len);
+        if (http2.hasClientPrefacePrefix(buf[0..preface_probe_len])) {
+            if (!http2.startsWithClientPreface(buf[0..total])) continue;
+
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            _ = http2_request.parseClientConnectionPreface(arena.allocator(), buf[0..total]) catch |err| switch (err) {
+                error.BufferTooShort, error.MissingHeaders => continue,
+                else => return error.MalformedRequest,
+            };
+            return buf[0..total];
+        }
 
         if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") == null and total > http.max_header_bytes) {
             return error.HeadersTooLarge;
@@ -972,6 +1157,77 @@ test "handleRequest returns service unavailable when route has no eligible upstr
     switch (result) {
         .response => |resp| try std.testing.expectEqual(http.StatusCode.service_unavailable, resp.status),
         .forward => return error.TestUnexpectedResult,
+    }
+}
+
+test "handleRequest returns forward plan for HTTP/2 route" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc",
+        .endpoint_id = "grpc-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 50051,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc:/pkg.Service",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const request = try buildTestHttp2Request(std.testing.allocator, 1, "POST", "grpc.internal", "/pkg.Service/Call");
+    defer std.testing.allocator.free(request);
+
+    const result = try proxy.handleRequest(request);
+    defer result.deinit(std.testing.allocator);
+
+    switch (result) {
+        .forward => |plan| {
+            try std.testing.expectEqual(Protocol.http2, plan.protocol);
+            try std.testing.expectEqual(@as(?u32, 1), plan.http2_stream_id);
+            try std.testing.expectEqual(http.Method.POST, plan.method);
+            try std.testing.expectEqualStrings("/pkg.Service/Call", plan.path);
+            try std.testing.expectEqualStrings("grpc.internal", plan.host);
+            try std.testing.expectEqualStrings("10.42.0.9", plan.upstream.address);
+        },
+        .response => return error.TestUnexpectedResult,
     }
 }
 
@@ -1298,6 +1554,11 @@ test "buildForwardRequest generates traceparent when absent" {
 const TestUpstreamAction = union(enum) {
     close,
     respond: []const u8,
+    stream_respond: struct {
+        first: []const u8,
+        delay_ms: u32,
+        second: []const u8,
+    },
     delayed_respond: struct {
         delay_ms: u32,
         response: []const u8,
@@ -1355,6 +1616,11 @@ const TestUpstreamServer = struct {
             switch (action) {
                 .close => {},
                 .respond => |response| _ = writeAll(client_fd, response) catch {},
+                .stream_respond => |resp| {
+                    _ = writeAll(client_fd, resp.first) catch {};
+                    std.Thread.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
+                    _ = writeAll(client_fd, resp.second) catch {};
+                },
                 .delayed_respond => |resp| {
                     std.Thread.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
                     _ = writeAll(client_fd, resp.response) catch {};
@@ -1441,6 +1707,18 @@ fn captureRequestBytes(fd: posix.socket_t, buf: []u8) usize {
         if (bytes_read == 0) break;
         total += bytes_read;
 
+        const preface_probe_len = @min(total, http2.client_preface.len);
+        if (http2.hasClientPrefacePrefix(buf[0..preface_probe_len])) {
+            if (!http2.startsWithClientPreface(buf[0..total])) continue;
+
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const parsed = http2_request.parseClientConnectionPreface(arena.allocator(), buf[0..total]) catch continue;
+            if (http2_passthrough.streamEndSeen(buf[0..total], parsed.request.stream_id)) {
+                return total;
+            }
+            continue;
+        }
         const parsed = http.parseRequest(buf[0..total]) catch return total;
         if (parsed) |request| {
             return requestEndOffset(buf[0..total], request);
@@ -1449,6 +1727,127 @@ fn captureRequestBytes(fd: posix.socket_t, buf: []u8) usize {
     return total;
 }
 
+fn readSocketBytes(fd: posix.socket_t, buf: []u8) usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const bytes_read = posix.read(fd, buf[total..]) catch break;
+        if (bytes_read == 0) break;
+        total += bytes_read;
+    }
+    return total;
+}
+
+fn buildTestHttp2Request(
+    alloc: std.mem.Allocator,
+    stream_id: u32,
+    method: []const u8,
+    authority: []const u8,
+    path: []const u8,
+) ![]u8 {
+    return buildTestHttp2RequestWithEndStream(alloc, stream_id, method, authority, path, true);
+}
+
+fn buildTestHttp2RequestWithEndStream(
+    alloc: std.mem.Allocator,
+    stream_id: u32,
+    method: []const u8,
+    authority: []const u8,
+    path: []const u8,
+    end_stream: bool,
+) ![]u8 {
+    const headers = try buildTestHttp2HeadersFrame(alloc, stream_id, method, authority, path, end_stream);
+    defer alloc.free(headers);
+
+    const settings = try buildHttp2Frame(alloc, .{
+        .length = 0,
+        .frame_type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+    defer alloc.free(settings);
+
+    var request: std.ArrayList(u8) = .empty;
+    defer request.deinit(alloc);
+    try request.appendSlice(alloc, http2.client_preface);
+    try request.appendSlice(alloc, settings);
+    try request.appendSlice(alloc, headers);
+    return request.toOwnedSlice(alloc);
+}
+
+fn buildTestHttp2HeadersOnlyRequest(
+    alloc: std.mem.Allocator,
+    stream_id: u32,
+    method: []const u8,
+    authority: []const u8,
+    path: []const u8,
+    end_stream: bool,
+) ![]u8 {
+    return buildTestHttp2HeadersFrame(alloc, stream_id, method, authority, path, end_stream);
+}
+
+fn buildTestHttp2HeadersFrame(
+    alloc: std.mem.Allocator,
+    stream_id: u32,
+    method: []const u8,
+    authority: []const u8,
+    path: []const u8,
+    end_stream: bool,
+) ![]u8 {
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+
+    if (std.mem.eql(u8, method, "GET")) {
+        try header_block.append(alloc, 0x82);
+    } else if (std.mem.eql(u8, method, "POST")) {
+        try header_block.append(alloc, 0x83);
+    } else {
+        return error.UnsupportedMethod;
+    }
+    try header_block.append(alloc, 0x86);
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x01, authority);
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x04, path);
+
+    const headers = try buildHttp2Frame(alloc, .{
+        .length = @intCast(header_block.items.len),
+        .frame_type = .headers,
+        .flags = 0x4 | if (end_stream) @as(u8, 0x1) else 0,
+        .stream_id = stream_id,
+    }, header_block.items);
+    return headers;
+}
+
+fn buildTestHttp2DataFrame(
+    alloc: std.mem.Allocator,
+    stream_id: u32,
+    payload: []const u8,
+    end_stream: bool,
+) ![]u8 {
+    return buildHttp2Frame(alloc, .{
+        .length = @intCast(payload.len),
+        .frame_type = .data,
+        .flags = if (end_stream) 0x1 else 0,
+        .stream_id = stream_id,
+    }, payload);
+}
+
+fn appendLiteralWithIndexedName(
+    buf: *std.ArrayList(u8),
+    alloc: std.mem.Allocator,
+    name_index: u8,
+    value: []const u8,
+) !void {
+    try buf.append(alloc, name_index);
+    try buf.append(alloc, @intCast(value.len));
+    try buf.appendSlice(alloc, value);
+}
+
+fn buildHttp2Frame(alloc: std.mem.Allocator, header: http2.FrameHeader, payload: []const u8) ![]u8 {
+    const buf = try alloc.alloc(u8, http2.frame_header_len + payload.len);
+    errdefer alloc.free(buf);
+    try http2.writeFrameHeader(buf[0..http2.frame_header_len], header);
+    @memcpy(buf[http2.frame_header_len..], payload);
+    return buf;
+}
 test "forwardRequest proxies upstream response bytes" {
     const store = @import("../../state/store.zig");
     const service_rollout = @import("../service_rollout.zig");
@@ -1561,6 +1960,119 @@ test "forwardRequest rejects looped proxy requests" {
 
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 502 Bad Gateway\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "{\"error\":\"proxy loop detected\"}") != null);
+}
+
+test "forwardRequest returns framed HTTP/2 not found response" {
+    const routes = [_]router.Route{};
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const request = try buildTestHttp2Request(std.testing.allocator, 3, "POST", "grpc.internal", "/pkg.Service/Call");
+    defer std.testing.allocator.free(request);
+
+    const response = try proxy.forwardRequest(request);
+    defer std.testing.allocator.free(response);
+
+    const settings = http2.parseFrameHeader(response[0..http2.frame_header_len]).?;
+    try std.testing.expect(http2.isInitialServerSettingsFrame(settings));
+
+    const headers_start = http2.frame_header_len;
+    const headers = http2.parseFrameHeader(response[headers_start .. headers_start + http2.frame_header_len]).?;
+    try std.testing.expectEqual(http2.FrameType.headers, headers.frame_type);
+    try std.testing.expectEqual(@as(u32, 3), headers.stream_id);
+
+    const payload_start = headers_start + http2.frame_header_len;
+    const payload_end = payload_start + headers.length;
+    var decoded = try @import("hpack.zig").decodeHeaderBlock(std.testing.allocator, response[payload_start..payload_end]);
+    defer {
+        for (decoded.items) |header| header.deinit(std.testing.allocator);
+        decoded.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqualStrings(":status", decoded.items[0].name);
+    try std.testing.expectEqualStrings("404", decoded.items[0].value);
+}
+
+test "forwardRequest proxies HTTP/2 upstream response bytes" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const upstream_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        1,
+        200,
+        "application/grpc",
+        "ok",
+    );
+    defer std.testing.allocator.free(upstream_response);
+    try std.testing.expectEqual(@as(u16, 200), try http2_passthrough.parseStatusCode(std.testing.allocator, upstream_response));
+
+    const actions = [_]TestUpstreamAction{
+        .{ .respond = upstream_response },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc",
+        .endpoint_id = "grpc-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc:/pkg.Service",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const request = try buildTestHttp2Request(std.testing.allocator, 1, "POST", "grpc.internal", "/pkg.Service/Call");
+    defer std.testing.allocator.free(request);
+
+    const response = try proxy.forwardRequest(request);
+    defer std.testing.allocator.free(response);
+
+    upstream.wait();
+    try std.testing.expectEqualSlices(u8, upstream_response, response);
+    try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream.request(0)[0..http2.client_preface.len]));
 }
 
 test "forwardRequest retries safe methods after upstream receive failure" {
@@ -1974,6 +2486,557 @@ test "handleConnection proxies a client socket request" {
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-For: 127.0.0.1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Host: api.internal\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Proto: http\r\n") != null);
+}
+
+test "handleConnection returns framed HTTP/2 local response" {
+    const routes = [_]router.Route{};
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(client_fd);
+    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const request = try buildTestHttp2Request(std.testing.allocator, 5, "POST", "grpc.internal", "/pkg.Service/Call");
+    defer std.testing.allocator.free(request);
+    try writeAll(client_fd, request);
+
+    var response_buf: [1024]u8 = undefined;
+    setSocketTimeoutMs(client_fd, 1000);
+    const bytes_read = readSocketBytes(client_fd, &response_buf);
+    try std.testing.expect(bytes_read > http2.frame_header_len * 2);
+
+    const response = response_buf[0..bytes_read];
+    const settings = http2.parseFrameHeader(response[0..http2.frame_header_len]).?;
+    try std.testing.expect(http2.isInitialServerSettingsFrame(settings));
+
+    const headers_start = http2.frame_header_len;
+    const headers = http2.parseFrameHeader(response[headers_start .. headers_start + http2.frame_header_len]).?;
+    try std.testing.expectEqual(http2.FrameType.headers, headers.frame_type);
+    try std.testing.expectEqual(@as(u32, 5), headers.stream_id);
+
+    const payload_start = headers_start + http2.frame_header_len;
+    const payload_end = payload_start + headers.length;
+    var decoded = try @import("hpack.zig").decodeHeaderBlock(std.testing.allocator, response[payload_start..payload_end]);
+    defer {
+        for (decoded.items) |header| header.deinit(std.testing.allocator);
+        decoded.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqualStrings(":status", decoded.items[0].name);
+    try std.testing.expectEqualStrings("404", decoded.items[0].value);
+}
+
+test "handleConnection proxies HTTP/2 upstream response bytes" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const upstream_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        7,
+        200,
+        "application/grpc",
+        "ok",
+    );
+    defer std.testing.allocator.free(upstream_response);
+
+    const actions = [_]TestUpstreamAction{
+        .{ .respond = upstream_response },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc",
+        .endpoint_id = "grpc-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc:/pkg.Service",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(client_fd);
+    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const request = try buildTestHttp2Request(std.testing.allocator, 7, "POST", "grpc.internal", "/pkg.Service/Call");
+    defer std.testing.allocator.free(request);
+    try writeAll(client_fd, request);
+
+    var response_buf: [1024]u8 = undefined;
+    setSocketTimeoutMs(client_fd, 1000);
+    const bytes_read = readSocketBytes(client_fd, &response_buf);
+    try std.testing.expectEqualSlices(u8, upstream_response, response_buf[0..bytes_read]);
+
+    upstream.wait();
+    try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream.request(0)[0..http2.client_preface.len]));
+}
+
+test "handleConnection streams HTTP/2 upstream frames before stream end" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const upstream_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        9,
+        200,
+        "application/grpc",
+        "ok",
+    );
+    defer std.testing.allocator.free(upstream_response);
+
+    const settings = http2.parseFrameHeader(upstream_response[0..http2.frame_header_len]).?;
+    const headers_start = http2.frame_header_len + settings.length;
+    const headers = http2.parseFrameHeader(upstream_response[headers_start .. headers_start + http2.frame_header_len]).?;
+    const split_at = headers_start + http2.frame_header_len + headers.length;
+    const first_chunk = try std.testing.allocator.dupe(u8, upstream_response[0..split_at]);
+    defer std.testing.allocator.free(first_chunk);
+    const second_chunk = try std.testing.allocator.dupe(u8, upstream_response[split_at..]);
+    defer std.testing.allocator.free(second_chunk);
+
+    const actions = [_]TestUpstreamAction{
+        .{ .stream_respond = .{
+            .first = first_chunk,
+            .delay_ms = 150,
+            .second = second_chunk,
+        } },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc",
+        .endpoint_id = "grpc-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc:/pkg.Service",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(client_fd);
+    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const request = try buildTestHttp2Request(std.testing.allocator, 9, "POST", "grpc.internal", "/pkg.Service/Call");
+    defer std.testing.allocator.free(request);
+    try writeAll(client_fd, request);
+
+    setSocketTimeoutMs(client_fd, 75);
+    var first_read_buf: [1024]u8 = undefined;
+    const first_read_len = try posix.read(client_fd, &first_read_buf);
+    try std.testing.expectEqualSlices(u8, first_chunk, first_read_buf[0..first_read_len]);
+
+    setSocketTimeoutMs(client_fd, 1000);
+    var second_read_buf: [1024]u8 = undefined;
+    const second_read_len = readSocketBytes(client_fd, &second_read_buf);
+    try std.testing.expectEqualSlices(u8, second_chunk, second_read_buf[0..second_read_len]);
+}
+
+test "handleConnection relays HTTP/2 client data frames upstream" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const upstream_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        11,
+        200,
+        "application/grpc",
+        "ok",
+    );
+    defer std.testing.allocator.free(upstream_response);
+
+    const actions = [_]TestUpstreamAction{
+        .{ .respond = upstream_response },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc",
+        .endpoint_id = "grpc-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc:/pkg.Service",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(client_fd);
+    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const request = try buildTestHttp2RequestWithEndStream(std.testing.allocator, 11, "POST", "grpc.internal", "/pkg.Service/Call", false);
+    defer std.testing.allocator.free(request);
+    const data = try buildTestHttp2DataFrame(std.testing.allocator, 11, "hello", true);
+    defer std.testing.allocator.free(data);
+
+    try writeAll(client_fd, request);
+    std.Thread.sleep(25 * std.time.ns_per_ms);
+    try writeAll(client_fd, data);
+
+    var response_buf: [1024]u8 = undefined;
+    setSocketTimeoutMs(client_fd, 1000);
+    const bytes_read = readSocketBytes(client_fd, &response_buf);
+    try std.testing.expectEqualSlices(u8, upstream_response, response_buf[0..bytes_read]);
+
+    upstream.wait();
+    try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream.request(0)[0..http2.client_preface.len]));
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "hello") != null);
+    try std.testing.expect(http2_passthrough.streamEndSeen(upstream.request(0), 11));
+}
+
+test "handleConnection supports multiple HTTP/2 streams on one client connection" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const first_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        13,
+        200,
+        "application/grpc",
+        "one",
+    );
+    defer std.testing.allocator.free(first_response);
+    const second_response = try http2_response.formatSimpleStreamResponse(
+        std.testing.allocator,
+        15,
+        200,
+        "application/grpc",
+        "two",
+    );
+    defer std.testing.allocator.free(second_response);
+    var combined_response: std.ArrayList(u8) = .empty;
+    defer combined_response.deinit(std.testing.allocator);
+    try combined_response.appendSlice(std.testing.allocator, first_response);
+    try combined_response.appendSlice(std.testing.allocator, second_response);
+
+    const MultiStreamUpstream = struct {
+        const Self = @This();
+
+        listen_fd: posix.socket_t,
+        port: u16,
+        thread: ?std.Thread = null,
+        response: []const u8,
+        request_buf: [4096]u8 = undefined,
+        request_len: usize = 0,
+
+        fn init(response: []const u8) !Self {
+            const listener = try initTestListenerSocket();
+            return .{
+                .listen_fd = listener.fd,
+                .port = listener.port,
+                .response = response,
+            };
+        }
+
+        fn deinit(self: *Self) void {
+            self.wait();
+            posix.close(self.listen_fd);
+        }
+
+        fn start(self: *Self) !void {
+            self.thread = try std.Thread.spawn(.{}, acceptOne, .{self});
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+        }
+
+        fn wait(self: *Self) void {
+            if (self.thread) |thread| {
+                thread.join();
+                self.thread = null;
+            }
+        }
+
+        fn acceptOne(self: *Self) void {
+            const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            defer posix.close(client_fd);
+            setSocketTimeoutMs(client_fd, 250);
+
+            while (self.request_len < self.request_buf.len) {
+                const bytes_read = posix.read(client_fd, self.request_buf[self.request_len..]) catch break;
+                if (bytes_read == 0) break;
+                self.request_len += bytes_read;
+                if (http2_passthrough.streamEndSeen(self.request_buf[0..self.request_len], 15)) break;
+            }
+
+            _ = writeAll(client_fd, self.response) catch {};
+        }
+
+        fn request(self: *Self) []const u8 {
+            return self.request_buf[0..self.request_len];
+        }
+    };
+
+    var upstream = try MultiStreamUpstream.init(combined_response.items);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc",
+        .endpoint_id = "grpc-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc:/pkg.Service",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(client_fd);
+    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const first_request = try buildTestHttp2Request(std.testing.allocator, 13, "POST", "grpc.internal", "/pkg.Service/First");
+    defer std.testing.allocator.free(first_request);
+    const second_request = try buildTestHttp2HeadersOnlyRequest(std.testing.allocator, 15, "POST", "grpc.internal", "/pkg.Service/Second", true);
+    defer std.testing.allocator.free(second_request);
+
+    try writeAll(client_fd, first_request);
+    try writeAll(client_fd, second_request);
+
+    var response_buf: [2048]u8 = undefined;
+    setSocketTimeoutMs(client_fd, 1000);
+    const bytes_read = readSocketBytes(client_fd, &response_buf);
+    try std.testing.expectEqualSlices(u8, combined_response.items, response_buf[0..bytes_read]);
+
+    upstream.wait();
+    const captured = upstream.request();
+    try std.testing.expect(http2_passthrough.streamEndSeen(captured, 13));
+    try std.testing.expect(http2_passthrough.streamEndSeen(captured, 15));
+    try std.testing.expect(std.mem.indexOf(u8, captured, "/pkg.Service/First") != null);
+    try std.testing.expect(std.mem.indexOf(u8, captured, "/pkg.Service/Second") != null);
 }
 
 test "handleConnection rejects looped request after listener restart" {

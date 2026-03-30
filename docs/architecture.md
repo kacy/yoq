@@ -130,7 +130,7 @@ multi-service application management — the docker-compose replacement.
 
 **orchestrator:** starts and stops services respecting dependency order. reconciles running state against desired state. handles restart policies (none, always, on_failure).
 
-**health checks:** a single checker thread polls HTTP, TCP, or exec probes at configurable intervals. health state is stored in a fixed-size registry (64 services, mutex-protected) that the orchestrator and DNS resolver read to gate traffic.
+**health checks:** a single checker thread polls HTTP, TCP, gRPC, or exec probes at configurable intervals. health state is stored in a fixed-size registry (64 services, mutex-protected) that the orchestrator and DNS resolver read to gate traffic.
 
 **rolling updates:** deployment history is tracked in SQLite. updates proceed incrementally with automatic rollback if health checks fail.
 

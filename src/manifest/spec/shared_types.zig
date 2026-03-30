@@ -77,6 +77,9 @@ pub const CheckType = union(enum) {
     tcp: struct {
         port: u16,
     },
+    grpc: struct {
+        port: u16,
+    },
     exec: struct {
         command: []const []const u8,
     },
@@ -96,7 +99,7 @@ pub const HealthCheck = struct {
                 for (e.command) |cmd| alloc.free(cmd);
                 alloc.free(e.command);
             },
-            .tcp => {},
+            .tcp, .grpc => {},
         }
     }
 };

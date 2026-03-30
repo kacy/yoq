@@ -130,7 +130,17 @@ services start in dependency order (topological sort). `yoq validate` checks for
 
 ### health checks
 
-HTTP, TCP, or exec probes run at configurable intervals. health state is stored in a fixed-size registry (64 services, mutex-protected). the orchestrator and DNS resolver read health state to gate traffic.
+HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes currently validate the HTTP/2 preface exchange on the configured port. health state is stored in a fixed-size registry (64 services, mutex-protected). the orchestrator and DNS resolver read health state to gate traffic.
+
+### gRPC routing
+
+gRPC services can use the HTTP routing listener through prior-knowledge HTTP/2 (h2c) passthrough. unary requests and streaming RPC traffic are forwarded end to end, including client `DATA` frames, server `DATA` frames, and trailing `HEADERS`.
+
+current limits:
+
+- the listener currently supports prior-knowledge `h2c`, not TLS/ALPN HTTP/2 termination
+- one accepted client connection is pinned to the first matched service route, so later RPC streams on the same channel must target that same routed service
+- `request_timeout_ms` currently acts as the idle timeout for that routed HTTP/2 connection
 
 ### rolling updates
 

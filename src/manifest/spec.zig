@@ -250,6 +250,15 @@ test "health check tcp deinit is no-op" {
     hc.deinit(alloc);
 }
 
+test "health check grpc deinit is no-op" {
+    const alloc = std.testing.allocator;
+
+    var hc = HealthCheck{
+        .check_type = .{ .grpc = .{ .port = 50051 } },
+    };
+    hc.deinit(alloc);
+}
+
 test "restart policy defaults to none" {
     const svc = Service{
         .name = "test",

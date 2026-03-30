@@ -1,7 +1,7 @@
 // health — health check engine for services
 //
 // periodically probes services with configured health checks (http, tcp,
-// or exec) and tracks their health status. the orchestrator spawns a
+// grpc, or exec) and tracks their health status. the orchestrator spawns a
 // single checker thread that polls all services at their configured
 // intervals.
 //
@@ -20,6 +20,10 @@ const types = @import("health/types.zig");
 const registry_support = @import("health/registry_support.zig");
 const checker_runtime = @import("health/checker_runtime.zig");
 const check_runtime = @import("health/check_runtime.zig");
+
+comptime {
+    _ = @import("health/check_runtime.zig");
+}
 
 pub const HealthStatus = types.HealthStatus;
 pub const ServiceHealth = types.ServiceHealth;
