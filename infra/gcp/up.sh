@@ -23,13 +23,17 @@ gcloud compute networks subnets describe "${SUBNET_NAME}" --project="${PROJECT_I
     --region="${REGION}" \
     --range="${NETWORK_CIDR}"
 
-gcloud compute firewall-rules describe "${RIG_LABEL}-ssh-api" --project="${PROJECT_ID}" >/dev/null 2>&1 || \
+gcloud compute firewall-rules update "${RIG_LABEL}-ssh-api" \
+  --project="${PROJECT_ID}" \
+  --source-ranges="${SSH_CIDR}" \
+  --rules="tcp:22,tcp:${API_PORT},tcp:${HTTP_PROXY_PORT}" \
+  >/dev/null 2>&1 || \
   gcloud compute firewall-rules create "${RIG_LABEL}-ssh-api" \
     --project="${PROJECT_ID}" \
     --network="${NETWORK_NAME}" \
     --direction=INGRESS \
     --action=ALLOW \
-    --rules="tcp:22,tcp:${API_PORT}" \
+    --rules="tcp:22,tcp:${API_PORT},tcp:${HTTP_PROXY_PORT}" \
     --source-ranges="${SSH_CIDR}" \
     --target-tags="${RIG_LABEL}"
 
