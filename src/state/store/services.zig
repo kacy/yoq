@@ -66,6 +66,7 @@ pub const ServiceHttpRouteRecord = struct {
     host: []const u8,
     path_prefix: []const u8,
     rewrite_prefix: ?[]const u8 = null,
+    match_headers: []const ServiceHttpRouteHeaderRecord = &.{},
     retries: i64,
     connect_timeout_ms: i64,
     request_timeout_ms: i64,
@@ -81,6 +82,25 @@ pub const ServiceHttpRouteRecord = struct {
         alloc.free(self.host);
         alloc.free(self.path_prefix);
         if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (self.match_headers) |header_match| header_match.deinit(alloc);
+        if (self.match_headers.len > 0) alloc.free(self.match_headers);
+    }
+};
+
+pub const ServiceHttpRouteHeaderRecord = struct {
+    service_name: []const u8,
+    route_name: []const u8,
+    header_name: []const u8,
+    header_value: []const u8,
+    match_order: i64,
+    created_at: i64,
+    updated_at: i64,
+
+    pub fn deinit(self: ServiceHttpRouteHeaderRecord, alloc: Allocator) void {
+        alloc.free(self.service_name);
+        alloc.free(self.route_name);
+        alloc.free(self.header_name);
+        alloc.free(self.header_value);
     }
 };
 
@@ -89,11 +109,17 @@ pub const ServiceHttpRouteInput = struct {
     host: []const u8,
     path_prefix: []const u8 = "/",
     rewrite_prefix: ?[]const u8 = null,
+    match_headers: []const ServiceHttpRouteHeaderInput = &.{},
     retries: i64 = 0,
     connect_timeout_ms: i64 = 1000,
     request_timeout_ms: i64 = 5000,
     target_port: ?i64 = null,
     preserve_host: bool = true,
+};
+
+pub const ServiceHttpRouteHeaderInput = struct {
+    header_name: []const u8,
+    header_value: []const u8,
 };
 
 const service_columns =
@@ -130,6 +156,19 @@ const ServiceHttpRouteRow = struct {
     target_port: ?i64,
     preserve_host: i64,
     route_order: i64,
+    created_at: i64,
+    updated_at: i64,
+};
+
+const service_http_route_header_columns =
+    "service_name, route_name, header_name, header_value, match_order, created_at, updated_at";
+
+const ServiceHttpRouteHeaderRow = struct {
+    service_name: sqlite.Text,
+    route_name: sqlite.Text,
+    header_name: sqlite.Text,
+    header_value: sqlite.Text,
+    match_order: i64,
     created_at: i64,
     updated_at: i64,
 };
@@ -219,6 +258,7 @@ fn rowToServiceHttpRouteRecord(row: ServiceHttpRouteRow) ServiceHttpRouteRecord 
         .host = row.host.data,
         .path_prefix = row.path_prefix.data,
         .rewrite_prefix = if (row.rewrite_prefix) |rewrite_prefix| rewrite_prefix.data else null,
+        .match_headers = &.{},
         .retries = row.retries,
         .connect_timeout_ms = row.connect_timeout_ms,
         .request_timeout_ms = row.request_timeout_ms,
@@ -228,6 +268,42 @@ fn rowToServiceHttpRouteRecord(row: ServiceHttpRouteRow) ServiceHttpRouteRecord 
         .created_at = row.created_at,
         .updated_at = row.updated_at,
     };
+}
+
+fn rowToServiceHttpRouteHeaderRecord(row: ServiceHttpRouteHeaderRow) ServiceHttpRouteHeaderRecord {
+    return .{
+        .service_name = row.service_name.data,
+        .route_name = row.route_name.data,
+        .header_name = row.header_name.data,
+        .header_value = row.header_value.data,
+        .match_order = row.match_order,
+        .created_at = row.created_at,
+        .updated_at = row.updated_at,
+    };
+}
+
+fn listServiceHttpRouteHeadersForDb(
+    alloc: Allocator,
+    db: *sqlite.Db,
+    service_name: []const u8,
+    route_name: []const u8,
+) StoreError![]const ServiceHttpRouteHeaderRecord {
+    var headers: std.ArrayList(ServiceHttpRouteHeaderRecord) = .empty;
+    errdefer {
+        for (headers.items) |header| header.deinit(alloc);
+        headers.deinit(alloc);
+    }
+
+    var stmt = db.prepare(
+        "SELECT " ++ service_http_route_header_columns ++
+            " FROM service_http_route_headers WHERE service_name = ? AND route_name = ? ORDER BY match_order, header_name;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(ServiceHttpRouteHeaderRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        headers.append(alloc, rowToServiceHttpRouteHeaderRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return headers.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
 
 fn listServiceHttpRoutesForDb(alloc: Allocator, db: *sqlite.Db, service_name: []const u8) StoreError![]const ServiceHttpRouteRecord {
@@ -242,7 +318,12 @@ fn listServiceHttpRoutesForDb(alloc: Allocator, db: *sqlite.Db, service_name: []
     defer stmt.deinit();
     var iter = stmt.iterator(ServiceHttpRouteRow, .{service_name}) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        routes.append(alloc, rowToServiceHttpRouteRecord(row)) catch return StoreError.ReadFailed;
+        var route = rowToServiceHttpRouteRecord(row);
+        route.match_headers = alloc.alloc(ServiceHttpRouteHeaderRecord, 0) catch return StoreError.ReadFailed;
+        errdefer route.deinit(alloc);
+        alloc.free(route.match_headers);
+        route.match_headers = try listServiceHttpRouteHeadersForDb(alloc, db, route.service_name, route.route_name);
+        routes.append(alloc, route) catch return StoreError.ReadFailed;
     }
     return routes.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
@@ -279,6 +360,11 @@ fn replaceServiceHttpRoutes(
     routes: []const ServiceHttpRouteInput,
 ) StoreError!void {
     db.exec(
+        "DELETE FROM service_http_route_headers WHERE service_name = ?;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.WriteFailed;
+    db.exec(
         "DELETE FROM service_http_routes WHERE service_name = ?;",
         .{},
         .{service_name},
@@ -304,6 +390,22 @@ fn replaceServiceHttpRoutes(
                 now,
             },
         ) catch return StoreError.WriteFailed;
+
+        for (route.match_headers, 0..) |header_match, header_idx| {
+            db.exec(
+                "INSERT INTO service_http_route_headers (" ++ service_http_route_header_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+                .{},
+                .{
+                    service_name,
+                    route.route_name,
+                    header_match.header_name,
+                    header_match.header_value,
+                    @as(i64, @intCast(header_idx)),
+                    now,
+                    now,
+                },
+            ) catch return StoreError.WriteFailed;
+        }
     }
 }
 
@@ -365,12 +467,25 @@ pub fn createService(record: ServiceRecord) StoreError!void {
                 .host = route.host,
                 .path_prefix = route.path_prefix,
                 .rewrite_prefix = route.rewrite_prefix,
+                .match_headers = blk: {
+                    var headers: std.ArrayListUnmanaged(ServiceHttpRouteHeaderInput) = .empty;
+                    for (route.match_headers) |header_match| {
+                        headers.append(std.heap.page_allocator, .{
+                            .header_name = header_match.header_name,
+                            .header_value = header_match.header_value,
+                        }) catch return StoreError.WriteFailed;
+                    }
+                    break :blk headers.toOwnedSlice(std.heap.page_allocator) catch return StoreError.WriteFailed;
+                },
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
                 .target_port = route.target_port,
                 .preserve_host = route.preserve_host,
             }) catch return StoreError.WriteFailed;
+        }
+        defer {
+            for (route_inputs.items) |route_input| if (route_input.match_headers.len > 0) std.heap.page_allocator.free(route_input.match_headers);
         }
         try replaceServiceHttpRoutes(db, record.service_name, record.updated_at, route_inputs.items);
         try syncDerivedServiceProxyFields(db, record.service_name, record.updated_at, route_inputs.items);

@@ -175,6 +175,21 @@ test "init creates service_http_routes table" {
     ) catch unreachable;
 }
 
+test "init creates service_http_route_headers table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO service_http_route_headers (" ++
+            "service_name, route_name, header_name, header_value, match_order, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "api", "default", "x-env", "canary", @as(i64, 0), @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
 test "init creates agents table" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();

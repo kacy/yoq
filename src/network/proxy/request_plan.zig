@@ -44,7 +44,9 @@ fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
     const parsed = (http.parseRequest(raw_request) catch return error.InvalidHttp1Request) orelse return error.IncompleteHttp1Request;
     const host_header = http.findHeaderValue(parsed.headers_raw, "Host") orelse return error.MissingHostHeader;
     const host = normalizeHost(host_header);
-    const route = router.matchRoute(routes, host, parsed.path_only) orelse return error.RouteNotFound;
+    const request_headers = try router.collectHttp1Headers(alloc, parsed.headers_raw);
+    defer alloc.free(request_headers);
+    const route = router.matchRoute(routes, host, parsed.path_only, request_headers) orelse return error.RouteNotFound;
 
     return .{
         .protocol = .http1,
@@ -61,7 +63,15 @@ fn planHttp2Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
     defer parsed.deinit(alloc);
 
     const host = normalizeHost(parsed.request.authority);
-    const route = router.matchRoute(routes, host, parsed.request.path) orelse return error.RouteNotFound;
+    var request_headers: std.ArrayList(router.RequestHeader) = .empty;
+    defer request_headers.deinit(alloc);
+    for (parsed.headers) |header| {
+        try request_headers.append(alloc, .{
+            .name = header.name,
+            .value = header.value,
+        });
+    }
+    const route = router.matchRoute(routes, host, parsed.request.path, request_headers.items) orelse return error.RouteNotFound;
 
     return .{
         .protocol = .http2,
@@ -107,6 +117,14 @@ fn appendLiteralWithIndexedName(buf: *std.ArrayList(u8), alloc: std.mem.Allocato
     try buf.appendSlice(alloc, value);
 }
 
+fn appendLiteralHeader(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name: []const u8, value: []const u8) !void {
+    try buf.append(alloc, 0x00);
+    try buf.append(alloc, @intCast(name.len));
+    try buf.appendSlice(alloc, name);
+    try buf.append(alloc, @intCast(value.len));
+    try buf.appendSlice(alloc, value);
+}
+
 fn buildFrame(alloc: std.mem.Allocator, header: http2.FrameHeader, payload: []const u8) ![]u8 {
     const buf = try alloc.alloc(u8, http2.frame_header_len + payload.len);
     errdefer alloc.free(buf);
@@ -141,6 +159,36 @@ test "planRequest matches HTTP/1 route and strips host port" {
     try std.testing.expectEqualStrings("api-v1", plan.route.name);
     try std.testing.expectEqual(@as(?u32, null), plan.http2_stream_id);
     try std.testing.expect(!plan.end_stream);
+}
+
+test "planRequest prefers header-specific HTTP/1 route" {
+    const alloc = std.testing.allocator;
+    const routes = [_]router.Route{
+        .{
+            .name = "api-default",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+        },
+        .{
+            .name = "api-canary",
+            .service = "api-canary",
+            .vip_address = "10.43.0.3",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+            .header_matches = &.{
+                .{ .name = "x-env", .value = "canary" },
+            },
+        },
+    };
+
+    const plan = try planRequest(
+        alloc,
+        &routes,
+        "GET /v1/users HTTP/1.1\r\nHost: api.internal\r\nX-Env: canary\r\n\r\n",
+    );
+    defer plan.deinit(alloc);
+
+    try std.testing.expectEqualStrings("api-canary", plan.route.service);
 }
 
 test "planRequest matches prior-knowledge HTTP/2 route" {
@@ -194,6 +242,62 @@ test "planRequest matches prior-knowledge HTTP/2 route" {
     try std.testing.expectEqualStrings("grpc", plan.route.service);
     try std.testing.expectEqual(@as(?u32, 1), plan.http2_stream_id);
     try std.testing.expect(plan.end_stream);
+}
+
+test "planRequest prefers header-specific HTTP/2 route" {
+    const alloc = std.testing.allocator;
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc-default",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+        },
+        .{
+            .name = "grpc-canary",
+            .service = "grpc-canary",
+            .vip_address = "10.43.0.10",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .header_matches = &.{
+                .{ .name = "x-env", .value = "canary" },
+            },
+        },
+    };
+
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+    try header_block.append(alloc, 0x83);
+    try header_block.append(alloc, 0x86);
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "grpc.internal");
+    try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call");
+    try appendLiteralHeader(&header_block, alloc, "x-env", "canary");
+
+    const settings = try buildFrame(alloc, .{
+        .length = 0,
+        .frame_type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+    defer alloc.free(settings);
+
+    const headers = try buildFrame(alloc, .{
+        .length = @intCast(header_block.items.len),
+        .frame_type = .headers,
+        .flags = 0x5,
+        .stream_id = 1,
+    }, header_block.items);
+    defer alloc.free(headers);
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(alloc);
+    try request_bytes.appendSlice(alloc, http2.client_preface);
+    try request_bytes.appendSlice(alloc, settings);
+    try request_bytes.appendSlice(alloc, headers);
+
+    const plan = try planRequest(alloc, &routes, request_bytes.items);
+    defer plan.deinit(alloc);
+
+    try std.testing.expectEqualStrings("grpc-canary", plan.route.service);
 }
 
 test "planRequest returns RouteNotFound for unmatched HTTP/2 request" {

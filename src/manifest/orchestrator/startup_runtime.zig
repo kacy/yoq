@@ -69,20 +69,46 @@ pub fn syncServiceDefinitions(
         defer route_inputs.deinit(alloc);
         var route_alloc_failed = false;
         for (svc.http_routes) |route| {
+            var match_headers: std.ArrayList(store.ServiceHttpRouteHeaderInput) = .empty;
+            errdefer match_headers.deinit(alloc);
+            for (route.match_headers) |header_match| {
+                match_headers.append(alloc, .{
+                    .header_name = header_match.name,
+                    .header_value = header_match.value,
+                }) catch {
+                    log.warn("orchestrator: failed to allocate http route header matches for {s}", .{svc.name});
+                    route_alloc_failed = true;
+                    break;
+                };
+            }
+            if (route_alloc_failed) {
+                match_headers.deinit(alloc);
+                break;
+            }
             route_inputs.append(alloc, .{
                 .route_name = route.name,
                 .host = route.host,
                 .path_prefix = route.path_prefix,
+                .rewrite_prefix = route.rewrite_prefix,
+                .match_headers = match_headers.toOwnedSlice(alloc) catch {
+                    log.warn("orchestrator: failed to allocate http route header matches for {s}", .{svc.name});
+                    route_alloc_failed = true;
+                    break;
+                },
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
                 .target_port = if (svc.ports.len > 0) svc.ports[0].container_port else null,
                 .preserve_host = route.preserve_host,
             }) catch {
+                alloc.free(match_headers.items);
                 log.warn("orchestrator: failed to allocate http routes for {s}", .{svc.name});
                 route_alloc_failed = true;
                 break;
             };
+        }
+        defer {
+            for (route_inputs.items) |route| if (route.match_headers.len > 0) alloc.free(route.match_headers);
         }
         if (route_alloc_failed) continue;
         const record = store.syncServiceConfig(

@@ -55,6 +55,18 @@ fn migrateServices(db: *sqlite.Db) void {
         \\    PRIMARY KEY (service_name, route_name)
         \\);
     ) catch {};
+    createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS service_http_route_headers (
+        \\    service_name TEXT NOT NULL,
+        \\    route_name TEXT NOT NULL,
+        \\    header_name TEXT NOT NULL,
+        \\    header_value TEXT NOT NULL,
+        \\    match_order INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (service_name, route_name, match_order)
+        \\);
+    ) catch {};
     addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN rewrite_prefix TEXT;") catch {};
     db.exec(
         "INSERT INTO service_http_routes (" ++

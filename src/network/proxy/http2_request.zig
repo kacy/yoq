@@ -28,10 +28,13 @@ pub const RequestHead = struct {
 
 pub const ParseResult = struct {
     request: RequestHead,
+    headers: []const hpack.HeaderField,
     consumed: usize,
 
     pub fn deinit(self: ParseResult, alloc: std.mem.Allocator) void {
         self.request.deinit(alloc);
+        for (self.headers) |header| header.deinit(alloc);
+        alloc.free(self.headers);
     }
 };
 
@@ -88,7 +91,7 @@ pub fn parseClientConnectionPreface(alloc: std.mem.Allocator, buf: []const u8) P
     if (request_stream_id == null or header_block.items.len == 0) return error.MissingHeaders;
 
     var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
-    defer {
+    errdefer {
         for (headers.items) |header| header.deinit(alloc);
         headers.deinit(alloc);
     }
@@ -113,14 +116,20 @@ pub fn parseClientConnectionPreface(alloc: std.mem.Allocator, buf: []const u8) P
         if (path) |value| alloc.free(value);
     }
 
+    const method_value = method orelse return error.MissingMethod;
+    const authority_value = authority orelse return error.MissingAuthority;
+    const path_value = path orelse return error.MissingPath;
+    const owned_headers = try headers.toOwnedSlice(alloc);
+
     return .{
         .request = .{
             .stream_id = request_stream_id.?,
-            .method = method orelse return error.MissingMethod,
-            .authority = authority orelse return error.MissingAuthority,
-            .path = path orelse return error.MissingPath,
+            .method = method_value,
+            .authority = authority_value,
+            .path = path_value,
             .end_stream = request_end_stream,
         },
+        .headers = owned_headers,
         .consumed = pos,
     };
 }

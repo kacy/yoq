@@ -73,6 +73,7 @@ pub const RouteSnapshot = struct {
     host: []const u8,
     path_prefix: []const u8,
     rewrite_prefix: ?[]const u8 = null,
+    header_matches: []const router.HeaderMatch = &.{},
     eligible_endpoints: u32,
     healthy_endpoints: u32,
     degraded: bool,
@@ -98,6 +99,8 @@ pub const RouteSnapshot = struct {
         alloc.free(self.host);
         alloc.free(self.path_prefix);
         if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (self.header_matches) |header_match| header_match.deinit(alloc);
+        if (self.header_matches.len > 0) alloc.free(self.header_matches);
     }
 };
 
@@ -393,6 +396,8 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
             if (route.match.host) |host| alloc.free(host);
             alloc.free(route.match.path_prefix);
             if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+            for (route.header_matches) |header_match| header_match.deinit(alloc);
+            if (route.header_matches.len > 0) alloc.free(route.header_matches);
         }
         routes_snapshot.deinit(alloc);
     }
@@ -407,6 +412,7 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
                 .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
             },
             .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+            .header_matches = try cloneHeaderMatches(alloc, route.header_matches),
             .eligible_endpoints = route.eligible_endpoints,
             .healthy_endpoints = route.healthy_endpoints,
             .degraded = route.degraded,
@@ -450,7 +456,7 @@ pub fn resolveRoute(alloc: std.mem.Allocator, host: []const u8, path: []const u8
     mutex.lock();
     defer mutex.unlock();
 
-    const matched = router.matchRoute(materialized_routes.items, host, path) orelse return error.RouteNotFound;
+    const matched = router.matchRoute(materialized_routes.items, host, path, &.{}) orelse return error.RouteNotFound;
     return cloneRouteSnapshot(alloc, matched);
 }
 
@@ -547,6 +553,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .host = try alloc.dupe(u8, route.match.host orelse ""),
         .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
         .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+        .header_matches = try cloneHeaderMatches(alloc, route.header_matches),
         .eligible_endpoints = route.eligible_endpoints,
         .healthy_endpoints = route.healthy_endpoints,
         .degraded = degraded_reason != .none,
@@ -565,6 +572,22 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .steering_drifted = steering_state.drifted,
         .steering_blocked_reason = steering_state.blocked_reason,
     };
+}
+
+fn cloneHeaderMatches(alloc: std.mem.Allocator, matches: []const router.HeaderMatch) ![]const router.HeaderMatch {
+    var cloned: std.ArrayList(router.HeaderMatch) = .empty;
+    errdefer {
+        for (cloned.items) |header_match| header_match.deinit(alloc);
+        cloned.deinit(alloc);
+    }
+
+    for (matches) |header_match| {
+        try cloned.append(alloc, .{
+            .name = try alloc.dupe(u8, header_match.name),
+            .value = try alloc.dupe(u8, header_match.value),
+        });
+    }
+    return cloned.toOwnedSlice(alloc);
 }
 
 fn syncLocked() !void {
@@ -602,6 +625,7 @@ fn syncLocked() !void {
                     .path_prefix = try std.heap.page_allocator.dupe(u8, service_route.path_prefix),
                 },
                 .rewrite_prefix = if (service_route.rewrite_prefix) |rewrite_prefix| try std.heap.page_allocator.dupe(u8, rewrite_prefix) else null,
+                .header_matches = try cloneHeaderMatches(std.heap.page_allocator, service_route.match_headers),
                 .eligible_endpoints = @intCast(service.eligible_endpoints),
                 .healthy_endpoints = @intCast(service.healthy_endpoints),
                 .degraded = service.degraded,
@@ -617,6 +641,8 @@ fn syncLocked() !void {
                 if (route.match.host) |owned_host| std.heap.page_allocator.free(owned_host);
                 std.heap.page_allocator.free(route.match.path_prefix);
                 if (route.rewrite_prefix) |rewrite_prefix| std.heap.page_allocator.free(rewrite_prefix);
+                for (route.header_matches) |header_match| header_match.deinit(std.heap.page_allocator);
+                if (route.header_matches.len > 0) std.heap.page_allocator.free(route.header_matches);
             }
             try materialized_routes.append(std.heap.page_allocator, route);
         }
@@ -637,6 +663,8 @@ fn deinitRoutesLocked() void {
         if (route.match.host) |host| std.heap.page_allocator.free(host);
         std.heap.page_allocator.free(route.match.path_prefix);
         if (route.rewrite_prefix) |rewrite_prefix| std.heap.page_allocator.free(rewrite_prefix);
+        for (route.header_matches) |header_match| header_match.deinit(std.heap.page_allocator);
+        if (route.header_matches.len > 0) std.heap.page_allocator.free(route.header_matches);
     }
     materialized_routes.clearAndFree(std.heap.page_allocator);
 }

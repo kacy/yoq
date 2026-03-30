@@ -20,6 +20,8 @@ ports = ["8081:8080"]
 [service.api.http_proxy]
 host = "demo.local"
 path_prefix = "/api"
+rewrite_prefix = "/"
+match_headers = ["x-env=canary"]
 preserve_host = false
 retries = 2
 connect_timeout_ms = 1500

@@ -337,16 +337,30 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             alloc.free(route.host);
             alloc.free(route.path_prefix);
             if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+            for (route.match_headers) |header_match| header_match.deinit(alloc);
+            if (route.match_headers.len > 0) alloc.free(route.match_headers);
         }
         defs.deinit(alloc);
     }
 
     for (routes) |route| {
+        var header_matches: std.ArrayList(service_registry.HttpHeaderMatch) = .empty;
+        errdefer {
+            for (header_matches.items) |header_match| header_match.deinit(alloc);
+            header_matches.deinit(alloc);
+        }
+        for (route.match_headers) |header_match| {
+            try header_matches.append(alloc, .{
+                .name = try alloc.dupe(u8, header_match.header_name),
+                .value = try alloc.dupe(u8, header_match.header_value),
+            });
+        }
         try defs.append(alloc, .{
             .route_name = try alloc.dupe(u8, route.route_name),
             .host = try alloc.dupe(u8, route.host),
             .path_prefix = try alloc.dupe(u8, route.path_prefix),
             .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+            .match_headers = try header_matches.toOwnedSlice(alloc),
             .retries = @intCast(route.retries),
             .connect_timeout_ms = @intCast(route.connect_timeout_ms),
             .request_timeout_ms = @intCast(route.request_timeout_ms),
@@ -364,6 +378,8 @@ fn deinitRouteDefinitions(alloc: Allocator, routes: []const service_registry.Htt
         alloc.free(route.host);
         alloc.free(route.path_prefix);
         if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (route.match_headers) |header_match| header_match.deinit(alloc);
+        if (route.match_headers.len > 0) alloc.free(route.match_headers);
     }
     alloc.free(routes);
 }

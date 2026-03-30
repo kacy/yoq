@@ -285,6 +285,10 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             writer.writeAll("\",\"rewrite_prefix\":\"") catch return common.internalError();
             json_helpers.writeJsonEscaped(writer, rewrite_prefix) catch return common.internalError();
         }
+        if (route.header_matches.len > 0) {
+            writer.writeAll("\",\"match_headers\":") catch return common.internalError();
+            writeHeaderMatchesJson(writer, route.header_matches) catch return common.internalError();
+        }
         writer.print(
             "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
             .{
@@ -512,6 +516,19 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
 
     const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn writeHeaderMatchesJson(writer: anytype, header_matches: anytype) !void {
+    try writer.writeByte('[');
+    for (header_matches, 0..) |header_match, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"name\":\"");
+        try json_helpers.writeJsonEscaped(writer, header_match.name);
+        try writer.writeAll("\",\"value\":\"");
+        try json_helpers.writeJsonEscaped(writer, header_match.value);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
 }
 
 fn writeSourceCounts(writer: anytype, source: service_reconciler.EventSource) !void {

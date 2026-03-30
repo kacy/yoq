@@ -5,7 +5,7 @@ this example is the canonical local routing walkthrough.
 it starts three echo services behind the built-in router:
 
 - `demo.local/` -> `gateway`
-- `demo.local/api/*` -> `api`
+- `demo.local/api/*` with `x-env: canary` -> `api`
 - `docs.demo.local/` -> `docs`
 
 start it manually:
@@ -14,7 +14,7 @@ start it manually:
 yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
 yoq up -f examples/http-routing/manifest.toml
 curl -H 'Host: demo.local' http://127.0.0.1:17080/
-curl -H 'Host: demo.local' http://127.0.0.1:17080/api/get
+curl -H 'Host: demo.local' -H 'x-env: canary' http://127.0.0.1:17080/api/get
 curl -H 'Host: docs.demo.local' http://127.0.0.1:17080/
 curl http://127.0.0.1:7700/v1/status?mode=service_discovery
 ```

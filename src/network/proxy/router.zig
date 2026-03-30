@@ -5,12 +5,28 @@ pub const Match = struct {
     path_prefix: []const u8 = "/",
 };
 
+pub const HeaderMatch = struct {
+    name: []const u8,
+    value: []const u8,
+
+    pub fn deinit(self: HeaderMatch, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.value);
+    }
+};
+
+pub const RequestHeader = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const Route = struct {
     name: []const u8,
     service: []const u8,
     vip_address: []const u8,
     match: Match,
     rewrite_prefix: ?[]const u8 = null,
+    header_matches: []const HeaderMatch = &.{},
     eligible_endpoints: u32 = 0,
     healthy_endpoints: u32 = 0,
     degraded: bool = false,
@@ -20,23 +36,65 @@ pub const Route = struct {
     preserve_host: bool = true,
 };
 
-pub fn matchRoute(routes: []const Route, host: []const u8, path: []const u8) ?Route {
+pub fn matchRoute(routes: []const Route, host: []const u8, path: []const u8, request_headers: []const RequestHeader) ?Route {
     var best: ?Route = null;
     var best_prefix_len: usize = 0;
+    var best_header_match_count: usize = 0;
 
     for (routes) |route| {
         if (route.match.host) |expected_host| {
             if (!std.ascii.eqlIgnoreCase(expected_host, host)) continue;
         }
         if (!std.mem.startsWith(u8, path, route.match.path_prefix)) continue;
+        if (!routeHeadersMatch(route.header_matches, request_headers)) continue;
 
-        if (best == null or route.match.path_prefix.len > best_prefix_len) {
+        if (best == null or
+            route.match.path_prefix.len > best_prefix_len or
+            (route.match.path_prefix.len == best_prefix_len and route.header_matches.len > best_header_match_count))
+        {
             best = route;
             best_prefix_len = route.match.path_prefix.len;
+            best_header_match_count = route.header_matches.len;
         }
     }
 
     return best;
+}
+
+pub fn collectHttp1Headers(alloc: std.mem.Allocator, headers_raw: []const u8) ![]const RequestHeader {
+    var headers: std.ArrayList(RequestHeader) = .empty;
+    errdefer headers.deinit(alloc);
+
+    var pos: usize = 0;
+    while (pos < headers_raw.len) {
+        const line_end = std.mem.indexOfPos(u8, headers_raw, pos, "\r\n") orelse headers_raw.len;
+        const line = headers_raw[pos..line_end];
+        if (std.mem.indexOfScalar(u8, line, ':')) |sep| {
+            const name = std.mem.trim(u8, line[0..sep], " \t");
+            const value = std.mem.trim(u8, line[sep + 1 ..], " \t");
+            try headers.append(alloc, .{
+                .name = name,
+                .value = value,
+            });
+        }
+        pos = if (line_end + 2 <= headers_raw.len) line_end + 2 else headers_raw.len;
+    }
+
+    return headers.toOwnedSlice(alloc);
+}
+
+fn routeHeadersMatch(route_matches: []const HeaderMatch, request_headers: []const RequestHeader) bool {
+    for (route_matches) |expected| {
+        var found = false;
+        for (request_headers) |header| {
+            if (!std.ascii.eqlIgnoreCase(expected.name, header.name)) continue;
+            if (!std.mem.eql(u8, expected.value, header.value)) continue;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
 }
 
 test "matchRoute matches host and path prefix" {
@@ -55,7 +113,7 @@ test "matchRoute matches host and path prefix" {
         },
     };
 
-    const route = matchRoute(&routes, "api.example.com", "/v1/users") orelse return error.TestExpectedNonNull;
+    const route = matchRoute(&routes, "api.example.com", "/v1/users", &.{}) orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("api-v1", route.name);
 }
 
@@ -75,7 +133,7 @@ test "matchRoute prefers longest path prefix" {
         },
     };
 
-    const route = matchRoute(&routes, "api.example.com", "/v1/health") orelse return error.TestExpectedNonNull;
+    const route = matchRoute(&routes, "api.example.com", "/v1/health", &.{}) orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("api-v1", route.service);
 }
 
@@ -89,6 +147,48 @@ test "matchRoute accepts wildcard host when omitted" {
         },
     };
 
-    const route = matchRoute(&routes, "unknown.example.com", "/") orelse return error.TestExpectedNonNull;
+    const route = matchRoute(&routes, "unknown.example.com", "/", &.{}) orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("catch-all", route.name);
+}
+
+test "matchRoute prefers more specific header match on the same path" {
+    const routes = [_]Route{
+        .{
+            .name = "api-default",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
+        },
+        .{
+            .name = "api-canary",
+            .service = "api-canary",
+            .vip_address = "10.43.0.3",
+            .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
+            .header_matches = &.{
+                .{ .name = "x-env", .value = "canary" },
+            },
+        },
+    };
+    const request_headers = [_]RequestHeader{
+        .{ .name = "X-Env", .value = "canary" },
+    };
+
+    const route = matchRoute(&routes, "api.example.com", "/v1/users", &request_headers) orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqualStrings("api-canary", route.name);
+}
+
+test "matchRoute rejects route when required header is missing" {
+    const routes = [_]Route{
+        .{
+            .name = "api-canary",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
+            .header_matches = &.{
+                .{ .name = "x-env", .value = "canary" },
+            },
+        },
+    };
+
+    try std.testing.expect(matchRoute(&routes, "api.example.com", "/v1/users", &.{}) == null);
 }

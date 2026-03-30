@@ -203,6 +203,10 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
             try writer.writeAll("\",\"rewrite_prefix\":\"");
             try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
         }
+        if (service.http_routes.len > 0 and service.http_routes[0].match_headers.len > 0) {
+            try writer.writeAll("\",\"match_headers\":");
+            try writeHeaderMatchesJson(writer, service.http_routes[0].match_headers);
+        }
         try writer.print(
             "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
             .{
@@ -227,6 +231,10 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
         if (http_route.rewrite_prefix) |rewrite_prefix| {
             try writer.writeAll("\",\"rewrite_prefix\":\"");
             try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
+        }
+        if (http_route.match_headers.len > 0) {
+            try writer.writeAll("\",\"match_headers\":");
+            try writeHeaderMatchesJson(writer, http_route.match_headers);
         }
         try writer.print(
             "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}}}",
@@ -340,6 +348,10 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
         try writer.writeAll("\",\"rewrite_prefix\":\"");
         try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
     }
+    if (proxy_route.header_matches.len > 0) {
+        try writer.writeAll("\",\"match_headers\":");
+        try writeHeaderMatchesJson(writer, proxy_route.header_matches);
+    }
     try writer.print(
         "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
         .{
@@ -372,6 +384,19 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
         try writer.writeAll("null");
     }
     try writer.writeByte('}');
+}
+
+fn writeHeaderMatchesJson(writer: anytype, header_matches: anytype) !void {
+    try writer.writeByte('[');
+    for (header_matches, 0..) |header_match, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"name\":\"");
+        try json_helpers.writeJsonEscaped(writer, header_match.name);
+        try writer.writeAll("\",\"value\":\"");
+        try json_helpers.writeJsonEscaped(writer, header_match.value);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
 }
 
 fn isValidSegment(value: []const u8) bool {

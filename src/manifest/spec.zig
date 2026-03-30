@@ -28,6 +28,7 @@ pub const RestartPolicy = shared_types.RestartPolicy;
 pub const CheckType = shared_types.CheckType;
 pub const HealthCheck = shared_types.HealthCheck;
 pub const TlsConfig = shared_types.TlsConfig;
+pub const HttpHeaderMatch = shared_types.HttpHeaderMatch;
 pub const HttpProxyRoute = shared_types.HttpProxyRoute;
 pub const PortMapping = shared_types.PortMapping;
 pub const VolumeMount = shared_types.VolumeMount;

@@ -1459,6 +1459,28 @@ test "http proxy config — rewrite prefix" {
     try std.testing.expectEqualStrings("/", manifest.services[0].http_routes[0].rewrite_prefix.?);
 }
 
+test "http routes config — exact header matches" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_routes.canary]
+        \\host = "api.internal"
+        \\path_prefix = "/v1"
+        \\match_headers = ["X-Env=canary", "x-region=us-east"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.services[0].http_routes.len);
+    try std.testing.expectEqual(@as(usize, 2), manifest.services[0].http_routes[0].match_headers.len);
+    try std.testing.expectEqualStrings("x-env", manifest.services[0].http_routes[0].match_headers[0].name);
+    try std.testing.expectEqualStrings("canary", manifest.services[0].http_routes[0].match_headers[0].value);
+    try std.testing.expectEqualStrings("x-region", manifest.services[0].http_routes[0].match_headers[1].name);
+    try std.testing.expectEqualStrings("us-east", manifest.services[0].http_routes[0].match_headers[1].value);
+}
+
 test "http proxy config — invalid rewrite prefix returns error" {
     const alloc = std.testing.allocator;
 
@@ -1502,6 +1524,20 @@ test "http routes config — duplicate host path returns error" {
         \\[service.web.http_routes.again]
         \\host = "api.internal"
         \\path_prefix = "/v1"
+    ));
+}
+
+test "http routes config — duplicate route header name returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_routes.canary]
+        \\host = "api.internal"
+        \\path_prefix = "/v1"
+        \\match_headers = ["x-env=canary", "X-Env=stable"]
     ));
 }
 
