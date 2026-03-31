@@ -28,8 +28,8 @@ pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
             \\
             \\commands:
             \\  install <domain> --cert <path> --key <path>   store a certificate
-            \\  provision <domain> --email <email> [--staging] obtain via ACME
-            \\  renew <domain> --email <email> [--staging]     renew via ACME
+            \\  provision <domain> [--email <email>] [--staging] obtain via ACME
+            \\  renew <domain> [--email <email>] [--staging]     renew via ACME
             \\  list                                           list certificates
             \\  rm <domain>                                    remove a certificate
             \\

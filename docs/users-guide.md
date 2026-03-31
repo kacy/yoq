@@ -150,7 +150,8 @@ current limits:
 
 - ACME currently uses HTTP-01 only
 - the target host must be reachable on port 80 during provision and renewal
-- standalone `yoq cert provision` and `yoq cert renew` currently require `--email`
+
+For standalone `yoq cert provision` and `yoq cert renew`, `--email` is optional. yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
 
 ### rolling updates
 
