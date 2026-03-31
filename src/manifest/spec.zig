@@ -254,11 +254,14 @@ test "health check tcp deinit is no-op" {
     hc.deinit(alloc);
 }
 
-test "health check grpc deinit is no-op" {
+test "health check grpc deinit frees optional service" {
     const alloc = std.testing.allocator;
 
     var hc = HealthCheck{
-        .check_type = .{ .grpc = .{ .port = 50051 } },
+        .check_type = .{ .grpc = .{
+            .port = 50051,
+            .service = try alloc.dupe(u8, "pkg.Health"),
+        } },
     };
     hc.deinit(alloc);
 }
