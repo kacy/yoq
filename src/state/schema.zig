@@ -190,6 +190,21 @@ test "init creates service_http_route_headers table" {
     ) catch unreachable;
 }
 
+test "init creates service_http_route_methods table" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    try init(&db);
+
+    db.exec(
+        "INSERT INTO service_http_route_methods (" ++
+            "service_name, route_name, method, match_order, created_at, updated_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "api", "default", "POST", @as(i64, 0), @as(i64, 1000), @as(i64, 1000) },
+    ) catch unreachable;
+}
+
 test "init creates service_http_route_backends table" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();

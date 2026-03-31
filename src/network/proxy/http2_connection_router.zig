@@ -553,7 +553,7 @@ const ConnectionRouter = struct {
                 .value = header.value,
             }) catch return null;
         }
-        return router.matchRoute(self.routes, host, parsed.request.path, request_headers.items);
+        return router.matchRoute(self.routes, parsed.request.method, host, parsed.request.path, request_headers.items);
     }
 };
 

@@ -73,6 +73,7 @@ pub const RouteSnapshot = struct {
     host: []const u8,
     path_prefix: []const u8,
     rewrite_prefix: ?[]const u8 = null,
+    method_matches: []const router.MethodMatch = &.{},
     header_matches: []const router.HeaderMatch = &.{},
     backend_services: []const router.BackendTarget = &.{},
     eligible_endpoints: u32,
@@ -101,6 +102,8 @@ pub const RouteSnapshot = struct {
         alloc.free(self.host);
         alloc.free(self.path_prefix);
         if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (self.method_matches) |method_match| method_match.deinit(alloc);
+        if (self.method_matches.len > 0) alloc.free(self.method_matches);
         for (self.header_matches) |header_match| header_match.deinit(alloc);
         if (self.header_matches.len > 0) alloc.free(self.header_matches);
         for (self.backend_services) |backend| backend.deinit(alloc);
@@ -497,6 +500,8 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
             if (route.match.host) |host| alloc.free(host);
             alloc.free(route.match.path_prefix);
             if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+            for (route.method_matches) |method_match| method_match.deinit(alloc);
+            if (route.method_matches.len > 0) alloc.free(route.method_matches);
             for (route.header_matches) |header_match| header_match.deinit(alloc);
             if (route.header_matches.len > 0) alloc.free(route.header_matches);
             for (route.backend_services) |backend| backend.deinit(alloc);
@@ -515,6 +520,7 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
                 .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
             },
             .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+            .method_matches = try cloneMethodMatches(alloc, route.method_matches),
             .header_matches = try cloneHeaderMatches(alloc, route.header_matches),
             .backend_services = try cloneBackendTargets(alloc, route.backend_services),
             .eligible_endpoints = route.eligible_endpoints,
@@ -557,11 +563,11 @@ pub fn snapshotServiceRoutes(alloc: std.mem.Allocator, service_name: []const u8)
     return routes_snapshot;
 }
 
-pub fn resolveRoute(alloc: std.mem.Allocator, host: []const u8, path: []const u8) !RouteSnapshot {
+pub fn resolveRoute(alloc: std.mem.Allocator, method: []const u8, host: []const u8, path: []const u8) !RouteSnapshot {
     mutex.lock();
     defer mutex.unlock();
 
-    const matched = router.matchRoute(materialized_routes.items, host, path, &.{}) orelse return error.RouteNotFound;
+    const matched = router.matchRoute(materialized_routes.items, method, host, path, &.{}) orelse return error.RouteNotFound;
     return cloneRouteSnapshot(alloc, matched);
 }
 
@@ -706,6 +712,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .host = try alloc.dupe(u8, route.match.host orelse ""),
         .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
         .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+        .method_matches = try cloneMethodMatches(alloc, route.method_matches),
         .header_matches = try cloneHeaderMatches(alloc, route.header_matches),
         .backend_services = try cloneBackendTargets(alloc, route.backend_services),
         .eligible_endpoints = route.eligible_endpoints,
@@ -740,6 +747,21 @@ fn cloneHeaderMatches(alloc: std.mem.Allocator, matches: anytype) ![]const route
         try cloned.append(alloc, .{
             .name = try alloc.dupe(u8, header_match.name),
             .value = try alloc.dupe(u8, header_match.value),
+        });
+    }
+    return cloned.toOwnedSlice(alloc);
+}
+
+fn cloneMethodMatches(alloc: std.mem.Allocator, matches: anytype) ![]const router.MethodMatch {
+    var cloned: std.ArrayList(router.MethodMatch) = .empty;
+    errdefer {
+        for (cloned.items) |method_match| method_match.deinit(alloc);
+        cloned.deinit(alloc);
+    }
+
+    for (matches) |method_match| {
+        try cloned.append(alloc, .{
+            .method = try alloc.dupe(u8, method_match.method),
         });
     }
     return cloned.toOwnedSlice(alloc);
@@ -796,6 +818,7 @@ fn syncLocked() !void {
                     .path_prefix = try std.heap.page_allocator.dupe(u8, service_route.path_prefix),
                 },
                 .rewrite_prefix = if (service_route.rewrite_prefix) |rewrite_prefix| try std.heap.page_allocator.dupe(u8, rewrite_prefix) else null,
+                .method_matches = try cloneMethodMatches(std.heap.page_allocator, service_route.match_methods),
                 .header_matches = try cloneHeaderMatches(std.heap.page_allocator, service_route.match_headers),
                 .backend_services = try cloneBackendTargets(std.heap.page_allocator, service_route.backend_services),
                 .eligible_endpoints = @intCast(service.eligible_endpoints),
@@ -814,6 +837,8 @@ fn syncLocked() !void {
                 if (route.match.host) |owned_host| std.heap.page_allocator.free(owned_host);
                 std.heap.page_allocator.free(route.match.path_prefix);
                 if (route.rewrite_prefix) |rewrite_prefix| std.heap.page_allocator.free(rewrite_prefix);
+                for (route.method_matches) |method_match| method_match.deinit(std.heap.page_allocator);
+                if (route.method_matches.len > 0) std.heap.page_allocator.free(route.method_matches);
                 for (route.header_matches) |header_match| header_match.deinit(std.heap.page_allocator);
                 if (route.header_matches.len > 0) std.heap.page_allocator.free(route.header_matches);
                 for (route.backend_services) |backend| backend.deinit(std.heap.page_allocator);
@@ -838,6 +863,8 @@ fn deinitRoutesLocked() void {
         if (route.match.host) |host| std.heap.page_allocator.free(host);
         std.heap.page_allocator.free(route.match.path_prefix);
         if (route.rewrite_prefix) |rewrite_prefix| std.heap.page_allocator.free(rewrite_prefix);
+        for (route.method_matches) |method_match| method_match.deinit(std.heap.page_allocator);
+        if (route.method_matches.len > 0) std.heap.page_allocator.free(route.method_matches);
         for (route.header_matches) |header_match| header_match.deinit(std.heap.page_allocator);
         if (route.header_matches.len > 0) std.heap.page_allocator.free(route.header_matches);
         for (route.backend_services) |backend| backend.deinit(std.heap.page_allocator);
@@ -1241,11 +1268,85 @@ test "resolveRoute matches by host and path" {
 
     bootstrapIfEnabled();
 
-    const route = try resolveRoute(std.testing.allocator, "api.internal", "/v1/users");
+    const route = try resolveRoute(std.testing.allocator, "GET", "api.internal", "/v1/users");
     defer route.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("api", route.service);
     try std.testing.expectEqualStrings("/v1", route.path_prefix);
+}
+
+test "resolveRoute prefers method-specific route" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+        .http_routes = &.{
+            .{
+                .service_name = "api",
+                .route_name = "default",
+                .host = "api.internal",
+                .path_prefix = "/v1",
+                .match_headers = &.{},
+                .backend_services = &.{},
+                .retries = 0,
+                .connect_timeout_ms = 1000,
+                .request_timeout_ms = 5000,
+                .http2_idle_timeout_ms = 30000,
+                .route_order = 0,
+                .created_at = 1000,
+                .updated_at = 1000,
+            },
+            .{
+                .service_name = "api",
+                .route_name = "write",
+                .host = "api.internal",
+                .path_prefix = "/v1",
+                .match_methods = &.{
+                    .{
+                        .service_name = "api",
+                        .route_name = "write",
+                        .method = "POST",
+                        .match_order = 0,
+                        .created_at = 1000,
+                        .updated_at = 1000,
+                    },
+                },
+                .match_headers = &.{},
+                .backend_services = &.{},
+                .retries = 0,
+                .connect_timeout_ms = 1000,
+                .request_timeout_ms = 5000,
+                .http2_idle_timeout_ms = 30000,
+                .route_order = 1,
+                .created_at = 1000,
+                .updated_at = 1000,
+            },
+        },
+    });
+
+    bootstrapIfEnabled();
+
+    const route = try resolveRoute(std.testing.allocator, "POST", "api.internal", "/v1/users");
+    defer route.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("api", route.service);
+    try std.testing.expectEqualStrings("POST", route.method_matches[0].method);
 }
 
 test "resolveUpstream returns the first eligible endpoint" {

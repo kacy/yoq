@@ -28,6 +28,7 @@ pub const RestartPolicy = shared_types.RestartPolicy;
 pub const CheckType = shared_types.CheckType;
 pub const HealthCheck = shared_types.HealthCheck;
 pub const TlsConfig = shared_types.TlsConfig;
+pub const HttpMethodMatch = shared_types.HttpMethodMatch;
 pub const HttpHeaderMatch = shared_types.HttpHeaderMatch;
 pub const HttpRouteBackend = shared_types.HttpRouteBackend;
 pub const HttpProxyRoute = shared_types.HttpProxyRoute;

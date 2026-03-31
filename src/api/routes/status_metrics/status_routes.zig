@@ -316,6 +316,10 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         } else {
             writer.writeAll("null") catch return common.internalError();
         }
+        if (route.method_matches.len > 0) {
+            writer.writeAll(",\"match_methods\":") catch return common.internalError();
+            writeMethodMatchesJson(writer, route.method_matches) catch return common.internalError();
+        }
         if (route.header_matches.len > 0) {
             writer.writeAll(",\"match_headers\":") catch return common.internalError();
             writeHeaderMatchesJson(writer, route.header_matches) catch return common.internalError();
@@ -550,6 +554,17 @@ fn writeBackendServicesJson(writer: anytype, backend_services: anytype) !void {
         try writer.writeAll("{\"service\":\"");
         try json_helpers.writeJsonEscaped(writer, backend.service_name);
         try writer.print("\",\"weight\":{d}}}", .{backend.weight});
+    }
+    try writer.writeByte(']');
+}
+
+fn writeMethodMatchesJson(writer: anytype, method_matches: anytype) !void {
+    try writer.writeByte('[');
+    for (method_matches, 0..) |method_match, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try json_helpers.writeJsonEscaped(writer, method_match.method);
+        try writer.writeByte('"');
     }
     try writer.writeByte(']');
 }
