@@ -123,6 +123,7 @@ the upstream target is the first service port in `ports`. `http_proxy` is just s
 | `match_methods` | array of strings | no | `[]` | allowed HTTP methods, chosen from `GET`, `HEAD`, `POST`, `PUT`, `DELETE` |
 | `match_headers` | array of strings | no | `[]` | exact header matches in `name=value` form |
 | `backend_services` | array of strings | no | owning service at `100` | weighted backend targets in `service=weight` form |
+| `mirror_service` | string | no | none | best-effort shadow copy target; does not affect the client response |
 | `retries` | integer | no | `0` | upstream retries for failed requests |
 | `connect_timeout_ms` | integer | no | `1000` | upstream connect timeout in milliseconds |
 | `request_timeout_ms` | integer | no | `5000` | upstream request timeout in milliseconds |
@@ -148,6 +149,7 @@ path_prefix = "/api"
 rewrite_prefix = "/"
 match_headers = ["x-env=canary"]
 backend_services = ["api=90", "api-canary=10"]
+mirror_service = "api-shadow"
 preserve_host = false
 retries = 2
 connect_timeout_ms = 1500
@@ -186,7 +188,9 @@ validation rules:
 - `http_proxy` and `http_routes` cannot be used together on the same service
 - route matching prefers the longest `path_prefix`, then the route with more exact header conditions, then the route with the narrower method set, then the first defined route
 - `backend_services` weights must sum to `100`
+- `mirror_service` cannot point at the owning service or one of the configured `backend_services`
 - weighted backend selection is deterministic per request key, and retry attempts can move to a different configured backend target
+- `mirror_service` is best-effort shadow traffic only: mirror failures are exposed in route traffic counters but do not change the client response or route degraded state
 
 server-side listener defaults:
 
@@ -200,9 +204,9 @@ yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
 yoq init-server --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
 ```
 
-use `GET /v1/status?mode=service_discovery`, `GET /v1/services/<name>/proxy-routes`, and `GET /v1/metrics?format=prometheus` to inspect listener, route, steering, and weighted-backend traffic state. `mode=service_rollout` remains accepted as a compatibility alias.
+use `GET /v1/status?mode=service_discovery`, `GET /v1/services/<name>/proxy-routes`, and `GET /v1/metrics?format=prometheus` to inspect listener, route, steering, weighted-backend traffic, and mirror traffic state. `mode=service_rollout` remains accepted as a compatibility alias.
 
-for weighted routes, the JSON service and status payloads include both aggregate `traffic` counters and per-backend `backend_traffic` counters, and Prometheus exposes `yoq_service_l7_proxy_route_*` counters labeled by route, owning service, and selected backend service.
+for weighted and mirrored routes, the JSON service and status payloads include aggregate `traffic`, per-backend `backend_traffic`, aggregate `mirror_traffic`, and per-backend `mirror_backend_traffic` counters. Prometheus exposes `yoq_service_l7_proxy_route_*` counters labeled by route, owning service, selected backend service, and `traffic_role=primary|mirror`.
 
 current HTTP/2 and gRPC routing limits:
 

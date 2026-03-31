@@ -461,6 +461,7 @@ test "route rollout status sample routes expose steering drift details" {
         .lb_policy = "consistent_hash",
         .http_proxy_host = "api.internal",
         .http_proxy_path_prefix = "/v1",
+        .http_proxy_mirror_service = "api-shadow",
         .http_proxy_target_port = 8080,
         .created_at = 1000,
         .updated_at = 1000,
@@ -489,6 +490,9 @@ test "route rollout status sample routes expose steering drift details" {
     proxy_runtime.recordRouteResponseCode("api:default", "api", "api", 200);
     proxy_runtime.recordRouteRetry("api:default", "api", "api");
     proxy_runtime.recordRouteUpstreamFailure("api:default", "api", "api");
+    proxy_runtime.recordMirrorRouteRequestStart("api:default", "api", "api-shadow");
+    proxy_runtime.recordMirrorRouteResponseCode("api:default", "api", "api-shadow", 204);
+    proxy_runtime.recordMirrorRouteUpstreamFailure("api:default", "api", "api-shadow");
 
     const req = http.Request{
         .method = .GET,
@@ -508,9 +512,12 @@ test "route rollout status sample routes expose steering drift details" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"none\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_service\":\"api-shadow\"") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"backend_traffic\":[{\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"sample_route_traffic\":[{\"route\":\"api:default\",\"service\":\"api\",\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"upstream_failures_total\":1}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_backend_traffic\":[{\"backend_service\":\"api-shadow\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"upstream_failures_total\":1}]") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"sample_route_traffic\":[{\"route\":\"api:default\",\"service\":\"api\",\"backend_service\":\"api\",\"traffic_role\":\"primary\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
 }
 
 test "resolveIpToService returns unknown for empty records" {
@@ -730,6 +737,7 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
         .lb_policy = "consistent_hash",
         .http_proxy_host = "edge.internal",
         .http_proxy_path_prefix = "/",
+        .http_proxy_mirror_service = "edge-shadow",
         .http_proxy_target_port = 8080,
         .created_at = 1000,
         .updated_at = 1000,
@@ -742,6 +750,9 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     proxy_runtime.recordRouteResponseCode("edge:default", "edge", "edge", 200);
     proxy_runtime.recordRetry();
     proxy_runtime.recordRouteRetry("edge:default", "edge", "edge");
+    proxy_runtime.recordMirrorRouteRequestStart("edge:default", "edge", "edge-shadow");
+    proxy_runtime.recordMirrorRouteResponseCode("edge:default", "edge", "edge-shadow", 204);
+    proxy_runtime.recordMirrorRouteUpstreamFailure("edge:default", "edge", "edge-shadow");
     proxy_runtime.recordLoopRejection();
     proxy_runtime.recordUpstreamFailure(.connect);
     proxy_runtime.recordRouteUpstreamFailure("edge:default", "edge", "edge");
@@ -787,14 +798,17 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_configured_services 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_routes 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_requests_total 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_requests_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_requests_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge\",traffic_role=\"primary\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_requests_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge-shadow\",traffic_role=\"mirror\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_responses_total{class=\"2xx\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_responses_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge\",class=\"2xx\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_responses_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge\",traffic_role=\"primary\",class=\"2xx\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_responses_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge-shadow\",traffic_role=\"mirror\",class=\"2xx\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_retries_total 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_retries_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_retries_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge\",traffic_role=\"primary\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_loop_rejections_total 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_upstream_failures_total{kind=\"connect\"} 1") != null);
-    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_upstream_failures_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_upstream_failures_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge\",traffic_role=\"primary\"} 1") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_route_upstream_failures_total{route=\"edge:default\",service=\"edge\",backend_service=\"edge-shadow\",traffic_role=\"mirror\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_circuit_trips_total 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_circuit_endpoints{state=\"open\"} 1") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_l7_proxy_listener_enabled 1") != null);

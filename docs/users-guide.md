@@ -138,7 +138,9 @@ gRPC services can use the HTTP routing listener through prior-knowledge HTTP/2 (
 
 HTTP routes can now narrow traffic by method as well as host, path, and exact headers. use `match_methods = ["GET", "POST"]` on `http_proxy` or named `http_routes` entries when you need separate read/write routing policy without splitting the service definition.
 
-For weighted routes, `GET /v1/services/<name>/proxy-routes` and `GET /v1/status?mode=service_discovery` now expose both aggregate route traffic and per-backend traffic breakdowns, which makes canary and cutover behavior visible without switching to Prometheus first.
+HTTP routes can also shadow traffic with `mirror_service = "<service>"`. mirroring is best-effort: the primary response still comes from the selected weighted backend, and mirror failures only show up in observability.
+
+For weighted or mirrored routes, `GET /v1/services/<name>/proxy-routes` and `GET /v1/status?mode=service_discovery` now expose aggregate route traffic, per-backend traffic, aggregate mirror traffic, and per-backend mirror traffic. Prometheus carries the same counters with `traffic_role=primary|mirror`.
 
 current limits:
 

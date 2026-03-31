@@ -106,6 +106,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    host TEXT NOT NULL,
         \\    path_prefix TEXT NOT NULL DEFAULT '/',
         \\    rewrite_prefix TEXT,
+        \\    mirror_service TEXT,
         \\    retries INTEGER NOT NULL DEFAULT 0,
         \\    connect_timeout_ms INTEGER NOT NULL DEFAULT 1000,
         \\    request_timeout_ms INTEGER NOT NULL DEFAULT 5000,

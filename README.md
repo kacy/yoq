@@ -49,6 +49,7 @@ Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't t
 - WireGuard-based cluster networking for multi-node deployments
 - HTTP routing for HTTP/1.1, prior-knowledge HTTP/2 (`h2c`), and TLS-terminated HTTP/2 via ALPN when a routed host is also bound to `service.<name>.tls.domain`
 - gRPC health checks using the standard `grpc.health.v1.Health/Check` RPC
+- route-level rewrites, method/header matching, weighted backend selection, and best-effort request mirroring
 
 current gRPC routing limits:
 

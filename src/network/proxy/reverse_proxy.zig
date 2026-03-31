@@ -59,6 +59,35 @@ pub const ForwardPlan = struct {
     }
 };
 
+const MirrorTask = struct {
+    allocator: std.mem.Allocator,
+    raw_request: []u8,
+    protocol: Protocol,
+    method: http.Method,
+    path: []u8,
+    outbound_path: []u8,
+    host: []u8,
+    outbound_host: []u8,
+    route_name: []u8,
+    route_service: []u8,
+    mirror_service: []u8,
+    connect_timeout_ms: u32,
+    request_timeout_ms: u32,
+    max_response_bytes: usize,
+    client_ip: ?[4]u8,
+
+    fn deinit(self: MirrorTask) void {
+        self.allocator.free(self.raw_request);
+        self.allocator.free(self.path);
+        self.allocator.free(self.outbound_path);
+        self.allocator.free(self.host);
+        self.allocator.free(self.outbound_host);
+        self.allocator.free(self.route_name);
+        self.allocator.free(self.route_service);
+        self.allocator.free(self.mirror_service);
+    }
+};
+
 pub const HandleResult = union(enum) {
     forward: ForwardPlan,
     response: ProxyResponse,
@@ -139,6 +168,7 @@ pub const ReverseProxy = struct {
             .forward => |plan| {
                 defer plan.deinit(self.allocator);
                 proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
+                self.startMirrorRequest(raw_request, &plan, client_ip);
                 const response = try self.forwardPlanWithClient(raw_request, &plan, client_ip);
                 if (parseForwardedStatusCode(self.allocator, plan.protocol, response)) |status_code| {
                     proxy_runtime.recordResponseCode(status_code);
@@ -228,6 +258,8 @@ pub const ReverseProxy = struct {
                     return;
                 }
 
+                proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
+                self.startMirrorRequest(request, &plan, peerIpFromSocket(client_fd));
                 const response = self.forwardPlanWithClient(request, &plan, peerIpFromSocket(client_fd)) catch {
                     proxy_runtime.recordResponse(.internal_server_error);
                     const internal = formatProxyResponse(self.allocator, .{
@@ -254,22 +286,75 @@ pub const ReverseProxy = struct {
         plan: *const ForwardPlan,
         client_ip: ?[4]u8,
     ) ![]u8 {
+        return buildForwardRequestBytes(self.allocator, raw_request, .{
+            .protocol = plan.protocol,
+            .method = plan.method,
+            .path = plan.path,
+            .outbound_path = plan.outbound_path,
+            .host = plan.host,
+            .outbound_host = plan.outbound_host,
+        }, client_ip);
+    }
+
+    fn startMirrorRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8) void {
+        const mirror_service = plan.route.mirror_service orelse return;
+        var task = cloneMirrorTask(self.allocator, self.max_response_bytes, raw_request, plan, mirror_service, client_ip) catch return;
+        const thread = std.Thread.spawn(.{}, runMirrorTask, .{task}) catch {
+            task.deinit();
+            return;
+        };
+        thread.detach();
+    }
+
+    const ForwardRequestSpec = struct {
+        protocol: Protocol,
+        method: http.Method,
+        path: []const u8,
+        outbound_path: []const u8,
+        host: []const u8,
+        outbound_host: []const u8,
+    };
+
+    fn buildForwardRequestBytes(
+        alloc: std.mem.Allocator,
+        raw_request: []const u8,
+        spec: ForwardRequestSpec,
+        client_ip: ?[4]u8,
+    ) ![]u8 {
+        return switch (spec.protocol) {
+            .http1 => buildHttp1ForwardRequestBytes(alloc, raw_request, spec, client_ip),
+            .http2 => http2_request.rewriteClientConnectionPreface(
+                alloc,
+                raw_request,
+                if (std.mem.eql(u8, spec.outbound_host, spec.host)) null else spec.outbound_host,
+                if (std.mem.eql(u8, spec.outbound_path, spec.path)) null else spec.outbound_path,
+                trustedForwardedProtoFromRawRequest(raw_request, client_ip),
+            ),
+        };
+    }
+
+    fn buildHttp1ForwardRequestBytes(
+        alloc: std.mem.Allocator,
+        raw_request: []const u8,
+        spec: ForwardRequestSpec,
+        client_ip: ?[4]u8,
+    ) ![]u8 {
         const parsed = (http.parseRequest(raw_request) catch return error.BadRequest) orelse return error.BadRequest;
-        const inbound_host = http.findHeaderValue(parsed.headers_raw, "Host") orelse plan.host;
+        const inbound_host = http.findHeaderValue(parsed.headers_raw, "Host") orelse spec.host;
         const prior_forwarded_for = http.findHeaderValue(parsed.headers_raw, x_forwarded_for_header);
         const inbound_traceparent = http.findHeaderValue(parsed.headers_raw, traceparent_header);
         const inbound_tracestate = http.findHeaderValue(parsed.headers_raw, tracestate_header);
         const forwarded_proto = trustedForwardedProto(parsed.headers_raw, client_ip) orelse "http";
 
         var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(self.allocator);
-        const writer = buf.writer(self.allocator);
+        errdefer buf.deinit(alloc);
+        const writer = buf.writer(alloc);
 
         try writer.print("{s} {s} HTTP/1.1\r\n", .{
             methodString(parsed.method),
-            plan.outbound_path,
+            spec.outbound_path,
         });
-        try writer.print("Host: {s}\r\n", .{plan.outbound_host});
+        try writer.print("Host: {s}\r\n", .{spec.outbound_host});
 
         var pos: usize = 0;
         while (pos < parsed.headers_raw.len) {
@@ -320,7 +405,7 @@ pub const ReverseProxy = struct {
         try writer.writeAll("Connection: close\r\n\r\n");
         try writer.writeAll(parsed.body);
 
-        return buf.toOwnedSlice(self.allocator);
+        return buf.toOwnedSlice(alloc);
     }
 
     fn forwardPlan(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
@@ -444,24 +529,92 @@ pub const ReverseProxy = struct {
         upstream: *const upstream_mod.Upstream,
         client_ip: ?[4]u8,
     ) ![]u8 {
-        const fd = try connectToUpstream(plan.route, upstream);
+        const fd = try connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
         defer posix.close(fd);
-        const request = switch (plan.protocol) {
-            .http1 => try self.buildForwardRequestWithClient(raw_request, plan, client_ip),
-            .http2 => try http2_request.rewriteClientConnectionPreface(
-                self.allocator,
-                raw_request,
-                if (std.mem.eql(u8, plan.outbound_host, plan.host)) null else plan.outbound_host,
-                if (std.mem.eql(u8, plan.outbound_path, plan.path)) null else plan.outbound_path,
-                trustedForwardedProtoFromRawRequest(raw_request, client_ip),
-            ),
-        };
+        const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
 
         writeAll(fd, request) catch return error.SendFailed;
         return readResponse(self.allocator, fd, self.max_response_bytes);
     }
 };
+
+fn cloneMirrorTask(
+    alloc: std.mem.Allocator,
+    max_response_bytes: usize,
+    raw_request: []const u8,
+    plan: *const ForwardPlan,
+    mirror_service: []const u8,
+    client_ip: ?[4]u8,
+) !MirrorTask {
+    return .{
+        .allocator = alloc,
+        .raw_request = try alloc.dupe(u8, raw_request),
+        .protocol = plan.protocol,
+        .method = plan.method,
+        .path = try alloc.dupe(u8, plan.path),
+        .outbound_path = try alloc.dupe(u8, plan.outbound_path),
+        .host = try alloc.dupe(u8, plan.host),
+        .outbound_host = if (plan.route.preserve_host)
+            try alloc.dupe(u8, plan.host)
+        else
+            try alloc.dupe(u8, mirror_service),
+        .route_name = try alloc.dupe(u8, plan.route.name),
+        .route_service = try alloc.dupe(u8, plan.route.service),
+        .mirror_service = try alloc.dupe(u8, mirror_service),
+        .connect_timeout_ms = plan.route.connect_timeout_ms,
+        .request_timeout_ms = plan.route.request_timeout_ms,
+        .max_response_bytes = max_response_bytes,
+        .client_ip = client_ip,
+    };
+}
+
+fn runMirrorTask(task: MirrorTask) void {
+    defer task.deinit();
+
+    proxy_runtime.recordMirrorRouteRequestStart(task.route_name, task.route_service, task.mirror_service);
+    var upstream = proxy_runtime.resolveUpstream(task.allocator, task.mirror_service) catch {
+        proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
+        return;
+    };
+    defer upstream.deinit(task.allocator);
+
+    const fd = connectToUpstream(task.connect_timeout_ms, task.request_timeout_ms, &upstream) catch {
+        proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
+        return;
+    };
+    defer posix.close(fd);
+
+    const request = ReverseProxy.buildForwardRequestBytes(task.allocator, task.raw_request, .{
+        .protocol = task.protocol,
+        .method = task.method,
+        .path = task.path,
+        .outbound_path = task.outbound_path,
+        .host = task.host,
+        .outbound_host = task.outbound_host,
+    }, task.client_ip) catch {
+        proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
+        return;
+    };
+    defer task.allocator.free(request);
+
+    writeAll(fd, request) catch {
+        proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
+        return;
+    };
+
+    const response = readResponse(task.allocator, fd, task.max_response_bytes) catch {
+        proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
+        return;
+    };
+    defer task.allocator.free(response);
+
+    const status_code = parseForwardedStatusCode(task.allocator, task.protocol, response) catch {
+        proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
+        return;
+    };
+    proxy_runtime.recordMirrorRouteResponseCode(task.route_name, task.route_service, task.mirror_service, status_code);
+}
 
 fn peerIpFromSocket(fd: posix.socket_t) ?[4]u8 {
     var peer_addr: posix.sockaddr.in = undefined;
@@ -833,7 +986,7 @@ fn parseForwardedStatusCode(alloc: std.mem.Allocator, protocol: Protocol, respon
     };
 }
 
-fn connectToUpstream(route: proxy_runtime.RouteSnapshot, upstream: *const upstream_mod.Upstream) !posix.socket_t {
+fn connectToUpstream(connect_timeout_ms: u32, request_timeout_ms: u32, upstream: *const upstream_mod.Upstream) !posix.socket_t {
     const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
 
     const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0) catch
@@ -842,12 +995,12 @@ fn connectToUpstream(route: proxy_runtime.RouteSnapshot, upstream: *const upstre
 
     const addr = std.net.Address.initIp4(upstream_ip, upstream.port);
     posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock, error.ConnectionPending => try waitForConnect(fd, route.connect_timeout_ms),
+        error.WouldBlock, error.ConnectionPending => try waitForConnect(fd, connect_timeout_ms),
         error.ConnectionTimedOut => return error.ConnectTimedOut,
         else => return error.ConnectFailed,
     };
     try setSocketBlocking(fd);
-    setSocketTimeoutMs(fd, route.request_timeout_ms);
+    setSocketTimeoutMs(fd, request_timeout_ms);
     return fd;
 }
 
@@ -2176,6 +2329,120 @@ test "forwardRequest proxies upstream response bytes" {
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Host: api\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Test: 1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Connection: close\r\n") != null);
+}
+
+test "forwardRequest mirrors shadow traffic without affecting the primary response" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const primary_actions = [_]TestUpstreamAction{
+        .{ .respond = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" },
+    };
+    var primary_upstream = try TestUpstreamServer.init(&primary_actions);
+    defer primary_upstream.deinit();
+    try primary_upstream.start();
+
+    const mirror_actions = [_]TestUpstreamAction{
+        .{ .respond = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" },
+    };
+    var mirror_upstream = try TestUpstreamServer.init(&mirror_actions);
+    defer mirror_upstream.deinit();
+    try mirror_upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_preserve_host = false,
+        .http_proxy_mirror_service = "api-shadow",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{
+        .service_name = "api-shadow",
+        .vip_address = "10.43.0.3",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = primary_upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api-shadow",
+        .endpoint_id = "shadow-1",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = mirror_upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/v1",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .preserve_host = false,
+            .mirror_service = "api-shadow",
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const response = try proxy.forwardRequest(
+        "GET /v1/users HTTP/1.1\r\nHost: api.internal\r\nX-Test: mirror\r\n\r\n",
+    );
+    defer std.testing.allocator.free(response);
+
+    primary_upstream.wait();
+    mirror_upstream.wait();
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, primary_upstream.request(0), "GET /v1/users HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mirror_upstream.request(0), "GET /v1/users HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mirror_upstream.request(0), "Host: api-shadow\r\n") != null);
+
+    var route_traffic = try proxy_runtime.snapshotRouteTraffic(std.testing.allocator);
+    defer {
+        for (route_traffic.items) |entry| entry.deinit(std.testing.allocator);
+        route_traffic.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 2), route_traffic.items.len);
 }
 
 test "forwardRequest formats local error responses" {

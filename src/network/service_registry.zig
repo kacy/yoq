@@ -79,6 +79,7 @@ pub const ServiceDefinition = struct {
     http_proxy_http2_idle_timeout_ms: ?u32 = null,
     http_proxy_target_port: ?u16 = null,
     http_proxy_preserve_host: ?bool = null,
+    http_proxy_mirror_service: ?[]const u8 = null,
 };
 
 pub const HttpRouteDefinition = struct {
@@ -89,6 +90,7 @@ pub const HttpRouteDefinition = struct {
     match_methods: []const HttpMethodMatch = &.{},
     match_headers: []const HttpHeaderMatch = &.{},
     backend_services: []const HttpRouteBackend = &.{},
+    mirror_service: ?[]const u8 = null,
     retries: u8 = 0,
     connect_timeout_ms: u32 = 1000,
     request_timeout_ms: u32 = 5000,
@@ -176,6 +178,7 @@ pub const ServiceSnapshot = struct {
     http_proxy_http2_idle_timeout_ms: ?u32,
     http_proxy_target_port: ?u16,
     http_proxy_preserve_host: ?bool,
+    http_proxy_mirror_service: ?[]const u8,
     total_endpoints: usize,
     eligible_endpoints: usize,
     healthy_endpoints: usize,
@@ -195,6 +198,7 @@ pub const ServiceSnapshot = struct {
         if (self.http_proxy_host) |host| alloc.free(host);
         if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
         if (self.http_proxy_rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        if (self.http_proxy_mirror_service) |mirror_service| alloc.free(mirror_service);
         alloc.free(self.last_reconcile_status);
         if (self.last_reconcile_error) |message| alloc.free(message);
     }
@@ -208,6 +212,7 @@ pub const HttpRouteSnapshot = struct {
     match_methods: []const HttpMethodMatch,
     match_headers: []const HttpHeaderMatch,
     backend_services: []const HttpRouteBackend,
+    mirror_service: ?[]const u8,
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
@@ -226,6 +231,7 @@ pub const HttpRouteSnapshot = struct {
         if (self.match_headers.len > 0) alloc.free(self.match_headers);
         for (self.backend_services) |backend| backend.deinit(alloc);
         if (self.backend_services.len > 0) alloc.free(self.backend_services);
+        if (self.mirror_service) |mirror_service| alloc.free(mirror_service);
     }
 };
 
@@ -267,6 +273,7 @@ const ServiceState = struct {
     http_proxy_http2_idle_timeout_ms: ?u32 = null,
     http_proxy_target_port: ?u16 = null,
     http_proxy_preserve_host: ?bool = null,
+    http_proxy_mirror_service: ?[]const u8 = null,
     endpoints: std.ArrayList(EndpointState) = .empty,
     last_reconcile_status: ReconcileStatus = .idle,
     last_reconcile_error: ?[]const u8 = null,
@@ -282,6 +289,7 @@ const ServiceState = struct {
         if (self.http_proxy_host) |host| alloc.free(host);
         if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
         if (self.http_proxy_rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        if (self.http_proxy_mirror_service) |mirror_service| alloc.free(mirror_service);
         if (self.last_reconcile_error) |message| alloc.free(message);
         for (self.endpoints.items) |endpoint| endpoint.deinit(alloc);
         self.endpoints.deinit(alloc);
@@ -296,6 +304,7 @@ const HttpRouteState = struct {
     match_methods: []const HttpMethodMatch,
     match_headers: []const HttpHeaderMatch,
     backend_services: []const HttpRouteBackend,
+    mirror_service: ?[]const u8,
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
@@ -314,6 +323,7 @@ const HttpRouteState = struct {
         if (self.match_headers.len > 0) alloc.free(self.match_headers);
         for (self.backend_services) |backend| backend.deinit(alloc);
         if (self.backend_services.len > 0) alloc.free(self.backend_services);
+        if (self.mirror_service) |mirror_service| alloc.free(mirror_service);
     }
 };
 
@@ -637,6 +647,7 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .http_proxy_http2_idle_timeout_ms = service.http_proxy_http2_idle_timeout_ms,
         .http_proxy_target_port = service.http_proxy_target_port,
         .http_proxy_preserve_host = service.http_proxy_preserve_host,
+        .http_proxy_mirror_service = if (service.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
         .total_endpoints = total_endpoints,
         .eligible_endpoints = eligible_endpoints,
         .healthy_endpoints = healthy_endpoints,
@@ -666,6 +677,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
                 .match_methods = try cloneMethodMatches(alloc, route.match_methods),
                 .match_headers = try cloneHeaderMatches(alloc, route.match_headers),
                 .backend_services = try cloneRouteBackends(alloc, route.backend_services),
+                .mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
@@ -686,6 +698,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
             .match_methods = &.{},
             .match_headers = &.{},
             .backend_services = try defaultRouteBackends(alloc, definition.service_name),
+            .mirror_service = if (definition.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
             .retries = definition.http_proxy_retries orelse 0,
             .connect_timeout_ms = definition.http_proxy_connect_timeout_ms orelse 1000,
             .request_timeout_ms = definition.http_proxy_request_timeout_ms orelse 5000,
@@ -720,6 +733,7 @@ fn cloneRouteSnapshots(alloc: Allocator, routes: []const HttpRouteState) Error![
             .match_methods = try cloneMethodMatches(alloc, route.match_methods),
             .match_headers = try cloneHeaderMatches(alloc, route.match_headers),
             .backend_services = try cloneRouteBackends(alloc, route.backend_services),
+            .mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
             .retries = route.retries,
             .connect_timeout_ms = route.connect_timeout_ms,
             .request_timeout_ms = route.request_timeout_ms,
@@ -744,6 +758,7 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
         service.http_proxy_http2_idle_timeout_ms = primary.http2_idle_timeout_ms;
         service.http_proxy_target_port = primary.target_port;
         service.http_proxy_preserve_host = primary.preserve_host;
+        try replaceOptionalOwned(alloc, &service.http_proxy_mirror_service, primary.mirror_service);
         return;
     }
 
@@ -756,6 +771,7 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
     service.http_proxy_http2_idle_timeout_ms = definition.http_proxy_http2_idle_timeout_ms;
     service.http_proxy_target_port = definition.http_proxy_target_port;
     service.http_proxy_preserve_host = definition.http_proxy_preserve_host;
+    try replaceOptionalOwned(alloc, &service.http_proxy_mirror_service, definition.http_proxy_mirror_service);
 }
 
 fn isEndpointEligible(endpoint: *const EndpointState) bool {

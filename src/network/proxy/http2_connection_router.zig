@@ -64,8 +64,8 @@ const ConnectionRouter = struct {
 
             var poll_fds: std.ArrayList(posix.pollfd) = .empty;
             defer poll_fds.deinit(self.allocator);
-            var session_indexes: std.ArrayList(usize) = .empty;
-            defer session_indexes.deinit(self.allocator);
+            var session_targets: std.ArrayList(SessionPollTarget) = .empty;
+            defer session_targets.deinit(self.allocator);
 
             try poll_fds.append(self.allocator, .{
                 .fd = self.client_fd,
@@ -78,7 +78,15 @@ const ConnectionRouter = struct {
                     .events = posix.POLL.IN,
                     .revents = 0,
                 });
-                try session_indexes.append(self.allocator, idx);
+                try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .primary });
+                if (session.mirror) |mirror| {
+                    try poll_fds.append(self.allocator, .{
+                        .fd = mirror.upstream_fd,
+                        .events = posix.POLL.IN,
+                        .revents = 0,
+                    });
+                    try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .mirror });
+                }
             }
 
             const ready = posix.poll(poll_fds.items, clampPollTimeout(timeout_ms)) catch return error.ReceiveFailed;
@@ -99,18 +107,23 @@ const ConnectionRouter = struct {
 
             var ready_sessions: std.ArrayList(usize) = .empty;
             defer ready_sessions.deinit(self.allocator);
-            for (session_indexes.items, 0..) |session_idx, poll_idx| {
+            for (session_targets.items, 0..) |_, poll_idx| {
                 const revents = poll_fds.items[poll_idx + 1].revents;
                 if (revents & posix.POLL.IN != 0) {
-                    try ready_sessions.append(self.allocator, session_idx);
+                    try ready_sessions.append(self.allocator, poll_idx);
                 } else if (revents & (posix.POLL.ERR | posix.POLL.HUP) != 0) {
-                    try ready_sessions.append(self.allocator, session_idx);
+                    try ready_sessions.append(self.allocator, poll_idx);
                 }
             }
             std.mem.sort(usize, ready_sessions.items, {}, comptime std.sort.desc(usize));
-            for (ready_sessions.items) |session_idx| {
-                if (session_idx >= self.streams.items.len) continue;
-                try self.readUpstream(session_idx);
+            for (ready_sessions.items) |target_idx| {
+                if (target_idx >= session_targets.items.len) continue;
+                const target = session_targets.items[target_idx];
+                if (target.stream_idx >= self.streams.items.len) continue;
+                switch (target.kind) {
+                    .primary => try self.readUpstream(target.stream_idx),
+                    .mirror => try self.readMirrorUpstream(target.stream_idx),
+                }
             }
         }
     }
@@ -301,6 +314,7 @@ const ConnectionRouter = struct {
                 .upstream = upstream,
                 .upstream_fd = upstream_fd,
                 .request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms)),
+                .mirror = self.startMirrorSession(route, parsed),
             });
             try self.consumeDownstreamBytes(parsed.consumed);
             self.last_activity_ms = nowMs();
@@ -320,6 +334,16 @@ const ConnectionRouter = struct {
         const rewritten = try rewriteFrameSequenceStreamId(self.allocator, self.downstream_buf.items, 0, 1);
         defer rewritten.deinit(self.allocator);
         try writeAll(self.streams.items[stream_idx].upstream_fd, rewritten.bytes);
+        if (self.streams.items[stream_idx].mirror) |*mirror| {
+            self.forwardMirrorFrame(mirror, rewritten.bytes) catch {
+                proxy_runtime.recordMirrorRouteUpstreamFailure(
+                    self.streams.items[stream_idx].route.name,
+                    self.streams.items[stream_idx].route.service,
+                    mirror.backend_service,
+                );
+                self.closeMirrorSession(stream_idx);
+            };
+        }
         try self.consumeDownstreamBytes(rewritten.consumed);
         self.last_activity_ms = nowMs();
 
@@ -359,6 +383,60 @@ const ConnectionRouter = struct {
                 .headers => try self.handleUpstreamHeaders(session_idx),
                 .data, .rst_stream => try self.forwardUpstreamStreamFrame(session_idx),
                 .window_update, .priority, .continuation, .unknown, .push_promise, .goaway => try self.discardUpstreamFrame(session_idx),
+            }
+        }
+    }
+
+    fn readMirrorUpstream(self: *ConnectionRouter, session_idx: usize) !void {
+        const session = &self.streams.items[session_idx];
+        const mirror = &(session.mirror orelse return);
+        var buf: [16 * 1024]u8 = undefined;
+        const bytes_read = posix.read(mirror.upstream_fd, &buf) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
+            self.closeMirrorSession(session_idx);
+            return;
+        };
+        if (bytes_read == 0) {
+            if (!mirror.response_started) {
+                proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
+            }
+            self.closeMirrorSession(session_idx);
+            return;
+        }
+
+        mirror.upstream_buf.appendSlice(self.allocator, buf[0..bytes_read]) catch {
+            self.failMirrorSession(session_idx);
+            return;
+        };
+        self.last_activity_ms = nowMs();
+
+        while (session_idx < self.streams.items.len and self.streams.items[session_idx].mirror != null) {
+            const active = &(self.streams.items[session_idx].mirror.?);
+            if (active.upstream_buf.items.len < http2.frame_header_len) return;
+            const frame = http2.parseFrameHeader(active.upstream_buf.items[0..http2.frame_header_len]).?;
+            if (http2.frame_header_len + frame.length > active.upstream_buf.items.len) return;
+
+            switch (frame.frame_type) {
+                .settings => self.handleMirrorSettings(session_idx, frame) catch {
+                    self.failMirrorSession(session_idx);
+                    return;
+                },
+                .ping => self.handleMirrorPing(session_idx, frame) catch {
+                    self.failMirrorSession(session_idx);
+                    return;
+                },
+                .headers => self.handleMirrorHeaders(session_idx) catch {
+                    self.failMirrorSession(session_idx);
+                    return;
+                },
+                .data, .rst_stream => self.discardMirrorStreamFrame(session_idx) catch {
+                    self.failMirrorSession(session_idx);
+                    return;
+                },
+                .window_update, .priority, .continuation, .unknown, .push_promise, .goaway => self.discardMirrorFrame(session_idx) catch {
+                    self.failMirrorSession(session_idx);
+                    return;
+                },
             }
         }
     }
@@ -461,6 +539,17 @@ const ConnectionRouter = struct {
             try self.failSession(idx, .receive, "{\"error\":\"upstream request timed out\"}");
             expired_any = true;
         }
+        idx = self.streams.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            const session = &self.streams.items[idx];
+            const mirror = &(session.mirror orelse continue);
+            if (mirror.response_started) continue;
+            if (now < mirror.request_deadline_at_ms) continue;
+            proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
+            self.closeMirrorSession(idx);
+            expired_any = true;
+        }
         return expired_any;
     }
 
@@ -471,6 +560,13 @@ const ConnectionRouter = struct {
             if (now >= session.request_deadline_at_ms) return 0;
             const remaining: u32 = @intCast(session.request_deadline_at_ms - now);
             next = if (next) |current| @min(current, remaining) else remaining;
+            if (session.mirror) |mirror| {
+                if (!mirror.response_started) {
+                    if (now >= mirror.request_deadline_at_ms) return 0;
+                    const mirror_remaining: u32 = @intCast(mirror.request_deadline_at_ms - now);
+                    next = if (next) |current| @min(current, mirror_remaining) else mirror_remaining;
+                }
+            }
         }
         return next;
     }
@@ -555,6 +651,155 @@ const ConnectionRouter = struct {
         }
         return router.matchRoute(self.routes, parsed.request.method, host, parsed.request.path, request_headers.items);
     }
+
+    fn startMirrorSession(self: *ConnectionRouter, route: router.Route, parsed: http2_request.ParseResult) ?MirrorSession {
+        const mirror_service = route.mirror_service orelse return null;
+        proxy_runtime.recordMirrorRouteRequestStart(route.name, route.service, mirror_service);
+
+        var upstream = proxy_runtime.resolveUpstream(self.allocator, mirror_service) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        errdefer upstream.deinit(self.allocator);
+
+        const outbound_path = buildOutboundPath(self.allocator, parsed.request.path, route.match.path_prefix, route.rewrite_prefix) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        defer self.allocator.free(outbound_path);
+        const normalized_host = normalizeHost(parsed.request.authority);
+        const outbound_authority = if (route.preserve_host) normalized_host else mirror_service;
+        const forwarded_proto = trustedForwardedProto(parsed.headers, self.client_ip);
+        const rewritten = http2_request.rewriteRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0, .{
+            .outbound_authority = if (std.mem.eql(u8, outbound_authority, normalized_host)) null else outbound_authority,
+            .outbound_path = if (std.mem.eql(u8, outbound_path, parsed.request.path)) null else outbound_path,
+            .forwarded_proto = forwarded_proto,
+            .stream_id = 1,
+        }) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        defer rewritten.deinit(self.allocator);
+
+        const upstream_fd = connectToUpstream(route, &upstream) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        errdefer posix.close(upstream_fd);
+
+        const preface_and_settings = buildInitialUpstreamPreamble(self.allocator) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        defer self.allocator.free(preface_and_settings);
+        writeAll(upstream_fd, preface_and_settings) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        writeAll(upstream_fd, rewritten.bytes) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+
+        return .{
+            .backend_service = self.allocator.dupe(u8, mirror_service) catch {
+                proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+                return null;
+            },
+            .upstream = upstream,
+            .upstream_fd = upstream_fd,
+            .request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms)),
+        };
+    }
+
+    fn forwardMirrorFrame(self: *ConnectionRouter, mirror: *MirrorSession, frame_bytes: []const u8) !void {
+        _ = self;
+        writeAll(mirror.upstream_fd, frame_bytes) catch {
+            return error.WriteFailed;
+        };
+    }
+
+    fn closeMirrorSession(self: *ConnectionRouter, session_idx: usize) void {
+        if (self.streams.items[session_idx].mirror) |*mirror| {
+            mirror.deinit(self.allocator);
+            self.streams.items[session_idx].mirror = null;
+        }
+    }
+
+    fn failMirrorSession(self: *ConnectionRouter, session_idx: usize) void {
+        const session = &self.streams.items[session_idx];
+        const mirror = session.mirror orelse return;
+        proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
+        self.closeMirrorSession(session_idx);
+    }
+
+    fn handleMirrorSettings(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
+        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const payload = mirror.upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
+        if ((frame.flags & 0x1) == 0) {
+            const ack = try buildFrame(self.allocator, .{
+                .length = 0,
+                .frame_type = .settings,
+                .flags = 0x1,
+                .stream_id = 0,
+            }, "");
+            defer self.allocator.free(ack);
+            try writeAll(mirror.upstream_fd, ack);
+        }
+        _ = payload;
+        try self.discardMirrorFrame(session_idx);
+    }
+
+    fn handleMirrorPing(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
+        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const payload = mirror.upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
+        if ((frame.flags & 0x1) == 0 and payload.len == 8) {
+            const ack = try buildFrame(self.allocator, .{
+                .length = 8,
+                .frame_type = .ping,
+                .flags = 0x1,
+                .stream_id = 0,
+            }, payload);
+            defer self.allocator.free(ack);
+            try writeAll(mirror.upstream_fd, ack);
+        }
+        try self.discardMirrorFrame(session_idx);
+    }
+
+    fn handleMirrorHeaders(self: *ConnectionRouter, session_idx: usize) !void {
+        const session = &self.streams.items[session_idx];
+        const mirror = &(session.mirror orelse return);
+        if (!mirror.response_started) {
+            const status = parseResponseStatus(mirror.upstream_buf.items) catch {
+                proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
+                self.closeMirrorSession(session_idx);
+                return;
+            };
+            mirror.response_started = true;
+            proxy_runtime.recordMirrorRouteResponseCode(session.route.name, session.route.service, mirror.backend_service, status);
+        }
+        try self.discardMirrorStreamFrame(session_idx);
+    }
+
+    fn discardMirrorStreamFrame(self: *ConnectionRouter, session_idx: usize) !void {
+        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const frame = http2.parseFrameHeader(mirror.upstream_buf.items[0..http2.frame_header_len]).?;
+        try self.consumeMirrorBytes(session_idx, http2.frame_header_len + frame.length);
+        if (frame.frame_type == .rst_stream or (frame.flags & 0x1) != 0) {
+            self.closeMirrorSession(session_idx);
+        }
+    }
+
+    fn discardMirrorFrame(self: *ConnectionRouter, session_idx: usize) !void {
+        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const frame = http2.parseFrameHeader(mirror.upstream_buf.items[0..http2.frame_header_len]).?;
+        try self.consumeMirrorBytes(session_idx, http2.frame_header_len + frame.length);
+    }
+
+    fn consumeMirrorBytes(self: *ConnectionRouter, session_idx: usize, consumed: usize) !void {
+        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        try mirror.upstream_buf.replaceRange(self.allocator, 0, consumed, "");
+    }
 };
 
 const StreamSession = struct {
@@ -564,6 +809,7 @@ const StreamSession = struct {
     upstream: upstream_mod.Upstream,
     upstream_fd: posix.socket_t,
     upstream_buf: std.ArrayList(u8) = .empty,
+    mirror: ?MirrorSession = null,
     response_started: bool = false,
     response_status: ?u16 = null,
     downstream_end_stream: bool = false,
@@ -574,7 +820,34 @@ const StreamSession = struct {
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
+        if (self.mirror) |*mirror| mirror.deinit(alloc);
     }
+};
+
+const MirrorSession = struct {
+    backend_service: []u8,
+    upstream: upstream_mod.Upstream,
+    upstream_fd: posix.socket_t,
+    upstream_buf: std.ArrayList(u8) = .empty,
+    response_started: bool = false,
+    request_deadline_at_ms: i64,
+
+    fn deinit(self: *MirrorSession, alloc: std.mem.Allocator) void {
+        posix.close(self.upstream_fd);
+        alloc.free(self.backend_service);
+        self.upstream.deinit(alloc);
+        self.upstream_buf.deinit(alloc);
+    }
+};
+
+const SessionPollTarget = struct {
+    stream_idx: usize,
+    kind: Kind,
+
+    const Kind = enum {
+        primary,
+        mirror,
+    };
 };
 
 fn trustedForwardedProto(headers: []const hpack.HeaderField, client_ip: ?[4]u8) ?[]const u8 {

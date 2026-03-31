@@ -231,6 +231,13 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
             try writer.writeAll(",\"backend_services\":");
             try writeBackendServicesJson(writer, service.http_routes[0].backend_services);
         }
+        if (service.http_routes.len > 0) {
+            if (service.http_routes[0].mirror_service) |mirror_service| {
+                try writer.writeAll(",\"mirror_service\":\"");
+                try json_helpers.writeJsonEscaped(writer, mirror_service);
+                try writer.writeByte('"');
+            }
+        }
         try writer.writeByte('}');
     } else {
         try writer.writeAll("null");
@@ -269,6 +276,11 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
         if (http_route.backend_services.len > 0) {
             try writer.writeAll(",\"backend_services\":");
             try writeBackendServicesJson(writer, http_route.backend_services);
+        }
+        if (http_route.mirror_service) |mirror_service| {
+            try writer.writeAll(",\"mirror_service\":\"");
+            try json_helpers.writeJsonEscaped(writer, mirror_service);
+            try writer.writeByte('"');
         }
         try writer.writeByte('}');
     }
@@ -412,6 +424,11 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
         try writer.writeAll(",\"backend_services\":");
         try writeBackendServicesJson(writer, proxy_route.backend_services);
     }
+    if (proxy_route.mirror_service) |mirror_service| {
+        try writer.writeAll(",\"mirror_service\":\"");
+        try json_helpers.writeJsonEscaped(writer, mirror_service);
+        try writer.writeByte('"');
+    }
     try writer.writeAll(",\"last_failure_at\":");
     if (proxy_route.last_failure_at) |timestamp| {
         try writer.print("{d}", .{timestamp});
@@ -419,9 +436,13 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"traffic\":");
-    try route_traffic_json.writeRouteTrafficSummaryJson(writer, proxy_route.name, route_traffic);
+    try route_traffic_json.writeRouteTrafficSummaryJson(writer, .primary, proxy_route.name, route_traffic);
     try writer.writeAll(",\"backend_traffic\":");
-    try route_traffic_json.writeRouteBackendTrafficJson(writer, proxy_route.name, route_traffic);
+    try route_traffic_json.writeRouteBackendTrafficJson(writer, .primary, proxy_route.name, route_traffic);
+    try writer.writeAll(",\"mirror_traffic\":");
+    try route_traffic_json.writeRouteTrafficSummaryJson(writer, .mirror, proxy_route.name, route_traffic);
+    try writer.writeAll(",\"mirror_backend_traffic\":");
+    try route_traffic_json.writeRouteBackendTrafficJson(writer, .mirror, proxy_route.name, route_traffic);
     try writer.writeByte('}');
 }
 
@@ -509,6 +530,7 @@ test "route handles GET /v1/services" {
         .http_proxy_http2_idle_timeout_ms = 45000,
         .http_proxy_target_port = 8080,
         .http_proxy_preserve_host = false,
+        .http_proxy_mirror_service = "api-shadow",
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -525,6 +547,7 @@ test "route handles GET /v1/services" {
         .registered_at = 1000,
         .last_seen_at = 1000,
     });
+    service_registry_runtime.syncServiceFromStore("api");
 
     const response = route(testRequest(.GET, "/v1/services"), std.testing.allocator).?;
     defer if (response.allocated) std.testing.allocator.free(response.body);
@@ -532,8 +555,11 @@ test "route handles GET /v1/services" {
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"http2_idle_timeout_ms\":45000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"http2_idle_timeout_ms\":45000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"http2_idle_timeout_ms\":45000,\"preserve_host\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"backend_services\":[{\"service\":\"api\",\"weight\":100}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_service\":\"api-shadow\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"listener_not_running\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }
@@ -681,14 +707,19 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
         .http_proxy_http2_idle_timeout_ms = 45000,
         .http_proxy_target_port = 8080,
         .http_proxy_preserve_host = false,
+        .http_proxy_mirror_service = "api-shadow",
         .created_at = 1000,
         .updated_at = 1000,
     });
+    service_registry_runtime.syncServiceFromStore("api");
     proxy_runtime.bootstrapIfEnabled();
     proxy_runtime.recordRouteRequestStart("api:default", "api", "api");
     proxy_runtime.recordRouteResponseCode("api:default", "api", "api", 200);
     proxy_runtime.recordRouteRetry("api:default", "api", "api");
     proxy_runtime.recordRouteUpstreamFailure("api:default", "api", "api");
+    proxy_runtime.recordMirrorRouteRequestStart("api:default", "api", "api-shadow");
+    proxy_runtime.recordMirrorRouteResponseCode("api:default", "api", "api-shadow", 202);
+    proxy_runtime.recordMirrorRouteUpstreamFailure("api:default", "api", "api-shadow");
 
     const response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
     defer if (response.allocated) std.testing.allocator.free(response.body);
@@ -709,8 +740,11 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"listener_not_running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"last_failure_kind\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_service\":\"api-shadow\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"backend_traffic\":[{\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"upstream_failures_total\":1}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_backend_traffic\":[{\"backend_service\":\"api-shadow\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"upstream_failures_total\":1}]") != null);
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering degradation" {

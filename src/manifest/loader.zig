@@ -1526,6 +1526,23 @@ test "http routes config — weighted backends" {
     try std.testing.expectEqual(@as(u8, 10), manifest.services[0].http_routes[0].backend_services[1].weight);
 }
 
+test "http routes config — mirror service" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.api]
+        \\image = "nginx:latest"
+        \\
+        \\[service.api.http_proxy]
+        \\host = "api.internal"
+        \\backend_services = ["api=100"]
+        \\mirror_service = "api-shadow"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqualStrings("api-shadow", manifest.services[0].http_routes[0].mirror_service.?);
+}
+
 test "http routes config — invalid method match returns error" {
     const alloc = std.testing.allocator;
 
@@ -1610,6 +1627,33 @@ test "http routes config — backend weights must sum to 100" {
         \\[service.api.http_proxy]
         \\host = "api.internal"
         \\backend_services = ["api=80", "api-canary=10"]
+    ));
+}
+
+test "http routes config — mirror service cannot target owning service" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.api]
+        \\image = "nginx:latest"
+        \\
+        \\[service.api.http_proxy]
+        \\host = "api.internal"
+        \\mirror_service = "api"
+    ));
+}
+
+test "http routes config — mirror service must differ from weighted backends" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.api]
+        \\image = "nginx:latest"
+        \\
+        \\[service.api.http_proxy]
+        \\host = "api.internal"
+        \\backend_services = ["api=90", "api-canary=10"]
+        \\mirror_service = "api-canary"
     ));
 }
 

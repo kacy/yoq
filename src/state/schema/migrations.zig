@@ -38,6 +38,7 @@ fn migrateServices(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_http2_idle_timeout_ms INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_target_port INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_preserve_host INTEGER;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_mirror_service TEXT;") catch {};
     createTableIfMissing(db,
         \\CREATE TABLE IF NOT EXISTS service_http_routes (
         \\    service_name TEXT NOT NULL,
@@ -45,6 +46,7 @@ fn migrateServices(db: *sqlite.Db) void {
         \\    host TEXT NOT NULL,
         \\    path_prefix TEXT NOT NULL DEFAULT '/',
         \\    rewrite_prefix TEXT,
+        \\    mirror_service TEXT,
         \\    retries INTEGER NOT NULL DEFAULT 0,
         \\    connect_timeout_ms INTEGER NOT NULL DEFAULT 1000,
         \\    request_timeout_ms INTEGER NOT NULL DEFAULT 5000,
@@ -93,11 +95,12 @@ fn migrateServices(db: *sqlite.Db) void {
         \\);
     ) catch {};
     addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN rewrite_prefix TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN mirror_service TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN http2_idle_timeout_ms INTEGER NOT NULL DEFAULT 30000;") catch {};
     db.exec(
         "INSERT INTO service_http_routes (" ++
-            "service_name, route_name, host, path_prefix, rewrite_prefix, retries, connect_timeout_ms, request_timeout_ms, http2_idle_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at" ++
-            ") SELECT service_name, 'default', http_proxy_host, COALESCE(http_proxy_path_prefix, '/'), http_proxy_rewrite_prefix, COALESCE(http_proxy_retries, 0), COALESCE(http_proxy_connect_timeout_ms, 1000), COALESCE(http_proxy_request_timeout_ms, 5000), COALESCE(http_proxy_http2_idle_timeout_ms, 30000), http_proxy_target_port, COALESCE(http_proxy_preserve_host, 1), 0, created_at, updated_at" ++
+            "service_name, route_name, host, path_prefix, rewrite_prefix, mirror_service, retries, connect_timeout_ms, request_timeout_ms, http2_idle_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at" ++
+            ") SELECT service_name, 'default', http_proxy_host, COALESCE(http_proxy_path_prefix, '/'), http_proxy_rewrite_prefix, http_proxy_mirror_service, COALESCE(http_proxy_retries, 0), COALESCE(http_proxy_connect_timeout_ms, 1000), COALESCE(http_proxy_request_timeout_ms, 5000), COALESCE(http_proxy_http2_idle_timeout_ms, 30000), http_proxy_target_port, COALESCE(http_proxy_preserve_host, 1), 0, created_at, updated_at" ++
             " FROM services WHERE http_proxy_host IS NOT NULL AND NOT EXISTS (" ++
             "SELECT 1 FROM service_http_routes routes WHERE routes.service_name = services.service_name AND routes.route_name = 'default'" ++
             ");",

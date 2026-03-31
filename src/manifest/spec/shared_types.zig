@@ -152,6 +152,7 @@ pub const HttpProxyRoute = struct {
     match_methods: []const HttpMethodMatch = &.{},
     match_headers: []const HttpHeaderMatch = &.{},
     backend_services: []const HttpRouteBackend = &.{},
+    mirror_service: ?[]const u8 = null,
     retries: u8 = 0,
     connect_timeout_ms: u32 = 1000,
     request_timeout_ms: u32 = 5000,
@@ -169,6 +170,7 @@ pub const HttpProxyRoute = struct {
         if (self.match_headers.len > 0) alloc.free(self.match_headers);
         for (self.backend_services) |backend| backend.deinit(alloc);
         if (self.backend_services.len > 0) alloc.free(self.backend_services);
+        if (self.mirror_service) |mirror_service| alloc.free(mirror_service);
     }
 };
 

@@ -229,6 +229,24 @@ pub fn parseHttpProxyRoute(
         alloc.free(backend_services);
     }
 
+    const mirror_service = proxy_table.getString("mirror_service");
+    if (mirror_service) |value| {
+        if (value.len == 0) {
+            log.err("manifest: service '{s}' {s} route '{s}' mirror_service cannot be empty", .{ service_name, field_name, route_name });
+            return common.LoadError.InvalidHttpProxyConfig;
+        }
+        if (std.mem.eql(u8, value, service_name)) {
+            log.err("manifest: service '{s}' {s} route '{s}' mirror_service cannot target the owning service", .{ service_name, field_name, route_name });
+            return common.LoadError.InvalidHttpProxyConfig;
+        }
+        for (backend_services) |backend| {
+            if (std.mem.eql(u8, backend.service_name, value)) {
+                log.err("manifest: service '{s}' {s} route '{s}' mirror_service must differ from backend_services targets", .{ service_name, field_name, route_name });
+                return common.LoadError.InvalidHttpProxyConfig;
+            }
+        }
+    }
+
     const retries_raw = proxy_table.getInt("retries") orelse 0;
     if (retries_raw < 0 or retries_raw > 5) {
         log.err("manifest: service '{s}' {s} route '{s}' retries must be between 0 and 5", .{ service_name, field_name, route_name });
@@ -278,6 +296,7 @@ pub fn parseHttpProxyRoute(
         .match_methods = match_methods,
         .match_headers = match_headers,
         .backend_services = backend_services,
+        .mirror_service = if (mirror_service) |value| alloc.dupe(u8, value) catch return common.LoadError.OutOfMemory else null,
         .retries = @intCast(retries_raw),
         .connect_timeout_ms = @intCast(connect_timeout_raw),
         .request_timeout_ms = @intCast(request_timeout_raw),

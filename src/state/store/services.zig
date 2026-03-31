@@ -46,6 +46,7 @@ pub const ServiceRecord = struct {
     http_proxy_http2_idle_timeout_ms: ?i64 = null,
     http_proxy_target_port: ?i64 = null,
     http_proxy_preserve_host: ?bool = null,
+    http_proxy_mirror_service: ?[]const u8 = null,
     created_at: i64,
     updated_at: i64,
 
@@ -58,6 +59,7 @@ pub const ServiceRecord = struct {
         if (self.http_proxy_host) |host| alloc.free(host);
         if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
         if (self.http_proxy_rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        if (self.http_proxy_mirror_service) |mirror_service| alloc.free(mirror_service);
     }
 };
 
@@ -70,6 +72,7 @@ pub const ServiceHttpRouteRecord = struct {
     match_methods: []const ServiceHttpRouteMethodRecord = &.{},
     match_headers: []const ServiceHttpRouteHeaderRecord = &.{},
     backend_services: []const ServiceHttpRouteBackendRecord = &.{},
+    mirror_service: ?[]const u8 = null,
     retries: i64,
     connect_timeout_ms: i64,
     request_timeout_ms: i64,
@@ -92,6 +95,7 @@ pub const ServiceHttpRouteRecord = struct {
         if (self.match_headers.len > 0) alloc.free(self.match_headers);
         for (self.backend_services) |backend| backend.deinit(alloc);
         if (self.backend_services.len > 0) alloc.free(self.backend_services);
+        if (self.mirror_service) |mirror_service| alloc.free(mirror_service);
     }
 };
 
@@ -135,6 +139,7 @@ pub const ServiceHttpRouteInput = struct {
     match_methods: []const ServiceHttpRouteMethodInput = &.{},
     match_headers: []const ServiceHttpRouteHeaderInput = &.{},
     backend_services: []const ServiceHttpRouteBackendInput = &.{},
+    mirror_service: ?[]const u8 = null,
     retries: i64 = 0,
     connect_timeout_ms: i64 = 1000,
     request_timeout_ms: i64 = 5000,
@@ -174,7 +179,7 @@ pub const ServiceHttpRouteBackendInput = struct {
 };
 
 const service_columns =
-    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_http2_idle_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, created_at, updated_at";
+    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_http2_idle_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, http_proxy_mirror_service, created_at, updated_at";
 
 const ServiceRow = struct {
     service_name: sqlite.Text,
@@ -189,12 +194,13 @@ const ServiceRow = struct {
     http_proxy_http2_idle_timeout_ms: ?i64,
     http_proxy_target_port: ?i64,
     http_proxy_preserve_host: ?i64,
+    http_proxy_mirror_service: ?sqlite.Text,
     created_at: i64,
     updated_at: i64,
 };
 
 const service_http_route_columns =
-    "service_name, route_name, host, path_prefix, rewrite_prefix, retries, connect_timeout_ms, request_timeout_ms, http2_idle_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at";
+    "service_name, route_name, host, path_prefix, rewrite_prefix, mirror_service, retries, connect_timeout_ms, request_timeout_ms, http2_idle_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at";
 
 const ServiceHttpRouteRow = struct {
     service_name: sqlite.Text,
@@ -202,6 +208,7 @@ const ServiceHttpRouteRow = struct {
     host: sqlite.Text,
     path_prefix: sqlite.Text,
     rewrite_prefix: ?sqlite.Text,
+    mirror_service: ?sqlite.Text,
     retries: i64,
     connect_timeout_ms: i64,
     request_timeout_ms: i64,
@@ -325,6 +332,7 @@ fn rowToServiceRecord(row: ServiceRow, http_routes: []const ServiceHttpRouteReco
         .http_proxy_http2_idle_timeout_ms = row.http_proxy_http2_idle_timeout_ms,
         .http_proxy_target_port = row.http_proxy_target_port,
         .http_proxy_preserve_host = if (row.http_proxy_preserve_host) |preserve_host| preserve_host != 0 else null,
+        .http_proxy_mirror_service = if (row.http_proxy_mirror_service) |mirror_service| mirror_service.data else null,
         .created_at = row.created_at,
         .updated_at = row.updated_at,
     };
@@ -340,6 +348,7 @@ fn rowToServiceHttpRouteRecord(row: ServiceHttpRouteRow) ServiceHttpRouteRecord 
         .match_methods = &.{},
         .match_headers = &.{},
         .backend_services = &.{},
+        .mirror_service = if (row.mirror_service) |mirror_service| mirror_service.data else null,
         .retries = row.retries,
         .connect_timeout_ms = row.connect_timeout_ms,
         .request_timeout_ms = row.request_timeout_ms,
@@ -495,7 +504,7 @@ fn syncDerivedServiceProxyFields(
 ) StoreError!void {
     const primary = if (routes.len > 0) routes[0] else null;
     db.exec(
-        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_rewrite_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_http2_idle_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
+        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_rewrite_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_http2_idle_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, http_proxy_mirror_service = ?, updated_at = ? WHERE service_name = ?;",
         .{},
         .{
             if (primary) |route| route.host else null,
@@ -507,6 +516,7 @@ fn syncDerivedServiceProxyFields(
             if (primary) |route| route.http2_idle_timeout_ms else null,
             if (primary) |route| route.target_port else null,
             if (primary) |route| @as(i64, @intFromBool(route.preserve_host)) else null,
+            if (primary) |route| route.mirror_service else null,
             now,
             service_name,
         },
@@ -542,7 +552,7 @@ fn replaceServiceHttpRoutes(
 
     for (routes, 0..) |route, idx| {
         db.exec(
-            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             .{},
             .{
                 service_name,
@@ -550,6 +560,7 @@ fn replaceServiceHttpRoutes(
                 route.host,
                 route.path_prefix,
                 route.rewrite_prefix,
+                route.mirror_service,
                 route.retries,
                 route.connect_timeout_ms,
                 route.request_timeout_ms,
@@ -642,7 +653,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
     var committed = false;
     errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
     db.exec(
-        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.service_name,
@@ -657,6 +668,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
             record.http_proxy_http2_idle_timeout_ms,
             record.http_proxy_target_port,
             if (record.http_proxy_preserve_host) |preserve_host| @as(?i64, @intFromBool(preserve_host)) else null,
+            record.http_proxy_mirror_service,
             record.created_at,
             record.updated_at,
         },
@@ -699,6 +711,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
                     }
                     break :blk backends.toOwnedSlice(std.heap.page_allocator) catch return StoreError.WriteFailed;
                 },
+                .mirror_service = route.mirror_service,
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
@@ -1090,6 +1103,7 @@ test "createService and getService round-trip" {
         .http_proxy_http2_idle_timeout_ms = 30000,
         .http_proxy_target_port = 8080,
         .http_proxy_preserve_host = true,
+        .http_proxy_mirror_service = "api-shadow",
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -1109,6 +1123,7 @@ test "createService and getService round-trip" {
     try std.testing.expectEqual(@as(?i64, 30000), service.http_proxy_http2_idle_timeout_ms);
     try std.testing.expectEqual(@as(?i64, 8080), service.http_proxy_target_port);
     try std.testing.expectEqual(@as(?bool, true), service.http_proxy_preserve_host);
+    try std.testing.expectEqualStrings("api-shadow", service.http_proxy_mirror_service.?);
     try std.testing.expectEqual(@as(i64, 1000), service.created_at);
 }
 
@@ -1183,6 +1198,7 @@ test "syncServiceConfig updates proxy policy without changing vip" {
                 .route_name = "default",
                 .host = "api.internal",
                 .path_prefix = "/v1",
+                .mirror_service = "api-shadow",
                 .retries = 2,
                 .connect_timeout_ms = 1500,
                 .request_timeout_ms = 5000,
@@ -1200,6 +1216,7 @@ test "syncServiceConfig updates proxy policy without changing vip" {
     try std.testing.expectEqual(@as(?i64, 45000), updated.http_proxy_http2_idle_timeout_ms);
     try std.testing.expectEqual(@as(?i64, 8080), updated.http_proxy_target_port);
     try std.testing.expectEqual(@as(?bool, false), updated.http_proxy_preserve_host);
+    try std.testing.expectEqualStrings("api-shadow", updated.http_proxy_mirror_service.?);
 }
 
 test "upsertServiceEndpoint updates an existing endpoint" {
