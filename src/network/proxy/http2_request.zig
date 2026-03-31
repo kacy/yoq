@@ -38,6 +38,19 @@ pub const ParseResult = struct {
     }
 };
 
+pub const StreamRewriteState = struct {
+    saw_client_preface: bool = false,
+};
+
+pub const StreamRewriteResult = struct {
+    bytes: []u8,
+    consumed: usize,
+
+    pub fn deinit(self: StreamRewriteResult, alloc: std.mem.Allocator) void {
+        alloc.free(self.bytes);
+    }
+};
+
 const Flag = struct {
     const end_stream: u8 = 0x1;
     const end_headers: u8 = 0x4;
@@ -241,6 +254,60 @@ pub fn rewriteClientConnectionPreface(
     return out.toOwnedSlice(alloc);
 }
 
+pub fn rewriteClientStreamChunk(
+    alloc: std.mem.Allocator,
+    buf: []const u8,
+    state: *StreamRewriteState,
+    forwarded_proto: []const u8,
+) (ParseError || hpack.Error)!?StreamRewriteResult {
+    var pos: usize = 0;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    if (!state.saw_client_preface) {
+        if (!http2.hasClientPrefacePrefix(buf[0..@min(buf.len, http2.client_preface.len)])) {
+            return error.MissingClientPreface;
+        }
+        if (buf.len < http2.client_preface.len) return null;
+        try out.appendSlice(alloc, http2.client_preface);
+        pos = http2.client_preface.len;
+        state.saw_client_preface = true;
+    }
+
+    while (pos + http2.frame_header_len <= buf.len) {
+        const frame_start = pos;
+        const frame = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+        pos += http2.frame_header_len;
+        if (pos + frame.length > buf.len) {
+            pos = frame_start;
+            break;
+        }
+
+        if (frame.frame_type != .headers) {
+            pos += frame.length;
+            try out.appendSlice(alloc, buf[frame_start..pos]);
+            continue;
+        }
+
+        const rewritten = rewriteHeadersSequence(alloc, buf, frame_start, forwarded_proto) catch |err| switch (err) {
+            error.BufferTooShort => {
+                pos = frame_start;
+                break;
+            },
+            else => return err,
+        };
+        defer alloc.free(rewritten.bytes);
+        pos = frame_start + rewritten.consumed;
+        try out.appendSlice(alloc, rewritten.bytes);
+    }
+
+    if (pos == 0) return null;
+    return .{
+        .bytes = try out.toOwnedSlice(alloc),
+        .consumed = pos,
+    };
+}
+
 fn headerBlockFragment(payload: []const u8, flags: u8) ParseError![]const u8 {
     var pos: usize = 0;
     var padded_len: usize = 0;
@@ -258,6 +325,69 @@ fn headerBlockFragment(payload: []const u8, flags: u8) ParseError![]const u8 {
 
     if (padded_len > payload.len - pos) return error.InvalidHeadersFrame;
     return payload[pos .. payload.len - padded_len];
+}
+
+fn rewriteHeadersSequence(
+    alloc: std.mem.Allocator,
+    buf: []const u8,
+    start: usize,
+    forwarded_proto: []const u8,
+) (ParseError || hpack.Error)!StreamRewriteResult {
+    var pos = start;
+    const first = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+    pos += http2.frame_header_len;
+    if (pos + first.length > buf.len) return error.BufferTooShort;
+
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+    try header_block.appendSlice(alloc, try headerBlockFragment(buf[pos .. pos + first.length], first.flags));
+    pos += first.length;
+
+    while ((first.flags & Flag.end_headers) == 0) {
+        if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
+        const continuation = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+        if (continuation.frame_type != .continuation or continuation.stream_id != first.stream_id)
+            return error.InvalidFrameSequence;
+        pos += http2.frame_header_len;
+        if (pos + continuation.length > buf.len) return error.BufferTooShort;
+        try header_block.appendSlice(alloc, buf[pos .. pos + continuation.length]);
+        pos += continuation.length;
+        if ((continuation.flags & Flag.end_headers) != 0) break;
+    }
+
+    var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
+    defer {
+        for (headers.items) |header| header.deinit(alloc);
+        headers.deinit(alloc);
+    }
+
+    var saw_forwarded_proto = false;
+    for (headers.items) |*header| {
+        if (std.mem.eql(u8, header.name, "x-forwarded-proto")) {
+            alloc.free(header.value);
+            header.value = try alloc.dupe(u8, forwarded_proto);
+            saw_forwarded_proto = true;
+        }
+    }
+    if (!saw_forwarded_proto) {
+        try headers.append(alloc, .{
+            .name = try alloc.dupe(u8, "x-forwarded-proto"),
+            .value = try alloc.dupe(u8, forwarded_proto),
+        });
+    }
+
+    const rewritten_block = try hpack.encodeHeaderBlockLiteral(alloc, headers.items);
+    defer alloc.free(rewritten_block);
+    const rewritten_headers = try buildFrame(alloc, .{
+        .length = @intCast(rewritten_block.len),
+        .frame_type = .headers,
+        .flags = (first.flags & Flag.end_stream) | Flag.end_headers,
+        .stream_id = first.stream_id,
+    }, rewritten_block);
+    return .{
+        .bytes = rewritten_headers,
+        .consumed = pos - start,
+    };
 }
 
 fn appendLiteralWithIndexedName(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name_index: u8, value: []const u8) !void {
@@ -507,6 +637,80 @@ test "rewriteClientConnectionPreface injects forwarded proto header" {
     for (parsed.headers) |header| {
         if (std.mem.eql(u8, header.name, "x-forwarded-proto")) {
             try std.testing.expectEqualStrings("https", header.value);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "rewriteClientStreamChunk injects forwarded proto on later streams" {
+    const alloc = std.testing.allocator;
+
+    const settings = try buildFrame(alloc, .{
+        .length = 0,
+        .frame_type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+    defer alloc.free(settings);
+
+    var stream1_block: std.ArrayList(u8) = .empty;
+    defer stream1_block.deinit(alloc);
+    try stream1_block.append(alloc, 0x83);
+    try stream1_block.append(alloc, 0x86);
+    try appendLiteralWithIndexedName(&stream1_block, alloc, 0x01, "svc.internal");
+    try appendLiteralWithIndexedName(&stream1_block, alloc, 0x04, "/pkg.Service/Call");
+
+    const stream1_headers = try buildFrame(alloc, .{
+        .length = @intCast(stream1_block.items.len),
+        .frame_type = .headers,
+        .flags = Flag.end_headers,
+        .stream_id = 1,
+    }, stream1_block.items);
+    defer alloc.free(stream1_headers);
+
+    var stream3_block: std.ArrayList(u8) = .empty;
+    defer stream3_block.deinit(alloc);
+    try stream3_block.append(alloc, 0x83);
+    try stream3_block.append(alloc, 0x86);
+    try appendLiteralWithIndexedName(&stream3_block, alloc, 0x01, "svc.internal");
+    try appendLiteralWithIndexedName(&stream3_block, alloc, 0x04, "/pkg.Service/Stream");
+
+    const stream3_headers = try buildFrame(alloc, .{
+        .length = @intCast(stream3_block.items.len),
+        .frame_type = .headers,
+        .flags = Flag.end_headers,
+        .stream_id = 3,
+    }, stream3_block.items);
+    defer alloc.free(stream3_headers);
+
+    var initial_chunk: std.ArrayList(u8) = .empty;
+    defer initial_chunk.deinit(alloc);
+    try initial_chunk.appendSlice(alloc, http2.client_preface);
+    try initial_chunk.appendSlice(alloc, settings);
+    try initial_chunk.appendSlice(alloc, stream1_headers);
+
+    var state = StreamRewriteState{};
+    const initial = (try rewriteClientStreamChunk(alloc, initial_chunk.items, &state, "https")).?;
+    defer initial.deinit(alloc);
+    try std.testing.expectEqual(initial_chunk.items.len, initial.consumed);
+
+    const later = (try rewriteClientStreamChunk(alloc, stream3_headers, &state, "https")).?;
+    defer later.deinit(alloc);
+    try std.testing.expectEqual(stream3_headers.len, later.consumed);
+
+    const header = http2.parseFrameHeader(later.bytes[0..http2.frame_header_len]).?;
+    try std.testing.expectEqual(http2.FrameType.headers, header.frame_type);
+    var decoded = try hpack.decodeHeaderBlock(alloc, later.bytes[http2.frame_header_len .. http2.frame_header_len + header.length]);
+    defer {
+        for (decoded.items) |field| field.deinit(alloc);
+        decoded.deinit(alloc);
+    }
+
+    var found = false;
+    for (decoded.items) |field| {
+        if (std.mem.eql(u8, field.name, "x-forwarded-proto")) {
+            try std.testing.expectEqualStrings("https", field.value);
             found = true;
         }
     }
