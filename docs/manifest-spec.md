@@ -300,14 +300,15 @@ domain = "example.com"
 standalone certificate commands:
 
 ```text
-yoq cert provision example.com --email admin@example.com
-yoq cert renew example.com --email admin@example.com
+yoq cert provision example.com
+yoq cert renew example.com
 ```
+
+`--email` remains available for the standalone ACME flow. When it is omitted, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
 
 current limits:
 
 - ACME uses HTTP-01 only
-- `yoq cert provision` and `yoq cert renew` require `--email`
 - the standalone CLI flow can only complete when this host can bind port 80 and serve the challenge path
 
 ---

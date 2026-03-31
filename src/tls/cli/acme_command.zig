@@ -23,7 +23,7 @@ pub fn renew(args: *std.process.ArgIterator, alloc: std.mem.Allocator) common.Tl
 
 const ParsedArgs = struct {
     domain: []const u8,
-    email: []const u8,
+    email: ?[]const u8,
     directory_url: []const u8,
 };
 
@@ -57,10 +57,7 @@ fn parseArgs(args: *std.process.ArgIterator) common.TlsCommandsError!ParsedArgs 
             writeErr("domain is required\n", .{});
             return common.TlsCommandsError.InvalidArgument;
         },
-        .email = email orelse {
-            writeErr("--email is required\n", .{});
-            return common.TlsCommandsError.InvalidArgument;
-        },
+        .email = email,
         .directory_url = if (use_staging) acme.letsencrypt_staging else acme.letsencrypt_production,
     };
 }
@@ -73,6 +70,10 @@ fn runAcmeCommand(
     var opened = store_support.openCertStore(alloc) catch |err|
         return store_support.reportOpenStoreError(err);
     defer store_support.closeCertStore(alloc, &opened);
+
+    const account_email = resolveAccountEmail(alloc, parsed.domain, parsed.email) catch
+        return common.TlsCommandsError.OutOfMemory;
+    defer alloc.free(account_email);
 
     if (require_existing) {
         const existing = opened.store.get(parsed.domain) catch |err| {
@@ -105,7 +106,7 @@ fn runAcmeCommand(
 
     var exported = client.issueAndExport(.{
         .domain = parsed.domain,
-        .email = parsed.email,
+        .email = account_email,
         .directory_url = parsed.directory_url,
         .challenge_registrar = challengeRegistrar(&challenges),
     }) catch |err| {
@@ -120,6 +121,37 @@ fn runAcmeCommand(
     };
 
     write("{s}\n", .{parsed.domain});
+}
+
+fn resolveAccountEmail(
+    alloc: std.mem.Allocator,
+    domain: []const u8,
+    explicit_email: ?[]const u8,
+) ![]u8 {
+    const env_email = std.process.getEnvVarOwned(alloc, "YOQ_ACME_EMAIL") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => null,
+    };
+    errdefer if (env_email) |email| alloc.free(email);
+    return resolveAccountEmailWithFallback(alloc, domain, explicit_email, env_email);
+}
+
+fn resolveAccountEmailWithFallback(
+    alloc: std.mem.Allocator,
+    domain: []const u8,
+    explicit_email: ?[]const u8,
+    env_email: ?[]u8,
+) ![]u8 {
+    if (explicit_email) |email| {
+        if (env_email) |owned_env_email| alloc.free(owned_env_email);
+        return alloc.dupe(u8, email);
+    }
+    if (env_email) |email| {
+        return email;
+    }
+
+    return std.fmt.allocPrint(alloc, "admin@{s}", .{domain});
 }
 
 fn challengeRegistrar(store: *proxy.ChallengeStore) acme.ChallengeRegistrar {
@@ -138,4 +170,38 @@ fn registerChallenge(ctx: *anyopaque, token: []const u8, key_authorization: []co
 fn removeChallenge(ctx: *anyopaque, token: []const u8) void {
     const store: *proxy.ChallengeStore = @ptrCast(@alignCast(ctx));
     store.remove(token);
+}
+
+test "resolveAccountEmail prefers explicit email" {
+    const alloc = std.testing.allocator;
+    const email = try resolveAccountEmailForTest(alloc, "example.com", "ops@example.com", "env@example.com");
+    defer alloc.free(email);
+
+    try std.testing.expectEqualStrings("ops@example.com", email);
+}
+
+test "resolveAccountEmail uses env email when flag is omitted" {
+    const alloc = std.testing.allocator;
+    const email = try resolveAccountEmailForTest(alloc, "example.com", null, "env@example.com");
+    defer alloc.free(email);
+
+    try std.testing.expectEqualStrings("env@example.com", email);
+}
+
+test "resolveAccountEmail falls back to admin at domain" {
+    const alloc = std.testing.allocator;
+    const email = try resolveAccountEmailForTest(alloc, "example.com", null, null);
+    defer alloc.free(email);
+
+    try std.testing.expectEqualStrings("admin@example.com", email);
+}
+
+fn resolveAccountEmailForTest(
+    alloc: std.mem.Allocator,
+    domain: []const u8,
+    explicit_email: ?[]const u8,
+    env_email: ?[]const u8,
+) ![]u8 {
+    const owned_env_email = if (env_email) |email| try alloc.dupe(u8, email) else null;
+    return resolveAccountEmailWithFallback(alloc, domain, explicit_email, owned_env_email);
 }
