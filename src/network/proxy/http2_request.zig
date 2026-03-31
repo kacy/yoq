@@ -51,6 +51,13 @@ pub const StreamRewriteResult = struct {
     }
 };
 
+pub const RewriteOptions = struct {
+    outbound_authority: ?[]const u8 = null,
+    outbound_path: ?[]const u8 = null,
+    forwarded_proto: ?[]const u8 = null,
+    stream_id: ?u32 = null,
+};
+
 const Flag = struct {
     const end_stream: u8 = 0x1;
     const end_headers: u8 = 0x4;
@@ -64,44 +71,105 @@ pub fn parseClientConnectionPreface(alloc: std.mem.Allocator, buf: []const u8) P
     }
 
     var pos: usize = http2.client_preface.len;
-    var header_block: std.ArrayList(u8) = .empty;
-    defer header_block.deinit(alloc);
-
-    var request_stream_id: ?u32 = null;
-    var request_end_stream = false;
 
     while (pos + http2.frame_header_len <= buf.len) {
         const frame = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+        if (frame.frame_type == .headers) break;
         pos += http2.frame_header_len;
-
         if (pos + frame.length > buf.len) return error.BufferTooShort;
-        const payload = buf[pos .. pos + frame.length];
+        if (frame.frame_type != .settings and frame.frame_type != .window_update and frame.frame_type != .ping) {
+            return error.InvalidFrameSequence;
+        }
         pos += frame.length;
+    }
+
+    const parsed = try parseRequestHeaderSequence(alloc, buf, pos);
+    return .{
+        .request = parsed.request,
+        .headers = parsed.headers,
+        .consumed = pos + parsed.consumed,
+    };
+}
+
+pub fn rewriteClientConnectionPreface(
+    alloc: std.mem.Allocator,
+    buf: []const u8,
+    outbound_authority: ?[]const u8,
+    outbound_path: ?[]const u8,
+    forwarded_proto: ?[]const u8,
+) (ParseError || hpack.Error)![]u8 {
+    if (outbound_authority == null and outbound_path == null and forwarded_proto == null) return alloc.dupe(u8, buf);
+    if (buf.len < http2.client_preface.len or !std.mem.eql(u8, buf[0..http2.client_preface.len], http2.client_preface)) {
+        return error.MissingClientPreface;
+    }
+
+    var pos: usize = http2.client_preface.len;
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, http2.client_preface);
+
+    while (pos + http2.frame_header_len <= buf.len) {
+        const frame_start = pos;
+        const frame = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
 
         switch (frame.frame_type) {
-            .settings, .window_update, .ping => continue,
-            .headers => {
-                if (frame.stream_id == 0) return error.InvalidHeadersFrame;
-                if (request_stream_id != null) return error.InvalidFrameSequence;
-                request_stream_id = frame.stream_id;
-                request_end_stream = (frame.flags & Flag.end_stream) != 0;
-                const fragment = try headerBlockFragment(payload, frame.flags);
-                try header_block.appendSlice(alloc, fragment);
-                if ((frame.flags & Flag.end_headers) != 0) break;
+            .settings, .window_update, .ping => {
+                pos += http2.frame_header_len;
+                if (pos + frame.length > buf.len) return error.BufferTooShort;
+                pos += frame.length;
+                const frame_end = pos;
+                try out.appendSlice(alloc, buf[frame_start..frame_end]);
             },
-            .continuation => {
-                if (request_stream_id == null or frame.stream_id != request_stream_id.?) return error.InvalidFrameSequence;
-                try header_block.appendSlice(alloc, payload);
-                if ((frame.flags & Flag.end_headers) != 0) break;
-            },
+            .headers => break,
             else => {
-                if (request_stream_id == null) continue;
                 return error.InvalidFrameSequence;
             },
         }
     }
 
-    if (request_stream_id == null or header_block.items.len == 0) return error.MissingHeaders;
+    const rewritten = try rewriteRequestHeaderSequence(alloc, buf, pos, .{
+        .outbound_authority = outbound_authority,
+        .outbound_path = outbound_path,
+        .forwarded_proto = forwarded_proto,
+    });
+    defer rewritten.deinit(alloc);
+
+    try out.appendSlice(alloc, rewritten.bytes);
+    try out.appendSlice(alloc, buf[pos + rewritten.consumed ..]);
+    return out.toOwnedSlice(alloc);
+}
+
+pub fn parseRequestHeaderSequence(
+    alloc: std.mem.Allocator,
+    buf: []const u8,
+    start: usize,
+) ParseError!ParseResult {
+    var pos = start;
+    if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
+    const first = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+    if (first.frame_type != .headers or first.stream_id == 0) return error.InvalidHeadersFrame;
+    pos += http2.frame_header_len;
+    if (pos + first.length > buf.len) return error.BufferTooShort;
+
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(alloc);
+    try header_block.appendSlice(alloc, try headerBlockFragment(buf[pos .. pos + first.length], first.flags));
+    pos += first.length;
+
+    while ((first.flags & Flag.end_headers) == 0) {
+        if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
+        const continuation = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+        if (continuation.frame_type != .continuation or continuation.stream_id != first.stream_id)
+            return error.InvalidFrameSequence;
+        pos += http2.frame_header_len;
+        if (pos + continuation.length > buf.len) return error.BufferTooShort;
+        try header_block.appendSlice(alloc, buf[pos .. pos + continuation.length]);
+        pos += continuation.length;
+        if ((continuation.flags & Flag.end_headers) != 0) break;
+    }
 
     var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
     errdefer {
@@ -129,86 +197,48 @@ pub fn parseClientConnectionPreface(alloc: std.mem.Allocator, buf: []const u8) P
         if (path) |value| alloc.free(value);
     }
 
-    const method_value = method orelse return error.MissingMethod;
-    const authority_value = authority orelse return error.MissingAuthority;
-    const path_value = path orelse return error.MissingPath;
-    const owned_headers = try headers.toOwnedSlice(alloc);
-
     return .{
         .request = .{
-            .stream_id = request_stream_id.?,
-            .method = method_value,
-            .authority = authority_value,
-            .path = path_value,
-            .end_stream = request_end_stream,
+            .stream_id = first.stream_id,
+            .method = method orelse return error.MissingMethod,
+            .authority = authority orelse return error.MissingAuthority,
+            .path = path orelse return error.MissingPath,
+            .end_stream = (first.flags & Flag.end_stream) != 0,
         },
-        .headers = owned_headers,
-        .consumed = pos,
+        .headers = try headers.toOwnedSlice(alloc),
+        .consumed = pos - start,
     };
 }
 
-pub fn rewriteClientConnectionPreface(
+pub fn rewriteRequestHeaderSequence(
     alloc: std.mem.Allocator,
     buf: []const u8,
-    outbound_authority: ?[]const u8,
-    outbound_path: ?[]const u8,
-    forwarded_proto: ?[]const u8,
-) (ParseError || hpack.Error)![]u8 {
-    if (outbound_authority == null and outbound_path == null and forwarded_proto == null) return alloc.dupe(u8, buf);
-    if (buf.len < http2.client_preface.len or !std.mem.eql(u8, buf[0..http2.client_preface.len], http2.client_preface)) {
-        return error.MissingClientPreface;
-    }
+    start: usize,
+    options: RewriteOptions,
+) (ParseError || hpack.Error)!StreamRewriteResult {
+    var pos = start;
+    if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
+    const first = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+    if (first.frame_type != .headers or first.stream_id == 0) return error.InvalidHeadersFrame;
+    pos += http2.frame_header_len;
+    if (pos + first.length > buf.len) return error.BufferTooShort;
 
-    var pos: usize = http2.client_preface.len;
     var header_block: std.ArrayList(u8) = .empty;
     defer header_block.deinit(alloc);
+    try header_block.appendSlice(alloc, try headerBlockFragment(buf[pos .. pos + first.length], first.flags));
+    pos += first.length;
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-    try out.appendSlice(alloc, http2.client_preface);
-
-    var request_stream_id: ?u32 = null;
-    var request_flags: u8 = 0;
-
-    while (pos + http2.frame_header_len <= buf.len) {
-        const frame_start = pos;
-        const frame = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+    while ((first.flags & Flag.end_headers) == 0) {
+        if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
+        const continuation = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
+        if (continuation.frame_type != .continuation or continuation.stream_id != first.stream_id)
+            return error.InvalidFrameSequence;
         pos += http2.frame_header_len;
-
-        if (pos + frame.length > buf.len) return error.BufferTooShort;
-        const payload = buf[pos .. pos + frame.length];
-        pos += frame.length;
-        const frame_end = pos;
-
-        switch (frame.frame_type) {
-            .settings, .window_update, .ping => {
-                if (request_stream_id == null) try out.appendSlice(alloc, buf[frame_start..frame_end]);
-            },
-            .headers => {
-                if (frame.stream_id == 0) return error.InvalidHeadersFrame;
-                if (request_stream_id != null) return error.InvalidFrameSequence;
-                request_stream_id = frame.stream_id;
-                request_flags = frame.flags;
-                const fragment = try headerBlockFragment(payload, frame.flags);
-                try header_block.appendSlice(alloc, fragment);
-                if ((frame.flags & Flag.end_headers) != 0) break;
-            },
-            .continuation => {
-                if (request_stream_id == null or frame.stream_id != request_stream_id.?) return error.InvalidFrameSequence;
-                try header_block.appendSlice(alloc, payload);
-                if ((frame.flags & Flag.end_headers) != 0) break;
-            },
-            else => {
-                if (request_stream_id == null) {
-                    try out.appendSlice(alloc, buf[frame_start..frame_end]);
-                } else {
-                    return error.InvalidFrameSequence;
-                }
-            },
-        }
+        if (pos + continuation.length > buf.len) return error.BufferTooShort;
+        try header_block.appendSlice(alloc, buf[pos .. pos + continuation.length]);
+        pos += continuation.length;
+        if ((continuation.flags & Flag.end_headers) != 0) break;
     }
-
-    if (request_stream_id == null or header_block.items.len == 0) return error.MissingHeaders;
 
     var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
     defer {
@@ -218,40 +248,37 @@ pub fn rewriteClientConnectionPreface(
 
     var saw_forwarded_proto = false;
     for (headers.items) |*header| {
-        if (outbound_authority != null and std.mem.eql(u8, header.name, ":authority")) {
+        if (options.outbound_authority != null and std.mem.eql(u8, header.name, ":authority")) {
             alloc.free(header.value);
-            header.value = try alloc.dupe(u8, outbound_authority.?);
-        } else if (outbound_path != null and std.mem.eql(u8, header.name, ":path")) {
+            header.value = try alloc.dupe(u8, options.outbound_authority.?);
+        } else if (options.outbound_path != null and std.mem.eql(u8, header.name, ":path")) {
             alloc.free(header.value);
-            header.value = try alloc.dupe(u8, outbound_path.?);
-        } else if (forwarded_proto != null and std.mem.eql(u8, header.name, "x-forwarded-proto")) {
+            header.value = try alloc.dupe(u8, options.outbound_path.?);
+        } else if (options.forwarded_proto != null and std.mem.eql(u8, header.name, "x-forwarded-proto")) {
             alloc.free(header.value);
-            header.value = try alloc.dupe(u8, forwarded_proto.?);
+            header.value = try alloc.dupe(u8, options.forwarded_proto.?);
             saw_forwarded_proto = true;
         }
     }
 
-    if (forwarded_proto != null and !saw_forwarded_proto) {
+    if (options.forwarded_proto != null and !saw_forwarded_proto) {
         try headers.append(alloc, .{
             .name = try alloc.dupe(u8, "x-forwarded-proto"),
-            .value = try alloc.dupe(u8, forwarded_proto.?),
+            .value = try alloc.dupe(u8, options.forwarded_proto.?),
         });
     }
 
     const rewritten_block = try hpack.encodeHeaderBlockLiteral(alloc, headers.items);
     defer alloc.free(rewritten_block);
-
-    const rewritten_headers = try buildFrame(alloc, .{
-        .length = @intCast(rewritten_block.len),
-        .frame_type = .headers,
-        .flags = (request_flags & Flag.end_stream) | Flag.end_headers,
-        .stream_id = request_stream_id.?,
-    }, rewritten_block);
-    defer alloc.free(rewritten_headers);
-
-    try out.appendSlice(alloc, rewritten_headers);
-    try out.appendSlice(alloc, buf[pos..]);
-    return out.toOwnedSlice(alloc);
+    return .{
+        .bytes = try buildFrame(alloc, .{
+            .length = @intCast(rewritten_block.len),
+            .frame_type = .headers,
+            .flags = (first.flags & Flag.end_stream) | Flag.end_headers,
+            .stream_id = options.stream_id orelse first.stream_id,
+        }, rewritten_block),
+        .consumed = pos - start,
+    };
 }
 
 pub fn rewriteClientStreamChunk(
@@ -289,7 +316,9 @@ pub fn rewriteClientStreamChunk(
             continue;
         }
 
-        const rewritten = rewriteHeadersSequence(alloc, buf, frame_start, forwarded_proto) catch |err| switch (err) {
+        const rewritten = rewriteRequestHeaderSequence(alloc, buf, frame_start, .{
+            .forwarded_proto = forwarded_proto,
+        }) catch |err| switch (err) {
             error.BufferTooShort => {
                 pos = frame_start;
                 break;
@@ -325,69 +354,6 @@ fn headerBlockFragment(payload: []const u8, flags: u8) ParseError![]const u8 {
 
     if (padded_len > payload.len - pos) return error.InvalidHeadersFrame;
     return payload[pos .. payload.len - padded_len];
-}
-
-fn rewriteHeadersSequence(
-    alloc: std.mem.Allocator,
-    buf: []const u8,
-    start: usize,
-    forwarded_proto: []const u8,
-) (ParseError || hpack.Error)!StreamRewriteResult {
-    var pos = start;
-    const first = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
-    pos += http2.frame_header_len;
-    if (pos + first.length > buf.len) return error.BufferTooShort;
-
-    var header_block: std.ArrayList(u8) = .empty;
-    defer header_block.deinit(alloc);
-    try header_block.appendSlice(alloc, try headerBlockFragment(buf[pos .. pos + first.length], first.flags));
-    pos += first.length;
-
-    while ((first.flags & Flag.end_headers) == 0) {
-        if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
-        const continuation = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
-        if (continuation.frame_type != .continuation or continuation.stream_id != first.stream_id)
-            return error.InvalidFrameSequence;
-        pos += http2.frame_header_len;
-        if (pos + continuation.length > buf.len) return error.BufferTooShort;
-        try header_block.appendSlice(alloc, buf[pos .. pos + continuation.length]);
-        pos += continuation.length;
-        if ((continuation.flags & Flag.end_headers) != 0) break;
-    }
-
-    var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
-    defer {
-        for (headers.items) |header| header.deinit(alloc);
-        headers.deinit(alloc);
-    }
-
-    var saw_forwarded_proto = false;
-    for (headers.items) |*header| {
-        if (std.mem.eql(u8, header.name, "x-forwarded-proto")) {
-            alloc.free(header.value);
-            header.value = try alloc.dupe(u8, forwarded_proto);
-            saw_forwarded_proto = true;
-        }
-    }
-    if (!saw_forwarded_proto) {
-        try headers.append(alloc, .{
-            .name = try alloc.dupe(u8, "x-forwarded-proto"),
-            .value = try alloc.dupe(u8, forwarded_proto),
-        });
-    }
-
-    const rewritten_block = try hpack.encodeHeaderBlockLiteral(alloc, headers.items);
-    defer alloc.free(rewritten_block);
-    const rewritten_headers = try buildFrame(alloc, .{
-        .length = @intCast(rewritten_block.len),
-        .frame_type = .headers,
-        .flags = (first.flags & Flag.end_stream) | Flag.end_headers,
-        .stream_id = first.stream_id,
-    }, rewritten_block);
-    return .{
-        .bytes = rewritten_headers,
-        .consumed = pos - start,
-    };
 }
 
 fn appendLiteralWithIndexedName(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name_index: u8, value: []const u8) !void {

@@ -209,11 +209,12 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
             try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
         }
         try writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}",
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{}",
             .{
                 service.http_proxy_retries orelse 0,
                 service.http_proxy_connect_timeout_ms orelse 1000,
                 service.http_proxy_request_timeout_ms orelse 5000,
+                service.http_proxy_http2_idle_timeout_ms orelse 30000,
                 service.http_proxy_preserve_host orelse true,
             },
         );
@@ -243,11 +244,12 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
             try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
         }
         try writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{}",
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{}",
             .{
                 http_route.retries,
                 http_route.connect_timeout_ms,
                 http_route.request_timeout_ms,
+                http_route.http2_idle_timeout_ms,
                 http_route.preserve_host,
             },
         );
@@ -366,7 +368,7 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
         try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
     }
     try writer.print(
-        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
+        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
         .{
             proxy_route.eligible_endpoints,
             proxy_route.healthy_endpoints,
@@ -375,6 +377,7 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
             proxy_route.retries,
             proxy_route.connect_timeout_ms,
             proxy_route.request_timeout_ms,
+            proxy_route.http2_idle_timeout_ms,
             proxy_route.preserve_host,
             proxy_route.vip_traffic_mode.label(),
             proxy_route.steering_desired_ports,
@@ -506,6 +509,7 @@ test "route handles GET /v1/services" {
         .http_proxy_retries = 2,
         .http_proxy_connect_timeout_ms = 1500,
         .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_http2_idle_timeout_ms = 45000,
         .http_proxy_target_port = 8080,
         .http_proxy_preserve_host = false,
         .created_at = 1000,
@@ -531,8 +535,8 @@ test "route handles GET /v1/services" {
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"vip_address\":\"10.43.0.2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_proxy\":{\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"http2_idle_timeout_ms\":45000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"http_routes\":[{\"name\":\"default\",\"host\":\"api.internal\",\"path_prefix\":\"/v1\",\"retries\":2,\"connect_timeout_ms\":1500,\"request_timeout_ms\":5000,\"http2_idle_timeout_ms\":45000,\"preserve_host\":false,\"backend_services\":[{\"service\":\"api\",\"weight\":100}]}]") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"listener_not_running\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
 }
@@ -621,6 +625,7 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
         .http_proxy_retries = 2,
         .http_proxy_connect_timeout_ms = 1500,
         .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_http2_idle_timeout_ms = 45000,
         .http_proxy_target_port = 8080,
         .http_proxy_preserve_host = false,
         .created_at = 1000,

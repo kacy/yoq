@@ -43,6 +43,7 @@ pub const Route = struct {
     retries: u8 = 0,
     connect_timeout_ms: u32 = 1000,
     request_timeout_ms: u32 = 5000,
+    http2_idle_timeout_ms: u32 = 30000,
     preserve_host: bool = true,
 };
 

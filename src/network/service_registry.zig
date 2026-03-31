@@ -76,6 +76,7 @@ pub const ServiceDefinition = struct {
     http_proxy_retries: ?u8 = null,
     http_proxy_connect_timeout_ms: ?u32 = null,
     http_proxy_request_timeout_ms: ?u32 = null,
+    http_proxy_http2_idle_timeout_ms: ?u32 = null,
     http_proxy_target_port: ?u16 = null,
     http_proxy_preserve_host: ?bool = null,
 };
@@ -90,6 +91,7 @@ pub const HttpRouteDefinition = struct {
     retries: u8 = 0,
     connect_timeout_ms: u32 = 1000,
     request_timeout_ms: u32 = 5000,
+    http2_idle_timeout_ms: u32 = 30000,
     target_port: ?u16 = null,
     preserve_host: bool = true,
 };
@@ -162,6 +164,7 @@ pub const ServiceSnapshot = struct {
     http_proxy_retries: ?u8,
     http_proxy_connect_timeout_ms: ?u32,
     http_proxy_request_timeout_ms: ?u32,
+    http_proxy_http2_idle_timeout_ms: ?u32,
     http_proxy_target_port: ?u16,
     http_proxy_preserve_host: ?bool,
     total_endpoints: usize,
@@ -198,6 +201,7 @@ pub const HttpRouteSnapshot = struct {
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
+    http2_idle_timeout_ms: u32,
     target_port: ?u16,
     preserve_host: bool,
 
@@ -248,6 +252,7 @@ const ServiceState = struct {
     http_proxy_retries: ?u8 = null,
     http_proxy_connect_timeout_ms: ?u32 = null,
     http_proxy_request_timeout_ms: ?u32 = null,
+    http_proxy_http2_idle_timeout_ms: ?u32 = null,
     http_proxy_target_port: ?u16 = null,
     http_proxy_preserve_host: ?bool = null,
     endpoints: std.ArrayList(EndpointState) = .empty,
@@ -281,6 +286,7 @@ const HttpRouteState = struct {
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
+    http2_idle_timeout_ms: u32,
     target_port: ?u16,
     preserve_host: bool,
 
@@ -613,6 +619,7 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .http_proxy_retries = service.http_proxy_retries,
         .http_proxy_connect_timeout_ms = service.http_proxy_connect_timeout_ms,
         .http_proxy_request_timeout_ms = service.http_proxy_request_timeout_ms,
+        .http_proxy_http2_idle_timeout_ms = service.http_proxy_http2_idle_timeout_ms,
         .http_proxy_target_port = service.http_proxy_target_port,
         .http_proxy_preserve_host = service.http_proxy_preserve_host,
         .total_endpoints = total_endpoints,
@@ -646,6 +653,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
+                .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
                 .target_port = route.target_port,
                 .preserve_host = route.preserve_host,
             });
@@ -664,6 +672,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
             .retries = definition.http_proxy_retries orelse 0,
             .connect_timeout_ms = definition.http_proxy_connect_timeout_ms orelse 1000,
             .request_timeout_ms = definition.http_proxy_request_timeout_ms orelse 5000,
+            .http2_idle_timeout_ms = definition.http_proxy_http2_idle_timeout_ms orelse 30000,
             .target_port = definition.http_proxy_target_port,
             .preserve_host = definition.http_proxy_preserve_host orelse true,
         });
@@ -696,6 +705,7 @@ fn cloneRouteSnapshots(alloc: Allocator, routes: []const HttpRouteState) Error![
             .retries = route.retries,
             .connect_timeout_ms = route.connect_timeout_ms,
             .request_timeout_ms = route.request_timeout_ms,
+            .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
             .target_port = route.target_port,
             .preserve_host = route.preserve_host,
         });
@@ -713,6 +723,7 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
         service.http_proxy_retries = primary.retries;
         service.http_proxy_connect_timeout_ms = primary.connect_timeout_ms;
         service.http_proxy_request_timeout_ms = primary.request_timeout_ms;
+        service.http_proxy_http2_idle_timeout_ms = primary.http2_idle_timeout_ms;
         service.http_proxy_target_port = primary.target_port;
         service.http_proxy_preserve_host = primary.preserve_host;
         return;
@@ -724,6 +735,7 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
     service.http_proxy_retries = definition.http_proxy_retries;
     service.http_proxy_connect_timeout_ms = definition.http_proxy_connect_timeout_ms;
     service.http_proxy_request_timeout_ms = definition.http_proxy_request_timeout_ms;
+    service.http_proxy_http2_idle_timeout_ms = definition.http_proxy_http2_idle_timeout_ms;
     service.http_proxy_target_port = definition.http_proxy_target_port;
     service.http_proxy_preserve_host = definition.http_proxy_preserve_host;
 }
@@ -1068,6 +1080,7 @@ test "service snapshots include optional http proxy policy" {
         .http_proxy_retries = 2,
         .http_proxy_connect_timeout_ms = 1500,
         .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_http2_idle_timeout_ms = 30000,
         .http_proxy_preserve_host = false,
     });
 
@@ -1079,6 +1092,7 @@ test "service snapshots include optional http proxy policy" {
     try std.testing.expectEqual(@as(?u8, 2), snapshot.http_proxy_retries);
     try std.testing.expectEqual(@as(?u32, 1500), snapshot.http_proxy_connect_timeout_ms);
     try std.testing.expectEqual(@as(?u32, 5000), snapshot.http_proxy_request_timeout_ms);
+    try std.testing.expectEqual(@as(?u32, 30000), snapshot.http_proxy_http2_idle_timeout_ms);
     try std.testing.expectEqual(@as(?bool, false), snapshot.http_proxy_preserve_host);
 }
 

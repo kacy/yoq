@@ -185,6 +185,7 @@ test "deinit frees all memory" {
                 .retries = 2,
                 .connect_timeout_ms = 1500,
                 .request_timeout_ms = 6000,
+                .http2_idle_timeout_ms = 30000,
                 .preserve_host = false,
             },
         }),

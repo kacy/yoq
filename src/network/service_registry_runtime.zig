@@ -244,6 +244,7 @@ fn loadSnapshotInto(next_registry: *service_registry.Registry) !void {
             .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
             .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
             .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+            .http_proxy_http2_idle_timeout_ms = if (service.http_proxy_http2_idle_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
             .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
             .http_proxy_preserve_host = service.http_proxy_preserve_host,
         });
@@ -299,6 +300,7 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
         .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
         .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
         .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+        .http_proxy_http2_idle_timeout_ms = if (service.http_proxy_http2_idle_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
         .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
         .http_proxy_preserve_host = service.http_proxy_preserve_host,
     });
@@ -378,6 +380,7 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             .retries = @intCast(route.retries),
             .connect_timeout_ms = @intCast(route.connect_timeout_ms),
             .request_timeout_ms = @intCast(route.request_timeout_ms),
+            .http2_idle_timeout_ms = @intCast(route.http2_idle_timeout_ms),
             .target_port = if (route.target_port) |port| @intCast(port) else null,
             .preserve_host = route.preserve_host,
         });
@@ -417,6 +420,7 @@ test "runtime bootstraps from persisted services" {
         .http_proxy_retries = 2,
         .http_proxy_connect_timeout_ms = 1500,
         .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_http2_idle_timeout_ms = 30000,
         .http_proxy_preserve_host = false,
         .created_at = 1000,
         .updated_at = 1000,
@@ -444,6 +448,7 @@ test "runtime bootstraps from persisted services" {
     try std.testing.expectEqual(@as(?u8, 2), snapshot.http_proxy_retries);
     try std.testing.expectEqual(@as(?u32, 1500), snapshot.http_proxy_connect_timeout_ms);
     try std.testing.expectEqual(@as(?u32, 5000), snapshot.http_proxy_request_timeout_ms);
+    try std.testing.expectEqual(@as(?u32, 30000), snapshot.http_proxy_http2_idle_timeout_ms);
     try std.testing.expectEqual(@as(?bool, false), snapshot.http_proxy_preserve_host);
     try std.testing.expectEqual(@as(usize, 1), snapshot.total_endpoints);
     try std.testing.expectEqual(@as(usize, 1), snapshot.eligible_endpoints);

@@ -52,8 +52,6 @@ Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't t
 current gRPC routing limits:
 
 - direct listener traffic still uses prior-knowledge `h2c`; TLS/ALPN HTTP/2 routing works through the TLS terminator when the routed host matches a service `tls.domain`
-- one accepted client connection stays pinned to the first matched routed service
-- `request_timeout_ms` currently acts as the idle timeout for routed HTTP/2 connections
 
 ### production features
 
