@@ -138,6 +138,8 @@ gRPC services can use the HTTP routing listener through prior-knowledge HTTP/2 (
 
 HTTP routes can now narrow traffic by method as well as host, path, and exact headers. use `match_methods = ["GET", "POST"]` on `http_proxy` or named `http_routes` entries when you need separate read/write routing policy without splitting the service definition.
 
+For weighted routes, `GET /v1/services/<name>/proxy-routes` and `GET /v1/status?mode=service_discovery` now expose both aggregate route traffic and per-backend traffic breakdowns, which makes canary and cutover behavior visible without switching to Prometheus first.
+
 current limits:
 
 - the plaintext routing listener still speaks prior-knowledge `h2c`; TLS/ALPN HTTP/2 support comes through the TLS terminator for routed hosts with matching `tls.domain`

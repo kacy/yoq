@@ -2,6 +2,7 @@ const std = @import("std");
 const http = @import("../http.zig");
 const common = @import("common.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
+const route_traffic_json = @import("route_traffic_json.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const proxy_runtime = @import("../../network/proxy/runtime.zig");
 const service_rollout = @import("../../network/service_rollout.zig");
@@ -359,8 +360,6 @@ fn writeEndpointJson(writer: anytype, endpoint: service_registry_runtime.Endpoin
 }
 
 fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) !void {
-    const traffic = findRouteTraffic(proxy_route.name, route_traffic);
-
     try writer.writeAll("{\"name\":\"");
     try json_helpers.writeJsonEscaped(writer, proxy_route.name);
     try writer.writeAll("\",\"service\":\"");
@@ -419,36 +418,11 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     } else {
         try writer.writeAll("null");
     }
-    try writer.print(
-        ",\"traffic\":{{\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"upstream_failures_total\":{d}}}",
-        .{
-            traffic.requests_total,
-            traffic.responses_2xx_total,
-            traffic.responses_4xx_total,
-            traffic.responses_5xx_total,
-            traffic.retries_total,
-            traffic.upstream_failures_total,
-        },
-    );
+    try writer.writeAll(",\"traffic\":");
+    try route_traffic_json.writeRouteTrafficSummaryJson(writer, proxy_route.name, route_traffic);
+    try writer.writeAll(",\"backend_traffic\":");
+    try route_traffic_json.writeRouteBackendTrafficJson(writer, proxy_route.name, route_traffic);
     try writer.writeByte('}');
-}
-
-fn findRouteTraffic(route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) proxy_runtime.RouteTrafficSnapshot {
-    for (route_traffic) |entry| {
-        if (std.mem.eql(u8, entry.route_name, route_name)) return entry;
-    }
-
-    return .{
-        .route_name = "",
-        .service_name = "",
-        .backend_service = "",
-        .requests_total = 0,
-        .responses_2xx_total = 0,
-        .responses_4xx_total = 0,
-        .responses_5xx_total = 0,
-        .retries_total = 0,
-        .upstream_failures_total = 0,
-    };
 }
 
 fn writeMethodMatchesJson(writer: anytype, method_matches: anytype) !void {
@@ -736,6 +710,7 @@ test "route handles GET /v1/services/{name}/proxy-routes" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"listener_not_running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"last_failure_kind\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"backend_traffic\":[{\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
 }
 
 test "route handles GET /v1/services/{name}/proxy-routes with steering degradation" {
@@ -795,6 +770,83 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering degradati
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"listener_not_running\"") != null);
+}
+
+test "route handles GET /v1/services/{name}/proxy-routes with weighted backend traffic breakdown" {
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+        .http_routes = &.{
+            .{
+                .service_name = "api",
+                .route_name = "canary",
+                .host = "api.internal",
+                .path_prefix = "/v1",
+                .match_methods = &.{},
+                .match_headers = &.{},
+                .backend_services = &.{
+                    .{
+                        .service_name = "api",
+                        .route_name = "canary",
+                        .backend_service = "api",
+                        .weight = 90,
+                        .backend_order = 0,
+                        .created_at = 1000,
+                        .updated_at = 1000,
+                    },
+                    .{
+                        .service_name = "api",
+                        .route_name = "canary",
+                        .backend_service = "api-canary",
+                        .weight = 10,
+                        .backend_order = 1,
+                        .created_at = 1000,
+                        .updated_at = 1000,
+                    },
+                },
+                .retries = 1,
+                .connect_timeout_ms = 1000,
+                .request_timeout_ms = 5000,
+                .http2_idle_timeout_ms = 30000,
+                .route_order = 0,
+                .created_at = 1000,
+                .updated_at = 1000,
+            },
+        },
+    });
+
+    proxy_runtime.bootstrapIfEnabled();
+    proxy_runtime.recordRouteRequestStart("api:canary", "api", "api");
+    proxy_runtime.recordRouteResponseCode("api:canary", "api", "api", 200);
+    proxy_runtime.recordRouteRequestStart("api:canary", "api", "api-canary");
+    proxy_runtime.recordRouteResponseCode("api:canary", "api", "api-canary", 503);
+    proxy_runtime.recordRouteUpstreamFailure("api:canary", "api", "api-canary");
+
+    const response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
+    defer if (response.allocated) std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"traffic\":{\"requests_total\":2,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":1,\"retries_total\":0,\"upstream_failures_total\":1}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"backend_traffic\":[{\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"upstream_failures_total\":0},{\"backend_service\":\"api-canary\",\"requests_total\":1,\"responses_2xx_total\":0,\"responses_4xx_total\":0,\"responses_5xx_total\":1,\"retries_total\":0,\"upstream_failures_total\":1}]") != null);
 }
 
 test "route handles GET /v1/services/{name} with steering drift details" {
