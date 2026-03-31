@@ -736,7 +736,14 @@ pub fn parseHealthCheck(
             log.err("manifest: service '{s}' health_check port out of range", .{service_name});
             return common.LoadError.InvalidHealthCheck;
         }
-        break :blk .{ .grpc = .{ .port = @intCast(port) } };
+        const service = if (hc_table.getString("service")) |value|
+            alloc.dupe(u8, value) catch return common.LoadError.OutOfMemory
+        else
+            null;
+        break :blk .{ .grpc = .{
+            .port = @intCast(port),
+            .service = service,
+        } };
     } else if (std.mem.eql(u8, type_str, "exec")) blk: {
         const cmd = try parseStringArray(alloc, hc_table.getArray("command"));
         if (cmd.len == 0) {

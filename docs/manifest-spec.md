@@ -247,7 +247,7 @@ port = 5432
 
 ### grpc checks
 
-requires `port`. a successful HTTP/2 preface exchange with the target port means healthy.
+requires `port`. yoq sends `grpc.health.v1.Health/Check` over HTTP/2 and requires a `SERVING` response. `service` is optional and defaults to the empty service name.
 
 when a service also uses `http_proxy` or `http_routes`, yoq forwards prior-knowledge HTTP/2 (h2c) traffic end to end for that routed service. if the same host is also declared under `[service.<name>.tls]`, the TLS proxy can terminate HTTPS, negotiate ALPN `h2`, and forward the decrypted traffic into that routed service. this supports unary and streaming gRPC traffic on a single routed connection, subject to the HTTP/2 routing limits above.
 
@@ -255,6 +255,7 @@ when a service also uses `http_proxy` or `http_routes`, yoq forwards prior-knowl
 [service.api.health_check]
 type = "grpc"
 port = 50051
+service = "pkg.Health"
 interval = 5
 timeout = 2
 ```

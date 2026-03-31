@@ -892,6 +892,7 @@ test "health check — grpc type" {
         \\[service.api.health_check]
         \\type = "grpc"
         \\port = 50051
+        \\service = "pkg.Health"
         \\interval = 5
     );
     defer manifest.deinit();
@@ -900,6 +901,7 @@ test "health check — grpc type" {
     switch (hc.check_type) {
         .grpc => |g| {
             try std.testing.expectEqual(@as(u16, 50051), g.port);
+            try std.testing.expectEqualStrings("pkg.Health", g.service.?);
         },
         else => return error.TestUnexpectedResult,
     }
