@@ -1352,6 +1352,7 @@ test "http proxy config — host and path prefix" {
         \\retries = 2
         \\connect_timeout_ms = 1500
         \\request_timeout_ms = 9000
+        \\http2_idle_timeout_ms = 45000
         \\preserve_host = false
     );
     defer manifest.deinit();
@@ -1365,6 +1366,7 @@ test "http proxy config — host and path prefix" {
     try std.testing.expectEqual(@as(u8, 2), proxy.retries);
     try std.testing.expectEqual(@as(u32, 1500), proxy.connect_timeout_ms);
     try std.testing.expectEqual(@as(u32, 9000), proxy.request_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 45000), proxy.http2_idle_timeout_ms);
     try std.testing.expect(!proxy.preserve_host);
 }
 
@@ -1387,6 +1389,7 @@ test "http proxy config — defaults" {
     try std.testing.expectEqual(@as(u8, 0), proxy.retries);
     try std.testing.expectEqual(@as(u32, 1000), proxy.connect_timeout_ms);
     try std.testing.expectEqual(@as(u32, 5000), proxy.request_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 30000), proxy.http2_idle_timeout_ms);
     try std.testing.expect(proxy.preserve_host);
 }
 

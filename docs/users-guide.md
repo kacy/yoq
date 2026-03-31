@@ -139,8 +139,6 @@ gRPC services can use the HTTP routing listener through prior-knowledge HTTP/2 (
 current limits:
 
 - the plaintext routing listener still speaks prior-knowledge `h2c`; TLS/ALPN HTTP/2 support comes through the TLS terminator for routed hosts with matching `tls.domain`
-- one accepted client connection is pinned to the first matched service route, so later RPC streams on the same channel must target that same routed service
-- `request_timeout_ms` currently acts as the idle timeout for that routed HTTP/2 connection
 
 ### TLS and ACME
 

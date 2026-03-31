@@ -251,6 +251,17 @@ pub fn parseHttpProxyRoute(
         return common.LoadError.InvalidHttpProxyConfig;
     }
 
+    const http2_idle_timeout_raw = proxy_table.getInt("http2_idle_timeout_ms") orelse 30000;
+    if (http2_idle_timeout_raw < 1 or http2_idle_timeout_raw > std.math.maxInt(u32)) {
+        log.err("manifest: service '{s}' {s} route '{s}' http2_idle_timeout_ms must be between 1 and {d}", .{
+            service_name,
+            field_name,
+            route_name,
+            std.math.maxInt(u32),
+        });
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
     const preserve_host = proxy_table.getBool("preserve_host") orelse true;
 
     return .{
@@ -263,6 +274,7 @@ pub fn parseHttpProxyRoute(
         .retries = @intCast(retries_raw),
         .connect_timeout_ms = @intCast(connect_timeout_raw),
         .request_timeout_ms = @intCast(request_timeout_raw),
+        .http2_idle_timeout_ms = @intCast(http2_idle_timeout_raw),
         .preserve_host = preserve_host,
     };
 }

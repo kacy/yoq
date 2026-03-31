@@ -84,6 +84,7 @@ pub const RouteSnapshot = struct {
     retries: u8,
     connect_timeout_ms: u32,
     request_timeout_ms: u32,
+    http2_idle_timeout_ms: u32,
     preserve_host: bool,
     vip_traffic_mode: VipTrafficMode = .not_applicable,
     steering_desired_ports: u32,
@@ -522,6 +523,7 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
             .retries = route.retries,
             .connect_timeout_ms = route.connect_timeout_ms,
             .request_timeout_ms = route.request_timeout_ms,
+            .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
             .preserve_host = route.preserve_host,
         });
     }
@@ -715,6 +717,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .retries = route.retries,
         .connect_timeout_ms = route.connect_timeout_ms,
         .request_timeout_ms = route.request_timeout_ms,
+        .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
         .preserve_host = route.preserve_host,
         .vip_traffic_mode = vip_traffic_mode,
         .steering_desired_ports = steering_state.desired_ports,
@@ -801,6 +804,7 @@ fn syncLocked() !void {
                 .retries = service_route.retries,
                 .connect_timeout_ms = service_route.connect_timeout_ms,
                 .request_timeout_ms = service_route.request_timeout_ms,
+                .http2_idle_timeout_ms = service_route.http2_idle_timeout_ms,
                 .preserve_host = service_route.preserve_host,
             };
             errdefer {

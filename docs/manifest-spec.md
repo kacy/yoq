@@ -125,6 +125,7 @@ the upstream target is the first service port in `ports`. `http_proxy` is just s
 | `retries` | integer | no | `0` | upstream retries for failed requests |
 | `connect_timeout_ms` | integer | no | `1000` | upstream connect timeout in milliseconds |
 | `request_timeout_ms` | integer | no | `5000` | upstream request timeout in milliseconds |
+| `http2_idle_timeout_ms` | integer | no | `30000` | idle timeout for routed downstream HTTP/2 connections |
 | `preserve_host` | boolean | no | `true` | forward the original `Host` header instead of the upstream host |
 
 ```toml
@@ -150,6 +151,7 @@ preserve_host = false
 retries = 2
 connect_timeout_ms = 1500
 request_timeout_ms = 5000
+http2_idle_timeout_ms = 30000
 ```
 
 multiple routes on one service:

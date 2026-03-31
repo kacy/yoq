@@ -74,7 +74,6 @@ what to verify:
 current limits:
 
 - routed gRPC supports prior-knowledge `h2c` directly, and HTTPS/ALPN `h2` when the routed host also has a matching `tls.domain`
-- one routed HTTP/2 client connection stays pinned to its first matched service
 
 ## 3. clustered deployment
 

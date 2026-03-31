@@ -43,6 +43,7 @@ pub const ServiceRecord = struct {
     http_proxy_retries: ?i64 = null,
     http_proxy_connect_timeout_ms: ?i64 = null,
     http_proxy_request_timeout_ms: ?i64 = null,
+    http_proxy_http2_idle_timeout_ms: ?i64 = null,
     http_proxy_target_port: ?i64 = null,
     http_proxy_preserve_host: ?bool = null,
     created_at: i64,
@@ -71,6 +72,7 @@ pub const ServiceHttpRouteRecord = struct {
     retries: i64,
     connect_timeout_ms: i64,
     request_timeout_ms: i64,
+    http2_idle_timeout_ms: i64,
     target_port: ?i64 = null,
     preserve_host: bool = true,
     route_order: i64,
@@ -117,6 +119,7 @@ pub const ServiceHttpRouteInput = struct {
     retries: i64 = 0,
     connect_timeout_ms: i64 = 1000,
     request_timeout_ms: i64 = 5000,
+    http2_idle_timeout_ms: i64 = 30000,
     target_port: ?i64 = null,
     preserve_host: bool = true,
 };
@@ -148,7 +151,7 @@ pub const ServiceHttpRouteBackendInput = struct {
 };
 
 const service_columns =
-    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, created_at, updated_at";
+    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_http2_idle_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, created_at, updated_at";
 
 const ServiceRow = struct {
     service_name: sqlite.Text,
@@ -160,6 +163,7 @@ const ServiceRow = struct {
     http_proxy_retries: ?i64,
     http_proxy_connect_timeout_ms: ?i64,
     http_proxy_request_timeout_ms: ?i64,
+    http_proxy_http2_idle_timeout_ms: ?i64,
     http_proxy_target_port: ?i64,
     http_proxy_preserve_host: ?i64,
     created_at: i64,
@@ -167,7 +171,7 @@ const ServiceRow = struct {
 };
 
 const service_http_route_columns =
-    "service_name, route_name, host, path_prefix, rewrite_prefix, retries, connect_timeout_ms, request_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at";
+    "service_name, route_name, host, path_prefix, rewrite_prefix, retries, connect_timeout_ms, request_timeout_ms, http2_idle_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at";
 
 const ServiceHttpRouteRow = struct {
     service_name: sqlite.Text,
@@ -178,6 +182,7 @@ const ServiceHttpRouteRow = struct {
     retries: i64,
     connect_timeout_ms: i64,
     request_timeout_ms: i64,
+    http2_idle_timeout_ms: i64,
     target_port: ?i64,
     preserve_host: i64,
     route_order: i64,
@@ -282,6 +287,7 @@ fn rowToServiceRecord(row: ServiceRow, http_routes: []const ServiceHttpRouteReco
         .http_proxy_retries = row.http_proxy_retries,
         .http_proxy_connect_timeout_ms = row.http_proxy_connect_timeout_ms,
         .http_proxy_request_timeout_ms = row.http_proxy_request_timeout_ms,
+        .http_proxy_http2_idle_timeout_ms = row.http_proxy_http2_idle_timeout_ms,
         .http_proxy_target_port = row.http_proxy_target_port,
         .http_proxy_preserve_host = if (row.http_proxy_preserve_host) |preserve_host| preserve_host != 0 else null,
         .created_at = row.created_at,
@@ -301,6 +307,7 @@ fn rowToServiceHttpRouteRecord(row: ServiceHttpRouteRow) ServiceHttpRouteRecord 
         .retries = row.retries,
         .connect_timeout_ms = row.connect_timeout_ms,
         .request_timeout_ms = row.request_timeout_ms,
+        .http2_idle_timeout_ms = row.http2_idle_timeout_ms,
         .target_port = row.target_port,
         .preserve_host = row.preserve_host != 0,
         .route_order = row.route_order,
@@ -414,7 +421,7 @@ fn syncDerivedServiceProxyFields(
 ) StoreError!void {
     const primary = if (routes.len > 0) routes[0] else null;
     db.exec(
-        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_rewrite_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
+        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_rewrite_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_http2_idle_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, updated_at = ? WHERE service_name = ?;",
         .{},
         .{
             if (primary) |route| route.host else null,
@@ -423,6 +430,7 @@ fn syncDerivedServiceProxyFields(
             if (primary) |route| route.retries else null,
             if (primary) |route| route.connect_timeout_ms else null,
             if (primary) |route| route.request_timeout_ms else null,
+            if (primary) |route| route.http2_idle_timeout_ms else null,
             if (primary) |route| route.target_port else null,
             if (primary) |route| @as(i64, @intFromBool(route.preserve_host)) else null,
             now,
@@ -455,7 +463,7 @@ fn replaceServiceHttpRoutes(
 
     for (routes, 0..) |route, idx| {
         db.exec(
-            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             .{},
             .{
                 service_name,
@@ -466,6 +474,7 @@ fn replaceServiceHttpRoutes(
                 route.retries,
                 route.connect_timeout_ms,
                 route.request_timeout_ms,
+                route.http2_idle_timeout_ms,
                 route.target_port,
                 @as(i64, @intFromBool(route.preserve_host)),
                 @as(i64, @intCast(idx)),
@@ -539,7 +548,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
     var committed = false;
     errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
     db.exec(
-        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.service_name,
@@ -551,6 +560,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
             record.http_proxy_retries,
             record.http_proxy_connect_timeout_ms,
             record.http_proxy_request_timeout_ms,
+            record.http_proxy_http2_idle_timeout_ms,
             record.http_proxy_target_port,
             if (record.http_proxy_preserve_host) |preserve_host| @as(?i64, @intFromBool(preserve_host)) else null,
             record.created_at,
@@ -589,6 +599,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
+                .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
                 .target_port = route.target_port,
                 .preserve_host = route.preserve_host,
             }) catch return StoreError.WriteFailed;
@@ -662,6 +673,7 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
         .http_proxy_retries = null,
         .http_proxy_connect_timeout_ms = null,
         .http_proxy_request_timeout_ms = null,
+        .http_proxy_http2_idle_timeout_ms = null,
         .http_proxy_target_port = null,
         .http_proxy_preserve_host = null,
         .created_at = now,
@@ -971,6 +983,7 @@ test "createService and getService round-trip" {
         .http_proxy_retries = 2,
         .http_proxy_connect_timeout_ms = 1500,
         .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_http2_idle_timeout_ms = 30000,
         .http_proxy_target_port = 8080,
         .http_proxy_preserve_host = true,
         .created_at = 1000,
@@ -989,6 +1002,7 @@ test "createService and getService round-trip" {
     try std.testing.expectEqual(@as(?i64, 2), service.http_proxy_retries);
     try std.testing.expectEqual(@as(?i64, 1500), service.http_proxy_connect_timeout_ms);
     try std.testing.expectEqual(@as(?i64, 5000), service.http_proxy_request_timeout_ms);
+    try std.testing.expectEqual(@as(?i64, 30000), service.http_proxy_http2_idle_timeout_ms);
     try std.testing.expectEqual(@as(?i64, 8080), service.http_proxy_target_port);
     try std.testing.expectEqual(@as(?bool, true), service.http_proxy_preserve_host);
     try std.testing.expectEqual(@as(i64, 1000), service.created_at);
@@ -1068,6 +1082,7 @@ test "syncServiceConfig updates proxy policy without changing vip" {
                 .retries = 2,
                 .connect_timeout_ms = 1500,
                 .request_timeout_ms = 5000,
+                .http2_idle_timeout_ms = 45000,
                 .target_port = 8080,
                 .preserve_host = false,
             },
@@ -1078,6 +1093,7 @@ test "syncServiceConfig updates proxy policy without changing vip" {
     try std.testing.expectEqualStrings(first.vip_address, updated.vip_address);
     try std.testing.expectEqualStrings("api.internal", updated.http_proxy_host.?);
     try std.testing.expectEqualStrings("/v1", updated.http_proxy_path_prefix.?);
+    try std.testing.expectEqual(@as(?i64, 45000), updated.http_proxy_http2_idle_timeout_ms);
     try std.testing.expectEqual(@as(?i64, 8080), updated.http_proxy_target_port);
     try std.testing.expectEqual(@as(?bool, false), updated.http_proxy_preserve_host);
 }
