@@ -136,6 +136,8 @@ HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes curre
 
 gRPC services can use the HTTP routing listener through prior-knowledge HTTP/2 (h2c) passthrough. unary requests and streaming RPC traffic are forwarded end to end, including client `DATA` frames, server `DATA` frames, and trailing `HEADERS`. if the routed host also has a matching `tls.domain`, the TLS terminator can negotiate ALPN `h2` and forward that HTTPS traffic into the same routing path.
 
+HTTP routes can now narrow traffic by method as well as host, path, and exact headers. use `match_methods = ["GET", "POST"]` on `http_proxy` or named `http_routes` entries when you need separate read/write routing policy without splitting the service definition.
+
 current limits:
 
 - the plaintext routing listener still speaks prior-knowledge `h2c`; TLS/ALPN HTTP/2 support comes through the TLS terminator for routed hosts with matching `tls.domain`

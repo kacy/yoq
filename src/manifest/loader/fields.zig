@@ -211,6 +211,12 @@ pub fn parseHttpProxyRoute(
         }
     }
 
+    const match_methods = try parseHttpRouteMethodMatches(alloc, service_name, field_name, route_name, proxy_table.getArray("match_methods"));
+    errdefer {
+        for (match_methods) |method_match| method_match.deinit(alloc);
+        alloc.free(match_methods);
+    }
+
     const match_headers = try parseHttpRouteHeaderMatches(alloc, service_name, field_name, route_name, proxy_table.getArray("match_headers"));
     errdefer {
         for (match_headers) |header_match| header_match.deinit(alloc);
@@ -269,6 +275,7 @@ pub fn parseHttpProxyRoute(
         .host = alloc.dupe(u8, host) catch return common.LoadError.OutOfMemory,
         .path_prefix = alloc.dupe(u8, path_prefix) catch return common.LoadError.OutOfMemory,
         .rewrite_prefix = if (rewrite_prefix) |value| alloc.dupe(u8, value) catch return common.LoadError.OutOfMemory else null,
+        .match_methods = match_methods,
         .match_headers = match_headers,
         .backend_services = backend_services,
         .retries = @intCast(retries_raw),
@@ -339,14 +346,86 @@ fn validateHttpProxyRouteConflict(
     for (existing) |route| {
         if (!std.ascii.eqlIgnoreCase(route.host, candidate.host)) continue;
         if (!std.mem.eql(u8, route.path_prefix, candidate.path_prefix)) continue;
+        if (!sameMethodMatches(route.match_methods, candidate.match_methods)) continue;
         if (!sameHeaderMatches(route.match_headers, candidate.match_headers)) continue;
 
         log.err(
-            "manifest: service '{s}' defines duplicate http route match host='{s}' path_prefix='{s}' with the same header conditions",
+            "manifest: service '{s}' defines duplicate http route match host='{s}' path_prefix='{s}' with the same method and header conditions",
             .{ service_name, candidate.host, candidate.path_prefix },
         );
         return common.LoadError.InvalidHttpProxyConfig;
     }
+}
+
+fn parseHttpRouteMethodMatches(
+    alloc: std.mem.Allocator,
+    service_name: []const u8,
+    field_name: []const u8,
+    route_name: []const u8,
+    raw_methods: ?[]const []const u8,
+) common.LoadError![]const spec.HttpMethodMatch {
+    const items = raw_methods orelse return alloc.alloc(spec.HttpMethodMatch, 0) catch return common.LoadError.OutOfMemory;
+
+    var result: std.ArrayListUnmanaged(spec.HttpMethodMatch) = .empty;
+    errdefer {
+        for (result.items) |item| item.deinit(alloc);
+        result.deinit(alloc);
+    }
+
+    for (items) |item| {
+        const method = std.mem.trim(u8, item, " \t");
+        if (!isValidHttpMethod(method)) {
+            log.err("manifest: service '{s}' {s} route '{s}' match_methods entry '{s}' is invalid", .{
+                service_name,
+                field_name,
+                route_name,
+                item,
+            });
+            return common.LoadError.InvalidHttpProxyConfig;
+        }
+
+        for (result.items) |existing| {
+            if (std.mem.eql(u8, existing.method, method)) {
+                log.err("manifest: service '{s}' {s} route '{s}' cannot repeat match method '{s}'", .{
+                    service_name,
+                    field_name,
+                    route_name,
+                    method,
+                });
+                return common.LoadError.InvalidHttpProxyConfig;
+            }
+        }
+
+        const method_copy = alloc.dupe(u8, method) catch return common.LoadError.OutOfMemory;
+        result.append(alloc, .{ .method = method_copy }) catch {
+            alloc.free(method_copy);
+            return common.LoadError.OutOfMemory;
+        };
+    }
+
+    return result.toOwnedSlice(alloc) catch return common.LoadError.OutOfMemory;
+}
+
+fn isValidHttpMethod(method: []const u8) bool {
+    return std.mem.eql(u8, method, "GET") or
+        std.mem.eql(u8, method, "HEAD") or
+        std.mem.eql(u8, method, "POST") or
+        std.mem.eql(u8, method, "PUT") or
+        std.mem.eql(u8, method, "DELETE");
+}
+
+fn sameMethodMatches(a: []const spec.HttpMethodMatch, b: []const spec.HttpMethodMatch) bool {
+    if (a.len != b.len) return false;
+    for (a) |left| {
+        var found = false;
+        for (b) |right| {
+            if (!std.mem.eql(u8, left.method, right.method)) continue;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
 }
 
 fn parseHttpRouteHeaderMatches(

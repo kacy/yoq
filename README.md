@@ -305,7 +305,7 @@ The [`examples/`](examples/) directory has ready-to-use manifests:
 - [`examples/redis/`](examples/redis/) for the simplest possible single-service setup
 - [`examples/web-app/`](examples/web-app/) for a multi-service app with postgres, redis, workers, and health checks
 - [`examples/cron/`](examples/cron/) for scheduled jobs with `every = "1h"`
-- [`examples/http-routing/`](examples/http-routing/) for host-, path-, and header-based HTTP routing
+- [`examples/http-routing/`](examples/http-routing/) for host-, path-, method-, and header-based HTTP routing
 - [`examples/cluster/`](examples/cluster/) for a minimal multi-node cluster flow
 - [docs/golden-path.md](docs/golden-path.md) for the recommended end-to-end evaluation workflow
 

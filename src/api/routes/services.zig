@@ -218,6 +218,10 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
                 service.http_proxy_preserve_host orelse true,
             },
         );
+        if (service.http_routes.len > 0 and service.http_routes[0].match_methods.len > 0) {
+            try writer.writeAll(",\"match_methods\":");
+            try writeMethodMatchesJson(writer, service.http_routes[0].match_methods);
+        }
         if (service.http_routes.len > 0 and service.http_routes[0].match_headers.len > 0) {
             try writer.writeAll(",\"match_headers\":");
             try writeHeaderMatchesJson(writer, service.http_routes[0].match_headers);
@@ -253,6 +257,10 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
                 http_route.preserve_host,
             },
         );
+        if (http_route.match_methods.len > 0) {
+            try writer.writeAll(",\"match_methods\":");
+            try writeMethodMatchesJson(writer, http_route.match_methods);
+        }
         if (http_route.match_headers.len > 0) {
             try writer.writeAll(",\"match_headers\":");
             try writeHeaderMatchesJson(writer, http_route.match_headers);
@@ -393,6 +401,10 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
     } else {
         try writer.writeAll("null");
     }
+    if (proxy_route.method_matches.len > 0) {
+        try writer.writeAll(",\"match_methods\":");
+        try writeMethodMatchesJson(writer, proxy_route.method_matches);
+    }
     if (proxy_route.header_matches.len > 0) {
         try writer.writeAll(",\"match_headers\":");
         try writeHeaderMatchesJson(writer, proxy_route.header_matches);
@@ -437,6 +449,17 @@ fn findRouteTraffic(route_name: []const u8, route_traffic: []const proxy_runtime
         .retries_total = 0,
         .upstream_failures_total = 0,
     };
+}
+
+fn writeMethodMatchesJson(writer: anytype, method_matches: anytype) !void {
+    try writer.writeByte('[');
+    for (method_matches, 0..) |method_match, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try json_helpers.writeJsonEscaped(writer, method_match.method);
+        try writer.writeByte('"');
+    }
+    try writer.writeByte(']');
 }
 
 fn writeHeaderMatchesJson(writer: anytype, header_matches: anytype) !void {
@@ -562,6 +585,62 @@ test "route handles GET /v1/services/{name}" {
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"service_name\":\"web\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":true") != null);
+}
+
+test "route handles GET /v1/services with route method matches" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+        .http_routes = &.{
+            .{
+                .service_name = "api",
+                .route_name = "write",
+                .host = "api.internal",
+                .path_prefix = "/v1",
+                .match_methods = &.{
+                    .{
+                        .service_name = "api",
+                        .route_name = "write",
+                        .method = "POST",
+                        .match_order = 0,
+                        .created_at = 1000,
+                        .updated_at = 1000,
+                    },
+                    .{
+                        .service_name = "api",
+                        .route_name = "write",
+                        .method = "PUT",
+                        .match_order = 1,
+                        .created_at = 1000,
+                        .updated_at = 1000,
+                    },
+                },
+                .match_headers = &.{},
+                .backend_services = &.{},
+                .retries = 0,
+                .connect_timeout_ms = 1000,
+                .request_timeout_ms = 5000,
+                .http2_idle_timeout_ms = 30000,
+                .route_order = 0,
+                .created_at = 1000,
+                .updated_at = 1000,
+            },
+        },
+    });
+
+    const response = route(testRequest(.GET, "/v1/services"), std.testing.allocator).?;
+    defer if (response.allocated) std.testing.allocator.free(response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"match_methods\":[\"POST\",\"PUT\"]") != null);
 }
 
 test "route handles GET /v1/services/{name}/endpoints" {

@@ -86,6 +86,7 @@ pub const HttpRouteDefinition = struct {
     host: []const u8,
     path_prefix: []const u8 = "/",
     rewrite_prefix: ?[]const u8 = null,
+    match_methods: []const HttpMethodMatch = &.{},
     match_headers: []const HttpHeaderMatch = &.{},
     backend_services: []const HttpRouteBackend = &.{},
     retries: u8 = 0,
@@ -94,6 +95,14 @@ pub const HttpRouteDefinition = struct {
     http2_idle_timeout_ms: u32 = 30000,
     target_port: ?u16 = null,
     preserve_host: bool = true,
+};
+
+pub const HttpMethodMatch = struct {
+    method: []const u8,
+
+    pub fn deinit(self: HttpMethodMatch, alloc: Allocator) void {
+        alloc.free(self.method);
+    }
 };
 
 pub const HttpHeaderMatch = struct {
@@ -196,6 +205,7 @@ pub const HttpRouteSnapshot = struct {
     host: []const u8,
     path_prefix: []const u8,
     rewrite_prefix: ?[]const u8,
+    match_methods: []const HttpMethodMatch,
     match_headers: []const HttpHeaderMatch,
     backend_services: []const HttpRouteBackend,
     retries: u8,
@@ -210,6 +220,8 @@ pub const HttpRouteSnapshot = struct {
         alloc.free(self.host);
         alloc.free(self.path_prefix);
         if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (self.match_methods) |method_match| method_match.deinit(alloc);
+        if (self.match_methods.len > 0) alloc.free(self.match_methods);
         for (self.match_headers) |header_match| header_match.deinit(alloc);
         if (self.match_headers.len > 0) alloc.free(self.match_headers);
         for (self.backend_services) |backend| backend.deinit(alloc);
@@ -281,6 +293,7 @@ const HttpRouteState = struct {
     host: []const u8,
     path_prefix: []const u8,
     rewrite_prefix: ?[]const u8,
+    match_methods: []const HttpMethodMatch,
     match_headers: []const HttpHeaderMatch,
     backend_services: []const HttpRouteBackend,
     retries: u8,
@@ -295,6 +308,8 @@ const HttpRouteState = struct {
         alloc.free(self.host);
         alloc.free(self.path_prefix);
         if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (self.match_methods) |method_match| method_match.deinit(alloc);
+        if (self.match_methods.len > 0) alloc.free(self.match_methods);
         for (self.match_headers) |header_match| header_match.deinit(alloc);
         if (self.match_headers.len > 0) alloc.free(self.match_headers);
         for (self.backend_services) |backend| backend.deinit(alloc);
@@ -648,6 +663,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
                 .host = try alloc.dupe(u8, route.host),
                 .path_prefix = try alloc.dupe(u8, route.path_prefix),
                 .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+                .match_methods = try cloneMethodMatches(alloc, route.match_methods),
                 .match_headers = try cloneHeaderMatches(alloc, route.match_headers),
                 .backend_services = try cloneRouteBackends(alloc, route.backend_services),
                 .retries = route.retries,
@@ -667,6 +683,7 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
             .host = try alloc.dupe(u8, host),
             .path_prefix = try alloc.dupe(u8, definition.http_proxy_path_prefix orelse "/"),
             .rewrite_prefix = if (definition.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+            .match_methods = &.{},
             .match_headers = &.{},
             .backend_services = try defaultRouteBackends(alloc, definition.service_name),
             .retries = definition.http_proxy_retries orelse 0,
@@ -700,6 +717,7 @@ fn cloneRouteSnapshots(alloc: Allocator, routes: []const HttpRouteState) Error![
             .host = try alloc.dupe(u8, route.host),
             .path_prefix = try alloc.dupe(u8, route.path_prefix),
             .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+            .match_methods = try cloneMethodMatches(alloc, route.match_methods),
             .match_headers = try cloneHeaderMatches(alloc, route.match_headers),
             .backend_services = try cloneRouteBackends(alloc, route.backend_services),
             .retries = route.retries,
@@ -745,6 +763,21 @@ fn isEndpointEligible(endpoint: *const EndpointState) bool {
     if (endpoint.node_lost) return false;
     if (endpoint.readiness_required) return endpoint.observed_health == .healthy;
     return endpoint.observed_health != .unhealthy;
+}
+
+fn cloneMethodMatches(alloc: Allocator, matches: []const HttpMethodMatch) Error![]const HttpMethodMatch {
+    var cloned: std.ArrayList(HttpMethodMatch) = .empty;
+    errdefer {
+        for (cloned.items) |method_match| method_match.deinit(alloc);
+        cloned.deinit(alloc);
+    }
+
+    for (matches) |method_match| {
+        try cloned.append(alloc, .{
+            .method = try alloc.dupe(u8, method_match.method),
+        });
+    }
+    return cloned.toOwnedSlice(alloc);
 }
 
 fn cloneHeaderMatches(alloc: Allocator, matches: []const HttpHeaderMatch) Error![]const HttpHeaderMatch {

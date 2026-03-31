@@ -21,6 +21,7 @@ ports = ["8081:8080"]
 host = "demo.local"
 path_prefix = "/api"
 rewrite_prefix = "/"
+match_methods = ["GET", "POST"]
 match_headers = ["x-env=canary"]
 backend_services = ["api=90", "api-canary=10"]
 preserve_host = false

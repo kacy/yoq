@@ -70,6 +70,17 @@ fn migrateServices(db: *sqlite.Db) void {
         \\);
     ) catch {};
     createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS service_http_route_methods (
+        \\    service_name TEXT NOT NULL,
+        \\    route_name TEXT NOT NULL,
+        \\    method TEXT NOT NULL,
+        \\    match_order INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (service_name, route_name, match_order)
+        \\);
+    ) catch {};
+    createTableIfMissing(db,
         \\CREATE TABLE IF NOT EXISTS service_http_route_backends (
         \\    service_name TEXT NOT NULL,
         \\    route_name TEXT NOT NULL,

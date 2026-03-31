@@ -70,6 +70,21 @@ pub fn syncServiceDefinitions(
         defer route_inputs.deinit(alloc);
         var route_alloc_failed = false;
         for (svc.http_routes) |route| {
+            var match_methods: std.ArrayList(store.ServiceHttpRouteMethodInput) = .empty;
+            errdefer match_methods.deinit(alloc);
+            for (route.match_methods) |method_match| {
+                match_methods.append(alloc, .{
+                    .method = method_match.method,
+                }) catch {
+                    log.warn("orchestrator: failed to allocate http route method matches for {s}", .{svc.name});
+                    route_alloc_failed = true;
+                    break;
+                };
+            }
+            if (route_alloc_failed) {
+                match_methods.deinit(alloc);
+                break;
+            }
             var match_headers: std.ArrayList(store.ServiceHttpRouteHeaderInput) = .empty;
             errdefer match_headers.deinit(alloc);
             for (route.match_headers) |header_match| {
@@ -99,6 +114,7 @@ pub fn syncServiceDefinitions(
                 };
             }
             if (route_alloc_failed) {
+                match_methods.deinit(alloc);
                 match_headers.deinit(alloc);
                 backend_services.deinit(alloc);
                 break;
@@ -108,6 +124,11 @@ pub fn syncServiceDefinitions(
                 .host = route.host,
                 .path_prefix = route.path_prefix,
                 .rewrite_prefix = route.rewrite_prefix,
+                .match_methods = match_methods.toOwnedSlice(alloc) catch {
+                    log.warn("orchestrator: failed to allocate http route method matches for {s}", .{svc.name});
+                    route_alloc_failed = true;
+                    break;
+                },
                 .match_headers = match_headers.toOwnedSlice(alloc) catch {
                     log.warn("orchestrator: failed to allocate http route header matches for {s}", .{svc.name});
                     route_alloc_failed = true;
@@ -124,6 +145,7 @@ pub fn syncServiceDefinitions(
                 .target_port = if (svc.ports.len > 0) svc.ports[0].container_port else null,
                 .preserve_host = route.preserve_host,
             }) catch {
+                alloc.free(match_methods.items);
                 alloc.free(match_headers.items);
                 alloc.free(backend_services.items);
                 log.warn("orchestrator: failed to allocate http routes for {s}", .{svc.name});
@@ -132,6 +154,7 @@ pub fn syncServiceDefinitions(
             };
         }
         defer {
+            for (route_inputs.items) |route| if (route.match_methods.len > 0) alloc.free(route.match_methods);
             for (route_inputs.items) |route| if (route.match_headers.len > 0) alloc.free(route.match_headers);
             for (route_inputs.items) |route| if (route.backend_services.len > 0) alloc.free(route.backend_services);
         }

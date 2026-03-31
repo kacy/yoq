@@ -46,7 +46,7 @@ fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
     const host = normalizeHost(host_header);
     const request_headers = try router.collectHttp1Headers(alloc, parsed.headers_raw);
     defer alloc.free(request_headers);
-    const route = router.matchRoute(routes, host, parsed.path_only, request_headers) orelse return error.RouteNotFound;
+    const route = router.matchRoute(routes, methodString(parsed.method), host, parsed.path_only, request_headers) orelse return error.RouteNotFound;
 
     return .{
         .protocol = .http1,
@@ -71,7 +71,7 @@ fn planHttp2Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
             .value = header.value,
         });
     }
-    const route = router.matchRoute(routes, host, parsed.request.path, request_headers.items) orelse return error.RouteNotFound;
+    const route = router.matchRoute(routes, parsed.request.method, host, parsed.request.path, request_headers.items) orelse return error.RouteNotFound;
 
     return .{
         .protocol = .http2,
@@ -189,6 +189,36 @@ test "planRequest prefers header-specific HTTP/1 route" {
     defer plan.deinit(alloc);
 
     try std.testing.expectEqualStrings("api-canary", plan.route.service);
+}
+
+test "planRequest prefers method-specific HTTP/1 route" {
+    const alloc = std.testing.allocator;
+    const routes = [_]router.Route{
+        .{
+            .name = "api-default",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+        },
+        .{
+            .name = "api-write",
+            .service = "api-write",
+            .vip_address = "10.43.0.3",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+            .method_matches = &.{
+                .{ .method = "POST" },
+            },
+        },
+    };
+
+    const plan = try planRequest(
+        alloc,
+        &routes,
+        "POST /v1/users HTTP/1.1\r\nHost: api.internal\r\n\r\n",
+    );
+    defer plan.deinit(alloc);
+
+    try std.testing.expectEqualStrings("api-write", plan.route.service);
 }
 
 test "planRequest matches prior-knowledge HTTP/2 route" {

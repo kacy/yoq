@@ -120,6 +120,7 @@ the upstream target is the first service port in `ports`. `http_proxy` is just s
 | `host` | string | yes | — | hostname to match |
 | `path_prefix` | string | no | `"/"` | path prefix to match |
 | `rewrite_prefix` | string | no | none | replace the matched prefix before forwarding upstream |
+| `match_methods` | array of strings | no | `[]` | allowed HTTP methods, chosen from `GET`, `HEAD`, `POST`, `PUT`, `DELETE` |
 | `match_headers` | array of strings | no | `[]` | exact header matches in `name=value` form |
 | `backend_services` | array of strings | no | owning service at `100` | weighted backend targets in `service=weight` form |
 | `retries` | integer | no | `0` | upstream retries for failed requests |
@@ -173,6 +174,7 @@ preserve_host = false
 [service.gateway.http_routes.canary]
 host = "demo.local"
 path_prefix = "/api"
+match_methods = ["GET", "POST"]
 match_headers = ["x-env=canary"]
 backend_services = ["api=90", "api-canary=10"]
 ```
@@ -180,9 +182,9 @@ backend_services = ["api=90", "api-canary=10"]
 validation rules:
 
 - each route name must be unique within the service
-- exact route matches are deduplicated by `host` + `path_prefix` + the full `match_headers` set
+- exact route matches are deduplicated by `host` + `path_prefix` + the full `match_methods` and `match_headers` sets
 - `http_proxy` and `http_routes` cannot be used together on the same service
-- route matching prefers the longest `path_prefix`, then the route with more exact header conditions, then the first defined route
+- route matching prefers the longest `path_prefix`, then the route with more exact header conditions, then the route with the narrower method set, then the first defined route
 - `backend_services` weights must sum to `100`
 - weighted backend selection is deterministic per request key, and retry attempts can move to a different configured backend target
 
@@ -205,8 +207,6 @@ for weighted routes, the JSON status payload includes `l7_proxy.sample_route_tra
 current HTTP/2 and gRPC routing limits:
 
 - the routing listener itself still accepts prior-knowledge HTTP/2 (`h2c`) only; TLS/ALPN HTTP/2 routing works through the TLS terminator when the routed host matches `service.<name>.tls.domain`
-- one accepted client connection is pinned to the first matched routed service, so additional streams on that connection must target the same service
-- `request_timeout_ms` applies to HTTP/2 connection inactivity as well as unary request handling
 
 ---
 

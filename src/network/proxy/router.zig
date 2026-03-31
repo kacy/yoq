@@ -5,6 +5,14 @@ pub const Match = struct {
     path_prefix: []const u8 = "/",
 };
 
+pub const MethodMatch = struct {
+    method: []const u8,
+
+    pub fn deinit(self: MethodMatch, alloc: std.mem.Allocator) void {
+        alloc.free(self.method);
+    }
+};
+
 pub const HeaderMatch = struct {
     name: []const u8,
     value: []const u8,
@@ -35,6 +43,7 @@ pub const Route = struct {
     vip_address: []const u8,
     match: Match,
     rewrite_prefix: ?[]const u8 = null,
+    method_matches: []const MethodMatch = &.{},
     header_matches: []const HeaderMatch = &.{},
     backend_services: []const BackendTarget = &.{},
     eligible_endpoints: u32 = 0,
@@ -47,25 +56,32 @@ pub const Route = struct {
     preserve_host: bool = true,
 };
 
-pub fn matchRoute(routes: []const Route, host: []const u8, path: []const u8, request_headers: []const RequestHeader) ?Route {
+pub fn matchRoute(routes: []const Route, method: []const u8, host: []const u8, path: []const u8, request_headers: []const RequestHeader) ?Route {
     var best: ?Route = null;
     var best_prefix_len: usize = 0;
     var best_header_match_count: usize = 0;
+    var best_method_specificity: usize = std.math.maxInt(usize);
 
     for (routes) |route| {
         if (route.match.host) |expected_host| {
             if (!std.ascii.eqlIgnoreCase(expected_host, host)) continue;
         }
         if (!std.mem.startsWith(u8, path, route.match.path_prefix)) continue;
+        if (!routeMethodsMatch(route.method_matches, method)) continue;
         if (!routeHeadersMatch(route.header_matches, request_headers)) continue;
+        const method_specificity = methodSpecificity(route.method_matches);
 
         if (best == null or
             route.match.path_prefix.len > best_prefix_len or
-            (route.match.path_prefix.len == best_prefix_len and route.header_matches.len > best_header_match_count))
+            (route.match.path_prefix.len == best_prefix_len and route.header_matches.len > best_header_match_count) or
+            (route.match.path_prefix.len == best_prefix_len and
+                route.header_matches.len == best_header_match_count and
+                method_specificity < best_method_specificity))
         {
             best = route;
             best_prefix_len = route.match.path_prefix.len;
             best_header_match_count = route.header_matches.len;
+            best_method_specificity = method_specificity;
         }
     }
 
@@ -92,6 +108,18 @@ pub fn collectHttp1Headers(alloc: std.mem.Allocator, headers_raw: []const u8) ![
     }
 
     return headers.toOwnedSlice(alloc);
+}
+
+fn routeMethodsMatch(route_matches: []const MethodMatch, request_method: []const u8) bool {
+    if (route_matches.len == 0) return true;
+    for (route_matches) |expected| {
+        if (std.mem.eql(u8, expected.method, request_method)) return true;
+    }
+    return false;
+}
+
+fn methodSpecificity(route_matches: []const MethodMatch) usize {
+    return if (route_matches.len == 0) std.math.maxInt(usize) else route_matches.len;
 }
 
 fn routeHeadersMatch(route_matches: []const HeaderMatch, request_headers: []const RequestHeader) bool {
@@ -124,7 +152,7 @@ test "matchRoute matches host and path prefix" {
         },
     };
 
-    const route = matchRoute(&routes, "api.example.com", "/v1/users", &.{}) orelse return error.TestExpectedNonNull;
+    const route = matchRoute(&routes, "GET", "api.example.com", "/v1/users", &.{}) orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("api-v1", route.name);
 }
 
@@ -144,7 +172,7 @@ test "matchRoute prefers longest path prefix" {
         },
     };
 
-    const route = matchRoute(&routes, "api.example.com", "/v1/health", &.{}) orelse return error.TestExpectedNonNull;
+    const route = matchRoute(&routes, "GET", "api.example.com", "/v1/health", &.{}) orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("api-v1", route.service);
 }
 
@@ -158,7 +186,7 @@ test "matchRoute accepts wildcard host when omitted" {
         },
     };
 
-    const route = matchRoute(&routes, "unknown.example.com", "/", &.{}) orelse return error.TestExpectedNonNull;
+    const route = matchRoute(&routes, "GET", "unknown.example.com", "/", &.{}) orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("catch-all", route.name);
 }
 
@@ -184,7 +212,7 @@ test "matchRoute prefers more specific header match on the same path" {
         .{ .name = "X-Env", .value = "canary" },
     };
 
-    const route = matchRoute(&routes, "api.example.com", "/v1/users", &request_headers) orelse return error.TestExpectedNonNull;
+    const route = matchRoute(&routes, "GET", "api.example.com", "/v1/users", &request_headers) orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("api-canary", route.name);
 }
 
@@ -201,5 +229,44 @@ test "matchRoute rejects route when required header is missing" {
         },
     };
 
-    try std.testing.expect(matchRoute(&routes, "api.example.com", "/v1/users", &.{}) == null);
+    try std.testing.expect(matchRoute(&routes, "GET", "api.example.com", "/v1/users", &.{}) == null);
+}
+
+test "matchRoute prefers method-specific route on the same path" {
+    const routes = [_]Route{
+        .{
+            .name = "api-default",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
+        },
+        .{
+            .name = "api-post",
+            .service = "api-write",
+            .vip_address = "10.43.0.3",
+            .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
+            .method_matches = &.{
+                .{ .method = "POST" },
+            },
+        },
+    };
+
+    const route = matchRoute(&routes, "POST", "api.example.com", "/v1/users", &.{}) orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqualStrings("api-post", route.name);
+}
+
+test "matchRoute rejects route when method is not allowed" {
+    const routes = [_]Route{
+        .{
+            .name = "api-post",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.example.com", .path_prefix = "/v1" },
+            .method_matches = &.{
+                .{ .method = "POST" },
+            },
+        },
+    };
+
+    try std.testing.expect(matchRoute(&routes, "GET", "api.example.com", "/v1/users", &.{}) == null);
 }

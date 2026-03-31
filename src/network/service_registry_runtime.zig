@@ -339,6 +339,8 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             alloc.free(route.host);
             alloc.free(route.path_prefix);
             if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+            for (route.match_methods) |method_match| method_match.deinit(alloc);
+            if (route.match_methods.len > 0) alloc.free(route.match_methods);
             for (route.match_headers) |header_match| header_match.deinit(alloc);
             if (route.match_headers.len > 0) alloc.free(route.match_headers);
             for (route.backend_services) |backend| backend.deinit(alloc);
@@ -348,6 +350,16 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
     }
 
     for (routes) |route| {
+        var method_matches: std.ArrayList(service_registry.HttpMethodMatch) = .empty;
+        errdefer {
+            for (method_matches.items) |method_match| method_match.deinit(alloc);
+            method_matches.deinit(alloc);
+        }
+        for (route.match_methods) |method_match| {
+            try method_matches.append(alloc, .{
+                .method = try alloc.dupe(u8, method_match.method),
+            });
+        }
         var header_matches: std.ArrayList(service_registry.HttpHeaderMatch) = .empty;
         errdefer {
             for (header_matches.items) |header_match| header_match.deinit(alloc);
@@ -375,6 +387,7 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             .host = try alloc.dupe(u8, route.host),
             .path_prefix = try alloc.dupe(u8, route.path_prefix),
             .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+            .match_methods = try method_matches.toOwnedSlice(alloc),
             .match_headers = try header_matches.toOwnedSlice(alloc),
             .backend_services = try backend_services.toOwnedSlice(alloc),
             .retries = @intCast(route.retries),
@@ -395,6 +408,8 @@ fn deinitRouteDefinitions(alloc: Allocator, routes: []const service_registry.Htt
         alloc.free(route.host);
         alloc.free(route.path_prefix);
         if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (route.match_methods) |method_match| method_match.deinit(alloc);
+        if (route.match_methods.len > 0) alloc.free(route.match_methods);
         for (route.match_headers) |header_match| header_match.deinit(alloc);
         if (route.match_headers.len > 0) alloc.free(route.match_headers);
         for (route.backend_services) |backend| backend.deinit(alloc);

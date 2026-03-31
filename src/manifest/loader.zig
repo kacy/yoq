@@ -1484,6 +1484,26 @@ test "http routes config — exact header matches" {
     try std.testing.expectEqualStrings("us-east", manifest.services[0].http_routes[0].match_headers[1].value);
 }
 
+test "http routes config — method matches" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_routes.write]
+        \\host = "api.internal"
+        \\path_prefix = "/v1"
+        \\match_methods = ["POST", "PUT"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), manifest.services[0].http_routes.len);
+    try std.testing.expectEqual(@as(usize, 2), manifest.services[0].http_routes[0].match_methods.len);
+    try std.testing.expectEqualStrings("POST", manifest.services[0].http_routes[0].match_methods[0].method);
+    try std.testing.expectEqualStrings("PUT", manifest.services[0].http_routes[0].match_methods[1].method);
+}
+
 test "http routes config — weighted backends" {
     const alloc = std.testing.allocator;
 
@@ -1502,6 +1522,20 @@ test "http routes config — weighted backends" {
     try std.testing.expectEqual(@as(u8, 90), manifest.services[0].http_routes[0].backend_services[0].weight);
     try std.testing.expectEqualStrings("api-canary", manifest.services[0].http_routes[0].backend_services[1].service_name);
     try std.testing.expectEqual(@as(u8, 10), manifest.services[0].http_routes[0].backend_services[1].weight);
+}
+
+test "http routes config — invalid method match returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidHttpProxyConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.http_routes.write]
+        \\host = "api.internal"
+        \\path_prefix = "/v1"
+        \\match_methods = ["PATCH"]
+    ));
 }
 
 test "http proxy config — invalid rewrite prefix returns error" {
