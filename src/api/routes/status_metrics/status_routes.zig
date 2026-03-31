@@ -2,6 +2,7 @@ const std = @import("std");
 const store = @import("../../../state/store.zig");
 const monitor = @import("../../../runtime/monitor.zig");
 const common = @import("../common.zig");
+const route_traffic_json = @import("../route_traffic_json.zig");
 const writers = @import("writers.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const dns_registry = @import("../../../network/dns/registry_support.zig");
@@ -334,6 +335,10 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
         } else {
             writer.writeAll("null") catch return common.internalError();
         }
+        writer.writeAll(",\"traffic\":") catch return common.internalError();
+        route_traffic_json.writeRouteTrafficSummaryJson(writer, route.name, l7_route_traffic.items) catch return common.internalError();
+        writer.writeAll(",\"backend_traffic\":") catch return common.internalError();
+        route_traffic_json.writeRouteBackendTrafficJson(writer, route.name, l7_route_traffic.items) catch return common.internalError();
         writer.writeByte('}') catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();

@@ -508,6 +508,8 @@ test "route rollout status sample routes expose steering drift details" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":false") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":true") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"none\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"backend_traffic\":[{\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"sample_route_traffic\":[{\"route\":\"api:default\",\"service\":\"api\",\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
 }
 

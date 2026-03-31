@@ -200,9 +200,9 @@ yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
 yoq init-server --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
 ```
 
-use `GET /v1/status?mode=service_discovery` and `GET /v1/metrics?format=prometheus` to inspect listener, route, and steering state. `mode=service_rollout` remains accepted as a compatibility alias.
+use `GET /v1/status?mode=service_discovery`, `GET /v1/services/<name>/proxy-routes`, and `GET /v1/metrics?format=prometheus` to inspect listener, route, steering, and weighted-backend traffic state. `mode=service_rollout` remains accepted as a compatibility alias.
 
-for weighted routes, the JSON status payload includes `l7_proxy.sample_route_traffic`, and Prometheus exposes `yoq_service_l7_proxy_route_*` counters labeled by route, owning service, and selected backend service.
+for weighted routes, the JSON service and status payloads include both aggregate `traffic` counters and per-backend `backend_traffic` counters, and Prometheus exposes `yoq_service_l7_proxy_route_*` counters labeled by route, owning service, and selected backend service.
 
 current HTTP/2 and gRPC routing limits:
 
