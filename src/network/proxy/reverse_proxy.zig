@@ -449,9 +449,7 @@ pub const ReverseProxy = struct {
             defer upstream.deinit(self.allocator);
 
             const response = self.forwardSingleAttempt(raw_request, plan, &upstream, client_ip) catch |err| {
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
-                proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
-                proxy_runtime.recordRouteUpstreamFailure(plan.route.name, plan.route.service, upstream.service);
+                recordUpstreamError(upstream.endpoint_id, cb_policy, mapUpstreamFailure(err), plan.route.name, plan.route.service, upstream.service);
                 if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
                     proxy_runtime.recordRetry();
                     proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
@@ -479,9 +477,7 @@ pub const ReverseProxy = struct {
             }
 
             const status_code = parseUpstreamStatusCode(response) catch {
-                proxy_runtime.recordUpstreamFailure(.other);
-                proxy_runtime.recordRouteUpstreamFailure(plan.route.name, plan.route.service, upstream.service);
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
+                recordUpstreamError(upstream.endpoint_id, cb_policy, .other, plan.route.name, plan.route.service, upstream.service);
                 log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
                     methodString(plan.method),
                     plan.host,
@@ -830,40 +826,26 @@ fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan
     };
     errdefer upstream.deinit(self.allocator);
 
-    switch (planned.protocol) {
-        .http1 => return .{ .forward = .{
-            .protocol = .http1,
-            .method = planned.method_enum.?,
-            .path = try self.allocator.dupe(u8, planned.path),
-            .outbound_path = try buildOutboundPath(self.allocator, planned.path, planned.route.match.path_prefix, planned.route.rewrite_prefix),
-            .host = try self.allocator.dupe(u8, planned.host),
-            .outbound_host = if (route.preserve_host)
-                try self.allocator.dupe(u8, planned.host)
-            else
-                try self.allocator.dupe(u8, backend_service),
-            .backend_service = try self.allocator.dupe(u8, backend_service),
-            .selection_key = selection_key,
-            .route = route,
-            .upstream = upstream,
-        } },
-        .http2 => return .{ .forward = .{
-            .protocol = .http2,
-            .http2_stream_id = planned.http2_stream_id,
-            .http2_request_end_stream = planned.end_stream,
-            .method = planned.method_enum.?,
-            .path = try self.allocator.dupe(u8, planned.path),
-            .outbound_path = try buildOutboundPath(self.allocator, planned.path, planned.route.match.path_prefix, planned.route.rewrite_prefix),
-            .host = try self.allocator.dupe(u8, planned.host),
-            .outbound_host = if (route.preserve_host)
-                try self.allocator.dupe(u8, planned.host)
-            else
-                try self.allocator.dupe(u8, backend_service),
-            .backend_service = try self.allocator.dupe(u8, backend_service),
-            .selection_key = selection_key,
-            .route = route,
-            .upstream = upstream,
-        } },
-    }
+    return .{ .forward = .{
+        .protocol = switch (planned.protocol) {
+            .http1 => .http1,
+            .http2 => .http2,
+        },
+        .http2_stream_id = planned.http2_stream_id,
+        .http2_request_end_stream = planned.end_stream,
+        .method = planned.method_enum.?,
+        .path = try self.allocator.dupe(u8, planned.path),
+        .outbound_path = try buildOutboundPath(self.allocator, planned.path, planned.route.match.path_prefix, planned.route.rewrite_prefix),
+        .host = try self.allocator.dupe(u8, planned.host),
+        .outbound_host = if (route.preserve_host)
+            try self.allocator.dupe(u8, planned.host)
+        else
+            try self.allocator.dupe(u8, backend_service),
+        .backend_service = try self.allocator.dupe(u8, backend_service),
+        .selection_key = selection_key,
+        .route = route,
+        .upstream = upstream,
+    } };
 }
 
 fn http1LoopResponse(self: *const ReverseProxy, raw_request: []const u8) !?ProxyResponse {
@@ -931,6 +913,19 @@ fn proxyFailureResponse(err: anyerror) ProxyResponse {
             .body = "{\"error\":\"upstream request failed\"}",
         },
     };
+}
+
+fn recordUpstreamError(
+    endpoint_id: []const u8,
+    cb_policy: proxy_policy.CircuitBreakerPolicy,
+    failure_kind: proxy_runtime.UpstreamFailureKind,
+    route_name: []const u8,
+    route_service: []const u8,
+    backend_service: []const u8,
+) void {
+    proxy_runtime.recordEndpointFailure(endpoint_id, cb_policy);
+    proxy_runtime.recordUpstreamFailure(failure_kind);
+    proxy_runtime.recordRouteUpstreamFailure(route_name, route_service, backend_service);
 }
 
 fn mapUpstreamFailure(err: anyerror) proxy_runtime.UpstreamFailureKind {
