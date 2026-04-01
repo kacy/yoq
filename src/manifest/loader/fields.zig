@@ -287,6 +287,24 @@ pub fn parseHttpProxyRoute(
     }
 
     const preserve_host = proxy_table.getBool("preserve_host") orelse true;
+    const retry_on_5xx = proxy_table.getBool("retry_on_5xx") orelse true;
+
+    const circuit_breaker_threshold_raw = proxy_table.getInt("circuit_breaker_threshold") orelse 3;
+    if (circuit_breaker_threshold_raw < 1 or circuit_breaker_threshold_raw > 10) {
+        log.err("manifest: service '{s}' {s} route '{s}' circuit_breaker_threshold must be between 1 and 10", .{ service_name, field_name, route_name });
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
+
+    const circuit_breaker_timeout_raw = proxy_table.getInt("circuit_breaker_timeout_ms") orelse 30000;
+    if (circuit_breaker_timeout_raw < 1 or circuit_breaker_timeout_raw > std.math.maxInt(u32)) {
+        log.err("manifest: service '{s}' {s} route '{s}' circuit_breaker_timeout_ms must be between 1 and {d}", .{
+            service_name,
+            field_name,
+            route_name,
+            std.math.maxInt(u32),
+        });
+        return common.LoadError.InvalidHttpProxyConfig;
+    }
 
     return .{
         .name = alloc.dupe(u8, route_name) catch return common.LoadError.OutOfMemory,
@@ -302,6 +320,9 @@ pub fn parseHttpProxyRoute(
         .request_timeout_ms = @intCast(request_timeout_raw),
         .http2_idle_timeout_ms = @intCast(http2_idle_timeout_raw),
         .preserve_host = preserve_host,
+        .retry_on_5xx = retry_on_5xx,
+        .circuit_breaker_threshold = @intCast(circuit_breaker_threshold_raw),
+        .circuit_breaker_timeout_ms = @intCast(circuit_breaker_timeout_raw),
     };
 }
 
