@@ -1606,6 +1606,65 @@ test "resolveUpstream skips endpoints with open circuits" {
     try std.testing.expectEqual(@as(u32, 0), state.circuit_half_open_endpoints);
 }
 
+test "per-route circuit breaker threshold controls trip point" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    const high_threshold: proxy_policy.CircuitBreakerPolicy = .{ .failure_threshold = 5 };
+
+    recordEndpointFailure("api-1", high_threshold);
+    recordEndpointFailure("api-1", high_threshold);
+    recordEndpointFailure("api-1", high_threshold);
+
+    // 3 failures with threshold=5 should NOT trip the circuit
+    const upstream1 = try resolveUpstream(std.testing.allocator, "api");
+    defer upstream1.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("api-1", upstream1.endpoint_id);
+
+    recordEndpointFailure("api-1", high_threshold);
+    recordEndpointFailure("api-1", high_threshold);
+
+    // 5 failures with threshold=5 SHOULD trip the circuit
+    const state = try snapshot(std.testing.allocator);
+    defer state.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), state.circuit_trips_total);
+    try std.testing.expectEqual(@as(u32, 1), state.circuit_open_endpoints);
+}
+
 test "route snapshots retain runtime failure details after recovery" {
     const store = @import("../../state/store.zig");
 
