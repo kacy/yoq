@@ -275,24 +275,7 @@ const ConnectionRouter = struct {
 
             const preface_and_settings = try buildInitialUpstreamPreamble(self.allocator);
             defer self.allocator.free(preface_and_settings);
-            writeAll(upstream_fd, preface_and_settings) catch {
-                posix.close(upstream_fd);
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
-                proxy_runtime.recordUpstreamFailure(.send);
-                proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
-                upstream.deinit(self.allocator);
-                if (proxy_policy.shouldRetry(request_policy, parsed.request.method, attempt, null, true)) {
-                    proxy_runtime.recordRetry();
-                    proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
-                    continue;
-                }
-                proxy_runtime.recordRouteFailure(route.name, .send);
-                proxy_runtime.recordResponse(.bad_gateway);
-                try self.sendLocalStreamResponse(parsed.request.stream_id, .bad_gateway, "{\"error\":\"upstream send failed\"}");
-                try self.consumeDownstreamBytes(parsed.consumed);
-                return;
-            };
-            writeAll(upstream_fd, rewritten.bytes) catch {
+            sendUpstreamPreamble(upstream_fd, preface_and_settings, rewritten.bytes) catch {
                 posix.close(upstream_fd);
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 proxy_runtime.recordUpstreamFailure(.send);
@@ -701,11 +684,7 @@ const ConnectionRouter = struct {
             return null;
         };
         defer self.allocator.free(preface_and_settings);
-        writeAll(upstream_fd, preface_and_settings) catch {
-            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
-            return null;
-        };
-        writeAll(upstream_fd, rewritten.bytes) catch {
+        sendUpstreamPreamble(upstream_fd, preface_and_settings, rewritten.bytes) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
@@ -1040,6 +1019,11 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     hasher.update(host);
     hasher.update(path);
     return hasher.final();
+}
+
+fn sendUpstreamPreamble(upstream_fd: posix.socket_t, preface_and_settings: []const u8, request_bytes: []const u8) !void {
+    try writeAll(upstream_fd, preface_and_settings);
+    try writeAll(upstream_fd, request_bytes);
 }
 
 fn connectToUpstream(route: router.Route, upstream: *const upstream_mod.Upstream) !posix.socket_t {
