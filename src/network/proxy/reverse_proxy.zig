@@ -433,11 +433,7 @@ pub const ReverseProxy = struct {
             var upstream = resolveAttemptUpstream(self.allocator, plan, attempt, cb_policy) catch |err| switch (err) {
                 error.NoHealthyUpstream => {
                     log.warn("l7 proxy no eligible upstream after retries method={s} host={s} path={s} service={s} retries={d}", .{
-                        methodString(plan.method),
-                        plan.host,
-                        plan.path,
-                        plan.route.service,
-                        retries_used,
+                        methodString(plan.method), plan.host, plan.path, plan.route.service, retries_used,
                     });
                     return formatProxyResponse(self.allocator, .{
                         .status = .service_unavailable,
@@ -458,14 +454,8 @@ pub const ReverseProxy = struct {
                 }
                 proxy_runtime.recordRouteFailure(plan.route.name, mapRouteFailureKind(err));
                 log.warn("l7 proxy upstream failure method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d} error={}", .{
-                    methodString(plan.method),
-                    plan.host,
-                    plan.path,
-                    plan.route.service,
-                    upstream.address,
-                    upstream.port,
-                    retries_used,
-                    err,
+                    methodString(plan.method), plan.host, plan.path, plan.route.service,
+                    upstream.address, upstream.port, retries_used, err,
                 });
                 return formatProxyResponse(self.allocator, proxyFailureResponse(err));
             };
@@ -476,51 +466,57 @@ pub const ReverseProxy = struct {
                 return response;
             }
 
-            const status_code = parseUpstreamStatusCode(response) catch {
-                recordUpstreamError(upstream.endpoint_id, cb_policy, .other, plan.route.name, plan.route.service, upstream.service);
-                log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
-                    methodString(plan.method),
-                    plan.host,
-                    plan.path,
-                    plan.route.service,
-                    upstream.address,
-                    upstream.port,
-                    retries_used,
-                });
-                self.allocator.free(response);
-                proxy_runtime.recordRouteFailure(plan.route.name, .invalid_response);
-                return formatProxyResponse(self.allocator, .{
-                    .status = .bad_gateway,
-                    .body = "{\"error\":\"invalid upstream response\"}",
-                });
-            };
-
-            if (status_code >= 500 and status_code <= 599) {
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
-            } else {
-                proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
+            if (self.evaluateHttp1Response(response, plan, &upstream, policy, cb_policy, attempt, retries_used)) |final_response| {
+                return final_response;
             }
-            if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, status_code, false)) {
-                proxy_runtime.recordRetry();
-                proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
-                retries_used += 1;
-                self.allocator.free(response);
-                continue;
-            }
-            log.info("l7 proxy proxied method={s} host={s} path={s} service={s} upstream={s}:{d} status={d} retries={d}", .{
-                methodString(plan.method),
-                plan.host,
-                plan.path,
-                plan.route.service,
-                upstream.address,
-                upstream.port,
-                status_code,
-                retries_used,
-            });
-            proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status_code);
-            proxy_runtime.recordRouteRecovered(plan.route.name);
-            return response;
+            retries_used += 1;
         }
+    }
+
+    /// Evaluate an HTTP/1 upstream response: parse status, record circuit state,
+    /// decide retry. Returns the final response bytes to send, or null to retry.
+    fn evaluateHttp1Response(
+        self: *const ReverseProxy,
+        response: []u8,
+        plan: *const ForwardPlan,
+        upstream: *const upstream_mod.Upstream,
+        policy: proxy_policy.RequestPolicy,
+        cb_policy: proxy_policy.CircuitBreakerPolicy,
+        attempt: u8,
+        retries_used: u8,
+    ) ?[]u8 {
+        const status_code = parseUpstreamStatusCode(response) catch {
+            recordUpstreamError(upstream.endpoint_id, cb_policy, .other, plan.route.name, plan.route.service, upstream.service);
+            log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
+                methodString(plan.method), plan.host, plan.path, plan.route.service,
+                upstream.address, upstream.port, retries_used,
+            });
+            self.allocator.free(response);
+            proxy_runtime.recordRouteFailure(plan.route.name, .invalid_response);
+            return formatProxyResponse(self.allocator, .{
+                .status = .bad_gateway,
+                .body = "{\"error\":\"invalid upstream response\"}",
+            }) catch return null;
+        };
+
+        if (status_code >= 500 and status_code <= 599) {
+            proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
+        } else {
+            proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
+        }
+        if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, status_code, false)) {
+            proxy_runtime.recordRetry();
+            proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
+            self.allocator.free(response);
+            return null;
+        }
+        log.info("l7 proxy proxied method={s} host={s} path={s} service={s} upstream={s}:{d} status={d} retries={d}", .{
+            methodString(plan.method), plan.host, plan.path, plan.route.service,
+            upstream.address, upstream.port, status_code, retries_used,
+        });
+        proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status_code);
+        proxy_runtime.recordRouteRecovered(plan.route.name);
+        return response;
     }
 
     fn forwardSingleAttempt(
