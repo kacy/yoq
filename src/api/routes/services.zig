@@ -210,13 +210,16 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
             try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
         }
         try writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{}",
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{},\"retry_on_5xx\":{},\"circuit_breaker_threshold\":{d},\"circuit_breaker_timeout_ms\":{d}",
             .{
                 service.http_proxy_retries orelse 0,
                 service.http_proxy_connect_timeout_ms orelse 1000,
                 service.http_proxy_request_timeout_ms orelse 5000,
                 service.http_proxy_http2_idle_timeout_ms orelse 30000,
                 service.http_proxy_preserve_host orelse true,
+                service.http_proxy_retry_on_5xx orelse true,
+                service.http_proxy_circuit_breaker_threshold orelse 3,
+                service.http_proxy_circuit_breaker_timeout_ms orelse 30000,
             },
         );
         if (service.http_routes.len > 0 and service.http_routes[0].match_methods.len > 0) {
@@ -256,13 +259,16 @@ fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_
             try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
         }
         try writer.print(
-            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{}",
+            "\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{},\"retry_on_5xx\":{},\"circuit_breaker_threshold\":{d},\"circuit_breaker_timeout_ms\":{d}",
             .{
                 http_route.retries,
                 http_route.connect_timeout_ms,
                 http_route.request_timeout_ms,
                 http_route.http2_idle_timeout_ms,
                 http_route.preserve_host,
+                http_route.retry_on_5xx,
+                http_route.circuit_breaker_threshold,
+                http_route.circuit_breaker_timeout_ms,
             },
         );
         if (http_route.match_methods.len > 0) {
@@ -387,7 +393,7 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
         try json_helpers.writeJsonEscaped(writer, rewrite_prefix);
     }
     try writer.print(
-        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
+        "\",\"eligible_endpoints\":{d},\"healthy_endpoints\":{d},\"degraded\":{},\"degraded_reason\":\"{s}\",\"retries\":{d},\"connect_timeout_ms\":{d},\"request_timeout_ms\":{d},\"http2_idle_timeout_ms\":{d},\"preserve_host\":{},\"retry_on_5xx\":{},\"circuit_breaker_threshold\":{d},\"circuit_breaker_timeout_ms\":{d},\"vip_traffic_mode\":\"{s}\",\"steering_desired_ports\":{d},\"steering_applied_ports\":{d},\"steering_ready\":{},\"steering_blocked\":{},\"steering_drifted\":{},\"steering_blocked_reason\":\"{s}\",\"last_failure_kind\":",
         .{
             proxy_route.eligible_endpoints,
             proxy_route.healthy_endpoints,
@@ -398,6 +404,9 @@ fn writeProxyRouteJson(writer: anytype, proxy_route: proxy_runtime.RouteSnapshot
             proxy_route.request_timeout_ms,
             proxy_route.http2_idle_timeout_ms,
             proxy_route.preserve_host,
+            proxy_route.retry_on_5xx,
+            proxy_route.circuit_breaker_threshold,
+            proxy_route.circuit_breaker_timeout_ms,
             proxy_route.vip_traffic_mode.label(),
             proxy_route.steering_desired_ports,
             proxy_route.steering_applied_ports,
