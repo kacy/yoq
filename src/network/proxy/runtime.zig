@@ -76,6 +76,7 @@ pub const RouteSnapshot = struct {
     method_matches: []const router.MethodMatch = &.{},
     header_matches: []const router.HeaderMatch = &.{},
     backend_services: []const router.BackendTarget = &.{},
+    mirror_service: ?[]const u8 = null,
     eligible_endpoints: u32,
     healthy_endpoints: u32,
     degraded: bool,
@@ -108,6 +109,7 @@ pub const RouteSnapshot = struct {
         if (self.header_matches.len > 0) alloc.free(self.header_matches);
         for (self.backend_services) |backend| backend.deinit(alloc);
         if (self.backend_services.len > 0) alloc.free(self.backend_services);
+        if (self.mirror_service) |mirror_service| alloc.free(mirror_service);
     }
 };
 
@@ -138,6 +140,7 @@ pub const Snapshot = struct {
 };
 
 pub const RouteTrafficSnapshot = struct {
+    traffic_role: RouteTrafficRole,
     route_name: []const u8,
     service_name: []const u8,
     backend_service: []const u8,
@@ -152,6 +155,18 @@ pub const RouteTrafficSnapshot = struct {
         alloc.free(self.route_name);
         alloc.free(self.service_name);
         alloc.free(self.backend_service);
+    }
+};
+
+pub const RouteTrafficRole = enum {
+    primary,
+    mirror,
+
+    pub fn label(self: RouteTrafficRole) []const u8 {
+        return switch (self) {
+            .primary => "primary",
+            .mirror => "mirror",
+        };
     }
 };
 
@@ -200,6 +215,7 @@ const RouteStatusState = struct {
 };
 
 const RouteTrafficState = struct {
+    traffic_role: RouteTrafficRole,
     route_name: []const u8,
     service_name: []const u8,
     backend_service: []const u8,
@@ -298,10 +314,18 @@ pub fn recordRequestStart() void {
 }
 
 pub fn recordRouteRequestStart(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    recordRouteRequestStartWithRole(.primary, route_name, service_name, backend_service);
+}
+
+pub fn recordMirrorRouteRequestStart(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    recordRouteRequestStartWithRole(.mirror, route_name, service_name, backend_service);
+}
+
+fn recordRouteRequestStartWithRole(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
     mutex.lock();
     defer mutex.unlock();
 
-    const state = ensureRouteTrafficLocked(route_name, service_name, backend_service) orelse return;
+    const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     state.requests_total += 1;
 }
 
@@ -322,10 +346,18 @@ pub fn recordResponseCode(status_code: u16) void {
 }
 
 pub fn recordRouteResponseCode(route_name: []const u8, service_name: []const u8, backend_service: []const u8, status_code: u16) void {
+    recordRouteResponseCodeWithRole(.primary, route_name, service_name, backend_service, status_code);
+}
+
+pub fn recordMirrorRouteResponseCode(route_name: []const u8, service_name: []const u8, backend_service: []const u8, status_code: u16) void {
+    recordRouteResponseCodeWithRole(.mirror, route_name, service_name, backend_service, status_code);
+}
+
+fn recordRouteResponseCodeWithRole(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8, status_code: u16) void {
     mutex.lock();
     defer mutex.unlock();
 
-    const state = ensureRouteTrafficLocked(route_name, service_name, backend_service) orelse return;
+    const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     switch (status_code) {
         200...299 => state.responses_2xx_total += 1,
         400...499 => state.responses_4xx_total += 1,
@@ -341,10 +373,18 @@ pub fn recordRetry() void {
 }
 
 pub fn recordRouteRetry(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    recordRouteRetryWithRole(.primary, route_name, service_name, backend_service);
+}
+
+pub fn recordMirrorRouteRetry(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    recordRouteRetryWithRole(.mirror, route_name, service_name, backend_service);
+}
+
+fn recordRouteRetryWithRole(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
     mutex.lock();
     defer mutex.unlock();
 
-    const state = ensureRouteTrafficLocked(route_name, service_name, backend_service) orelse return;
+    const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     state.retries_total += 1;
 }
 
@@ -367,10 +407,18 @@ pub fn recordUpstreamFailure(kind: UpstreamFailureKind) void {
 }
 
 pub fn recordRouteUpstreamFailure(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    recordRouteUpstreamFailureWithRole(.primary, route_name, service_name, backend_service);
+}
+
+pub fn recordMirrorRouteUpstreamFailure(route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
+    recordRouteUpstreamFailureWithRole(.mirror, route_name, service_name, backend_service);
+}
+
+fn recordRouteUpstreamFailureWithRole(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
     mutex.lock();
     defer mutex.unlock();
 
-    const state = ensureRouteTrafficLocked(route_name, service_name, backend_service) orelse return;
+    const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     state.upstream_failures_total += 1;
 }
 
@@ -472,6 +520,7 @@ pub fn snapshotRouteTraffic(alloc: std.mem.Allocator) !std.ArrayList(RouteTraffi
     var it = route_traffic.iterator();
     while (it.next()) |entry| {
         try traffic_snapshot.append(alloc, .{
+            .traffic_role = entry.value_ptr.traffic_role,
             .route_name = try alloc.dupe(u8, entry.value_ptr.route_name),
             .service_name = try alloc.dupe(u8, entry.value_ptr.service_name),
             .backend_service = try alloc.dupe(u8, entry.value_ptr.backend_service),
@@ -506,6 +555,7 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
             if (route.header_matches.len > 0) alloc.free(route.header_matches);
             for (route.backend_services) |backend| backend.deinit(alloc);
             if (route.backend_services.len > 0) alloc.free(route.backend_services);
+            if (route.mirror_service) |mirror_service| alloc.free(mirror_service);
         }
         routes_snapshot.deinit(alloc);
     }
@@ -523,6 +573,7 @@ pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Rout
             .method_matches = try cloneMethodMatches(alloc, route.method_matches),
             .header_matches = try cloneHeaderMatches(alloc, route.header_matches),
             .backend_services = try cloneBackendTargets(alloc, route.backend_services),
+            .mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
             .eligible_endpoints = route.eligible_endpoints,
             .healthy_endpoints = route.healthy_endpoints,
             .degraded = route.degraded,
@@ -715,6 +766,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .method_matches = try cloneMethodMatches(alloc, route.method_matches),
         .header_matches = try cloneHeaderMatches(alloc, route.header_matches),
         .backend_services = try cloneBackendTargets(alloc, route.backend_services),
+        .mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
         .eligible_endpoints = route.eligible_endpoints,
         .healthy_endpoints = route.healthy_endpoints,
         .degraded = degraded_reason != .none,
@@ -821,6 +873,7 @@ fn syncLocked() !void {
                 .method_matches = try cloneMethodMatches(std.heap.page_allocator, service_route.match_methods),
                 .header_matches = try cloneHeaderMatches(std.heap.page_allocator, service_route.match_headers),
                 .backend_services = try cloneBackendTargets(std.heap.page_allocator, service_route.backend_services),
+                .mirror_service = if (service_route.mirror_service) |mirror_service| try std.heap.page_allocator.dupe(u8, mirror_service) else null,
                 .eligible_endpoints = @intCast(service.eligible_endpoints),
                 .healthy_endpoints = @intCast(service.healthy_endpoints),
                 .degraded = service.degraded,
@@ -843,6 +896,7 @@ fn syncLocked() !void {
                 if (route.header_matches.len > 0) std.heap.page_allocator.free(route.header_matches);
                 for (route.backend_services) |backend| backend.deinit(std.heap.page_allocator);
                 if (route.backend_services.len > 0) std.heap.page_allocator.free(route.backend_services);
+                if (route.mirror_service) |mirror_service| std.heap.page_allocator.free(mirror_service);
             }
             try materialized_routes.append(std.heap.page_allocator, route);
         }
@@ -869,6 +923,7 @@ fn deinitRoutesLocked() void {
         if (route.header_matches.len > 0) std.heap.page_allocator.free(route.header_matches);
         for (route.backend_services) |backend| backend.deinit(std.heap.page_allocator);
         if (route.backend_services.len > 0) std.heap.page_allocator.free(route.backend_services);
+        if (route.mirror_service) |mirror_service| std.heap.page_allocator.free(mirror_service);
     }
     materialized_routes.clearAndFree(std.heap.page_allocator);
 }
@@ -933,13 +988,14 @@ fn deinitRouteTrafficLocked() void {
     route_traffic.clearAndFree(std.heap.page_allocator);
 }
 
-fn ensureRouteTrafficLocked(route_name: []const u8, service_name: []const u8, backend_service: []const u8) ?*RouteTrafficState {
-    const key = std.fmt.allocPrint(std.heap.page_allocator, "{s}\x1f{s}", .{ route_name, backend_service }) catch return null;
+fn ensureRouteTrafficLocked(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8) ?*RouteTrafficState {
+    const key = std.fmt.allocPrint(std.heap.page_allocator, "{s}\x1f{s}\x1f{s}", .{ route_name, backend_service, role.label() }) catch return null;
     errdefer std.heap.page_allocator.free(key);
 
     const result = route_traffic.getOrPut(std.heap.page_allocator, key) catch return null;
     if (!result.found_existing) {
         result.value_ptr.* = .{
+            .traffic_role = role,
             .route_name = std.heap.page_allocator.dupe(u8, route_name) catch {
                 std.heap.page_allocator.free(result.key_ptr.*);
                 _ = route_traffic.remove(key);
@@ -1421,6 +1477,9 @@ test "snapshot exposes L7 proxy observability counters" {
     recordResponse(.bad_gateway);
     recordRetry();
     recordRouteRetry("edge:default", "edge", "edge");
+    recordMirrorRouteRequestStart("edge:default", "edge", "edge-shadow");
+    recordMirrorRouteResponseCode("edge:default", "edge", "edge-shadow", 202);
+    recordMirrorRouteUpstreamFailure("edge:default", "edge", "edge-shadow");
     recordLoopRejection();
     recordUpstreamFailure(.connect);
     recordRouteUpstreamFailure("edge:default", "edge", "edge");
@@ -1450,7 +1509,8 @@ test "snapshot exposes L7 proxy observability counters" {
         route_traffic_snapshot.deinit(std.testing.allocator);
     }
 
-    try std.testing.expectEqual(@as(usize, 1), route_traffic_snapshot.items.len);
+    try std.testing.expectEqual(@as(usize, 2), route_traffic_snapshot.items.len);
+    try std.testing.expectEqual(RouteTrafficRole.primary, route_traffic_snapshot.items[0].traffic_role);
     try std.testing.expectEqualStrings("edge:default", route_traffic_snapshot.items[0].route_name);
     try std.testing.expectEqualStrings("edge", route_traffic_snapshot.items[0].service_name);
     try std.testing.expectEqualStrings("edge", route_traffic_snapshot.items[0].backend_service);
@@ -1458,6 +1518,11 @@ test "snapshot exposes L7 proxy observability counters" {
     try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[0].responses_2xx_total);
     try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[0].retries_total);
     try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[0].upstream_failures_total);
+    try std.testing.expectEqual(RouteTrafficRole.mirror, route_traffic_snapshot.items[1].traffic_role);
+    try std.testing.expectEqualStrings("edge-shadow", route_traffic_snapshot.items[1].backend_service);
+    try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[1].requests_total);
+    try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[1].responses_2xx_total);
+    try std.testing.expectEqual(@as(u64, 1), route_traffic_snapshot.items[1].upstream_failures_total);
 }
 
 test "resolveUpstream skips endpoints with open circuits" {

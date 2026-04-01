@@ -303,6 +303,7 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
         .http_proxy_http2_idle_timeout_ms = if (service.http_proxy_http2_idle_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
         .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
         .http_proxy_preserve_host = service.http_proxy_preserve_host,
+        .http_proxy_mirror_service = service.http_proxy_mirror_service,
     });
 
     var endpoints = store.listServiceEndpoints(alloc, service_name) catch return error.StoreReadFailed;
@@ -345,6 +346,7 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             if (route.match_headers.len > 0) alloc.free(route.match_headers);
             for (route.backend_services) |backend| backend.deinit(alloc);
             if (route.backend_services.len > 0) alloc.free(route.backend_services);
+            if (route.mirror_service) |mirror_service| alloc.free(mirror_service);
         }
         defs.deinit(alloc);
     }
@@ -390,6 +392,7 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             .match_methods = try method_matches.toOwnedSlice(alloc),
             .match_headers = try header_matches.toOwnedSlice(alloc),
             .backend_services = try backend_services.toOwnedSlice(alloc),
+            .mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
             .retries = @intCast(route.retries),
             .connect_timeout_ms = @intCast(route.connect_timeout_ms),
             .request_timeout_ms = @intCast(route.request_timeout_ms),
@@ -414,6 +417,7 @@ fn deinitRouteDefinitions(alloc: Allocator, routes: []const service_registry.Htt
         if (route.match_headers.len > 0) alloc.free(route.match_headers);
         for (route.backend_services) |backend| backend.deinit(alloc);
         if (route.backend_services.len > 0) alloc.free(route.backend_services);
+        if (route.mirror_service) |mirror_service| alloc.free(mirror_service);
     }
     alloc.free(routes);
 }

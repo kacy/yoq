@@ -11,9 +11,10 @@ pub const RouteTrafficAggregate = struct {
     upstream_failures_total: u64 = 0,
 };
 
-pub fn aggregateRouteTraffic(route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) RouteTrafficAggregate {
+pub fn aggregateRouteTraffic(role: proxy_runtime.RouteTrafficRole, route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) RouteTrafficAggregate {
     var aggregate: RouteTrafficAggregate = .{};
     for (route_traffic) |entry| {
+        if (entry.traffic_role != role) continue;
         if (!std.mem.eql(u8, entry.route_name, route_name)) continue;
         aggregate.requests_total += entry.requests_total;
         aggregate.responses_2xx_total += entry.responses_2xx_total;
@@ -25,8 +26,8 @@ pub fn aggregateRouteTraffic(route_name: []const u8, route_traffic: []const prox
     return aggregate;
 }
 
-pub fn writeRouteTrafficSummaryJson(writer: anytype, route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) !void {
-    const aggregate = aggregateRouteTraffic(route_name, route_traffic);
+pub fn writeRouteTrafficSummaryJson(writer: anytype, role: proxy_runtime.RouteTrafficRole, route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) !void {
+    const aggregate = aggregateRouteTraffic(role, route_name, route_traffic);
     try writer.print(
         "{{\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"upstream_failures_total\":{d}}}",
         .{
@@ -40,10 +41,11 @@ pub fn writeRouteTrafficSummaryJson(writer: anytype, route_name: []const u8, rou
     );
 }
 
-pub fn writeRouteBackendTrafficJson(writer: anytype, route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) !void {
+pub fn writeRouteBackendTrafficJson(writer: anytype, role: proxy_runtime.RouteTrafficRole, route_name: []const u8, route_traffic: []const proxy_runtime.RouteTrafficSnapshot) !void {
     try writer.writeByte('[');
     var first = true;
     for (route_traffic) |entry| {
+        if (entry.traffic_role != role) continue;
         if (!std.mem.eql(u8, entry.route_name, route_name)) continue;
         if (!first) try writer.writeByte(',');
         first = false;

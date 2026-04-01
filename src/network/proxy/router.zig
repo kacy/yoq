@@ -46,6 +46,7 @@ pub const Route = struct {
     method_matches: []const MethodMatch = &.{},
     header_matches: []const HeaderMatch = &.{},
     backend_services: []const BackendTarget = &.{},
+    mirror_service: ?[]const u8 = null,
     eligible_endpoints: u32 = 0,
     healthy_endpoints: u32 = 0,
     degraded: bool = false,

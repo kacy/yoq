@@ -329,6 +329,11 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             writer.writeAll(",\"backend_services\":") catch return common.internalError();
             writeBackendServicesJson(writer, route.backend_services) catch return common.internalError();
         }
+        if (route.mirror_service) |mirror_service| {
+            writer.writeAll(",\"mirror_service\":\"") catch return common.internalError();
+            json_helpers.writeJsonEscaped(writer, mirror_service) catch return common.internalError();
+            writer.writeByte('"') catch return common.internalError();
+        }
         writer.writeAll(",\"last_failure_at\":") catch return common.internalError();
         if (route.last_failure_at) |timestamp| {
             writer.print("{d}", .{timestamp}) catch return common.internalError();
@@ -336,9 +341,13 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
             writer.writeAll("null") catch return common.internalError();
         }
         writer.writeAll(",\"traffic\":") catch return common.internalError();
-        route_traffic_json.writeRouteTrafficSummaryJson(writer, route.name, l7_route_traffic.items) catch return common.internalError();
+        route_traffic_json.writeRouteTrafficSummaryJson(writer, .primary, route.name, l7_route_traffic.items) catch return common.internalError();
         writer.writeAll(",\"backend_traffic\":") catch return common.internalError();
-        route_traffic_json.writeRouteBackendTrafficJson(writer, route.name, l7_route_traffic.items) catch return common.internalError();
+        route_traffic_json.writeRouteBackendTrafficJson(writer, .primary, route.name, l7_route_traffic.items) catch return common.internalError();
+        writer.writeAll(",\"mirror_traffic\":") catch return common.internalError();
+        route_traffic_json.writeRouteTrafficSummaryJson(writer, .mirror, route.name, l7_route_traffic.items) catch return common.internalError();
+        writer.writeAll(",\"mirror_backend_traffic\":") catch return common.internalError();
+        route_traffic_json.writeRouteBackendTrafficJson(writer, .mirror, route.name, l7_route_traffic.items) catch return common.internalError();
         writer.writeByte('}') catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
@@ -584,6 +593,8 @@ fn writeRouteTrafficJson(writer: anytype, route_traffic: anytype) !void {
         try json_helpers.writeJsonEscaped(writer, entry.service_name);
         try writer.writeAll("\",\"backend_service\":\"");
         try json_helpers.writeJsonEscaped(writer, entry.backend_service);
+        try writer.writeAll("\",\"traffic_role\":\"");
+        try json_helpers.writeJsonEscaped(writer, entry.traffic_role.label());
         try writer.print(
             "\",\"requests_total\":{d},\"responses_2xx_total\":{d},\"responses_4xx_total\":{d},\"responses_5xx_total\":{d},\"retries_total\":{d},\"upstream_failures_total\":{d}}}",
             .{

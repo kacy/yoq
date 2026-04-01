@@ -139,6 +139,7 @@ pub fn syncServiceDefinitions(
                     route_alloc_failed = true;
                     break;
                 },
+                .mirror_service = route.mirror_service,
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,

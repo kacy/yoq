@@ -341,8 +341,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_route_requests_total counter\n");
     for (l7_proxy_route_traffic.items) |entry| {
         try writer.print(
-            "yoq_service_l7_proxy_route_requests_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\"}} {d}\n",
-            .{ entry.route_name, entry.service_name, entry.backend_service, entry.requests_total },
+            "yoq_service_l7_proxy_route_requests_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.requests_total },
         );
     }
 
@@ -353,16 +353,16 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.print("yoq_service_l7_proxy_responses_total{{class=\"5xx\"}} {d}\n", .{l7_proxy.responses_5xx_total});
     for (l7_proxy_route_traffic.items) |entry| {
         try writer.print(
-            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",class=\"2xx\"}} {d}\n",
-            .{ entry.route_name, entry.service_name, entry.backend_service, entry.responses_2xx_total },
+            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\",class=\"2xx\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.responses_2xx_total },
         );
         try writer.print(
-            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",class=\"4xx\"}} {d}\n",
-            .{ entry.route_name, entry.service_name, entry.backend_service, entry.responses_4xx_total },
+            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\",class=\"4xx\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.responses_4xx_total },
         );
         try writer.print(
-            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",class=\"5xx\"}} {d}\n",
-            .{ entry.route_name, entry.service_name, entry.backend_service, entry.responses_5xx_total },
+            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\",class=\"5xx\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.responses_5xx_total },
         );
     }
 
@@ -373,8 +373,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_route_retries_total counter\n");
     for (l7_proxy_route_traffic.items) |entry| {
         try writer.print(
-            "yoq_service_l7_proxy_route_retries_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\"}} {d}\n",
-            .{ entry.route_name, entry.service_name, entry.backend_service, entry.retries_total },
+            "yoq_service_l7_proxy_route_retries_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.retries_total },
         );
     }
 
@@ -392,8 +392,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_route_upstream_failures_total counter\n");
     for (l7_proxy_route_traffic.items) |entry| {
         try writer.print(
-            "yoq_service_l7_proxy_route_upstream_failures_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\"}} {d}\n",
-            .{ entry.route_name, entry.service_name, entry.backend_service, entry.upstream_failures_total },
+            "yoq_service_l7_proxy_route_upstream_failures_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.upstream_failures_total },
         );
     }
 
