@@ -363,15 +363,7 @@ pub const ReverseProxy = struct {
             pos = if (line_end + 2 <= parsed.headers_raw.len) line_end + 2 else parsed.headers_raw.len;
 
             if (line.len == 0) continue;
-            if (startsWithHeaderName(line, "Host")) continue;
-            if (startsWithHeaderName(line, "Connection")) continue;
-            if (startsWithHeaderName(line, "Content-Length")) continue;
-            if (startsWithHeaderName(line, proxy_loop_header)) continue;
-            if (startsWithHeaderName(line, x_forwarded_for_header)) continue;
-            if (startsWithHeaderName(line, x_forwarded_host_header)) continue;
-            if (startsWithHeaderName(line, x_forwarded_proto_header)) continue;
-            if (startsWithHeaderName(line, traceparent_header)) continue;
-            if (startsWithHeaderName(line, tracestate_header)) continue;
+            if (isForwardSkippedHeader(line)) continue;
 
             try writer.writeAll(line);
             try writer.writeAll("\r\n");
@@ -388,18 +380,7 @@ pub const ReverseProxy = struct {
         }
         try writer.print("{s}: {s}\r\n", .{ x_forwarded_host_header, inbound_host });
         try writer.print("{s}: {s}\r\n", .{ x_forwarded_proto_header, forwarded_proto });
-        if (inbound_traceparent) |value| {
-            if (isValidTraceparent(value)) {
-                try writer.print("{s}: {s}\r\n", .{ traceparent_header, value });
-                if (inbound_tracestate) |state| {
-                    try writer.print("{s}: {s}\r\n", .{ tracestate_header, state });
-                }
-            } else {
-                try writeGeneratedTraceHeaders(writer);
-            }
-        } else {
-            try writeGeneratedTraceHeaders(writer);
-        }
+        try writeTraceHeaders(writer, inbound_traceparent, inbound_tracestate);
         try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
         try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
         try writer.writeAll("Connection: close\r\n\r\n");
@@ -696,12 +677,44 @@ fn methodString(method: http.Method) []const u8 {
     };
 }
 
+const forward_skip_headers = [_][]const u8{
+    "Host",
+    "Connection",
+    "Content-Length",
+    proxy_loop_header,
+    x_forwarded_for_header,
+    x_forwarded_host_header,
+    x_forwarded_proto_header,
+    traceparent_header,
+    tracestate_header,
+};
+
+fn isForwardSkippedHeader(line: []const u8) bool {
+    for (forward_skip_headers) |name| {
+        if (startsWithHeaderName(line, name)) return true;
+    }
+    return false;
+}
+
 fn startsWithHeaderName(line: []const u8, name: []const u8) bool {
     if (line.len <= name.len or line[name.len] != ':') return false;
     for (line[0..name.len], name) |a, b| {
         if (std.ascii.toLower(a) != std.ascii.toLower(b)) return false;
     }
     return true;
+}
+
+fn writeTraceHeaders(writer: anytype, inbound_traceparent: ?[]const u8, inbound_tracestate: ?[]const u8) !void {
+    if (inbound_traceparent) |value| {
+        if (isValidTraceparent(value)) {
+            try writer.print("{s}: {s}\r\n", .{ traceparent_header, value });
+            if (inbound_tracestate) |state| {
+                try writer.print("{s}: {s}\r\n", .{ tracestate_header, state });
+            }
+            return;
+        }
+    }
+    try writeGeneratedTraceHeaders(writer);
 }
 
 fn writeGeneratedTraceHeaders(writer: anytype) !void {
