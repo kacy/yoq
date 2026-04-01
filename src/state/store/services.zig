@@ -46,6 +46,9 @@ pub const ServiceRecord = struct {
     http_proxy_http2_idle_timeout_ms: ?i64 = null,
     http_proxy_target_port: ?i64 = null,
     http_proxy_preserve_host: ?bool = null,
+    http_proxy_retry_on_5xx: ?bool = null,
+    http_proxy_circuit_breaker_threshold: ?i64 = null,
+    http_proxy_circuit_breaker_timeout_ms: ?i64 = null,
     http_proxy_mirror_service: ?[]const u8 = null,
     created_at: i64,
     updated_at: i64,
@@ -79,6 +82,9 @@ pub const ServiceHttpRouteRecord = struct {
     http2_idle_timeout_ms: i64,
     target_port: ?i64 = null,
     preserve_host: bool = true,
+    retry_on_5xx: bool = true,
+    circuit_breaker_threshold: i64 = 3,
+    circuit_breaker_timeout_ms: i64 = 30000,
     route_order: i64,
     created_at: i64,
     updated_at: i64,
@@ -146,6 +152,9 @@ pub const ServiceHttpRouteInput = struct {
     http2_idle_timeout_ms: i64 = 30000,
     target_port: ?i64 = null,
     preserve_host: bool = true,
+    retry_on_5xx: bool = true,
+    circuit_breaker_threshold: i64 = 3,
+    circuit_breaker_timeout_ms: i64 = 30000,
 };
 
 pub const ServiceHttpRouteMethodInput = struct {
@@ -179,7 +188,7 @@ pub const ServiceHttpRouteBackendInput = struct {
 };
 
 const service_columns =
-    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_http2_idle_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, http_proxy_mirror_service, created_at, updated_at";
+    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_http2_idle_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, http_proxy_retry_on_5xx, http_proxy_circuit_breaker_threshold, http_proxy_circuit_breaker_timeout_ms, http_proxy_mirror_service, created_at, updated_at";
 
 const ServiceRow = struct {
     service_name: sqlite.Text,
@@ -194,13 +203,16 @@ const ServiceRow = struct {
     http_proxy_http2_idle_timeout_ms: ?i64,
     http_proxy_target_port: ?i64,
     http_proxy_preserve_host: ?i64,
+    http_proxy_retry_on_5xx: ?i64,
+    http_proxy_circuit_breaker_threshold: ?i64,
+    http_proxy_circuit_breaker_timeout_ms: ?i64,
     http_proxy_mirror_service: ?sqlite.Text,
     created_at: i64,
     updated_at: i64,
 };
 
 const service_http_route_columns =
-    "service_name, route_name, host, path_prefix, rewrite_prefix, mirror_service, retries, connect_timeout_ms, request_timeout_ms, http2_idle_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at";
+    "service_name, route_name, host, path_prefix, rewrite_prefix, mirror_service, retries, connect_timeout_ms, request_timeout_ms, http2_idle_timeout_ms, target_port, preserve_host, retry_on_5xx, circuit_breaker_threshold, circuit_breaker_timeout_ms, route_order, created_at, updated_at";
 
 const ServiceHttpRouteRow = struct {
     service_name: sqlite.Text,
@@ -215,6 +227,9 @@ const ServiceHttpRouteRow = struct {
     http2_idle_timeout_ms: i64,
     target_port: ?i64,
     preserve_host: i64,
+    retry_on_5xx: i64,
+    circuit_breaker_threshold: i64,
+    circuit_breaker_timeout_ms: i64,
     route_order: i64,
     created_at: i64,
     updated_at: i64,
@@ -332,6 +347,9 @@ fn rowToServiceRecord(row: ServiceRow, http_routes: []const ServiceHttpRouteReco
         .http_proxy_http2_idle_timeout_ms = row.http_proxy_http2_idle_timeout_ms,
         .http_proxy_target_port = row.http_proxy_target_port,
         .http_proxy_preserve_host = if (row.http_proxy_preserve_host) |preserve_host| preserve_host != 0 else null,
+        .http_proxy_retry_on_5xx = if (row.http_proxy_retry_on_5xx) |retry_on_5xx| retry_on_5xx != 0 else null,
+        .http_proxy_circuit_breaker_threshold = row.http_proxy_circuit_breaker_threshold,
+        .http_proxy_circuit_breaker_timeout_ms = row.http_proxy_circuit_breaker_timeout_ms,
         .http_proxy_mirror_service = if (row.http_proxy_mirror_service) |mirror_service| mirror_service.data else null,
         .created_at = row.created_at,
         .updated_at = row.updated_at,
@@ -355,6 +373,9 @@ fn rowToServiceHttpRouteRecord(row: ServiceHttpRouteRow) ServiceHttpRouteRecord 
         .http2_idle_timeout_ms = row.http2_idle_timeout_ms,
         .target_port = row.target_port,
         .preserve_host = row.preserve_host != 0,
+        .retry_on_5xx = row.retry_on_5xx != 0,
+        .circuit_breaker_threshold = row.circuit_breaker_threshold,
+        .circuit_breaker_timeout_ms = row.circuit_breaker_timeout_ms,
         .route_order = row.route_order,
         .created_at = row.created_at,
         .updated_at = row.updated_at,
@@ -504,7 +525,7 @@ fn syncDerivedServiceProxyFields(
 ) StoreError!void {
     const primary = if (routes.len > 0) routes[0] else null;
     db.exec(
-        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_rewrite_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_http2_idle_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, http_proxy_mirror_service = ?, updated_at = ? WHERE service_name = ?;",
+        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_rewrite_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_http2_idle_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, http_proxy_retry_on_5xx = ?, http_proxy_circuit_breaker_threshold = ?, http_proxy_circuit_breaker_timeout_ms = ?, http_proxy_mirror_service = ?, updated_at = ? WHERE service_name = ?;",
         .{},
         .{
             if (primary) |route| route.host else null,
@@ -516,6 +537,9 @@ fn syncDerivedServiceProxyFields(
             if (primary) |route| route.http2_idle_timeout_ms else null,
             if (primary) |route| route.target_port else null,
             if (primary) |route| @as(i64, @intFromBool(route.preserve_host)) else null,
+            if (primary) |route| @as(i64, @intFromBool(route.retry_on_5xx)) else null,
+            if (primary) |route| route.circuit_breaker_threshold else null,
+            if (primary) |route| route.circuit_breaker_timeout_ms else null,
             if (primary) |route| route.mirror_service else null,
             now,
             service_name,
@@ -552,7 +576,7 @@ fn replaceServiceHttpRoutes(
 
     for (routes, 0..) |route, idx| {
         db.exec(
-            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO service_http_routes (" ++ service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             .{},
             .{
                 service_name,
@@ -567,6 +591,9 @@ fn replaceServiceHttpRoutes(
                 route.http2_idle_timeout_ms,
                 route.target_port,
                 @as(i64, @intFromBool(route.preserve_host)),
+                @as(i64, @intFromBool(route.retry_on_5xx)),
+                route.circuit_breaker_threshold,
+                route.circuit_breaker_timeout_ms,
                 @as(i64, @intCast(idx)),
                 now,
                 now,
@@ -653,7 +680,7 @@ pub fn createService(record: ServiceRecord) StoreError!void {
     var committed = false;
     errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
     db.exec(
-        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.service_name,
@@ -668,6 +695,9 @@ pub fn createService(record: ServiceRecord) StoreError!void {
             record.http_proxy_http2_idle_timeout_ms,
             record.http_proxy_target_port,
             if (record.http_proxy_preserve_host) |preserve_host| @as(?i64, @intFromBool(preserve_host)) else null,
+            if (record.http_proxy_retry_on_5xx) |retry_on_5xx| @as(?i64, @intFromBool(retry_on_5xx)) else null,
+            record.http_proxy_circuit_breaker_threshold,
+            record.http_proxy_circuit_breaker_timeout_ms,
             record.http_proxy_mirror_service,
             record.created_at,
             record.updated_at,
@@ -718,6 +748,9 @@ pub fn createService(record: ServiceRecord) StoreError!void {
                 .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
                 .target_port = route.target_port,
                 .preserve_host = route.preserve_host,
+                .retry_on_5xx = route.retry_on_5xx,
+                .circuit_breaker_threshold = route.circuit_breaker_threshold,
+                .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
             }) catch return StoreError.WriteFailed;
         }
         defer {

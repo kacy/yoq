@@ -247,6 +247,9 @@ fn loadSnapshotInto(next_registry: *service_registry.Registry) !void {
             .http_proxy_http2_idle_timeout_ms = if (service.http_proxy_http2_idle_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
             .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
             .http_proxy_preserve_host = service.http_proxy_preserve_host,
+            .http_proxy_retry_on_5xx = service.http_proxy_retry_on_5xx,
+            .http_proxy_circuit_breaker_threshold = if (service.http_proxy_circuit_breaker_threshold) |v| @intCast(v) else null,
+            .http_proxy_circuit_breaker_timeout_ms = if (service.http_proxy_circuit_breaker_timeout_ms) |v| @intCast(v) else null,
         });
 
         var endpoints = store.listServiceEndpoints(alloc, service.service_name) catch return error.StoreReadFailed;
@@ -303,6 +306,9 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
         .http_proxy_http2_idle_timeout_ms = if (service.http_proxy_http2_idle_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
         .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
         .http_proxy_preserve_host = service.http_proxy_preserve_host,
+        .http_proxy_retry_on_5xx = service.http_proxy_retry_on_5xx,
+        .http_proxy_circuit_breaker_threshold = if (service.http_proxy_circuit_breaker_threshold) |v| @intCast(v) else null,
+        .http_proxy_circuit_breaker_timeout_ms = if (service.http_proxy_circuit_breaker_timeout_ms) |v| @intCast(v) else null,
         .http_proxy_mirror_service = service.http_proxy_mirror_service,
     });
 
@@ -399,6 +405,9 @@ fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRout
             .http2_idle_timeout_ms = @intCast(route.http2_idle_timeout_ms),
             .target_port = if (route.target_port) |port| @intCast(port) else null,
             .preserve_host = route.preserve_host,
+            .retry_on_5xx = route.retry_on_5xx,
+            .circuit_breaker_threshold = @intCast(route.circuit_breaker_threshold),
+            .circuit_breaker_timeout_ms = @intCast(route.circuit_breaker_timeout_ms),
         });
     }
 

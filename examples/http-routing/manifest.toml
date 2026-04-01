@@ -29,6 +29,9 @@ preserve_host = false
 retries = 2
 connect_timeout_ms = 1500
 request_timeout_ms = 5000
+retry_on_5xx = true
+circuit_breaker_threshold = 5
+circuit_breaker_timeout_ms = 15000
 
 [service.api-canary]
 image = "hashicorp/http-echo:1.0"

@@ -421,11 +421,16 @@ pub const ReverseProxy = struct {
         const policy = proxy_policy.RequestPolicy{
             .retries = plan.route.retries,
             .preserve_host = plan.route.preserve_host,
+            .retry_on_5xx = plan.route.retry_on_5xx,
+        };
+        const cb_policy = proxy_policy.CircuitBreakerPolicy{
+            .failure_threshold = plan.route.circuit_breaker_threshold,
+            .open_timeout_ms = plan.route.circuit_breaker_timeout_ms,
         };
         var attempt: u8 = 0;
         var retries_used: u8 = 0;
         while (true) : (attempt += 1) {
-            var upstream = resolveAttemptUpstream(self.allocator, plan, attempt) catch |err| switch (err) {
+            var upstream = resolveAttemptUpstream(self.allocator, plan, attempt, cb_policy) catch |err| switch (err) {
                 error.NoHealthyUpstream => {
                     log.warn("l7 proxy no eligible upstream after retries method={s} host={s} path={s} service={s} retries={d}", .{
                         methodString(plan.method),
@@ -444,7 +449,7 @@ pub const ReverseProxy = struct {
             defer upstream.deinit(self.allocator);
 
             const response = self.forwardSingleAttempt(raw_request, plan, &upstream, client_ip) catch |err| {
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 proxy_runtime.recordUpstreamFailure(mapUpstreamFailure(err));
                 proxy_runtime.recordRouteUpstreamFailure(plan.route.name, plan.route.service, upstream.service);
                 if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
@@ -476,7 +481,7 @@ pub const ReverseProxy = struct {
             const status_code = parseUpstreamStatusCode(response) catch {
                 proxy_runtime.recordUpstreamFailure(.other);
                 proxy_runtime.recordRouteUpstreamFailure(plan.route.name, plan.route.service, upstream.service);
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
                     methodString(plan.method),
                     plan.host,
@@ -495,7 +500,7 @@ pub const ReverseProxy = struct {
             };
 
             if (status_code >= 500 and status_code <= 599) {
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
             } else {
                 proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
             }
@@ -946,7 +951,7 @@ fn mapRouteFailureKind(err: anyerror) proxy_runtime.RouteFailureKind {
     };
 }
 
-fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, attempt: u8) !upstream_mod.Upstream {
+fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, attempt: u8, cb_policy: proxy_policy.CircuitBreakerPolicy) !upstream_mod.Upstream {
     if (attempt == 0) {
         return .{
             .service = try alloc.dupe(u8, plan.backend_service),
@@ -958,7 +963,7 @@ fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, at
     }
 
     const backend_service = proxy_runtime.selectSnapshotBackendService(plan.route, plan.selection_key, attempt);
-    return proxy_runtime.resolveUpstream(alloc, backend_service);
+    return proxy_runtime.resolveUpstreamWithPolicy(alloc, backend_service, cb_policy);
 }
 
 fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64 {
@@ -2887,8 +2892,8 @@ test "forwardRequest retries onto a different endpoint after circuit opens" {
         .registered_at = 1000,
         .last_seen_at = 1000,
     });
-    proxy_runtime.recordEndpointFailure("api-1");
-    proxy_runtime.recordEndpointFailure("api-1");
+    proxy_runtime.recordEndpointFailure("api-1", .{});
+    proxy_runtime.recordEndpointFailure("api-1", .{});
     proxy_runtime.bootstrapIfEnabled();
 
     const routes = [_]router.Route{
@@ -3032,7 +3037,7 @@ test "resolveAttemptUpstream retries onto a different weighted backend service" 
     };
     defer plan.deinit(std.testing.allocator);
 
-    var retry_upstream = try resolveAttemptUpstream(std.testing.allocator, &plan, 1);
+    var retry_upstream = try resolveAttemptUpstream(std.testing.allocator, &plan, 1, .{});
     defer retry_upstream.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("api-canary", retry_upstream.service);

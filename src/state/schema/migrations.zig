@@ -39,6 +39,9 @@ fn migrateServices(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_target_port INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_preserve_host INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_mirror_service TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_retry_on_5xx INTEGER;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_circuit_breaker_threshold INTEGER;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_circuit_breaker_timeout_ms INTEGER;") catch {};
     createTableIfMissing(db,
         \\CREATE TABLE IF NOT EXISTS service_http_routes (
         \\    service_name TEXT NOT NULL,
@@ -97,6 +100,9 @@ fn migrateServices(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN rewrite_prefix TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN mirror_service TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN http2_idle_timeout_ms INTEGER NOT NULL DEFAULT 30000;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN retry_on_5xx INTEGER NOT NULL DEFAULT 1;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN circuit_breaker_threshold INTEGER NOT NULL DEFAULT 3;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE service_http_routes ADD COLUMN circuit_breaker_timeout_ms INTEGER NOT NULL DEFAULT 30000;") catch {};
     db.exec(
         "INSERT INTO service_http_routes (" ++
             "service_name, route_name, host, path_prefix, rewrite_prefix, mirror_service, retries, connect_timeout_ms, request_timeout_ms, http2_idle_timeout_ms, target_port, preserve_host, route_order, created_at, updated_at" ++

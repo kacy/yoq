@@ -75,3 +75,24 @@ test "shouldAllowHalfOpen waits for timeout window" {
     try std.testing.expect(!shouldAllowHalfOpen(policy, 1000, 5999));
     try std.testing.expect(shouldAllowHalfOpen(policy, 1000, 6000));
 }
+
+test "shouldRetry skips 5xx when retry_on_5xx is false" {
+    const policy = RequestPolicy{ .retries = 3, .retry_on_5xx = false };
+
+    try std.testing.expect(!shouldRetry(policy, "GET", 0, 503, false));
+    try std.testing.expect(!shouldRetry(policy, "GET", 0, 500, false));
+}
+
+test "shouldRetry still retries transport errors when retry_on_5xx is false" {
+    const policy = RequestPolicy{ .retries = 3, .retry_on_5xx = false };
+
+    try std.testing.expect(shouldRetry(policy, "GET", 0, null, true));
+}
+
+test "shouldTripCircuit respects custom threshold" {
+    const policy = CircuitBreakerPolicy{ .failure_threshold = 5 };
+
+    try std.testing.expect(!shouldTripCircuit(policy, 3));
+    try std.testing.expect(!shouldTripCircuit(policy, 4));
+    try std.testing.expect(shouldTripCircuit(policy, 5));
+}

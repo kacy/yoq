@@ -55,6 +55,9 @@ pub const Route = struct {
     request_timeout_ms: u32 = 5000,
     http2_idle_timeout_ms: u32 = 30000,
     preserve_host: bool = true,
+    retry_on_5xx: bool = true,
+    circuit_breaker_threshold: u8 = 3,
+    circuit_breaker_timeout_ms: u32 = 30_000,
 };
 
 pub fn matchRoute(routes: []const Route, method: []const u8, host: []const u8, path: []const u8, request_headers: []const RequestHeader) ?Route {

@@ -79,6 +79,9 @@ pub const ServiceDefinition = struct {
     http_proxy_http2_idle_timeout_ms: ?u32 = null,
     http_proxy_target_port: ?u16 = null,
     http_proxy_preserve_host: ?bool = null,
+    http_proxy_retry_on_5xx: ?bool = null,
+    http_proxy_circuit_breaker_threshold: ?u8 = null,
+    http_proxy_circuit_breaker_timeout_ms: ?u32 = null,
     http_proxy_mirror_service: ?[]const u8 = null,
 };
 
@@ -97,6 +100,9 @@ pub const HttpRouteDefinition = struct {
     http2_idle_timeout_ms: u32 = 30000,
     target_port: ?u16 = null,
     preserve_host: bool = true,
+    retry_on_5xx: bool = true,
+    circuit_breaker_threshold: u8 = 3,
+    circuit_breaker_timeout_ms: u32 = 30_000,
 };
 
 pub const HttpMethodMatch = struct {
@@ -178,6 +184,9 @@ pub const ServiceSnapshot = struct {
     http_proxy_http2_idle_timeout_ms: ?u32,
     http_proxy_target_port: ?u16,
     http_proxy_preserve_host: ?bool,
+    http_proxy_retry_on_5xx: ?bool,
+    http_proxy_circuit_breaker_threshold: ?u8,
+    http_proxy_circuit_breaker_timeout_ms: ?u32,
     http_proxy_mirror_service: ?[]const u8,
     total_endpoints: usize,
     eligible_endpoints: usize,
@@ -219,6 +228,9 @@ pub const HttpRouteSnapshot = struct {
     http2_idle_timeout_ms: u32,
     target_port: ?u16,
     preserve_host: bool,
+    retry_on_5xx: bool = true,
+    circuit_breaker_threshold: u8 = 3,
+    circuit_breaker_timeout_ms: u32 = 30_000,
 
     pub fn deinit(self: HttpRouteSnapshot, alloc: Allocator) void {
         alloc.free(self.route_name);
@@ -273,6 +285,9 @@ const ServiceState = struct {
     http_proxy_http2_idle_timeout_ms: ?u32 = null,
     http_proxy_target_port: ?u16 = null,
     http_proxy_preserve_host: ?bool = null,
+    http_proxy_retry_on_5xx: ?bool = null,
+    http_proxy_circuit_breaker_threshold: ?u8 = null,
+    http_proxy_circuit_breaker_timeout_ms: ?u32 = null,
     http_proxy_mirror_service: ?[]const u8 = null,
     endpoints: std.ArrayList(EndpointState) = .empty,
     last_reconcile_status: ReconcileStatus = .idle,
@@ -311,6 +326,9 @@ const HttpRouteState = struct {
     http2_idle_timeout_ms: u32,
     target_port: ?u16,
     preserve_host: bool,
+    retry_on_5xx: bool = true,
+    circuit_breaker_threshold: u8 = 3,
+    circuit_breaker_timeout_ms: u32 = 30_000,
 
     fn deinit(self: HttpRouteState, alloc: Allocator) void {
         alloc.free(self.route_name);
@@ -647,6 +665,9 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .http_proxy_http2_idle_timeout_ms = service.http_proxy_http2_idle_timeout_ms,
         .http_proxy_target_port = service.http_proxy_target_port,
         .http_proxy_preserve_host = service.http_proxy_preserve_host,
+        .http_proxy_retry_on_5xx = service.http_proxy_retry_on_5xx,
+        .http_proxy_circuit_breaker_threshold = service.http_proxy_circuit_breaker_threshold,
+        .http_proxy_circuit_breaker_timeout_ms = service.http_proxy_circuit_breaker_timeout_ms,
         .http_proxy_mirror_service = if (service.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
         .total_endpoints = total_endpoints,
         .eligible_endpoints = eligible_endpoints,
@@ -684,6 +705,9 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
                 .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
                 .target_port = route.target_port,
                 .preserve_host = route.preserve_host,
+                .retry_on_5xx = route.retry_on_5xx,
+                .circuit_breaker_threshold = route.circuit_breaker_threshold,
+                .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
             });
         }
         return routes;
@@ -705,6 +729,9 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
             .http2_idle_timeout_ms = definition.http_proxy_http2_idle_timeout_ms orelse 30000,
             .target_port = definition.http_proxy_target_port,
             .preserve_host = definition.http_proxy_preserve_host orelse true,
+            .retry_on_5xx = definition.http_proxy_retry_on_5xx orelse true,
+            .circuit_breaker_threshold = definition.http_proxy_circuit_breaker_threshold orelse 3,
+            .circuit_breaker_timeout_ms = definition.http_proxy_circuit_breaker_timeout_ms orelse 30_000,
         });
     }
 
@@ -740,6 +767,9 @@ fn cloneRouteSnapshots(alloc: Allocator, routes: []const HttpRouteState) Error![
             .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
             .target_port = route.target_port,
             .preserve_host = route.preserve_host,
+            .retry_on_5xx = route.retry_on_5xx,
+            .circuit_breaker_threshold = route.circuit_breaker_threshold,
+            .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
         });
     }
 
@@ -758,6 +788,9 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
         service.http_proxy_http2_idle_timeout_ms = primary.http2_idle_timeout_ms;
         service.http_proxy_target_port = primary.target_port;
         service.http_proxy_preserve_host = primary.preserve_host;
+        service.http_proxy_retry_on_5xx = primary.retry_on_5xx;
+        service.http_proxy_circuit_breaker_threshold = primary.circuit_breaker_threshold;
+        service.http_proxy_circuit_breaker_timeout_ms = primary.circuit_breaker_timeout_ms;
         try replaceOptionalOwned(alloc, &service.http_proxy_mirror_service, primary.mirror_service);
         return;
     }
@@ -771,6 +804,9 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
     service.http_proxy_http2_idle_timeout_ms = definition.http_proxy_http2_idle_timeout_ms;
     service.http_proxy_target_port = definition.http_proxy_target_port;
     service.http_proxy_preserve_host = definition.http_proxy_preserve_host;
+    service.http_proxy_retry_on_5xx = definition.http_proxy_retry_on_5xx;
+    service.http_proxy_circuit_breaker_threshold = definition.http_proxy_circuit_breaker_threshold;
+    service.http_proxy_circuit_breaker_timeout_ms = definition.http_proxy_circuit_breaker_timeout_ms;
     try replaceOptionalOwned(alloc, &service.http_proxy_mirror_service, definition.http_proxy_mirror_service);
 }
 

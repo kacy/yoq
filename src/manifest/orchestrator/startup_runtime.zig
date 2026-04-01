@@ -145,6 +145,9 @@ pub fn syncServiceDefinitions(
                 .request_timeout_ms = route.request_timeout_ms,
                 .target_port = if (svc.ports.len > 0) svc.ports[0].container_port else null,
                 .preserve_host = route.preserve_host,
+                .retry_on_5xx = route.retry_on_5xx,
+                .circuit_breaker_threshold = route.circuit_breaker_threshold,
+                .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
             }) catch {
                 alloc.free(match_methods.items);
                 alloc.free(match_headers.items);

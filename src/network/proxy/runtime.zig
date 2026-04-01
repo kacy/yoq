@@ -88,6 +88,9 @@ pub const RouteSnapshot = struct {
     request_timeout_ms: u32,
     http2_idle_timeout_ms: u32,
     preserve_host: bool,
+    retry_on_5xx: bool = true,
+    circuit_breaker_threshold: u8 = 3,
+    circuit_breaker_timeout_ms: u32 = 30_000,
     vip_traffic_mode: VipTrafficMode = .not_applicable,
     steering_desired_ports: u32,
     steering_applied_ports: u32,
@@ -430,7 +433,7 @@ pub fn recordEndpointSuccess(endpoint_id: []const u8) void {
     circuit.* = .{};
 }
 
-pub fn recordEndpointFailure(endpoint_id: []const u8) void {
+pub fn recordEndpointFailure(endpoint_id: []const u8, cb_policy: proxy_policy.CircuitBreakerPolicy) void {
     mutex.lock();
     defer mutex.unlock();
 
@@ -449,7 +452,7 @@ pub fn recordEndpointFailure(endpoint_id: []const u8) void {
             if (circuit.consecutive_failures < std.math.maxInt(u8)) {
                 circuit.consecutive_failures += 1;
             }
-            if (proxy_policy.shouldTripCircuit(default_circuit_policy, circuit.consecutive_failures)) {
+            if (proxy_policy.shouldTripCircuit(cb_policy, circuit.consecutive_failures)) {
                 circuit.state = .open;
                 circuit.opened_at_ms = std.time.milliTimestamp();
                 circuit.half_open_in_flight = false;
@@ -460,7 +463,7 @@ pub fn recordEndpointFailure(endpoint_id: []const u8) void {
             circuit.state = .open;
             circuit.opened_at_ms = std.time.milliTimestamp();
             circuit.half_open_in_flight = false;
-            circuit.consecutive_failures = default_circuit_policy.failure_threshold;
+            circuit.consecutive_failures = cb_policy.failure_threshold;
             circuit_trips_total += 1;
         },
         .open => {
@@ -623,6 +626,10 @@ pub fn resolveRoute(alloc: std.mem.Allocator, method: []const u8, host: []const 
 }
 
 pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upstream_mod.Upstream {
+    return resolveUpstreamWithPolicy(alloc, service_name, default_circuit_policy);
+}
+
+pub fn resolveUpstreamWithPolicy(alloc: std.mem.Allocator, service_name: []const u8, cb_policy: proxy_policy.CircuitBreakerPolicy) !upstream_mod.Upstream {
     const service = try service_registry_runtime.snapshotService(alloc, service_name);
     defer service.deinit(alloc);
 
@@ -650,7 +657,7 @@ pub fn resolveUpstream(alloc: std.mem.Allocator, service_name: []const u8) !upst
             .endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id),
             .address = try alloc.dupe(u8, endpoint.ip_address),
             .port = port,
-            .eligible = endpoint.eligible and endpointAllowsRequestLocked(endpoint.endpoint_id, now_ms),
+            .eligible = endpoint.eligible and endpointAllowsRequestLocked(endpoint.endpoint_id, now_ms, cb_policy),
         });
     }
 
@@ -672,14 +679,14 @@ pub fn selectSnapshotBackendService(route: RouteSnapshot, request_key: u64, atte
     return selectBackendServiceFromTargets(route.service, route.backend_services, request_key, attempt);
 }
 
-fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64) bool {
+fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64, cb_policy: proxy_policy.CircuitBreakerPolicy) bool {
     const circuit = endpoint_circuits.getPtr(endpoint_id) orelse return true;
 
     switch (circuit.state) {
         .closed => return true,
         .open => {
             const opened_at_ms = circuit.opened_at_ms orelse return false;
-            if (!proxy_policy.shouldAllowHalfOpen(default_circuit_policy, opened_at_ms, now_ms)) return false;
+            if (!proxy_policy.shouldAllowHalfOpen(cb_policy, opened_at_ms, now_ms)) return false;
 
             circuit.state = .half_open;
             circuit.half_open_in_flight = true;
@@ -778,6 +785,9 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnaps
         .request_timeout_ms = route.request_timeout_ms,
         .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
         .preserve_host = route.preserve_host,
+        .retry_on_5xx = route.retry_on_5xx,
+        .circuit_breaker_threshold = route.circuit_breaker_threshold,
+        .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
         .vip_traffic_mode = vip_traffic_mode,
         .steering_desired_ports = steering_state.desired_ports,
         .steering_applied_ports = steering_state.applied_ports,
@@ -882,6 +892,9 @@ fn syncLocked() !void {
                 .request_timeout_ms = service_route.request_timeout_ms,
                 .http2_idle_timeout_ms = service_route.http2_idle_timeout_ms,
                 .preserve_host = service_route.preserve_host,
+                .retry_on_5xx = service_route.retry_on_5xx,
+                .circuit_breaker_threshold = service_route.circuit_breaker_threshold,
+                .circuit_breaker_timeout_ms = service_route.circuit_breaker_timeout_ms,
             };
             errdefer {
                 std.heap.page_allocator.free(route.name);
@@ -1576,9 +1589,9 @@ test "resolveUpstream skips endpoints with open circuits" {
         .last_seen_at = 1001,
     });
 
-    recordEndpointFailure("api-1");
-    recordEndpointFailure("api-1");
-    recordEndpointFailure("api-1");
+    recordEndpointFailure("api-1", .{});
+    recordEndpointFailure("api-1", .{});
+    recordEndpointFailure("api-1", .{});
 
     const upstream = try resolveUpstream(std.testing.allocator, "api");
     defer upstream.deinit(std.testing.allocator);
@@ -1591,6 +1604,65 @@ test "resolveUpstream skips endpoints with open circuits" {
     try std.testing.expectEqual(@as(u64, 1), state.circuit_trips_total);
     try std.testing.expectEqual(@as(u32, 1), state.circuit_open_endpoints);
     try std.testing.expectEqual(@as(u32, 0), state.circuit_half_open_endpoints);
+}
+
+test "per-route circuit breaker threshold controls trip point" {
+    const store = @import("../../state/store.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    const high_threshold: proxy_policy.CircuitBreakerPolicy = .{ .failure_threshold = 5 };
+
+    recordEndpointFailure("api-1", high_threshold);
+    recordEndpointFailure("api-1", high_threshold);
+    recordEndpointFailure("api-1", high_threshold);
+
+    // 3 failures with threshold=5 should NOT trip the circuit
+    const upstream1 = try resolveUpstream(std.testing.allocator, "api");
+    defer upstream1.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("api-1", upstream1.endpoint_id);
+
+    recordEndpointFailure("api-1", high_threshold);
+    recordEndpointFailure("api-1", high_threshold);
+
+    // 5 failures with threshold=5 SHOULD trip the circuit
+    const state = try snapshot(std.testing.allocator);
+    defer state.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), state.circuit_trips_total);
+    try std.testing.expectEqual(@as(u32, 1), state.circuit_open_endpoints);
 }
 
 test "route snapshots retain runtime failure details after recovery" {

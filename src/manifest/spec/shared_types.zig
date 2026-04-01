@@ -158,6 +158,9 @@ pub const HttpProxyRoute = struct {
     request_timeout_ms: u32 = 5000,
     http2_idle_timeout_ms: u32 = 30000,
     preserve_host: bool = true,
+    retry_on_5xx: bool = true,
+    circuit_breaker_threshold: u8 = 3,
+    circuit_breaker_timeout_ms: u32 = 30_000,
 
     pub fn deinit(self: HttpProxyRoute, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
