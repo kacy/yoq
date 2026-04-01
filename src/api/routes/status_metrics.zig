@@ -756,9 +756,9 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     proxy_runtime.recordLoopRejection();
     proxy_runtime.recordUpstreamFailure(.connect);
     proxy_runtime.recordRouteUpstreamFailure("edge:default", "edge", "edge");
-    proxy_runtime.recordEndpointFailure("edge-1");
-    proxy_runtime.recordEndpointFailure("edge-1");
-    proxy_runtime.recordEndpointFailure("edge-1");
+    proxy_runtime.recordEndpointFailure("edge-1", .{});
+    proxy_runtime.recordEndpointFailure("edge-1", .{});
+    proxy_runtime.recordEndpointFailure("edge-1", .{});
 
     const resp = handleMetricsPrometheus(testing.allocator);
     defer if (resp.allocated) testing.allocator.free(resp.body);

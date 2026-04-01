@@ -225,11 +225,14 @@ const ConnectionRouter = struct {
         const selection_key = routeSelectionKey(parsed.request.method, normalized_host, parsed.request.path);
         const forwarded_proto = trustedForwardedProto(parsed.headers, self.client_ip);
 
+        const request_policy = proxy_policy.RequestPolicy{ .retries = route.retries, .retry_on_5xx = route.retry_on_5xx };
+        const cb_policy = proxy_policy.CircuitBreakerPolicy{ .failure_threshold = route.circuit_breaker_threshold, .open_timeout_ms = route.circuit_breaker_timeout_ms };
+
         var attempt: u8 = 0;
         while (true) : (attempt += 1) {
             const backend_service = proxy_runtime.selectBackendService(route, selection_key, attempt);
             proxy_runtime.recordRouteRequestStart(route.name, route.service, backend_service);
-            var upstream = proxy_runtime.resolveUpstream(self.allocator, backend_service) catch |err| switch (err) {
+            var upstream = proxy_runtime.resolveUpstreamWithPolicy(self.allocator, backend_service, cb_policy) catch |err| switch (err) {
                 error.NoHealthyUpstream => {
                     proxy_runtime.recordRouteFailure(route.name, .no_eligible_upstream);
                     proxy_runtime.recordResponse(.service_unavailable);
@@ -254,11 +257,11 @@ const ConnectionRouter = struct {
             defer rewritten.deinit(self.allocator);
 
             const upstream_fd = connectToUpstream(route, &upstream) catch {
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 proxy_runtime.recordUpstreamFailure(.connect);
                 proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
                 upstream.deinit(self.allocator);
-                if (proxy_policy.shouldRetry(.{ .retries = route.retries }, parsed.request.method, attempt, null, true)) {
+                if (proxy_policy.shouldRetry(request_policy, parsed.request.method, attempt, null, true)) {
                     proxy_runtime.recordRetry();
                     proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
                     continue;
@@ -274,11 +277,11 @@ const ConnectionRouter = struct {
             defer self.allocator.free(preface_and_settings);
             writeAll(upstream_fd, preface_and_settings) catch {
                 posix.close(upstream_fd);
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 proxy_runtime.recordUpstreamFailure(.send);
                 proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
                 upstream.deinit(self.allocator);
-                if (proxy_policy.shouldRetry(.{ .retries = route.retries }, parsed.request.method, attempt, null, true)) {
+                if (proxy_policy.shouldRetry(request_policy, parsed.request.method, attempt, null, true)) {
                     proxy_runtime.recordRetry();
                     proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
                     continue;
@@ -291,11 +294,11 @@ const ConnectionRouter = struct {
             };
             writeAll(upstream_fd, rewritten.bytes) catch {
                 posix.close(upstream_fd);
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id);
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 proxy_runtime.recordUpstreamFailure(.send);
                 proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
                 upstream.deinit(self.allocator);
-                if (proxy_policy.shouldRetry(.{ .retries = route.retries }, parsed.request.method, attempt, null, true)) {
+                if (proxy_policy.shouldRetry(request_policy, parsed.request.method, attempt, null, true)) {
                     proxy_runtime.recordRetry();
                     proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
                     continue;
@@ -481,7 +484,10 @@ const ConnectionRouter = struct {
             session.response_started = true;
             session.response_status = status;
             if (status >= 500 and status <= 599) {
-                proxy_runtime.recordEndpointFailure(session.upstream.endpoint_id);
+                proxy_runtime.recordEndpointFailure(session.upstream.endpoint_id, .{
+                    .failure_threshold = session.route.circuit_breaker_threshold,
+                    .open_timeout_ms = session.route.circuit_breaker_timeout_ms,
+                });
             } else {
                 proxy_runtime.recordEndpointSuccess(session.upstream.endpoint_id);
             }
@@ -514,7 +520,10 @@ const ConnectionRouter = struct {
         body: []const u8,
     ) !void {
         const session = &self.streams.items[session_idx];
-        proxy_runtime.recordEndpointFailure(session.upstream.endpoint_id);
+        proxy_runtime.recordEndpointFailure(session.upstream.endpoint_id, .{
+            .failure_threshold = session.route.circuit_breaker_threshold,
+            .open_timeout_ms = session.route.circuit_breaker_timeout_ms,
+        });
         proxy_runtime.recordUpstreamFailure(failure);
         proxy_runtime.recordRouteUpstreamFailure(session.route.name, session.route.service, session.backend_service);
         proxy_runtime.recordRouteFailure(session.route.name, switch (failure) {
