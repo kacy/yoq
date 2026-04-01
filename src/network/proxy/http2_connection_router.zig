@@ -256,9 +256,10 @@ const ConnectionRouter = struct {
             });
             defer rewritten.deinit(self.allocator);
 
-            const upstream_fd = connectToUpstream(route, &upstream) catch {
+            const upstream_fd = self.connectAndSendUpstream(route, &upstream, rewritten.bytes) catch |connect_err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
-                proxy_runtime.recordUpstreamFailure(.connect);
+                const failure_kind: proxy_runtime.UpstreamFailureKind = if (connect_err == error.ConnectFailed or connect_err == error.ConnectTimedOut) .connect else .send;
+                proxy_runtime.recordUpstreamFailure(failure_kind);
                 proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
                 upstream.deinit(self.allocator);
                 if (proxy_policy.shouldRetry(request_policy, parsed.request.method, attempt, null, true)) {
@@ -266,29 +267,11 @@ const ConnectionRouter = struct {
                     proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
                     continue;
                 }
-                proxy_runtime.recordRouteFailure(route.name, .connect);
+                const route_failure: proxy_runtime.RouteFailureKind = if (failure_kind == .connect) .connect else .send;
+                proxy_runtime.recordRouteFailure(route.name, route_failure);
                 proxy_runtime.recordResponse(.bad_gateway);
-                try self.sendLocalStreamResponse(parsed.request.stream_id, .bad_gateway, "{\"error\":\"upstream connect failed\"}");
-                try self.consumeDownstreamBytes(parsed.consumed);
-                return;
-            };
-
-            const preface_and_settings = try buildInitialUpstreamPreamble(self.allocator);
-            defer self.allocator.free(preface_and_settings);
-            sendUpstreamPreamble(upstream_fd, preface_and_settings, rewritten.bytes) catch {
-                posix.close(upstream_fd);
-                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
-                proxy_runtime.recordUpstreamFailure(.send);
-                proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
-                upstream.deinit(self.allocator);
-                if (proxy_policy.shouldRetry(request_policy, parsed.request.method, attempt, null, true)) {
-                    proxy_runtime.recordRetry();
-                    proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
-                    continue;
-                }
-                proxy_runtime.recordRouteFailure(route.name, .send);
-                proxy_runtime.recordResponse(.bad_gateway);
-                try self.sendLocalStreamResponse(parsed.request.stream_id, .bad_gateway, "{\"error\":\"upstream send failed\"}");
+                const body = if (failure_kind == .connect) "{\"error\":\"upstream connect failed\"}" else "{\"error\":\"upstream send failed\"}";
+                try self.sendLocalStreamResponse(parsed.request.stream_id, .bad_gateway, body);
                 try self.consumeDownstreamBytes(parsed.consumed);
                 return;
             };
@@ -1019,6 +1002,15 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     hasher.update(host);
     hasher.update(path);
     return hasher.final();
+}
+
+fn connectAndSendUpstream(self: *ConnectionRouter, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8) !posix.socket_t {
+    const upstream_fd = try connectToUpstream(route, upstream);
+    errdefer posix.close(upstream_fd);
+    const preface_and_settings = try buildInitialUpstreamPreamble(self.allocator);
+    defer self.allocator.free(preface_and_settings);
+    try sendUpstreamPreamble(upstream_fd, preface_and_settings, request_bytes);
+    return upstream_fd;
 }
 
 fn sendUpstreamPreamble(upstream_fd: posix.socket_t, preface_and_settings: []const u8, request_bytes: []const u8) !void {
