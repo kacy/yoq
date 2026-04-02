@@ -2292,3 +2292,144 @@ test "leader commit advances when majority matches" {
         alloc.free(actions);
     }
 }
+
+test "stale append_entries_reply does not regress match_index" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // become leader
+    for (0..max_election_ticks + 1) |_| {
+        raft.tick();
+    }
+    const ea = raft.drainActions();
+    defer alloc.free(ea);
+    raft.handleRequestVoteReply(2, .{
+        .term = raft.currentTerm(),
+        .vote_granted = true,
+    });
+    const la = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+
+    // propose two entries
+    const idx1 = try raft.propose("cmd1");
+    const idx2 = try raft.propose("cmd2");
+    const pa = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, pa);
+        alloc.free(pa);
+    }
+
+    // peer 2 confirms up to idx2 (newer reply arrives first)
+    raft.handleAppendEntriesReply(2, .{
+        .term = raft.currentTerm(),
+        .success = true,
+        .match_index = idx2,
+    });
+    try testing.expectEqual(idx2, raft.match_index[0]);
+
+    // stale reply for idx1 arrives later — must NOT regress match_index
+    raft.handleAppendEntriesReply(2, .{
+        .term = raft.currentTerm(),
+        .success = true,
+        .match_index = idx1,
+    });
+    try testing.expectEqual(idx2, raft.match_index[0]);
+
+    const actions = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, actions);
+        alloc.free(actions);
+    }
+}
+
+test "truncation followed by append uses fresh state" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    // follower has entries [1:term1, 2:term1]
+    try log.append(.{ .index = 1, .term = 1, .data = "a" });
+    try log.append(.{ .index = 2, .term = 1, .data = "b" });
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // leader sends entry at index 2 with different term — should truncate and replace
+    const reply = raft.handleAppendEntries(.{
+        .term = 2,
+        .leader_id = 2,
+        .prev_log_index = 1,
+        .prev_log_term = 1,
+        .entries = &.{
+            .{ .index = 2, .term = 2, .data = "new_b" },
+            .{ .index = 3, .term = 2, .data = "c" },
+        },
+        .leader_commit = 0,
+    });
+    try testing.expect(reply.success);
+    try testing.expectEqual(@as(LogIndex, 3), reply.match_index);
+
+    // verify both entries were written with correct terms
+    try testing.expectEqual(@as(Term, 2), log.termAt(2));
+    try testing.expectEqual(@as(Term, 2), log.termAt(3));
+
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+}
+
+test "snapshot reply does not regress match_index" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var leader = try setupTestRaft(alloc, 1, peers, &log);
+    defer leader.deinit();
+
+    // become leader
+    for (0..max_election_ticks + 1) |_| {
+        leader.tick();
+    }
+    const ea = leader.drainActions();
+    defer alloc.free(ea);
+    leader.handleRequestVoteReply(2, .{
+        .term = leader.currentTerm(),
+        .vote_granted = true,
+    });
+    const la = leader.drainActions();
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+
+    // manually set peer 2 match_index high (simulating prior replication)
+    leader.match_index[0] = 200;
+    leader.next_index[0] = 201;
+
+    // set a snapshot at index 100
+    leader.snapshot_meta = .{
+        .last_included_index = 100,
+        .last_included_term = leader.currentTerm(),
+        .data_len = 0,
+    };
+
+    // snapshot reply arrives — must NOT regress match_index from 200 to 100
+    leader.handleInstallSnapshotReply(2, .{ .term = leader.currentTerm() });
+    try testing.expectEqual(@as(LogIndex, 200), leader.match_index[0]);
+    try testing.expectEqual(@as(LogIndex, 201), leader.next_index[0]);
+
+    const actions = leader.drainActions();
+    defer {
+        freeActionEntries(alloc, actions);
+        alloc.free(actions);
+    }
+}
