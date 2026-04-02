@@ -50,8 +50,10 @@ pub fn handleInstallSnapshotReply(
 
     const peer_idx = common.peerIndex(self, from) orelse return;
     if (self.snapshot_meta) |meta| {
-        self.match_index[peer_idx] = meta.last_included_index;
-        self.next_index[peer_idx] = meta.last_included_index + 1;
+        if (meta.last_included_index > self.match_index[peer_idx]) {
+            self.match_index[peer_idx] = meta.last_included_index;
+            self.next_index[peer_idx] = meta.last_included_index + 1;
+        }
     }
 }
 
