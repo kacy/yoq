@@ -31,13 +31,15 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: digest_support.
     var buf: [8192]u8 = undefined;
     var write_ok = true;
     while (true) {
-        const bytes_read = src_file.read(&buf) catch {
+        const bytes_read = src_file.read(&buf) catch |e| {
+            log.warn("blob copy read failed: {}", .{e});
             write_ok = false;
             break;
         };
         if (bytes_read == 0) break;
         hasher.update(buf[0..bytes_read]);
-        dest_file.writeAll(buf[0..bytes_read]) catch {
+        dest_file.writeAll(buf[0..bytes_read]) catch |e| {
+            log.warn("blob copy write failed: {}", .{e});
             write_ok = false;
             break;
         };
@@ -75,7 +77,8 @@ fn writeToStore(data: []const u8, digest: digest_support.Digest) types.BlobError
 
     const file = std.fs.cwd().createFile(tmp_path, .{}) catch return types.BlobError.WriteFailed;
 
-    file.writeAll(data) catch {
+    file.writeAll(data) catch |e| {
+        log.warn("blob store write failed: {}", .{e});
         file.close();
         std.fs.cwd().deleteFile(tmp_path) catch {};
         return types.BlobError.WriteFailed;
@@ -89,14 +92,16 @@ fn writeToStore(data: []const u8, digest: digest_support.Digest) types.BlobError
 fn renameTempToBlob(tmp_path: []const u8, digest: digest_support.Digest) types.BlobError!void {
     var path_buf: [types.max_path]u8 = undefined;
     const final_path = blobPath(digest, &path_buf) catch return types.BlobError.PathTooLong;
-    std.fs.cwd().rename(tmp_path, final_path) catch {
+    std.fs.cwd().rename(tmp_path, final_path) catch |e| {
         if (hasVerifiedBlob(digest)) {
             std.fs.cwd().deleteFile(tmp_path) catch {};
             return;
         }
 
+        log.warn("blob rename failed, retrying after cleanup: {}", .{e});
         removeBlob(digest);
-        std.fs.cwd().rename(tmp_path, final_path) catch {
+        std.fs.cwd().rename(tmp_path, final_path) catch |e2| {
+            log.warn("blob rename retry failed: {}", .{e2});
             std.fs.cwd().deleteFile(tmp_path) catch {};
             return types.BlobError.WriteFailed;
         };
@@ -202,7 +207,8 @@ pub fn listBlobsOnDisk(alloc: std.mem.Allocator) types.BlobError!std.ArrayList([
     var dir_buf: [types.max_path]u8 = undefined;
     const dir_path = blobDir(&dir_buf) catch return types.BlobError.PathTooLong;
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| {
+        if (e != error.FileNotFound) log.warn("failed to open blob directory: {}", .{e});
         return std.ArrayList([]const u8).empty;
     };
     defer dir.close();
