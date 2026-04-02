@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const ip = @import("../ip.zig");
+const log = @import("../../lib/log.zig");
 const upstream_mod = @import("upstream.zig");
 
 pub fn clampPollTimeout(timeout_ms: u32) i32 {
@@ -35,8 +36,12 @@ pub fn setSocketTimeoutMs(fd: posix.socket_t, timeout_ms: u32) void {
         .sec = @divTrunc(timeout_ms, 1000),
         .usec = @as(i64, @intCast(@rem(timeout_ms, 1000))) * 1000,
     };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch |e| {
+        log.warn("l7 proxy failed to set SO_RCVTIMEO: {}", .{e});
+    };
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch |e| {
+        log.warn("l7 proxy failed to set SO_SNDTIMEO: {}", .{e});
+    };
 }
 
 pub fn writeAll(fd: posix.socket_t, data: []const u8) !void {
