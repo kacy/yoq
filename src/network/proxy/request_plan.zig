@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("../../api/http.zig");
 const http2 = @import("http2.zig");
+const proxy_helpers = @import("proxy_helpers.zig");
 const http2_request = @import("http2_request.zig");
 const router = @import("router.zig");
 
@@ -43,15 +44,15 @@ pub fn planRequest(alloc: std.mem.Allocator, routes: []const router.Route, raw_r
 fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_request: []const u8) PlanError!RequestPlan {
     const parsed = (http.parseRequest(raw_request) catch return error.InvalidHttp1Request) orelse return error.IncompleteHttp1Request;
     const host_header = http.findHeaderValue(parsed.headers_raw, "Host") orelse return error.MissingHostHeader;
-    const host = normalizeHost(host_header);
+    const host = proxy_helpers.normalizeHost(host_header);
     const request_headers = try router.collectHttp1Headers(alloc, parsed.headers_raw);
     defer alloc.free(request_headers);
-    const route = router.matchRoute(routes, methodString(parsed.method), host, parsed.path_only, request_headers) orelse return error.RouteNotFound;
+    const route = router.matchRoute(routes, proxy_helpers.methodString(parsed.method), host, parsed.path_only, request_headers) orelse return error.RouteNotFound;
 
     return .{
         .protocol = .http1,
         .method_enum = parsed.method,
-        .method = try alloc.dupe(u8, methodString(parsed.method)),
+        .method = try alloc.dupe(u8, proxy_helpers.methodString(parsed.method)),
         .host = try alloc.dupe(u8, host),
         .path = try alloc.dupe(u8, parsed.path),
         .route = route,
@@ -62,7 +63,7 @@ fn planHttp2Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
     const parsed = try http2_request.parseClientConnectionPreface(alloc, raw_request);
     defer parsed.deinit(alloc);
 
-    const host = normalizeHost(parsed.request.authority);
+    const host = proxy_helpers.normalizeHost(parsed.request.authority);
     var request_headers: std.ArrayList(router.RequestHeader) = .empty;
     defer request_headers.deinit(alloc);
     for (parsed.headers) |header| {
@@ -75,7 +76,7 @@ fn planHttp2Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
 
     return .{
         .protocol = .http2,
-        .method_enum = parseMethodString(parsed.request.method),
+        .method_enum = proxy_helpers.parseMethodString(parsed.request.method),
         .method = try alloc.dupe(u8, parsed.request.method),
         .host = try alloc.dupe(u8, host),
         .path = try alloc.dupe(u8, parsed.request.path),
@@ -83,32 +84,6 @@ fn planHttp2Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
         .http2_stream_id = parsed.request.stream_id,
         .end_stream = parsed.request.end_stream,
     };
-}
-
-fn normalizeHost(host_header: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, host_header, ':')) |port_sep| {
-        return host_header[0..port_sep];
-    }
-    return host_header;
-}
-
-fn methodString(method: http.Method) []const u8 {
-    return switch (method) {
-        .GET => "GET",
-        .HEAD => "HEAD",
-        .POST => "POST",
-        .PUT => "PUT",
-        .DELETE => "DELETE",
-    };
-}
-
-fn parseMethodString(method: []const u8) ?http.Method {
-    if (std.mem.eql(u8, method, "GET")) return .GET;
-    if (std.mem.eql(u8, method, "HEAD")) return .HEAD;
-    if (std.mem.eql(u8, method, "POST")) return .POST;
-    if (std.mem.eql(u8, method, "PUT")) return .PUT;
-    if (std.mem.eql(u8, method, "DELETE")) return .DELETE;
-    return null;
 }
 
 fn appendLiteralWithIndexedName(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name_index: u8, value: []const u8) !void {

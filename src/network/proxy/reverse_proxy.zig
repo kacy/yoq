@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
+const proxy_helpers = @import("proxy_helpers.zig");
 const ip = @import("../ip.zig");
 const http2 = @import("http2.zig");
 const http2_connection_router = @import("http2_connection_router.zig");
@@ -20,7 +21,6 @@ const x_forwarded_host_header = "X-Forwarded-Host";
 const x_forwarded_proto_header = "X-Forwarded-Proto";
 const traceparent_header = "traceparent";
 const tracestate_header = "tracestate";
-const trusted_forwarded_proto_ip: [4]u8 = .{ 127, 0, 0, 1 };
 
 const Protocol = enum {
     http1,
@@ -351,7 +351,7 @@ pub const ReverseProxy = struct {
         const writer = buf.writer(alloc);
 
         try writer.print("{s} {s} HTTP/1.1\r\n", .{
-            methodString(parsed.method),
+            proxy_helpers.methodString(parsed.method),
             spec.outbound_path,
         });
         try writer.print("Host: {s}\r\n", .{spec.outbound_host});
@@ -414,7 +414,7 @@ pub const ReverseProxy = struct {
             var upstream = resolveAttemptUpstream(self.allocator, plan, attempt, cb_policy) catch |err| switch (err) {
                 error.NoHealthyUpstream => {
                     log.warn("l7 proxy no eligible upstream after retries method={s} host={s} path={s} service={s} retries={d}", .{
-                        methodString(plan.method), plan.host, plan.path, plan.route.service, retries_used,
+                        proxy_helpers.methodString(plan.method), plan.host, plan.path, plan.route.service, retries_used,
                     });
                     return formatProxyResponse(self.allocator, .{
                         .status = .service_unavailable,
@@ -427,7 +427,7 @@ pub const ReverseProxy = struct {
 
             const response = self.forwardSingleAttempt(raw_request, plan, &upstream, client_ip) catch |err| {
                 recordUpstreamError(upstream.endpoint_id, cb_policy, mapUpstreamFailure(err), plan.route.name, plan.route.service, upstream.service);
-                if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, null, true)) {
+                if (proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), attempt, null, true)) {
                     proxy_runtime.recordRetry();
                     proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
                     retries_used += 1;
@@ -435,7 +435,7 @@ pub const ReverseProxy = struct {
                 }
                 proxy_runtime.recordRouteFailure(plan.route.name, mapRouteFailureKind(err));
                 log.warn("l7 proxy upstream failure method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d} error={}", .{
-                    methodString(plan.method), plan.host, plan.path, plan.route.service,
+                    proxy_helpers.methodString(plan.method), plan.host, plan.path, plan.route.service,
                     upstream.address, upstream.port, retries_used, err,
                 });
                 return formatProxyResponse(self.allocator, proxyFailureResponse(err));
@@ -469,7 +469,7 @@ pub const ReverseProxy = struct {
         const status_code = parseUpstreamStatusCode(response) catch {
             recordUpstreamError(upstream.endpoint_id, cb_policy, .other, plan.route.name, plan.route.service, upstream.service);
             log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
-                methodString(plan.method), plan.host, plan.path, plan.route.service,
+                proxy_helpers.methodString(plan.method), plan.host, plan.path, plan.route.service,
                 upstream.address, upstream.port, retries_used,
             });
             self.allocator.free(response);
@@ -485,14 +485,14 @@ pub const ReverseProxy = struct {
         } else {
             proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
         }
-        if (proxy_policy.shouldRetry(policy, methodString(plan.method), attempt, status_code, false)) {
+        if (proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), attempt, status_code, false)) {
             proxy_runtime.recordRetry();
             proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
             self.allocator.free(response);
             return null;
         }
         log.info("l7 proxy proxied method={s} host={s} path={s} service={s} upstream={s}:{d} status={d} retries={d}", .{
-            methodString(plan.method), plan.host, plan.path, plan.route.service,
+            proxy_helpers.methodString(plan.method), plan.host, plan.path, plan.route.service,
             upstream.address, upstream.port, status_code, retries_used,
         });
         proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status_code);
@@ -603,12 +603,12 @@ fn peerIpFromSocket(fd: posix.socket_t) ?[4]u8 {
 }
 
 fn trustedForwardedProto(headers_raw: []const u8, client_ip: ?[4]u8) ?[]const u8 {
-    if (client_ip == null or !std.mem.eql(u8, &client_ip.?, &trusted_forwarded_proto_ip)) return null;
+    if (client_ip == null or !std.mem.eql(u8, &client_ip.?, &proxy_helpers.trusted_forwarded_proto_ip)) return null;
     return http.findHeaderValue(headers_raw, x_forwarded_proto_header);
 }
 
 fn trustedForwardedProtoFromRawRequest(raw_request: []const u8, client_ip: ?[4]u8) ?[]const u8 {
-    if (client_ip == null or !std.mem.eql(u8, &client_ip.?, &trusted_forwarded_proto_ip)) return null;
+    if (client_ip == null or !std.mem.eql(u8, &client_ip.?, &proxy_helpers.trusted_forwarded_proto_ip)) return null;
     if (!http2.startsWithClientPreface(raw_request)) return null;
 
     var parsed = http2_request.parseClientConnectionPreface(std.heap.page_allocator, raw_request) catch return null;
@@ -621,60 +621,6 @@ fn trustedForwardedProtoFromRawRequest(raw_request: []const u8, client_ip: ?[4]u
 
 fn writeIp4(writer: anytype, address: [4]u8) !void {
     try writer.print("{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
-}
-
-fn normalizeHost(host_header: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, host_header, ':')) |port_sep| {
-        return host_header[0..port_sep];
-    }
-    return host_header;
-}
-
-fn buildOutboundPath(
-    alloc: std.mem.Allocator,
-    original_path: []const u8,
-    matched_prefix: []const u8,
-    rewrite_prefix: ?[]const u8,
-) ![]u8 {
-    const replacement = rewrite_prefix orelse return alloc.dupe(u8, original_path);
-    const query_start = std.mem.indexOfScalar(u8, original_path, '?');
-    const path_only = if (query_start) |start| original_path[0..start] else original_path;
-    const query = if (query_start) |start| original_path[start..] else "";
-    const suffix = if (std.mem.eql(u8, matched_prefix, "/"))
-        path_only
-    else if (path_only.len >= matched_prefix.len)
-        path_only[matched_prefix.len..]
-    else
-        "";
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-    try out.appendSlice(alloc, replacement);
-    if (suffix.len > 0) {
-        if (std.mem.eql(u8, replacement, "/")) {
-            if (suffix[0] == '/') {
-                try out.appendSlice(alloc, suffix[1..]);
-            } else {
-                try out.appendSlice(alloc, suffix);
-            }
-        } else {
-            if (suffix[0] != '/') try out.append(alloc, '/');
-            try out.appendSlice(alloc, suffix);
-        }
-    }
-    if (out.items.len == 0) try out.append(alloc, '/');
-    try out.appendSlice(alloc, query);
-    return out.toOwnedSlice(alloc);
-}
-
-fn methodString(method: http.Method) []const u8 {
-    return switch (method) {
-        .GET => "GET",
-        .HEAD => "HEAD",
-        .POST => "POST",
-        .PUT => "PUT",
-        .DELETE => "DELETE",
-    };
 }
 
 const forward_skip_headers = [_][]const u8{
@@ -844,7 +790,7 @@ fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan
         .http2_request_end_stream = planned.end_stream,
         .method = planned.method_enum.?,
         .path = try self.allocator.dupe(u8, planned.path),
-        .outbound_path = try buildOutboundPath(self.allocator, planned.path, planned.route.match.path_prefix, planned.route.rewrite_prefix),
+        .outbound_path = try proxy_helpers.buildOutboundPath(self.allocator, planned.path, planned.route.match.path_prefix, planned.route.rewrite_prefix),
         .host = try self.allocator.dupe(u8, planned.host),
         .outbound_host = if (route.preserve_host)
             try self.allocator.dupe(u8, planned.host)
@@ -862,10 +808,10 @@ fn http1LoopResponse(self: *const ReverseProxy, raw_request: []const u8) !?Proxy
     if (http.findHeaderValue(request.headers_raw, proxy_loop_header) == null) return null;
 
     const host_header = http.findHeaderValue(request.headers_raw, "Host") orelse "";
-    const host = normalizeHost(host_header);
+    const host = proxy_helpers.normalizeHost(host_header);
     proxy_runtime.recordLoopRejection();
     log.warn("l7 proxy loop rejected method={s} host={s} path={s}", .{
-        methodString(request.method),
+        proxy_helpers.methodString(request.method),
         host,
         request.path_only,
     });

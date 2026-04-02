@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const http = @import("../../api/http.zig");
 const http2 = @import("http2.zig");
+const proxy_helpers = @import("proxy_helpers.zig");
 const http2_request = @import("http2_request.zig");
 const http2_response = @import("http2_response.zig");
 const proxy_policy = @import("policy.zig");
@@ -10,8 +11,6 @@ const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
 const ip = @import("../ip.zig");
 const hpack = @import("hpack.zig");
-
-const trusted_forwarded_proto_ip: [4]u8 = .{ 127, 0, 0, 1 };
 
 pub fn proxyConnection(
     alloc: std.mem.Allocator,
@@ -214,14 +213,14 @@ const ConnectionRouter = struct {
             return;
         };
 
-        const method_enum = parseMethodString(parsed.request.method) orelse {
+        const method_enum = proxy_helpers.parseMethodString(parsed.request.method) orelse {
             try self.sendLocalStreamResponse(parsed.request.stream_id, .bad_request, "{\"error\":\"unsupported http2 method\"}");
             proxy_runtime.recordResponse(.bad_request);
             try self.consumeDownstreamBytes(parsed.consumed);
             return;
         };
 
-        const normalized_host = normalizeHost(parsed.request.authority);
+        const normalized_host = proxy_helpers.normalizeHost(parsed.request.authority);
         const selection_key = routeSelectionKey(parsed.request.method, normalized_host, parsed.request.path);
         const forwarded_proto = trustedForwardedProto(parsed.headers, self.client_ip);
 
@@ -244,7 +243,7 @@ const ConnectionRouter = struct {
             };
             errdefer upstream.deinit(self.allocator);
 
-            const outbound_path = try buildOutboundPath(self.allocator, parsed.request.path, route.match.path_prefix, route.rewrite_prefix);
+            const outbound_path = try proxy_helpers.buildOutboundPath(self.allocator, parsed.request.path, route.match.path_prefix, route.rewrite_prefix);
             defer self.allocator.free(outbound_path);
             const outbound_authority = if (route.preserve_host) normalized_host else backend_service;
 
@@ -615,7 +614,7 @@ const ConnectionRouter = struct {
     }
 
     fn matchRouteForParsedRequest(self: *ConnectionRouter, parsed: http2_request.ParseResult) ?router.Route {
-        const host = normalizeHost(parsed.request.authority);
+        const host = proxy_helpers.normalizeHost(parsed.request.authority);
         var request_headers: std.ArrayList(router.RequestHeader) = .empty;
         defer request_headers.deinit(self.allocator);
         for (parsed.headers) |header| {
@@ -637,12 +636,12 @@ const ConnectionRouter = struct {
         };
         errdefer upstream.deinit(self.allocator);
 
-        const outbound_path = buildOutboundPath(self.allocator, parsed.request.path, route.match.path_prefix, route.rewrite_prefix) catch {
+        const outbound_path = proxy_helpers.buildOutboundPath(self.allocator, parsed.request.path, route.match.path_prefix, route.rewrite_prefix) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
         defer self.allocator.free(outbound_path);
-        const normalized_host = normalizeHost(parsed.request.authority);
+        const normalized_host = proxy_helpers.normalizeHost(parsed.request.authority);
         const outbound_authority = if (route.preserve_host) normalized_host else mirror_service;
         const forwarded_proto = trustedForwardedProto(parsed.headers, self.client_ip);
         const rewritten = http2_request.rewriteRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0, .{
@@ -822,62 +821,11 @@ const SessionPollTarget = struct {
 };
 
 fn trustedForwardedProto(headers: []const hpack.HeaderField, client_ip: ?[4]u8) ?[]const u8 {
-    if (client_ip == null or !std.mem.eql(u8, &client_ip.?, &trusted_forwarded_proto_ip)) return null;
+    if (client_ip == null or !std.mem.eql(u8, &client_ip.?, &proxy_helpers.trusted_forwarded_proto_ip)) return null;
     for (headers) |header| {
         if (std.mem.eql(u8, header.name, "x-forwarded-proto")) return header.value;
     }
     return null;
-}
-
-fn normalizeHost(host_header: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, host_header, ':')) |port_sep| return host_header[0..port_sep];
-    return host_header;
-}
-
-fn parseMethodString(method: []const u8) ?http.Method {
-    if (std.mem.eql(u8, method, "GET")) return .GET;
-    if (std.mem.eql(u8, method, "HEAD")) return .HEAD;
-    if (std.mem.eql(u8, method, "POST")) return .POST;
-    if (std.mem.eql(u8, method, "PUT")) return .PUT;
-    if (std.mem.eql(u8, method, "DELETE")) return .DELETE;
-    return null;
-}
-
-fn buildOutboundPath(
-    alloc: std.mem.Allocator,
-    original_path: []const u8,
-    matched_prefix: []const u8,
-    rewrite_prefix: ?[]const u8,
-) ![]u8 {
-    const replacement = rewrite_prefix orelse return alloc.dupe(u8, original_path);
-    const query_start = std.mem.indexOfScalar(u8, original_path, '?');
-    const path_only = if (query_start) |start| original_path[0..start] else original_path;
-    const query = if (query_start) |start| original_path[start..] else "";
-    const suffix = if (std.mem.eql(u8, matched_prefix, "/"))
-        path_only
-    else if (path_only.len >= matched_prefix.len)
-        path_only[matched_prefix.len..]
-    else
-        "";
-
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(alloc);
-    try out.appendSlice(alloc, replacement);
-    if (suffix.len > 0) {
-        if (std.mem.eql(u8, replacement, "/")) {
-            if (suffix[0] == '/') {
-                try out.appendSlice(alloc, suffix[1..]);
-            } else {
-                try out.appendSlice(alloc, suffix);
-            }
-        } else {
-            if (suffix[0] != '/') try out.append(alloc, '/');
-            try out.appendSlice(alloc, suffix);
-        }
-    }
-    if (out.items.len == 0) try out.append(alloc, '/');
-    try out.appendSlice(alloc, query);
-    return out.toOwnedSlice(alloc);
 }
 
 fn buildInitialUpstreamPreamble(alloc: std.mem.Allocator) ![]u8 {
