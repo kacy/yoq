@@ -85,6 +85,14 @@ pub fn writeFrameHeader(dest: []u8, header: FrameHeader) Error!void {
     std.mem.writeInt(u32, dest[5..9], header.stream_id, .big);
 }
 
+pub fn buildFrame(alloc: std.mem.Allocator, header: FrameHeader, payload: []const u8) ![]u8 {
+    const buf = try alloc.alloc(u8, frame_header_len + payload.len);
+    errdefer alloc.free(buf);
+    try writeFrameHeader(buf[0..frame_header_len], header);
+    @memcpy(buf[frame_header_len..], payload);
+    return buf;
+}
+
 pub fn isInitialServerSettingsFrame(header: FrameHeader) bool {
     return header.frame_type == .settings and header.stream_id == 0;
 }

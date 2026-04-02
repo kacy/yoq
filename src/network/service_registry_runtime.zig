@@ -231,51 +231,7 @@ fn loadSnapshotInto(next_registry: *service_registry.Registry) !void {
     }
 
     for (services.items) |service| {
-        const route_definitions = try cloneRouteDefinitions(alloc, service.http_routes);
-        defer deinitRouteDefinitions(alloc, route_definitions);
-        try next_registry.upsertService(.{
-            .service_name = service.service_name,
-            .vip_address = service.vip_address,
-            .lb_policy = service.lb_policy,
-            .http_routes = route_definitions,
-            .http_proxy_host = service.http_proxy_host,
-            .http_proxy_path_prefix = service.http_proxy_path_prefix,
-            .http_proxy_rewrite_prefix = service.http_proxy_rewrite_prefix,
-            .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
-            .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
-            .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
-            .http_proxy_http2_idle_timeout_ms = if (service.http_proxy_http2_idle_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
-            .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
-            .http_proxy_preserve_host = service.http_proxy_preserve_host,
-            .http_proxy_retry_on_5xx = service.http_proxy_retry_on_5xx,
-            .http_proxy_circuit_breaker_threshold = if (service.http_proxy_circuit_breaker_threshold) |v| @intCast(v) else null,
-            .http_proxy_circuit_breaker_timeout_ms = if (service.http_proxy_circuit_breaker_timeout_ms) |v| @intCast(v) else null,
-        });
-
-        var endpoints = store.listServiceEndpoints(alloc, service.service_name) catch return error.StoreReadFailed;
-        defer {
-            for (endpoints.items) |endpoint| endpoint.deinit(alloc);
-            endpoints.deinit(alloc);
-        }
-
-        var definitions: std.ArrayList(service_registry.EndpointDefinition) = .empty;
-        defer definitions.deinit(alloc);
-        for (endpoints.items) |endpoint| {
-            try definitions.append(alloc, .{
-                .endpoint_id = endpoint.endpoint_id,
-                .container_id = endpoint.container_id,
-                .node_id = endpoint.node_id,
-                .ip_address = endpoint.ip_address,
-                .port = endpoint.port,
-                .weight = endpoint.weight,
-                .admin_state = endpoint.admin_state,
-                .generation = endpoint.generation,
-                .registered_at = endpoint.registered_at,
-                .last_seen_at = endpoint.last_seen_at,
-            });
-        }
-
-        try next_registry.replaceServiceEndpoints(service.service_name, definitions.items);
+        try upsertServiceFromRecord(next_registry, alloc, &service);
     }
 }
 
@@ -290,29 +246,15 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
     };
     defer service.deinit(alloc);
 
+    try upsertServiceFromRecord(&registry, alloc, &service);
+}
+
+fn upsertServiceFromRecord(target: *service_registry.Registry, alloc: Allocator, service: *const store.ServiceRecord) !void {
     const route_definitions = try cloneRouteDefinitions(alloc, service.http_routes);
     defer deinitRouteDefinitions(alloc, route_definitions);
-    try registry.upsertService(.{
-        .service_name = service.service_name,
-        .vip_address = service.vip_address,
-        .lb_policy = service.lb_policy,
-        .http_routes = route_definitions,
-        .http_proxy_host = service.http_proxy_host,
-        .http_proxy_path_prefix = service.http_proxy_path_prefix,
-        .http_proxy_rewrite_prefix = service.http_proxy_rewrite_prefix,
-        .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
-        .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
-        .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
-        .http_proxy_http2_idle_timeout_ms = if (service.http_proxy_http2_idle_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
-        .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
-        .http_proxy_preserve_host = service.http_proxy_preserve_host,
-        .http_proxy_retry_on_5xx = service.http_proxy_retry_on_5xx,
-        .http_proxy_circuit_breaker_threshold = if (service.http_proxy_circuit_breaker_threshold) |v| @intCast(v) else null,
-        .http_proxy_circuit_breaker_timeout_ms = if (service.http_proxy_circuit_breaker_timeout_ms) |v| @intCast(v) else null,
-        .http_proxy_mirror_service = service.http_proxy_mirror_service,
-    });
+    try target.upsertService(serviceDefinitionFromRecord(service, route_definitions));
 
-    var endpoints = store.listServiceEndpoints(alloc, service_name) catch return error.StoreReadFailed;
+    var endpoints = store.listServiceEndpoints(alloc, service.service_name) catch return error.StoreReadFailed;
     defer {
         for (endpoints.items) |endpoint| endpoint.deinit(alloc);
         endpoints.deinit(alloc);
@@ -335,7 +277,29 @@ fn syncServiceFromStoreLocked(service_name: []const u8) !void {
         });
     }
 
-    try registry.replaceServiceEndpoints(service_name, definitions.items);
+    try target.replaceServiceEndpoints(service.service_name, definitions.items);
+}
+
+fn serviceDefinitionFromRecord(service: *const store.ServiceRecord, route_definitions: []const service_registry.HttpRouteDefinition) service_registry.ServiceDefinition {
+    return .{
+        .service_name = service.service_name,
+        .vip_address = service.vip_address,
+        .lb_policy = service.lb_policy,
+        .http_routes = route_definitions,
+        .http_proxy_host = service.http_proxy_host,
+        .http_proxy_path_prefix = service.http_proxy_path_prefix,
+        .http_proxy_rewrite_prefix = service.http_proxy_rewrite_prefix,
+        .http_proxy_retries = if (service.http_proxy_retries) |retries| @intCast(retries) else null,
+        .http_proxy_connect_timeout_ms = if (service.http_proxy_connect_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+        .http_proxy_request_timeout_ms = if (service.http_proxy_request_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+        .http_proxy_http2_idle_timeout_ms = if (service.http_proxy_http2_idle_timeout_ms) |timeout_ms| @intCast(timeout_ms) else null,
+        .http_proxy_target_port = if (service.http_proxy_target_port) |port| @intCast(port) else null,
+        .http_proxy_preserve_host = service.http_proxy_preserve_host,
+        .http_proxy_retry_on_5xx = service.http_proxy_retry_on_5xx,
+        .http_proxy_circuit_breaker_threshold = if (service.http_proxy_circuit_breaker_threshold) |v| @intCast(v) else null,
+        .http_proxy_circuit_breaker_timeout_ms = if (service.http_proxy_circuit_breaker_timeout_ms) |v| @intCast(v) else null,
+        .http_proxy_mirror_service = service.http_proxy_mirror_service,
+    };
 }
 
 fn cloneRouteDefinitions(alloc: Allocator, routes: []const store.ServiceHttpRouteRecord) ![]const service_registry.HttpRouteDefinition {

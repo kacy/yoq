@@ -740,28 +740,20 @@ test "selectBackendService uses weighted backend targets" {
     try std.testing.expectEqualStrings("api-canary", selectBackendService(route, 99, 0));
 }
 
+fn calculateDegradedReason(route_state: ?RouteStatusState, route_degraded: bool, steering_ready: bool) RouteDegradedReason {
+    if (route_state) |state| {
+        if (state.degraded_reason != .none) return state.degraded_reason;
+    }
+    if (route_degraded) return .service_state;
+    if (!steering_ready) return .steering_not_ready;
+    return .none;
+}
+
 fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !RouteSnapshot {
     const route_state = route_statuses.get(route.name);
     const steering_state = try steering_runtime.snapshotServiceStatus(alloc, route.service);
-    const vip_traffic_mode: VipTrafficMode = if (steering_state.ready)
-        .l7_proxy
-    else
-        .l4_fallback;
-    const degraded_reason: RouteDegradedReason = if (route_state) |state|
-        if (state.degraded_reason != .none)
-            state.degraded_reason
-        else if (route.degraded)
-            .service_state
-        else if (!steering_state.ready)
-            .steering_not_ready
-        else
-            .none
-    else if (route.degraded)
-        .service_state
-    else if (!steering_state.ready)
-        .steering_not_ready
-    else
-        .none;
+    const vip_traffic_mode: VipTrafficMode = if (steering_state.ready) .l7_proxy else .l4_fallback;
+    const degraded_reason = calculateDegradedReason(route_state, route.degraded, steering_state.ready);
 
     return .{
         .name = try alloc.dupe(u8, route.name),

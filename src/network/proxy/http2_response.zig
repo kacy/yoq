@@ -49,7 +49,7 @@ fn formatSimpleResponseWithSettings(
     const content_length = std.fmt.bufPrint(&content_length_buf, "{d}", .{body.len}) catch unreachable;
     try appendLiteralHeaderWithIndexedName(&header_block, alloc, 28, content_length);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = Flag.end_headers | if (body.len == 0) Flag.end_stream else 0,
@@ -57,7 +57,7 @@ fn formatSimpleResponseWithSettings(
     }, header_block.items);
     defer alloc.free(headers);
 
-    const data = if (body.len == 0) null else try buildFrame(alloc, .{
+    const data = if (body.len == 0) null else try http2.buildFrame(alloc, .{
         .length = @intCast(body.len),
         .frame_type = .data,
         .flags = Flag.end_stream,
@@ -126,14 +126,6 @@ fn appendInteger(
         remaining >>= 7;
     }
     try buf.append(alloc, @intCast(remaining));
-}
-
-fn buildFrame(alloc: std.mem.Allocator, header: http2.FrameHeader, payload: []const u8) ![]u8 {
-    const buf = try alloc.alloc(u8, http2.frame_header_len + payload.len);
-    errdefer alloc.free(buf);
-    try http2.writeFrameHeader(buf[0..http2.frame_header_len], header);
-    @memcpy(buf[http2.frame_header_len..], payload);
-    return buf;
 }
 
 fn parseNextFrame(buf: []const u8, pos: usize) ?struct { header: http2.FrameHeader, payload: []const u8, next: usize } {
