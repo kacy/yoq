@@ -193,7 +193,7 @@ pub fn checkSuspectTimeouts(self: anytype) !void {
     var iter = self.members.iterator();
     while (iter.next()) |entry| {
         const member = entry.value_ptr;
-        if (member.state == .suspect and self.tick_count - member.state_changed_at >= self.suspect_timeout) {
+        if (member.state == .suspect and self.tick_count >= member.state_changed_at and self.tick_count - member.state_changed_at >= self.suspect_timeout) {
             try dead_list.append(self.alloc, member.id);
         }
     }

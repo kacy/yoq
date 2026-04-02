@@ -854,7 +854,7 @@ fn parseResponseStatus(buf: []const u8) !u16 {
 
     var header_block: std.ArrayList(u8) = .empty;
     defer header_block.deinit(std.heap.page_allocator);
-    try header_block.appendSlice(std.heap.page_allocator, headerBlockFragment(buf[pos .. pos + first.length], first.flags));
+    try header_block.appendSlice(std.heap.page_allocator, headerBlockFragment(buf[pos .. pos + first.length], first.flags) orelse return error.InvalidResponse);
     pos += first.length;
 
     while ((first.flags & 0x4) == 0) {
@@ -934,14 +934,16 @@ fn appendRewrittenFrame(
     try out.appendSlice(alloc, payload);
 }
 
-fn headerBlockFragment(payload: []const u8, flags: u8) []const u8 {
+fn headerBlockFragment(payload: []const u8, flags: u8) ?[]const u8 {
     var pos: usize = 0;
     var padded_len: usize = 0;
     if ((flags & 0x8) != 0) {
+        if (payload.len == 0) return null;
         padded_len = payload[0];
         pos += 1;
     }
     if ((flags & 0x20) != 0) pos += 5;
+    if (pos > payload.len or padded_len > payload.len - pos) return null;
     return payload[pos .. payload.len - padded_len];
 }
 

@@ -180,7 +180,8 @@ pub fn checkDiskSpace() Check {
         return makeCheck("disk-space", .warn, "could not check disk space");
     }
 
-    const avail_bytes = stat.f_bavail * @as(u64, @bitCast(stat.f_bsize));
+    const bsize: u64 = if (stat.f_bsize > 0) @intCast(stat.f_bsize) else return makeCheck("disk-space", .warn, "invalid block size");
+    const avail_bytes = stat.f_bavail * bsize;
     const avail_gb = avail_bytes / (1024 * 1024 * 1024);
 
     if (avail_gb >= 10) {

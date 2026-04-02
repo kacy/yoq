@@ -436,8 +436,8 @@ pub const ReverseProxy = struct {
                 }
                 proxy_runtime.recordRouteFailure(plan.route.name, mapRouteFailureKind(err));
                 log.warn("l7 proxy upstream failure method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d} error={}", .{
-                    proxy_helpers.methodString(plan.method), plan.host, plan.path, plan.route.service,
-                    upstream.address, upstream.port, retries_used, err,
+                    proxy_helpers.methodString(plan.method), plan.host,     plan.path,    plan.route.service,
+                    upstream.address,                        upstream.port, retries_used, err,
                 });
                 return formatProxyResponse(self.allocator, proxyFailureResponse(err));
             };
@@ -470,8 +470,8 @@ pub const ReverseProxy = struct {
         const status_code = parseUpstreamStatusCode(response) catch {
             recordUpstreamError(upstream.endpoint_id, cb_policy, .other, plan.route.name, plan.route.service, upstream.service);
             log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
-                proxy_helpers.methodString(plan.method), plan.host, plan.path, plan.route.service,
-                upstream.address, upstream.port, retries_used,
+                proxy_helpers.methodString(plan.method), plan.host,     plan.path,    plan.route.service,
+                upstream.address,                        upstream.port, retries_used,
             });
             self.allocator.free(response);
             proxy_runtime.recordRouteFailure(plan.route.name, .invalid_response);
@@ -493,8 +493,8 @@ pub const ReverseProxy = struct {
             return null;
         }
         log.info("l7 proxy proxied method={s} host={s} path={s} service={s} upstream={s}:{d} status={d} retries={d}", .{
-            proxy_helpers.methodString(plan.method), plan.host, plan.path, plan.route.service,
-            upstream.address, upstream.port, status_code, retries_used,
+            proxy_helpers.methodString(plan.method), plan.host,     plan.path,   plan.route.service,
+            upstream.address,                        upstream.port, status_code, retries_used,
         });
         proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status_code);
         proxy_runtime.recordRouteRecovered(plan.route.name);
@@ -2126,6 +2126,7 @@ fn appendLiteralWithIndexedName(
     name_index: u8,
     value: []const u8,
 ) !void {
+    if (value.len > 127) return error.HeaderTooLong;
     try buf.append(alloc, name_index);
     try buf.append(alloc, @intCast(value.len));
     try buf.appendSlice(alloc, value);

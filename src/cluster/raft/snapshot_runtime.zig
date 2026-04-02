@@ -75,8 +75,8 @@ pub fn sendInstallSnapshot(self: anytype, peer_idx: usize, meta: SnapshotMeta) v
 pub fn finishInstallSnapshot(self: anytype, meta: SnapshotMeta) bool {
     if (!self.log.setSnapshotMeta(meta)) return false;
     self.snapshot_meta = meta;
-    self.commit_index = meta.last_included_index;
-    self.last_applied = meta.last_included_index;
+    self.commit_index = @max(self.commit_index, meta.last_included_index);
+    self.last_applied = @max(self.last_applied, meta.last_included_index);
     return true;
 }
 

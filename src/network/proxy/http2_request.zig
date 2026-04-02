@@ -353,10 +353,12 @@ fn headerBlockFragment(payload: []const u8, flags: u8) ParseError![]const u8 {
     }
 
     if (padded_len > payload.len - pos) return error.InvalidHeadersFrame;
+    if (padded_len > payload.len) return error.InvalidHeadersFrame;
     return payload[pos .. payload.len - padded_len];
 }
 
 fn appendLiteralWithIndexedName(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name_index: u8, value: []const u8) !void {
+    if (value.len > 127) return error.HeaderTooLong;
     try buf.append(alloc, name_index);
     try buf.append(alloc, @intCast(value.len));
     try buf.appendSlice(alloc, value);

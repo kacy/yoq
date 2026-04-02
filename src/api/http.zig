@@ -97,7 +97,7 @@ pub fn parseRequest(buf: []const u8) HttpError!?Request {
     // request line must end before the header terminator
     if (line.headers_start > header_end) return HttpError.BadRequest;
     const headers_raw = buf[line.headers_start..header_end];
-    const content_length = findContentLength(headers_raw);
+    const content_length = findContentLength(headers_raw) catch return HttpError.BadRequest;
     if (content_length > max_body_bytes) return HttpError.BodyTooLarge;
     if (body_start + content_length > buf.len) return null;
 
@@ -116,7 +116,7 @@ pub fn parseRequest(buf: []const u8) HttpError!?Request {
 
 /// extract Content-Length from raw headers. case-insensitive.
 /// returns 0 if not found or unparseable.
-pub fn findContentLength(headers: []const u8) usize {
+pub fn findContentLength(headers: []const u8) HttpError!usize {
     const needle = "content-length:";
     var pos: usize = 0;
 
@@ -141,7 +141,7 @@ pub fn findContentLength(headers: []const u8) usize {
                 while (val_start < line.len and line[val_start] == ' ') {
                     val_start += 1;
                 }
-                return std.fmt.parseInt(usize, line[val_start..], 10) catch 0;
+                return std.fmt.parseInt(usize, line[val_start..], 10) catch return HttpError.BadRequest;
             }
         }
 
@@ -183,12 +183,21 @@ pub fn formatResponseWithType(buf: []u8, status: StatusCode, content_type: []con
 /// shorthand for a JSON error response body.
 /// formats: {"error":"<message>"}
 pub fn formatError(buf: []u8, status: StatusCode, message: []const u8) []const u8 {
-    // build the JSON error body first in a temp buffer
     var body_buf: [512]u8 = undefined;
-    const body = std.fmt.bufPrint(&body_buf, "{{\"error\":\"{s}\"}}", .{message}) catch
-        "{\"error\":\"internal error\"}";
-
-    return formatResponse(buf, status, body);
+    var stream = std.io.fixedBufferStream(&body_buf);
+    const writer = stream.writer();
+    writer.writeAll("{\"error\":\"") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}");
+    for (message) |c| {
+        switch (c) {
+            '"' => writer.writeAll("\\\"") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+            '\\' => writer.writeAll("\\\\") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+            '\n' => writer.writeAll("\\n") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+            '\r' => writer.writeAll("\\r") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+            else => writer.writeByte(c) catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+        }
+    }
+    writer.writeAll("\"}") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}");
+    return formatResponse(buf, status, body_buf[0..stream.pos]);
 }
 
 /// find a header value by name (case-insensitive) in raw headers.
@@ -361,15 +370,20 @@ test "empty URI returns error" {
 }
 
 test "content-length case insensitive" {
-    try std.testing.expectEqual(@as(usize, 42), findContentLength("Content-Length: 42\r\n"));
-    try std.testing.expectEqual(@as(usize, 42), findContentLength("content-length: 42\r\n"));
-    try std.testing.expectEqual(@as(usize, 42), findContentLength("CONTENT-LENGTH: 42\r\n"));
-    try std.testing.expectEqual(@as(usize, 42), findContentLength("Content-length:42\r\n"));
+    try std.testing.expectEqual(@as(usize, 42), try findContentLength("Content-Length: 42\r\n"));
+    try std.testing.expectEqual(@as(usize, 42), try findContentLength("content-length: 42\r\n"));
+    try std.testing.expectEqual(@as(usize, 42), try findContentLength("CONTENT-LENGTH: 42\r\n"));
+    try std.testing.expectEqual(@as(usize, 42), try findContentLength("Content-length:42\r\n"));
 }
 
 test "content-length missing returns 0" {
-    try std.testing.expectEqual(@as(usize, 0), findContentLength("Host: localhost\r\n"));
-    try std.testing.expectEqual(@as(usize, 0), findContentLength(""));
+    try std.testing.expectEqual(@as(usize, 0), try findContentLength("Host: localhost\r\n"));
+    try std.testing.expectEqual(@as(usize, 0), try findContentLength(""));
+}
+
+test "content-length malformed returns error" {
+    try std.testing.expectError(HttpError.BadRequest, findContentLength("Content-Length: abc\r\n"));
+    try std.testing.expectError(HttpError.BadRequest, findContentLength("Content-Length: \r\n"));
 }
 
 test "format response" {
