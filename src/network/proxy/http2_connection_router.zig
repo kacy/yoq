@@ -256,7 +256,7 @@ const ConnectionRouter = struct {
             });
             defer rewritten.deinit(self.allocator);
 
-            const upstream_fd = self.connectAndSendUpstream(route, &upstream, rewritten.bytes) catch |connect_err| {
+            const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, rewritten.bytes) catch |connect_err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 const failure_kind: proxy_runtime.UpstreamFailureKind = if (connect_err == error.ConnectFailed or connect_err == error.ConnectTimedOut) .connect else .send;
                 proxy_runtime.recordUpstreamFailure(failure_kind);
@@ -1004,11 +1004,11 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     return hasher.final();
 }
 
-fn connectAndSendUpstream(self: *ConnectionRouter, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8) !posix.socket_t {
+fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8) !posix.socket_t {
     const upstream_fd = try connectToUpstream(route, upstream);
     errdefer posix.close(upstream_fd);
-    const preface_and_settings = try buildInitialUpstreamPreamble(self.allocator);
-    defer self.allocator.free(preface_and_settings);
+    const preface_and_settings = try buildInitialUpstreamPreamble(alloc);
+    defer alloc.free(preface_and_settings);
     try sendUpstreamPreamble(upstream_fd, preface_and_settings, request_bytes);
     return upstream_fd;
 }
