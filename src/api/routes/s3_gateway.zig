@@ -155,7 +155,7 @@ fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
         },
         .DELETE => {
             // DeleteObject — S3 returns 204 even if object doesn't exist
-            s3.deleteObject(bucket, key) catch {};
+            s3.deleteObject(bucket, key) catch return common.internalError();
             return .{ .status = .no_content, .body = "", .allocated = false };
         },
         .POST => common.methodNotAllowed(),
