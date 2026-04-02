@@ -214,7 +214,9 @@ pub const ReverseProxy = struct {
                 }),
             } catch return;
             defer self.allocator.free(response);
-            _ = socket_helpers.writeAll(client_fd, response) catch {};
+            _ = socket_helpers.writeAll(client_fd, response) catch |e| {
+                log.warn("l7 proxy client write failed: {}", .{e});
+            };
             return;
         };
 
@@ -225,7 +227,9 @@ pub const ReverseProxy = struct {
                 .body = "{\"error\":\"proxy request failed\"}",
             }) catch return;
             defer self.allocator.free(internal);
-            _ = socket_helpers.writeAll(client_fd, internal) catch {};
+            _ = socket_helpers.writeAll(client_fd, internal) catch |e| {
+                log.warn("l7 proxy client write failed: {}", .{e});
+            };
             return;
         };
         switch (handled) {
@@ -233,7 +237,9 @@ pub const ReverseProxy = struct {
                 proxy_runtime.recordResponse(resp.status);
                 const response = formatResponseForProtocol(self.allocator, resp) catch return;
                 defer self.allocator.free(response);
-                _ = socket_helpers.writeAll(client_fd, response) catch {};
+                _ = socket_helpers.writeAll(client_fd, response) catch |e| {
+                    log.warn("l7 proxy client write failed: {}", .{e});
+                };
             },
             .forward => |plan| {
                 defer plan.deinit(self.allocator);
@@ -254,7 +260,9 @@ pub const ReverseProxy = struct {
                             "{\"error\":\"proxy request failed\"}",
                         ) catch return;
                         defer self.allocator.free(internal);
-                        _ = socket_helpers.writeAll(client_fd, internal) catch {};
+                        _ = socket_helpers.writeAll(client_fd, internal) catch |e| {
+                            log.warn("l7 proxy client write failed: {}", .{e});
+                        };
                     };
                     return;
                 }
@@ -268,11 +276,15 @@ pub const ReverseProxy = struct {
                         .body = "{\"error\":\"proxy request failed\"}",
                     }) catch return;
                     defer self.allocator.free(internal);
-                    _ = socket_helpers.writeAll(client_fd, internal) catch {};
+                    _ = socket_helpers.writeAll(client_fd, internal) catch |e| {
+                        log.warn("l7 proxy client write failed: {}", .{e});
+                    };
                     return;
                 };
                 defer self.allocator.free(response);
-                _ = socket_helpers.writeAll(client_fd, response) catch {};
+                _ = socket_helpers.writeAll(client_fd, response) catch |e| {
+                    log.warn("l7 proxy client write failed: {}", .{e});
+                };
             },
         }
     }
