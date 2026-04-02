@@ -111,7 +111,7 @@ test "dispatch version" {
     const resp = dispatch(req, std.testing.allocator);
 
     try std.testing.expectEqual(http.StatusCode.ok, resp.status);
-    try std.testing.expectEqualStrings("{\"version\":\"0.1.0\"}", resp.body);
+    try std.testing.expectEqualStrings("{\"version\":\"0.1.8\"}", resp.body);
 }
 
 test "dispatch not found" {
