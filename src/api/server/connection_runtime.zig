@@ -120,7 +120,9 @@ pub fn findHeaderEnd(buf: []const u8) ?usize {
 
 fn setReadTimeout(fd: posix.fd_t, seconds: i64) void {
     const timeout = posix.timeval{ .sec = seconds, .usec = 0 };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |e| {
+        log.warn("api server failed to set read timeout: {}", .{e});
+    };
 }
 
 fn sendError(fd: posix.fd_t, status: http.StatusCode, message: []const u8) void {
