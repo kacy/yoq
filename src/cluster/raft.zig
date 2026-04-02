@@ -2096,3 +2096,199 @@ test "transferLeadership returns false when not leader" {
 test "protocolVersion returns 1" {
     try testing.expectEqual(@as(u32, 1), Raft.protocolVersion());
 }
+
+test "finishInstallSnapshot preserves higher commit_index" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // simulate: node has already committed up to index 100
+    raft.commit_index = 100;
+    raft.last_applied = 100;
+
+    // install a snapshot at a lower index — commit_index must not regress
+    const result = raft.finishInstallSnapshot(.{
+        .last_included_index = 50,
+        .last_included_term = 1,
+        .data_len = 0,
+    });
+    try testing.expect(result);
+    try testing.expectEqual(@as(LogIndex, 100), raft.commit_index);
+    try testing.expectEqual(@as(LogIndex, 100), raft.last_applied);
+
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+}
+
+test "finishInstallSnapshot advances commit_index when snapshot is ahead" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    try testing.expectEqual(@as(LogIndex, 0), raft.commit_index);
+
+    const result = raft.finishInstallSnapshot(.{
+        .last_included_index = 200,
+        .last_included_term = 3,
+        .data_len = 0,
+    });
+    try testing.expect(result);
+    try testing.expectEqual(@as(LogIndex, 200), raft.commit_index);
+    try testing.expectEqual(@as(LogIndex, 200), raft.last_applied);
+
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+}
+
+test "handleAppendEntries advances commit_index from leader_commit" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    // add entries to the log so commit can advance
+    try log.append(.{ .index = 1, .term = 1, .data = "a" });
+    try log.append(.{ .index = 2, .term = 1, .data = "b" });
+    try log.append(.{ .index = 3, .term = 1, .data = "c" });
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    try testing.expectEqual(@as(LogIndex, 0), raft.commit_index);
+
+    // leader says commit up to 2
+    const reply = raft.handleAppendEntries(.{
+        .term = 1,
+        .leader_id = 2,
+        .prev_log_index = 3,
+        .prev_log_term = 1,
+        .entries = &.{},
+        .leader_commit = 2,
+    });
+    try testing.expect(reply.success);
+    try testing.expectEqual(@as(LogIndex, 2), raft.commit_index);
+
+    // should have a commit_entries action
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+    var found_commit = false;
+    for (actions) |action| {
+        if (action == .commit_entries) {
+            try testing.expectEqual(@as(LogIndex, 2), action.commit_entries.up_to);
+            found_commit = true;
+        }
+    }
+    try testing.expect(found_commit);
+}
+
+test "handleAppendEntries with conflicting entry truncates and appends" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    // existing entries at term 1
+    try log.append(.{ .index = 1, .term = 1, .data = "old" });
+    try log.append(.{ .index = 2, .term = 1, .data = "old2" });
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // leader sends entry at index 2 with term 2 — conflicts with existing
+    const reply = raft.handleAppendEntries(.{
+        .term = 2,
+        .leader_id = 2,
+        .prev_log_index = 1,
+        .prev_log_term = 1,
+        .entries = &.{.{ .index = 2, .term = 2, .data = "new" }},
+        .leader_commit = 0,
+    });
+    try testing.expect(reply.success);
+    try testing.expectEqual(@as(LogIndex, 2), reply.match_index);
+
+    // verify the entry was replaced
+    try testing.expectEqual(@as(Term, 2), log.termAt(2));
+
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+}
+
+test "handleAppendEntries rejects mismatched prev_log" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    try log.append(.{ .index = 1, .term = 1, .data = "cmd" });
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // leader claims prev_log at index 1 has term 5, but we have term 1
+    const reply = raft.handleAppendEntries(.{
+        .term = 2,
+        .leader_id = 2,
+        .prev_log_index = 1,
+        .prev_log_term = 5,
+        .entries = &.{},
+        .leader_commit = 0,
+    });
+    try testing.expect(!reply.success);
+
+    const actions = raft.drainActions();
+    defer alloc.free(actions);
+}
+
+test "leader commit advances when majority matches" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    // become leader
+    for (0..max_election_ticks + 1) |_| {
+        raft.tick();
+    }
+    const ea = raft.drainActions();
+    defer alloc.free(ea);
+    raft.handleRequestVoteReply(2, .{
+        .term = raft.currentTerm(),
+        .vote_granted = true,
+    });
+    const la = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, la);
+        alloc.free(la);
+    }
+    try testing.expectEqual(Role.leader, raft.role);
+
+    // propose a command
+    const idx = try raft.propose("test-cmd");
+
+    // peer 2 confirms replication
+    raft.handleAppendEntriesReply(2, .{
+        .term = raft.currentTerm(),
+        .success = true,
+        .match_index = idx,
+    });
+
+    // commit should advance (leader + peer 2 = majority of 3)
+    try testing.expectEqual(idx, raft.commit_index);
+
+    const actions = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, actions);
+        alloc.free(actions);
+    }
+}
