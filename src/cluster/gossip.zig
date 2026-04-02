@@ -1570,3 +1570,36 @@ test "decodeUpdates rejects invalid MemberState byte" {
         else => unreachable,
     }
 }
+
+test "suspect timeout skipped when tick_count wraps below state_changed_at" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    g.suspect_timeout = 5;
+
+    // mark suspect with a high state_changed_at (simulating pre-wrap state)
+    if (g.members.getPtr(2)) |m| {
+        m.state = .suspect;
+        m.state_changed_at = std.math.maxInt(u64) - 1;
+    }
+
+    // set tick_count to a low value (simulating post-wrap)
+    g.tick_count = 3;
+
+    // tick a few times — member must NOT be marked dead since tick_count < state_changed_at
+    for (0..6) |_| {
+        try g.tick();
+        const actions = g.drainActions();
+        defer g.freeActions(actions);
+        for (actions) |action| {
+            if (action == .member_dead and action.member_dead.id == 2) {
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+
+    // member should still be suspect
+    try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
+}
