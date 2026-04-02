@@ -87,12 +87,14 @@ fn planHttp2Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
 }
 
 fn appendLiteralWithIndexedName(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name_index: u8, value: []const u8) !void {
+    if (value.len > 127) return error.HeaderTooLong;
     try buf.append(alloc, name_index);
     try buf.append(alloc, @intCast(value.len));
     try buf.appendSlice(alloc, value);
 }
 
 fn appendLiteralHeader(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name: []const u8, value: []const u8) !void {
+    if (name.len > 127 or value.len > 127) return error.HeaderTooLong;
     try buf.append(alloc, 0x00);
     try buf.append(alloc, @intCast(name.len));
     try buf.appendSlice(alloc, name);

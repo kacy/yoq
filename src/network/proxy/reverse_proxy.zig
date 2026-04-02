@@ -2126,6 +2126,7 @@ fn appendLiteralWithIndexedName(
     name_index: u8,
     value: []const u8,
 ) !void {
+    if (value.len > 127) return error.HeaderTooLong;
     try buf.append(alloc, name_index);
     try buf.append(alloc, @intCast(value.len));
     try buf.appendSlice(alloc, value);
