@@ -22,6 +22,8 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse return common.badRequest("missing memory_mb field");
     if (cpu_cores <= 0 or cpu_cores > 10000) return common.badRequest("invalid cpu_cores");
     if (memory_mb <= 0 or memory_mb > 10_000_000) return common.badRequest("invalid memory_mb");
+    if (cpu_cores > std.math.maxInt(u32)) return common.badRequest("cpu_cores too large");
+    if (memory_mb > std.math.maxInt(u64)) return common.badRequest("memory_mb too large");
 
     const wg_public_key = extractJsonString(request.body, "wg_public_key");
     const wg_listen_port = extractJsonInt(request.body, "wg_listen_port");
@@ -93,6 +95,13 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
     const gpu_count_val = extractJsonInt(request.body, "gpu_count");
     const gpu_model_str = json_helpers.extractJsonString(request.body, "gpu_model");
     const gpu_vram_val = extractJsonInt(request.body, "gpu_vram_mb");
+
+    if (gpu_count_val) |g| {
+        if (g > std.math.maxInt(u32)) return common.badRequest("gpu_count too large");
+    }
+    if (gpu_vram_val) |v| {
+        if (v > std.math.maxInt(u64)) return common.badRequest("gpu_vram_mb too large");
+    }
 
     const sql = agent_registry.registerSqlFull(
         &sql_buf,

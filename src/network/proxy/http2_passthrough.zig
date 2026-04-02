@@ -4,6 +4,8 @@ const hpack = @import("hpack.zig");
 const http2 = @import("http2.zig");
 const socket_helpers = @import("socket_helpers.zig");
 
+const stream_buffer_size = 16 * 1024;
+
 pub const Error = error{
     InvalidResponse,
     ReceiveFailed,
@@ -61,8 +63,8 @@ pub fn relaySocketConnection(
     var client_open = true;
     var upstream_open = true;
 
-    var client_buf: [16 * 1024]u8 = undefined;
-    var upstream_buf: [16 * 1024]u8 = undefined;
+    var client_buf: [stream_buffer_size]u8 = undefined;
+    var upstream_buf: [stream_buffer_size]u8 = undefined;
 
     while (client_open and upstream_open) {
         var poll_fds = [_]posix.pollfd{
