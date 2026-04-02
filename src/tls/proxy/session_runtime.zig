@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const log = @import("../../lib/log.zig");
 const http2_request = @import("../../network/proxy/http2_request.zig");
 const backend_mod = @import("../backend.zig");
 const handshake = @import("../handshake.zig");
@@ -334,7 +335,10 @@ pub fn sendEncryptedCloseNotify(fd: posix.fd_t, keys: handshake.TrafficKeys, seq
     var out: [5 + 64]u8 = undefined;
     record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return;
     @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
-    _ = posix.write(fd, out[0 .. 5 + ct_len]) catch {};
+    _ = posix.write(fd, out[0 .. 5 + ct_len]) catch |e| {
+        log.warn("tls encrypted data write failed: {}", .{e});
+        return;
+    };
     seq.* += 1;
 }
 

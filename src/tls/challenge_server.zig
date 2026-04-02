@@ -93,6 +93,8 @@ pub const ChallengeServer = struct {
             key_auth.len,
             key_auth,
         }) catch return;
-        _ = posix.write(client_fd, response) catch {};
+        _ = posix.write(client_fd, response) catch |e| {
+            log.warn("acme challenge response write failed: {}", .{e});
+        };
     }
 };

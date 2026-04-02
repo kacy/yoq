@@ -462,7 +462,9 @@ pub const TlsProxy = struct {
 
         var response_buf: [1024]u8 = undefined;
         const response = http_support.formatRedirectResponse(&response_buf, location) catch return;
-        _ = posix.write(client_fd, response) catch {};
+        _ = posix.write(client_fd, response) catch |e| {
+            log.warn("tls proxy redirect write failed: {}", .{e});
+        };
     }
 
     fn serveAcmeChallenge(self: *TlsProxy, client_fd: posix.fd_t, token: []const u8) void {
@@ -477,7 +479,9 @@ pub const TlsProxy = struct {
 
         var response_buf: [1024]u8 = undefined;
         const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ key_auth.len, key_auth }) catch return;
-        _ = posix.write(client_fd, response) catch {};
+        _ = posix.write(client_fd, response) catch |e| {
+            log.warn("tls proxy acme challenge write failed: {}", .{e});
+        };
     }
 };
 
