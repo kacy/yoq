@@ -1892,6 +1892,7 @@ const TestUpstreamServer = struct {
     }
 
     fn start(self: *TestUpstreamServer) !void {
+        socket_helpers.setSocketTimeoutMs(self.listen_fd, 5000);
         self.thread = try std.Thread.spawn(.{}, acceptOne, .{self});
         std.Thread.sleep(50 * std.time.ns_per_ms);
     }
