@@ -57,12 +57,13 @@ pub fn handleAppendEntries(
         const last = self.log.lastIndex();
         const new_commit = @min(args.leader_commit, last);
         if (new_commit > self.commit_index) {
-            self.commit_index = new_commit;
             self.actions.append(self.alloc, .{
                 .commit_entries = .{ .up_to = new_commit },
             }) catch |e| {
                 logger.warn("raft: failed to queue commit action: {}", .{e});
+                return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
             };
+            self.commit_index = new_commit;
         }
     }
 
