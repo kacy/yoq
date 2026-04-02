@@ -323,8 +323,7 @@ pub const Watcher = struct {
 
             // safely calculate next offset
             const next_offset = name_offset + event.len;
-            if (next_offset < offset) {
-                // overflow check
+            if (next_offset < offset or next_offset > buf.len) {
                 log.warn("watcher: offset overflow, stopping event processing", .{});
                 break;
             }
