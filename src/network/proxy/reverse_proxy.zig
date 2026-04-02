@@ -508,7 +508,7 @@ pub const ReverseProxy = struct {
         upstream: *const upstream_mod.Upstream,
         client_ip: ?[4]u8,
     ) ![]u8 {
-        const fd = try connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+        const fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
         defer posix.close(fd);
         const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
@@ -558,7 +558,7 @@ fn runMirrorTask(task: MirrorTask) void {
     };
     defer upstream.deinit(task.allocator);
 
-    const fd = connectToUpstream(task.connect_timeout_ms, task.request_timeout_ms, &upstream) catch {
+    const fd = socket_helpers.connectToUpstream(task.connect_timeout_ms, task.request_timeout_ms, &upstream) catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
@@ -940,24 +940,6 @@ fn parseForwardedStatusCode(alloc: std.mem.Allocator, protocol: Protocol, respon
         .http1 => parseUpstreamStatusCode(response),
         .http2 => http2_passthrough.parseStatusCode(alloc, response),
     };
-}
-
-fn connectToUpstream(connect_timeout_ms: u32, request_timeout_ms: u32, upstream: *const upstream_mod.Upstream) !posix.socket_t {
-    const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
-
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0) catch
-        return error.ConnectFailed;
-    errdefer posix.close(fd);
-
-    const addr = std.net.Address.initIp4(upstream_ip, upstream.port);
-    posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock, error.ConnectionPending => try socket_helpers.waitForConnect(fd, connect_timeout_ms),
-        error.ConnectionTimedOut => return error.ConnectTimedOut,
-        else => return error.ConnectFailed,
-    };
-    try socket_helpers.setSocketBlocking(fd);
-    socket_helpers.setSocketTimeoutMs(fd, request_timeout_ms);
-    return fd;
 }
 
 fn readResponse(alloc: std.mem.Allocator, fd: posix.socket_t, max_bytes: usize) ![]u8 {

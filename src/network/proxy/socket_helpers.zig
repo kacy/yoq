@@ -1,5 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
+const ip = @import("../ip.zig");
+const upstream_mod = @import("upstream.zig");
 
 pub fn clampPollTimeout(timeout_ms: u32) i32 {
     return @intCast(@min(timeout_ms, @as(u32, @intCast(std.math.maxInt(i32)))));
@@ -44,6 +46,24 @@ pub fn writeAll(fd: posix.socket_t, data: []const u8) !void {
         if (bytes_written == 0) return error.WriteFailed;
         written += bytes_written;
     }
+}
+
+pub fn connectToUpstream(connect_timeout_ms: u32, request_timeout_ms: u32, upstream: *const upstream_mod.Upstream) !posix.socket_t {
+    const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
+
+    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0) catch
+        return error.ConnectFailed;
+    errdefer posix.close(fd);
+
+    const addr = std.net.Address.initIp4(upstream_ip, upstream.port);
+    posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock, error.ConnectionPending => try waitForConnect(fd, connect_timeout_ms),
+        error.ConnectionTimedOut => return error.ConnectTimedOut,
+        else => return error.ConnectFailed,
+    };
+    try setSocketBlocking(fd);
+    setSocketTimeoutMs(fd, request_timeout_ms);
+    return fd;
 }
 
 test "clampPollTimeout clamps large values" {

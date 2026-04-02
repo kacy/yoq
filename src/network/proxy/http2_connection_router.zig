@@ -656,7 +656,7 @@ const ConnectionRouter = struct {
         };
         defer rewritten.deinit(self.allocator);
 
-        const upstream_fd = connectToUpstream(route, &upstream) catch {
+        const upstream_fd = socket_helpers.connectToUpstream(route.connect_timeout_ms, route.request_timeout_ms, &upstream) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
@@ -954,7 +954,7 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
 }
 
 fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8) !posix.socket_t {
-    const upstream_fd = try connectToUpstream(route, upstream);
+    const upstream_fd = try socket_helpers.connectToUpstream(route.connect_timeout_ms, route.request_timeout_ms, upstream);
     errdefer posix.close(upstream_fd);
     const preface_and_settings = try buildInitialUpstreamPreamble(alloc);
     defer alloc.free(preface_and_settings);
@@ -965,24 +965,6 @@ fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstrea
 fn sendUpstreamPreamble(upstream_fd: posix.socket_t, preface_and_settings: []const u8, request_bytes: []const u8) !void {
     try socket_helpers.writeAll(upstream_fd, preface_and_settings);
     try socket_helpers.writeAll(upstream_fd, request_bytes);
-}
-
-fn connectToUpstream(route: router.Route, upstream: *const upstream_mod.Upstream) !posix.socket_t {
-    const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
-
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0) catch
-        return error.ConnectFailed;
-    errdefer posix.close(fd);
-
-    const addr = std.net.Address.initIp4(upstream_ip, upstream.port);
-    posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock, error.ConnectionPending => try socket_helpers.waitForConnect(fd, route.connect_timeout_ms),
-        error.ConnectionTimedOut => return error.ConnectTimedOut,
-        else => return error.ConnectFailed,
-    };
-    try socket_helpers.setSocketBlocking(fd);
-    socket_helpers.setSocketTimeoutMs(fd, route.request_timeout_ms);
-    return fd;
 }
 
 fn nowMs() i64 {
