@@ -625,7 +625,9 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
         try ensureDegradedServiceLocked(service_name);
         if (!authoritative) return;
 
-        service_registry_runtime.markReconcileFailed(service_name, value.reason) catch {};
+        service_registry_runtime.markReconcileFailed(service_name, value.reason) catch |e| {
+            log.warn("service reconciler: failed to mark {s} as failed: {}", .{ service_name, e });
+        };
 
         if (!retryDueLocked(service_name, now)) return;
 
@@ -646,7 +648,9 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
             audit_repairs_total += 1;
             removeDegradedServiceLocked(service_name);
             clearRetryStateLocked(service_name);
-            service_registry_runtime.markReconcileSucceeded(service_name) catch {};
+            service_registry_runtime.markReconcileSucceeded(service_name) catch |e| {
+                log.warn("service reconciler: failed to mark {s} as succeeded: {}", .{ service_name, e });
+            };
         } else {
             noteRetryFailureLocked(service_name, now) catch |err| {
                 log.warn("service reconciler: failed to track retry backoff for {s}: {}", .{ service_name, err });
@@ -657,7 +661,9 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
 
     removeDegradedServiceLocked(service_name);
     clearRetryStateLocked(service_name);
-    if (authoritative) service_registry_runtime.markReconcileSucceeded(service_name) catch {};
+    if (authoritative) service_registry_runtime.markReconcileSucceeded(service_name) catch |e| {
+        log.warn("service reconciler: failed to mark {s} as succeeded: {}", .{ service_name, e });
+    };
 }
 
 fn quarantineStaleEndpointsLocked() void {
@@ -1061,7 +1067,9 @@ fn reconcileServiceLocked(service_name: []const u8) !void {
     }
 
     if (desired.items.len > dns_registry_support.max_backends_per_service) {
-        service_registry_runtime.markReconcileFailed(service_name, "eligible backends exceed load balancer capacity") catch {};
+        service_registry_runtime.markReconcileFailed(service_name, "eligible backends exceed load balancer capacity") catch |e| {
+            log.warn("service reconciler: failed to mark {s} as failed: {}", .{ service_name, e });
+        };
     }
 
     const vip = ip_mod.parseIp(service_snapshot.vip_address) orelse return error.StoreReadFailed;
