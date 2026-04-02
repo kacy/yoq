@@ -183,12 +183,21 @@ pub fn formatResponseWithType(buf: []u8, status: StatusCode, content_type: []con
 /// shorthand for a JSON error response body.
 /// formats: {"error":"<message>"}
 pub fn formatError(buf: []u8, status: StatusCode, message: []const u8) []const u8 {
-    // build the JSON error body first in a temp buffer
     var body_buf: [512]u8 = undefined;
-    const body = std.fmt.bufPrint(&body_buf, "{{\"error\":\"{s}\"}}", .{message}) catch
-        "{\"error\":\"internal error\"}";
-
-    return formatResponse(buf, status, body);
+    var stream = std.io.fixedBufferStream(&body_buf);
+    const writer = stream.writer();
+    writer.writeAll("{\"error\":\"") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}");
+    for (message) |c| {
+        switch (c) {
+            '"' => writer.writeAll("\\\"") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+            '\\' => writer.writeAll("\\\\") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+            '\n' => writer.writeAll("\\n") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+            '\r' => writer.writeAll("\\r") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+            else => writer.writeByte(c) catch return formatResponse(buf, status, "{\"error\":\"internal error\"}"),
+        }
+    }
+    writer.writeAll("\"}") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}");
+    return formatResponse(buf, status, body_buf[0..stream.pos]);
 }
 
 /// find a header value by name (case-insensitive) in raw headers.
