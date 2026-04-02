@@ -3,6 +3,7 @@ const posix = std.posix;
 const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
+const socket_helpers = @import("socket_helpers.zig");
 const ip = @import("../ip.zig");
 const http2 = @import("http2.zig");
 const http2_connection_router = @import("http2_connection_router.zig");
@@ -182,7 +183,7 @@ pub const ReverseProxy = struct {
 
     pub fn handleConnection(self: *const ReverseProxy, client_fd: posix.fd_t) void {
         defer posix.close(client_fd);
-        setSocketTimeoutMs(client_fd, 5000);
+        socket_helpers.setSocketTimeoutMs(client_fd, 5000);
         var trace_id: [16]u8 = undefined;
         log.generateTraceId(&trace_id);
         log.setTraceId(&trace_id);
@@ -213,7 +214,7 @@ pub const ReverseProxy = struct {
                 }),
             } catch return;
             defer self.allocator.free(response);
-            _ = writeAll(client_fd, response) catch {};
+            _ = socket_helpers.writeAll(client_fd, response) catch {};
             return;
         };
 
@@ -224,7 +225,7 @@ pub const ReverseProxy = struct {
                 .body = "{\"error\":\"proxy request failed\"}",
             }) catch return;
             defer self.allocator.free(internal);
-            _ = writeAll(client_fd, internal) catch {};
+            _ = socket_helpers.writeAll(client_fd, internal) catch {};
             return;
         };
         switch (handled) {
@@ -232,7 +233,7 @@ pub const ReverseProxy = struct {
                 proxy_runtime.recordResponse(resp.status);
                 const response = formatResponseForProtocol(self.allocator, resp) catch return;
                 defer self.allocator.free(response);
-                _ = writeAll(client_fd, response) catch {};
+                _ = socket_helpers.writeAll(client_fd, response) catch {};
             },
             .forward => |plan| {
                 defer plan.deinit(self.allocator);
@@ -253,7 +254,7 @@ pub const ReverseProxy = struct {
                             "{\"error\":\"proxy request failed\"}",
                         ) catch return;
                         defer self.allocator.free(internal);
-                        _ = writeAll(client_fd, internal) catch {};
+                        _ = socket_helpers.writeAll(client_fd, internal) catch {};
                     };
                     return;
                 }
@@ -267,11 +268,11 @@ pub const ReverseProxy = struct {
                         .body = "{\"error\":\"proxy request failed\"}",
                     }) catch return;
                     defer self.allocator.free(internal);
-                    _ = writeAll(client_fd, internal) catch {};
+                    _ = socket_helpers.writeAll(client_fd, internal) catch {};
                     return;
                 };
                 defer self.allocator.free(response);
-                _ = writeAll(client_fd, response) catch {};
+                _ = socket_helpers.writeAll(client_fd, response) catch {};
             },
         }
     }
@@ -512,7 +513,7 @@ pub const ReverseProxy = struct {
         const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
 
-        writeAll(fd, request) catch return error.SendFailed;
+        socket_helpers.writeAll(fd, request) catch return error.SendFailed;
         return readResponse(self.allocator, fd, self.max_response_bytes);
     }
 };
@@ -576,7 +577,7 @@ fn runMirrorTask(task: MirrorTask) void {
     };
     defer task.allocator.free(request);
 
-    writeAll(fd, request) catch {
+    socket_helpers.writeAll(fd, request) catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
@@ -950,58 +951,13 @@ fn connectToUpstream(connect_timeout_ms: u32, request_timeout_ms: u32, upstream:
 
     const addr = std.net.Address.initIp4(upstream_ip, upstream.port);
     posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock, error.ConnectionPending => try waitForConnect(fd, connect_timeout_ms),
+        error.WouldBlock, error.ConnectionPending => try socket_helpers.waitForConnect(fd, connect_timeout_ms),
         error.ConnectionTimedOut => return error.ConnectTimedOut,
         else => return error.ConnectFailed,
     };
-    try setSocketBlocking(fd);
-    setSocketTimeoutMs(fd, request_timeout_ms);
+    try socket_helpers.setSocketBlocking(fd);
+    socket_helpers.setSocketTimeoutMs(fd, request_timeout_ms);
     return fd;
-}
-
-fn waitForConnect(fd: posix.socket_t, timeout_ms: u32) !void {
-    var poll_fds = [_]posix.pollfd{
-        .{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 },
-    };
-    const timeout = clampPollTimeout(timeout_ms);
-    const ready = posix.poll(&poll_fds, timeout) catch return error.ConnectFailed;
-    if (ready == 0) return error.ConnectTimedOut;
-    if (poll_fds[0].revents & posix.POLL.OUT == 0 and poll_fds[0].revents & (posix.POLL.ERR | posix.POLL.HUP) == 0) {
-        return error.ConnectFailed;
-    }
-
-    posix.getsockoptError(fd) catch |err| switch (err) {
-        error.ConnectionTimedOut => return error.ConnectTimedOut,
-        else => return error.ConnectFailed,
-    };
-}
-
-fn setSocketBlocking(fd: posix.socket_t) !void {
-    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return error.ConnectFailed;
-    const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-    _ = posix.fcntl(fd, posix.F.SETFL, flags & ~nonblock) catch return error.ConnectFailed;
-}
-
-fn clampPollTimeout(timeout_ms: u32) i32 {
-    return @intCast(@min(timeout_ms, @as(u32, @intCast(std.math.maxInt(i32)))));
-}
-
-fn setSocketTimeoutMs(fd: posix.socket_t, timeout_ms: u32) void {
-    const tv = posix.timeval{
-        .sec = @divTrunc(timeout_ms, 1000),
-        .usec = @as(i64, @intCast(@rem(timeout_ms, 1000))) * 1000,
-    };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
-}
-
-fn writeAll(fd: posix.socket_t, data: []const u8) !void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const bytes_written = posix.write(fd, data[written..]) catch return error.WriteFailed;
-        if (bytes_written == 0) return error.WriteFailed;
-        written += bytes_written;
-    }
 }
 
 fn readResponse(alloc: std.mem.Allocator, fd: posix.socket_t, max_bytes: usize) ![]u8 {
@@ -1961,21 +1917,21 @@ const TestUpstreamServer = struct {
     fn acceptOne(self: *TestUpstreamServer) void {
         for (self.actions, 0..) |action, index| {
             const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
-            setSocketTimeoutMs(client_fd, 1000);
+            socket_helpers.setSocketTimeoutMs(client_fd, 1000);
             self.request_lens[index] = captureRequestBytes(client_fd, &self.request_bufs[index]);
             self.accepted = index + 1;
 
             switch (action) {
                 .close => {},
-                .respond => |response| _ = writeAll(client_fd, response) catch {},
+                .respond => |response| _ = socket_helpers.writeAll(client_fd, response) catch {},
                 .stream_respond => |resp| {
-                    _ = writeAll(client_fd, resp.first) catch {};
+                    _ = socket_helpers.writeAll(client_fd, resp.first) catch {};
                     std.Thread.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
-                    _ = writeAll(client_fd, resp.second) catch {};
+                    _ = socket_helpers.writeAll(client_fd, resp.second) catch {};
                 },
                 .delayed_respond => |resp| {
                     std.Thread.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
-                    _ = writeAll(client_fd, resp.response) catch {};
+                    _ = socket_helpers.writeAll(client_fd, resp.response) catch {};
                 },
             }
             posix.close(client_fd);
@@ -3074,7 +3030,7 @@ test "handleConnection proxies a client socket request" {
     const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
     try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
-    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+    try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
     var response_buf: [1024]u8 = undefined;
     const bytes_read = try posix.read(client_fd, &response_buf);
     try std.testing.expect(bytes_read > 0);
@@ -3110,10 +3066,10 @@ test "handleConnection returns framed HTTP/2 local response" {
 
     const request = try buildTestHttp2Request(std.testing.allocator, 5, "POST", "grpc.internal", "/pkg.Service/Call");
     defer std.testing.allocator.free(request);
-    try writeAll(client_fd, request);
+    try socket_helpers.writeAll(client_fd, request);
 
     var response_buf: [1024]u8 = undefined;
-    setSocketTimeoutMs(client_fd, 1000);
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const bytes_read = readSocketBytes(client_fd, &response_buf);
     try std.testing.expect(bytes_read > http2.frame_header_len * 2);
 
@@ -3227,7 +3183,7 @@ test "handleConnection proxies HTTP/2 upstream response bytes" {
 
     const request = try buildTestHttp2Request(std.testing.allocator, 7, "POST", "grpc.internal", "/pkg.Service/Call");
     defer std.testing.allocator.free(request);
-    try writeAll(client_fd, request);
+    try socket_helpers.writeAll(client_fd, request);
 
     const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
     defer std.testing.allocator.free(settings_ack);
@@ -3237,7 +3193,7 @@ test "handleConnection proxies HTTP/2 upstream response bytes" {
     try expected.appendSlice(std.testing.allocator, upstream_response);
 
     var response_buf: [1024]u8 = undefined;
-    setSocketTimeoutMs(client_fd, 1000);
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const bytes_read = readSocketBytes(client_fd, &response_buf);
     try std.testing.expectEqualSlices(u8, expected.items, response_buf[0..bytes_read]);
 
@@ -3348,9 +3304,9 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
 
     const request = try buildTestHttp2Request(std.testing.allocator, 9, "POST", "grpc.internal", "/pkg.Service/Call");
     defer std.testing.allocator.free(request);
-    try writeAll(client_fd, request);
+    try socket_helpers.writeAll(client_fd, request);
 
-    setSocketTimeoutMs(client_fd, 75);
+    socket_helpers.setSocketTimeoutMs(client_fd, 75);
     const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
     defer std.testing.allocator.free(settings_ack);
     var ack_read_buf: [1024]u8 = undefined;
@@ -3361,7 +3317,7 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
     const first_read_len = readSocketBytes(client_fd, &first_read_buf);
     try std.testing.expectEqualSlices(u8, first_chunk, first_read_buf[0..first_read_len]);
 
-    setSocketTimeoutMs(client_fd, 1000);
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     var second_read_buf: [1024]u8 = undefined;
     const second_read_len = readSocketBytes(client_fd, &second_read_buf);
     try std.testing.expectEqualSlices(u8, second_chunk, second_read_buf[0..second_read_len]);
@@ -3460,9 +3416,9 @@ test "handleConnection relays HTTP/2 client data frames upstream" {
     const data = try buildTestHttp2DataFrame(std.testing.allocator, 11, "hello", true);
     defer std.testing.allocator.free(data);
 
-    try writeAll(client_fd, request);
+    try socket_helpers.writeAll(client_fd, request);
     std.Thread.sleep(25 * std.time.ns_per_ms);
-    try writeAll(client_fd, data);
+    try socket_helpers.writeAll(client_fd, data);
 
     const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
     defer std.testing.allocator.free(settings_ack);
@@ -3472,7 +3428,7 @@ test "handleConnection relays HTTP/2 client data frames upstream" {
     try expected.appendSlice(std.testing.allocator, upstream_response);
 
     var response_buf: [1024]u8 = undefined;
-    setSocketTimeoutMs(client_fd, 1000);
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const bytes_read = readSocketBytes(client_fd, &response_buf);
     try std.testing.expectEqualSlices(u8, expected.items, response_buf[0..bytes_read]);
 
@@ -3646,11 +3602,11 @@ test "handleConnection routes later HTTP/2 streams independently on one client c
     const second_request = try buildTestHttp2HeadersOnlyRequest(std.testing.allocator, 15, "POST", "grpc-two.internal", "/pkg.Second/Call", true);
     defer std.testing.allocator.free(second_request);
 
-    try writeAll(client_fd, first_request);
-    try writeAll(client_fd, second_request);
+    try socket_helpers.writeAll(client_fd, first_request);
+    try socket_helpers.writeAll(client_fd, second_request);
 
     var response_buf: [2048]u8 = undefined;
-    setSocketTimeoutMs(client_fd, 1000);
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const bytes_read = readSocketBytes(client_fd, &response_buf);
     try std.testing.expectEqualSlices(u8, settings_ack, response_buf[0..settings_ack.len]);
     try std.testing.expectEqualSlices(u8, downstream_settings, response_buf[settings_ack.len .. settings_ack.len + downstream_settings.len]);
@@ -3691,7 +3647,7 @@ test "handleConnection rejects looped request after listener restart" {
     var client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
     try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
-    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n");
+    try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;
     var bytes_read = try posix.read(client_fd, &response_buf);
@@ -3708,7 +3664,7 @@ test "handleConnection rejects looped request after listener restart" {
     client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     const restarted_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
     try posix.connect(client_fd, &restarted_addr.any, restarted_addr.getOsSockLen());
-    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n");
+    try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n");
 
     bytes_read = try posix.read(client_fd, &response_buf);
     try std.testing.expect(bytes_read > 0);

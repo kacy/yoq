@@ -5,6 +5,7 @@ const service_registry_runtime_mod = @import("../service_registry_runtime.zig");
 const listener_runtime_mod = @import("listener_runtime.zig");
 const steering_runtime = @import("steering_runtime.zig");
 const posix = std.posix;
+const socket_helpers = @import("socket_helpers.zig");
 
 pub const sync_interval_secs: u64 = 15;
 
@@ -418,7 +419,7 @@ const TestUpstreamServer = struct {
         const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
         defer posix.close(client_fd);
         self.request_len = posix.read(client_fd, &self.request_buf) catch 0;
-        _ = writeAll(client_fd, self.response) catch {};
+        _ = socket_helpers.writeAll(client_fd, self.response) catch {};
     }
 };
 
@@ -427,15 +428,6 @@ var recorded_target_port: u16 = 0;
 fn recordMappedTarget(_: ?[4]u8, _: u16, _: u8, target_ip: [4]u8, target_port: u16) void {
     std.debug.assert(std.mem.eql(u8, target_ip[0..], &[_]u8{ 127, 0, 0, 1 }));
     recorded_target_port = target_port;
-}
-
-fn writeAll(fd: posix.socket_t, data: []const u8) !void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const bytes_written = posix.write(fd, data[written..]) catch return error.WriteFailed;
-        if (bytes_written == 0) return error.WriteFailed;
-        written += bytes_written;
-    }
 }
 
 test "mapped listener target serves proxied HTTP after event-driven repair" {
@@ -509,7 +501,7 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
     defer posix.close(client_fd);
     const listener_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
     try posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
-    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+    try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;
     const bytes_read = try posix.read(client_fd, &response_buf);
@@ -594,7 +586,7 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     defer posix.close(client_fd);
     const listener_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
     try posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
-    try writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+    try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;
     const bytes_read = try posix.read(client_fd, &response_buf);

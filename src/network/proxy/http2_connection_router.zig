@@ -3,6 +3,7 @@ const posix = std.posix;
 const http = @import("../../api/http.zig");
 const http2 = @import("http2.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
+const socket_helpers = @import("socket_helpers.zig");
 const http2_request = @import("http2_request.zig");
 const http2_response = @import("http2_response.zig");
 const proxy_policy = @import("policy.zig");
@@ -88,7 +89,7 @@ const ConnectionRouter = struct {
                 }
             }
 
-            const ready = posix.poll(poll_fds.items, clampPollTimeout(timeout_ms)) catch return error.ReceiveFailed;
+            const ready = posix.poll(poll_fds.items, socket_helpers.clampPollTimeout(timeout_ms)) catch return error.ReceiveFailed;
             if (ready == 0) {
                 if (try self.expireTimedOutStreams(nowMs())) continue;
                 break;
@@ -166,7 +167,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try writeAll(self.client_fd, ack);
+            try socket_helpers.writeAll(self.client_fd, ack);
         }
         try self.discardFrame();
     }
@@ -181,7 +182,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try writeAll(self.client_fd, ack);
+            try socket_helpers.writeAll(self.client_fd, ack);
         }
         try self.discardFrame();
     }
@@ -200,7 +201,7 @@ const ConnectionRouter = struct {
                 .stream_id = 1,
             });
             defer rewritten.deinit(self.allocator);
-            try writeAll(self.streams.items[stream_idx].upstream_fd, rewritten.bytes);
+            try socket_helpers.writeAll(self.streams.items[stream_idx].upstream_fd, rewritten.bytes);
             try self.consumeDownstreamBytes(rewritten.consumed);
             self.last_activity_ms = nowMs();
             return;
@@ -301,7 +302,7 @@ const ConnectionRouter = struct {
         };
         const rewritten = try rewriteFrameSequenceStreamId(self.allocator, self.downstream_buf.items, 0, 1);
         defer rewritten.deinit(self.allocator);
-        try writeAll(self.streams.items[stream_idx].upstream_fd, rewritten.bytes);
+        try socket_helpers.writeAll(self.streams.items[stream_idx].upstream_fd, rewritten.bytes);
         if (self.streams.items[stream_idx].mirror) |*mirror| {
             self.forwardMirrorFrame(mirror, rewritten.bytes) catch {
                 proxy_runtime.recordMirrorRouteUpstreamFailure(
@@ -422,7 +423,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try writeAll(self.streams.items[session_idx].upstream_fd, ack);
+            try socket_helpers.writeAll(self.streams.items[session_idx].upstream_fd, ack);
         }
         try self.discardUpstreamFrame(session_idx);
     }
@@ -437,7 +438,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try writeAll(self.streams.items[session_idx].upstream_fd, ack);
+            try socket_helpers.writeAll(self.streams.items[session_idx].upstream_fd, ack);
         }
         try self.discardUpstreamFrame(session_idx);
     }
@@ -469,7 +470,7 @@ const ConnectionRouter = struct {
         }
         const rewritten = try rewriteFrameSequenceStreamId(self.allocator, session.upstream_buf.items, 0, session.downstream_stream_id);
         defer rewritten.deinit(self.allocator);
-        try writeAll(self.client_fd, rewritten.bytes);
+        try socket_helpers.writeAll(self.client_fd, rewritten.bytes);
         try self.consumeUpstreamBytes(session_idx, rewritten.consumed);
 
         if (frame.frame_type == .rst_stream or (frame.flags & 0x1) != 0) {
@@ -567,7 +568,7 @@ const ConnectionRouter = struct {
             try http2_response.formatSimpleResponse(self.allocator, stream_id, @intFromEnum(status), "application/json", body);
         defer self.allocator.free(response);
         self.sent_settings = true;
-        try writeAll(self.client_fd, response);
+        try socket_helpers.writeAll(self.client_fd, response);
     }
 
     fn sendDownstreamSettingsFrame(self: *ConnectionRouter, payload: []const u8) !void {
@@ -580,7 +581,7 @@ const ConnectionRouter = struct {
         }, payload);
         defer self.allocator.free(frame);
         self.sent_settings = true;
-        try writeAll(self.client_fd, frame);
+        try socket_helpers.writeAll(self.client_fd, frame);
     }
 
     fn discardFrame(self: *ConnectionRouter) !void {
@@ -684,7 +685,7 @@ const ConnectionRouter = struct {
 
     fn forwardMirrorFrame(self: *ConnectionRouter, mirror: *MirrorSession, frame_bytes: []const u8) !void {
         _ = self;
-        writeAll(mirror.upstream_fd, frame_bytes) catch {
+        socket_helpers.writeAll(mirror.upstream_fd, frame_bytes) catch {
             return error.WriteFailed;
         };
     }
@@ -714,7 +715,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try writeAll(mirror.upstream_fd, ack);
+            try socket_helpers.writeAll(mirror.upstream_fd, ack);
         }
         _ = payload;
         try self.discardMirrorFrame(session_idx);
@@ -731,7 +732,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try writeAll(mirror.upstream_fd, ack);
+            try socket_helpers.writeAll(mirror.upstream_fd, ack);
         }
         try self.discardMirrorFrame(session_idx);
     }
@@ -962,8 +963,8 @@ fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstrea
 }
 
 fn sendUpstreamPreamble(upstream_fd: posix.socket_t, preface_and_settings: []const u8, request_bytes: []const u8) !void {
-    try writeAll(upstream_fd, preface_and_settings);
-    try writeAll(upstream_fd, request_bytes);
+    try socket_helpers.writeAll(upstream_fd, preface_and_settings);
+    try socket_helpers.writeAll(upstream_fd, request_bytes);
 }
 
 fn connectToUpstream(route: router.Route, upstream: *const upstream_mod.Upstream) !posix.socket_t {
@@ -975,53 +976,13 @@ fn connectToUpstream(route: router.Route, upstream: *const upstream_mod.Upstream
 
     const addr = std.net.Address.initIp4(upstream_ip, upstream.port);
     posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock, error.ConnectionPending => try waitForConnect(fd, route.connect_timeout_ms),
+        error.WouldBlock, error.ConnectionPending => try socket_helpers.waitForConnect(fd, route.connect_timeout_ms),
         error.ConnectionTimedOut => return error.ConnectTimedOut,
         else => return error.ConnectFailed,
     };
-    try setSocketBlocking(fd);
-    setSocketTimeoutMs(fd, route.request_timeout_ms);
+    try socket_helpers.setSocketBlocking(fd);
+    socket_helpers.setSocketTimeoutMs(fd, route.request_timeout_ms);
     return fd;
-}
-
-fn waitForConnect(fd: posix.socket_t, timeout_ms: u32) !void {
-    var poll_fds = [_]posix.pollfd{
-        .{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 },
-    };
-    const ready = posix.poll(&poll_fds, clampPollTimeout(timeout_ms)) catch return error.ConnectFailed;
-    if (ready == 0) return error.ConnectTimedOut;
-    posix.getsockoptError(fd) catch |err| switch (err) {
-        error.ConnectionTimedOut => return error.ConnectTimedOut,
-        else => return error.ConnectFailed,
-    };
-}
-
-fn setSocketBlocking(fd: posix.socket_t) !void {
-    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return error.ConnectFailed;
-    const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-    _ = posix.fcntl(fd, posix.F.SETFL, flags & ~nonblock) catch return error.ConnectFailed;
-}
-
-fn setSocketTimeoutMs(fd: posix.socket_t, timeout_ms: u32) void {
-    const tv = posix.timeval{
-        .sec = @intCast(@divTrunc(timeout_ms, 1000)),
-        .usec = @intCast(@mod(timeout_ms, 1000) * 1000),
-    };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
-}
-
-fn writeAll(fd: posix.socket_t, data: []const u8) !void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const bytes_written = posix.write(fd, data[written..]) catch return error.WriteFailed;
-        if (bytes_written == 0) return error.WriteFailed;
-        written += bytes_written;
-    }
-}
-
-fn clampPollTimeout(timeout_ms: u32) i32 {
-    return @intCast(@min(timeout_ms, @as(u32, @intCast(std.math.maxInt(i32)))));
 }
 
 fn nowMs() i64 {

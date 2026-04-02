@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const hpack = @import("hpack.zig");
 const http2 = @import("http2.zig");
+const socket_helpers = @import("socket_helpers.zig");
 
 pub const Error = error{
     InvalidResponse,
@@ -77,7 +78,7 @@ pub fn relaySocketConnection(
             },
         };
 
-        const ready = posix.poll(&poll_fds, clampPollTimeout(timeout_ms)) catch return error.ReceiveFailed;
+        const ready = posix.poll(&poll_fds, socket_helpers.clampPollTimeout(timeout_ms)) catch return error.ReceiveFailed;
         if (ready == 0) return;
 
         if (client_open and poll_fds[0].revents & posix.POLL.IN != 0) {
@@ -85,7 +86,7 @@ pub fn relaySocketConnection(
             if (bytes_read == 0) {
                 client_open = false;
             } else {
-                try writeAll(upstream_fd, client_buf[0..bytes_read]);
+                try socket_helpers.writeAll(upstream_fd, client_buf[0..bytes_read]);
             }
         } else if (client_open and (poll_fds[0].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0) {
             client_open = false;
@@ -96,7 +97,7 @@ pub fn relaySocketConnection(
             if (bytes_read == 0) {
                 upstream_open = false;
             } else {
-                try writeAll(client_fd, upstream_buf[0..bytes_read]);
+                try socket_helpers.writeAll(client_fd, upstream_buf[0..bytes_read]);
             }
         } else if (upstream_open and (poll_fds[1].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0) {
             upstream_open = false;
@@ -104,15 +105,3 @@ pub fn relaySocketConnection(
     }
 }
 
-fn clampPollTimeout(timeout_ms: u32) i32 {
-    return @intCast(@min(timeout_ms, @as(u32, @intCast(std.math.maxInt(i32)))));
-}
-
-fn writeAll(fd: posix.socket_t, data: []const u8) Error!void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const bytes_written = posix.write(fd, data[written..]) catch return error.WriteFailed;
-        if (bytes_written == 0) return error.WriteFailed;
-        written += bytes_written;
-    }
-}
