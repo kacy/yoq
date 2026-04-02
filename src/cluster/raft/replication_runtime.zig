@@ -45,8 +45,10 @@ pub fn handleAppendEntries(
             if (!self.log.truncateFrom(entry.index)) {
                 return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
             }
-        }
-        if (existing_term == 0 or existing_term != entry.term) {
+            self.log.append(entry) catch {
+                return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+            };
+        } else if (existing_term == 0) {
             self.log.append(entry) catch {
                 return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
             };
@@ -90,8 +92,10 @@ pub fn handleAppendEntriesReply(
 
     const peer_idx = common.peerIndex(self, from) orelse return;
     if (reply.success) {
-        self.match_index[peer_idx] = reply.match_index;
-        self.next_index[peer_idx] = reply.match_index + 1;
+        if (reply.match_index > self.match_index[peer_idx]) {
+            self.match_index[peer_idx] = reply.match_index;
+            self.next_index[peer_idx] = reply.match_index + 1;
+        }
         advanceCommitIndex(self);
         return;
     }
