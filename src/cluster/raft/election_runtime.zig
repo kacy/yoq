@@ -101,6 +101,7 @@ pub fn transferLeadership(self: anytype, min_election_ticks: u32, max_election_t
         .become_follower = .{ .leader_id = 0 },
     }) catch |e| {
         logger.warn("raft: failed to queue become_follower action during transfer: {}", .{e});
+        return false;
     };
     return true;
 }
