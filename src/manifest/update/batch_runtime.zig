@@ -25,7 +25,9 @@ pub fn handleBatchFailure(
             progress.message = reason;
 
             if (deployment_id) |id| {
-                deployment_store.updateDeploymentStatus(id, .rolled_back, reason) catch {};
+                deployment_store.updateDeploymentStatus(id, .rolled_back, reason) catch |e| {
+                    log.warn("failed to update deployment status to rolled_back: {}", .{e});
+                };
             }
 
             return common.UpdateError.BatchFailed;
@@ -35,7 +37,9 @@ pub fn handleBatchFailure(
             progress.message = reason;
 
             if (deployment_id) |id| {
-                deployment_store.updateDeploymentStatus(id, .failed, reason) catch {};
+                deployment_store.updateDeploymentStatus(id, .failed, reason) catch |e| {
+                    log.warn("failed to update deployment status to failed: {}", .{e});
+                };
             }
 
             return common.UpdateError.UpdatePaused;

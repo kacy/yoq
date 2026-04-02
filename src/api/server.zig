@@ -59,7 +59,9 @@ pub const Server = struct {
 
         // allow address reuse so we can restart quickly
         const optval: c_int = 1;
-        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&optval)) catch {};
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&optval)) catch |e| {
+            log.warn("api server failed to set SO_REUSEADDR: {}", .{e});
+        };
 
         const addr = std.net.Address.initIp4(bind_addr, port);
         posix.bind(fd, &addr.any, addr.getOsSockLen()) catch return ServerError.BindFailed;
