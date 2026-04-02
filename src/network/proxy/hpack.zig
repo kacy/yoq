@@ -110,13 +110,13 @@ pub fn decodeInteger(buf: []const u8, prefix_bits: u3) DecodeError!IntegerDecode
     }
 
     var consumed: usize = 1;
-    var shift: u6 = 0;
+    var shift: u8 = 0;
     while (true) {
         if (consumed >= buf.len) return error.BufferTooShort;
         const byte = buf[consumed];
         const payload = byte & 0x7f;
         if (shift >= @bitSizeOf(usize)) return error.IntegerOverflow;
-        value += (@as(usize, payload) << shift);
+        value += (@as(usize, payload) << @intCast(shift));
         consumed += 1;
         if ((byte & 0x80) == 0) break;
         shift += 7;
