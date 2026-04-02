@@ -160,7 +160,7 @@ const ConnectionRouter = struct {
 
     fn handleClientSettings(self: *ConnectionRouter, frame: http2.FrameHeader) !void {
         if ((frame.flags & 0x1) == 0) {
-            const ack = try buildFrame(self.allocator, .{
+            const ack = try http2.buildFrame(self.allocator, .{
                 .length = 0,
                 .frame_type = .settings,
                 .flags = 0x1,
@@ -175,7 +175,7 @@ const ConnectionRouter = struct {
     fn handleClientPing(self: *ConnectionRouter, frame: http2.FrameHeader) !void {
         const payload = self.downstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0 and payload.len == 8) {
-            const ack = try buildFrame(self.allocator, .{
+            const ack = try http2.buildFrame(self.allocator, .{
                 .length = 8,
                 .frame_type = .ping,
                 .flags = 0x1,
@@ -416,7 +416,7 @@ const ConnectionRouter = struct {
             if (!self.sent_settings) {
                 try self.sendDownstreamSettingsFrame(payload);
             }
-            const ack = try buildFrame(self.allocator, .{
+            const ack = try http2.buildFrame(self.allocator, .{
                 .length = 0,
                 .frame_type = .settings,
                 .flags = 0x1,
@@ -431,7 +431,7 @@ const ConnectionRouter = struct {
     fn handleUpstreamPing(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
         const payload = self.streams.items[session_idx].upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0 and payload.len == 8) {
-            const ack = try buildFrame(self.allocator, .{
+            const ack = try http2.buildFrame(self.allocator, .{
                 .length = 8,
                 .frame_type = .ping,
                 .flags = 0x1,
@@ -573,7 +573,7 @@ const ConnectionRouter = struct {
 
     fn sendDownstreamSettingsFrame(self: *ConnectionRouter, payload: []const u8) !void {
         if (self.sent_settings) return;
-        const frame = try buildFrame(self.allocator, .{
+        const frame = try http2.buildFrame(self.allocator, .{
             .length = @intCast(payload.len),
             .frame_type = .settings,
             .flags = 0,
@@ -708,7 +708,7 @@ const ConnectionRouter = struct {
         const mirror = &(self.streams.items[session_idx].mirror orelse return);
         const payload = mirror.upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0) {
-            const ack = try buildFrame(self.allocator, .{
+            const ack = try http2.buildFrame(self.allocator, .{
                 .length = 0,
                 .frame_type = .settings,
                 .flags = 0x1,
@@ -725,7 +725,7 @@ const ConnectionRouter = struct {
         const mirror = &(self.streams.items[session_idx].mirror orelse return);
         const payload = mirror.upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0 and payload.len == 8) {
-            const ack = try buildFrame(self.allocator, .{
+            const ack = try http2.buildFrame(self.allocator, .{
                 .length = 8,
                 .frame_type = .ping,
                 .flags = 0x1,
@@ -881,7 +881,7 @@ fn buildOutboundPath(
 }
 
 fn buildInitialUpstreamPreamble(alloc: std.mem.Allocator) ![]u8 {
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -1070,14 +1070,6 @@ fn writeAll(fd: posix.socket_t, data: []const u8) !void {
         if (bytes_written == 0) return error.WriteFailed;
         written += bytes_written;
     }
-}
-
-fn buildFrame(alloc: std.mem.Allocator, header: http2.FrameHeader, payload: []const u8) ![]u8 {
-    const buf = try alloc.alloc(u8, http2.frame_header_len + payload.len);
-    errdefer alloc.free(buf);
-    try http2.writeFrameHeader(buf[0..http2.frame_header_len], header);
-    @memcpy(buf[http2.frame_header_len..], payload);
-    return buf;
 }
 
 fn clampPollTimeout(timeout_ms: u32) i32 {

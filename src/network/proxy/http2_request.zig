@@ -271,7 +271,7 @@ pub fn rewriteRequestHeaderSequence(
     const rewritten_block = try hpack.encodeHeaderBlockLiteral(alloc, headers.items);
     defer alloc.free(rewritten_block);
     return .{
-        .bytes = try buildFrame(alloc, .{
+        .bytes = try http2.buildFrame(alloc, .{
             .length = @intCast(rewritten_block.len),
             .frame_type = .headers,
             .flags = (first.flags & Flag.end_stream) | Flag.end_headers,
@@ -362,14 +362,6 @@ fn appendLiteralWithIndexedName(buf: *std.ArrayList(u8), alloc: std.mem.Allocato
     try buf.appendSlice(alloc, value);
 }
 
-fn buildFrame(alloc: std.mem.Allocator, header: http2.FrameHeader, payload: []const u8) ![]u8 {
-    var buf = try alloc.alloc(u8, http2.frame_header_len + payload.len);
-    errdefer alloc.free(buf);
-    try http2.writeFrameHeader(buf[0..http2.frame_header_len], header);
-    @memcpy(buf[http2.frame_header_len..], payload);
-    return buf;
-}
-
 test "parseClientConnectionPreface parses initial HEADERS request" {
     const alloc = std.testing.allocator;
 
@@ -380,7 +372,7 @@ test "parseClientConnectionPreface parses initial HEADERS request" {
     try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "api.internal"); // :authority
     try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call"); // :path
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -388,7 +380,7 @@ test "parseClientConnectionPreface parses initial HEADERS request" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = Flag.end_headers | Flag.end_stream,
@@ -438,7 +430,7 @@ test "parseClientConnectionPreface parses huffman-encoded authority" {
     });
     try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call"); // :path
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -446,7 +438,7 @@ test "parseClientConnectionPreface parses huffman-encoded authority" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = Flag.end_headers | Flag.end_stream,
@@ -478,7 +470,7 @@ test "parseClientConnectionPreface parses HEADERS plus CONTINUATION" {
     try appendLiteralWithIndexedName(&second_fragment, alloc, 0x01, "api.internal");
     try appendLiteralWithIndexedName(&second_fragment, alloc, 0x04, "/v1/users");
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -486,7 +478,7 @@ test "parseClientConnectionPreface parses HEADERS plus CONTINUATION" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = first_fragment.len,
         .frame_type = .headers,
         .flags = 0,
@@ -494,7 +486,7 @@ test "parseClientConnectionPreface parses HEADERS plus CONTINUATION" {
     }, &first_fragment);
     defer alloc.free(headers);
 
-    const continuation = try buildFrame(alloc, .{
+    const continuation = try http2.buildFrame(alloc, .{
         .length = @intCast(second_fragment.items.len),
         .frame_type = .continuation,
         .flags = Flag.end_headers,
@@ -529,7 +521,7 @@ test "rewriteClientConnectionPreface rewrites authority and path" {
     try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "api.internal");
     try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/api/users?id=7");
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -537,7 +529,7 @@ test "rewriteClientConnectionPreface rewrites authority and path" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = Flag.end_headers | Flag.end_stream,
@@ -571,7 +563,7 @@ test "rewriteClientConnectionPreface injects forwarded proto header" {
     try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "api.internal");
     try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call");
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -579,7 +571,7 @@ test "rewriteClientConnectionPreface injects forwarded proto header" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = Flag.end_headers | Flag.end_stream,
@@ -612,7 +604,7 @@ test "rewriteClientConnectionPreface injects forwarded proto header" {
 test "rewriteClientStreamChunk injects forwarded proto on later streams" {
     const alloc = std.testing.allocator;
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -627,7 +619,7 @@ test "rewriteClientStreamChunk injects forwarded proto on later streams" {
     try appendLiteralWithIndexedName(&stream1_block, alloc, 0x01, "svc.internal");
     try appendLiteralWithIndexedName(&stream1_block, alloc, 0x04, "/pkg.Service/Call");
 
-    const stream1_headers = try buildFrame(alloc, .{
+    const stream1_headers = try http2.buildFrame(alloc, .{
         .length = @intCast(stream1_block.items.len),
         .frame_type = .headers,
         .flags = Flag.end_headers,
@@ -642,7 +634,7 @@ test "rewriteClientStreamChunk injects forwarded proto on later streams" {
     try appendLiteralWithIndexedName(&stream3_block, alloc, 0x01, "svc.internal");
     try appendLiteralWithIndexedName(&stream3_block, alloc, 0x04, "/pkg.Service/Stream");
 
-    const stream3_headers = try buildFrame(alloc, .{
+    const stream3_headers = try http2.buildFrame(alloc, .{
         .length = @intCast(stream3_block.items.len),
         .frame_type = .headers,
         .flags = Flag.end_headers,
@@ -690,7 +682,7 @@ test "parseClientConnectionPreface rejects missing preface" {
 test "parseClientConnectionPreface rejects header block without authority" {
     const alloc = std.testing.allocator;
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -699,7 +691,7 @@ test "parseClientConnectionPreface rejects header block without authority" {
     defer alloc.free(settings);
 
     const header_block = [_]u8{ 0x82, 0x84 };
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = header_block.len,
         .frame_type = .headers,
         .flags = Flag.end_headers,

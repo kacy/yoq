@@ -125,14 +125,6 @@ fn appendLiteralHeader(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name: 
     try buf.appendSlice(alloc, value);
 }
 
-fn buildFrame(alloc: std.mem.Allocator, header: http2.FrameHeader, payload: []const u8) ![]u8 {
-    const buf = try alloc.alloc(u8, http2.frame_header_len + payload.len);
-    errdefer alloc.free(buf);
-    try http2.writeFrameHeader(buf[0..http2.frame_header_len], header);
-    @memcpy(buf[http2.frame_header_len..], payload);
-    return buf;
-}
-
 test "planRequest matches HTTP/1 route and strips host port" {
     const alloc = std.testing.allocator;
     const routes = [_]router.Route{
@@ -239,7 +231,7 @@ test "planRequest matches prior-knowledge HTTP/2 route" {
     try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "grpc.internal");
     try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call");
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -247,7 +239,7 @@ test "planRequest matches prior-knowledge HTTP/2 route" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = 0x5,
@@ -302,7 +294,7 @@ test "planRequest prefers header-specific HTTP/2 route" {
     try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call");
     try appendLiteralHeader(&header_block, alloc, "x-env", "canary");
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -310,7 +302,7 @@ test "planRequest prefers header-specific HTTP/2 route" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = 0x5,
@@ -348,7 +340,7 @@ test "planRequest returns RouteNotFound for unmatched HTTP/2 request" {
     try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "grpc.internal");
     try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call");
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -356,7 +348,7 @@ test "planRequest returns RouteNotFound for unmatched HTTP/2 request" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = 0x4,
@@ -391,7 +383,7 @@ test "planRequest preserves unsupported HTTP/2 method as null method_enum" {
     try appendLiteralWithIndexedName(&header_block, alloc, 0x01, "grpc.internal");
     try appendLiteralWithIndexedName(&header_block, alloc, 0x04, "/pkg.Service/Call");
 
-    const settings = try buildFrame(alloc, .{
+    const settings = try http2.buildFrame(alloc, .{
         .length = 0,
         .frame_type = .settings,
         .flags = 0,
@@ -399,7 +391,7 @@ test "planRequest preserves unsupported HTTP/2 method as null method_enum" {
     }, "");
     defer alloc.free(settings);
 
-    const headers = try buildFrame(alloc, .{
+    const headers = try http2.buildFrame(alloc, .{
         .length = @intCast(header_block.items.len),
         .frame_type = .headers,
         .flags = 0x4,
