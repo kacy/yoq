@@ -205,7 +205,9 @@ fn writeCgroupFile(cgroup_path: []const u8, filename: []const u8, value: []const
     const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cgroup_path, filename }) catch return;
     const file = std.fs.cwd().openFile(file_path, .{ .mode = .write_only }) catch return;
     defer file.close();
-    file.writeAll(value) catch {};
+    file.writeAll(value) catch |e| {
+        log.warn("gpu cgroup write failed for {s}/{s}: {}", .{ cgroup_path, filename, e });
+    };
 }
 
 fn ensureContainerDevDir(merged_dir: []const u8) !void {
