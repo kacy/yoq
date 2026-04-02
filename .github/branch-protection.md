@@ -1,16 +1,13 @@
 # branch protection rollout
 
-protect `main` with pull requests before merge and start with only the phase-1 checks required.
+protect `main` with pull requests before merge.
 
-initial required checks:
+required checks:
 
 - `ci / fmt-check`
 - `ci / build-debug`
 - `ci / docker-build`
 - `ci / examples-validate`
-
-phase-2 required checks after the current `zig build test` failure is fixed:
-
 - `ci / unit-tests`
 - `ci / bpf-consistency`
 

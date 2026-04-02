@@ -282,7 +282,7 @@ Notes:
 
 ## current status
 
-~77K lines of Zig, ~1474 tests, v0.1.1. coverage across runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, metrics, and alerting.
+~102K lines of Zig, ~1914 tests, v0.1.7. coverage across runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, metrics, and alerting.
 
 see [docs/architecture.md](docs/architecture.md) for subsystem details and [docs/users-guide.md](docs/users-guide.md) for a guide to the internals.
 
@@ -318,7 +318,6 @@ yoq up -f examples/redis/manifest.toml
 
 ## what's next
 
-- richer HTTP routing — broader ingress policy and more advanced traffic shaping
-- hardening — continued stability, edge-case testing, and operational polish
+- hardening — continued stability, edge-case testing, and operational polish toward v1.0
 - web UI remains intentionally deferred; the CLI is the primary interface
 - image signing is not built in; use cosign externally
