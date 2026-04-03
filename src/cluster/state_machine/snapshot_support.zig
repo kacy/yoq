@@ -74,7 +74,7 @@ pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) Sn
     };
     defer std.heap.page_allocator.free(tmp_data);
 
-    const file = std.fs.cwd().createFile(dest_path, .{}) catch return SnapshotError.IoError;
+    const file = std.fs.cwd().createFile(dest_path, .{ .truncate = true, .mode = 0o600 }) catch return SnapshotError.IoError;
     defer file.close();
 
     var header: [snapshot_header_size]u8 = undefined;
@@ -147,11 +147,21 @@ fn createUniqueTempFile(buf: []u8, prefix: []const u8, suffix: []const u8) Snaps
         if (slice.len >= buf.len) return SnapshotError.IoError;
         buf[slice.len] = 0;
         const path: [:0]const u8 = buf[0..slice.len :0];
-        const file = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| switch (err) {
+        const file = std.fs.cwd().createFile(path, .{ .exclusive = true, .mode = 0o600 }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return SnapshotError.IoError,
         };
         return .{ .path = path, .file = file };
     }
     return SnapshotError.IoError;
+}
+
+test "createUniqueTempFile uses owner-only permissions" {
+    var buf: [128]u8 = undefined;
+    var tmp = try createUniqueTempFile(&buf, "/tmp/yoq-snapshot-perm-test", ".db");
+    defer std.fs.cwd().deleteFile(tmp.path) catch {};
+    defer tmp.file.close();
+
+    const stat = try tmp.file.stat();
+    try std.testing.expectEqual(@as(u32, 0), stat.mode & 0o077);
 }
