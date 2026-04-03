@@ -2,6 +2,7 @@ const std = @import("std");
 const agent_registry = @import("../registry.zig");
 const scheduler = @import("../scheduler.zig");
 const gossip_mod = @import("../gossip.zig");
+const gossip_sender_validation = @import("../gossip_sender_validation.zig");
 const ip_mod = @import("../../network/ip.zig");
 const service_reconciler = @import("../../network/service_reconciler.zig");
 const logger = @import("../../lib/log.zig");
@@ -135,6 +136,10 @@ pub fn receiveGossipMessages(self: anytype) void {
     while (msg_count < 10) {
         const result = self.transport.receiveGossip(&buf) catch break;
         const recv = result orelse break;
+        if (!gossip_sender_validation.isTrustedSender(g, recv)) {
+            logger.warn("gossip: rejected spoofed sender {} from unexpected source", .{recv.sender_id});
+            continue;
+        }
         const msg = gossip_mod.Gossip.decode(self.alloc, recv.payload) catch continue;
         msgs[msg_count] = msg;
         msg_count += 1;

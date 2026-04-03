@@ -747,6 +747,7 @@ test "udp gossip: send and receive with HMAC" {
     const result = try waitForGossipResult(&receiver, &buf);
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(u64, 1), result.?.sender_id);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, @as([4]u8, @bitCast(result.?.from_addr.in.sa.addr)));
     try std.testing.expectEqualSlices(u8, payload, result.?.payload);
 }
 

@@ -46,6 +46,7 @@ pub const VerifiedBody = struct {
 
 pub const GossipReceiveResult = struct {
     sender_id: u64,
+    from_addr: std.net.Address,
     payload: []const u8,
 };
 
