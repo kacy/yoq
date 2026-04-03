@@ -1603,3 +1603,145 @@ test "suspect timeout skipped when tick_count wraps below state_changed_at" {
     // member should still be suspect
     try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
 }
+
+test "applyStateUpdate discovers new alive member" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
+    defer g.deinit();
+
+    // receive update about previously unknown member 5
+    try g.applyStateUpdate(.{
+        .id = 5,
+        .addr = .{ .ip = .{ 10, 0, 0, 5 }, .port = 7000 },
+        .state = .alive,
+        .incarnation = 1,
+    });
+
+    // member should be added
+    const member = g.members.get(5).?;
+    try std.testing.expectEqual(MemberState.alive, member.state);
+    try std.testing.expectEqual(@as(u64, 1), member.incarnation);
+
+    // should emit member_alive action
+    const actions = g.drainActions();
+    defer g.freeActions(actions);
+    var found_alive = false;
+    for (actions) |action| {
+        if (action == .member_alive and action.member_alive.id == 5) found_alive = true;
+    }
+    try std.testing.expect(found_alive);
+}
+
+test "applyStateUpdate discovers new suspect member" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
+    defer g.deinit();
+
+    // receive suspect update for unknown member — should add as suspect
+    try g.applyStateUpdate(.{
+        .id = 5,
+        .addr = .{ .ip = .{ 10, 0, 0, 5 }, .port = 7000 },
+        .state = .suspect,
+        .incarnation = 3,
+    });
+
+    const member = g.members.get(5).?;
+    try std.testing.expectEqual(MemberState.suspect, member.state);
+
+    const actions = g.drainActions();
+    defer g.freeActions(actions);
+    var found_suspect = false;
+    for (actions) |action| {
+        if (action == .member_suspect and action.member_suspect.id == 5) found_suspect = true;
+    }
+    try std.testing.expect(found_suspect);
+}
+
+test "applyStateUpdate higher incarnation overrides any state" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // mark dead at incarnation 5
+    try g.applyStateUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .dead,
+        .incarnation = 5,
+    });
+    var drain = g.drainActions();
+    g.freeActions(drain);
+    try std.testing.expectEqual(MemberState.dead, g.members.get(2).?.state);
+
+    // alive at higher incarnation 6 — should override dead
+    try g.applyStateUpdate(.{
+        .id = 2,
+        .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 },
+        .state = .alive,
+        .incarnation = 6,
+    });
+    drain = g.drainActions();
+    g.freeActions(drain);
+    try std.testing.expectEqual(MemberState.alive, g.members.get(2).?.state);
+    try std.testing.expectEqual(@as(u64, 6), g.members.get(2).?.incarnation);
+}
+
+test "probe cycle skips all-dead members without hanging" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+    try g.addMember(3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
+
+    // mark both dead
+    if (g.members.getPtr(2)) |m| m.state = .dead;
+    if (g.members.getPtr(3)) |m| m.state = .dead;
+
+    // tick should not hang or crash — no one to probe
+    for (0..10) |_| {
+        try g.tick();
+        const actions = g.drainActions();
+        defer g.freeActions(actions);
+    }
+
+    // probe_phase should be idle since no valid target found
+    try std.testing.expectEqual(Gossip.ProbePhase.idle, g.probe_phase);
+}
+
+test "codec encode decode round-trip for ping_req with updates" {
+    const update = StateUpdate{
+        .id = 42,
+        .addr = .{ .ip = .{ 192, 168, 1, 1 }, .port = 9000 },
+        .state = .suspect,
+        .incarnation = 777,
+    };
+
+    var buf: [256]u8 = undefined;
+    const msg = Gossip.GossipMessage{
+        .ping_req = .{
+            .from = 1,
+            .target = 2,
+            .sequence = 99,
+            .updates = BoundedUpdates.fromSlice(&.{update}),
+        },
+    };
+    const len = try Gossip.encode(&buf, msg, 6);
+    const decoded = try Gossip.decode(std.testing.allocator, buf[0..len]);
+
+    switch (decoded) {
+        .ping_req => |p| {
+            try std.testing.expectEqual(@as(u64, 1), p.from);
+            try std.testing.expectEqual(@as(u64, 2), p.target);
+            try std.testing.expectEqual(@as(u64, 99), p.sequence);
+            try std.testing.expectEqual(@as(u8, 1), p.updates.len);
+            const decoded_update = p.updates.slice()[0];
+            try std.testing.expectEqual(@as(u64, 42), decoded_update.id);
+            try std.testing.expectEqual(MemberState.suspect, decoded_update.state);
+            try std.testing.expectEqual(@as(u64, 777), decoded_update.incarnation);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
