@@ -61,7 +61,7 @@ pub const HttpError = error{
 
 pub const max_uri_bytes: usize = 2048;
 pub const max_header_bytes: usize = 16 * 1024;
-pub const max_body_bytes: usize = 32 * 1024;
+pub const max_body_bytes: usize = 256 * 1024 * 1024;
 
 /// a parsed HTTP request. all slices reference the original input buffer —
 /// no allocations, no copies. the caller must keep the input alive.
@@ -157,17 +157,22 @@ pub fn formatResponse(buf: []u8, status: StatusCode, body: []const u8) []const u
     return formatResponseWithType(buf, status, "application/json", body);
 }
 
-/// format a complete HTTP response with a custom content type.
-pub fn formatResponseWithType(buf: []u8, status: StatusCode, content_type: []const u8, body: []const u8) []const u8 {
+/// format only the HTTP response headers into a buffer.
+pub fn formatResponseHeaders(buf: []u8, status: StatusCode, content_type: []const u8, content_length: usize) []const u8 {
     const code: u16 = @intFromEnum(status);
     const phrase = status.phrase();
 
-    const result = std.fmt.bufPrint(buf, "HTTP/1.1 {d} {s}\r\n" ++
+    return std.fmt.bufPrint(buf, "HTTP/1.1 {d} {s}\r\n" ++
         "Content-Type: {s}\r\n" ++
         "Content-Length: {d}\r\n" ++
         "Connection: close\r\n" ++
-        "\r\n" ++
-        "{s}", .{ code, phrase, content_type, body.len, body }) catch {
+        "\r\n", .{ code, phrase, content_type, content_length }) catch buf[0..0];
+}
+
+/// format a complete HTTP response with a custom content type.
+pub fn formatResponseWithType(buf: []u8, status: StatusCode, content_type: []const u8, body: []const u8) []const u8 {
+    const headers = formatResponseHeaders(buf, status, content_type, body.len);
+    if (headers.len == 0 or headers.len + body.len > buf.len) {
         // buffer too small — return a minimal error
         const fallback = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         if (buf.len >= fallback.len) {
@@ -175,9 +180,10 @@ pub fn formatResponseWithType(buf: []u8, status: StatusCode, content_type: []con
             return buf[0..fallback.len];
         }
         return buf[0..0];
-    };
+    }
 
-    return result;
+    @memcpy(buf[headers.len .. headers.len + body.len], body);
+    return buf[0 .. headers.len + body.len];
 }
 
 /// shorthand for a JSON error response body.
@@ -420,6 +426,16 @@ test "format response with empty body" {
 
     try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 204 No Content\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Length: 0") != null);
+}
+
+test "format response headers only" {
+    var buf: [256]u8 = undefined;
+    const headers = formatResponseHeaders(&buf, .ok, "application/octet-stream", 8192);
+
+    try std.testing.expect(std.mem.startsWith(u8, headers, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, headers, "Content-Type: application/octet-stream") != null);
+    try std.testing.expect(std.mem.indexOf(u8, headers, "Content-Length: 8192") != null);
+    try std.testing.expect(std.mem.endsWith(u8, headers, "\r\n\r\n"));
 }
 
 test "GET request with multiple headers" {

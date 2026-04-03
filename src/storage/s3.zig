@@ -444,18 +444,7 @@ pub fn completeMultipartUpload(
         }
     }.lessThan);
 
-    // concatenate parts and write final object
-    var combined: std.ArrayListUnmanaged(u8) = .empty;
-    defer combined.deinit(alloc);
-
-    for (part_names.items) |pn| {
-        const part_data = dir.readFileAlloc(alloc, pn, 256 * 1024 * 1024) catch return S3Error.IoError;
-        defer alloc.free(part_data);
-        combined.appendSlice(alloc, part_data) catch return S3Error.IoError;
-    }
-
-    // write the final object
-    const etag = try putObject(bucket_name, key, combined.items);
+    const etag = try writeMultipartObject(dir, bucket_name, key, part_names.items);
 
     // clean up staging directory
     std.fs.cwd().deleteTree(staging_path) catch {};
@@ -482,6 +471,37 @@ pub fn computeEtag(data: []const u8) [32]u8 {
     var digest: [Md5.digest_length]u8 = undefined;
     Md5.hash(data, &digest, .{});
 
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn writeMultipartObject(dir: std.fs.Dir, bucket_name: []const u8, key: []const u8, part_names: []const []const u8) S3Error![32]u8 {
+    var out_path_buf: [paths.max_path]u8 = undefined;
+    const file_path = try storagePath(&out_path_buf, storage_subdir ++ "/{s}/{s}", .{ bucket_name, key });
+
+    if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_sep| {
+        std.fs.cwd().makePath(file_path[0..last_sep]) catch return S3Error.IoError;
+    }
+
+    const out_file = std.fs.cwd().createFile(file_path, .{ .truncate = true }) catch return S3Error.IoError;
+    defer out_file.close();
+
+    var hasher = std.crypto.hash.Md5.init(.{});
+    var buf: [8192]u8 = undefined;
+
+    for (part_names) |pn| {
+        const part_file = dir.openFile(pn, .{}) catch return S3Error.IoError;
+        defer part_file.close();
+
+        while (true) {
+            const bytes_read = part_file.read(&buf) catch return S3Error.IoError;
+            if (bytes_read == 0) break;
+            out_file.writeAll(buf[0..bytes_read]) catch return S3Error.IoError;
+            hasher.update(buf[0..bytes_read]);
+        }
+    }
+
+    var digest: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+    hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
 }
 
@@ -612,4 +632,33 @@ test "verifyMultipartTarget rejects reused upload id for different object" {
     try verifyMultipartTarget(staging, "bucket-a", "key-a");
     try std.testing.expectError(S3Error.UploadNotFound, verifyMultipartTarget(staging, "bucket-b", "key-a"));
     try std.testing.expectError(S3Error.UploadNotFound, verifyMultipartTarget(staging, "bucket-a", "key-b"));
+}
+
+test "completeMultipartUpload streams parts into final object" {
+    const bucket = "multipart-stream-bucket";
+    const key = "nested/object.bin";
+
+    var bucket_path_buf: [paths.max_path]u8 = undefined;
+    const bucket_path = try storagePath(&bucket_path_buf, storage_subdir ++ "/{s}", .{bucket});
+    std.fs.cwd().deleteTree(bucket_path) catch {};
+    defer std.fs.cwd().deleteTree(bucket_path) catch {};
+
+    try createBucket(bucket);
+    const upload_id = try initiateMultipartUpload(bucket, key);
+
+    var staging_path_buf: [paths.max_path]u8 = undefined;
+    const staging_path = try storagePath(&staging_path_buf, multipart_subdir ++ "/{s}", .{upload_id});
+    defer std.fs.cwd().deleteTree(staging_path) catch {};
+
+    _ = try uploadPart(&upload_id, bucket, key, 1, "hello ");
+    _ = try uploadPart(&upload_id, bucket, key, 2, "streamed ");
+    _ = try uploadPart(&upload_id, bucket, key, 3, "world");
+
+    const etag = try completeMultipartUpload(std.testing.allocator, bucket, key, &upload_id);
+    const data = try getObject(std.testing.allocator, bucket, key);
+    defer std.testing.allocator.free(data);
+    const expected_etag = computeEtag("hello streamed world");
+
+    try std.testing.expectEqualStrings("hello streamed world", data);
+    try std.testing.expectEqualStrings(&expected_etag, &etag);
 }

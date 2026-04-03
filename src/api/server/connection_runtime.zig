@@ -8,6 +8,15 @@ const rate_limit = @import("rate_limit.zig");
 pub const max_connections: u32 = 128;
 pub var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
+pub const OwnedRequest = struct {
+    buffer: []u8,
+    request: http.Request,
+
+    pub fn deinit(self: OwnedRequest, alloc: std.mem.Allocator) void {
+        alloc.free(self.buffer);
+    }
+};
+
 pub fn connectionWrapper(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
     defer releaseConnectionSlot();
     handleConnection(alloc, client_fd);
@@ -45,8 +54,7 @@ pub fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
 
     setReadTimeout(client_fd, 5);
 
-    var buf: [65536]u8 = undefined;
-    const request = readRequest(client_fd, &buf) catch |err| switch (err) {
+    const owned_request = readRequestAlloc(alloc, client_fd) catch |err| switch (err) {
         error.MalformedRequest => {
             sendError(client_fd, .bad_request, "malformed request");
             return;
@@ -67,20 +75,23 @@ pub fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
             sendError(client_fd, .bad_request, "request too large or timed out");
             return;
         },
+        error.AllocFailed => {
+            sendError(client_fd, .internal_server_error, "request allocation failed");
+            return;
+        },
     };
+    defer owned_request.deinit(alloc);
 
     var trace_id: [16]u8 = undefined;
     log.generateTraceId(&trace_id);
     log.setTraceId(&trace_id);
     defer log.clearTraceId();
 
-    const response = routes.dispatch(request, alloc);
+    const response = routes.dispatch(owned_request.request, alloc);
     defer if (response.allocated) alloc.free(response.body);
 
-    var resp_buf: [4096]u8 = undefined;
     const content_type = response.content_type orelse "application/json";
-    const resp = http.formatResponseWithType(&resp_buf, response.status, content_type, response.body);
-    writeAll(client_fd, resp);
+    writeResponse(client_fd, response.status, content_type, response.body);
 }
 
 pub const ReadRequestError = error{
@@ -89,7 +100,62 @@ pub const ReadRequestError = error{
     HeadersTooLarge,
     BodyTooLarge,
     ReadIncomplete,
+    AllocFailed,
 };
+
+pub fn readRequestAlloc(alloc: std.mem.Allocator, fd: posix.fd_t) ReadRequestError!OwnedRequest {
+    var data: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer data.deinit(alloc);
+
+    var expected_total: ?usize = null;
+    var chunk: [8192]u8 = undefined;
+
+    while (true) {
+        if (expected_total) |needed| {
+            if (data.items.len >= needed) break;
+        }
+
+        const bytes_read = posix.read(fd, &chunk) catch break;
+        if (bytes_read == 0) break;
+
+        data.appendSlice(alloc, chunk[0..bytes_read]) catch return error.AllocFailed;
+
+        if (expected_total == null) {
+            if (findHeaderEnd(data.items)) |header_end| {
+                const request_line_end = std.mem.indexOf(u8, data.items, "\r\n") orelse return error.MalformedRequest;
+                if (request_line_end + 2 > header_end) return error.MalformedRequest;
+
+                const headers_raw = data.items[request_line_end + 2 .. header_end];
+                const content_length = http.findContentLength(headers_raw) catch return error.MalformedRequest;
+                if (content_length > http.max_body_bytes) return error.BodyTooLarge;
+
+                expected_total = header_end + 4 + content_length;
+                data.ensureTotalCapacity(alloc, expected_total.?) catch return error.AllocFailed;
+            } else if (data.items.len > http.max_header_bytes) {
+                return error.HeadersTooLarge;
+            }
+        }
+    }
+
+    const required_len = expected_total orelse return error.ReadIncomplete;
+    if (data.items.len < required_len) return error.ReadIncomplete;
+
+    const buffer = data.toOwnedSlice(alloc) catch return error.AllocFailed;
+    errdefer alloc.free(buffer);
+
+    const parsed = http.parseRequest(buffer) catch |err| return switch (err) {
+        error.UriTooLong => error.UriTooLong,
+        error.HeadersTooLarge => error.HeadersTooLarge,
+        error.BodyTooLarge => error.BodyTooLarge,
+        else => error.MalformedRequest,
+    };
+    const request = parsed orelse return error.ReadIncomplete;
+
+    return .{
+        .buffer = buffer,
+        .request = request,
+    };
+}
 
 pub fn readRequest(fd: posix.fd_t, buf: []u8) ReadRequestError!http.Request {
     var total: usize = 0;
@@ -131,6 +197,18 @@ fn sendError(fd: posix.fd_t, status: http.StatusCode, message: []const u8) void 
     writeAll(fd, resp);
 }
 
+fn writeResponse(fd: posix.fd_t, status: http.StatusCode, content_type: []const u8, body: []const u8) void {
+    var header_buf: [512]u8 = undefined;
+    const headers = http.formatResponseHeaders(&header_buf, status, content_type, body.len);
+    if (headers.len == 0) {
+        sendError(fd, .internal_server_error, "response formatting failed");
+        return;
+    }
+
+    writeAll(fd, headers);
+    if (body.len > 0) writeAll(fd, body);
+}
+
 fn writeAll(fd: posix.fd_t, data: []const u8) void {
     var written: usize = 0;
     while (written < data.len) {
@@ -138,4 +216,58 @@ fn writeAll(fd: posix.fd_t, data: []const u8) void {
         if (bytes_written == 0) return;
         written += bytes_written;
     }
+}
+
+test "readRequestAlloc handles body larger than legacy buffer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("large-request.txt", .{ .read = true });
+    defer file.close();
+
+    const body_len = 96 * 1024;
+    const body = try std.testing.allocator.alloc(u8, body_len);
+    defer std.testing.allocator.free(body);
+    @memset(body, 'Z');
+
+    const request_head = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "POST /s3/bucket/object HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\n\r\n",
+        .{body.len},
+    );
+    defer std.testing.allocator.free(request_head);
+
+    try file.writeAll(request_head);
+    try file.writeAll(body);
+    try file.seekTo(0);
+
+    const owned = try readRequestAlloc(std.testing.allocator, file.handle);
+    defer owned.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, body_len), owned.request.body.len);
+    try std.testing.expectEqualStrings("/s3/bucket/object", owned.request.path_only);
+    try std.testing.expectEqualSlices(u8, body, owned.request.body);
+}
+
+test "writeResponse streams body larger than response scratch buffer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("large-response.txt", .{ .read = true });
+    defer file.close();
+
+    const body_len = 12 * 1024;
+    const body = try std.testing.allocator.alloc(u8, body_len);
+    defer std.testing.allocator.free(body);
+    @memset(body, 'R');
+
+    writeResponse(file.handle, .ok, "application/octet-stream", body);
+    try file.seekTo(0);
+
+    const response = try file.readToEndAlloc(std.testing.allocator, body_len + 512);
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Length: 12288\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, response, body));
 }
