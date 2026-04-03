@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
+const log = @import("../../lib/log.zig");
 const parse_support = @import("parse_support.zig");
 
 pub fn allocate(db: *sqlite.Db, container_id: []const u8) common.IpError![4]u8 {
@@ -24,6 +25,8 @@ pub fn allocate(db: *sqlite.Db, container_id: []const u8) common.IpError![4]u8 {
             if (addr[0] == 10 and addr[1] == 42) {
                 const offset = @as(usize, addr[2]) * 256 + addr[3];
                 allocated.set(offset);
+            } else {
+                log.warn("ip allocator: ignoring out-of-range IP {d}.{d}.{d}.{d} in allocation table", .{ addr[0], addr[1], addr[2], addr[3] });
             }
         }
         count += 1;
