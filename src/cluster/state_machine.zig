@@ -104,6 +104,10 @@ pub fn readSnapshotMeta(path: []const u8) SnapshotError!SnapshotMeta {
     return snapshot_support.readSnapshotMeta(path);
 }
 
+pub fn parseSnapshotMeta(data: []const u8) SnapshotError!SnapshotMeta {
+    return snapshot_support.parseSnapshotMeta(data);
+}
+
 // -- tests --
 
 test "apply executes SQL statement" {

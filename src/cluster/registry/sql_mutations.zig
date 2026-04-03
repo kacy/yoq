@@ -119,7 +119,7 @@ pub fn heartbeatSql(
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
 
     const health_raw = resources.gpu_health.slice();
-    var health_esc_buf: [64]u8 = undefined;
+    var health_esc_buf: [256]u8 = undefined;
     const health_esc = if (health_raw.len > 0)
         try sql_escape.escapeSqlString(&health_esc_buf, health_raw)
     else

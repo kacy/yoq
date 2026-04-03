@@ -13,6 +13,20 @@ pub const SnapshotError = error{
     CorruptSnapshot,
 };
 
+pub fn parseSnapshotMeta(data: []const u8) SnapshotError!SnapshotMeta {
+    if (data.len < snapshot_header_size) return SnapshotError.InvalidSnapshot;
+    const last_included_index = std.mem.readInt(u64, data[0..8], .little);
+    const last_included_term = std.mem.readInt(u64, data[8..16], .little);
+    const sqlite_data_len = std.mem.readInt(u64, data[16..24], .little);
+    if (sqlite_data_len > max_snapshot_size) return SnapshotError.InvalidSnapshot;
+    if (data.len != snapshot_header_size + sqlite_data_len) return SnapshotError.CorruptSnapshot;
+    return .{
+        .last_included_index = last_included_index,
+        .last_included_term = last_included_term,
+        .data_len = sqlite_data_len,
+    };
+}
+
 pub const snapshot_header_size = 24;
 pub const max_snapshot_size: u64 = 64 * 1024 * 1024;
 

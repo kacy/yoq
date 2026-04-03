@@ -247,8 +247,8 @@ pub fn processActions(self: anytype) void {
             .apply_snapshot => |snap| {
                 defer self.alloc.free(snap.data);
 
-                const meta = self.state_machine.restoreFromBytes(snap.data) catch |e| {
-                    logger.warn("snapshot: failed to restore from bytes: {}", .{e});
+                const meta = @import("../state_machine.zig").parseSnapshotMeta(snap.data) catch |e| {
+                    logger.warn("snapshot: invalid snapshot data: {}", .{e});
                     continue;
                 };
 
@@ -260,6 +260,11 @@ pub fn processActions(self: anytype) void {
                     logger.warn("snapshot: failed to truncate raft log up to index {}", .{meta.last_included_index});
                     continue;
                 }
+
+                _ = self.state_machine.restoreFromBytes(snap.data) catch |e| {
+                    logger.warn("snapshot: failed to restore state machine: {}", .{e});
+                    continue;
+                };
                 self.last_snapshot_index = meta.last_included_index;
                 logger.info("snapshot: restored state machine to index {}", .{meta.last_included_index});
             },

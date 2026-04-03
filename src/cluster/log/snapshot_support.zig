@@ -21,6 +21,7 @@ pub fn getSnapshotMeta(db: *sqlite.Db) ?SnapshotMeta {
     ) catch return null) orelse return null;
 
     if (row.last_included_index == 0) return null;
+    if (row.last_included_term <= 0) return null;
 
     return SnapshotMeta{
         .last_included_index = common.safeU64(row.last_included_index) catch return null,
