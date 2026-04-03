@@ -79,9 +79,11 @@ pub fn stopResolver() void {
     }
 
     resolver_running.store(false, .release);
+
+    // shut down the socket to unblock any recvfrom() in the resolver thread
+    // before closing it, so the thread sees ENOTCONN instead of EBADF
     if (resolver_socket) |sock| {
-        posix.close(sock);
-        resolver_socket = null;
+        posix.shutdown(sock, .both) catch {};
     }
 
     const thread = resolver_thread;
@@ -91,6 +93,14 @@ pub fn stopResolver() void {
     if (thread) |t| {
         t.join();
     }
+
+    // close socket after thread has exited
+    resolver_mutex.lock();
+    if (resolver_socket) |sock| {
+        posix.close(sock);
+        resolver_socket = null;
+    }
+    resolver_mutex.unlock();
 }
 
 fn initUpstreamDns() void {
