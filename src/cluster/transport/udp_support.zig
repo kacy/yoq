@@ -60,7 +60,9 @@ pub fn receiveGossip(self: anytype, buf: []u8) TransportError!?GossipReceiveResu
     const fd = self.udp_fd orelse return TransportError.ReceiveFailed;
     const key = self.shared_key orelse return TransportError.AuthenticationFailed;
 
-    const recv_len = posix.recvfrom(fd, buf, 0, null, null) catch |err| {
+    var from_addr: posix.sockaddr = undefined;
+    var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
+    const recv_len = posix.recvfrom(fd, buf, 0, &from_addr, &addr_len) catch |err| {
         return switch (err) {
             error.WouldBlock => null,
             else => TransportError.ReceiveFailed,
@@ -84,6 +86,7 @@ pub fn receiveGossip(self: anytype, buf: []u8) TransportError!?GossipReceiveResu
 
     return .{
         .sender_id = common.readU64(sender_bytes),
+        .from_addr = std.net.Address{ .any = from_addr },
         .payload = payload,
     };
 }

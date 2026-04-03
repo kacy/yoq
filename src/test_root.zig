@@ -89,12 +89,15 @@ comptime {
     _ = @import("api/http.zig");
     _ = @import("api/routes.zig");
     _ = @import("api/server.zig");
+    _ = @import("api/server/connection_runtime.zig");
     _ = @import("cluster/raft_types.zig");
     _ = @import("cluster/log.zig");
     _ = @import("cluster/raft.zig");
     _ = @import("cluster/transport.zig");
     _ = @import("cluster/gossip.zig");
+    _ = @import("cluster/gossip_sender_validation.zig");
     _ = @import("cluster/state_machine.zig");
+    _ = @import("cluster/state_machine/snapshot_support.zig");
     _ = @import("cluster/node.zig");
     _ = @import("cluster/config.zig");
     _ = @import("cluster/agent_types.zig");

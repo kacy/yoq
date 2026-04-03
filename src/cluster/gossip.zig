@@ -1708,7 +1708,7 @@ test "probe cycle skips all-dead members without hanging" {
     }
 
     // probe_phase should be idle since no valid target found
-    try std.testing.expectEqual(Gossip.ProbePhase.idle, g.probe_phase);
+    try std.testing.expectEqual(ProbePhase.idle, g.probe_phase);
 }
 
 test "codec encode decode round-trip for ping_req with updates" {
@@ -1720,7 +1720,7 @@ test "codec encode decode round-trip for ping_req with updates" {
     };
 
     var buf: [256]u8 = undefined;
-    const msg = Gossip.GossipMessage{
+    const msg = GossipMessage{
         .ping_req = .{
             .from = 1,
             .target = 2,
@@ -1728,7 +1728,7 @@ test "codec encode decode round-trip for ping_req with updates" {
             .updates = BoundedUpdates.fromSlice(&.{update}),
         },
     };
-    const len = try Gossip.encode(&buf, msg, 6);
+    const len = try Gossip.encode(&buf, msg);
     const decoded = try Gossip.decode(std.testing.allocator, buf[0..len]);
 
     switch (decoded) {

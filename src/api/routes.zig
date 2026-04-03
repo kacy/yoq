@@ -46,7 +46,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
             return .{ .status = .ok, .body = "{\"status\":\"ok\"}", .allocated = false };
         }
         if (std.mem.eql(u8, request.path_only, "/version")) {
-            return .{ .status = .ok, .body = "{\"version\":\"0.1.7\"}", .allocated = false };
+            return .{ .status = .ok, .body = "{\"version\":\"0.1.8\"}", .allocated = false };
         }
     }
 

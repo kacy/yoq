@@ -140,7 +140,12 @@ fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
                 else => s3Error(alloc, "InternalError", "failed to get object"),
             };
 
-            return .{ .status = .ok, .body = data, .allocated = true };
+            return .{
+                .status = .ok,
+                .body = data,
+                .allocated = true,
+                .content_type = "application/octet-stream",
+            };
         },
         .HEAD => {
             // HeadObject — return metadata without body
@@ -237,7 +242,7 @@ fn s3ErrorStatus(alloc: std.mem.Allocator, status: http.StatusCode, code: []cons
     const owned = alloc.dupe(u8, xml) catch
         return .{ .status = status, .body = "<Error><Code>InternalError</Code></Error>", .allocated = false };
 
-    return .{ .status = status, .body = owned, .allocated = true };
+    return .{ .status = status, .body = owned, .allocated = true, .content_type = "application/xml" };
 }
 
 fn headResponse(alloc: std.mem.Allocator, meta: s3.ObjectMeta) Response {
@@ -263,7 +268,7 @@ fn etagJsonResponse(alloc: std.mem.Allocator, etag: []const u8) Response {
 
 fn xmlResponse(alloc: std.mem.Allocator, xml: []const u8) Response {
     const owned = alloc.dupe(u8, xml) catch return common.internalError();
-    return .{ .status = .ok, .body = owned, .allocated = true };
+    return .{ .status = .ok, .body = owned, .allocated = true, .content_type = "application/xml" };
 }
 
 // -- tests --
