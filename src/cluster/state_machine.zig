@@ -649,3 +649,81 @@ test "two state machines produce identical state from same log" {
     try std.testing.expectEqualStrings("draining", agents1[0].status);
     try std.testing.expectEqualStrings("draining", agents2[0].status);
 }
+
+test "apply refuses out-of-order entry with gap" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    // apply entry 1 normally
+    sm.apply(.{
+        .index = 1,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a1', 'h1', 'active', 1, 1024, 0, 0, 0, 100, 100);",
+    });
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+
+    // skip entry 2 and try to apply entry 3 — should be rejected (gap)
+    sm.apply(.{
+        .index = 3,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a3', 'h3', 'active', 1, 1024, 0, 0, 0, 100, 100);",
+    });
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+}
+
+test "apply with duplicate key SQL does not advance last_applied" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    // entry 1 is valid
+    sm.apply(.{
+        .index = 1,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a1', 'h1', 'active', 1, 1024, 0, 0, 0, 100, 100);",
+    });
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+
+    // entry 2 has valid prefix but bad SQL (duplicate key) — should fail and NOT advance
+    sm.apply(.{
+        .index = 2,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a1', 'h1', 'active', 1, 1024, 0, 0, 0, 100, 100);",
+    });
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+}
+
+test "applyUpTo stops at missing entries in the middle" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+
+    var raft_log = try @import("log.zig").Log.initMemory();
+    defer raft_log.deinit();
+    const alloc = std.testing.allocator;
+
+    // only add entry 1 (entry 2 is missing)
+    try raft_log.append(.{
+        .index = 1,
+        .term = 1,
+        .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a1', 'h1', 'active', 1, 1024, 0, 0, 0, 100, 100);",
+    });
+
+    // ask to apply up to 3 — should apply 1 then stop at missing 2
+    sm.applyUpTo(&raft_log, alloc, 3);
+    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+}
+
+test "isAllowedStatement rejects unterminated quote" {
+    try std.testing.expect(!isAllowedStatement("INSERT INTO agents (id) VALUES ('unterminated"));
+}
+
+test "isAllowedStatement handles escaped quotes in values" {
+    try std.testing.expect(isAllowedStatement("INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('it''s', 'h', 'active', 1, 1024, 0, 0, 0, 100, 100);"));
+}
+
+test "isAllowedStatement rejects injection via semicolon outside quotes" {
+    try std.testing.expect(!isAllowedStatement("INSERT INTO agents (id) VALUES ('ok'); DROP TABLE agents"));
+}
+
+test "isAllowedStatement rejects whitespace-only input" {
+    try std.testing.expect(!isAllowedStatement("   \n\t  "));
+}
