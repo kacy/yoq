@@ -7,6 +7,7 @@
 const std = @import("std");
 const helpers = @import("helpers");
 const cluster_test_harness = @import("cluster_test_harness");
+const http = @import("../../src/api/http.zig");
 const http_client = @import("http_client");
 
 const TestCluster = cluster_test_harness.TestCluster;
@@ -158,21 +159,33 @@ test "security: oversized request headers rejected" {
     }
 }
 
-test "security: oversized request body rejected" {
+test "security: request body above configured max rejected" {
     var cluster = try initSingleNode();
     defer cluster.deinit();
-    const port = cluster.nodes.items[0].api_port;
-    const token = cluster.api_token;
 
-    // 64KB body exceeds the 32KB limit
-    var big_body: [64 * 1024]u8 = undefined;
-    @memset(&big_body, 'B');
+    var req_buf: [256]u8 = undefined;
+    const request = std.fmt.bufPrint(
+        &req_buf,
+        "POST /v1/deploy HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\nContent-Length: {d}\r\n\r\n",
+        .{ cluster.api_token, http.max_body_bytes + 1 },
+    ) catch return;
 
-    var resp = http_client.postWithAuth(alloc, addr, port, "/v1/deploy", &big_body, token) catch return;
-    defer resp.deinit(alloc);
+    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return;
+    defer std.posix.close(fd);
 
-    // should be rejected (413 Content Too Large or 400 Bad Request)
-    try std.testing.expect(resp.status_code == 413 or resp.status_code == 400);
+    const timeout = std.posix.timeval{ .sec = 5, .usec = 0 };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+
+    const sock_addr = std.net.Address.initIp4(addr, cluster.nodes.items[0].api_port);
+    std.posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch return;
+    _ = std.posix.write(fd, request) catch return;
+
+    var resp_buf: [1024]u8 = undefined;
+    const bytes = std.posix.read(fd, &resp_buf) catch return;
+    if (bytes > 0) {
+        const resp = resp_buf[0..bytes];
+        try std.testing.expect(std.mem.indexOf(u8, resp, "413 Content Too Large") != null);
+    }
 }
 
 // -- concurrent auth tests --

@@ -190,6 +190,58 @@ pub fn build(b: *std.Build) void {
     run_helpers.has_side_effects = true;
     integration_test_step.dependOn(&run_helpers.step);
 
+    // -- contract tests (no sqlite/root required) --
+    //
+    // these assert externally visible API and storage behavior with exact
+    // status codes, content types, and response bodies. keep these
+    // deterministic and filesystem-backed without requiring root.
+    const contract_test_step = b.step("test-contract", "Run API and storage contract tests");
+    const contract_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_contract.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addSqlite(contract_test_mod, b, target, optimize);
+    const contract_tests = b.addTest(.{
+        .root_module = contract_test_mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{"contract"},
+    });
+    const run_contract = std.Build.Step.Run.create(b, "run contract tests");
+    run_contract.producer = contract_tests;
+    run_contract.addArtifactArg(contract_tests);
+    run_contract.has_side_effects = true;
+    run_contract.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
+    if (b.args) |args| {
+        run_contract.addArgs(args);
+    }
+    contract_test_step.dependOn(&run_contract.step);
+
+    // -- deterministic simulation tests (require sqlite, no root) --
+    //
+    // these focus on cluster state-machine behavior under simulated delivery,
+    // partitions, and recovery without relying on timing-heavy subprocess tests.
+    const sim_test_step = b.step("test-sim", "Run deterministic cluster simulation tests");
+    const sim_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_sim.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addSqlite(sim_test_mod, b, target, optimize);
+
+    const sim_tests = b.addTest(.{
+        .root_module = sim_test_mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
+    });
+    const run_sim = std.Build.Step.Run.create(b, "run simulation tests");
+    run_sim.producer = sim_tests;
+    run_sim.addArtifactArg(sim_tests);
+    run_sim.has_side_effects = true;
+    run_sim.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
+    if (b.args) |args| {
+        run_sim.addArgs(args);
+    }
+    sim_test_step.dependOn(&run_sim.step);
+
     // -- privileged integration tests (require root + linux 6.1+) --
     //
     // these tests run the yoq binary as a subprocess and exercise the full

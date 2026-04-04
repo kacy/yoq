@@ -1,4 +1,4 @@
-.PHONY: build run test test-integration test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
+.PHONY: build run test test-integration test-contract test-sim test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
 
 build:
 	zig build -Doptimize=ReleaseSafe
@@ -11,6 +11,12 @@ test:
 
 test-integration:
 	zig build test-integration -Doptimize=ReleaseSafe
+
+test-contract:
+	zig build test-contract -Doptimize=ReleaseSafe
+
+test-sim:
+	zig build test-sim -Doptimize=ReleaseSafe
 
 test-privileged: build
 	sudo zig build test-privileged -Doptimize=ReleaseSafe
