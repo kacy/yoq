@@ -72,7 +72,8 @@ pub const Raft = struct {
     log: *persistent_log.Log,
     peers: []const NodeId,
 
-    // volatile state (lost on restart)
+    // volatile state. on restart we recover the snapshot boundary,
+    // because any installed snapshot is already durably committed/applied.
     commit_index: LogIndex,
     last_applied: LogIndex,
 
@@ -126,14 +127,19 @@ pub const Raft = struct {
         // load snapshot metadata from persistent storage
         const snap_meta = log.getSnapshotMeta();
 
+        const recovered_index: LogIndex = if (snap_meta) |meta|
+            meta.last_included_index
+        else
+            0;
+
         var raft = Raft{
             .alloc = alloc,
             .id = id,
             .role = .follower,
             .log = log,
             .peers = owned_peers,
-            .commit_index = 0,
-            .last_applied = 0,
+            .commit_index = recovered_index,
+            .last_applied = recovered_index,
             .next_index = next_idx,
             .match_index = match_idx,
             .votes_granted = votes_granted,
@@ -680,6 +686,27 @@ test "handleInstallSnapshot defers state update until snapshot is finished" {
     }));
     try testing.expectEqual(@as(LogIndex, 100), follower.commit_index);
     try testing.expectEqual(@as(LogIndex, 100), follower.last_applied);
+}
+
+test "init reloads snapshot boundary into commit_index and last_applied" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    _ = log.setSnapshotMeta(.{
+        .last_included_index = 42,
+        .last_included_term = 7,
+        .data_len = 0,
+    });
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    try testing.expect(raft.snapshot_meta != null);
+    try testing.expectEqual(@as(LogIndex, 42), raft.commit_index);
+    try testing.expectEqual(@as(LogIndex, 42), raft.last_applied);
+    try testing.expectEqual(@as(LogIndex, 42), raft.snapshot_meta.?.last_included_index);
 }
 
 test "handleInstallSnapshot rejects stale term" {

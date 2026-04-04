@@ -255,6 +255,8 @@ pub fn deleteObject(name: []const u8, key: []const u8) S3Error!void {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
+
+    try cleanupEmptyObjectDirs(name, key);
 }
 
 /// head an object — returns metadata without reading the full file.
@@ -545,6 +547,21 @@ fn isPartFileName(name: []const u8) bool {
         if (c < '0' or c > '9') return false;
     }
     return true;
+}
+
+fn cleanupEmptyObjectDirs(bucket: []const u8, key: []const u8) S3Error!void {
+    var parent = key[0 .. std.mem.lastIndexOfScalar(u8, key, '/') orelse return];
+
+    while (true) {
+        var dir_buf: [paths.max_path]u8 = undefined;
+        const dir_path = try storagePath(&dir_buf, storage_subdir ++ "/{s}/{s}", .{ bucket, parent });
+        std.fs.cwd().deleteDir(dir_path) catch |err| switch (err) {
+            error.DirNotEmpty, error.FileNotFound => return,
+            else => return S3Error.IoError,
+        };
+
+        parent = parent[0 .. std.mem.lastIndexOfScalar(u8, parent, '/') orelse return];
+    }
 }
 
 // -- tests --

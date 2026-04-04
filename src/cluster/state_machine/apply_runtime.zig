@@ -3,6 +3,7 @@ const types = @import("../raft_types.zig");
 const log = @import("../../lib/log.zig");
 const raft_log_mod = @import("../log.zig");
 const sql_guard = @import("sql_guard.zig");
+const db_runtime = @import("db_runtime.zig");
 
 const LogEntry = types.LogEntry;
 const LogIndex = types.LogIndex;
@@ -22,6 +23,10 @@ pub fn apply(self: anytype, entry: LogEntry) void {
 
     self.db.execDynamic(entry.data, .{}, .{}) catch |err| {
         log.err("state machine: failed to apply entry {d}: {}", .{ entry.index, err });
+        return;
+    };
+    db_runtime.setLastApplied(&self.db, entry.index) catch |err| {
+        log.err("state machine: failed to persist last_applied {d}: {}", .{ entry.index, err });
         return;
     };
     self.last_applied = entry.index;

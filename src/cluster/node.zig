@@ -422,6 +422,39 @@ pub const Node = struct {
 /// returns null if the formatted string doesn't fit (needs room for the NUL).
 const bufPrintZ = path_support.bufPrintZ;
 
+fn insertAgentForTest(db: *sqlite.Db, id: []const u8, status: []const u8) !void {
+    db.exec(
+        "INSERT INTO agents (" ++
+            "id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at" ++
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{
+            id,
+            "10.0.0.10:7700",
+            status,
+            @as(i64, 4),
+            @as(i64, 8192),
+            @as(i64, 0),
+            @as(i64, 0),
+            @as(i64, 0),
+            @as(i64, 1000),
+            @as(i64, 1000),
+        },
+    ) catch unreachable;
+}
+
+fn getAgentStatusForTest(alloc: std.mem.Allocator, db: *sqlite.Db, id: []const u8) !?[]const u8 {
+    const Row = struct { status: sqlite.Text };
+    const row = (try db.oneAlloc(
+        Row,
+        alloc,
+        "SELECT status FROM agents WHERE id = ?;",
+        .{},
+        .{id},
+    )) orelse return null;
+    return row.status.data;
+}
+
 // -- tests --
 
 test "resolveNodeId matches configured peer" {
@@ -715,4 +748,281 @@ test "leaderAddrBuf returns peer address when leader is a peer" {
     const addr = node.leaderAddrBuf(&buf);
     try std.testing.expect(addr != null);
     try std.testing.expectEqualStrings("10.0.0.2:7700", addr.?);
+}
+
+test "processActions snapshot restart preserves last_applied continuity" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    {
+        var node = Node.init(alloc, .{
+            .id = 1,
+            .port = 0,
+            .peers = &.{},
+            .data_dir = tmp_path,
+        }) catch return;
+        defer node.deinit();
+
+        try node.log.append(.{
+            .index = 1,
+            .term = 1,
+            .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('snap01', '10.0.0.10:7700', 'active', 4, 8192, 0, 0, 0, 1000, 1000);",
+        });
+
+        try node.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 1 } });
+        node.mu.lock();
+        node.processActions();
+        node.mu.unlock();
+        try std.testing.expectEqual(@as(LogIndex, 1), node.state_machine.last_applied);
+
+        try node.raft.actions.append(alloc, .{ .take_snapshot = .{ .up_to_index = 1, .term = 1 } });
+        node.mu.lock();
+        node.processActions();
+        node.mu.unlock();
+
+        try std.testing.expectEqual(@as(LogIndex, 1), node.last_snapshot_index);
+        try std.testing.expect(node.raft.snapshot_meta != null);
+        try std.testing.expectEqual(@as(LogIndex, 1), node.raft.snapshot_meta.?.last_included_index);
+    }
+
+    var restarted = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = tmp_path,
+    }) catch return;
+    defer restarted.deinit();
+
+    try std.testing.expectEqual(@as(LogIndex, 1), restarted.last_snapshot_index);
+    try std.testing.expect(restarted.raft.snapshot_meta != null);
+    try std.testing.expectEqual(@as(LogIndex, 1), restarted.raft.snapshot_meta.?.last_included_index);
+    try std.testing.expectEqual(@as(LogIndex, 1), restarted.state_machine.last_applied);
+
+    const active_status = (try getAgentStatusForTest(alloc, &restarted.state_machine.db, "snap01")).?;
+    defer alloc.free(active_status);
+    try std.testing.expectEqualStrings("active", active_status);
+
+    try restarted.log.append(.{
+        .index = 2,
+        .term = 1,
+        .data = "UPDATE agents SET status = 'draining' WHERE id = 'snap01';",
+    });
+    try restarted.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 2 } });
+    restarted.mu.lock();
+    restarted.processActions();
+    restarted.mu.unlock();
+
+    try std.testing.expectEqual(@as(LogIndex, 2), restarted.state_machine.last_applied);
+    const draining_status = (try getAgentStatusForTest(alloc, &restarted.state_machine.db, "snap01")).?;
+    defer alloc.free(draining_status);
+    try std.testing.expectEqualStrings("draining", draining_status);
+}
+
+test "install_snapshot restart preserves recovered state and future applies" {
+    const alloc = std.testing.allocator;
+
+    var snapshot_dir = std.testing.tmpDir(.{});
+    defer snapshot_dir.cleanup();
+    var snapshot_root_buf: [512]u8 = undefined;
+    const snapshot_root = snapshot_dir.dir.realpath(".", &snapshot_root_buf) catch return;
+
+    var snapshot_path_buf: [640]u8 = undefined;
+    const snapshot_path = std.fmt.bufPrint(&snapshot_path_buf, "{s}/cluster-snapshot.dat", .{snapshot_root}) catch return;
+
+    var source_sm = StateMachine.initMemory() catch return;
+    defer source_sm.deinit();
+    try insertAgentForTest(&source_sm.db, "snapmsg", "active");
+    try source_sm.takeSnapshot(snapshot_path, .{
+        .last_included_index = 5,
+        .last_included_term = 2,
+        .data_len = 0,
+    });
+
+    const snapshot_bytes = std.fs.cwd().readFileAlloc(alloc, snapshot_path, 1024 * 1024) catch return;
+    defer alloc.free(snapshot_bytes);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    {
+        var node = Node.init(alloc, .{
+            .id = 1,
+            .port = 0,
+            .peers = peers,
+            .data_dir = tmp_path,
+        }) catch return;
+        defer node.deinit();
+
+        try node.log.append(.{
+            .index = 1,
+            .term = 1,
+            .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('stale01', '10.0.0.11:7700', 'active', 4, 8192, 0, 0, 0, 1000, 1000);",
+        });
+        try node.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 1 } });
+        node.mu.lock();
+        node.processActions();
+        node.mu.unlock();
+
+        node.handleMessage(.{
+            .from_addr = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+            .sender_id = 2,
+            .message = .{ .install_snapshot = .{
+                .term = 2,
+                .leader_id = 2,
+                .last_included_index = 5,
+                .last_included_term = 2,
+                .data = try alloc.dupe(u8, snapshot_bytes),
+            } },
+        });
+
+        try std.testing.expectEqual(@as(LogIndex, 5), node.last_snapshot_index);
+        try std.testing.expect(node.raft.snapshot_meta != null);
+        try std.testing.expectEqual(@as(LogIndex, 5), node.raft.snapshot_meta.?.last_included_index);
+        try std.testing.expectEqual(@as(LogIndex, 5), node.state_machine.last_applied);
+        try std.testing.expect((try node.log.getEntry(alloc, 1)) == null);
+
+        const restored_status = (try getAgentStatusForTest(alloc, &node.state_machine.db, "snapmsg")).?;
+        defer alloc.free(restored_status);
+        try std.testing.expectEqualStrings("active", restored_status);
+    }
+
+    var restarted = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer restarted.deinit();
+
+    try std.testing.expectEqual(@as(LogIndex, 5), restarted.last_snapshot_index);
+    try std.testing.expect(restarted.raft.snapshot_meta != null);
+    try std.testing.expectEqual(@as(LogIndex, 5), restarted.raft.snapshot_meta.?.last_included_index);
+    try std.testing.expectEqual(@as(LogIndex, 5), restarted.state_machine.last_applied);
+
+    try restarted.log.append(.{
+        .index = 6,
+        .term = 2,
+        .data = "UPDATE agents SET status = 'draining' WHERE id = 'snapmsg';",
+    });
+    try restarted.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 6 } });
+    restarted.mu.lock();
+    restarted.processActions();
+    restarted.mu.unlock();
+
+    try std.testing.expectEqual(@as(LogIndex, 6), restarted.state_machine.last_applied);
+    const updated_status = (try getAgentStatusForTest(alloc, &restarted.state_machine.db, "snapmsg")).?;
+    defer alloc.free(updated_status);
+    try std.testing.expectEqualStrings("draining", updated_status);
+}
+
+test "install_snapshot restart ignores stale snapshot older than recovered boundary" {
+    const alloc = std.testing.allocator;
+
+    var snapshot_dir = std.testing.tmpDir(.{});
+    defer snapshot_dir.cleanup();
+    var snapshot_root_buf: [512]u8 = undefined;
+    const snapshot_root = snapshot_dir.dir.realpath(".", &snapshot_root_buf) catch return;
+
+    var newer_path_buf: [640]u8 = undefined;
+    const newer_path = std.fmt.bufPrint(&newer_path_buf, "{s}/snapshot-newer.dat", .{snapshot_root}) catch return;
+    var older_path_buf: [640]u8 = undefined;
+    const older_path = std.fmt.bufPrint(&older_path_buf, "{s}/snapshot-older.dat", .{snapshot_root}) catch return;
+
+    var newer_sm = StateMachine.initMemory() catch return;
+    defer newer_sm.deinit();
+    try insertAgentForTest(&newer_sm.db, "snapstale", "active");
+    try newer_sm.takeSnapshot(newer_path, .{
+        .last_included_index = 5,
+        .last_included_term = 2,
+        .data_len = 0,
+    });
+
+    var older_sm = StateMachine.initMemory() catch return;
+    defer older_sm.deinit();
+    try insertAgentForTest(&older_sm.db, "snapstale", "draining");
+    try older_sm.takeSnapshot(older_path, .{
+        .last_included_index = 4,
+        .last_included_term = 2,
+        .data_len = 0,
+    });
+
+    const newer_bytes = std.fs.cwd().readFileAlloc(alloc, newer_path, 1024 * 1024) catch return;
+    defer alloc.free(newer_bytes);
+    const older_bytes = std.fs.cwd().readFileAlloc(alloc, older_path, 1024 * 1024) catch return;
+    defer alloc.free(older_bytes);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    const peers = &[_]PeerConfig{
+        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+    };
+
+    {
+        var node = Node.init(alloc, .{
+            .id = 1,
+            .port = 0,
+            .peers = peers,
+            .data_dir = tmp_path,
+        }) catch return;
+        defer node.deinit();
+
+        node.handleMessage(.{
+            .from_addr = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+            .sender_id = 2,
+            .message = .{ .install_snapshot = .{
+                .term = 2,
+                .leader_id = 2,
+                .last_included_index = 5,
+                .last_included_term = 2,
+                .data = try alloc.dupe(u8, newer_bytes),
+            } },
+        });
+
+        try std.testing.expectEqual(@as(LogIndex, 5), node.state_machine.last_applied);
+        const initial_status = (try getAgentStatusForTest(alloc, &node.state_machine.db, "snapstale")).?;
+        defer alloc.free(initial_status);
+        try std.testing.expectEqualStrings("active", initial_status);
+    }
+
+    var restarted = Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = peers,
+        .data_dir = tmp_path,
+    }) catch return;
+    defer restarted.deinit();
+
+    try std.testing.expectEqual(@as(LogIndex, 5), restarted.raft.commit_index);
+    try std.testing.expectEqual(@as(LogIndex, 5), restarted.state_machine.last_applied);
+
+    restarted.handleMessage(.{
+        .from_addr = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .sender_id = 2,
+        .message = .{ .install_snapshot = .{
+            .term = 2,
+            .leader_id = 2,
+            .last_included_index = 4,
+            .last_included_term = 2,
+            .data = try alloc.dupe(u8, older_bytes),
+        } },
+    });
+
+    try std.testing.expectEqual(@as(LogIndex, 5), restarted.raft.commit_index);
+    try std.testing.expectEqual(@as(LogIndex, 5), restarted.state_machine.last_applied);
+    const status_after_stale = (try getAgentStatusForTest(alloc, &restarted.state_machine.db, "snapstale")).?;
+    defer alloc.free(status_after_stale);
+    try std.testing.expectEqualStrings("active", status_after_stale);
 }

@@ -40,16 +40,20 @@ pub const StateMachine = struct {
     last_applied: LogIndex,
 
     pub fn init(path: [:0]const u8) StateMachineError!StateMachine {
+        var db = try db_runtime.init(path);
+        errdefer db.deinit();
         return .{
-            .db = try db_runtime.init(path),
-            .last_applied = 0,
+            .db = db,
+            .last_applied = db_runtime.getLastApplied(&db) catch return StateMachineError.DbOpenFailed,
         };
     }
 
     pub fn initMemory() StateMachineError!StateMachine {
+        var db = try db_runtime.initMemory();
+        errdefer db.deinit();
         return .{
-            .db = try db_runtime.initMemory(),
-            .last_applied = 0,
+            .db = db,
+            .last_applied = db_runtime.getLastApplied(&db) catch return StateMachineError.DbOpenFailed,
         };
     }
 
@@ -562,6 +566,32 @@ test "snapshot round-trip preserves last_applied" {
     // last_applied should be restored from the snapshot header
     try std.testing.expectEqual(@as(LogIndex, 3), sm2.last_applied);
     try std.testing.expectEqual(@as(LogIndex, 3), meta.last_included_index);
+}
+
+test "init reloads persisted last_applied from disk" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+
+    var sm_path_buf: [512]u8 = undefined;
+    const sm_path_slice = std.fmt.bufPrint(&sm_path_buf, "{s}/persisted.db", .{tmp_path}) catch return;
+    sm_path_buf[sm_path_slice.len] = 0;
+    const sm_path: [:0]const u8 = sm_path_buf[0..sm_path_slice.len :0];
+
+    {
+        var sm = StateMachine.init(sm_path) catch return;
+        defer sm.deinit();
+
+        sm.apply(.{ .index = 1, .term = 1, .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('persisted', 'h', 'active', 1, 1024, 0, 0, 0, 1, 1);" });
+        sm.apply(.{ .index = 2, .term = 1, .data = "UPDATE agents SET status = 'draining' WHERE id = 'persisted';" });
+        try std.testing.expectEqual(@as(LogIndex, 2), sm.last_applied);
+    }
+
+    var reopened = StateMachine.init(sm_path) catch return;
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(LogIndex, 2), reopened.last_applied);
 }
 
 test "restoreFromBytes rejects snapshot with trailing data" {
