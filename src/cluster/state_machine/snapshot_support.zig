@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const types = @import("../raft_types.zig");
+const db_runtime = @import("db_runtime.zig");
 
 const c = sqlite.c;
 const LogIndex = types.LogIndex;
@@ -131,6 +132,7 @@ pub fn restoreFromBytes(self: anytype, data: []const u8) SnapshotError!SnapshotM
         .last_included_term = last_included_term,
         .data_len = sqlite_data_len,
     };
+    db_runtime.setLastApplied(&self.db, last_included_index) catch return SnapshotError.BackupFailed;
     self.last_applied = last_included_index;
     return meta;
 }

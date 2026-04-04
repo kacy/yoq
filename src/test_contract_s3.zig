@@ -113,6 +113,57 @@ test "contract: s3 object lifecycle preserves bytes and metadata" {
     try std.testing.expect(std.mem.indexOf(u8, missing.body, "<Code>NoSuchKey</Code>") != null);
 }
 
+test "contract: s3 delete object is idempotent and bucket delete rejects non-empty buckets" {
+    support.contract_lock.lock();
+    defer support.contract_lock.unlock();
+
+    try support.cleanupS3TestState();
+    defer support.cleanupS3TestState() catch {};
+
+    freeResponse(try routeRequest(.PUT, "/s3/delete-bucket", ""));
+    freeResponse(try routeRequest(.PUT, "/s3/delete-bucket/nested/blob.bin", "payload"));
+
+    const bucket_not_empty = try routeRequest(.DELETE, "/s3/delete-bucket", "");
+    defer freeResponse(bucket_not_empty);
+    try std.testing.expectEqual(http.StatusCode.bad_request, bucket_not_empty.status);
+    try std.testing.expectEqualStrings("application/xml", bucket_not_empty.content_type.?);
+    try std.testing.expect(std.mem.indexOf(u8, bucket_not_empty.body, "<Code>BucketNotEmpty</Code>") != null);
+
+    const first_delete = try routeRequest(.DELETE, "/s3/delete-bucket/nested/blob.bin", "");
+    defer freeResponse(first_delete);
+    try std.testing.expectEqual(http.StatusCode.no_content, first_delete.status);
+
+    const second_delete = try routeRequest(.DELETE, "/s3/delete-bucket/nested/blob.bin", "");
+    defer freeResponse(second_delete);
+    try std.testing.expectEqual(http.StatusCode.no_content, second_delete.status);
+    try std.testing.expectEqualStrings("", second_delete.body);
+
+    const bucket_delete = try routeRequest(.DELETE, "/s3/delete-bucket", "");
+    defer freeResponse(bucket_delete);
+    try std.testing.expectEqual(http.StatusCode.no_content, bucket_delete.status);
+}
+
+test "contract: s3 list objects honors prefix for nested keys" {
+    support.contract_lock.lock();
+    defer support.contract_lock.unlock();
+
+    try support.cleanupS3TestState();
+    defer support.cleanupS3TestState() catch {};
+
+    freeResponse(try routeRequest(.PUT, "/s3/list-bucket", ""));
+    freeResponse(try routeRequest(.PUT, "/s3/list-bucket/logs/2026/boot.log", "boot"));
+    freeResponse(try routeRequest(.PUT, "/s3/list-bucket/logs/2026/app.log", "app"));
+    freeResponse(try routeRequest(.PUT, "/s3/list-bucket/images/logo.png", "png"));
+
+    const list = try routeRequest(.GET, "/s3/list-bucket?prefix=logs/2026/", "");
+    defer freeResponse(list);
+    try std.testing.expectEqual(http.StatusCode.ok, list.status);
+    try std.testing.expectEqualStrings("application/xml", list.content_type.?);
+    try std.testing.expect(std.mem.indexOf(u8, list.body, "<Key>logs/2026/boot.log</Key>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list.body, "<Key>logs/2026/app.log</Key>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list.body, "<Key>images/logo.png</Key>") == null);
+}
+
 test "contract: s3 multipart completion assembles the final object" {
     support.contract_lock.lock();
     defer support.contract_lock.unlock();
@@ -180,6 +231,32 @@ test "contract: s3 multipart abort invalidates the upload id" {
     try std.testing.expectEqual(http.StatusCode.not_found, complete_aborted.status);
     try std.testing.expectEqualStrings("application/xml", complete_aborted.content_type.?);
     try std.testing.expect(std.mem.indexOf(u8, complete_aborted.body, "<Code>NoSuchUpload</Code>") != null);
+}
+
+test "contract: s3 multipart upload id is bound to the original object key" {
+    support.contract_lock.lock();
+    defer support.contract_lock.unlock();
+
+    try support.cleanupS3TestState();
+    defer support.cleanupS3TestState() catch {};
+
+    freeResponse(try routeRequest(.PUT, "/s3/multipart-bucket", ""));
+
+    const init = try routeRequest(.POST, "/s3/multipart-bucket/video.bin?uploads", "");
+    defer freeResponse(init);
+    const upload_id = try expectXmlTag(init.body, "UploadId");
+
+    var wrong_target_path_buf: [160]u8 = undefined;
+    const wrong_target_path = try std.fmt.bufPrint(
+        &wrong_target_path_buf,
+        "/s3/multipart-bucket/other.bin?partNumber=1&uploadId={s}",
+        .{upload_id},
+    );
+    const wrong_target = try routeRequest(.PUT, wrong_target_path, "hello");
+    defer freeResponse(wrong_target);
+    try std.testing.expectEqual(http.StatusCode.not_found, wrong_target.status);
+    try std.testing.expectEqualStrings("application/xml", wrong_target.content_type.?);
+    try std.testing.expect(std.mem.indexOf(u8, wrong_target.body, "<Code>NoSuchUpload</Code>") != null);
 }
 
 test "contract: s3 invalid bucket and key return exact client errors" {
