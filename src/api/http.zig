@@ -119,6 +119,7 @@ pub fn parseRequest(buf: []const u8) HttpError!?Request {
 pub fn findContentLength(headers: []const u8) HttpError!usize {
     const needle = "content-length:";
     var pos: usize = 0;
+    var parsed_content_length: ?usize = null;
 
     while (pos < headers.len) {
         // find next line
@@ -136,19 +137,22 @@ pub fn findContentLength(headers: []const u8) HttpError!usize {
             }
 
             if (match) {
+                if (parsed_content_length != null) return HttpError.BadRequest;
+
                 // skip header name and any whitespace
                 var val_start = needle.len;
                 while (val_start < line.len and line[val_start] == ' ') {
                     val_start += 1;
                 }
-                return std.fmt.parseInt(usize, line[val_start..], 10) catch return HttpError.BadRequest;
+                parsed_content_length = std.fmt.parseInt(usize, line[val_start..], 10) catch
+                    return HttpError.BadRequest;
             }
         }
 
         pos = if (line_end + 2 <= headers.len) line_end + 2 else headers.len;
     }
 
-    return 0;
+    return parsed_content_length orelse 0;
 }
 
 /// format a complete HTTP response into a buffer.
@@ -392,6 +396,17 @@ test "content-length malformed returns error" {
     try std.testing.expectError(HttpError.BadRequest, findContentLength("Content-Length: \r\n"));
 }
 
+test "duplicate content-length returns error" {
+    try std.testing.expectError(
+        HttpError.BadRequest,
+        findContentLength("Content-Length: 1\r\nContent-Length: 1\r\n"),
+    );
+    try std.testing.expectError(
+        HttpError.BadRequest,
+        findContentLength("Content-Length: 1\r\ncontent-length: 2\r\n"),
+    );
+}
+
 test "format response" {
     var buf: [1024]u8 = undefined;
     const resp = formatResponse(&buf, .ok, "{\"status\":\"ok\"}");
@@ -507,4 +522,15 @@ test "parse request rejects large body" {
     var req_buf: [128]u8 = undefined;
     const req = std.fmt.bufPrint(&req_buf, "POST /data HTTP/1.1\r\nContent-Length: {s}\r\n\r\n", .{raw}) catch unreachable;
     try std.testing.expectError(HttpError.BodyTooLarge, parseRequest(req));
+}
+
+test "parse request rejects duplicate content-length" {
+    const raw = "POST /data HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nbody";
+    try std.testing.expectError(HttpError.BadRequest, parseRequest(raw));
+}
+
+test "parse request ignores bytes beyond declared body length" {
+    const raw = "POST /data HTTP/1.1\r\nContent-Length: 4\r\n\r\nbodyEXTRA";
+    const req = (try parseRequest(raw)).?;
+    try std.testing.expectEqualStrings("body", req.body);
 }

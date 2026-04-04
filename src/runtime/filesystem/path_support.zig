@@ -21,7 +21,7 @@ pub fn isSymlink(path: []const u8) bool {
 pub fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
     const fd = posix.open(path, .{ .NOFOLLOW = true, .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |e| {
         if (e == error.NotDir or e == error.SymLinkLoop) {
-            log.err("filesystem: path is a symlink or contains symlinks: {s}", .{path});
+            log.warn("filesystem: path is a symlink or contains symlinks: {s}", .{path});
             return FilesystemError.BindSourceIsSymlink;
         }
         log.warn("filesystem: could not validate path {s}: {s}", .{ path, @errorName(e) });
@@ -35,7 +35,7 @@ pub fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
 
     if (stat.mode & posix.S.IFMT == posix.S.IFLNK) {
         posix.close(fd);
-        log.err("filesystem: path is a symlink: {s}", .{path});
+        log.warn("filesystem: path is a symlink: {s}", .{path});
         return FilesystemError.BindSourceIsSymlink;
     }
 
