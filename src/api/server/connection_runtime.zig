@@ -191,6 +191,10 @@ pub fn findHeaderEnd(buf: []const u8) ?usize {
 }
 
 fn setReadTimeout(fd: posix.fd_t, seconds: i64) void {
+    var sock_addr: posix.sockaddr.storage = undefined;
+    var sock_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+    posix.getsockname(fd, @ptrCast(&sock_addr), &sock_len) catch return;
+
     const timeout = posix.timeval{ .sec = seconds, .usec = 0 };
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |e| {
         log.warn("api server failed to set read timeout: {}", .{e});

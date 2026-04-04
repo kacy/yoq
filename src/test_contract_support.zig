@@ -11,3 +11,6 @@ pub fn cleanupS3TestState() !void {
     const multipart_root = try paths.dataPath(&path_buf, "s3-multipart");
     std.fs.cwd().deleteTree(multipart_root) catch {};
 }
+
+pub const test_api_token =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
