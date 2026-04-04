@@ -20,5 +20,6 @@ test "contract smoke test" {
 
 comptime {
     _ = @import("test_contract_http.zig");
+    _ = @import("test_contract_restart.zig");
     _ = @import("test_contract_s3.zig");
 }

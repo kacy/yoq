@@ -214,6 +214,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_contract.addArgs(args);
     }
+    run_contract.step.dependOn(b.getInstallStep());
     contract_test_step.dependOn(&run_contract.step);
 
     // -- deterministic simulation tests (require sqlite, no root) --
