@@ -70,7 +70,7 @@ test "writeNetworkFiles sets resolv.conf to bridge gateway" {
     var path_buf: [512]u8 = undefined;
     const rootfs_path = tmp_dir.dir.realpath(".", &path_buf) catch return;
 
-    writeNetworkFiles(rootfs_path, .{ 10, 42, 0, 5 }, "myhost");
+    writeNetworkFiles(rootfs_path, .{ 10, 42, 0, 5 }, .{ 10, 42, 0, 1 }, "myhost");
 
     var resolv_path_buf: [600]u8 = undefined;
     const resolv_path = std.fmt.bufPrint(&resolv_path_buf, "{s}/etc/resolv.conf", .{rootfs_path}) catch return;
@@ -89,7 +89,7 @@ test "writeNetworkFiles sets etc/hosts with hostname" {
     var path_buf: [512]u8 = undefined;
     const rootfs_path = tmp_dir.dir.realpath(".", &path_buf) catch return;
 
-    writeNetworkFiles(rootfs_path, .{ 10, 42, 0, 7 }, "dbserver");
+    writeNetworkFiles(rootfs_path, .{ 10, 42, 0, 7 }, .{ 10, 42, 0, 1 }, "dbserver");
 
     var hosts_path_buf: [600]u8 = undefined;
     const hosts_path = std.fmt.bufPrint(&hosts_path_buf, "{s}/etc/hosts", .{rootfs_path}) catch return;

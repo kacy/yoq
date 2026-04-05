@@ -53,8 +53,7 @@ pub const Cgroup = struct {
         };
 
         if (!subtree_controllers_enabled) {
-            enableSubtreeControllers(cgroup_root ++ "/" ++ yoq_prefix);
-            subtree_controllers_enabled = true;
+            subtree_controllers_enabled = enableSubtreeControllers(cgroup_root ++ "/" ++ yoq_prefix);
         }
 
         std.fs.cwd().makeDir(cg.path()) catch |e| switch (e) {
@@ -336,12 +335,60 @@ pub const Cgroup = struct {
     }
 };
 
-fn enableSubtreeControllers(dir_path: []const u8) void {
-    var buf: [512]u8 = undefined;
-    const ctrl_path = std.fmt.bufPrint(&buf, "{s}/cgroup.subtree_control", .{dir_path}) catch return;
-    const file = std.fs.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch return;
+fn enableSubtreeControllers(dir_path: []const u8) bool {
+    var ctrl_buf: [512]u8 = undefined;
+    const ctrl_path = std.fmt.bufPrint(&ctrl_buf, "{s}/cgroup.subtree_control", .{dir_path}) catch return false;
+    const file = std.fs.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch return false;
     defer file.close();
-    file.writeAll("+cpu +memory +pids +io") catch {};
+
+    var controllers_path_buf: [512]u8 = undefined;
+    const controllers_path = std.fmt.bufPrint(&controllers_path_buf, "{s}/cgroup.controllers", .{dir_path}) catch return false;
+    const controllers_file = std.fs.cwd().openFile(controllers_path, .{}) catch return false;
+    defer controllers_file.close();
+
+    var available_buf: [256]u8 = undefined;
+    const available_len = controllers_file.readAll(&available_buf) catch return false;
+    const available = std.mem.trim(u8, available_buf[0..available_len], " \n\r\t");
+
+    var desired_buf: [64]u8 = undefined;
+    const desired = buildDesiredSubtreeControl(available, &desired_buf) orelse return false;
+
+    file.writeAll(desired) catch {
+        log.warn("cgroup: failed to enable subtree controllers '{s}' for {s}", .{ desired, dir_path });
+        return false;
+    };
+    return true;
+}
+
+fn buildDesiredSubtreeControl(available: []const u8, buf: []u8) ?[]const u8 {
+    const wanted = [_][]const u8{ "cpu", "memory", "pids", "io" };
+    var pos: usize = 0;
+
+    for (wanted) |name| {
+        if (!controllersContain(available, name)) continue;
+        const separator_len: usize = if (pos > 0) 1 else 0;
+        const needed: usize = 1 + name.len + separator_len;
+        if (pos + needed > buf.len) return null;
+        if (pos > 0) {
+            buf[pos] = ' ';
+            pos += 1;
+        }
+        buf[pos] = '+';
+        pos += 1;
+        @memcpy(buf[pos .. pos + name.len], name);
+        pos += name.len;
+    }
+
+    if (pos == 0) return null;
+    return buf[0..pos];
+}
+
+fn controllersContain(available: []const u8, wanted: []const u8) bool {
+    var parts = std.mem.tokenizeAny(u8, available, " \n\r\t");
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, wanted)) return true;
+    }
+    return false;
 }
 
 test "resource limits validation" {
@@ -354,6 +401,18 @@ test "resource limits validation" {
 
     const result2 = cg.setLimits(.{ .cpu_weight = 10001 });
     try std.testing.expectError(CgroupError.InvalidLimit, result2);
+}
+
+test "buildDesiredSubtreeControl only enables available controllers" {
+    var buf: [64]u8 = undefined;
+    const desired = buildDesiredSubtreeControl("cpu memory pids", &buf).?;
+    try std.testing.expectEqualStrings("+cpu +memory +pids", desired);
+}
+
+test "buildDesiredSubtreeControl includes io when available" {
+    var buf: [64]u8 = undefined;
+    const desired = buildDesiredSubtreeControl("cpu io memory pids", &buf).?;
+    try std.testing.expectEqualStrings("+cpu +memory +pids +io", desired);
 }
 
 test "isEmpty returns true for whitespace-only cgroup.procs content" {

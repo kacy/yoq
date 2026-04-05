@@ -89,6 +89,16 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
                 }
             }
             if (!setup_failed) {
+                filesystem.mountEssentialAt(ctx.fs_config.merged_dir) catch |err| {
+                    switch (err) {
+                        error.MountPermissionDenied => {
+                            setup_failed = true;
+                        },
+                        else => return @intFromEnum(ExitCode.essential_mount_failed),
+                    }
+                };
+            }
+            if (!setup_failed) {
                 filesystem.pivotRoot(ctx.fs_config.merged_dir) catch {
                     setup_failed = true;
                 };
@@ -109,21 +119,20 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
                 };
             }
             if (!setup_failed) {
+                filesystem.mountEssentialAt(ctx.rootfs) catch |err| {
+                    switch (err) {
+                        error.MountPermissionDenied => {
+                            setup_failed = true;
+                        },
+                        else => return @intFromEnum(ExitCode.essential_mount_failed),
+                    }
+                };
+            }
+            if (!setup_failed) {
                 filesystem.pivotRoot(ctx.rootfs) catch {
                     setup_failed = true;
                 };
             }
-        }
-
-        if (!setup_failed) {
-            filesystem.mountEssential() catch |err| {
-                switch (err) {
-                    error.MountPermissionDenied => {
-                        setup_failed = true;
-                    },
-                    else => return @intFromEnum(ExitCode.essential_mount_failed),
-                }
-            };
         }
 
         if (shouldRefuseIsolationFallback(ctx.host_mode, setup_failed)) {

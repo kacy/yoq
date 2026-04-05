@@ -133,6 +133,10 @@ pub fn resolverRunning() bool {
     return resolver_runtime.isRunning();
 }
 
+pub fn resolverOwnedByCurrentProcess() bool {
+    return resolver_runtime.isOwnedByCurrentProcess();
+}
+
 /// stop the DNS resolver thread.
 pub fn stopResolver() void {
     resolver_runtime.stopResolver();

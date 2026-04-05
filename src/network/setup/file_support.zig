@@ -10,17 +10,21 @@ pub fn isValidHostname(name: []const u8) bool {
     return true;
 }
 
-pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, hostname: []const u8) void {
+pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, gateway_ip: [4]u8, hostname: []const u8) void {
     const valid_hostname = isValidHostname(hostname);
     if (!valid_hostname) {
         log.warn("invalid hostname, using container ID prefix instead", .{});
     }
 
-    writeFileInRootfs(rootfs_path, "etc/resolv.conf",
-        \\nameserver 10.42.0.1
+    var gateway_buf: [16]u8 = undefined;
+    const gateway_str = ip.formatIp(gateway_ip, &gateway_buf);
+    var resolv_buf: [128]u8 = undefined;
+    const resolv = std.fmt.bufPrint(&resolv_buf,
+        \\nameserver {s}
         \\nameserver 8.8.8.8
         \\
-    );
+    , .{gateway_str}) catch return;
+    writeFileInRootfs(rootfs_path, "etc/resolv.conf", resolv);
 
     if (valid_hostname) {
         var hosts_buf: [256]u8 = undefined;
