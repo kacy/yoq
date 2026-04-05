@@ -207,6 +207,384 @@ fn electLeader(node1: *SimNode, node2: *SimNode, node3: *SimNode) !void {
     try deliverLeaderActions(node1, node2, node3, null);
 }
 
+const RandomFaultPlan = struct {
+    drop_requests: [8]bool = [_]bool{false} ** 8,
+    drop_replies: [8]bool = [_]bool{false} ** 8,
+    duplicate_targets: [8]bool = [_]bool{false} ** 8,
+
+    fn clear(self: *RandomFaultPlan) void {
+        self.* = .{};
+    }
+
+    fn toggleDropRequests(self: *RandomFaultPlan, id: NodeId) void {
+        self.drop_requests[@intCast(id)] = !self.drop_requests[@intCast(id)];
+    }
+
+    fn toggleDropReplies(self: *RandomFaultPlan, id: NodeId) void {
+        self.drop_replies[@intCast(id)] = !self.drop_replies[@intCast(id)];
+    }
+
+    fn toggleDuplicate(self: *RandomFaultPlan, id: NodeId) void {
+        self.duplicate_targets[@intCast(id)] = !self.duplicate_targets[@intCast(id)];
+    }
+
+    fn requestTargets(self: *const RandomFaultPlan) []const NodeId {
+        return boolFlagsToNodeIds(&self.drop_requests);
+    }
+
+    fn replyTargets(self: *const RandomFaultPlan) []const NodeId {
+        return boolFlagsToNodeIds(&self.drop_replies);
+    }
+
+    fn duplicateTargets(self: *const RandomFaultPlan) []const NodeId {
+        return boolFlagsToNodeIds(&self.duplicate_targets);
+    }
+};
+
+fn boolFlagsToNodeIds(flags: *const [8]bool) []const NodeId {
+    var count: usize = 0;
+    for (flags[1..]) |flag| {
+        if (flag) count += 1;
+    }
+
+    return switch (count) {
+        0 => &.{},
+        1 => switch (firstNodeId(flags, 1).?) {
+            1 => &.{1},
+            2 => &.{2},
+            3 => &.{3},
+            4 => &.{4},
+            5 => &.{5},
+            6 => &.{6},
+            7 => &.{7},
+            else => &.{},
+        },
+        2 => blk: {
+            const a = firstNodeId(flags, 1).?;
+            const b = firstNodeId(flags, a + 1).?;
+            break :blk switch (a) {
+                1 => switch (b) {
+                    2 => &.{ 1, 2 },
+                    3 => &.{ 1, 3 },
+                    4 => &.{ 1, 4 },
+                    5 => &.{ 1, 5 },
+                    6 => &.{ 1, 6 },
+                    7 => &.{ 1, 7 },
+                    else => &.{},
+                },
+                2 => switch (b) {
+                    3 => &.{ 2, 3 },
+                    4 => &.{ 2, 4 },
+                    5 => &.{ 2, 5 },
+                    6 => &.{ 2, 6 },
+                    7 => &.{ 2, 7 },
+                    else => &.{},
+                },
+                3 => switch (b) {
+                    4 => &.{ 3, 4 },
+                    5 => &.{ 3, 5 },
+                    6 => &.{ 3, 6 },
+                    7 => &.{ 3, 7 },
+                    else => &.{},
+                },
+                4 => switch (b) {
+                    5 => &.{ 4, 5 },
+                    6 => &.{ 4, 6 },
+                    7 => &.{ 4, 7 },
+                    else => &.{},
+                },
+                5 => switch (b) {
+                    6 => &.{ 5, 6 },
+                    7 => &.{ 5, 7 },
+                    else => &.{},
+                },
+                6 => switch (b) {
+                    7 => &.{ 6, 7 },
+                    else => &.{},
+                },
+                else => &.{},
+            };
+        },
+        3 => blk: {
+            const a = firstNodeId(flags, 1).?;
+            const b = firstNodeId(flags, a + 1).?;
+            const c = firstNodeId(flags, b + 1).?;
+            break :blk switch (a) {
+                1 => switch (b) {
+                    2 => switch (c) {
+                        3 => &.{ 1, 2, 3 },
+                        4 => &.{ 1, 2, 4 },
+                        5 => &.{ 1, 2, 5 },
+                        6 => &.{ 1, 2, 6 },
+                        7 => &.{ 1, 2, 7 },
+                        else => &.{},
+                    },
+                    3 => switch (c) {
+                        4 => &.{ 1, 3, 4 },
+                        5 => &.{ 1, 3, 5 },
+                        6 => &.{ 1, 3, 6 },
+                        7 => &.{ 1, 3, 7 },
+                        else => &.{},
+                    },
+                    else => &.{},
+                },
+                else => &.{},
+            };
+        },
+        else => &.{},
+    };
+}
+
+fn firstNodeId(flags: *const [8]bool, start: usize) ?NodeId {
+    var idx = start;
+    while (idx < flags.len) : (idx += 1) {
+        if (flags[idx]) return @intCast(idx);
+    }
+    return null;
+}
+
+fn currentLeader(nodes: []const *SimNode) ?*SimNode {
+    var leader: ?*SimNode = null;
+    for (nodes) |node| {
+        if (node.raft.role != .leader) continue;
+        if (leader != null) return null;
+        leader = node;
+    }
+    return leader;
+}
+
+fn pumpClusterActions(nodes: []const *SimNode, faults: *const RandomFaultPlan) !void {
+    const request_targets = faults.requestTargets();
+    const reply_targets = faults.replyTargets();
+    const duplicate_targets = faults.duplicateTargets();
+
+    for (0..128) |_| {
+        var any = false;
+        for (nodes) |sender| {
+            const actions = sender.raft.drainActions();
+            if (actions.len == 0) {
+                std.testing.allocator.free(actions);
+                continue;
+            }
+            any = true;
+
+            for (actions) |action| switch (action) {
+                .send_request_vote => |vote| {
+                    if (isDropped(vote.target, request_targets)) continue;
+
+                    const voter = try nodeByIdIn(nodes, vote.target);
+                    for (0..deliveryCount(vote.target, duplicate_targets)) |_| {
+                        const reply = voter.raft.handleRequestVote(vote.args);
+                        if (isDropped(vote.target, reply_targets)) continue;
+                        sender.raft.handleRequestVoteReply(vote.target, reply);
+                    }
+                },
+                .send_append_entries => |append| {
+                    if (isDropped(append.target, request_targets)) continue;
+
+                    const follower = try nodeByIdIn(nodes, append.target);
+                    for (0..deliveryCount(append.target, duplicate_targets)) |_| {
+                        const reply = follower.raft.handleAppendEntries(append.args);
+                        if (isDropped(append.target, reply_targets)) continue;
+                        sender.raft.handleAppendEntriesReply(append.target, reply);
+                    }
+                },
+                .send_install_snapshot => |snapshot| {
+                    if (isDropped(snapshot.target, request_targets)) continue;
+
+                    const follower = try nodeByIdIn(nodes, snapshot.target);
+                    for (0..deliveryCount(snapshot.target, duplicate_targets)) |_| {
+                        const commit_before = follower.raft.commit_index;
+                        const reply = follower.raft.handleInstallSnapshot(snapshot.args);
+
+                        if (snapshot.args.term >= reply.term and snapshot.args.last_included_index > commit_before) {
+                            try std.testing.expect(follower.log.truncateUpTo(snapshot.args.last_included_index));
+                            try std.testing.expect(follower.raft.finishInstallSnapshot(.{
+                                .last_included_index = snapshot.args.last_included_index,
+                                .last_included_term = snapshot.args.last_included_term,
+                                .data_len = snapshot.args.data.len,
+                            }));
+                        }
+
+                        if (isDropped(snapshot.target, reply_targets)) continue;
+                        sender.raft.handleInstallSnapshotReply(snapshot.target, reply);
+                    }
+                },
+                .send_request_vote_reply => |reply| {
+                    if (isDropped(reply.target, reply_targets)) continue;
+                    const target = try nodeByIdIn(nodes, reply.target);
+                    target.raft.handleRequestVoteReply(sender.id, reply.reply);
+                },
+                .send_append_entries_reply => |reply| {
+                    if (isDropped(reply.target, reply_targets)) continue;
+                    const target = try nodeByIdIn(nodes, reply.target);
+                    target.raft.handleAppendEntriesReply(sender.id, reply.reply);
+                },
+                .send_install_snapshot_reply => |reply| {
+                    if (isDropped(reply.target, reply_targets)) continue;
+                    const target = try nodeByIdIn(nodes, reply.target);
+                    target.raft.handleInstallSnapshotReply(sender.id, reply.reply);
+                },
+                else => {},
+            };
+
+            freeActions(std.testing.allocator, actions);
+        }
+        if (!any) return;
+    }
+
+    return error.ActionLoopDidNotQuiesce;
+}
+
+fn tickAll(nodes: []const *SimNode, count: usize) void {
+    for (0..count) |_| {
+        for (nodes) |node| {
+            node.raft.tick();
+        }
+    }
+}
+
+fn settleCluster(nodes: []const *SimNode, faults: *RandomFaultPlan, rounds: usize) !void {
+    faults.clear();
+    for (0..rounds) |_| {
+        tickAll(nodes, 1);
+        try pumpClusterActions(nodes, faults);
+    }
+}
+
+fn ensureRandomSimInvariants(nodes: []const *SimNode, prev_commit: *[8]u64) !void {
+    for (nodes) |node| {
+        const id: usize = @intCast(node.id);
+        if (node.raft.commit_index < prev_commit[id]) return error.CommitIndexRegressed;
+        prev_commit[id] = node.raft.commit_index;
+
+        if (node.raft.commit_index > node.log.lastIndex()) return error.CommitBeyondLog;
+        if (node.raft.snapshot_meta) |meta| {
+            if (node.raft.commit_index < meta.last_included_index) {
+                return error.CommitBehindSnapshot;
+            }
+        }
+    }
+
+    var i: usize = 0;
+    while (i < nodes.len) : (i += 1) {
+        var j: usize = i + 1;
+        while (j < nodes.len) : (j += 1) {
+            const shared = @min(nodes[i].raft.commit_index, nodes[j].raft.commit_index);
+            var idx: u64 = 1;
+            while (idx <= shared) : (idx += 1) {
+                const ti = nodes[i].log.termAt(idx);
+                const tj = nodes[j].log.termAt(idx);
+                if (ti != 0 and tj != 0 and ti != tj) return error.CommittedTermMismatch;
+            }
+        }
+    }
+}
+
+fn appendTrace(trace: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+    try trace.writer(std.testing.allocator).print(fmt, args);
+}
+
+fn runRandomSeed(seed: u64, trace: *std.ArrayList(u8)) !void {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+
+    var node1 = try SimNode.init(alloc, 1, &.{ 2, 3 });
+    defer node1.deinit();
+    var node2 = try SimNode.init(alloc, 2, &.{ 1, 3 });
+    defer node2.deinit();
+    var node3 = try SimNode.init(alloc, 3, &.{ 1, 2 });
+    defer node3.deinit();
+
+    const nodes = [_]*SimNode{ &node1, &node2, &node3 };
+    var faults = RandomFaultPlan{};
+    var prev_commit: [8]u64 = [_]u64{0} ** 8;
+    var command_seq: usize = 0;
+
+    try settleCluster(&nodes, &faults, 24);
+    try ensureRandomSimInvariants(&nodes, &prev_commit);
+
+    for (0..32) |step| {
+        const event = random.uintLessThan(u8, 7);
+        switch (event) {
+            0 => {
+                const target = random.uintLessThan(usize, nodes.len);
+                const ticks = random.uintLessThan(u8, 4) + 1;
+                try appendTrace(trace, "step {d}: tick node {d} x{d}\n", .{ step, nodes[target].id, ticks });
+                for (0..ticks) |_| nodes[target].raft.tick();
+            },
+            1 => {
+                if (currentLeader(&nodes)) |leader| {
+                    var cmd_buf: [64]u8 = undefined;
+                    const cmd = try std.fmt.bufPrint(&cmd_buf, "seed-{d}-cmd-{d}", .{ seed, command_seq });
+                    command_seq += 1;
+                    _ = try leader.raft.propose(cmd);
+                    try appendTrace(trace, "step {d}: propose on leader {d} -> {s}\n", .{ step, leader.id, cmd });
+                } else {
+                    try appendTrace(trace, "step {d}: propose skipped (no single leader)\n", .{step});
+                }
+            },
+            2 => {
+                const id: NodeId = @intCast(random.uintLessThan(u8, 3) + 1);
+                faults.toggleDropRequests(id);
+                try appendTrace(trace, "step {d}: toggle drop requests for {d} -> {}\n", .{ step, id, faults.drop_requests[@intCast(id)] });
+            },
+            3 => {
+                const id: NodeId = @intCast(random.uintLessThan(u8, 3) + 1);
+                faults.toggleDropReplies(id);
+                try appendTrace(trace, "step {d}: toggle drop replies for {d} -> {}\n", .{ step, id, faults.drop_replies[@intCast(id)] });
+            },
+            4 => {
+                const id: NodeId = @intCast(random.uintLessThan(u8, 3) + 1);
+                faults.toggleDuplicate(id);
+                try appendTrace(trace, "step {d}: toggle duplicate delivery for {d} -> {}\n", .{ step, id, faults.duplicate_targets[@intCast(id)] });
+            },
+            5 => {
+                const target = random.uintLessThan(usize, nodes.len);
+                try nodes[target].restart(switch (nodes[target].id) {
+                    1 => &.{ 2, 3 },
+                    2 => &.{ 1, 3 },
+                    3 => &.{ 1, 2 },
+                    else => unreachable,
+                });
+                try appendTrace(trace, "step {d}: restart node {d}\n", .{ step, nodes[target].id });
+            },
+            6 => {
+                faults.clear();
+                try appendTrace(trace, "step {d}: heal all links\n", .{step});
+            },
+            else => unreachable,
+        }
+
+        try pumpClusterActions(&nodes, &faults);
+        try ensureRandomSimInvariants(&nodes, &prev_commit);
+    }
+
+    try appendTrace(trace, "final: heal and settle\n", .{});
+    try settleCluster(&nodes, &faults, 48);
+    try ensureRandomSimInvariants(&nodes, &prev_commit);
+
+    const leader = currentLeader(&nodes) orelse return error.NoLeaderAfterHeal;
+    var final_cmd_buf: [64]u8 = undefined;
+    const final_cmd = try std.fmt.bufPrint(&final_cmd_buf, "seed-{d}-final-sync", .{seed});
+    _ = try leader.raft.propose(final_cmd);
+    try appendTrace(trace, "final: propose sync command on leader {d} -> {s}\n", .{ leader.id, final_cmd });
+
+    try settleCluster(&nodes, &faults, 24);
+    try ensureRandomSimInvariants(&nodes, &prev_commit);
+
+    const expected_commit = leader.raft.commit_index;
+    const expected_last = leader.log.lastIndex();
+    for (&nodes) |node| {
+        if (node.raft.commit_index != expected_commit) return error.FinalCommitDidNotConverge;
+        if (node.log.lastIndex() != expected_last) return error.FinalLogDidNotConverge;
+        const entry = (try node.log.getEntry(alloc, expected_last)) orelse return error.MissingFinalEntry;
+        defer alloc.free(entry.data);
+        if (!std.mem.eql(u8, final_cmd, entry.data)) return error.FinalEntryMismatch;
+    }
+}
+
 test "sim: isolated follower catches up after rejoin" {
     const alloc = std.testing.allocator;
 
@@ -817,4 +1195,18 @@ test "sim: snapshot retry after follower restart resumes replication cleanly" {
     defer alloc.free(recovered.data);
     try std.testing.expectEqualStrings("cmd-4", recovered.data);
     try std.testing.expectEqual(@as(u64, 4), node2.raft.commit_index);
+}
+
+test "sim: randomized fixed seeds preserve raft invariants under transport faults" {
+    const seeds = [_]u64{ 1, 2, 3, 4, 5, 7, 11, 13, 17, 19 };
+
+    for (seeds) |seed| {
+        var trace = std.ArrayList(u8).empty;
+        defer trace.deinit(std.testing.allocator);
+
+        runRandomSeed(seed, &trace) catch |err| {
+            std.debug.print("random sim seed {d} failed with {} trace:\n{s}", .{ seed, err, trace.items });
+            return err;
+        };
+    }
 }
