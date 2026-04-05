@@ -100,9 +100,15 @@ pub fn handleAppendEntriesReply(
         return;
     }
 
-    if (self.next_index[peer_idx] > 1) {
-        self.next_index[peer_idx] -= 1;
+    const backtrack_floor = self.match_index[peer_idx] + 1;
+    if (self.next_index[peer_idx] <= backtrack_floor) {
+        // A delayed failure reply can arrive after a newer success reply has
+        // already advanced match_index. Ignore it rather than undoing known
+        // follower progress and resending old traffic.
+        return;
     }
+
+    self.next_index[peer_idx] -= 1;
     sendAppendEntries(self, peer_idx);
 }
 
