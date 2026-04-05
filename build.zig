@@ -90,6 +90,26 @@ pub fn build(b: *std.Build) void {
     addSqlite(exe.root_module, b, target, optimize);
     b.installArtifact(exe);
 
+    const test_http_server = b.addExecutable(.{
+        .name = "yoq-test-http-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/privileged/http_server.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(test_http_server);
+
+    const test_net_probe = b.addExecutable(.{
+        .name = "yoq-test-net-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/privileged/net_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(test_net_probe);
+
     const run_step = b.step("run", "Run yoq");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
@@ -276,6 +296,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             }),
+            .filters = if (test_filter) |filter| &.{filter} else &.{},
         });
         const helpers_mod = b.createModule(.{
             .root_source_file = b.path("tests/helpers.zig"),
@@ -294,9 +315,27 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        const http_mod = b.createModule(.{
+            .root_source_file = b.path("src/api/http.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const container_mod = b.createModule(.{
+            .root_source_file = b.path("src/runtime/container.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const cgroups_mod = b.createModule(.{
+            .root_source_file = b.path("src/runtime/cgroups.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
         cluster_harness_mod.addImport("helpers", helpers_mod);
         cluster_harness_mod.addImport("http_client", http_client_mod);
         priv_mod.root_module.addImport("http_client", http_client_mod);
+        priv_mod.root_module.addImport("http", http_mod);
+        priv_mod.root_module.addImport("container", container_mod);
+        priv_mod.root_module.addImport("cgroups", cgroups_mod);
         priv_mod.root_module.addImport("cluster_test_harness", cluster_harness_mod);
         // workaround for zig 0.15.2: avoid --listen=- hang
         const run_priv = std.Build.Step.Run.create(b, b.fmt("run {s}", .{test_file}));

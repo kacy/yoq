@@ -191,6 +191,11 @@ pub const RootfsFixture = struct {
     }
 };
 
+pub const RootfsBinary = struct {
+    host_path: []const u8,
+    dest_path: []const u8,
+};
+
 pub fn uniqueName(alloc: std.mem.Allocator, prefix: []const u8) ![]const u8 {
     var rand_bytes: [4]u8 = undefined;
     std.crypto.random.bytes(&rand_bytes);
@@ -206,6 +211,34 @@ pub fn uniqueName(alloc: std.mem.Allocator, prefix: []const u8) ![]const u8 {
 }
 
 pub fn createShellRootfs(alloc: std.mem.Allocator) !RootfsFixture {
+    var fixture = try createEmptyRootfs(alloc);
+    errdefer fixture.deinit();
+
+    try copyHostFileIntoRootfs(alloc, fixture.rootfs_path, "/bin/sh");
+    try copyBinaryDependencies(alloc, fixture.rootfs_path, "/bin/sh");
+
+    return fixture;
+}
+
+pub fn createNetworkingRootfs(alloc: std.mem.Allocator) !RootfsFixture {
+    return createRootfsWithBinaries(alloc, &.{
+        .{ .host_path = "zig-out/bin/yoq-test-http-server", .dest_path = "/bin/yoq-test-http-server" },
+        .{ .host_path = "zig-out/bin/yoq-test-net-probe", .dest_path = "/bin/yoq-test-net-probe" },
+    });
+}
+
+pub fn createRootfsWithBinaries(alloc: std.mem.Allocator, binaries: []const RootfsBinary) !RootfsFixture {
+    var fixture = try createEmptyRootfs(alloc);
+    errdefer fixture.deinit();
+
+    for (binaries) |binary| {
+        try copyRepoBinaryIntoRootfs(alloc, fixture.rootfs_path, binary.host_path, binary.dest_path);
+    }
+
+    return fixture;
+}
+
+fn createEmptyRootfs(alloc: std.mem.Allocator) !RootfsFixture {
     var tmp = try tmpDir();
     errdefer tmp.cleanup();
 
@@ -216,9 +249,6 @@ pub fn createShellRootfs(alloc: std.mem.Allocator) !RootfsFixture {
     const tmp_path = try std.fmt.allocPrint(alloc, "{s}/tmp", .{rootfs_path});
     defer alloc.free(tmp_path);
     try std.fs.cwd().makePath(tmp_path);
-
-    try copyHostFileIntoRootfs(alloc, rootfs_path, "/bin/sh");
-    try copyBinaryDependencies(alloc, rootfs_path, "/bin/sh");
 
     return .{
         .alloc = alloc,
@@ -260,9 +290,22 @@ fn extractDependencyPath(line: []const u8) ?[]const u8 {
 }
 
 fn copyHostFileIntoRootfs(alloc: std.mem.Allocator, rootfs_path: []const u8, source_path: []const u8) !void {
-    if (!std.mem.startsWith(u8, source_path, "/")) return error.InvalidSourcePath;
+    try copyHostFileIntoRootfsAt(alloc, rootfs_path, source_path, source_path);
+}
 
-    const relative = source_path[1..];
+fn copyRepoBinaryIntoRootfs(alloc: std.mem.Allocator, rootfs_path: []const u8, source_path: []const u8, dest_path: []const u8) !void {
+    const absolute = try std.fs.cwd().realpathAlloc(alloc, source_path);
+    defer alloc.free(absolute);
+
+    try copyHostFileIntoRootfsAt(alloc, rootfs_path, absolute, dest_path);
+    try copyBinaryDependencies(alloc, rootfs_path, absolute);
+}
+
+fn copyHostFileIntoRootfsAt(alloc: std.mem.Allocator, rootfs_path: []const u8, source_path: []const u8, dest_path: []const u8) !void {
+    if (!std.mem.startsWith(u8, source_path, "/")) return error.InvalidSourcePath;
+    if (!std.mem.startsWith(u8, dest_path, "/")) return error.InvalidSourcePath;
+
+    const relative = dest_path[1..];
     const destination = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ rootfs_path, relative });
     defer alloc.free(destination);
 

@@ -248,7 +248,7 @@ test "rapid start/stop cycles don't leak" {
 }
 
 test "container ID validation rejects path traversal" {
-    const container = @import("../../src/runtime/container.zig");
+    const container = @import("container");
 
     // valid IDs
     try std.testing.expect(container.isValidContainerId("abc123def456"));

@@ -13,6 +13,7 @@ restart = "always"
 type = "tcp"
 port = 5432
 interval = 5
+timeout = 3
 
 [service.redis]
 image = "redis:7"
