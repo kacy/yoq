@@ -4,13 +4,13 @@
 // through the `yoq gpu <topo|bench>` commands.
 
 const std = @import("std");
-const cli = @import("../lib/cli.zig");
+const cli_output = @import("../lib/cli_output.zig");
 const json_out = @import("../lib/json_output.zig");
 const detect = @import("detect.zig");
 const mesh = @import("mesh.zig");
 
-const write = cli.write;
-const writeErr = cli.writeErr;
+const write = cli_output.write;
+const writeErr = cli_output.writeErr;
 
 const GpuCommandsError = error{
     InvalidArgument,
@@ -67,7 +67,7 @@ fn bench(alloc: std.mem.Allocator, opts: BenchOpts) void {
 fn benchWithSnapshot(alloc: std.mem.Allocator, opts: BenchOpts, snapshot: *Snapshot) void {
     const gpu_count = validateBenchSnapshot(opts, snapshot) orelse return;
 
-    if (cli.output_mode == .json) {
+    if (cli_output.output_mode == .json) {
         benchJson(alloc, gpu_count, opts, snapshot);
         return;
     }
@@ -213,7 +213,7 @@ fn topo() void {
     var snapshot = Snapshot.collect();
     defer snapshot.deinit();
 
-    if (cli.output_mode == .json) {
+    if (cli_output.output_mode == .json) {
         topoJson(&snapshot);
         return;
     }
@@ -275,7 +275,7 @@ fn parseGpuCommand(args: *std.process.ArgIterator) !ParsedGpuCommand {
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
-            cli.output_mode = .json;
+            cli_output.output_mode = .json;
             continue;
         }
 
@@ -415,9 +415,9 @@ fn formatGpuPeers(info: *const detect.GpuInfo, buf: []u8) []const u8 {
 
 test "topo json output format" {
     // save and restore output mode
-    const saved = cli.output_mode;
-    defer cli.output_mode = saved;
-    cli.output_mode = .json;
+    const saved = cli_output.output_mode;
+    defer cli_output.output_mode = saved;
+    cli_output.output_mode = .json;
 
     const gpu_result = detect.DetectResult{
         .gpus = undefined,
@@ -442,9 +442,9 @@ test "topo json output format" {
 }
 
 test "bench with zero GPUs does not crash" {
-    const saved = cli.output_mode;
-    defer cli.output_mode = saved;
-    cli.output_mode = .human;
+    const saved = cli_output.output_mode;
+    defer cli_output.output_mode = saved;
+    cli_output.output_mode = .human;
 
     var snapshot = Snapshot{
         .gpu = .{
@@ -464,9 +464,9 @@ test "bench with zero GPUs does not crash" {
 }
 
 test "bench json with zero GPUs does not crash" {
-    const saved = cli.output_mode;
-    defer cli.output_mode = saved;
-    cli.output_mode = .json;
+    const saved = cli_output.output_mode;
+    defer cli_output.output_mode = saved;
+    cli_output.output_mode = .json;
 
     var snapshot = Snapshot{
         .gpu = .{
