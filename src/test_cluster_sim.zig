@@ -82,6 +82,16 @@ fn deliveryCount(id: NodeId, duplicated_targets: []const NodeId) usize {
 }
 
 fn runElectionWithPeers(candidate: *SimNode, voters: []const *SimNode, dropped_targets: []const NodeId) !void {
+    try runElectionWithPeersPlan(candidate, voters, dropped_targets, &.{}, &.{});
+}
+
+fn runElectionWithPeersPlan(
+    candidate: *SimNode,
+    voters: []const *SimNode,
+    dropped_targets: []const NodeId,
+    dropped_replies: []const NodeId,
+    duplicated_targets: []const NodeId,
+) !void {
     const alloc = std.testing.allocator;
 
     for (0..70) |_| {
@@ -100,8 +110,11 @@ fn runElectionWithPeers(candidate: *SimNode, voters: []const *SimNode, dropped_t
         if (isDropped(vote.target, dropped_targets)) continue;
 
         const voter = try nodeByIdIn(voters, vote.target);
-        const reply = voter.raft.handleRequestVote(vote.args);
-        candidate.raft.handleRequestVoteReply(vote.target, reply);
+        for (0..deliveryCount(vote.target, duplicated_targets)) |_| {
+            const reply = voter.raft.handleRequestVote(vote.args);
+            if (isDropped(vote.target, dropped_replies)) continue;
+            candidate.raft.handleRequestVoteReply(vote.target, reply);
+        }
     }
 }
 
@@ -605,4 +618,76 @@ test "sim: dropped install_snapshot reply recovers on retry without regressing f
     defer alloc.free(recovered.data);
     try std.testing.expectEqualStrings("cmd-4", recovered.data);
     try std.testing.expectEqual(@as(u64, 4), node2.raft.commit_index);
+}
+
+test "sim: duplicate install_snapshot delivery is idempotent" {
+    const alloc = std.testing.allocator;
+
+    var node1 = try SimNode.init(alloc, 1, &.{ 2, 3 });
+    defer node1.deinit();
+    var node2 = try SimNode.init(alloc, 2, &.{ 1, 3 });
+    defer node2.deinit();
+    var node3 = try SimNode.init(alloc, 3, &.{ 1, 2 });
+    defer node3.deinit();
+
+    try electLeader(&node1, &node2, &node3);
+
+    _ = try node1.raft.propose("cmd-1");
+    try deliverLeaderActions(&node1, &node2, &node3, null);
+    _ = try node1.raft.propose("cmd-2");
+    try deliverLeaderActions(&node1, &node2, &node3, 2);
+    _ = try node1.raft.propose("cmd-3");
+    try deliverLeaderActions(&node1, &node2, &node3, 2);
+
+    try std.testing.expect(node1.raft.onSnapshotComplete(.{
+        .last_included_index = 3,
+        .last_included_term = node1.log.termAt(3),
+        .data_len = 0,
+    }));
+    try std.testing.expect(node1.log.truncateUpTo(3));
+
+    tickHeartbeats(&node1, 6);
+    try deliverLeaderActionsToWithPlan(&node1, &.{ &node2, &node3 }, &.{}, &.{}, &.{2});
+
+    const snapshot_meta = node2.log.getSnapshotMeta() orelse return error.MissingSnapshotMeta;
+    try std.testing.expectEqual(@as(u64, 3), snapshot_meta.last_included_index);
+    try std.testing.expectEqual(@as(u64, 3), node2.raft.commit_index);
+    try std.testing.expectEqual(@as(u64, 3), node2.log.lastIndex());
+
+    _ = try node1.raft.propose("cmd-4");
+    try deliverLeaderActions(&node1, &node2, &node3, null);
+    tickHeartbeats(&node1, 6);
+    try deliverLeaderActions(&node1, &node2, &node3, null);
+
+    const recovered = (try node2.log.getEntry(alloc, 4)).?;
+    defer alloc.free(recovered.data);
+    try std.testing.expectEqualStrings("cmd-4", recovered.data);
+    try std.testing.expectEqual(@as(u64, 4), node2.raft.commit_index);
+}
+
+test "sim: dropped request_vote replies recover on the next election round" {
+    const alloc = std.testing.allocator;
+
+    var node1 = try SimNode.init(alloc, 1, &.{ 2, 3 });
+    defer node1.deinit();
+    var node2 = try SimNode.init(alloc, 2, &.{ 1, 3 });
+    defer node2.deinit();
+    var node3 = try SimNode.init(alloc, 3, &.{ 1, 2 });
+    defer node3.deinit();
+
+    try runElectionWithPeersPlan(&node1, &.{ &node2, &node3 }, &.{}, &.{ 2, 3 }, &.{});
+    try std.testing.expectEqual(types.Role.candidate, node1.raft.role);
+    const first_term = node1.raft.currentTerm();
+
+    for (0..70) |_| {
+        node1.raft.tick();
+    }
+    try runElectionWithPeersPlan(&node1, &.{ &node2, &node3 }, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(types.Role.leader, node1.raft.role);
+    try std.testing.expect(node1.raft.currentTerm() > first_term);
+    try deliverLeaderActions(&node1, &node2, &node3, null);
+
+    _ = try node1.raft.propose("cmd-1");
+    try deliverLeaderActions(&node1, &node2, &node3, null);
+    try std.testing.expectEqual(@as(u64, 1), node1.raft.commit_index);
 }

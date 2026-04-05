@@ -871,6 +871,40 @@ test "handleInstallSnapshotReply updates peer tracking" {
     try testing.expectEqual(@as(LogIndex, 50), leader.match_index[0]);
 }
 
+test "leader steps down on higher term in install_snapshot_reply" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var leader = try setupTestRaft(alloc, 1, peers, &log);
+    defer leader.deinit();
+
+    for (0..max_election_ticks + 1) |_| {
+        leader.tick();
+    }
+    const election_actions = leader.drainActions();
+    defer alloc.free(election_actions);
+    leader.handleRequestVoteReply(2, .{
+        .term = leader.currentTerm(),
+        .vote_granted = true,
+    });
+    const leader_actions = leader.drainActions();
+    defer test_support.deinitOwnedActions(Action, alloc, leader_actions);
+
+    try testing.expectEqual(Role.leader, leader.role);
+    const original_term = leader.currentTerm();
+
+    leader.handleInstallSnapshotReply(2, .{
+        .term = original_term + 1,
+    });
+
+    try testing.expectEqual(Role.follower, leader.role);
+    try testing.expectEqual(original_term + 1, leader.currentTerm());
+    const actions = leader.drainActions();
+    defer alloc.free(actions);
+}
+
 test "onSnapshotComplete updates metadata" {
     const alloc = testing.allocator;
     var log = try Log.initMemory();
