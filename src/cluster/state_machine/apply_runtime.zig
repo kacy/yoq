@@ -1,4 +1,5 @@
 const std = @import("std");
+const sqlite = @import("sqlite");
 const types = @import("../raft_types.zig");
 const log = @import("../../lib/log.zig");
 const raft_log_mod = @import("../log.zig");
@@ -21,10 +22,21 @@ pub fn apply(self: anytype, entry: LogEntry) void {
         return;
     }
 
-    self.db.execDynamic(entry.data, .{}, .{}) catch |err| {
+    var stmt = self.db.prepareDynamic(entry.data) catch |err| {
         log.err("state machine: failed to apply entry {d}: {}", .{ entry.index, err });
         return;
     };
+    defer stmt.deinit();
+
+    stmt.exec(.{}, .{}) catch |err| {
+        // clear the raw sqlite statement error state so finalization does not
+        // emit a second package-level error log for expected exec failures
+        _ = sqlite.c.sqlite3_clear_bindings(stmt.stmt);
+        _ = sqlite.c.sqlite3_reset(stmt.stmt);
+        log.err("state machine: failed to apply entry {d}: {}", .{ entry.index, err });
+        return;
+    };
+
     db_runtime.setLastApplied(&self.db, entry.index) catch |err| {
         log.err("state machine: failed to persist last_applied {d}: {}", .{ entry.index, err });
         return;
