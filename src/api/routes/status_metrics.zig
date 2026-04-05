@@ -139,6 +139,7 @@ test "route returns null for DELETE to metrics" {
 
 test "route handles /v1/status?mode=service_rollout GET" {
     const ebpf_map_support = @import("../../network/ebpf/map_support.zig");
+    const health_registry = @import("../../manifest/health/registry_support.zig");
     const service_registry_backfill = @import("../../network/service_registry_backfill.zig");
     const service_rollout = @import("../../network/service_rollout.zig");
     const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
@@ -152,6 +153,8 @@ test "route handles /v1/status?mode=service_rollout GET" {
 
     try store.initTestDb();
     defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
     proxy_control_plane.resetForTest();
@@ -263,6 +266,7 @@ test "route handles /v1/status?mode=service_rollout GET" {
 }
 
 test "route rollout status reports reconciler cutover ready after clean backfill and audit" {
+    const health_registry = @import("../../manifest/health/registry_support.zig");
     const service_registry_backfill = @import("../../network/service_registry_backfill.zig");
     const service_rollout = @import("../../network/service_rollout.zig");
     const dns_registry = @import("../../network/dns/registry_support.zig");
@@ -275,6 +279,8 @@ test "route rollout status reports reconciler cutover ready after clean backfill
 
     try store.initTestDb();
     defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
     proxy_control_plane.resetForTest();
@@ -336,7 +342,98 @@ test "route rollout status reports reconciler cutover ready after clean backfill
     try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"components_not_ready\"]") != null);
 }
 
+test "service discovery status reports node signal loss and recovery" {
+    const health_registry = @import("../../manifest/health/registry_support.zig");
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const dns_registry = @import("../../network/dns/registry_support.zig");
+    const service_reconciler = @import("../../network/service_reconciler.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const service_registry_backfill = @import("../../network/service_registry_backfill.zig");
+    const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_registry_backfill.resetForTest();
+    defer service_registry_backfill.resetForTest();
+    proxy_control_plane.resetForTest();
+    defer proxy_control_plane.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    dns_registry.resetClusterLookupFaultsForTest();
+    defer dns_registry.resetClusterLookupFaultsForTest();
+    dns_registry.resetDnsInterceptorFaultsForTest();
+    defer dns_registry.resetDnsInterceptorFaultsForTest();
+    dns_registry.resetLoadBalancerFaultsForTest();
+    defer dns_registry.resetLoadBalancerFaultsForTest();
+    service_reconciler.resetForTest();
+    defer service_reconciler.resetForTest();
+    service_rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = 7,
+        .ip_address = "10.42.7.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_reconciler.bootstrapIfEnabled();
+    service_reconciler.noteNodeLost(7);
+
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/status?mode=service_discovery",
+        .path_only = "/v1/status",
+        .query = "mode=service_discovery",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const after_loss = route(req, testing.allocator).?;
+    defer if (after_loss.allocated) testing.allocator.free(after_loss.body);
+
+    try testing.expectEqual(http.StatusCode.ok, after_loss.status);
+    try testing.expect(std.mem.indexOf(u8, after_loss.body, "\"node_signals\":{\"lost_total\":1,\"recovered_total\":0,\"endpoints_changed_total\":1,\"last_lost_node_id\":7,\"last_recovered_node_id\":null}") != null);
+
+    service_reconciler.noteNodeRecovered(7);
+
+    const after_recovery = route(req, testing.allocator).?;
+    defer if (after_recovery.allocated) testing.allocator.free(after_recovery.body);
+
+    try testing.expectEqual(http.StatusCode.ok, after_recovery.status);
+    try testing.expect(std.mem.indexOf(u8, after_recovery.body, "\"node_signals\":{\"lost_total\":1,\"recovered_total\":1,\"endpoints_changed_total\":2,\"last_lost_node_id\":7,\"last_recovered_node_id\":7}") != null);
+}
+
 test "route rollout status reports steering blocker for VIP cutover readiness" {
+    const health_registry = @import("../../manifest/health/registry_support.zig");
     const service_registry_backfill = @import("../../network/service_registry_backfill.zig");
     const service_rollout = @import("../../network/service_rollout.zig");
     const dns_registry = @import("../../network/dns/registry_support.zig");
@@ -349,6 +446,8 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
 
     try store.initTestDb();
     defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
     proxy_control_plane.resetForTest();
@@ -429,6 +528,7 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
 }
 
 test "route rollout status sample routes expose steering drift details" {
+    const health_registry = @import("../../manifest/health/registry_support.zig");
     const service_rollout = @import("../../network/service_rollout.zig");
     const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
     const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
@@ -438,6 +538,8 @@ test "route rollout status sample routes expose steering drift details" {
 
     try store.initTestDb();
     defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
     service_registry_runtime.resetForTest();
     defer service_registry_runtime.resetForTest();
     proxy_control_plane.resetForTest();
@@ -885,6 +987,103 @@ test "handleMetricsPrometheus exposes service rollout metrics" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_health_checker_stale_results_total 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_checker_queue_depth 0") != null);
     try testing.expect(std.mem.indexOf(u8, resp.body, "yoq_service_checker_workers_busy 0") != null);
+}
+
+test "service discovery status and metrics expose stale endpoint quarantine recovery" {
+    const sqlite = @import("sqlite");
+    const cluster_registry_test_support = @import("../../cluster/registry/test_support.zig");
+    const health_registry = @import("../../manifest/health/registry_support.zig");
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const dns_registry = @import("../../network/dns/registry_support.zig");
+    const service_reconciler = @import("../../network/service_reconciler.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const service_registry_backfill = @import("../../network/service_registry_backfill.zig");
+    const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_registry_backfill.resetForTest();
+    defer service_registry_backfill.resetForTest();
+    proxy_control_plane.resetForTest();
+    defer proxy_control_plane.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    dns_registry.resetClusterLookupFaultsForTest();
+    defer dns_registry.resetClusterLookupFaultsForTest();
+    dns_registry.resetDnsInterceptorFaultsForTest();
+    defer dns_registry.resetDnsInterceptorFaultsForTest();
+    dns_registry.resetLoadBalancerFaultsForTest();
+    defer dns_registry.resetLoadBalancerFaultsForTest();
+    service_reconciler.resetForTest();
+    defer service_reconciler.resetForTest();
+    service_rollout.setForTest(.{ .service_registry_v2 = true, .service_registry_reconciler = true });
+    defer service_rollout.resetForTest();
+
+    var cluster_db = try sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    });
+    defer cluster_db.deinit();
+    try cluster_db.exec(cluster_registry_test_support.agents_schema, .{}, .{});
+    const prev_cluster_db = dns_registry.currentClusterDb();
+    dns_registry.setClusterDb(&cluster_db);
+    defer dns_registry.setClusterDb(prev_cluster_db);
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:0",
+        .container_id = "ctr-1",
+        .node_id = 7,
+        .ip_address = "10.42.7.9",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_reconciler.bootstrapIfEnabled();
+
+    const status_req = http.Request{
+        .method = .GET,
+        .path = "/v1/status?mode=service_discovery",
+        .path_only = "/v1/status",
+        .query = "mode=service_discovery",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const status_resp = route(status_req, testing.allocator).?;
+    defer if (status_resp.allocated) testing.allocator.free(status_resp.body);
+    try testing.expectEqual(http.StatusCode.ok, status_resp.status);
+    try testing.expect(std.mem.indexOf(u8, status_resp.body, "\"stale_endpoint_quarantines_total\":1") != null);
+
+    const metrics_resp = handleMetricsPrometheus(testing.allocator);
+    defer if (metrics_resp.allocated) testing.allocator.free(metrics_resp.body);
+    try testing.expectEqual(http.StatusCode.ok, metrics_resp.status);
+    try testing.expect(std.mem.indexOf(u8, metrics_resp.body, "yoq_service_reconciler_stale_endpoint_quarantines_total 1") != null);
 }
 
 test "handleGpuMetrics returns valid JSON" {

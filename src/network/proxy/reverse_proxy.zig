@@ -62,6 +62,7 @@ pub const ForwardPlan = struct {
 
 const MirrorTask = struct {
     allocator: std.mem.Allocator,
+    active_mirror_requests: *std.atomic.Value(usize),
     raw_request: []u8,
     protocol: Protocol,
     method: http.Method,
@@ -106,6 +107,7 @@ pub const ReverseProxy = struct {
     routes: []const router.Route,
     running: bool = false,
     max_response_bytes: usize = 64 * 1024,
+    active_mirror_requests: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
     pub fn init(allocator: std.mem.Allocator, routes: []const router.Route) ReverseProxy {
         return .{
@@ -115,7 +117,9 @@ pub const ReverseProxy = struct {
     }
 
     pub fn deinit(self: *ReverseProxy) void {
-        _ = self;
+        while (self.active_mirror_requests.load(.acquire) != 0) {
+            std.Thread.sleep(std.time.ns_per_ms);
+        }
     }
 
     pub fn start(self: *ReverseProxy) void {
@@ -311,8 +315,21 @@ pub const ReverseProxy = struct {
 
     fn startMirrorRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8) void {
         const mirror_service = plan.route.mirror_service orelse return;
-        var task = cloneMirrorTask(self.allocator, self.max_response_bytes, raw_request, plan, mirror_service, client_ip) catch return;
+        _ = @constCast(&self.active_mirror_requests).fetchAdd(1, .monotonic);
+        var task = cloneMirrorTask(
+            self.allocator,
+            @constCast(&self.active_mirror_requests),
+            self.max_response_bytes,
+            raw_request,
+            plan,
+            mirror_service,
+            client_ip,
+        ) catch {
+            _ = @constCast(&self.active_mirror_requests).fetchSub(1, .monotonic);
+            return;
+        };
         const thread = std.Thread.spawn(.{}, runMirrorTask, .{task}) catch {
+            _ = @constCast(&self.active_mirror_requests).fetchSub(1, .monotonic);
             task.deinit();
             return;
         };
@@ -532,6 +549,7 @@ pub const ReverseProxy = struct {
 
 fn cloneMirrorTask(
     alloc: std.mem.Allocator,
+    active_mirror_requests: *std.atomic.Value(usize),
     max_response_bytes: usize,
     raw_request: []const u8,
     plan: *const ForwardPlan,
@@ -540,6 +558,7 @@ fn cloneMirrorTask(
 ) !MirrorTask {
     return .{
         .allocator = alloc,
+        .active_mirror_requests = active_mirror_requests,
         .raw_request = try alloc.dupe(u8, raw_request),
         .protocol = plan.protocol,
         .method = plan.method,
@@ -561,6 +580,7 @@ fn cloneMirrorTask(
 }
 
 fn runMirrorTask(task: MirrorTask) void {
+    defer _ = task.active_mirror_requests.fetchSub(1, .release);
     defer task.deinit();
 
     proxy_runtime.recordMirrorRouteRequestStart(task.route_name, task.route_service, task.mirror_service);
@@ -1038,6 +1058,7 @@ fn cloneRouteSnapshot(alloc: std.mem.Allocator, route: router.Route) !proxy_runt
         .host = try alloc.dupe(u8, route.match.host orelse ""),
         .path_prefix = try alloc.dupe(u8, route.match.path_prefix),
         .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+        .mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
         .eligible_endpoints = route.eligible_endpoints,
         .healthy_endpoints = route.healthy_endpoints,
         .degraded = route.degraded,

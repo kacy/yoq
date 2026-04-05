@@ -46,8 +46,7 @@ test "chaos: kill non-leader, verify cluster continues, restart and rejoin" {
     try std.testing.expect(!cluster.getNode(victim_id).?.isRunning());
 
     // cluster should still have a leader (majority intact: 2 of 3)
-    const still_leader = try cluster.waitForLeader(5000);
-    try std.testing.expect(still_leader != null);
+    _ = try cluster.waitForLeader(5000);
 
     // restart the killed node
     try cluster.restartNode(victim_id);

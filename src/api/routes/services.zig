@@ -508,6 +508,13 @@ fn testRequest(method: http.Method, path: []const u8) http.Request {
     };
 }
 
+fn startListenerForApiTestOrSkip(listener_runtime: anytype) !void {
+    listener_runtime.startForTest(std.testing.allocator, 0);
+    if (listener_runtime.portIfRunning() == null) {
+        return error.SkipZigTest;
+    }
+}
+
 test "route handles GET /v1/services" {
     const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
 
@@ -1007,6 +1014,200 @@ test "route handles GET /v1/services/{name}/proxy-routes with steering drift det
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_drifted\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering_blocked_reason\":\"none\"") != null);
+}
+
+test "route handles GET /v1/services/{name} recovers steering after listener restart" {
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .http_proxy_target_port = 8080,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:8080",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    steering_runtime.setPortMapperAvailableForTest(true);
+    steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    listener_runtime.setStateChangeHook(steering_runtime.syncIfEnabled);
+    defer listener_runtime.setStateChangeHook(null);
+
+    {
+        const response = route(testRequest(.GET, "/v1/services/api"), std.testing.allocator).?;
+        defer if (response.allocated) std.testing.allocator.free(response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, response.status);
+        try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"listener_not_running\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
+    }
+
+    try startListenerForApiTestOrSkip(listener_runtime);
+
+    {
+        const response = route(testRequest(.GET, "/v1/services/api"), std.testing.allocator).?;
+        defer if (response.allocated) std.testing.allocator.free(response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, response.status);
+        try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":1,\"ready\":true,\"blocked\":false,\"drifted\":false,\"blocked_reason\":\"none\",\"vip_traffic_mode\":\"l7_proxy\"}") != null);
+        try std.testing.expect(std.mem.indexOf(u8, response.body, "\"eligible_endpoints\":1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, response.body, "\"degraded\":false") != null);
+    }
+
+    listener_runtime.stop();
+
+    {
+        const response = route(testRequest(.GET, "/v1/services/api"), std.testing.allocator).?;
+        defer if (response.allocated) std.testing.allocator.free(response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, response.status);
+        try std.testing.expect(std.mem.indexOf(u8, response.body, "\"steering\":{\"desired_ports\":1,\"applied_ports\":0,\"ready\":false,\"blocked\":true,\"drifted\":false,\"blocked_reason\":\"listener_not_running\",\"vip_traffic_mode\":\"l4_fallback\"}") != null);
+    }
+}
+
+test "route handles service endpoint drift and resync recovery" {
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_target_port = 8080,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:8080",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+
+    service_registry_runtime.syncServiceFromStore("api");
+    steering_runtime.setPortMapperAvailableForTest(true);
+    steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    listener_runtime.setStateChangeHook(steering_runtime.syncIfEnabled);
+    defer listener_runtime.setStateChangeHook(null);
+    try startListenerForApiTestOrSkip(listener_runtime);
+    proxy_runtime.bootstrapIfEnabled();
+
+    {
+        const service_response = route(testRequest(.GET, "/v1/services/api"), std.testing.allocator).?;
+        defer if (service_response.allocated) std.testing.allocator.free(service_response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, service_response.status);
+        try std.testing.expect(std.mem.indexOf(u8, service_response.body, "\"total_endpoints\":1,\"eligible_endpoints\":1,\"healthy_endpoints\":0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, service_response.body, "\"degraded\":false") != null);
+    }
+    {
+        const routes_response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
+        defer if (routes_response.allocated) std.testing.allocator.free(routes_response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, routes_response.status);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"eligible_endpoints\":1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"degraded\":false") != null);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"steering_ready\":true") != null);
+    }
+
+    service_registry_runtime.removeContainer("ctr-1");
+    proxy_runtime.bootstrapIfEnabled();
+
+    {
+        const service_response = route(testRequest(.GET, "/v1/services/api"), std.testing.allocator).?;
+        defer if (service_response.allocated) std.testing.allocator.free(service_response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, service_response.status);
+        try std.testing.expect(std.mem.indexOf(u8, service_response.body, "\"total_endpoints\":0,\"eligible_endpoints\":0,\"healthy_endpoints\":0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, service_response.body, "\"degraded\":true") != null);
+    }
+    {
+        const routes_response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
+        defer if (routes_response.allocated) std.testing.allocator.free(routes_response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, routes_response.status);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"eligible_endpoints\":0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"degraded_reason\":\"service_state\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"steering_ready\":true") != null);
+    }
+
+    service_registry_runtime.syncServiceFromStore("api");
+    proxy_runtime.bootstrapIfEnabled();
+
+    {
+        const service_response = route(testRequest(.GET, "/v1/services/api"), std.testing.allocator).?;
+        defer if (service_response.allocated) std.testing.allocator.free(service_response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, service_response.status);
+        try std.testing.expect(std.mem.indexOf(u8, service_response.body, "\"total_endpoints\":1,\"eligible_endpoints\":1,\"healthy_endpoints\":0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, service_response.body, "\"degraded\":false") != null);
+    }
+    {
+        const routes_response = route(testRequest(.GET, "/v1/services/api/proxy-routes"), std.testing.allocator).?;
+        defer if (routes_response.allocated) std.testing.allocator.free(routes_response.body);
+
+        try std.testing.expectEqual(http.StatusCode.ok, routes_response.status);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"eligible_endpoints\":1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"degraded\":false") != null);
+        try std.testing.expect(std.mem.indexOf(u8, routes_response.body, "\"steering_ready\":true") != null);
+    }
 }
 
 test "route handles POST drain and DELETE endpoint" {

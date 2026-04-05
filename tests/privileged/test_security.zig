@@ -7,7 +7,7 @@
 const std = @import("std");
 const helpers = @import("helpers");
 const cluster_test_harness = @import("cluster_test_harness");
-const http = @import("../../src/api/http.zig");
+const http = @import("http");
 const http_client = @import("http_client");
 
 const TestCluster = cluster_test_harness.TestCluster;
@@ -129,7 +129,6 @@ test "security: SQL injection in query params" {
 test "security: oversized request headers rejected" {
     var cluster = try initSingleNode();
     defer cluster.deinit();
-    const port = cluster.nodes.items[0].api_port;
 
     // build a request with >16KB of headers
     var big_header: [17 * 1024]u8 = undefined;

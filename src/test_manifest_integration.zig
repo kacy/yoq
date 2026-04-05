@@ -17,6 +17,24 @@ fn expectContains(haystack: []const u8, needle: []const u8) !void {
     }
 }
 
+fn expectManifestLoadsAndValidatesCleanly(path: []const u8) !void {
+    errdefer std.debug.print("example manifest failed validation: {s}\n", .{path});
+
+    var manifest = try loader.load(alloc, path);
+    defer manifest.deinit();
+
+    var result = try validator.check(alloc, &manifest);
+    defer result.deinit();
+
+    if (result.diagnostics.len != 0) {
+        std.debug.print("unexpected diagnostics for {s}:\n", .{path});
+        for (result.diagnostics) |diagnostic| {
+            std.debug.print("  {s}: {s}\n", .{ @tagName(diagnostic.severity), diagnostic.message });
+        }
+        return error.TestUnexpectedManifestDiagnostics;
+    }
+}
+
 // -- basic loading --
 
 test "load minimal manifest" {
@@ -357,4 +375,26 @@ test "expand environment variables with defaults" {
 test "load from nonexistent file returns FileNotFound" {
     const result = loader.load(alloc, "/tmp/nonexistent-yoq-manifest-test.toml");
     try std.testing.expectError(loader.LoadError.FileNotFound, result);
+}
+
+test "checked-in example manifests load and validate cleanly" {
+    var examples_dir = try std.fs.cwd().openDir("examples", .{ .iterate = true });
+    defer examples_dir.close();
+
+    var walker = try examples_dir.walk(alloc);
+    defer walker.deinit();
+
+    var checked: usize = 0;
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.eql(u8, entry.basename, "manifest.toml")) continue;
+
+        const path = try std.fmt.allocPrint(alloc, "examples/{s}", .{entry.path});
+        defer alloc.free(path);
+
+        try expectManifestLoadsAndValidatesCleanly(path);
+        checked += 1;
+    }
+
+    try std.testing.expect(checked > 0);
 }

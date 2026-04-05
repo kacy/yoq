@@ -7,7 +7,7 @@
 const std = @import("std");
 const helpers = @import("helpers");
 const cluster_test_harness = @import("cluster_test_harness");
-const http = @import("../../src/api/http.zig");
+const http = @import("http");
 const http_client = @import("http_client");
 
 const TestCluster = cluster_test_harness.TestCluster;

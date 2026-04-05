@@ -190,7 +190,7 @@ test "backoff increases on restart but caps" {
 }
 
 test "ResourceLimits validation errors" {
-    const cgroups = @import("../../src/runtime/cgroups.zig");
+    const cgroups = @import("cgroups");
 
     // memory below minimum (4MB)
     const bad_mem = cgroups.ResourceLimits{ .memory_max = 1024 * 1024 };
@@ -206,7 +206,7 @@ test "ResourceLimits validation errors" {
 }
 
 test "unlimited resource limits" {
-    const cgroups = @import("../../src/runtime/cgroups.zig");
+    const cgroups = @import("cgroups");
 
     // unlimited should pass validation
     try cgroups.ResourceLimits.unlimited.validate();

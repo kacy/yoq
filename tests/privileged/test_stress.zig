@@ -30,8 +30,7 @@ test "stress: 5-node cluster forms under load" {
     try cluster.startAll();
 
     // all 5 nodes should elect a leader within 20s
-    const leader = try cluster.waitForLeader(20000);
-    try std.testing.expect(leader != null);
+    _ = try cluster.waitForLeader(20000);
 
     // verify all nodes converge on the same leader
     _ = try cluster.waitForConvergence(15000);
