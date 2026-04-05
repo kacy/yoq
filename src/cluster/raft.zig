@@ -2377,6 +2377,101 @@ test "stale append_entries_reply does not regress match_index" {
     }
 }
 
+test "failed append_entries_reply backtracks only above matched prefix" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    for (0..max_election_ticks + 1) |_| {
+        raft.tick();
+    }
+    const election_actions = raft.drainActions();
+    defer alloc.free(election_actions);
+    raft.handleRequestVoteReply(2, .{
+        .term = raft.currentTerm(),
+        .vote_granted = true,
+    });
+    const leader_actions = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, leader_actions);
+        alloc.free(leader_actions);
+    }
+
+    raft.match_index[0] = 1;
+    raft.next_index[0] = 3;
+
+    raft.handleAppendEntriesReply(2, .{
+        .term = raft.currentTerm(),
+        .success = false,
+        .match_index = 0,
+    });
+
+    try testing.expectEqual(@as(LogIndex, 1), raft.match_index[0]);
+    try testing.expectEqual(@as(LogIndex, 2), raft.next_index[0]);
+
+    const actions = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, actions);
+        alloc.free(actions);
+    }
+
+    var found_resend = false;
+    for (actions) |action| {
+        if (action == .send_append_entries and action.send_append_entries.target == 2) {
+            found_resend = true;
+        }
+    }
+    try testing.expect(found_resend);
+}
+
+test "stale failed append_entries_reply does not regress next_index or trigger resend" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+
+    const peers: []const NodeId = &.{ 2, 3 };
+    var raft = try setupTestRaft(alloc, 1, peers, &log);
+    defer raft.deinit();
+
+    for (0..max_election_ticks + 1) |_| {
+        raft.tick();
+    }
+    const election_actions = raft.drainActions();
+    defer alloc.free(election_actions);
+    raft.handleRequestVoteReply(2, .{
+        .term = raft.currentTerm(),
+        .vote_granted = true,
+    });
+    const leader_actions = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, leader_actions);
+        alloc.free(leader_actions);
+    }
+
+    raft.match_index[0] = 5;
+    raft.next_index[0] = 6;
+
+    raft.handleAppendEntriesReply(2, .{
+        .term = raft.currentTerm(),
+        .success = false,
+        .match_index = 0,
+    });
+
+    try testing.expectEqual(@as(LogIndex, 5), raft.match_index[0]);
+    try testing.expectEqual(@as(LogIndex, 6), raft.next_index[0]);
+
+    const actions = raft.drainActions();
+    defer {
+        freeActionEntries(alloc, actions);
+        alloc.free(actions);
+    }
+    try testing.expectEqual(@as(usize, 0), actions.len);
+}
+
 test "truncation followed by append uses fresh state" {
     const alloc = testing.allocator;
     var log = try Log.initMemory();
