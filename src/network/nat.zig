@@ -466,7 +466,7 @@ test "protocol strings" {
 test "dnat args with port 1" {
     var port_buf: [8]u8 = undefined;
     var dest_buf: [32]u8 = undefined;
-    const args = buildDnatArgs(.add, 1, "10.42.0.2", 80, .tcp, &port_buf, &dest_buf);
+    const args = buildDnatArgs(.add, "PREROUTING", false, 1, "10.42.0.2", 80, .tcp, &port_buf, &dest_buf);
     try std.testing.expectEqualStrings("1", args[8].?);
     try std.testing.expectEqualStrings("10.42.0.2:80", args[12].?);
 }
@@ -474,7 +474,7 @@ test "dnat args with port 1" {
 test "dnat args with port 65535" {
     var port_buf: [8]u8 = undefined;
     var dest_buf: [32]u8 = undefined;
-    const args = buildDnatArgs(.add, 65535, "10.42.0.2", 65535, .tcp, &port_buf, &dest_buf);
+    const args = buildDnatArgs(.add, "PREROUTING", false, 65535, "10.42.0.2", 65535, .tcp, &port_buf, &dest_buf);
     try std.testing.expectEqualStrings("65535", args[8].?);
     try std.testing.expectEqualStrings("10.42.0.2:65535", args[12].?);
 }

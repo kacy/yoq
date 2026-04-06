@@ -98,7 +98,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    b.installArtifact(test_http_server);
+    const install_test_http_server = b.addInstallArtifact(test_http_server, .{});
 
     const test_net_probe = b.addExecutable(.{
         .name = "yoq-test-net-probe",
@@ -108,7 +108,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    b.installArtifact(test_net_probe);
+    const install_test_net_probe = b.addInstallArtifact(test_net_probe, .{});
 
     const run_step = b.step("run", "Run yoq");
     const run_cmd = b.addRunArtifact(exe);
@@ -342,6 +342,9 @@ pub fn build(b: *std.Build) void {
         run_priv.producer = priv_mod;
         run_priv.addArtifactArg(priv_mod);
         run_priv.has_side_effects = true;
+        run_priv.step.dependOn(b.getInstallStep());
+        run_priv.step.dependOn(&install_test_http_server.step);
+        run_priv.step.dependOn(&install_test_net_probe.step);
         privileged_test_step.dependOn(&run_priv.step);
     }
 
