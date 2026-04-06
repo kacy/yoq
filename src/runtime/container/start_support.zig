@@ -10,6 +10,7 @@ const net_setup = @import("../../network/setup.zig");
 const gpu_passthrough = @import("../../gpu/passthrough.zig");
 const log = @import("../../lib/log.zig");
 const ip = @import("../../network/ip.zig");
+const bridge = @import("../../network/bridge.zig");
 const exec_runtime = @import("exec_runtime.zig");
 const id_paths = @import("id_paths.zig");
 
@@ -71,14 +72,23 @@ pub fn setupNetwork(config: anytype, dirs: ?*const id_paths.OverlayDirs, pid: po
 
                 var ip_buf: [16]u8 = undefined;
                 const ip_str = ip.formatIp(info.ip, &ip_buf);
+                const gateway_ip = if (net_config.node_id) |node_id|
+                    (ip.subnetForNode(node_id) catch unreachable).gateway
+                else
+                    bridge.gateway_ip;
+                const network_root = if (dirs) |overlay_dirs|
+                    overlay_dirs.mergedPath()
+                else
+                    config.rootfs;
                 store.updateNetwork(config.id, ip_str, info.vethName()) catch |err| {
                     log.warn("failed to persist network info for {s}: {}", .{ config.id, err });
                 };
 
-                if (dirs) |overlay_dirs| {
+                if (network_root.len > 0) {
                     net_setup.writeNetworkFiles(
-                        overlay_dirs.mergedPath(),
+                        network_root,
                         info.ip,
+                        gateway_ip,
                         config.hostname,
                     );
                 }

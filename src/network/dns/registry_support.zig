@@ -7,6 +7,7 @@ const policy = @import("../policy.zig");
 const packet_support = @import("packet_support.zig");
 const service_observability = @import("../service_observability.zig");
 const rollout = @import("../service_rollout.zig");
+const store = @import("../../state/store.zig");
 
 const ebpf = if (builtin.os.tag == .linux) @import("../ebpf.zig") else struct {
     pub const LoadBalancerBackends = struct {
@@ -444,6 +445,35 @@ pub fn lookupService(name: []const u8) ?[4]u8 {
     return lookupClusterService(name);
 }
 
+pub fn lookupServiceForDns(name: []const u8) ?[4]u8 {
+    {
+        registry_mutex.lock();
+        defer registry_mutex.unlock();
+
+        if (findServiceViewLocked(name)) |view| {
+            if (ebpf.getLoadBalancer() == null and view.backend_count > 0) {
+                return view.backends[0].ip;
+            }
+            return view.dns_ip;
+        }
+
+        var i: usize = max_services;
+        while (i > 0) {
+            i -= 1;
+            const entry = &registry[i];
+            if (entry.active and
+                entry.name_len == name.len and
+                std.mem.eql(u8, entry.name[0..entry.name_len], name))
+            {
+                return entry.ip;
+            }
+        }
+    }
+
+    if (lookupPersistedLocalService(name)) |ip| return ip;
+    return lookupClusterService(name);
+}
+
 pub fn lookupLocalService(name: []const u8) ?[4]u8 {
     registry_mutex.lock();
     defer registry_mutex.unlock();
@@ -460,6 +490,25 @@ pub fn lookupLocalService(name: []const u8) ?[4]u8 {
         {
             return entry.ip;
         }
+    }
+    return null;
+}
+
+fn lookupPersistedLocalService(name: []const u8) ?[4]u8 {
+    var db = store.openDb() catch return null;
+    defer db.deinit();
+
+    const Row = struct { ip_address: sqlite.Text };
+
+    var stmt = db.prepare(
+        "SELECT ip_address FROM service_names WHERE name = ? ORDER BY registered_at DESC LIMIT 1;",
+    ) catch return null;
+    defer stmt.deinit();
+
+    const row = stmt.oneAlloc(Row, std.heap.page_allocator, .{}, .{name}) catch return null;
+    if (row) |r| {
+        defer std.heap.page_allocator.free(r.ip_address.data);
+        return ip_mod.parseIp(r.ip_address.data);
     }
     return null;
 }

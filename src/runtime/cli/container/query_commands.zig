@@ -23,6 +23,7 @@ fn psJson(alloc: std.mem.Allocator, ids: []const []const u8) void {
 
         w.beginObject();
         w.stringField("id", id);
+        w.stringField("name", record.hostname);
         w.stringField("status", status);
         if (record.ip_address) |addr| {
             w.stringField("ip", addr);
@@ -63,17 +64,17 @@ pub fn ps(alloc: std.mem.Allocator) !void {
         return;
     }
 
-    write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ "CONTAINER ID", "STATUS", "IP", "COMMAND" });
+    write("{s:<14} {s:<10} {s:<16} {s:<24} {s:<20}\n", .{ "CONTAINER ID", "STATUS", "IP", "NAME", "COMMAND" });
     for (ids.items) |id| {
         const record = store.load(alloc, id) catch |err| {
-            write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, @errorName(err), "-", "-" });
+            write("{s:<14} {s:<10} {s:<16} {s:<24} {s:<20}\n", .{ id, @errorName(err), "-", "-", "-" });
             continue;
         };
         defer record.deinit(alloc);
 
         const status = state_support.reconcileLiveness(id, record.status, record.pid);
         const ip_display: []const u8 = record.ip_address orelse "-";
-        write("{s:<14} {s:<10} {s:<16} {s:<20}\n", .{ id, status, ip_display, record.command });
+        write("{s:<14} {s:<10} {s:<16} {s:<24} {s:<20}\n", .{ id, status, ip_display, record.hostname, record.command });
     }
 }
 

@@ -114,7 +114,9 @@ pub fn setupContainer(
     if (!config.skip_dns and !dns.resolverRunning()) {
         return common.SetupError.ConfigFailed;
     }
-    ebpf_support.loadDnsInterceptorOnBridge();
+    if (dns.resolverOwnedByCurrentProcess()) {
+        ebpf_support.loadDnsInterceptorOnBridge();
+    }
     service_reconciler.refreshComponentStateIfEnabled();
 
     if (!config.skip_dns) {

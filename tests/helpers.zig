@@ -261,7 +261,11 @@ fn copyBinaryDependencies(alloc: std.mem.Allocator, rootfs_path: []const u8, hos
     var result = try run(alloc, &.{ "ldd", host_binary });
     defer result.deinit();
 
-    if (result.exit_code != 0) return error.DependencyScanFailed;
+    if (result.exit_code != 0) {
+        const combined = if (result.stderr.len > 0) result.stderr else result.stdout;
+        if (std.mem.indexOf(u8, combined, "not a dynamic executable") != null) return;
+        return error.DependencyScanFailed;
+    }
 
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     while (lines.next()) |line_raw| {

@@ -2,8 +2,6 @@ const std = @import("std");
 const posix = std.posix;
 
 const ipv4_loopback = [4]u8{ 127, 0, 0, 1 };
-const dns_addr = [4]u8{ 10, 42, 0, 1 };
-
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -80,6 +78,7 @@ fn queryDnsARecord(host: []const u8) ![4]u8 {
         return err;
     };
 
+    const dns_addr = try loadDnsServer();
     const addr = std.net.Address.initIp4(dns_addr, 53);
     _ = posix.sendto(fd, packet[0..query_len], 0, &addr.any, addr.getOsSockLen()) catch |err| {
         std.debug.print("dns sendto failed: {}\n", .{err});
@@ -92,6 +91,23 @@ fn queryDnsARecord(host: []const u8) ![4]u8 {
         return err;
     };
     return try parseDnsResponse(response[0..response_len]);
+}
+
+fn loadDnsServer() ![4]u8 {
+    var buf: [256]u8 = undefined;
+    const file = std.fs.cwd().openFile("/etc/resolv.conf", .{}) catch return error.DnsLookupFailed;
+    defer file.close();
+    const len = file.readAll(&buf) catch return error.DnsLookupFailed;
+    var lines = std.mem.splitScalar(u8, buf[0..len], '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (!std.mem.startsWith(u8, trimmed, "nameserver")) continue;
+        var parts = std.mem.tokenizeAny(u8, trimmed, " \t");
+        _ = parts.next() orelse continue;
+        const addr = parts.next() orelse continue;
+        if (parseIpv4(addr)) |ip| return ip;
+    }
+    return error.DnsLookupFailed;
 }
 
 fn buildDnsQuery(host: []const u8, out: *[512]u8) !usize {

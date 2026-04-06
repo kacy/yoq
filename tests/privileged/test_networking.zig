@@ -16,6 +16,26 @@ fn trimOutput(output: []const u8) []const u8 {
     return std.mem.trim(u8, output, " \n\r\t");
 }
 
+fn isIpv4Output(output: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const trimmed = trimOutput(line);
+        if (trimmed.len == 0) continue;
+
+        var parts = std.mem.splitScalar(u8, trimmed, '.');
+        var count: usize = 0;
+        var valid = true;
+        while (parts.next()) |part| : (count += 1) {
+            _ = std.fmt.parseUnsigned(u8, part, 10) catch {
+                valid = false;
+                break;
+            };
+        }
+        if (valid and count == 4) return true;
+    }
+    return false;
+}
+
 fn stopAndRemoveContainer(env: *helpers.TestEnv, name: []const u8) void {
     if (env.runYoq(&.{ "stop", name })) |result| {
         var stop = result;
@@ -33,6 +53,25 @@ fn removeContainer(env: *helpers.TestEnv, name: []const u8) void {
         var rm = result;
         rm.deinit();
     } else |_| {}
+}
+
+fn waitForContainerRunning(env: *helpers.TestEnv, name: []const u8) !void {
+    var attempt: usize = 0;
+    while (attempt < 40) : (attempt += 1) {
+        var ps = try env.runYoq(&.{"ps"});
+        defer ps.deinit();
+
+        if (ps.exit_code == 0 and
+            std.mem.indexOf(u8, ps.stdout, name) != null and
+            std.mem.indexOf(u8, ps.stdout, "running") != null)
+        {
+            return;
+        }
+        std.Thread.sleep(250 * std.time.ns_per_ms);
+    }
+
+    std.debug.print("timed out waiting for container {s} to reach running state\n", .{name});
+    return error.TestExpectedContains;
 }
 
 fn initNetworkingFixture() !struct { env: helpers.TestEnv, rootfs: helpers.RootfsFixture } {
@@ -108,6 +147,11 @@ fn waitForServiceDiscoveryHttpFailure(env: *helpers.TestEnv, rootfs_path: []cons
 }
 
 fn waitForServiceDiscoveryResolution(env: *helpers.TestEnv, rootfs_path: []const u8, server_name: []const u8) !void {
+    var last_stdout: ?[]u8 = null;
+    defer if (last_stdout) |buf| alloc.free(buf);
+    var last_stderr: ?[]u8 = null;
+    defer if (last_stderr) |buf| alloc.free(buf);
+
     var attempt: usize = 0;
     while (attempt < 20) : (attempt += 1) {
         const client_name = try helpers.uniqueName(alloc, "test-client-resolve");
@@ -119,11 +163,23 @@ fn waitForServiceDiscoveryResolution(env: *helpers.TestEnv, rootfs_path: []const
         defer client.deinit();
         removeContainer(env, client_name);
 
-        if (client.exit_code == 0 and std.mem.indexOf(u8, client.stdout, "10.42.") != null) return;
+        if (last_stdout) |buf| alloc.free(buf);
+        last_stdout = try alloc.dupe(u8, client.stdout);
+        if (last_stderr) |buf| alloc.free(buf);
+        last_stderr = try alloc.dupe(u8, client.stderr);
+
+        if (client.exit_code == 0 and isIpv4Output(client.stdout)) return;
         std.Thread.sleep(250 * std.time.ns_per_ms);
     }
 
     std.debug.print("timed out waiting for service discovery resolution for {s}\n", .{server_name});
+    if (last_stdout) |buf| std.debug.print("last client stdout:\n{s}\n", .{buf});
+    if (last_stderr) |buf| std.debug.print("last client stderr:\n{s}\n", .{buf});
+    if (env.runYoq(&.{"ps"})) |result| {
+        var ps = result;
+        defer ps.deinit();
+        std.debug.print("yoq ps at failure:\n{s}\n", .{ps.stdout});
+    } else |_| {}
     return error.TestExpectedContains;
 }
 
@@ -141,6 +197,7 @@ fn startLocalHttpServer(env: *helpers.TestEnv, rootfs_path: []const u8, name: []
         defer run_result.deinit();
         try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
         try std.testing.expect(trimOutput(run_result.stdout).len > 0);
+        try waitForContainerRunning(env, name);
         return;
     }
 
@@ -150,6 +207,7 @@ fn startLocalHttpServer(env: *helpers.TestEnv, rootfs_path: []const u8, name: []
     defer run_result.deinit();
     try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
     try std.testing.expect(trimOutput(run_result.stdout).len > 0);
+    try waitForContainerRunning(env, name);
 }
 
 fn requireExternalNetworkTests() !void {

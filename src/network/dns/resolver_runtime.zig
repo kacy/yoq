@@ -20,6 +20,7 @@ var upstream_initialized: bool = false;
 var resolver_thread: ?std.Thread = null;
 var resolver_socket: ?posix.socket_t = null;
 var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var external_resolver_available: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var resolver_mutex: std.Thread.Mutex = .{};
 var rate_limits: [256]RateLimitEntry = [_]RateLimitEntry{.{
     .ip = 0,
@@ -32,7 +33,7 @@ pub fn startResolver() void {
     resolver_mutex.lock();
     defer resolver_mutex.unlock();
 
-    if (resolver_running.load(.acquire)) return;
+    if (resolver_running.load(.acquire) or external_resolver_available.load(.acquire)) return;
 
     initUpstreamDns();
 
@@ -47,13 +48,19 @@ pub fn startResolver() void {
     };
 
     posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |e| {
-        log.warn("dns: failed to bind to 10.42.0.1:53: {}", .{e});
+        if (e == error.AddressInUse) {
+            external_resolver_available.store(true, .release);
+            log.info("dns resolver already available on 10.42.0.1:53", .{});
+        } else {
+            log.warn("dns: failed to bind to 10.42.0.1:53: {}", .{e});
+        }
         posix.close(sock);
         return;
     };
 
     resolver_socket = sock;
     resolver_running.store(true, .release);
+    external_resolver_available.store(false, .release);
 
     resolver_thread = std.Thread.spawn(.{}, resolverLoop, .{sock}) catch |e| {
         log.warn("dns: failed to spawn resolver thread: {}", .{e});
@@ -67,6 +74,10 @@ pub fn startResolver() void {
 }
 
 pub fn isRunning() bool {
+    return resolver_running.load(.acquire) or external_resolver_available.load(.acquire);
+}
+
+pub fn isOwnedByCurrentProcess() bool {
     return resolver_running.load(.acquire);
 }
 
@@ -74,6 +85,7 @@ pub fn stopResolver() void {
     resolver_mutex.lock();
 
     if (!resolver_running.load(.acquire)) {
+        external_resolver_available.store(false, .release);
         resolver_mutex.unlock();
         return;
     }
@@ -100,6 +112,7 @@ pub fn stopResolver() void {
         posix.close(sock);
         resolver_socket = null;
     }
+    external_resolver_available.store(false, .release);
     resolver_mutex.unlock();
 }
 
@@ -205,7 +218,7 @@ fn handleQuery(
     }
 
     const name = question.name[0..question.name_len];
-    if (registry_support.lookupService(name)) |service_ip| {
+    if (registry_support.lookupServiceForDns(name)) |service_ip| {
         var response_buf: [512]u8 = undefined;
         if (packet_support.buildResponse(query, query.len, service_ip, &response_buf)) |resp_len| {
             _ = posix.sendto(sock, response_buf[0..resp_len], 0, @ptrCast(client_addr), addr_len) catch |e| {

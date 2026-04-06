@@ -59,6 +59,10 @@ pub fn mountEssential() FilesystemError!void {
     return essential_mounts.mountEssential();
 }
 
+pub fn mountEssentialAt(target_root: []const u8) FilesystemError!void {
+    return essential_mounts.mountEssentialAt(target_root);
+}
+
 fn isPathSafe(path: []const u8) bool {
     return path_support.isPathSafe(path);
 }

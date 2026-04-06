@@ -65,6 +65,9 @@ pub fn unregisterContainerService(container_id: []const u8) void {
     store.removeServiceEndpointsByContainer(container_id) catch |err| {
         log.warn("service registry bridge: failed to remove persisted endpoints for container {s}: {}", .{ container_id, err });
     };
+    store.unregisterServiceName(container_id) catch |err| {
+        log.warn("service registry bridge: failed to remove legacy service names for container {s}: {}", .{ container_id, err });
+    };
     service_registry_runtime.removeContainer(container_id);
 
     const operation: BridgeOperation = .container_unregister;
@@ -195,6 +198,10 @@ fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_
         .last_seen_at = now,
     }) catch |err| {
         log.warn("service registry bridge: failed to persist endpoint {s} for service {s}: {}", .{ endpoint_id, service_name, err });
+    };
+
+    store.registerServiceName(service_name, container_id, ip_address) catch |err| {
+        log.warn("service registry bridge: failed to persist legacy service name {s} for container {s}: {}", .{ service_name, container_id, err });
     };
 }
 
