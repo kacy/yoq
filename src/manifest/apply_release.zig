@@ -1,4 +1,6 @@
 const std = @import("std");
+const json_helpers = @import("../lib/json_helpers.zig");
+const store = @import("../state/store.zig");
 const update_common = @import("update/common.zig");
 
 pub const ApplyOutcome = struct {
@@ -21,6 +23,8 @@ pub const ApplyResult = struct {
             .placed = self.outcome.placed,
             .failed = self.outcome.failed,
             .message = self.outcome.message,
+            .manifest_hash = "",
+            .created_at = 0,
         };
     }
 };
@@ -33,6 +37,8 @@ pub const ApplyReport = struct {
     placed: usize,
     failed: usize,
     message: ?[]const u8 = null,
+    manifest_hash: []const u8 = "",
+    created_at: i64 = 0,
 
     pub fn deinit(self: ApplyReport, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
@@ -61,6 +67,28 @@ pub const ApplyReport = struct {
         );
     }
 };
+
+pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
+    return .{
+        .app_name = dep.app_name orelse dep.service_name,
+        .release_id = dep.id,
+        .status = update_common.DeploymentStatus.fromString(dep.status) orelse .failed,
+        .service_count = countServices(dep.config_snapshot),
+        .placed = 0,
+        .failed = 0,
+        .message = dep.message,
+        .manifest_hash = dep.manifest_hash,
+        .created_at = dep.created_at,
+    };
+}
+
+fn countServices(snapshot: []const u8) usize {
+    const services = json_helpers.extractJsonArray(snapshot, "services") orelse return 0;
+    var iter = json_helpers.extractJsonObjects(services);
+    var count: usize = 0;
+    while (iter.next() != null) count += 1;
+    return count;
+}
 
 pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
     const release_id = try tracker.begin();
@@ -215,4 +243,26 @@ test "ApplyReport summaryText includes release status and counts" {
         "release dep789 completed: all requested services started (3 placed, 0 failed, 3 services)",
         summary,
     );
+}
+
+test "reportFromDeployment preserves release metadata and counts services" {
+    const dep = store.DeploymentRecord{
+        .id = "dep-22",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:xyz",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .status = "completed",
+        .message = "all requested services started",
+        .created_at = 220,
+    };
+
+    const report = reportFromDeployment(dep);
+    try std.testing.expectEqualStrings("demo-app", report.app_name);
+    try std.testing.expectEqualStrings("dep-22", report.release_id.?);
+    try std.testing.expectEqual(update_common.DeploymentStatus.completed, report.status);
+    try std.testing.expectEqual(@as(usize, 2), report.service_count);
+    try std.testing.expectEqualStrings("sha256:xyz", report.manifest_hash);
+    try std.testing.expectEqual(@as(i64, 220), report.created_at);
+    try std.testing.expectEqualStrings("all requested services started", report.message.?);
 }

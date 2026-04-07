@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const json_out = @import("../../lib/json_output.zig");
+const apply_release = @import("../apply_release.zig");
 const manifest_loader = @import("../loader.zig");
 const orchestrator = @import("../orchestrator.zig");
 const release_history = @import("../release_history.zig");
@@ -245,14 +246,15 @@ const HistoryEntryView = struct {
 };
 
 fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
+    const report = apply_release.reportFromDeployment(dep);
     return .{
-        .id = dep.id,
+        .id = report.release_id orelse dep.id,
         .app = dep.app_name,
         .service = dep.service_name,
-        .status = dep.status,
-        .manifest_hash = dep.manifest_hash,
-        .created_at = dep.created_at,
-        .message = dep.message,
+        .status = report.status.toString(),
+        .manifest_hash = report.manifest_hash,
+        .created_at = report.created_at,
+        .message = report.message,
     };
 }
 

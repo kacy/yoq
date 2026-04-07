@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("../../http.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
+const apply_release = @import("../../../manifest/apply_release.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
 const deploy_routes = @import("deploy_routes.zig");
@@ -56,7 +57,7 @@ pub fn handleAppStatus(alloc: std.mem.Allocator, app_name: []const u8, ctx: Rout
     };
     defer latest.deinit(alloc);
 
-    const body = formatAppStatusResponse(alloc, latest, countServices(latest.config_snapshot)) catch
+    const body = formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest)) catch
         return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
@@ -94,14 +95,6 @@ pub fn handleAppRollback(
     return deploy_routes.handleAppApply(alloc, apply_request, ctx);
 }
 
-fn countServices(snapshot: []const u8) usize {
-    const services = json_helpers.extractJsonArray(snapshot, "services") orelse return 0;
-    var iter = json_helpers.extractJsonObjects(services);
-    var count: usize = 0;
-    while (iter.next() != null) count += 1;
-    return count;
-}
-
 fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store.DeploymentRecord) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
@@ -109,9 +102,10 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
 
     try writer.writeByte('[');
     for (deployments, 0..) |dep, i| {
+        const report = apply_release.reportFromDeployment(dep);
         if (i > 0) try writer.writeByte(',');
         try writer.writeAll("{\"id\":\"");
-        try json_helpers.writeJsonEscaped(writer, dep.id);
+        try json_helpers.writeJsonEscaped(writer, report.release_id orelse "");
         if (dep.app_name) |app_name| {
             try writer.writeAll("\",\"app\":\"");
             try json_helpers.writeJsonEscaped(writer, app_name);
@@ -122,11 +116,11 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeAll(",\"service\":\"");
         try json_helpers.writeJsonEscaped(writer, dep.service_name);
         try writer.writeAll("\",\"status\":\"");
-        try json_helpers.writeJsonEscaped(writer, dep.status);
+        try json_helpers.writeJsonEscaped(writer, report.status.toString());
         try writer.writeAll("\",\"manifest_hash\":\"");
-        try json_helpers.writeJsonEscaped(writer, dep.manifest_hash);
-        try writer.print("\",\"created_at\":{d}", .{dep.created_at});
-        if (dep.message) |message| {
+        try json_helpers.writeJsonEscaped(writer, report.manifest_hash);
+        try writer.print("\",\"created_at\":{d}", .{report.created_at});
+        if (report.message) |message| {
             try writer.writeAll(",\"message\":\"");
             try json_helpers.writeJsonEscaped(writer, message);
             try writer.writeByte('"');
@@ -141,26 +135,25 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
 
 fn formatAppStatusResponse(
     alloc: std.mem.Allocator,
-    latest: store.DeploymentRecord,
-    service_count: usize,
+    report: apply_release.ApplyReport,
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
     const writer = json_buf.writer(alloc);
 
     try writer.writeAll("{\"app_name\":\"");
-    try json_helpers.writeJsonEscaped(writer, latest.app_name orelse latest.service_name);
+    try json_helpers.writeJsonEscaped(writer, report.app_name);
     try writer.writeAll("\",\"release_id\":\"");
-    try json_helpers.writeJsonEscaped(writer, latest.id);
+    try json_helpers.writeJsonEscaped(writer, report.release_id orelse "");
     try writer.writeAll("\",\"status\":\"");
-    try json_helpers.writeJsonEscaped(writer, latest.status);
+    try json_helpers.writeJsonEscaped(writer, report.status.toString());
     try writer.writeAll("\",\"manifest_hash\":\"");
-    try json_helpers.writeJsonEscaped(writer, latest.manifest_hash);
+    try json_helpers.writeJsonEscaped(writer, report.manifest_hash);
     try writer.print("\",\"created_at\":{d},\"service_count\":{d}", .{
-        latest.created_at,
-        service_count,
+        report.created_at,
+        report.service_count,
     });
-    if (latest.message) |message| {
+    if (report.message) |message| {
         try writer.writeAll(",\"message\":\"");
         try json_helpers.writeJsonEscaped(writer, message);
         try writer.writeByte('"');
@@ -218,7 +211,7 @@ test "formatAppStatusResponse summarizes latest release" {
         .created_at = 200,
     };
 
-    const json = try formatAppStatusResponse(alloc, latest, countServices(latest.config_snapshot));
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest));
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);

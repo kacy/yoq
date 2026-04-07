@@ -1,6 +1,7 @@
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const json_out = @import("../../lib/json_output.zig");
+const apply_release = @import("../../manifest/apply_release.zig");
 const store = @import("../../state/store.zig");
 const monitor = @import("../monitor.zig");
 const cgroups = @import("../cgroups.zig");
@@ -120,7 +121,7 @@ fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!vo
     };
     defer latest.deinit(alloc);
 
-    const snapshot = appStatusFromDeployment(latest);
+    const snapshot = appStatusFromReport(apply_release.reportFromDeployment(latest));
     printAppStatus(snapshot);
 }
 
@@ -279,24 +280,16 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
 }
 
-fn appStatusFromDeployment(latest: store.DeploymentRecord) AppStatusSnapshot {
+fn appStatusFromReport(report: apply_release.ApplyReport) AppStatusSnapshot {
     return .{
-        .app_name = latest.app_name orelse latest.service_name,
-        .release_id = latest.id,
-        .status = latest.status,
-        .manifest_hash = latest.manifest_hash,
-        .created_at = latest.created_at,
-        .service_count = countServices(latest.config_snapshot),
-        .message = latest.message,
+        .app_name = report.app_name,
+        .release_id = report.release_id orelse "?",
+        .status = report.status.toString(),
+        .manifest_hash = report.manifest_hash,
+        .created_at = report.created_at,
+        .service_count = report.service_count,
+        .message = report.message,
     };
-}
-
-fn countServices(snapshot: []const u8) usize {
-    const services = extractJsonArray(snapshot, "services") orelse return 0;
-    var iter = json_helpers.extractJsonObjects(services);
-    var count: usize = 0;
-    while (iter.next() != null) count += 1;
-    return count;
 }
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
@@ -418,26 +411,20 @@ test "parseAppStatusResponse extracts app fields" {
     try std.testing.expect(snapshot.message == null);
 }
 
-test "countServices counts service objects in app snapshot" {
-    const snapshot =
-        \\{"app_name":"demo-app","services":[{"name":"web"},{"name":"db"},{"name":"worker"}]}
-    ;
-    try std.testing.expectEqual(@as(usize, 3), countServices(snapshot));
-}
-
-test "appStatusFromDeployment matches remote app status shape" {
-    const latest = store.DeploymentRecord{
-        .id = "dep-2",
+test "appStatusFromReport matches remote app status shape" {
+    const report = apply_release.ApplyReport{
         .app_name = "demo-app",
-        .service_name = "demo-app",
-        .manifest_hash = "sha256:222",
-        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
-        .status = "completed",
+        .release_id = "dep-2",
+        .status = .completed,
+        .service_count = 2,
+        .placed = 2,
+        .failed = 0,
         .message = "all placements healthy",
+        .manifest_hash = "sha256:222",
         .created_at = 200,
     };
 
-    const local = appStatusFromDeployment(latest);
+    const local = appStatusFromReport(report);
     const remote = parseAppStatusResponse(
         \\{"app_name":"demo-app","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"message":"all placements healthy"}
     );
