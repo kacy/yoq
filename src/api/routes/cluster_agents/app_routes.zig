@@ -92,7 +92,7 @@ pub fn handleAppRollback(
         .body = release.config_snapshot,
         .content_length = release.config_snapshot.len,
     };
-    return deploy_routes.handleAppApply(alloc, apply_request, ctx);
+    return deploy_routes.handleAppRollbackApply(alloc, apply_request, ctx, release_id);
 }
 
 fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store.DeploymentRecord) ![]u8 {

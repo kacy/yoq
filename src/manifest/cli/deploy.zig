@@ -99,7 +99,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     defer prepared.deinit();
     prepared.beginRuntime();
 
-    const apply_report = prepared.startRelease() catch |err| {
+    const apply_report = prepared.startRelease(.{}) catch |err| {
         writeErr("failed to start services: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };

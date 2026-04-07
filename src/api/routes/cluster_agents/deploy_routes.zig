@@ -28,6 +28,7 @@ const ClusterReleaseTracker = struct {
     db: *sqlite.Db,
     app_name: ?[]const u8,
     config_snapshot: []const u8,
+    context: apply_release.ApplyContext = .{},
 
     fn begin(self: *const ClusterReleaseTracker) !?[]const u8 {
         const name = self.app_name orelse return null;
@@ -52,7 +53,9 @@ const ClusterReleaseTracker = struct {
     }
 
     fn mark(self: *const ClusterReleaseTracker, id: []const u8, status: @import("../../../manifest/update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
-        deployment_store.updateDeploymentStatusInDb(self.db, id, status, message) catch return ClusterApplyError.InternalError;
+        const resolved_message = apply_release.materializeMessage(self.alloc, self.context, status, message) catch return ClusterApplyError.InternalError;
+        defer if (resolved_message) |msg| self.alloc.free(msg);
+        deployment_store.updateDeploymentStatusInDb(self.db, id, status, resolved_message) catch return ClusterApplyError.InternalError;
     }
 
     fn freeReleaseId(self: *const ClusterReleaseTracker, id: []const u8) void {
@@ -175,6 +178,7 @@ fn handleApply(
     request: @import("../../http.zig").Request,
     ctx: RouteContext,
     response_mode: ResponseMode,
+    apply_context: apply_release.ApplyContext,
 ) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
@@ -213,6 +217,7 @@ fn handleApply(
         .db = db,
         .app_name = parsed.app_name,
         .config_snapshot = request.body,
+        .context = apply_context,
     };
     var backend = ClusterApplyBackend{
         .alloc = alloc,
@@ -224,7 +229,7 @@ fn handleApply(
         ClusterApplyError.NotLeader => return common.notLeader(alloc, node),
         ClusterApplyError.InternalError => return common.internalError(),
     };
-    const apply_report = apply_result.toReport(parsed.app_name orelse "", parsed.requests.items.len);
+    const apply_report = apply_result.toReport(parsed.app_name orelse "", parsed.requests.items.len, apply_context);
     defer apply_report.deinit(alloc);
 
     const body = switch (response_mode) {
@@ -235,11 +240,23 @@ fn handleApply(
 }
 
 pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
-    return handleApply(alloc, request, ctx, .app);
+    return handleApply(alloc, request, ctx, .app, .{});
 }
 
 pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
-    return handleApply(alloc, request, ctx, .legacy);
+    return handleApply(alloc, request, ctx, .legacy, .{});
+}
+
+pub fn handleAppRollbackApply(
+    alloc: std.mem.Allocator,
+    request: @import("../../http.zig").Request,
+    ctx: RouteContext,
+    source_release_id: []const u8,
+) Response {
+    return handleApply(alloc, request, ctx, .app, .{
+        .trigger = .rollback,
+        .source_release_id = source_release_id,
+    });
 }
 
 fn formatLegacyApplyResponse(alloc: std.mem.Allocator, placed: usize, failed: usize) ![]u8 {
@@ -253,6 +270,8 @@ fn formatAppApplyResponse(alloc: std.mem.Allocator, report: apply_release.ApplyR
 
     try writer.writeAll("{\"app_name\":\"");
     try json_helpers.writeJsonEscaped(writer, report.app_name);
+    try writer.writeAll("\",\"trigger\":\"");
+    try json_helpers.writeJsonEscaped(writer, report.trigger.toString());
     try writer.writeAll("\",\"release_id\":\"");
     try json_helpers.writeJsonEscaped(writer, report.release_id orelse "");
     try writer.writeAll("\",\"status\":\"");
@@ -262,7 +281,20 @@ fn formatAppApplyResponse(alloc: std.mem.Allocator, report: apply_release.ApplyR
         report.placed,
         report.failed,
     });
-    if (report.message) |message| {
+    if (report.source_release_id) |source_release_id| {
+        try writer.writeAll(",\"source_release_id\":\"");
+        try json_helpers.writeJsonEscaped(writer, source_release_id);
+        try writer.writeByte('"');
+    } else {
+        try writer.writeAll(",\"source_release_id\":null");
+    }
+    const resolved_message = try apply_release.materializeMessage(alloc, .{
+        .trigger = report.trigger,
+        .source_release_id = report.source_release_id,
+    }, report.status, report.message);
+    defer if (resolved_message) |message| alloc.free(message);
+
+    if (resolved_message) |message| {
         try writer.writeAll(",\"message\":\"");
         try json_helpers.writeJsonEscaped(writer, message);
         try writer.writeByte('"');
@@ -287,12 +319,34 @@ test "formatAppApplyResponse includes app release metadata" {
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"apply\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"abc123def456\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"completed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"apply completed\"") != null);
+}
+
+test "formatAppApplyResponse includes rollback trigger metadata" {
+    const alloc = std.testing.allocator;
+    const json = try formatAppApplyResponse(alloc, .{
+        .app_name = "demo-app",
+        .release_id = "dep-2",
+        .status = .completed,
+        .service_count = 2,
+        .placed = 2,
+        .failed = 0,
+        .message = "all placements succeeded",
+        .trigger = .rollback,
+        .source_release_id = "dep-1",
+    });
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":\"dep-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"rollback to dep-1 completed: all placements succeeded\"") != null);
 }
 
 test "formatLegacyApplyResponse preserves compact deploy shape" {

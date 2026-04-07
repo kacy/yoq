@@ -67,14 +67,17 @@ pub const PreparedLocalApply = struct {
         self.runtime_started = true;
     }
 
-    pub fn startRelease(self: *PreparedLocalApply) !apply_release.ApplyReport {
-        var release_tracker = LocalReleaseTracker{ .plan = self.release };
+    pub fn startRelease(self: *PreparedLocalApply, context: apply_release.ApplyContext) !apply_release.ApplyReport {
+        var release_tracker = LocalReleaseTracker{
+            .plan = self.release,
+            .context = context,
+        };
         var apply_backend = LocalApplyBackend{
             .orch = &self.orch,
             .release = self.release,
         };
         const apply_result = try apply_release.execute(&release_tracker, &apply_backend);
-        return apply_result.toReport(self.release.app.app_name, self.release.resolvedServiceCount());
+        return apply_result.toReport(self.release.app.app_name, self.release.resolvedServiceCount(), context);
     }
 
     pub fn startDevWatcher(self: *PreparedLocalApply) DevWatcherRuntime {
@@ -134,15 +137,19 @@ pub const DevWatcherRuntime = struct {
 
 const LocalReleaseTracker = struct {
     plan: *const release_plan.ReleasePlan,
+    context: apply_release.ApplyContext = .{},
 
     fn begin(self: *const LocalReleaseTracker) !?[]const u8 {
         return release_history.recordAppReleaseStart(self.plan) catch null;
     }
 
-    fn mark(_: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+    fn mark(self: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+        const resolved_message = try apply_release.materializeMessage(self.plan.alloc, self.context, status, message);
+        defer if (resolved_message) |msg| self.plan.alloc.free(msg);
+
         switch (status) {
-            .completed => release_history.markAppReleaseCompleted(id) catch {},
-            .failed => release_history.markAppReleaseFailed(id, message) catch {},
+            .completed => release_history.markAppReleaseCompleted(id, resolved_message) catch {},
+            .failed => release_history.markAppReleaseFailed(id, resolved_message) catch {},
             else => {},
         }
     }

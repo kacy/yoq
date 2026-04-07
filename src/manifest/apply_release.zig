@@ -3,6 +3,23 @@ const json_helpers = @import("../lib/json_helpers.zig");
 const store = @import("../state/store.zig");
 const update_common = @import("update/common.zig");
 
+pub const ApplyTrigger = enum {
+    apply,
+    rollback,
+
+    pub fn toString(self: ApplyTrigger) []const u8 {
+        return switch (self) {
+            .apply => "apply",
+            .rollback => "rollback",
+        };
+    }
+};
+
+pub const ApplyContext = struct {
+    trigger: ApplyTrigger = .apply,
+    source_release_id: ?[]const u8 = null,
+};
+
 pub const ApplyOutcome = struct {
     status: update_common.DeploymentStatus,
     message: ?[]const u8 = null,
@@ -14,7 +31,7 @@ pub const ApplyResult = struct {
     release_id: ?[]const u8,
     outcome: ApplyOutcome,
 
-    pub fn toReport(self: ApplyResult, app_name: []const u8, service_count: usize) ApplyReport {
+    pub fn toReport(self: ApplyResult, app_name: []const u8, service_count: usize, context: ApplyContext) ApplyReport {
         return .{
             .app_name = app_name,
             .release_id = self.release_id,
@@ -25,6 +42,8 @@ pub const ApplyResult = struct {
             .message = self.outcome.message,
             .manifest_hash = "",
             .created_at = 0,
+            .trigger = context.trigger,
+            .source_release_id = context.source_release_id,
         };
     }
 };
@@ -39,6 +58,8 @@ pub const ApplyReport = struct {
     message: ?[]const u8 = null,
     manifest_hash: []const u8 = "",
     created_at: i64 = 0,
+    trigger: ApplyTrigger = .apply,
+    source_release_id: ?[]const u8 = null,
 
     pub fn deinit(self: ApplyReport, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
@@ -46,24 +67,24 @@ pub const ApplyReport = struct {
 
     pub fn summaryText(self: ApplyReport, alloc: std.mem.Allocator) ![]u8 {
         const status_text = self.status.toString();
-        const message = self.message orelse switch (self.status) {
-            .completed => "apply completed",
-            .failed => "apply failed",
-            else => status_text,
-        };
+        const message = try materializeMessage(alloc, .{
+            .trigger = self.trigger,
+            .source_release_id = self.source_release_id,
+        }, self.status, self.message);
+        defer if (message) |msg| alloc.free(msg);
 
         if (self.release_id) |id| {
             return std.fmt.allocPrint(
                 alloc,
                 "release {s} {s}: {s} ({d} placed, {d} failed, {d} services)",
-                .{ id, status_text, message, self.placed, self.failed, self.service_count },
+                .{ id, status_text, message.?, self.placed, self.failed, self.service_count },
             );
         }
 
         return std.fmt.allocPrint(
             alloc,
             "{s}: {s} ({d} placed, {d} failed, {d} services)",
-            .{ status_text, message, self.placed, self.failed, self.service_count },
+            .{ status_text, message.?, self.placed, self.failed, self.service_count },
         );
     }
 };
@@ -79,6 +100,34 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .message = dep.message,
         .manifest_hash = dep.manifest_hash,
         .created_at = dep.created_at,
+    };
+}
+
+pub fn materializeMessage(
+    alloc: std.mem.Allocator,
+    context: ApplyContext,
+    status: update_common.DeploymentStatus,
+    explicit: ?[]const u8,
+) !?[]u8 {
+    const status_text = status.toString();
+
+    return switch (context.trigger) {
+        .apply => if (explicit) |message|
+            try alloc.dupe(u8, message)
+        else switch (status) {
+            .completed => try alloc.dupe(u8, "apply completed"),
+            .failed => try alloc.dupe(u8, "apply failed"),
+            else => try alloc.dupe(u8, status_text),
+        },
+        .rollback => if (context.source_release_id) |source_id|
+            if (explicit) |message|
+                try std.fmt.allocPrint(alloc, "rollback to {s} {s}: {s}", .{ source_id, status_text, message })
+            else
+                try std.fmt.allocPrint(alloc, "rollback to {s} {s}", .{ source_id, status_text })
+        else if (explicit) |message|
+            try std.fmt.allocPrint(alloc, "rollback {s}: {s}", .{ status_text, message })
+        else
+            try std.fmt.allocPrint(alloc, "rollback {s}", .{status_text}),
     };
 }
 
@@ -214,7 +263,7 @@ test "ApplyResult projects to shared apply report" {
         },
     };
 
-    const report = result.toReport("demo-app", 3);
+    const report = result.toReport("demo-app", 3, .{});
     try std.testing.expectEqualStrings("demo-app", report.app_name);
     try std.testing.expectEqualStrings("dep789", report.release_id.?);
     try std.testing.expectEqual(update_common.DeploymentStatus.completed, report.status);
@@ -222,6 +271,8 @@ test "ApplyResult projects to shared apply report" {
     try std.testing.expectEqual(@as(usize, 3), report.placed);
     try std.testing.expectEqual(@as(usize, 0), report.failed);
     try std.testing.expect(report.message == null);
+    try std.testing.expectEqual(ApplyTrigger.apply, report.trigger);
+    try std.testing.expect(report.source_release_id == null);
 }
 
 test "ApplyReport summaryText includes release status and counts" {
@@ -242,6 +293,20 @@ test "ApplyReport summaryText includes release status and counts" {
     try std.testing.expectEqualStrings(
         "release dep789 completed: all requested services started (3 placed, 0 failed, 3 services)",
         summary,
+    );
+}
+
+test "materializeMessage contextualizes rollback transitions" {
+    const alloc = std.testing.allocator;
+    const message = try materializeMessage(alloc, .{
+        .trigger = .rollback,
+        .source_release_id = "dep100",
+    }, .completed, "all placements succeeded");
+    defer alloc.free(message.?);
+
+    try std.testing.expectEqualStrings(
+        "rollback to dep100 completed: all placements succeeded",
+        message.?,
     );
 }
 
