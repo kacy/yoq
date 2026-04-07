@@ -239,9 +239,11 @@ const HistoryEntryView = struct {
     id: []const u8,
     app: ?[]const u8,
     service: []const u8,
+    trigger: []const u8,
     status: []const u8,
     manifest_hash: []const u8,
     created_at: i64,
+    source_release_id: ?[]const u8,
     message: ?[]const u8,
 };
 
@@ -251,9 +253,11 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .id = report.release_id orelse dep.id,
         .app = dep.app_name,
         .service = dep.service_name,
+        .trigger = report.trigger.toString(),
         .status = report.status.toString(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
+        .source_release_id = report.source_release_id,
         .message = report.message,
     };
 }
@@ -263,9 +267,11 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .id = json_helpers.extractJsonString(obj, "id") orelse "?",
         .app = json_helpers.extractJsonString(obj, "app"),
         .service = json_helpers.extractJsonString(obj, "service") orelse "?",
+        .trigger = json_helpers.extractJsonString(obj, "trigger") orelse "apply",
         .status = json_helpers.extractJsonString(obj, "status") orelse "?",
         .manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?",
         .created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0,
+        .source_release_id = json_helpers.extractJsonString(obj, "source_release_id"),
         .message = json_helpers.extractJsonString(obj, "message"),
     };
 }
@@ -294,9 +300,11 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.stringField("id", entry.id);
     if (entry.app) |app_name| w.stringField("app", app_name) else w.nullField("app");
     w.stringField("service", entry.service);
+    w.stringField("trigger", entry.trigger);
     w.stringField("status", entry.status);
     w.stringField("manifest_hash", entry.manifest_hash);
     w.intField("created_at", entry.created_at);
+    if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     w.endObject();
 }
@@ -333,15 +341,17 @@ fn rollbackRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: [
 
 test "parseHistoryObject extracts app release fields" {
     const entry = parseHistoryObject(
-        \\{"id":"dep-1","app":"demo-app","service":"demo-app","status":"completed","manifest_hash":"sha256:123","created_at":42,"message":null}
+        \\{"id":"dep-1","app":"demo-app","service":"demo-app","trigger":"apply","status":"completed","manifest_hash":"sha256:123","created_at":42,"source_release_id":null,"message":null}
     );
 
     try std.testing.expectEqualStrings("dep-1", entry.id);
     try std.testing.expectEqualStrings("demo-app", entry.app.?);
     try std.testing.expectEqualStrings("demo-app", entry.service);
+    try std.testing.expectEqualStrings("apply", entry.trigger);
     try std.testing.expectEqualStrings("completed", entry.status);
     try std.testing.expectEqualStrings("sha256:123", entry.manifest_hash);
     try std.testing.expectEqual(@as(i64, 42), entry.created_at);
+    try std.testing.expect(entry.source_release_id == null);
     try std.testing.expect(entry.message == null);
 }
 
@@ -351,7 +361,7 @@ test "historyEntryFromDeployment matches remote app history shape" {
         .app_name = "demo-app",
         .service_name = "demo-app",
         .manifest_hash = "sha256:123",
-        .config_snapshot = "{}",
+        .config_snapshot = "{\"services\":[{\"name\":\"web\"}]}",
         .status = "completed",
         .message = "healthy",
         .created_at = 42,
@@ -359,15 +369,17 @@ test "historyEntryFromDeployment matches remote app history shape" {
 
     const local = historyEntryFromDeployment(dep);
     const remote = parseHistoryObject(
-        \\{"id":"dep-1","app":"demo-app","service":"demo-app","status":"completed","manifest_hash":"sha256:123","created_at":42,"message":"healthy"}
+        \\{"id":"dep-1","app":"demo-app","service":"demo-app","trigger":"apply","status":"completed","manifest_hash":"sha256:123","created_at":42,"source_release_id":null,"message":"healthy"}
     );
 
     try std.testing.expectEqualStrings(local.id, remote.id);
     try std.testing.expectEqualStrings(local.app.?, remote.app.?);
     try std.testing.expectEqualStrings(local.service, remote.service);
+    try std.testing.expectEqualStrings(local.trigger, remote.trigger);
     try std.testing.expectEqualStrings(local.status, remote.status);
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expect(local.source_release_id == null);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
 }
 
@@ -376,9 +388,11 @@ test "writeHistoryJsonObject round-trips through remote parser" {
         .id = "dep-1",
         .app = "demo-app",
         .service = "demo-app",
+        .trigger = "rollback",
         .status = "completed",
         .manifest_hash = "sha256:123",
         .created_at = 42,
+        .source_release_id = "dep-0",
         .message = "healthy",
     };
 
@@ -389,9 +403,11 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(entry.id, parsed.id);
     try std.testing.expectEqualStrings(entry.app.?, parsed.app.?);
     try std.testing.expectEqualStrings(entry.service, parsed.service);
+    try std.testing.expectEqualStrings(entry.trigger, parsed.trigger);
     try std.testing.expectEqualStrings(entry.status, parsed.status);
     try std.testing.expectEqualStrings(entry.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(entry.created_at, parsed.created_at);
+    try std.testing.expectEqualStrings(entry.source_release_id.?, parsed.source_release_id.?);
     try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
 }
 

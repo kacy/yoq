@@ -115,11 +115,20 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         }
         try writer.writeAll(",\"service\":\"");
         try json_helpers.writeJsonEscaped(writer, dep.service_name);
+        try writer.writeAll("\",\"trigger\":\"");
+        try json_helpers.writeJsonEscaped(writer, report.trigger.toString());
         try writer.writeAll("\",\"status\":\"");
         try json_helpers.writeJsonEscaped(writer, report.status.toString());
         try writer.writeAll("\",\"manifest_hash\":\"");
         try json_helpers.writeJsonEscaped(writer, report.manifest_hash);
         try writer.print("\",\"created_at\":{d}", .{report.created_at});
+        if (report.source_release_id) |source_release_id| {
+            try writer.writeAll(",\"source_release_id\":\"");
+            try json_helpers.writeJsonEscaped(writer, source_release_id);
+            try writer.writeByte('"');
+        } else {
+            try writer.writeAll(",\"source_release_id\":null");
+        }
         if (report.message) |message| {
             try writer.writeAll(",\"message\":\"");
             try json_helpers.writeJsonEscaped(writer, message);
@@ -143,6 +152,8 @@ fn formatAppStatusResponse(
 
     try writer.writeAll("{\"app_name\":\"");
     try json_helpers.writeJsonEscaped(writer, report.app_name);
+    try writer.writeAll("\",\"trigger\":\"");
+    try json_helpers.writeJsonEscaped(writer, report.trigger.toString());
     try writer.writeAll("\",\"release_id\":\"");
     try json_helpers.writeJsonEscaped(writer, report.release_id orelse "");
     try writer.writeAll("\",\"status\":\"");
@@ -153,6 +164,13 @@ fn formatAppStatusResponse(
         report.created_at,
         report.service_count,
     });
+    if (report.source_release_id) |source_release_id| {
+        try writer.writeAll(",\"source_release_id\":\"");
+        try json_helpers.writeJsonEscaped(writer, source_release_id);
+        try writer.writeByte('"');
+    } else {
+        try writer.writeAll(",\"source_release_id\":null");
+    }
     if (report.message) |message| {
         try writer.writeAll(",\"message\":\"");
         try json_helpers.writeJsonEscaped(writer, message);
@@ -194,6 +212,8 @@ test "formatAppHistoryResponse emits release records" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"dep-2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app\":\"demo-app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"apply\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"placement failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":null") != null);
 }
@@ -215,8 +235,30 @@ test "formatAppStatusResponse summarizes latest release" {
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"apply\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
+}
+
+test "formatAppStatusResponse includes rollback metadata inferred from stored release message" {
+    const alloc = std.testing.allocator;
+    const latest = store.DeploymentRecord{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:333",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .status = "completed",
+        .message = "rollback to dep-1 completed: all placements succeeded",
+        .created_at = 300,
+    };
+
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest));
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":\"dep-1\"") != null);
 }
 
 test "route rejects app rollback without cluster" {

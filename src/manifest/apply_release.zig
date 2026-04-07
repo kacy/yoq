@@ -90,6 +90,7 @@ pub const ApplyReport = struct {
 };
 
 pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
+    const inferred = inferContextFromStoredMessage(dep.message);
     return .{
         .app_name = dep.app_name orelse dep.service_name,
         .release_id = dep.id,
@@ -100,7 +101,30 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .message = dep.message,
         .manifest_hash = dep.manifest_hash,
         .created_at = dep.created_at,
+        .trigger = inferred.trigger,
+        .source_release_id = inferred.source_release_id,
     };
+}
+
+fn inferContextFromStoredMessage(message: ?[]const u8) ApplyContext {
+    const text = message orelse return .{};
+    const prefix = "rollback to ";
+    if (std.mem.startsWith(u8, text, prefix)) {
+        const remainder = text[prefix.len..];
+        const split = std.mem.indexOfScalar(u8, remainder, ' ') orelse return .{ .trigger = .rollback };
+        const source_release_id = remainder[0..split];
+        if (source_release_id.len > 0) {
+            return .{
+                .trigger = .rollback,
+                .source_release_id = source_release_id,
+            };
+        }
+        return .{ .trigger = .rollback };
+    }
+    if (std.mem.startsWith(u8, text, "rollback ")) {
+        return .{ .trigger = .rollback };
+    }
+    return .{};
 }
 
 pub fn materializeMessage(
@@ -330,4 +354,23 @@ test "reportFromDeployment preserves release metadata and counts services" {
     try std.testing.expectEqualStrings("sha256:xyz", report.manifest_hash);
     try std.testing.expectEqual(@as(i64, 220), report.created_at);
     try std.testing.expectEqualStrings("all requested services started", report.message.?);
+    try std.testing.expectEqual(ApplyTrigger.apply, report.trigger);
+    try std.testing.expect(report.source_release_id == null);
+}
+
+test "reportFromDeployment infers rollback context from stored message" {
+    const dep = store.DeploymentRecord{
+        .id = "dep-23",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:zzz",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .status = "completed",
+        .message = "rollback to dep-11 completed: all placements succeeded",
+        .created_at = 230,
+    };
+
+    const report = reportFromDeployment(dep);
+    try std.testing.expectEqual(ApplyTrigger.rollback, report.trigger);
+    try std.testing.expectEqualStrings("dep-11", report.source_release_id.?);
 }

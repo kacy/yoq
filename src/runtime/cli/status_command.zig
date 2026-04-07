@@ -100,11 +100,13 @@ fn statusLocal(alloc: std.mem.Allocator, verbose: bool) StatusError!void {
 
 const AppStatusSnapshot = struct {
     app_name: []const u8,
+    trigger: []const u8,
     release_id: []const u8,
     status: []const u8,
     manifest_hash: []const u8,
     created_at: i64,
     service_count: usize,
+    source_release_id: ?[]const u8,
     message: ?[]const u8,
 };
 
@@ -260,11 +262,13 @@ fn printAppStatus(snapshot: AppStatusSnapshot) void {
 fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
     return .{
         .app_name = extractJsonString(json, "app_name") orelse "?",
+        .trigger = extractJsonString(json, "trigger") orelse "apply",
         .release_id = extractJsonString(json, "release_id") orelse "?",
         .status = extractJsonString(json, "status") orelse "unknown",
         .manifest_hash = extractJsonString(json, "manifest_hash") orelse "?",
         .created_at = extractJsonInt(json, "created_at") orelse 0,
         .service_count = @intCast(@max(0, extractJsonInt(json, "service_count") orelse 0)),
+        .source_release_id = extractJsonString(json, "source_release_id"),
         .message = extractJsonString(json, "message"),
     };
 }
@@ -272,22 +276,26 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
 fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot) void {
     w.beginObject();
     w.stringField("app_name", snapshot.app_name);
+    w.stringField("trigger", snapshot.trigger);
     w.stringField("release_id", snapshot.release_id);
     w.stringField("status", snapshot.status);
     w.stringField("manifest_hash", snapshot.manifest_hash);
     w.intField("created_at", snapshot.created_at);
     w.uintField("service_count", snapshot.service_count);
+    if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
 }
 
 fn appStatusFromReport(report: apply_release.ApplyReport) AppStatusSnapshot {
     return .{
         .app_name = report.app_name,
+        .trigger = report.trigger.toString(),
         .release_id = report.release_id orelse "?",
         .status = report.status.toString(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
         .service_count = report.service_count,
+        .source_release_id = report.source_release_id,
         .message = report.message,
     };
 }
@@ -399,15 +407,17 @@ fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8
 
 test "parseAppStatusResponse extracts app fields" {
     const snapshot = parseAppStatusResponse(
-        \\{"app_name":"demo-app","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"message":null}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"source_release_id":null,"message":null}
     );
 
     try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
+    try std.testing.expectEqualStrings("apply", snapshot.trigger);
     try std.testing.expectEqualStrings("abc123def456", snapshot.release_id);
     try std.testing.expectEqualStrings("completed", snapshot.status);
     try std.testing.expectEqualStrings("sha256:123", snapshot.manifest_hash);
     try std.testing.expectEqual(@as(i64, 42), snapshot.created_at);
     try std.testing.expectEqual(@as(usize, 2), snapshot.service_count);
+    try std.testing.expect(snapshot.source_release_id == null);
     try std.testing.expect(snapshot.message == null);
 }
 
@@ -426,26 +436,30 @@ test "appStatusFromReport matches remote app status shape" {
 
     const local = appStatusFromReport(report);
     const remote = parseAppStatusResponse(
-        \\{"app_name":"demo-app","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"message":"all placements healthy"}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"source_release_id":null,"message":"all placements healthy"}
     );
 
     try std.testing.expectEqualStrings(local.app_name, remote.app_name);
+    try std.testing.expectEqualStrings(local.trigger, remote.trigger);
     try std.testing.expectEqualStrings(local.release_id, remote.release_id);
     try std.testing.expectEqualStrings(local.status, remote.status);
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
     try std.testing.expectEqual(local.service_count, remote.service_count);
+    try std.testing.expect(local.source_release_id == null);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
 }
 
 test "writeAppStatusJsonObject round-trips through remote parser" {
     const snapshot = AppStatusSnapshot{
         .app_name = "demo-app",
+        .trigger = "rollback",
         .release_id = "dep-2",
         .status = "completed",
         .manifest_hash = "sha256:222",
         .created_at = 200,
         .service_count = 2,
+        .source_release_id = "dep-1",
         .message = "all placements healthy",
     };
 
@@ -454,10 +468,12 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
 
     const parsed = parseAppStatusResponse(w.getWritten());
     try std.testing.expectEqualStrings(snapshot.app_name, parsed.app_name);
+    try std.testing.expectEqualStrings(snapshot.trigger, parsed.trigger);
     try std.testing.expectEqualStrings(snapshot.release_id, parsed.release_id);
     try std.testing.expectEqualStrings(snapshot.status, parsed.status);
     try std.testing.expectEqualStrings(snapshot.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(snapshot.created_at, parsed.created_at);
     try std.testing.expectEqual(snapshot.service_count, parsed.service_count);
+    try std.testing.expectEqualStrings(snapshot.source_release_id.?, parsed.source_release_id.?);
     try std.testing.expectEqualStrings(snapshot.message.?, parsed.message.?);
 }
