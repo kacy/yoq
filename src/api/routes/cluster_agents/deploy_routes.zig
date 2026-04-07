@@ -52,24 +52,73 @@ fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
+fn extractJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const u8) !?[]u8 {
+    const array_json = extractJsonArray(json, key) orelse return null;
+    if (array_json.len < 2) return null;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var pos: usize = 1;
+    var first = true;
+    while (pos < array_json.len - 1) {
+        while (pos < array_json.len - 1 and (array_json[pos] == ' ' or array_json[pos] == '\n' or array_json[pos] == '\r' or array_json[pos] == '\t' or array_json[pos] == ',')) : (pos += 1) {}
+        if (pos >= array_json.len - 1) break;
+        if (array_json[pos] != '"') return null;
+        pos += 1;
+        const start = pos;
+
+        while (pos < array_json.len - 1) : (pos += 1) {
+            if (array_json[pos] == '\\') {
+                pos += 1;
+                if (pos >= array_json.len - 1) return null;
+                continue;
+            }
+            if (array_json[pos] == '"') break;
+        }
+        if (pos >= array_json.len - 1) return null;
+
+        if (!first) try out.append(alloc, ' ');
+        first = false;
+        try out.appendSlice(alloc, array_json[start..pos]);
+        pos += 1;
+    }
+
+    return try out.toOwnedSlice(alloc);
+}
+
+fn extractCommandString(alloc: std.mem.Allocator, block: []const u8) ![]const u8 {
+    if (extractJsonString(block, "command")) |command| {
+        return alloc.dupe(u8, command);
+    }
+    if (try extractJsonStringArray(alloc, block, "command")) |joined| {
+        defer alloc.free(joined);
+        return alloc.dupe(u8, joined);
+    }
+    return alloc.dupe(u8, "");
+}
+
+fn handleApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
     var requests: std.ArrayListUnmanaged(scheduler.PlacementRequest) = .empty;
-    defer requests.deinit(alloc);
+    defer {
+        for (requests.items) |req| alloc.free(req.command);
+        requests.deinit(alloc);
+    }
 
-    const volume_app = extractJsonString(request.body, "volume_app");
+    const app_name = extractJsonString(request.body, "app_name") orelse extractJsonString(request.body, "volume_app");
     const services_json = extractJsonArray(request.body, "services") orelse
         return common.badRequest("missing services array");
 
     var iter = json_helpers.extractJsonObjects(services_json);
     while (iter.next()) |block| {
-
         const image = extractJsonString(block, "image") orelse {
             continue;
         };
-        const command = extractJsonString(block, "command") orelse "";
+        const command = extractCommandString(alloc, block) catch return common.internalError();
+        errdefer alloc.free(command);
         const cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000;
         const memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256;
         const gpu_limit = extractJsonInt(block, "gpu_limit") orelse 0;
@@ -80,9 +129,11 @@ pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig")
         const gpus_per_rank_val = extractJsonInt(block, "gpus_per_rank");
 
         if (!common.validateClusterInput(image)) {
+            alloc.free(command);
             continue;
         }
         if (command.len > 0 and !common.validateClusterInput(command)) {
+            alloc.free(command);
             continue;
         }
 
@@ -97,18 +148,21 @@ pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig")
             .required_labels = required_labels,
             .gang_world_size = if (gang_world_size_val) |v| @intCast(@max(0, v)) else 0,
             .gpus_per_rank = if (gpus_per_rank_val) |v| @intCast(@max(1, v)) else 1,
-        }) catch return common.internalError();
+        }) catch {
+            alloc.free(command);
+            return common.internalError();
+        };
     }
 
     if (requests.items.len == 0) return common.badRequest("no services to deploy");
 
     const db = node.stateMachineDb();
 
-    const vol_constraints = if (volume_app) |app_name|
-        volumes_mod.getVolumesByApp(alloc, db, app_name) catch &[_]volumes_mod.VolumeConstraint{}
+    const vol_constraints = if (app_name) |name|
+        volumes_mod.getVolumesByApp(alloc, db, name) catch &[_]volumes_mod.VolumeConstraint{}
     else
         &[_]volumes_mod.VolumeConstraint{};
-    defer if (volume_app != null) alloc.free(vol_constraints);
+    defer if (app_name != null) alloc.free(vol_constraints);
 
     if (vol_constraints.len > 0) {
         for (requests.items) |*req| {
@@ -224,6 +278,14 @@ pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig")
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
+pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
+    return handleApply(alloc, request, ctx);
+}
+
+pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
+    return handleApply(alloc, request, ctx);
+}
+
 test "extractJsonArray finds services array regardless of field order" {
     const json =
         \\{"services":[{"name":"svc-a","image":"alpine","gpu":{"devices":["../../dev/sda"]}},{"image":"busybox","name":"svc-b"}]}
@@ -241,4 +303,16 @@ test "extractJsonArray finds services array regardless of field order" {
     try std.testing.expectEqualStrings("busybox", extractJsonString(second, "image").?);
 
     try std.testing.expect(iter.next() == null);
+}
+
+test "extractCommandString joins structured command arrays" {
+    const alloc = std.testing.allocator;
+    const block =
+        \\{"name":"web","image":"nginx","command":["nginx","-g","daemon off;"]}
+    ;
+
+    const command = try extractCommandString(alloc, block);
+    defer alloc.free(command);
+
+    try std.testing.expectEqualStrings("nginx -g daemon off;", command);
 }

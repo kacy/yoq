@@ -27,6 +27,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
         if (std.mem.eql(u8, path, "/cluster/propose")) return cluster_routes.handleClusterPropose(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/cluster/step-down")) return cluster_routes.handleLeaderStepDown(alloc, ctx);
         if (std.mem.eql(u8, path, "/agents/register")) return agent_routes.handleAgentRegister(alloc, request, ctx);
+        if (std.mem.eql(u8, path, "/apps/apply")) return deploy_routes.handleAppApply(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/deploy")) return deploy_routes.handleDeploy(alloc, request, ctx);
     }
 
@@ -154,6 +155,18 @@ test "route rejects POST /agents/register without cluster" {
 test "route rejects POST /deploy without cluster" {
     const ctx: RouteContext = .{ .cluster = null, .join_token = null };
     const req = testRequest(.POST, "/deploy");
+
+    const response = route(req, testing.allocator, ctx);
+    try testing.expect(response != null);
+    if (response) |resp| {
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
+test "route rejects app apply without cluster" {
+    const ctx: RouteContext = .{ .cluster = null, .join_token = null };
+    const req = testRequest(.POST, "/apps/apply");
 
     const response = route(req, testing.allocator, ctx);
     try testing.expect(response != null);

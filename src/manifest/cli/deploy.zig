@@ -2,14 +2,12 @@ const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const app_spec = @import("../app_spec.zig");
 const manifest_loader = @import("../loader.zig");
-const manifest_spec = @import("../spec.zig");
 const orchestrator = @import("../orchestrator.zig");
 const startup_runtime = @import("../orchestrator/startup_runtime.zig");
 const watcher_mod = @import("../../dev/watcher.zig");
 const store = @import("../../state/store.zig");
 const process = @import("../../runtime/process.zig");
 const http_client = @import("../../cluster/http_client.zig");
-const json_helpers = @import("../../lib/json_helpers.zig");
 const container_cmds = @import("../../runtime/container_commands.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const service_rollout = @import("../../network/service_rollout.zig");
@@ -79,7 +77,13 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 
     if (server_addr) |addr| {
-        try deployToCluster(alloc, addr, &app);
+        if (service_names.items.len > 0) {
+            var filtered = app.selectServices(alloc, service_names.items) catch return DeployError.OutOfMemory;
+            defer filtered.deinit();
+            try deployToCluster(alloc, addr, &filtered);
+        } else {
+            try deployToCluster(alloc, addr, &app);
+        }
         return;
     }
 
@@ -190,7 +194,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
 fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, app: *const app_spec.ApplicationSpec) DeployError!void {
     const server = cli.parseServerAddr(addr_str);
-    const body = app.toLegacyDeployJson(alloc) catch return DeployError.OutOfMemory;
+    const body = app.toApplyJson(alloc) catch return DeployError.OutOfMemory;
     defer alloc.free(body);
 
     writeErr("deploying {d} services to cluster {s}...\n", .{ app.services.len, addr_str });
@@ -198,7 +202,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, app: *const a
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
-    var resp = http_client.postWithAuth(alloc, server.ip, server.port, "/deploy", body, token) catch |err| {
+    var resp = http_client.postWithAuth(alloc, server.ip, server.port, "/apps/apply", body, token) catch |err| {
         writeErr("failed to connect to cluster server: {}\n", .{err});
         writeErr("hint: is the server running? try 'yoq serve' or 'yoq init-server'\n", .{});
         return DeployError.ConnectionFailed;
