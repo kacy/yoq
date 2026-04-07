@@ -1,6 +1,7 @@
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const app_spec = @import("../app_spec.zig");
+const release_plan = @import("../release_plan.zig");
 const manifest_loader = @import("../loader.zig");
 const orchestrator = @import("../orchestrator.zig");
 const startup_runtime = @import("../orchestrator/startup_runtime.zig");
@@ -76,14 +77,11 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         }
     }
 
+    var release = release_plan.ReleasePlan.fromAppSpec(alloc, &app, service_names.items) catch return DeployError.OutOfMemory;
+    defer release.deinit();
+
     if (server_addr) |addr| {
-        if (service_names.items.len > 0) {
-            var filtered = app.selectServices(alloc, service_names.items) catch return DeployError.OutOfMemory;
-            defer filtered.deinit();
-            try deployToCluster(alloc, addr, &filtered);
-        } else {
-            try deployToCluster(alloc, addr, &app);
-        }
+        try deployToCluster(alloc, addr, &release);
         return;
     }
 
@@ -93,22 +91,22 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
             if (i > 0) writeErr(",", .{});
             writeErr(" {s}", .{name});
         }
-        writeErr(" ({d} services)...\n", .{service_names.items.len});
+        writeErr(" ({d} requested, {d} resolved)...\n", .{ service_names.items.len, release.resolvedServiceCount() });
     } else if (dev_mode) {
-        writeErr("starting {s} in dev mode ({d} services)...\n", .{ app.app_name, app.services.len });
+        writeErr("starting {s} in dev mode ({d} services)...\n", .{ release.app.app_name, release.resolvedServiceCount() });
     } else {
-        writeErr("starting {s} ({d} services)...\n", .{ app.app_name, app.services.len });
+        writeErr("starting {s} ({d} services)...\n", .{ release.app.app_name, release.resolvedServiceCount() });
     }
 
-    var orch = orchestrator.Orchestrator.init(alloc, &manifest, app.app_name) catch |err| {
+    var orch = orchestrator.Orchestrator.init(alloc, &manifest, release.app.app_name) catch |err| {
         writeErr("failed to initialize orchestrator: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };
     defer orch.deinit();
     orch.dev_mode = dev_mode;
 
-    if (service_names.items.len > 0) {
-        orch.service_filter = service_names.items;
+    if (release.service_filter) |filter| {
+        orch.service_filter = filter;
     }
 
     orch.computeStartSet() catch |err| {
@@ -147,6 +145,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         if (watcher != null) {
             var any_watch_failed = false;
             for (manifest.services, 0..) |svc, i| {
+                if (!release.includesService(svc.name)) continue;
                 for (svc.volumes) |vol| {
                     if (vol.kind != .bind) continue;
 
@@ -192,12 +191,12 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     writeErr("stopped\n", .{});
 }
 
-fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, app: *const app_spec.ApplicationSpec) DeployError!void {
+fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, release: *const release_plan.ReleasePlan) DeployError!void {
     const server = cli.parseServerAddr(addr_str);
-    const body = app.toApplyJson(alloc) catch return DeployError.OutOfMemory;
+    const body = release.toApplyJson(alloc) catch return DeployError.OutOfMemory;
     defer alloc.free(body);
 
-    writeErr("deploying {d} services to cluster {s}...\n", .{ app.services.len, addr_str });
+    writeErr("deploying {d} services to cluster {s}...\n", .{ release.resolvedServiceCount(), addr_str });
 
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
