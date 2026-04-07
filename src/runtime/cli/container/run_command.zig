@@ -72,7 +72,7 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) Conta
                 return ContainerError.InvalidArgument;
             }
             env.append(alloc, env_str) catch return ContainerError.OutOfMemory;
-        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--volume")) {
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--volume") or std.mem.eql(u8, arg, "--mount")) {
             const mount_str = args.next() orelse {
                 writeErr("{s} requires source:target[:ro]\n", .{arg});
                 return ContainerError.InvalidArgument;
@@ -149,7 +149,7 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) Conta
     }
 
     const run_target = target orelse {
-        writeErr("usage: yoq run [--name <name>] [-e KEY=VALUE] [-v source:target[:ro]] [-p host:container] [--memory SIZE] [--pids N] [--cpu-weight N] [--cpus N] [-d] [--restart POLICY] [--no-net] <image|rootfs> [command]\n", .{});
+        writeErr("usage: yoq run [--name <name>] [-e KEY=VALUE] [-v source:target[:ro]] [--mount source:target[:ro]] [-p host:container] [--memory SIZE] [--pids N] [--cpu-weight N] [--cpus N] [-d] [--restart POLICY] [--no-net] <image|rootfs> [command]\n", .{});
         return ContainerError.InvalidArgument;
     };
 
