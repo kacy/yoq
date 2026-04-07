@@ -160,6 +160,100 @@ fn formatAppStatusResponse(
     return json_buf.toOwnedSlice(alloc);
 }
 
+const RouteFlowHarness = struct {
+    alloc: std.mem.Allocator,
+    tmp: std.testing.TmpDir,
+    node: cluster_node.Node,
+
+    fn init(alloc: std.mem.Allocator) !RouteFlowHarness {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+
+        var path_buf: [512]u8 = undefined;
+        const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+
+        var node = cluster_node.Node.init(alloc, .{
+            .id = 1,
+            .port = 0,
+            .peers = &.{},
+            .data_dir = tmp_path,
+        }) catch return error.SkipZigTest;
+        errdefer node.deinit();
+
+        node.raft.role = .leader;
+        node.leader_id = node.config.id;
+
+        var harness = RouteFlowHarness{
+            .alloc = alloc,
+            .tmp = tmp,
+            .node = node,
+        };
+        try harness.seedActiveAgent();
+        return harness;
+    }
+
+    fn deinit(self: *RouteFlowHarness) void {
+        self.node.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn ctx(self: *RouteFlowHarness) RouteContext {
+        return .{ .cluster = &self.node, .join_token = null };
+    }
+
+    fn seedActiveAgent(self: *RouteFlowHarness) !void {
+        self.node.stateMachineDb().exec(
+            "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            .{},
+            .{ "abc123def456", "10.0.0.2:7701", "active", @as(i64, 4), @as(i64, 8192), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "" },
+        ) catch return error.SkipZigTest;
+    }
+
+    fn appApply(self: *RouteFlowHarness, body: []const u8) Response {
+        return deploy_routes.handleAppApply(self.alloc, makeRequest(.POST, "/apps/apply", body), self.ctx());
+    }
+
+    fn rollback(self: *RouteFlowHarness, app_name: []const u8, release_id: []const u8) !Response {
+        const body = try std.fmt.allocPrint(self.alloc, "{{\"release_id\":\"{s}\"}}", .{release_id});
+        defer self.alloc.free(body);
+        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/rollback", .{app_name});
+        defer self.alloc.free(path);
+        return handleAppRollback(self.alloc, app_name, makeRequest(.POST, path, body), self.ctx());
+    }
+
+    fn status(self: *RouteFlowHarness, app_name: []const u8) Response {
+        return handleAppStatus(self.alloc, app_name, self.ctx());
+    }
+
+    fn history(self: *RouteFlowHarness, app_name: []const u8) Response {
+        return handleAppHistory(self.alloc, app_name, self.ctx());
+    }
+};
+
+fn makeRequest(method: http.Method, path: []const u8, body: []const u8) http.Request {
+    return .{
+        .method = method,
+        .path = path,
+        .path_only = path,
+        .query = "",
+        .headers_raw = "",
+        .body = body,
+        .content_length = body.len,
+    };
+}
+
+fn freeResponse(alloc: std.mem.Allocator, response: Response) void {
+    if (response.allocated) alloc.free(response.body);
+}
+
+fn expectJsonContains(json: []const u8, needle: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, json, needle) != null);
+}
+
+fn expectResponseOk(response: Response) !void {
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+}
+
 test "formatAppHistoryResponse emits release records" {
     const alloc = std.testing.allocator;
     const deployments = [_]store.DeploymentRecord{
@@ -356,84 +450,40 @@ test "app apply then rollback routes preserve release transition metadata" {
         \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"]}]}
     ;
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
 
-    var path_buf: [512]u8 = undefined;
-    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+    const apply_response = harness.appApply(apply_body);
+    defer freeResponse(alloc, apply_response);
 
-    var node = cluster_node.Node.init(alloc, .{
-        .id = 1,
-        .port = 0,
-        .peers = &.{},
-        .data_dir = tmp_path,
-    }) catch return error.SkipZigTest;
-    defer node.deinit();
-
-    node.raft.role = .leader;
-    node.leader_id = node.config.id;
-
-    const db = node.stateMachineDb();
-    db.exec(
-        "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-        .{},
-        .{ "abc123def456", "10.0.0.2:7701", "active", @as(i64, 4), @as(i64, 8192), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "" },
-    ) catch return error.SkipZigTest;
-
-    const ctx: RouteContext = .{ .cluster = &node, .join_token = null };
-
-    const apply_request = http.Request{
-        .method = .POST,
-        .path = "/apps/apply",
-        .path_only = "/apps/apply",
-        .query = "",
-        .headers_raw = "",
-        .body = apply_body,
-        .content_length = apply_body.len,
-    };
-    const apply_response = deploy_routes.handleAppApply(alloc, apply_request, ctx);
-    defer if (apply_response.allocated) alloc.free(apply_response.body);
-
-    try std.testing.expectEqual(http.StatusCode.ok, apply_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"trigger\":\"apply\"") != null);
+    try expectResponseOk(apply_response);
+    try expectJsonContains(apply_response.body, "\"trigger\":\"apply\"");
 
     const source_release_id = json_helpers.extractJsonString(apply_response.body, "release_id").?;
 
-    const rollback_body = try std.fmt.allocPrint(alloc, "{{\"release_id\":\"{s}\"}}", .{source_release_id});
-    defer alloc.free(rollback_body);
+    const rollback_response = try harness.rollback("demo-app", source_release_id);
+    defer freeResponse(alloc, rollback_response);
 
-    const rollback_request = http.Request{
-        .method = .POST,
-        .path = "/apps/demo-app/rollback",
-        .path_only = "/apps/demo-app/rollback",
-        .query = "",
-        .headers_raw = "",
-        .body = rollback_body,
-        .content_length = rollback_body.len,
-    };
-    const rollback_response = handleAppRollback(alloc, "demo-app", rollback_request, ctx);
-    defer if (rollback_response.allocated) alloc.free(rollback_response.body);
+    try expectResponseOk(rollback_response);
+    try expectJsonContains(rollback_response.body, "\"trigger\":\"rollback\"");
+    try expectJsonContains(rollback_response.body, "\"source_release_id\":\"");
+    try expectJsonContains(rollback_response.body, source_release_id);
 
-    try std.testing.expectEqual(http.StatusCode.ok, rollback_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, rollback_response.body, "\"trigger\":\"rollback\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rollback_response.body, "\"source_release_id\":\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rollback_response.body, source_release_id) != null);
+    const status_response = harness.status("demo-app");
+    defer freeResponse(alloc, status_response);
 
-    const status_response = handleAppStatus(alloc, "demo-app", ctx);
-    defer if (status_response.allocated) alloc.free(status_response.body);
+    try expectResponseOk(status_response);
+    try expectJsonContains(status_response.body, "\"trigger\":\"rollback\"");
+    try expectJsonContains(status_response.body, "\"source_release_id\":\"");
+    try expectJsonContains(status_response.body, source_release_id);
 
-    try std.testing.expectEqual(http.StatusCode.ok, status_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"trigger\":\"rollback\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"source_release_id\":\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, source_release_id) != null);
+    const history_response = harness.history("demo-app");
+    defer freeResponse(alloc, history_response);
 
-    const history_response = handleAppHistory(alloc, "demo-app", ctx);
-    defer if (history_response.allocated) alloc.free(history_response.body);
-
-    try std.testing.expectEqual(http.StatusCode.ok, history_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"trigger\":\"rollback\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"source_release_id\":\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, source_release_id) != null);
+    try expectResponseOk(history_response);
+    try expectJsonContains(history_response.body, "\"trigger\":\"rollback\"");
+    try expectJsonContains(history_response.body, "\"source_release_id\":\"");
+    try expectJsonContains(history_response.body, source_release_id);
 }
 
 test "app apply route preserves failed release metadata across reads" {
@@ -442,74 +492,42 @@ test "app apply route preserves failed release metadata across reads" {
         \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"],"cpu_limit":999999,"memory_limit_mb":999999}]}
     ;
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
 
-    var path_buf: [512]u8 = undefined;
-    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+    const apply_response = harness.appApply(apply_body);
+    defer freeResponse(alloc, apply_response);
 
-    var node = cluster_node.Node.init(alloc, .{
-        .id = 1,
-        .port = 0,
-        .peers = &.{},
-        .data_dir = tmp_path,
-    }) catch return error.SkipZigTest;
-    defer node.deinit();
-
-    node.raft.role = .leader;
-    node.leader_id = node.config.id;
-
-    const db = node.stateMachineDb();
-    db.exec(
-        "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-        .{},
-        .{ "abc123def456", "10.0.0.2:7701", "active", @as(i64, 4), @as(i64, 8192), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "" },
-    ) catch return error.SkipZigTest;
-
-    const ctx: RouteContext = .{ .cluster = &node, .join_token = null };
-
-    const apply_request = http.Request{
-        .method = .POST,
-        .path = "/apps/apply",
-        .path_only = "/apps/apply",
-        .query = "",
-        .headers_raw = "",
-        .body = apply_body,
-        .content_length = apply_body.len,
-    };
-    const apply_response = deploy_routes.handleAppApply(alloc, apply_request, ctx);
-    defer if (apply_response.allocated) alloc.free(apply_response.body);
-
-    try std.testing.expectEqual(http.StatusCode.ok, apply_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"trigger\":\"apply\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"status\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"failed\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"source_release_id\":null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"message\":\"one or more placements failed\"") != null);
+    try expectResponseOk(apply_response);
+    try expectJsonContains(apply_response.body, "\"trigger\":\"apply\"");
+    try expectJsonContains(apply_response.body, "\"status\":\"failed\"");
+    try expectJsonContains(apply_response.body, "\"failed\":1");
+    try expectJsonContains(apply_response.body, "\"source_release_id\":null");
+    try expectJsonContains(apply_response.body, "\"message\":\"one or more placements failed\"");
 
     const release_id = json_helpers.extractJsonString(apply_response.body, "release_id").?;
 
-    const status_response = handleAppStatus(alloc, "demo-app", ctx);
-    defer if (status_response.allocated) alloc.free(status_response.body);
+    const status_response = harness.status("demo-app");
+    defer freeResponse(alloc, status_response);
 
-    try std.testing.expectEqual(http.StatusCode.ok, status_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"release_id\":\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, release_id) != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"trigger\":\"apply\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"status\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"source_release_id\":null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"message\":\"one or more placements failed\"") != null);
+    try expectResponseOk(status_response);
+    try expectJsonContains(status_response.body, "\"release_id\":\"");
+    try expectJsonContains(status_response.body, release_id);
+    try expectJsonContains(status_response.body, "\"trigger\":\"apply\"");
+    try expectJsonContains(status_response.body, "\"status\":\"failed\"");
+    try expectJsonContains(status_response.body, "\"source_release_id\":null");
+    try expectJsonContains(status_response.body, "\"message\":\"one or more placements failed\"");
 
-    const history_response = handleAppHistory(alloc, "demo-app", ctx);
-    defer if (history_response.allocated) alloc.free(history_response.body);
+    const history_response = harness.history("demo-app");
+    defer freeResponse(alloc, history_response);
 
-    try std.testing.expectEqual(http.StatusCode.ok, history_response.status);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"id\":\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, release_id) != null);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"trigger\":\"apply\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"status\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"source_release_id\":null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"message\":\"one or more placements failed\"") != null);
+    try expectResponseOk(history_response);
+    try expectJsonContains(history_response.body, "\"id\":\"");
+    try expectJsonContains(history_response.body, release_id);
+    try expectJsonContains(history_response.body, "\"trigger\":\"apply\"");
+    try expectJsonContains(history_response.body, "\"status\":\"failed\"");
+    try expectJsonContains(history_response.body, "\"source_release_id\":null");
+    try expectJsonContains(history_response.body, "\"message\":\"one or more placements failed\"");
 }
 
 test "route rejects app rollback without cluster" {
