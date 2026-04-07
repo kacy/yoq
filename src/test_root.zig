@@ -78,6 +78,7 @@ comptime {
     _ = @import("manifest/app_spec.zig");
     _ = @import("manifest/release_plan.zig");
     _ = @import("manifest/release_history.zig");
+    _ = @import("manifest/cli/ops.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
     _ = @import("manifest/gpu_runtime.zig");

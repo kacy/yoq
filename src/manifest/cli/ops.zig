@@ -167,15 +167,15 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         var w = json_out.JsonWriter{};
         w.beginArray();
         for (deployments.items) |dep| {
-            w.beginObject();
-            w.stringField("id", dep.id);
-            if (dep.app_name) |app_name| w.stringField("app", app_name) else w.nullField("app");
-            w.stringField("service", dep.service_name);
-            w.stringField("status", dep.status);
-            w.stringField("manifest_hash", dep.manifest_hash);
-            w.intField("created_at", dep.created_at);
-            if (dep.message) |msg| w.stringField("message", msg) else w.nullField("message");
-            w.endObject();
+            writeHistoryJsonObject(&w, .{
+                .id = dep.id,
+                .app = dep.app_name,
+                .service = dep.service_name,
+                .status = dep.status,
+                .manifest_hash = dep.manifest_hash,
+                .created_at = dep.created_at,
+                .message = dep.message,
+            });
         }
         w.endArray();
         w.flush();
@@ -191,19 +191,17 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return;
     }
 
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{ "ID", "STATUS", "HASH", "TIMESTAMP", "MESSAGE" });
+    writeHistoryHeader();
 
     for (deployments.items) |dep| {
-        var ts_buf: [20]u8 = undefined;
-        const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{dep.created_at}) catch "?";
-        const msg = dep.message orelse "";
-
-        write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{
-            truncate(dep.id, 12),
-            dep.status,
-            truncate(dep.manifest_hash, 12),
-            ts_str,
-            truncate(msg, 40),
+        writeHistoryRow(.{
+            .id = dep.id,
+            .app = dep.app_name,
+            .service = dep.service_name,
+            .status = dep.status,
+            .manifest_hash = dep.manifest_hash,
+            .created_at = dep.created_at,
+            .message = dep.message,
         });
     }
 }
@@ -245,30 +243,64 @@ fn printRemoteAppHistory(alloc: std.mem.Allocator, addr_str: []const u8, app_nam
         return;
     };
 
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{ "ID", "STATUS", "HASH", "TIMESTAMP", "MESSAGE" });
-    writeHistoryRow(first);
+    writeHistoryHeader();
+    writeHistoryRow(parseHistoryObject(first));
     while (iter.next()) |obj| {
-        writeHistoryRow(obj);
+        writeHistoryRow(parseHistoryObject(obj));
     }
 }
 
-fn writeHistoryRow(obj: []const u8) void {
-    const id = json_helpers.extractJsonString(obj, "id") orelse "?";
-    const status = json_helpers.extractJsonString(obj, "status") orelse "?";
-    const manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?";
-    const created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0;
-    const message = json_helpers.extractJsonString(obj, "message") orelse "";
+const HistoryEntryView = struct {
+    id: []const u8,
+    app: ?[]const u8,
+    service: []const u8,
+    status: []const u8,
+    manifest_hash: []const u8,
+    created_at: i64,
+    message: ?[]const u8,
+};
+
+fn parseHistoryObject(obj: []const u8) HistoryEntryView {
+    return .{
+        .id = json_helpers.extractJsonString(obj, "id") orelse "?",
+        .app = json_helpers.extractJsonString(obj, "app"),
+        .service = json_helpers.extractJsonString(obj, "service") orelse "?",
+        .status = json_helpers.extractJsonString(obj, "status") orelse "?",
+        .manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?",
+        .created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0,
+        .message = json_helpers.extractJsonString(obj, "message"),
+    };
+}
+
+fn writeHistoryHeader() void {
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{ "ID", "STATUS", "HASH", "TIMESTAMP", "MESSAGE" });
+}
+
+fn writeHistoryRow(entry: HistoryEntryView) void {
+    const message = entry.message orelse "";
 
     var ts_buf: [20]u8 = undefined;
-    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{created_at}) catch "?";
+    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{entry.created_at}) catch "?";
 
     write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{
-        truncate(id, 12),
-        status,
-        truncate(manifest_hash, 12),
+        truncate(entry.id, 12),
+        entry.status,
+        truncate(entry.manifest_hash, 12),
         ts_str,
         truncate(message, 40),
     });
+}
+
+fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void {
+    w.beginObject();
+    w.stringField("id", entry.id);
+    if (entry.app) |app_name| w.stringField("app", app_name) else w.nullField("app");
+    w.stringField("service", entry.service);
+    w.stringField("status", entry.status);
+    w.stringField("manifest_hash", entry.manifest_hash);
+    w.intField("created_at", entry.created_at);
+    if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
+    w.endObject();
 }
 
 fn rollbackRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8, release_id: []const u8) !void {
@@ -299,6 +331,20 @@ fn rollbackRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: [
     }
 
     write("{s}\n", .{resp.body});
+}
+
+test "parseHistoryObject extracts app release fields" {
+    const entry = parseHistoryObject(
+        \\{"id":"dep-1","app":"demo-app","service":"demo-app","status":"completed","manifest_hash":"sha256:123","created_at":42,"message":null}
+    );
+
+    try std.testing.expectEqualStrings("dep-1", entry.id);
+    try std.testing.expectEqualStrings("demo-app", entry.app.?);
+    try std.testing.expectEqualStrings("demo-app", entry.service);
+    try std.testing.expectEqualStrings("completed", entry.status);
+    try std.testing.expectEqualStrings("sha256:123", entry.manifest_hash);
+    try std.testing.expectEqual(@as(i64, 42), entry.created_at);
+    try std.testing.expect(entry.message == null);
 }
 
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
