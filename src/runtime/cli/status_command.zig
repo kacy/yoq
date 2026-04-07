@@ -13,6 +13,7 @@ const writeErr = cli.writeErr;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 const extractJsonFloat = json_helpers.extractJsonFloat;
+const extractJsonArray = json_helpers.extractJsonArray;
 
 const StatusError = error{
     InvalidArgument,
@@ -25,19 +26,43 @@ const StatusError = error{
 pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var verbose = false;
     var server: ?cli.ServerAddr = null;
+    var app_mode = false;
+    var target_name: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             cli.output_mode = .json;
         } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             verbose = true;
+        } else if (std.mem.eql(u8, arg, "--app")) {
+            app_mode = true;
         } else if (std.mem.eql(u8, arg, "--server")) {
             const addr_str = args.next() orelse {
                 writeErr("--server requires a host:port address\n", .{});
                 return StatusError.InvalidArgument;
             };
             server = cli.parseServerAddr(addr_str);
+        } else {
+            target_name = arg;
         }
+    }
+
+    if (!app_mode and target_name != null) {
+        writeErr("usage: yoq status [--app [name]] [--verbose] [--server host:port]\n", .{});
+        return StatusError.InvalidArgument;
+    }
+
+    if (app_mode) {
+        const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+        defer if (owned_app_name) |name| alloc.free(name);
+        const app_name = target_name orelse owned_app_name.?;
+
+        if (server) |s| {
+            try statusRemoteApp(alloc, s.ip, s.port, app_name);
+        } else {
+            try statusLocalApp(alloc, app_name);
+        }
+        return;
     }
 
     if (server) |s| {
@@ -70,6 +95,41 @@ fn statusLocal(alloc: std.mem.Allocator, verbose: bool) StatusError!void {
     defer snapshots.deinit(alloc);
 
     printStatusTable(snapshots.items, verbose);
+}
+
+const AppStatusSnapshot = struct {
+    app_name: []const u8,
+    release_id: []const u8,
+    status: []const u8,
+    manifest_hash: []const u8,
+    created_at: i64,
+    service_count: usize,
+    message: ?[]const u8,
+};
+
+fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!void {
+    const latest = store.getLatestDeploymentByApp(alloc, app_name) catch |err| switch (err) {
+        error.NotFound => {
+            write("no releases found for app {s}\n", .{app_name});
+            return;
+        },
+        else => {
+            writeErr("failed to read app status\n", .{});
+            return StatusError.StoreError;
+        },
+    };
+    defer latest.deinit(alloc);
+
+    const snapshot: AppStatusSnapshot = .{
+        .app_name = latest.app_name orelse latest.service_name,
+        .release_id = latest.id,
+        .status = latest.status,
+        .manifest_hash = latest.manifest_hash,
+        .created_at = latest.created_at,
+        .service_count = countServices(latest.config_snapshot),
+        .message = latest.message,
+    };
+    printAppStatus(snapshot);
 }
 
 fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) StatusError!void {
@@ -146,6 +206,95 @@ fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool)
     }
 
     printStatusTable(snapshots.items, verbose);
+}
+
+fn statusRemoteApp(alloc: std.mem.Allocator, addr: [4]u8, port: u16, app_name: []const u8) StatusError!void {
+    const path = std.fmt.allocPrint(alloc, "/apps/{s}/status", .{app_name}) catch return StatusError.OutOfMemory;
+    defer alloc.free(path);
+
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiToken(&token_buf);
+
+    var resp = http_client.getWithAuth(alloc, addr, port, path, token) catch {
+        writeErr("failed to connect to server\n", .{});
+        return StatusError.ConnectionFailed;
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code == 404) {
+        write("no releases found for app {s}\n", .{app_name});
+        return;
+    }
+    if (resp.status_code != 200) {
+        writeErr("server returned status {d}\n", .{resp.status_code});
+        return StatusError.ServerError;
+    }
+
+    const snapshot = parseAppStatusResponse(resp.body);
+    printAppStatus(snapshot);
+}
+
+fn printAppStatus(snapshot: AppStatusSnapshot) void {
+    if (cli.output_mode == .json) {
+        var w = json_out.JsonWriter{};
+        w.beginObject();
+        w.stringField("app_name", snapshot.app_name);
+        w.stringField("release_id", snapshot.release_id);
+        w.stringField("status", snapshot.status);
+        w.stringField("manifest_hash", snapshot.manifest_hash);
+        w.intField("created_at", snapshot.created_at);
+        w.uintField("service_count", snapshot.service_count);
+        if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+        w.endObject();
+        w.flush();
+        return;
+    }
+
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "TIMESTAMP", "SERVICES", "MESSAGE",
+    });
+
+    var ts_buf: [20]u8 = undefined;
+    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{snapshot.created_at}) catch "?";
+    const msg = snapshot.message orelse "";
+
+    var count_buf: [16]u8 = undefined;
+    const count_str = std.fmt.bufPrint(&count_buf, "{d}", .{snapshot.service_count}) catch "?";
+
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s}\n", .{
+        snapshot.app_name,
+        cli.truncate(snapshot.release_id, 12),
+        snapshot.status,
+        ts_str,
+        count_str,
+        cli.truncate(msg, 40),
+    });
+}
+
+fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
+    return .{
+        .app_name = extractJsonString(json, "app_name") orelse "?",
+        .release_id = extractJsonString(json, "release_id") orelse "?",
+        .status = extractJsonString(json, "status") orelse "unknown",
+        .manifest_hash = extractJsonString(json, "manifest_hash") orelse "?",
+        .created_at = extractJsonInt(json, "created_at") orelse 0,
+        .service_count = @intCast(@max(0, extractJsonInt(json, "service_count") orelse 0)),
+        .message = extractJsonString(json, "message"),
+    };
+}
+
+fn countServices(snapshot: []const u8) usize {
+    const services = extractJsonArray(snapshot, "services") orelse return 0;
+    var iter = json_helpers.extractJsonObjects(services);
+    var count: usize = 0;
+    while (iter.next() != null) count += 1;
+    return count;
+}
+
+fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return StatusError.StoreError;
+    return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return StatusError.OutOfMemory;
 }
 
 fn printStatusTable(snapshots: []const monitor.ServiceSnapshot, verbose: bool) void {
@@ -245,4 +394,25 @@ fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8
     const some = extractJsonFloat(json, some_key) orelse return null;
     const full = extractJsonFloat(json, full_key) orelse return null;
     return .{ .some_avg10 = some, .full_avg10 = full };
+}
+
+test "parseAppStatusResponse extracts app fields" {
+    const snapshot = parseAppStatusResponse(
+        \\{"app_name":"demo-app","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"message":null}
+    );
+
+    try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
+    try std.testing.expectEqualStrings("abc123def456", snapshot.release_id);
+    try std.testing.expectEqualStrings("completed", snapshot.status);
+    try std.testing.expectEqualStrings("sha256:123", snapshot.manifest_hash);
+    try std.testing.expectEqual(@as(i64, 42), snapshot.created_at);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.service_count);
+    try std.testing.expect(snapshot.message == null);
+}
+
+test "countServices counts service objects in app snapshot" {
+    const snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web"},{"name":"db"},{"name":"worker"}]}
+    ;
+    try std.testing.expectEqual(@as(usize, 3), countServices(snapshot));
 }

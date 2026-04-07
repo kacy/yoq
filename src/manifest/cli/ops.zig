@@ -17,6 +17,7 @@ const OpsError = error{
     InvalidArgument,
     ManifestLoadFailed,
     DeploymentFailed,
+    ConnectionFailed,
     StoreError,
     UnknownService,
 };

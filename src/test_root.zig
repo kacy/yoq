@@ -15,6 +15,7 @@ comptime {
     _ = @import("runtime/exec.zig");
     _ = @import("runtime/logs.zig");
     _ = @import("runtime/commands.zig");
+    _ = @import("runtime/cli/status_command.zig");
     _ = @import("runtime/container_commands.zig");
     _ = @import("runtime/run_state.zig");
     _ = @import("state/store.zig");
