@@ -317,6 +317,63 @@ test "app status and history surface rollback release metadata from persisted ro
     try std.testing.expect(std.mem.indexOf(u8, status_json, "\"source_release_id\":\"dep-1\"") != null);
 }
 
+test "app status and history surface failed apply metadata from persisted rows" {
+    const alloc = std.testing.allocator;
+
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try store.saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .status = "failed",
+        .message = "scheduler error during apply",
+        .created_at = 200,
+    });
+
+    var deployments = try store.listDeploymentsByAppInDb(&db, alloc, "demo-app");
+    defer {
+        for (deployments.items) |dep| dep.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    const history_json = try formatAppHistoryResponse(alloc, deployments.items);
+    defer alloc.free(history_json);
+
+    try std.testing.expect(std.mem.indexOf(u8, history_json, "\"id\":\"dep-2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_json, "\"trigger\":\"apply\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_json, "\"status\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_json, "\"source_release_id\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_json, "\"message\":\"scheduler error during apply\"") != null);
+
+    const latest = try store.getLatestDeploymentByAppInDb(&db, alloc, "demo-app");
+    defer latest.deinit(alloc);
+
+    const status_json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest));
+    defer alloc.free(status_json);
+
+    try std.testing.expect(std.mem.indexOf(u8, status_json, "\"release_id\":\"dep-2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_json, "\"trigger\":\"apply\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_json, "\"status\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_json, "\"service_count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_json, "\"source_release_id\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_json, "\"message\":\"scheduler error during apply\"") != null);
+}
+
 test "route rejects app rollback without cluster" {
     const body = "{\"release_id\":\"abc123def456\"}";
     const request = http.Request{
