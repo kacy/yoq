@@ -19,8 +19,8 @@ pub fn recordAppReleaseStart(plan: *const release_plan.ReleasePlan) ![]const u8 
     return id;
 }
 
-pub fn markAppReleaseCompleted(id: []const u8) !void {
-    try deployment_store.updateDeploymentStatus(id, .completed, null);
+pub fn markAppReleaseCompleted(id: []const u8, message: ?[]const u8) !void {
+    try deployment_store.updateDeploymentStatus(id, .completed, message);
 }
 
 pub fn markAppReleaseFailed(id: []const u8, message: ?[]const u8) !void {
