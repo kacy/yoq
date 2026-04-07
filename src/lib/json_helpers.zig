@@ -99,6 +99,49 @@ pub fn extractJsonFloat(json: []const u8, key: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, json[pos..end]) catch null;
 }
 
+/// extract a top-level array value from a JSON object: {"key":[...]}
+pub fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":[", .{key}) catch return null;
+    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
+
+    const array_start = start_pos + needle.len - 1;
+    var pos = array_start;
+    var depth: usize = 0;
+    var in_string = false;
+    var escape = false;
+
+    while (pos < json.len) : (pos += 1) {
+        const c = json[pos];
+
+        if (escape) {
+            escape = false;
+            continue;
+        }
+
+        if (c == '\\' and in_string) {
+            escape = true;
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+
+        if (in_string) continue;
+
+        if (c == '[') {
+            depth += 1;
+        } else if (c == ']') {
+            depth -= 1;
+            if (depth == 0) return json[array_start .. pos + 1];
+        }
+    }
+
+    return null;
+}
+
 // -- JSON array iteration --
 // iterate over top-level objects in a JSON array like [{...},{...}].
 // returns slices into the original buffer — no allocation needed.
@@ -224,6 +267,18 @@ test "extractJsonInt basic" {
 test "extractJsonObjects empty array" {
     var iter = extractJsonObjects("[]");
     try std.testing.expect(iter.next() == null);
+}
+
+test "extractJsonArray basic" {
+    const json = "{\"services\":[{\"id\":\"a\"}],\"count\":1}";
+    const array = extractJsonArray(json, "services").?;
+    try std.testing.expectEqualStrings("[{\"id\":\"a\"}]", array);
+}
+
+test "extractJsonArray handles nested arrays and strings" {
+    const json = "{\"services\":[{\"cmd\":\"echo [ok]\",\"ports\":[80,443]}]}";
+    const array = extractJsonArray(json, "services").?;
+    try std.testing.expectEqualStrings("[{\"cmd\":\"echo [ok]\",\"ports\":[80,443]}]", array);
 }
 
 test "extractJsonObjects single object" {

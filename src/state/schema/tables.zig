@@ -160,6 +160,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
     try exec(db,
         \\CREATE TABLE IF NOT EXISTS deployments (
         \\    id TEXT PRIMARY KEY,
+        \\    app_name TEXT,
         \\    service_name TEXT NOT NULL,
         \\    manifest_hash TEXT NOT NULL,
         \\    config_snapshot TEXT NOT NULL DEFAULT '',

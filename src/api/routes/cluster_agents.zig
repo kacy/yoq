@@ -5,6 +5,7 @@ const common = @import("common.zig");
 const testing = std.testing;
 const cluster_routes = @import("cluster_agents/cluster_routes.zig");
 const agent_routes = @import("cluster_agents/agent_routes.zig");
+const app_routes = @import("cluster_agents/app_routes.zig");
 const deploy_routes = @import("cluster_agents/deploy_routes.zig");
 const writers = @import("cluster_agents/writers.zig");
 
@@ -27,12 +28,15 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
         if (std.mem.eql(u8, path, "/cluster/propose")) return cluster_routes.handleClusterPropose(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/cluster/step-down")) return cluster_routes.handleLeaderStepDown(alloc, ctx);
         if (std.mem.eql(u8, path, "/agents/register")) return agent_routes.handleAgentRegister(alloc, request, ctx);
+        if (std.mem.eql(u8, path, "/apps/apply")) return deploy_routes.handleAppApply(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/deploy")) return deploy_routes.handleDeploy(alloc, request, ctx);
     }
 
     if (request.method == .GET) {
         if (std.mem.eql(u8, path, "/cluster/version")) return cluster_routes.handleClusterVersion();
     }
+
+    if (app_routes.route(request, alloc, ctx)) |resp| return resp;
 
     if (path.len > "/agents/".len and std.mem.startsWith(u8, path, "/agents/")) {
         const rest = path["/agents/".len..];
@@ -154,6 +158,42 @@ test "route rejects POST /agents/register without cluster" {
 test "route rejects POST /deploy without cluster" {
     const ctx: RouteContext = .{ .cluster = null, .join_token = null };
     const req = testRequest(.POST, "/deploy");
+
+    const response = route(req, testing.allocator, ctx);
+    try testing.expect(response != null);
+    if (response) |resp| {
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
+test "route rejects app apply without cluster" {
+    const ctx: RouteContext = .{ .cluster = null, .join_token = null };
+    const req = testRequest(.POST, "/apps/apply");
+
+    const response = route(req, testing.allocator, ctx);
+    try testing.expect(response != null);
+    if (response) |resp| {
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
+test "route rejects app history without cluster" {
+    const ctx: RouteContext = .{ .cluster = null, .join_token = null };
+    const req = testRequest(.GET, "/apps/demo-app/history");
+
+    const response = route(req, testing.allocator, ctx);
+    try testing.expect(response != null);
+    if (response) |resp| {
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
+test "route rejects app status without cluster" {
+    const ctx: RouteContext = .{ .cluster = null, .join_token = null };
+    const req = testRequest(.GET, "/apps/demo-app/status");
 
     const response = route(req, testing.allocator, ctx);
     try testing.expect(response != null);

@@ -193,9 +193,18 @@ yoq validate [-f manifest.toml] [-q] validate a manifest
 ### deployment and operations
 
 ```text
-yoq rollback <service>               roll back a deployment
-yoq history <service>                show deployment history
+yoq rollback <service>               roll back a service deployment
+yoq rollback --app [name]            print the last app release snapshot
+yoq rollback --app [name] --server host:port --release <id>
+                                     re-apply a prior app release remotely
+yoq history <service>                show service deployment history
+yoq history --app [name]             show local app release history
+yoq history --app [name] --server host:port [--json]
+                                     show remote app release history
 yoq status [--verbose]               show service status and resources
+yoq status --app [name]              show local app release status
+yoq status --app [name] --server host:port
+                                     show remote app release status
 yoq metrics [service]                show service metrics
 yoq metrics --pairs                  show service-to-service metrics
 yoq policy deny <src> <tgt>          block traffic between services
@@ -279,6 +288,7 @@ Notes:
 - `--json` is available on `ps`, `images`, `prune`, `version`, `gpu topo`, and `doctor`.
 - crons defined in the manifest start automatically with `yoq up`.
 - deployment, metrics, and certificate commands also support `--server host:port`.
+- clustered manifest deploys now go through the app-first `/apps/apply` API. the older `/deploy` route remains as a compatibility shim for legacy callers.
 
 ## current status
 

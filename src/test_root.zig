@@ -15,9 +15,11 @@ comptime {
     _ = @import("runtime/exec.zig");
     _ = @import("runtime/logs.zig");
     _ = @import("runtime/commands.zig");
+    _ = @import("runtime/cli/status_command.zig");
     _ = @import("runtime/container_commands.zig");
     _ = @import("runtime/run_state.zig");
     _ = @import("state/store.zig");
+    _ = @import("state/store/deployments.zig");
     _ = @import("state/schema.zig");
     _ = @import("state/commands.zig");
     _ = @import("state/volumes.zig");
@@ -73,6 +75,10 @@ comptime {
     _ = @import("build/manifest.zig");
     _ = @import("build/commands.zig");
     _ = @import("manifest/spec.zig");
+    _ = @import("manifest/app_spec.zig");
+    _ = @import("manifest/release_plan.zig");
+    _ = @import("manifest/release_history.zig");
+    _ = @import("manifest/cli/ops.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
     _ = @import("manifest/gpu_runtime.zig");
@@ -88,6 +94,8 @@ comptime {
     _ = @import("dev/watcher.zig");
     _ = @import("api/http.zig");
     _ = @import("api/routes.zig");
+    _ = @import("api/routes/cluster_agents.zig");
+    _ = @import("api/routes/cluster_agents/app_routes.zig");
     _ = @import("api/routes/cluster_agents/deploy_routes.zig");
     _ = @import("api/routes/status_metrics.zig");
     _ = @import("api/server.zig");

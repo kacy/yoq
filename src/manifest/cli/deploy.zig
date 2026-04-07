@@ -1,14 +1,15 @@
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
+const app_spec = @import("../app_spec.zig");
+const release_history = @import("../release_history.zig");
+const release_plan = @import("../release_plan.zig");
 const manifest_loader = @import("../loader.zig");
-const manifest_spec = @import("../spec.zig");
 const orchestrator = @import("../orchestrator.zig");
 const startup_runtime = @import("../orchestrator/startup_runtime.zig");
 const watcher_mod = @import("../../dev/watcher.zig");
 const store = @import("../../state/store.zig");
 const process = @import("../../runtime/process.zig");
 const http_client = @import("../../cluster/http_client.zig");
-const json_helpers = @import("../../lib/json_helpers.zig");
 const container_cmds = @import("../../runtime/container_commands.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const service_rollout = @import("../../network/service_rollout.zig");
@@ -60,18 +61,6 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
     defer manifest.deinit();
 
-    for (service_names.items) |name| {
-        if (manifest.serviceByName(name) == null) {
-            writeErr("unknown service: {s}\n", .{name});
-            return DeployError.UnknownService;
-        }
-    }
-
-    if (server_addr) |addr| {
-        try deployToCluster(alloc, addr, &manifest);
-        return;
-    }
-
     var cwd_buf: [4096]u8 = undefined;
     const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
         writeErr("failed to resolve working directory: {}\n", .{err});
@@ -79,28 +68,49 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
     const app_name = std.fs.path.basename(cwd);
 
+    var app = app_spec.fromManifest(alloc, app_name, &manifest) catch return DeployError.OutOfMemory;
+    defer app.deinit();
+
+    for (service_names.items) |name| {
+        if (app.serviceByName(name) == null) {
+            writeErr("unknown service: {s}\n", .{name});
+            return DeployError.UnknownService;
+        }
+    }
+
+    var release = release_plan.ReleasePlan.fromAppSpec(alloc, &app, service_names.items) catch return DeployError.OutOfMemory;
+    defer release.deinit();
+
+    if (server_addr) |addr| {
+        try deployToCluster(alloc, addr, &release);
+        return;
+    }
+
+    const release_id = release_history.recordAppReleaseStart(&release) catch null;
+    defer if (release_id) |id| alloc.free(id);
+
     if (service_names.items.len > 0) {
         writeErr("starting", .{});
         for (service_names.items, 0..) |name, i| {
             if (i > 0) writeErr(",", .{});
             writeErr(" {s}", .{name});
         }
-        writeErr(" ({d} services)...\n", .{service_names.items.len});
+        writeErr(" ({d} requested, {d} resolved)...\n", .{ service_names.items.len, release.resolvedServiceCount() });
     } else if (dev_mode) {
-        writeErr("starting {s} in dev mode ({d} services)...\n", .{ app_name, manifest.services.len });
+        writeErr("starting {s} in dev mode ({d} services)...\n", .{ release.app.app_name, release.resolvedServiceCount() });
     } else {
-        writeErr("starting {s} ({d} services)...\n", .{ app_name, manifest.services.len });
+        writeErr("starting {s} ({d} services)...\n", .{ release.app.app_name, release.resolvedServiceCount() });
     }
 
-    var orch = orchestrator.Orchestrator.init(alloc, &manifest, app_name) catch |err| {
+    var orch = orchestrator.Orchestrator.init(alloc, &manifest, release.app.app_name) catch |err| {
         writeErr("failed to initialize orchestrator: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };
     defer orch.deinit();
     orch.dev_mode = dev_mode;
 
-    if (service_names.items.len > 0) {
-        orch.service_filter = service_names.items;
+    if (release.service_filter) |filter| {
+        orch.service_filter = filter;
     }
 
     orch.computeStartSet() catch |err| {
@@ -123,9 +133,16 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     orchestrator.installSignalHandlers();
 
     orch.startAll() catch |err| {
+        if (release_id) |id| {
+            release_history.markAppReleaseFailed(id, "service startup failed") catch {};
+        }
         writeErr("failed to start services: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };
+
+    if (release_id) |id| {
+        release_history.markAppReleaseCompleted(id) catch {};
+    }
 
     var watcher: ?watcher_mod.Watcher = null;
     var watcher_thread: ?std.Thread = null;
@@ -139,6 +156,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         if (watcher != null) {
             var any_watch_failed = false;
             for (manifest.services, 0..) |svc, i| {
+                if (!release.includesService(svc.name)) continue;
                 for (svc.volumes) |vol| {
                     if (vol.kind != .bind) continue;
 
@@ -184,45 +202,14 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     writeErr("stopped\n", .{});
 }
 
-fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, manifest: *const manifest_spec.Manifest) DeployError!void {
+fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, release: *const release_plan.ReleasePlan) DeployError!void {
     const server = cli.parseServerAddr(addr_str);
-
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeAll("{\"services\":[") catch return DeployError.OutOfMemory;
-
-    for (manifest.services, 0..) |svc, i| {
-        if (i > 0) writer.writeByte(',') catch break;
-
-        var cmd_buf: [1024]u8 = undefined;
-        var cmd_len: usize = 0;
-        for (svc.command, 0..) |arg, j| {
-            if (j > 0 and cmd_len < cmd_buf.len) {
-                cmd_buf[cmd_len] = ' ';
-                cmd_len += 1;
-            }
-            const copy_len = @min(arg.len, cmd_buf.len - cmd_len);
-            @memcpy(cmd_buf[cmd_len..][0..copy_len], arg[0..copy_len]);
-            cmd_len += copy_len;
-        }
-
-        writer.writeAll("{\"image\":\"") catch break;
-        json_helpers.writeJsonEscaped(writer, svc.image) catch break;
-        writer.writeAll("\",\"command\":\"") catch break;
-        json_helpers.writeJsonEscaped(writer, cmd_buf[0..cmd_len]) catch break;
-        writer.writeAll("\",\"cpu_limit\":1000,\"memory_limit_mb\":256}") catch break;
-    }
-
-    writer.writeAll("]}") catch return DeployError.OutOfMemory;
-
-    writeErr("deploying {d} services to cluster {s}...\n", .{ manifest.services.len, addr_str });
+    writeErr("deploying {d} services to cluster {s}...\n", .{ release.resolvedServiceCount(), addr_str });
 
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
-    var resp = http_client.postWithAuth(alloc, server.ip, server.port, "/deploy", json_buf.items, token) catch |err| {
+    var resp = http_client.postWithAuth(alloc, server.ip, server.port, "/apps/apply", release.config_snapshot, token) catch |err| {
         writeErr("failed to connect to cluster server: {}\n", .{err});
         writeErr("hint: is the server running? try 'yoq serve' or 'yoq init-server'\n", .{});
         return DeployError.ConnectionFailed;
