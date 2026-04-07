@@ -120,10 +120,10 @@ test "stress: burst node registration via agent join API" {
     for (0..10) |i| {
         var body_buf: [256]u8 = undefined;
         const body = std.fmt.bufPrint(&body_buf,
-            \\{{"node_id":{d},"addr":"10.0.{d}.{d}","port":9700,"role":"agent","cpu_cores":4,"memory_mb":8192}}
-        , .{ 100 + i, i / 255, i % 255 }) catch continue;
+            \\{{"token":"{s}","address":"10.0.{d}.{d}:9700","role":"agent","cpu_cores":4,"memory_mb":8192}}
+        , .{ cluster.join_token, i / 255, i % 255 }) catch continue;
 
-        var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/v1/join", body, cluster.api_token) catch continue;
+        var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/agents/register", body, cluster.api_token) catch continue;
         defer resp.deinit(alloc);
 
         if (resp.status_code == 200 or resp.status_code == 201 or resp.status_code == 409) {
@@ -151,10 +151,10 @@ test "stress: mixed workload scheduling burst" {
     for (0..15) |i| {
         var body_buf: [512]u8 = undefined;
         const body = std.fmt.bufPrint(&body_buf,
-            \\{{"name":"svc-{d}","image":"alpine:latest","command":["sleep","10"],"cpu":100,"memory_mb":64}}
+            \\{{"services":[{{"name":"svc-{d}","image":"alpine:latest","command":"sleep 10","cpu":100,"memory_mb":64}}]}}
         , .{i}) catch continue;
 
-        var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/v1/deploy", body, cluster.api_token) catch continue;
+        var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/deploy", body, cluster.api_token) catch continue;
         defer resp.deinit(alloc);
 
         // 200/201 = accepted, 409 = already exists, 503 = busy (all ok under stress)
@@ -178,9 +178,9 @@ test "stress: leader failover under active workload" {
 
     // submit a workload to the leader
     const body =
-        \\{"name":"stress-workload","image":"alpine:latest","command":["sleep","30"],"cpu":100,"memory_mb":64}
+        \\{"services":[{"name":"stress-workload","image":"alpine:latest","command":"sleep 30","cpu":100,"memory_mb":64}]}
     ;
-    var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/v1/deploy", body, cluster.api_token) catch {
+    var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/deploy", body, cluster.api_token) catch {
         // if the deploy API isn't available, just verify failover works
         cluster.killNode(leader.id);
         _ = try cluster.waitForLeader(15000);
