@@ -99,11 +99,11 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     defer prepared.deinit();
     prepared.beginRuntime();
 
-    const release_id = prepared.startRelease() catch |err| {
+    const apply_report = prepared.startRelease() catch |err| {
         writeErr("failed to start services: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };
-    defer if (release_id) |id| alloc.free(id);
+    defer apply_report.deinit(alloc);
 
     var watcher = local_apply_backend.DevWatcherRuntime{};
 

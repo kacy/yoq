@@ -11,6 +11,32 @@ pub const ApplyOutcome = struct {
 pub const ApplyResult = struct {
     release_id: ?[]const u8,
     outcome: ApplyOutcome,
+
+    pub fn toReport(self: ApplyResult, app_name: []const u8, service_count: usize) ApplyReport {
+        return .{
+            .app_name = app_name,
+            .release_id = self.release_id,
+            .status = self.outcome.status,
+            .service_count = service_count,
+            .placed = self.outcome.placed,
+            .failed = self.outcome.failed,
+            .message = self.outcome.message,
+        };
+    }
+};
+
+pub const ApplyReport = struct {
+    app_name: []const u8,
+    release_id: ?[]const u8,
+    status: update_common.DeploymentStatus,
+    service_count: usize,
+    placed: usize,
+    failed: usize,
+    message: ?[]const u8 = null,
+
+    pub fn deinit(self: ApplyReport, alloc: std.mem.Allocator) void {
+        if (self.release_id) |id| alloc.free(id);
+    }
 };
 
 pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
@@ -124,4 +150,25 @@ test "execute marks failed releases on backend error" {
     try std.testing.expectError(BackendError.StartupFailed, execute(&tracker, &backend));
     try std.testing.expectEqual(update_common.DeploymentStatus.failed, tracker.last_status.?);
     try std.testing.expectEqualStrings("service startup failed", tracker.last_message.?);
+}
+
+test "ApplyResult projects to shared apply report" {
+    const result = ApplyResult{
+        .release_id = "dep789",
+        .outcome = .{
+            .status = .completed,
+            .message = null,
+            .placed = 3,
+            .failed = 0,
+        },
+    };
+
+    const report = result.toReport("demo-app", 3);
+    try std.testing.expectEqualStrings("demo-app", report.app_name);
+    try std.testing.expectEqualStrings("dep789", report.release_id.?);
+    try std.testing.expectEqual(update_common.DeploymentStatus.completed, report.status);
+    try std.testing.expectEqual(@as(usize, 3), report.service_count);
+    try std.testing.expectEqual(@as(usize, 3), report.placed);
+    try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expect(report.message == null);
 }

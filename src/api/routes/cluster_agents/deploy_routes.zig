@@ -224,20 +224,12 @@ fn handleApply(
         ClusterApplyError.NotLeader => return common.notLeader(alloc, node),
         ClusterApplyError.InternalError => return common.internalError(),
     };
-    const release_id = apply_result.release_id;
-    defer if (release_id) |id| alloc.free(id);
+    const apply_report = apply_result.toReport(parsed.app_name orelse "", parsed.requests.items.len);
+    defer apply_report.deinit(alloc);
 
     const body = switch (response_mode) {
-        .legacy => formatLegacyApplyResponse(alloc, apply_result.outcome.placed, apply_result.outcome.failed) catch return common.internalError(),
-        .app => formatAppApplyResponse(
-            alloc,
-            parsed.app_name.?,
-            release_id orelse "",
-            apply_result.outcome.status.toString(),
-            parsed.requests.items.len,
-            apply_result.outcome.placed,
-            apply_result.outcome.failed,
-        ) catch return common.internalError(),
+        .legacy => formatLegacyApplyResponse(alloc, apply_report.placed, apply_report.failed) catch return common.internalError(),
+        .app => formatAppApplyResponse(alloc, apply_report) catch return common.internalError(),
     };
     return .{ .status = .ok, .body = body, .allocated = true };
 }
@@ -254,29 +246,21 @@ fn formatLegacyApplyResponse(alloc: std.mem.Allocator, placed: usize, failed: us
     return std.fmt.allocPrint(alloc, "{{\"placed\":{d},\"failed\":{d}}}", .{ placed, failed });
 }
 
-fn formatAppApplyResponse(
-    alloc: std.mem.Allocator,
-    app_name: []const u8,
-    release_id: []const u8,
-    status: []const u8,
-    service_count: usize,
-    placed: usize,
-    failed: usize,
-) ![]u8 {
+fn formatAppApplyResponse(alloc: std.mem.Allocator, report: apply_release.ApplyReport) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
     const writer = json_buf.writer(alloc);
 
     try writer.writeAll("{\"app_name\":\"");
-    try json_helpers.writeJsonEscaped(writer, app_name);
+    try json_helpers.writeJsonEscaped(writer, report.app_name);
     try writer.writeAll("\",\"release_id\":\"");
-    try json_helpers.writeJsonEscaped(writer, release_id);
+    try json_helpers.writeJsonEscaped(writer, report.release_id orelse "");
     try writer.writeAll("\",\"status\":\"");
-    try json_helpers.writeJsonEscaped(writer, status);
+    try json_helpers.writeJsonEscaped(writer, report.status.toString());
     try writer.print("\",\"service_count\":{d},\"placed\":{d},\"failed\":{d}", .{
-        service_count,
-        placed,
-        failed,
+        report.service_count,
+        report.placed,
+        report.failed,
     });
     try writer.writeByte('}');
 
@@ -285,7 +269,14 @@ fn formatAppApplyResponse(
 
 test "formatAppApplyResponse includes app release metadata" {
     const alloc = std.testing.allocator;
-    const json = try formatAppApplyResponse(alloc, "demo-app", "abc123def456", "completed", 2, 2, 0);
+    const json = try formatAppApplyResponse(alloc, .{
+        .app_name = "demo-app",
+        .release_id = "abc123def456",
+        .status = .completed,
+        .service_count = 2,
+        .placed = 2,
+        .failed = 0,
+    });
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);

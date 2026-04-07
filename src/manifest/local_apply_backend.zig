@@ -67,14 +67,14 @@ pub const PreparedLocalApply = struct {
         self.runtime_started = true;
     }
 
-    pub fn startRelease(self: *PreparedLocalApply) !?[]const u8 {
+    pub fn startRelease(self: *PreparedLocalApply) !apply_release.ApplyReport {
         var release_tracker = LocalReleaseTracker{ .plan = self.release };
         var apply_backend = LocalApplyBackend{
             .orch = &self.orch,
             .release = self.release,
         };
         const apply_result = try apply_release.execute(&release_tracker, &apply_backend);
-        return apply_result.release_id;
+        return apply_result.toReport(self.release.app.app_name, self.release.resolvedServiceCount());
     }
 
     pub fn startDevWatcher(self: *PreparedLocalApply) DevWatcherRuntime {
