@@ -80,9 +80,12 @@ pub const getServicePolicies = @import("store/services.zig").getServicePolicies;
 pub const saveDeployment = @import("store/deployments.zig").saveDeployment;
 pub const getDeployment = @import("store/deployments.zig").getDeployment;
 pub const listDeployments = @import("store/deployments.zig").listDeployments;
+pub const listDeploymentsByApp = @import("store/deployments.zig").listDeploymentsByApp;
 pub const updateDeploymentStatus = @import("store/deployments.zig").updateDeploymentStatus;
 pub const getLatestDeployment = @import("store/deployments.zig").getLatestDeployment;
+pub const getLatestDeploymentByApp = @import("store/deployments.zig").getLatestDeploymentByApp;
 pub const getLastSuccessfulDeployment = @import("store/deployments.zig").getLastSuccessfulDeployment;
+pub const getLastSuccessfulDeploymentByApp = @import("store/deployments.zig").getLastSuccessfulDeploymentByApp;
 
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
 pub const updateTrainingJobState = @import("store/training.zig").updateTrainingJobState;

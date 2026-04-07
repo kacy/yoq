@@ -75,6 +75,7 @@ pub fn performRollingUpdate(
     if (deployment_id) |did| {
         deployment_store.recordDeployment(
             did,
+            null,
             context.service_name,
             context.manifest_hash,
             context.config_snapshot,

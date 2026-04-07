@@ -7,6 +7,7 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
     migrateContainers(db);
     migrateAgents(db);
     migrateServices(db);
+    migrateDeployments(db);
 }
 
 fn migrateContainers(db: *sqlite.Db) void {
@@ -123,6 +124,10 @@ fn migrateServices(db: *sqlite.Db) void {
         .{},
         .{},
     ) catch {};
+}
+
+fn migrateDeployments(db: *sqlite.Db) void {
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN app_name TEXT;") catch {};
 }
 
 fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {

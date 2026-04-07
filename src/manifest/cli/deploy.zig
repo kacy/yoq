@@ -1,6 +1,7 @@
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const app_spec = @import("../app_spec.zig");
+const release_history = @import("../release_history.zig");
 const release_plan = @import("../release_plan.zig");
 const manifest_loader = @import("../loader.zig");
 const orchestrator = @import("../orchestrator.zig");
@@ -85,6 +86,9 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return;
     }
 
+    const release_id = release_history.recordAppReleaseStart(&release) catch null;
+    defer if (release_id) |id| alloc.free(id);
+
     if (service_names.items.len > 0) {
         writeErr("starting", .{});
         for (service_names.items, 0..) |name, i| {
@@ -129,9 +133,16 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     orchestrator.installSignalHandlers();
 
     orch.startAll() catch |err| {
+        if (release_id) |id| {
+            release_history.markAppReleaseFailed(id, "service startup failed") catch {};
+        }
         writeErr("failed to start services: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };
+
+    if (release_id) |id| {
+        release_history.markAppReleaseCompleted(id) catch {};
+    }
 
     var watcher: ?watcher_mod.Watcher = null;
     var watcher_thread: ?std.Thread = null;

@@ -17,6 +17,7 @@ pub fn generateDeploymentId(alloc: std.mem.Allocator) ![]const u8 {
 
 pub fn recordDeployment(
     id: []const u8,
+    app_name: ?[]const u8,
     service_name: []const u8,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
@@ -25,6 +26,7 @@ pub fn recordDeployment(
 ) !void {
     store.saveDeployment(.{
         .id = id,
+        .app_name = app_name,
         .service_name = service_name,
         .manifest_hash = manifest_hash,
         .config_snapshot = config_snapshot,

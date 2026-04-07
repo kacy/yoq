@@ -18,6 +18,7 @@ comptime {
     _ = @import("runtime/container_commands.zig");
     _ = @import("runtime/run_state.zig");
     _ = @import("state/store.zig");
+    _ = @import("state/store/deployments.zig");
     _ = @import("state/schema.zig");
     _ = @import("state/commands.zig");
     _ = @import("state/volumes.zig");
@@ -75,6 +76,7 @@ comptime {
     _ = @import("manifest/spec.zig");
     _ = @import("manifest/app_spec.zig");
     _ = @import("manifest/release_plan.zig");
+    _ = @import("manifest/release_history.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
     _ = @import("manifest/gpu_runtime.zig");

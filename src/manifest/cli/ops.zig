@@ -3,6 +3,7 @@ const cli = @import("../../lib/cli.zig");
 const json_out = @import("../../lib/json_output.zig");
 const manifest_loader = @import("../loader.zig");
 const orchestrator = @import("../orchestrator.zig");
+const release_history = @import("../release_history.zig");
 const update = @import("../update.zig");
 const store = @import("../../state/store.zig");
 
@@ -19,51 +20,96 @@ const OpsError = error{
 };
 
 pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    const service_name = args.next() orelse {
-        writeErr("usage: yoq rollback <service>\n", .{});
-        return OpsError.InvalidArgument;
-    };
+    var target_name: ?[]const u8 = null;
+    var app_mode = false;
 
-    const config = update.rollback(alloc, service_name) catch |err| {
-        switch (err) {
-            update.UpdateError.NoPreviousDeployment => {
-                writeErr("no previous deployment found for {s}\n", .{service_name});
-            },
-            update.UpdateError.StoreFailed => {
-                writeErr("failed to read deployment history\n", .{});
-            },
-            else => {
-                writeErr("rollback failed\n", .{});
-            },
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--app")) {
+            app_mode = true;
+        } else {
+            target_name = arg;
         }
-        return OpsError.StoreError;
+    }
+
+    const config = if (app_mode) blk: {
+        const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+        defer if (owned_app_name) |name| alloc.free(name);
+        const app_name = target_name orelse owned_app_name.?;
+        break :blk release_history.rollbackApp(alloc, app_name) catch {
+            writeErr("no previous deployment found for app {s}\n", .{app_name});
+            return OpsError.StoreError;
+        };
+    } else blk: {
+        const service_name = target_name orelse {
+            writeErr("usage: yoq rollback <service>\n", .{});
+            writeErr("   or: yoq rollback --app [name]\n", .{});
+            return OpsError.InvalidArgument;
+        };
+
+        break :blk update.rollback(alloc, service_name) catch |err| {
+            switch (err) {
+                update.UpdateError.NoPreviousDeployment => {
+                    writeErr("no previous deployment found for {s}\n", .{service_name});
+                },
+                update.UpdateError.StoreFailed => {
+                    writeErr("failed to read deployment history\n", .{});
+                },
+                else => {
+                    writeErr("rollback failed\n", .{});
+                },
+            }
+            return OpsError.StoreError;
+        };
     };
     defer alloc.free(config);
 
-    write("rollback config for {s}:\n{s}\n", .{ service_name, config });
+    if (app_mode) {
+        const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+        defer if (owned_app_name) |name| alloc.free(name);
+        const app_name = target_name orelse owned_app_name.?;
+        write("rollback config for app {s}:\n{s}\n", .{ app_name, config });
+    } else {
+        write("rollback config for {s}:\n{s}\n", .{ target_name.?, config });
+    }
     write("\nto apply this rollback, redeploy with this config using 'yoq up'\n", .{});
 }
 
 pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    var service_name: ?[]const u8 = null;
+    var target_name: ?[]const u8 = null;
+    var app_mode = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             cli.output_mode = .json;
+        } else if (std.mem.eql(u8, arg, "--app")) {
+            app_mode = true;
         } else {
-            service_name = arg;
+            target_name = arg;
         }
     }
 
-    const svc = service_name orelse {
-        writeErr("usage: yoq history <service> [--json]\n", .{});
-        return OpsError.InvalidArgument;
-    };
+    const owned_label = if (app_mode and target_name == null) try currentAppNameAlloc(alloc) else null;
+    defer if (owned_label) |label| alloc.free(label);
 
-    var deployments = store.listDeployments(alloc, svc) catch |err| {
-        writeErr("failed to read deployment history: {}\n", .{err});
-        return OpsError.StoreError;
-    };
+    const label = if (app_mode)
+        target_name orelse owned_label.?
+    else
+        target_name orelse {
+            writeErr("usage: yoq history <service> [--json]\n", .{});
+            writeErr("   or: yoq history --app [name] [--json]\n", .{});
+            return OpsError.InvalidArgument;
+        };
+
+    var deployments = if (app_mode)
+        release_history.listAppReleases(alloc, label) catch |err| {
+            writeErr("failed to read app release history: {}\n", .{err});
+            return OpsError.StoreError;
+        }
+    else
+        store.listDeployments(alloc, label) catch |err| {
+            writeErr("failed to read deployment history: {}\n", .{err});
+            return OpsError.StoreError;
+        };
     defer {
         for (deployments.items) |dep| dep.deinit(alloc);
         deployments.deinit(alloc);
@@ -75,6 +121,7 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         for (deployments.items) |dep| {
             w.beginObject();
             w.stringField("id", dep.id);
+            if (dep.app_name) |app_name| w.stringField("app", app_name) else w.nullField("app");
             w.stringField("service", dep.service_name);
             w.stringField("status", dep.status);
             w.stringField("manifest_hash", dep.manifest_hash);
@@ -88,7 +135,11 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 
     if (deployments.items.len == 0) {
-        write("no deployments found for {s}\n", .{svc});
+        if (app_mode) {
+            write("no releases found for app {s}\n", .{label});
+        } else {
+            write("no deployments found for {s}\n", .{label});
+        }
         return;
     }
 
@@ -107,6 +158,12 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
             truncate(msg, 40),
         });
     }
+}
+
+fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return OpsError.StoreError;
+    return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return OpsError.StoreError;
 }
 
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
