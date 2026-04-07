@@ -72,7 +72,7 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) Conta
                 return ContainerError.InvalidArgument;
             }
             env.append(alloc, env_str) catch return ContainerError.OutOfMemory;
-        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--volume")) {
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--volume") or std.mem.eql(u8, arg, "--mount")) {
             const mount_str = args.next() orelse {
                 writeErr("{s} requires source:target[:ro]\n", .{arg});
                 return ContainerError.InvalidArgument;
@@ -93,6 +93,24 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) Conta
             };
             limits.memory_max = parseMemorySize(mem_str) orelse {
                 writeErr("invalid memory size: {s}\n", .{mem_str});
+                return ContainerError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--pids")) {
+            const pids_str = args.next() orelse {
+                writeErr("--pids requires a numeric limit\n", .{});
+                return ContainerError.InvalidArgument;
+            };
+            limits.pids_max = std.fmt.parseUnsigned(u32, pids_str, 10) catch {
+                writeErr("invalid pids limit: {s}\n", .{pids_str});
+                return ContainerError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--cpu-weight")) {
+            const weight_str = args.next() orelse {
+                writeErr("--cpu-weight requires a value between 1 and 10000\n", .{});
+                return ContainerError.InvalidArgument;
+            };
+            limits.cpu_weight = std.fmt.parseUnsigned(u16, weight_str, 10) catch {
+                writeErr("invalid cpu weight: {s}\n", .{weight_str});
                 return ContainerError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--cpus")) {
@@ -131,7 +149,7 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) Conta
     }
 
     const run_target = target orelse {
-        writeErr("usage: yoq run [--name <name>] [-e KEY=VALUE] [-v source:target[:ro]] [-p host:container] [--memory SIZE] [--cpus N] [-d] [--restart POLICY] [--no-net] <image|rootfs> [command]\n", .{});
+        writeErr("usage: yoq run [--name <name>] [-e KEY=VALUE] [-v source:target[:ro]] [--mount source:target[:ro]] [-p host:container] [--memory SIZE] [--pids N] [--cpu-weight N] [--cpus N] [-d] [--restart POLICY] [--no-net] <image|rootfs> [command]\n", .{});
         return ContainerError.InvalidArgument;
     };
 

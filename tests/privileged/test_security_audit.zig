@@ -35,7 +35,7 @@ test "security audit: GPU device path traversal rejected" {
 
     // attempt to reference GPU devices outside allowed paths
     const malicious_paths = [_][]const u8{
-        "/v1/deploy",
+        "/deploy",
     };
     const malicious_bodies = [_][]const u8{
         // GPU device path traversal
@@ -78,11 +78,28 @@ test "security audit: GPU MIG partition IDs validated" {
     };
 
     for (bodies) |body| {
-        var resp = http_client.postWithAuth(alloc, addr, port, "/v1/deploy", body, token) catch continue;
+        var resp = http_client.postWithAuth(alloc, addr, port, "/deploy", body, token) catch continue;
         defer resp.deinit(alloc);
         // must not crash the server
         try std.testing.expect(resp.status_code != 500);
     }
+}
+
+test "security audit: deploy parses valid JSON regardless of field order" {
+    var cluster = try initCluster(1, 19508, 17508);
+    defer cluster.deinit();
+    const port = cluster.nodes.items[0].api_port;
+    const token = cluster.api_token;
+
+    const body =
+        \\{"services":[{"name":"field-order-test","image":"alpine","command":"true"}]}
+    ;
+
+    var resp = try http_client.postWithAuth(alloc, addr, port, "/deploy", body, token);
+    defer resp.deinit(alloc);
+
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+    try helpers.expectContains(resp.body, "no agents available");
 }
 
 // -- WireGuard key management --
@@ -97,7 +114,7 @@ test "security audit: WG key not exposed in API responses" {
     const endpoints = [_][]const u8{
         "/cluster/status",
         "/health",
-        "/v1/containers",
+        "/containers",
         "/v1/metrics?format=prometheus",
     };
 
@@ -177,7 +194,7 @@ test "security audit: auth tokens constant-time comparison" {
     };
 
     for (bad_tokens) |token| {
-        var resp = http_client.getWithAuth(alloc, addr, port, "/v1/containers", token) catch continue;
+        var resp = http_client.getWithAuth(alloc, addr, port, "/containers", token) catch continue;
         defer resp.deinit(alloc);
         try std.testing.expectEqual(@as(u16, 401), resp.status_code);
     }
@@ -190,7 +207,7 @@ test "security audit: token not logged or reflected in responses" {
     const token = cluster.api_token;
 
     // make a request with valid token
-    var resp = http_client.getWithAuth(alloc, addr, port, "/v1/containers", token) catch return;
+    var resp = http_client.getWithAuth(alloc, addr, port, "/containers", token) catch return;
     defer resp.deinit(alloc);
 
     // response body must not contain the auth token
@@ -207,7 +224,7 @@ test "security audit: rate limiting on auth failures" {
     // send 50 rapid auth failures — server should not crash or OOM
     var failures: u32 = 0;
     for (0..50) |_| {
-        var resp = http_client.getWithAuth(alloc, addr, port, "/v1/containers", "bad-token-flood") catch {
+        var resp = http_client.getWithAuth(alloc, addr, port, "/containers", "bad-token-flood") catch {
             failures += 1;
             continue;
         };
@@ -217,6 +234,9 @@ test "security audit: rate limiting on auth failures" {
 
     // all should have been rejected (server still alive)
     try std.testing.expect(failures >= 45);
+
+    // Wait for the next limiter window before checking liveness.
+    std.Thread.sleep(1_100_000_000);
 
     // server should still be responsive after the flood
     var health = http_client.getWithAuth(alloc, addr, port, "/health", null) catch return;
@@ -248,7 +268,7 @@ test "security audit: concurrent deploy with different auth tokens" {
                     result.* = 0;
                     return;
                 };
-                var resp = http_client.postWithAuth(a, [4]u8{ 127, 0, 0, 1 }, p, "/v1/deploy", body, effective_token) catch {
+                var resp = http_client.postWithAuth(a, [4]u8{ 127, 0, 0, 1 }, p, "/deploy", body, effective_token) catch {
                     result.* = 0;
                     return;
                 };
@@ -292,7 +312,7 @@ test "security audit: cluster join rejects spoofed tokens" {
     };
 
     for (spoofed_bodies) |body| {
-        var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/v1/join", body, "bad-api-token") catch continue;
+        var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/agents/register", body, "bad-api-token") catch continue;
         defer resp.deinit(alloc);
         // must reject — 401 or 403
         try std.testing.expect(resp.status_code == 401 or resp.status_code == 403);
@@ -306,7 +326,7 @@ test "security audit: API endpoints reject oversized JSON" {
     var req_buf: [256]u8 = undefined;
     const request = std.fmt.bufPrint(
         &req_buf,
-        "POST /v1/deploy HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\nContent-Length: {d}\r\n\r\n",
+        "POST /deploy HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\nContent-Length: {d}\r\n\r\n",
         .{ cluster.api_token, http.max_body_bytes + 1 },
     ) catch return;
 

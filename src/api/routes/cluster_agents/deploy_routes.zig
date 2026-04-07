@@ -10,6 +10,48 @@ const RouteContext = common.RouteContext;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 
+fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":[", .{key}) catch return null;
+    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
+
+    const array_start = start_pos + needle.len - 1;
+    var pos = array_start;
+    var depth: usize = 0;
+    var in_string = false;
+    var escape = false;
+
+    while (pos < json.len) : (pos += 1) {
+        const c = json[pos];
+
+        if (escape) {
+            escape = false;
+            continue;
+        }
+
+        if (c == '\\' and in_string) {
+            escape = true;
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+
+        if (in_string) continue;
+
+        if (c == '[') {
+            depth += 1;
+        } else if (c == ']') {
+            depth -= 1;
+            if (depth == 0) return json[array_start .. pos + 1];
+        }
+    }
+
+    return null;
+}
+
 pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
@@ -18,15 +60,13 @@ pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig")
     defer requests.deinit(alloc);
 
     const volume_app = extractJsonString(request.body, "volume_app");
+    const services_json = extractJsonArray(request.body, "services") orelse
+        return common.badRequest("missing services array");
 
-    var pos: usize = 0;
-    while (pos < request.body.len) {
-        const block_start = std.mem.indexOfPos(u8, request.body, pos, "{\"image\":\"") orelse break;
-        const block_end = std.mem.indexOfPos(u8, request.body, block_start + 1, "}") orelse break;
-        const block = request.body[block_start .. block_end + 1];
+    var iter = json_helpers.extractJsonObjects(services_json);
+    while (iter.next()) |block| {
 
         const image = extractJsonString(block, "image") orelse {
-            pos = block_end + 1;
             continue;
         };
         const command = extractJsonString(block, "command") orelse "";
@@ -40,11 +80,9 @@ pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig")
         const gpus_per_rank_val = extractJsonInt(block, "gpus_per_rank");
 
         if (!common.validateClusterInput(image)) {
-            pos = block_end + 1;
             continue;
         }
         if (command.len > 0 and !common.validateClusterInput(command)) {
-            pos = block_end + 1;
             continue;
         }
 
@@ -60,8 +98,6 @@ pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig")
             .gang_world_size = if (gang_world_size_val) |v| @intCast(@max(0, v)) else 0,
             .gpus_per_rank = if (gpus_per_rank_val) |v| @intCast(@max(1, v)) else 1,
         }) catch return common.internalError();
-
-        pos = block_end + 1;
     }
 
     if (requests.items.len == 0) return common.badRequest("no services to deploy");
@@ -186,4 +222,23 @@ pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig")
 
     const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+test "extractJsonArray finds services array regardless of field order" {
+    const json =
+        \\{"services":[{"name":"svc-a","image":"alpine","gpu":{"devices":["../../dev/sda"]}},{"image":"busybox","name":"svc-b"}]}
+    ;
+
+    const services = extractJsonArray(json, "services").?;
+    var iter = json_helpers.extractJsonObjects(services);
+
+    const first = iter.next().?;
+    try std.testing.expectEqualStrings("svc-a", extractJsonString(first, "name").?);
+    try std.testing.expectEqualStrings("alpine", extractJsonString(first, "image").?);
+
+    const second = iter.next().?;
+    try std.testing.expectEqualStrings("svc-b", extractJsonString(second, "name").?);
+    try std.testing.expectEqualStrings("busybox", extractJsonString(second, "image").?);
+
+    try std.testing.expect(iter.next() == null);
 }

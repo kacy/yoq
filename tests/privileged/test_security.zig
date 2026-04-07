@@ -43,9 +43,9 @@ test "security: protected endpoints reject missing auth token" {
     const port = cluster.nodes.items[0].api_port;
 
     const protected_paths = [_][]const u8{
-        "/v1/containers",
+        "/containers",
         "/cluster/status",
-        "/v1/deploy",
+        "/deploy",
     };
 
     for (protected_paths) |path| {
@@ -61,7 +61,7 @@ test "security: protected endpoints reject invalid token" {
     const port = cluster.nodes.items[0].api_port;
 
     const protected_paths = [_][]const u8{
-        "/v1/containers",
+        "/containers",
         "/cluster/status",
     };
 
@@ -92,9 +92,9 @@ test "security: path traversal in container ID rejected" {
     const token = cluster.api_token;
 
     const traversal_paths = [_][]const u8{
-        "/v1/containers/../../etc/passwd",
-        "/v1/containers/..%2F..%2Fetc%2Fpasswd",
-        "/v1/containers/abc/../../../etc/shadow",
+        "/containers/../../etc/passwd",
+        "/containers/..%2F..%2Fetc%2Fpasswd",
+        "/containers/abc/../../../etc/shadow",
     };
 
     for (traversal_paths) |path| {
@@ -112,8 +112,8 @@ test "security: SQL injection in query params" {
     const token = cluster.api_token;
 
     const injection_paths = [_][]const u8{
-        "/v1/containers?name='; DROP TABLE containers;--",
-        "/v1/containers?id=1 OR 1=1",
+        "/containers?name='; DROP TABLE containers;--",
+        "/containers?id=1 OR 1=1",
     };
 
     for (injection_paths) |path| {
@@ -165,7 +165,7 @@ test "security: request body above configured max rejected" {
     var req_buf: [256]u8 = undefined;
     const request = std.fmt.bufPrint(
         &req_buf,
-        "POST /v1/deploy HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\nContent-Length: {d}\r\n\r\n",
+        "POST /deploy HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\nContent-Length: {d}\r\n\r\n",
         .{ cluster.api_token, http.max_body_bytes + 1 },
     ) catch return;
 
@@ -206,7 +206,7 @@ test "security: concurrent auth attempts don't race" {
             fn run(p: u16, tok: []const u8, valid: bool, result: *u16) void {
                 const a = std.heap.page_allocator;
                 const effective_token = if (valid) tok else "bad-token";
-                var resp = http_client.getWithAuth(a, [4]u8{ 127, 0, 0, 1 }, p, "/v1/containers", effective_token) catch {
+                var resp = http_client.getWithAuth(a, [4]u8{ 127, 0, 0, 1 }, p, "/containers", effective_token) catch {
                     result.* = 0;
                     return;
                 };
