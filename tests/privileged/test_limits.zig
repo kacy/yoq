@@ -45,7 +45,7 @@ test "container with memory limit can allocate within limit" {
     var run_result = try env.runYoq(&.{
         "run",      "--name", name,
         "--memory", "8m",     fixture.rootfs_path,
-        "/bin/sh",  "-c",     "dd if=/dev/zero of=/tmp/test bs=1M count=4 2>/dev/null && echo ok",
+        "/bin/sh",  "-c",     "i=0; while [ \"$i\" -lt 4096 ]; do printf '%1024s' ''; i=$((i + 1)); done > /tmp/test && echo ok",
     });
     defer run_result.deinit();
 
@@ -150,13 +150,13 @@ test "container restart policy no prevents restart" {
     var run_result = try env.runYoq(&.{
         "run",       "-d", "--name", name,
         "--restart", "no",
-        fixture.rootfs_path, "/bin/false", // exits with 1
+        fixture.rootfs_path, "/bin/sh", "-c", "exit 1",
     });
     defer run_result.deinit();
     try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
 
     // wait for it to exit
-    std.time.sleep(200 * std.time.ns_per_ms);
+    std.Thread.sleep(200 * std.time.ns_per_ms);
 
     // check status
     var ps_result = try env.runYoq(&.{"ps"});
@@ -190,29 +190,29 @@ test "backoff increases on restart but caps" {
 }
 
 test "ResourceLimits validation errors" {
-    const cgroups = @import("cgroups");
+    const cgroups_common = @import("cgroups_common");
 
     // memory below minimum (4MB)
-    const bad_mem = cgroups.ResourceLimits{ .memory_max = 1024 * 1024 };
-    try std.testing.expectError(cgroups.CgroupError.LimitBelowMinimum, bad_mem.validate());
+    const bad_mem = cgroups_common.ResourceLimits{ .memory_max = 1024 * 1024 };
+    try std.testing.expectError(cgroups_common.CgroupError.LimitBelowMinimum, bad_mem.validate());
 
     // pids below minimum (1)
-    const bad_pids = cgroups.ResourceLimits{ .pids_max = 0 };
-    try std.testing.expectError(cgroups.CgroupError.LimitBelowMinimum, bad_pids.validate());
+    const bad_pids = cgroups_common.ResourceLimits{ .pids_max = 0 };
+    try std.testing.expectError(cgroups_common.CgroupError.LimitBelowMinimum, bad_pids.validate());
 
     // valid limits
-    const good = cgroups.ResourceLimits{ .memory_max = 8 * 1024 * 1024, .pids_max = 10 };
+    const good = cgroups_common.ResourceLimits{ .memory_max = 8 * 1024 * 1024, .pids_max = 10 };
     try good.validate();
 }
 
 test "unlimited resource limits" {
-    const cgroups = @import("cgroups");
+    const cgroups_common = @import("cgroups_common");
 
     // unlimited should pass validation
-    try cgroups.ResourceLimits.unlimited.validate();
+    try cgroups_common.ResourceLimits.unlimited.validate();
 
     // all limits should be null
-    try std.testing.expect(cgroups.ResourceLimits.unlimited.memory_max == null);
-    try std.testing.expect(cgroups.ResourceLimits.unlimited.pids_max == null);
-    try std.testing.expect(cgroups.ResourceLimits.unlimited.cpu_weight == null);
+    try std.testing.expect(cgroups_common.ResourceLimits.unlimited.memory_max == null);
+    try std.testing.expect(cgroups_common.ResourceLimits.unlimited.pids_max == null);
+    try std.testing.expect(cgroups_common.ResourceLimits.unlimited.cpu_weight == null);
 }

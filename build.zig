@@ -284,6 +284,8 @@ pub fn build(b: *std.Build) void {
         "tests/privileged/test_networking.zig",
         "tests/privileged/test_cluster.zig",
         "tests/privileged/test_chaos.zig",
+        "tests/privileged/test_errors.zig",
+        "tests/privileged/test_limits.zig",
         "tests/privileged/test_security.zig",
         "tests/privileged/test_security_audit.zig",
         "tests/privileged/test_stress.zig",
@@ -330,12 +332,18 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        const cgroups_common_mod = b.createModule(.{
+            .root_source_file = b.path("src/runtime/cgroups/common.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
         cluster_harness_mod.addImport("helpers", helpers_mod);
         cluster_harness_mod.addImport("http_client", http_client_mod);
         priv_mod.root_module.addImport("http_client", http_client_mod);
         priv_mod.root_module.addImport("http", http_mod);
         priv_mod.root_module.addImport("container", container_mod);
         priv_mod.root_module.addImport("cgroups", cgroups_mod);
+        priv_mod.root_module.addImport("cgroups_common", cgroups_common_mod);
         priv_mod.root_module.addImport("cluster_test_harness", cluster_harness_mod);
         // workaround for zig 0.15.2: avoid --listen=- hang
         const run_priv = std.Build.Step.Run.create(b, b.fmt("run {s}", .{test_file}));
