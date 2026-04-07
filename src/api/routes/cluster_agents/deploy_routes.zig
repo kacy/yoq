@@ -1,14 +1,21 @@
 const std = @import("std");
+const sqlite = @import("sqlite");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
+const deployment_store = @import("../../../manifest/update/deployment_store.zig");
 const common = @import("../common.zig");
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
+
+const ResponseMode = enum {
+    legacy,
+    app,
+};
 
 fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {
     var search_buf: [128]u8 = undefined;
@@ -98,7 +105,12 @@ fn extractCommandString(alloc: std.mem.Allocator, block: []const u8) ![]const u8
     return alloc.dupe(u8, "");
 }
 
-fn handleApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
+fn handleApply(
+    alloc: std.mem.Allocator,
+    request: @import("../../http.zig").Request,
+    ctx: RouteContext,
+    response_mode: ResponseMode,
+) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
@@ -109,6 +121,9 @@ fn handleApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Requ
     }
 
     const app_name = extractJsonString(request.body, "app_name") orelse extractJsonString(request.body, "volume_app");
+    if (response_mode == .app and app_name == null) {
+        return common.badRequest("missing app_name");
+    }
     const services_json = extractJsonArray(request.body, "services") orelse
         return common.badRequest("missing services array");
 
@@ -180,6 +195,15 @@ fn handleApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Requ
         return .{ .status = .bad_request, .body = "{\"error\":\"no agents available\"}", .allocated = false };
     }
 
+    var release_id: ?[]const u8 = null;
+    defer if (release_id) |id| alloc.free(id);
+    if (app_name) |name| {
+        const manifest_hash = computeManifestHash(alloc, request.body) catch return common.internalError();
+        defer alloc.free(manifest_hash);
+
+        release_id = recordClusterReleaseStart(alloc, db, name, manifest_hash, request.body) catch return common.internalError();
+    }
+
     var placed: usize = 0;
     var failed: usize = 0;
 
@@ -212,6 +236,9 @@ fn handleApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Requ
                     };
 
                     _ = node.propose(sql) catch {
+                        if (release_id) |id| {
+                            updateClusterReleaseStatus(db, id, "failed", "leadership changed during apply") catch {};
+                        }
                         return common.notLeader(alloc, node);
                     };
                 }
@@ -239,7 +266,12 @@ fn handleApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Requ
     }
 
     if (normal_requests.items.len > 0) {
-        const placements = scheduler.schedule(alloc, normal_requests.items, agents) catch return common.internalError();
+        const placements = scheduler.schedule(alloc, normal_requests.items, agents) catch {
+            if (release_id) |id| {
+                updateClusterReleaseStatus(db, id, "failed", "scheduler error during apply") catch {};
+            }
+            return common.internalError();
+        };
         defer alloc.free(placements);
 
         for (placements) |maybe_placement| {
@@ -260,6 +292,9 @@ fn handleApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Requ
                 };
 
                 _ = node.propose(sql) catch {
+                    if (release_id) |id| {
+                        updateClusterReleaseStatus(db, id, "failed", "leadership changed during apply") catch {};
+                    }
                     return common.notLeader(alloc, node);
                 };
                 placed += 1;
@@ -269,21 +304,110 @@ fn handleApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Requ
         }
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-    std.fmt.format(writer, "{{\"placed\":{d},\"failed\":{d}}}", .{ placed, failed }) catch return common.internalError();
+    const status = if (failed == 0) "completed" else "failed";
+    if (release_id) |id| {
+        const message = if (failed == 0) null else "one or more placements failed";
+        updateClusterReleaseStatus(db, id, status, message) catch return common.internalError();
+    }
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = switch (response_mode) {
+        .legacy => formatLegacyApplyResponse(alloc, placed, failed) catch return common.internalError(),
+        .app => formatAppApplyResponse(
+            alloc,
+            app_name.?,
+            release_id orelse "",
+            status,
+            requests.items.len,
+            placed,
+            failed,
+        ) catch return common.internalError(),
+    };
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
-    return handleApply(alloc, request, ctx);
+    return handleApply(alloc, request, ctx, .app);
 }
 
 pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
-    return handleApply(alloc, request, ctx);
+    return handleApply(alloc, request, ctx, .legacy);
+}
+
+fn computeManifestHash(alloc: std.mem.Allocator, payload: []const u8) ![]u8 {
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(payload, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return std.fmt.allocPrint(alloc, "sha256:{s}", .{hex});
+}
+
+fn recordClusterReleaseStart(
+    alloc: std.mem.Allocator,
+    db: *sqlite.Db,
+    app_name: []const u8,
+    manifest_hash: []const u8,
+    config_snapshot: []const u8,
+) ![]u8 {
+    const id = try deployment_store.generateDeploymentId(alloc);
+    errdefer alloc.free(id);
+
+    db.exec(
+        "INSERT INTO deployments (id, app_name, service_name, manifest_hash, config_snapshot, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{
+            id,
+            app_name,
+            app_name,
+            manifest_hash,
+            config_snapshot,
+            "in_progress",
+            null,
+            std.time.timestamp(),
+        },
+    ) catch return error.WriteFailed;
+
+    return id;
+}
+
+fn updateClusterReleaseStatus(db: *sqlite.Db, id: []const u8, status: []const u8, message: ?[]const u8) !void {
+    db.exec(
+        "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
+        .{},
+        .{ status, message, id },
+    ) catch return error.WriteFailed;
+}
+
+fn formatLegacyApplyResponse(alloc: std.mem.Allocator, placed: usize, failed: usize) ![]u8 {
+    return std.fmt.allocPrint(alloc, "{{\"placed\":{d},\"failed\":{d}}}", .{ placed, failed });
+}
+
+fn formatAppApplyResponse(
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    release_id: []const u8,
+    status: []const u8,
+    service_count: usize,
+    placed: usize,
+    failed: usize,
+) ![]u8 {
+    var json_buf: std.ArrayList(u8) = .empty;
+    errdefer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    try writer.writeAll("{\"app_name\":\"");
+    try json_helpers.writeJsonEscaped(writer, app_name);
+    try writer.writeAll("\",\"release_id\":\"");
+    try json_helpers.writeJsonEscaped(writer, release_id);
+    try writer.writeAll("\",\"status\":\"");
+    try json_helpers.writeJsonEscaped(writer, status);
+    try writer.print("\",\"service_count\":{d},\"placed\":{d},\"failed\":{d}", .{
+        service_count,
+        placed,
+        failed,
+    });
+    try writer.writeByte('}');
+
+    return json_buf.toOwnedSlice(alloc);
 }
 
 test "extractJsonArray finds services array regardless of field order" {
@@ -315,4 +439,25 @@ test "extractCommandString joins structured command arrays" {
     defer alloc.free(command);
 
     try std.testing.expectEqualStrings("nginx -g daemon off;", command);
+}
+
+test "formatAppApplyResponse includes app release metadata" {
+    const alloc = std.testing.allocator;
+    const json = try formatAppApplyResponse(alloc, "demo-app", "abc123def456", "completed", 2, 2, 0);
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"abc123def456\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":0") != null);
+}
+
+test "formatLegacyApplyResponse preserves compact deploy shape" {
+    const alloc = std.testing.allocator;
+    const json = try formatLegacyApplyResponse(alloc, 1, 1);
+    defer alloc.free(json);
+
+    try std.testing.expectEqualStrings("{\"placed\":1,\"failed\":1}", json);
 }
