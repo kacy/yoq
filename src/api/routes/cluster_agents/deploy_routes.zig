@@ -268,39 +268,27 @@ fn formatAppApplyResponse(alloc: std.mem.Allocator, report: apply_release.ApplyR
     errdefer json_buf.deinit(alloc);
     const writer = json_buf.writer(alloc);
 
-    try writer.writeAll("{\"app_name\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.app_name);
-    try writer.writeAll("\",\"trigger\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.trigger.toString());
-    try writer.writeAll("\",\"release_id\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.release_id orelse "");
-    try writer.writeAll("\",\"status\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.status.toString());
-    try writer.print("\",\"service_count\":{d},\"placed\":{d},\"failed\":{d}", .{
+    try writer.writeByte('{');
+    try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "release_id", report.release_id orelse "");
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
+    try writer.print(",\"service_count\":{d},\"placed\":{d},\"failed\":{d}", .{
         report.service_count,
         report.placed,
         report.failed,
     });
-    if (report.source_release_id) |source_release_id| {
-        try writer.writeAll(",\"source_release_id\":\"");
-        try json_helpers.writeJsonEscaped(writer, source_release_id);
-        try writer.writeByte('"');
-    } else {
-        try writer.writeAll(",\"source_release_id\":null");
-    }
-    const resolved_message = try apply_release.materializeMessage(alloc, .{
-        .trigger = report.trigger,
-        .source_release_id = report.source_release_id,
-    }, report.status, report.message);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
+
+    const resolved_message = try report.resolvedMessage(alloc);
     defer if (resolved_message) |message| alloc.free(message);
 
-    if (resolved_message) |message| {
-        try writer.writeAll(",\"message\":\"");
-        try json_helpers.writeJsonEscaped(writer, message);
-        try writer.writeByte('"');
-    } else {
-        try writer.writeAll(",\"message\":null");
-    }
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "message", resolved_message);
     try writer.writeByte('}');
 
     return json_buf.toOwnedSlice(alloc);

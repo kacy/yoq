@@ -106,38 +106,23 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
     for (deployments, 0..) |dep, i| {
         const report = apply_release.reportFromDeployment(dep);
         if (i > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"id\":\"");
-        try json_helpers.writeJsonEscaped(writer, report.release_id orelse "");
-        if (dep.app_name) |app_name| {
-            try writer.writeAll("\",\"app\":\"");
-            try json_helpers.writeJsonEscaped(writer, app_name);
-            try writer.writeByte('"');
-        } else {
-            try writer.writeAll("\",\"app\":null");
-        }
-        try writer.writeAll(",\"service\":\"");
-        try json_helpers.writeJsonEscaped(writer, dep.service_name);
-        try writer.writeAll("\",\"trigger\":\"");
-        try json_helpers.writeJsonEscaped(writer, report.trigger.toString());
-        try writer.writeAll("\",\"status\":\"");
-        try json_helpers.writeJsonEscaped(writer, report.status.toString());
-        try writer.writeAll("\",\"manifest_hash\":\"");
-        try json_helpers.writeJsonEscaped(writer, report.manifest_hash);
-        try writer.print("\",\"created_at\":{d}", .{report.created_at});
-        if (report.source_release_id) |source_release_id| {
-            try writer.writeAll(",\"source_release_id\":\"");
-            try json_helpers.writeJsonEscaped(writer, source_release_id);
-            try writer.writeByte('"');
-        } else {
-            try writer.writeAll(",\"source_release_id\":null");
-        }
-        if (report.message) |message| {
-            try writer.writeAll(",\"message\":\"");
-            try json_helpers.writeJsonEscaped(writer, message);
-            try writer.writeByte('"');
-        } else {
-            try writer.writeAll(",\"message\":null");
-        }
+        try writer.writeByte('{');
+        try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "app", dep.app_name);
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "service", dep.service_name);
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
+        try writer.print(",\"created_at\":{d}", .{report.created_at});
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
         try writer.writeByte('}');
     }
     try writer.writeByte(']');
@@ -152,34 +137,24 @@ fn formatAppStatusResponse(
     errdefer json_buf.deinit(alloc);
     const writer = json_buf.writer(alloc);
 
-    try writer.writeAll("{\"app_name\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.app_name);
-    try writer.writeAll("\",\"trigger\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.trigger.toString());
-    try writer.writeAll("\",\"release_id\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.release_id orelse "");
-    try writer.writeAll("\",\"status\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.status.toString());
-    try writer.writeAll("\",\"manifest_hash\":\"");
-    try json_helpers.writeJsonEscaped(writer, report.manifest_hash);
-    try writer.print("\",\"created_at\":{d},\"service_count\":{d}", .{
+    try writer.writeByte('{');
+    try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "release_id", report.release_id orelse "");
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
+    try writer.print(",\"created_at\":{d},\"service_count\":{d}", .{
         report.created_at,
         report.service_count,
     });
-    if (report.source_release_id) |source_release_id| {
-        try writer.writeAll(",\"source_release_id\":\"");
-        try json_helpers.writeJsonEscaped(writer, source_release_id);
-        try writer.writeByte('"');
-    } else {
-        try writer.writeAll(",\"source_release_id\":null");
-    }
-    if (report.message) |message| {
-        try writer.writeAll(",\"message\":\"");
-        try json_helpers.writeJsonEscaped(writer, message);
-        try writer.writeByte('"');
-    } else {
-        try writer.writeAll(",\"message\":null");
-    }
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
     try writer.writeByte('}');
     return json_buf.toOwnedSlice(alloc);
 }

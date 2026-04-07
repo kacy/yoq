@@ -27,6 +27,28 @@ pub fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
     }
 }
 
+/// write a single JSON string field without a leading comma.
+pub fn writeJsonStringField(writer: anytype, key: []const u8, value: []const u8) !void {
+    try writer.writeByte('"');
+    try writer.writeAll(key);
+    try writer.writeAll("\":\"");
+    try writeJsonEscaped(writer, value);
+    try writer.writeByte('"');
+}
+
+/// write a single JSON string-or-null field without a leading comma.
+pub fn writeNullableJsonStringField(writer: anytype, key: []const u8, value: ?[]const u8) !void {
+    try writer.writeByte('"');
+    try writer.writeAll(key);
+    if (value) |text| {
+        try writer.writeAll("\":\"");
+        try writeJsonEscaped(writer, text);
+        try writer.writeByte('"');
+    } else {
+        try writer.writeAll("\":null");
+    }
+}
+
 // -- JSON field extraction --
 // minimal JSON field extraction for known request shapes.
 // avoids pulling in a full parser for simple key-value lookups.
@@ -241,6 +263,24 @@ test "plain ascii passthrough" {
 
     try writeJsonEscaped(writer, "abc123");
     try std.testing.expectEqualStrings("abc123", stream.getWritten());
+}
+
+test "writeJsonStringField emits quoted field" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    try writeJsonStringField(writer, "app_name", "demo-app");
+    try std.testing.expectEqualStrings("\"app_name\":\"demo-app\"", stream.getWritten());
+}
+
+test "writeNullableJsonStringField emits null field" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+
+    try writeNullableJsonStringField(writer, "source_release_id", null);
+    try std.testing.expectEqualStrings("\"source_release_id\":null", stream.getWritten());
 }
 
 test "extractJsonString basic" {

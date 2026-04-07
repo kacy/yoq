@@ -65,12 +65,20 @@ pub const ApplyReport = struct {
         if (self.release_id) |id| alloc.free(id);
     }
 
-    pub fn summaryText(self: ApplyReport, alloc: std.mem.Allocator) ![]u8 {
-        const status_text = self.status.toString();
-        const message = try materializeMessage(alloc, .{
+    pub fn context(self: ApplyReport) ApplyContext {
+        return .{
             .trigger = self.trigger,
             .source_release_id = self.source_release_id,
-        }, self.status, self.message);
+        };
+    }
+
+    pub fn resolvedMessage(self: ApplyReport, alloc: std.mem.Allocator) !?[]u8 {
+        return materializeMessage(alloc, self.context(), self.status, self.message);
+    }
+
+    pub fn summaryText(self: ApplyReport, alloc: std.mem.Allocator) ![]u8 {
+        const status_text = self.status.toString();
+        const message = try self.resolvedMessage(alloc);
         defer if (message) |msg| alloc.free(msg);
 
         if (self.release_id) |id| {
