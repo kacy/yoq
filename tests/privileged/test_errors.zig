@@ -23,7 +23,7 @@ test "run with nonexistent rootfs fails gracefully" {
     var env = try helpers.TestEnv.init(alloc);
     defer env.deinit();
 
-    const result = try env.runYoq(&.{
+    var result = try env.runYoq(&.{
         "run", "/nonexistent/path/to/rootfs", "/bin/sh", "-c", "echo hello",
     });
     defer result.deinit();
@@ -40,7 +40,7 @@ test "run with invalid container ID is rejected" {
     defer fixture.deinit();
 
     // try to use a path-traversal id (should be rejected)
-    const result = try env.runYoq(&.{
+    var result = try env.runYoq(&.{
         "run", "--name", "../etc/passwd", fixture.rootfs_path, "/bin/sh", "-c", "echo hello",
     });
     defer result.deinit();
@@ -59,7 +59,7 @@ test "run with command that doesn't exist" {
     const name = try helpers.uniqueName(alloc, "error-cmd-not-found");
     defer alloc.free(name);
 
-    const result = try env.runYoq(&.{
+    var result = try env.runYoq(&.{
         "run", "--name", name, fixture.rootfs_path, "/nonexistent/command",
     });
     defer result.deinit();
@@ -83,7 +83,7 @@ test "run with extremely long command line" {
     defer alloc.free(long_arg);
     @memset(long_arg, 'a');
 
-    const result = try env.runYoq(&.{
+    var result = try env.runYoq(&.{
         "run", "--name", name, fixture.rootfs_path, "/bin/echo", long_arg,
     });
     defer result.deinit();
@@ -96,7 +96,7 @@ test "logs for nonexistent container" {
     var env = try helpers.TestEnv.init(alloc);
     defer env.deinit();
 
-    const result = try env.runYoq(&.{ "logs", "nonexistent123" });
+    var result = try env.runYoq(&.{ "logs", "nonexistent123" });
     defer result.deinit();
 
     // should fail gracefully
@@ -107,7 +107,7 @@ test "rm nonexistent container" {
     var env = try helpers.TestEnv.init(alloc);
     defer env.deinit();
 
-    const result = try env.runYoq(&.{ "rm", "nonexistent123" });
+    var result = try env.runYoq(&.{ "rm", "nonexistent123" });
     defer result.deinit();
 
     // might fail but shouldn't crash
@@ -118,7 +118,7 @@ test "stop nonexistent container" {
     var env = try helpers.TestEnv.init(alloc);
     defer env.deinit();
 
-    const result = try env.runYoq(&.{ "stop", "nonexistent123" });
+    var result = try env.runYoq(&.{ "stop", "nonexistent123" });
     defer result.deinit();
 
     // should fail gracefully
@@ -129,7 +129,7 @@ test "exec into nonexistent container" {
     var env = try helpers.TestEnv.init(alloc);
     defer env.deinit();
 
-    const result = try env.runYoq(&.{ "exec", "nonexistent123", "/bin/sh" });
+    var result = try env.runYoq(&.{ "exec", "nonexistent123", "/bin/sh" });
     defer result.deinit();
 
     // should fail gracefully
@@ -147,7 +147,7 @@ test "run with invalid bind mount source" {
     defer alloc.free(name);
 
     // try to mount a sensitive path
-    const result = try env.runYoq(&.{
+    var result = try env.runYoq(&.{
         "run",     "--name",                  name,
         "--mount", "/etc/passwd:/etc/passwd", fixture.rootfs_path,
         "/bin/sh", "-c",                      "echo hello",
@@ -169,7 +169,7 @@ test "run with resource limits enforced" {
     defer alloc.free(name);
 
     // run with very low memory limit
-    const result = try env.runYoq(&.{
+    var result = try env.runYoq(&.{
         "run", "--name", name,
         "--memory",          "4m", // minimum allowed
         fixture.rootfs_path, "/bin/sh",
@@ -191,7 +191,7 @@ test "run with memory below minimum is rejected" {
     defer alloc.free(name);
 
     // 1 MB is below the 4 MB minimum
-    const result = try env.runYoq(&.{
+    var result = try env.runYoq(&.{
         "run",      "--name", name,
         "--memory", "1m",     fixture.rootfs_path,
         "/bin/sh",  "-c",     "echo hello",

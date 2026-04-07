@@ -95,6 +95,24 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) Conta
                 writeErr("invalid memory size: {s}\n", .{mem_str});
                 return ContainerError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--pids")) {
+            const pids_str = args.next() orelse {
+                writeErr("--pids requires a numeric limit\n", .{});
+                return ContainerError.InvalidArgument;
+            };
+            limits.pids_max = std.fmt.parseUnsigned(u32, pids_str, 10) catch {
+                writeErr("invalid pids limit: {s}\n", .{pids_str});
+                return ContainerError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--cpu-weight")) {
+            const weight_str = args.next() orelse {
+                writeErr("--cpu-weight requires a value between 1 and 10000\n", .{});
+                return ContainerError.InvalidArgument;
+            };
+            limits.cpu_weight = std.fmt.parseUnsigned(u16, weight_str, 10) catch {
+                writeErr("invalid cpu weight: {s}\n", .{weight_str});
+                return ContainerError.InvalidArgument;
+            };
         } else if (std.mem.eql(u8, arg, "--cpus")) {
             const cpu_str = args.next() orelse {
                 writeErr("--cpus requires a number like 2 or 0.5\n", .{});
@@ -131,7 +149,7 @@ fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) Conta
     }
 
     const run_target = target orelse {
-        writeErr("usage: yoq run [--name <name>] [-e KEY=VALUE] [-v source:target[:ro]] [-p host:container] [--memory SIZE] [--cpus N] [-d] [--restart POLICY] [--no-net] <image|rootfs> [command]\n", .{});
+        writeErr("usage: yoq run [--name <name>] [-e KEY=VALUE] [-v source:target[:ro]] [-p host:container] [--memory SIZE] [--pids N] [--cpu-weight N] [--cpus N] [-d] [--restart POLICY] [--no-net] <image|rootfs> [command]\n", .{});
         return ContainerError.InvalidArgument;
     };
 
