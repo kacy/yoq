@@ -161,6 +161,15 @@ For standalone `yoq cert provision` and `yoq cert renew`, `--email` is optional.
 
 deployment history is tracked in SQLite. updates proceed incrementally — if health checks fail during a rollout, yoq automatically rolls back.
 
+for manifest-driven app deploys, yoq now normalizes the manifest into one canonical application snapshot before execution. local `yoq up` and remote `yoq up --server` both operate on that same app-level snapshot, and app releases are recorded in SQLite with the full config snapshot and manifest hash.
+
+this gives the operator one app-first day-2 model:
+
+- `yoq status --app [name]` — current app release status
+- `yoq history --app [name]` — app release history
+- `yoq rollback --app [name]` — print the last successful local app snapshot
+- `yoq rollback --app [name] --server host:port --release <id>` — re-apply a prior remote app release
+
 ### dev mode
 
 `yoq up --dev` bind-mounts source directories and watches for file changes via inotify. changed files trigger a container restart with 500ms debounce. logs are multiplexed with colored service name prefixes.
@@ -204,6 +213,16 @@ bin-packing placement: scores agents by free CPU + memory, assigns containers to
 agents register via HTTP, then heartbeat every 5s reporting capacity. they pull assignments, download images, and start containers locally. WireGuard tunnels are set up on join.
 
 if the leader changes, agents follow automatically — heartbeat responses include leader hints.
+
+### app-first control plane
+
+cluster manifest deploys now use `POST /apps/apply` as the canonical write path. the older `POST /deploy` route is still accepted as a compatibility shim, but new CLI work targets the app-first route.
+
+the cluster API also exposes app-scoped day-2 reads and rollback:
+
+- `GET /apps/<name>/status` — latest app release metadata
+- `GET /apps/<name>/history` — app release history
+- `POST /apps/<name>/rollback` with `{"release_id":"..."}` — re-apply a stored app release snapshot
 
 ### rolling upgrades
 
