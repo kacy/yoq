@@ -78,10 +78,12 @@ pub const listNetworkPolicies = @import("store/services.zig").listNetworkPolicie
 pub const getServicePolicies = @import("store/services.zig").getServicePolicies;
 
 pub const saveDeployment = @import("store/deployments.zig").saveDeployment;
+pub const saveDeploymentInDb = @import("store/deployments.zig").saveDeploymentInDb;
 pub const getDeployment = @import("store/deployments.zig").getDeployment;
 pub const listDeployments = @import("store/deployments.zig").listDeployments;
 pub const listDeploymentsByApp = @import("store/deployments.zig").listDeploymentsByApp;
 pub const updateDeploymentStatus = @import("store/deployments.zig").updateDeploymentStatus;
+pub const updateDeploymentStatusInDb = @import("store/deployments.zig").updateDeploymentStatusInDb;
 pub const getLatestDeployment = @import("store/deployments.zig").getLatestDeployment;
 pub const getLatestDeploymentByApp = @import("store/deployments.zig").getLatestDeploymentByApp;
 pub const getLastSuccessfulDeployment = @import("store/deployments.zig").getLastSuccessfulDeployment;

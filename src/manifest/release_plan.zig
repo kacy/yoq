@@ -1,6 +1,7 @@
 const std = @import("std");
 const app_spec = @import("app_spec.zig");
 const loader = @import("loader.zig");
+const deployment_store = @import("update/deployment_store.zig");
 
 pub const ReleasePlan = struct {
     app: app_spec.ApplicationSpec,
@@ -40,7 +41,7 @@ pub const ReleasePlan = struct {
 
         const config_snapshot = try planned_app.toApplyJson(alloc);
         errdefer alloc.free(config_snapshot);
-        const manifest_hash = try computeManifestHash(alloc, config_snapshot);
+        const manifest_hash = try deployment_store.computeManifestHash(alloc, config_snapshot);
         errdefer alloc.free(manifest_hash);
 
         return .{
@@ -66,14 +67,6 @@ pub const ReleasePlan = struct {
         return alloc.dupe(u8, self.config_snapshot);
     }
 };
-
-fn computeManifestHash(alloc: std.mem.Allocator, payload: []const u8) ![]const u8 {
-    const Sha256 = std.crypto.hash.sha2.Sha256;
-    var digest: [Sha256.digest_length]u8 = undefined;
-    Sha256.hash(payload, &digest, .{});
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    return std.fmt.allocPrint(alloc, "sha256:{s}", .{hex});
-}
 
 test "full release plan clones full app without a service filter" {
     const alloc = std.testing.allocator;

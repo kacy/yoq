@@ -56,6 +56,10 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
 
 pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
     const db = try common.getDb();
+    return saveDeploymentInDb(db, record);
+}
+
+pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
     db.exec(
         "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
@@ -113,6 +117,15 @@ pub fn listDeploymentsByApp(alloc: Allocator, app_name: []const u8) StoreError!s
 
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try common.getDb();
+    return updateDeploymentStatusInDb(db, id, status, message);
+}
+
+pub fn updateDeploymentStatusInDb(
+    db: *sqlite.Db,
+    id: []const u8,
+    status: []const u8,
+    message: ?[]const u8,
+) StoreError!void {
     db.exec(
         "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
         .{},

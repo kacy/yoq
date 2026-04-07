@@ -1,5 +1,4 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
@@ -198,7 +197,7 @@ fn handleApply(
     var release_id: ?[]const u8 = null;
     defer if (release_id) |id| alloc.free(id);
     if (app_name) |name| {
-        const manifest_hash = computeManifestHash(alloc, request.body) catch return common.internalError();
+        const manifest_hash = deployment_store.computeManifestHash(alloc, request.body) catch return common.internalError();
         defer alloc.free(manifest_hash);
 
         release_id = recordClusterReleaseStart(alloc, db, name, manifest_hash, request.body) catch return common.internalError();
@@ -237,7 +236,7 @@ fn handleApply(
 
                     _ = node.propose(sql) catch {
                         if (release_id) |id| {
-                            updateClusterReleaseStatus(db, id, "failed", "leadership changed during apply") catch {};
+                            deployment_store.updateDeploymentStatusInDb(db, id, .failed, "leadership changed during apply") catch {};
                         }
                         return common.notLeader(alloc, node);
                     };
@@ -268,7 +267,7 @@ fn handleApply(
     if (normal_requests.items.len > 0) {
         const placements = scheduler.schedule(alloc, normal_requests.items, agents) catch {
             if (release_id) |id| {
-                updateClusterReleaseStatus(db, id, "failed", "scheduler error during apply") catch {};
+                deployment_store.updateDeploymentStatusInDb(db, id, .failed, "scheduler error during apply") catch {};
             }
             return common.internalError();
         };
@@ -293,7 +292,7 @@ fn handleApply(
 
                 _ = node.propose(sql) catch {
                     if (release_id) |id| {
-                        updateClusterReleaseStatus(db, id, "failed", "leadership changed during apply") catch {};
+                        deployment_store.updateDeploymentStatusInDb(db, id, .failed, "leadership changed during apply") catch {};
                     }
                     return common.notLeader(alloc, node);
                 };
@@ -307,7 +306,12 @@ fn handleApply(
     const status = if (failed == 0) "completed" else "failed";
     if (release_id) |id| {
         const message = if (failed == 0) null else "one or more placements failed";
-        updateClusterReleaseStatus(db, id, status, message) catch return common.internalError();
+        deployment_store.updateDeploymentStatusInDb(
+            db,
+            id,
+            if (failed == 0) .completed else .failed,
+            message,
+        ) catch return common.internalError();
     }
 
     const body = switch (response_mode) {
@@ -333,17 +337,9 @@ pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig")
     return handleApply(alloc, request, ctx, .legacy);
 }
 
-fn computeManifestHash(alloc: std.mem.Allocator, payload: []const u8) ![]u8 {
-    const Sha256 = std.crypto.hash.sha2.Sha256;
-    var digest: [Sha256.digest_length]u8 = undefined;
-    Sha256.hash(payload, &digest, .{});
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    return std.fmt.allocPrint(alloc, "sha256:{s}", .{hex});
-}
-
 fn recordClusterReleaseStart(
     alloc: std.mem.Allocator,
-    db: *sqlite.Db,
+    db: anytype,
     app_name: []const u8,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
@@ -351,30 +347,18 @@ fn recordClusterReleaseStart(
     const id = try deployment_store.generateDeploymentId(alloc);
     errdefer alloc.free(id);
 
-    db.exec(
-        "INSERT INTO deployments (id, app_name, service_name, manifest_hash, config_snapshot, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
-        .{},
-        .{
-            id,
-            app_name,
-            app_name,
-            manifest_hash,
-            config_snapshot,
-            "in_progress",
-            null,
-            std.time.timestamp(),
-        },
-    ) catch return error.WriteFailed;
+    try deployment_store.recordDeploymentInDb(
+        db,
+        id,
+        app_name,
+        app_name,
+        manifest_hash,
+        config_snapshot,
+        .in_progress,
+        null,
+    );
 
     return id;
-}
-
-fn updateClusterReleaseStatus(db: *sqlite.Db, id: []const u8, status: []const u8, message: ?[]const u8) !void {
-    db.exec(
-        "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
-        .{},
-        .{ status, message, id },
-    ) catch return error.WriteFailed;
 }
 
 fn formatLegacyApplyResponse(alloc: std.mem.Allocator, placed: usize, failed: usize) ![]u8 {
