@@ -35,7 +35,7 @@ test "security audit: GPU device path traversal rejected" {
 
     // attempt to reference GPU devices outside allowed paths
     const malicious_paths = [_][]const u8{
-        "/v1/deploy",
+        "/deploy",
     };
     const malicious_bodies = [_][]const u8{
         // GPU device path traversal
@@ -78,11 +78,28 @@ test "security audit: GPU MIG partition IDs validated" {
     };
 
     for (bodies) |body| {
-        var resp = http_client.postWithAuth(alloc, addr, port, "/v1/deploy", body, token) catch continue;
+        var resp = http_client.postWithAuth(alloc, addr, port, "/deploy", body, token) catch continue;
         defer resp.deinit(alloc);
         // must not crash the server
         try std.testing.expect(resp.status_code != 500);
     }
+}
+
+test "security audit: deploy parses valid JSON regardless of field order" {
+    var cluster = try initCluster(1, 19508, 17508);
+    defer cluster.deinit();
+    const port = cluster.nodes.items[0].api_port;
+    const token = cluster.api_token;
+
+    const body =
+        \\{"services":[{"name":"field-order-test","image":"alpine","command":"true"}]}
+    ;
+
+    var resp = try http_client.postWithAuth(alloc, addr, port, "/deploy", body, token);
+    defer resp.deinit(alloc);
+
+    try std.testing.expectEqual(@as(u16, 400), resp.status_code);
+    try helpers.expectContains(resp.body, "no agents available");
 }
 
 // -- WireGuard key management --
@@ -248,7 +265,7 @@ test "security audit: concurrent deploy with different auth tokens" {
                     result.* = 0;
                     return;
                 };
-                var resp = http_client.postWithAuth(a, [4]u8{ 127, 0, 0, 1 }, p, "/v1/deploy", body, effective_token) catch {
+                var resp = http_client.postWithAuth(a, [4]u8{ 127, 0, 0, 1 }, p, "/deploy", body, effective_token) catch {
                     result.* = 0;
                     return;
                 };
