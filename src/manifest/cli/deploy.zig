@@ -193,15 +193,12 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
 fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, release: *const release_plan.ReleasePlan) DeployError!void {
     const server = cli.parseServerAddr(addr_str);
-    const body = release.toApplyJson(alloc) catch return DeployError.OutOfMemory;
-    defer alloc.free(body);
-
     writeErr("deploying {d} services to cluster {s}...\n", .{ release.resolvedServiceCount(), addr_str });
 
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
-    var resp = http_client.postWithAuth(alloc, server.ip, server.port, "/apps/apply", body, token) catch |err| {
+    var resp = http_client.postWithAuth(alloc, server.ip, server.port, "/apps/apply", release.config_snapshot, token) catch |err| {
         writeErr("failed to connect to cluster server: {}\n", .{err});
         writeErr("hint: is the server running? try 'yoq serve' or 'yoq init-server'\n", .{});
         return DeployError.ConnectionFailed;

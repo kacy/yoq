@@ -5,11 +5,15 @@ const loader = @import("loader.zig");
 pub const ReleasePlan = struct {
     app: app_spec.ApplicationSpec,
     service_filter: ?[]const []const u8,
+    manifest_hash: []const u8,
+    config_snapshot: []const u8,
     requested_target_count: usize,
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *ReleasePlan) void {
         if (self.service_filter) |filter| self.alloc.free(filter);
+        self.alloc.free(self.manifest_hash);
+        self.alloc.free(self.config_snapshot);
         self.app.deinit();
     }
 
@@ -34,9 +38,16 @@ pub const ReleasePlan = struct {
             service_filter = filter;
         }
 
+        const config_snapshot = try planned_app.toApplyJson(alloc);
+        errdefer alloc.free(config_snapshot);
+        const manifest_hash = try computeManifestHash(alloc, config_snapshot);
+        errdefer alloc.free(manifest_hash);
+
         return .{
             .app = planned_app,
             .service_filter = service_filter,
+            .manifest_hash = manifest_hash,
+            .config_snapshot = config_snapshot,
             .requested_target_count = targets.len,
             .alloc = alloc,
         };
@@ -52,9 +63,17 @@ pub const ReleasePlan = struct {
     }
 
     pub fn toApplyJson(self: *const ReleasePlan, alloc: std.mem.Allocator) ![]u8 {
-        return self.app.toApplyJson(alloc);
+        return alloc.dupe(u8, self.config_snapshot);
     }
 };
+
+fn computeManifestHash(alloc: std.mem.Allocator, payload: []const u8) ![]const u8 {
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(payload, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return std.fmt.allocPrint(alloc, "sha256:{s}", .{hex});
+}
 
 test "full release plan clones full app without a service filter" {
     const alloc = std.testing.allocator;
@@ -76,6 +95,8 @@ test "full release plan clones full app without a service filter" {
 
     try std.testing.expect(release.service_filter == null);
     try std.testing.expectEqual(@as(usize, 2), release.resolvedServiceCount());
+    try std.testing.expect(std.mem.startsWith(u8, release.manifest_hash, "sha256:"));
+    try std.testing.expect(std.mem.indexOf(u8, release.config_snapshot, "\"app_name\":\"demo-app\"") != null);
     try std.testing.expect(release.includesService("web"));
     try std.testing.expect(release.includesService("db"));
 }
@@ -109,6 +130,8 @@ test "partial release plan resolves transitive dependencies and exposes a filter
     try std.testing.expectEqualStrings("db", release.service_filter.?[0]);
     try std.testing.expectEqualStrings("api", release.service_filter.?[1]);
     try std.testing.expectEqualStrings("web", release.service_filter.?[2]);
+    try std.testing.expect(std.mem.indexOf(u8, release.config_snapshot, "\"depends_on\":[\"db\"]") != null);
+    try std.testing.expect(std.mem.startsWith(u8, release.manifest_hash, "sha256:"));
     try std.testing.expect(release.includesService("api"));
     try std.testing.expect(!release.includesService("missing"));
 }
