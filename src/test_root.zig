@@ -77,6 +77,7 @@ comptime {
     _ = @import("manifest/spec.zig");
     _ = @import("manifest/app_spec.zig");
     _ = @import("manifest/apply_release.zig");
+    _ = @import("manifest/local_apply_backend.zig");
     _ = @import("manifest/release_plan.zig");
     _ = @import("manifest/release_history.zig");
     _ = @import("manifest/cli/ops.zig");

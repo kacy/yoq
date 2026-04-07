@@ -1,21 +1,13 @@
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
-const apply_release = @import("../apply_release.zig");
 const app_spec = @import("../app_spec.zig");
-const release_history = @import("../release_history.zig");
+const local_apply_backend = @import("../local_apply_backend.zig");
 const release_plan = @import("../release_plan.zig");
 const manifest_loader = @import("../loader.zig");
-const orchestrator = @import("../orchestrator.zig");
-const startup_runtime = @import("../orchestrator/startup_runtime.zig");
-const watcher_mod = @import("../../dev/watcher.zig");
 const store = @import("../../state/store.zig");
 const process = @import("../../runtime/process.zig");
 const http_client = @import("../../cluster/http_client.zig");
 const container_cmds = @import("../../runtime/container_commands.zig");
-const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
-const service_rollout = @import("../../network/service_rollout.zig");
-const service_reconciler = @import("../../network/service_reconciler.zig");
-const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -28,43 +20,6 @@ const DeployError = error{
     StoreError,
     OutOfMemory,
     UnknownService,
-};
-
-const LocalReleaseTracker = struct {
-    plan: *const release_plan.ReleasePlan,
-
-    fn begin(self: *const LocalReleaseTracker) !?[]const u8 {
-        return release_history.recordAppReleaseStart(self.plan) catch null;
-    }
-
-    fn mark(_: *const LocalReleaseTracker, id: []const u8, status: @import("../update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
-        switch (status) {
-            .completed => release_history.markAppReleaseCompleted(id) catch {},
-            .failed => release_history.markAppReleaseFailed(id, message) catch {},
-            else => {},
-        }
-    }
-
-    fn freeReleaseId(self: *const LocalReleaseTracker, id: []const u8) void {
-        self.plan.alloc.free(id);
-    }
-};
-
-const LocalApplyBackend = struct {
-    orch: *orchestrator.Orchestrator,
-    release: *const release_plan.ReleasePlan,
-
-    fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
-        try self.orch.startAll();
-        return .{
-            .status = .completed,
-            .placed = self.release.resolvedServiceCount(),
-        };
-    }
-
-    fn failureMessage(_: *const LocalApplyBackend, _: anytype) ?[]const u8 {
-        return "service startup failed";
-    }
 };
 
 pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
@@ -137,103 +92,35 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         writeErr("starting {s} ({d} services)...\n", .{ release.app.app_name, release.resolvedServiceCount() });
     }
 
-    var orch = orchestrator.Orchestrator.init(alloc, &manifest, release.app.app_name) catch |err| {
+    var prepared = local_apply_backend.PreparedLocalApply.init(alloc, &manifest, &release, dev_mode) catch |err| {
         writeErr("failed to initialize orchestrator: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };
-    defer orch.deinit();
-    orch.dev_mode = dev_mode;
+    defer prepared.deinit();
+    prepared.beginRuntime();
 
-    if (release.service_filter) |filter| {
-        orch.service_filter = filter;
-    }
-
-    orch.computeStartSet() catch |err| {
-        writeErr("failed to resolve service start set: {}\n", .{err});
-        return DeployError.DeploymentFailed;
-    };
-
-    startup_runtime.syncServiceDefinitions(alloc, manifest.services, orch.start_set);
-
-    service_rollout.logStartupSummary();
-    service_reconciler.ensureDataPlaneReadyIfEnabled();
-    service_reconciler.bootstrapIfEnabled();
-    service_reconciler.startAuditLoopIfEnabled();
-    listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
-    defer listener_runtime.setStateChangeHook(null);
-    listener_runtime.startIfEnabled(alloc);
-    defer listener_runtime.stop();
-    proxy_control_plane.startSyncLoopIfEnabled();
-    defer proxy_control_plane.stopSyncLoop();
-    orchestrator.installSignalHandlers();
-
-    var release_tracker = LocalReleaseTracker{ .plan = &release };
-    var apply_backend = LocalApplyBackend{
-        .orch = &orch,
-        .release = &release,
-    };
-    const apply_result = apply_release.execute(&release_tracker, &apply_backend) catch |err| {
+    const release_id = prepared.startRelease() catch |err| {
         writeErr("failed to start services: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };
-    const release_id = apply_result.release_id;
     defer if (release_id) |id| alloc.free(id);
 
-    var watcher: ?watcher_mod.Watcher = null;
-    var watcher_thread: ?std.Thread = null;
+    var watcher = local_apply_backend.DevWatcherRuntime{};
 
     if (dev_mode) {
-        watcher = watcher_mod.Watcher.init(alloc) catch |e| blk: {
-            writeErr("warning: file watcher unavailable: {}\n", .{e});
-            break :blk null;
-        };
-
-        if (watcher != null) {
-            var any_watch_failed = false;
-            for (manifest.services, 0..) |svc, i| {
-                if (!release.includesService(svc.name)) continue;
-                for (svc.volumes) |vol| {
-                    if (vol.kind != .bind) continue;
-
-                    var resolve_buf: [4096]u8 = undefined;
-                    const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch |e| {
-                        writeErr("warning: failed to resolve path {s}: {}\n", .{ vol.source, e });
-                        any_watch_failed = true;
-                        continue;
-                    };
-
-                    watcher.?.addRecursive(abs_source, i) catch |e| {
-                        writeErr("warning: failed to watch {s}: {}\n", .{ vol.source, e });
-                        any_watch_failed = true;
-                    };
-                }
-            }
-
-            if (!any_watch_failed or watcher.?.watch_count > 0) {
-                watcher_thread = std.Thread.spawn(.{}, orchestrator.watcherThread, .{
-                    &orch, &watcher.?,
-                }) catch |e| blk: {
-                    writeErr("warning: failed to start watcher thread: {}\n", .{e});
-                    break :blk null;
-                };
-            } else {
-                writeErr("warning: no directories could be watched, file change detection disabled\n", .{});
-            }
-        }
-
+        watcher = prepared.startDevWatcher();
         writeErr("all services running. watching for changes...\n", .{});
     } else {
         writeErr("all services running. press ctrl-c to stop.\n", .{});
     }
 
-    orch.waitForShutdown();
+    prepared.orch.waitForShutdown();
 
     writeErr("\nshutting down...\n", .{});
 
-    if (watcher) |*w| w.deinit();
-    if (watcher_thread) |t| t.join();
+    watcher.deinit();
 
-    orch.stopAll();
+    prepared.orch.stopAll();
     writeErr("stopped\n", .{});
 }
 
