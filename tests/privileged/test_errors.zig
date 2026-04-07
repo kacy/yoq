@@ -84,12 +84,14 @@ test "run with extremely long command line" {
     @memset(long_arg, 'a');
 
     var result = try env.runYoq(&.{
-        "run", "--name", name, fixture.rootfs_path, "/bin/echo", long_arg,
+        "run", "--name", name, fixture.rootfs_path,
+        "/bin/sh", "-c", "printf '%s' \"$1\" >/dev/null && echo ok", "sh", long_arg,
     });
     defer result.deinit();
 
-    // should succeed or fail gracefully - either way we verify no crash
-    try std.testing.expect(result.exit_code == 0 or result.exit_code == 127);
+    // long argv should still execute successfully with a shell-only rootfs
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+    try helpers.expectContains(result.stdout, "ok");
 }
 
 test "logs for nonexistent container" {
@@ -110,8 +112,8 @@ test "rm nonexistent container" {
     var result = try env.runYoq(&.{ "rm", "nonexistent123" });
     defer result.deinit();
 
-    // might fail but shouldn't crash
-    try std.testing.expect(result.exit_code == 0 or result.exit_code != 0);
+    try std.testing.expect(result.exit_code != 0);
+    try helpers.expectContains(result.stderr, "container not found");
 }
 
 test "stop nonexistent container" {
@@ -212,9 +214,9 @@ test "run detached and cleanup" {
     const name = try helpers.uniqueName(alloc, "error-detach");
     defer alloc.free(name);
 
-    // start detached container
+    // start detached container with a shell builtin so the shell-only rootfs is sufficient
     var run_result = try env.runYoq(&.{
-        "run", "-d", "--name", name, fixture.rootfs_path, "/bin/sh", "-c", "sleep 0.1",
+        "run", "-d", "--name", name, fixture.rootfs_path, "/bin/sh", "-c", ":",
     });
     defer run_result.deinit();
     try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
@@ -225,12 +227,12 @@ test "run detached and cleanup" {
     // stop should fail since it's already stopped
     var stop_result = try env.runYoq(&.{ "stop", name });
     defer stop_result.deinit();
-    // might fail but shouldn't crash
+    try std.testing.expect(stop_result.exit_code != 0);
 
     // rm should succeed
     var rm_result = try env.runYoq(&.{ "rm", name });
     defer rm_result.deinit();
-    // cleanup should work
+    try std.testing.expectEqual(@as(u8, 0), rm_result.exit_code);
 }
 
 test "rapid start/stop cycles don't leak" {
