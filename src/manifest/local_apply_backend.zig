@@ -139,11 +139,11 @@ const LocalReleaseTracker = struct {
     plan: *const release_plan.ReleasePlan,
     context: apply_release.ApplyContext = .{},
 
-    fn begin(self: *const LocalReleaseTracker) !?[]const u8 {
+    pub fn begin(self: *const LocalReleaseTracker) !?[]const u8 {
         return release_history.recordAppReleaseStart(self.plan) catch null;
     }
 
-    fn mark(self: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+    pub fn mark(self: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
         const resolved_message = try apply_release.materializeMessage(self.plan.alloc, self.context, status, message);
         defer if (resolved_message) |msg| self.plan.alloc.free(msg);
 
@@ -154,7 +154,7 @@ const LocalReleaseTracker = struct {
         }
     }
 
-    fn freeReleaseId(self: *const LocalReleaseTracker, id: []const u8) void {
+    pub fn freeReleaseId(self: *const LocalReleaseTracker, id: []const u8) void {
         self.plan.alloc.free(id);
     }
 };
@@ -163,7 +163,7 @@ const LocalApplyBackend = struct {
     orch: *orchestrator.Orchestrator,
     release: *const release_plan.ReleasePlan,
 
-    fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
+    pub fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
         try self.orch.startAll();
         return .{
             .status = .completed,
@@ -172,7 +172,7 @@ const LocalApplyBackend = struct {
         };
     }
 
-    fn failureMessage(_: *const LocalApplyBackend, _: anytype) ?[]const u8 {
+    pub fn failureMessage(_: *const LocalApplyBackend, _: anytype) ?[]const u8 {
         return "service startup failed";
     }
 };

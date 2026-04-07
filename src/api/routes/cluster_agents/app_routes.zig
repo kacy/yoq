@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("../../http.zig");
 const sqlite = @import("sqlite");
+const cluster_node = @import("../../../cluster/node.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
 const schema = @import("../../../state/schema.zig");
@@ -347,6 +348,92 @@ test "app status and history surface failed apply metadata from persisted rows" 
     try std.testing.expect(std.mem.indexOf(u8, status_json, "\"service_count\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_json, "\"source_release_id\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_json, "\"message\":\"scheduler error during apply\"") != null);
+}
+
+test "app apply then rollback routes preserve release transition metadata" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"]}]}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+
+    var node = cluster_node.Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = tmp_path,
+    }) catch return error.SkipZigTest;
+    defer node.deinit();
+
+    node.raft.role = .leader;
+    node.leader_id = node.config.id;
+
+    const db = node.stateMachineDb();
+    db.exec(
+        "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "abc123def456", "10.0.0.2:7701", "active", @as(i64, 4), @as(i64, 8192), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "" },
+    ) catch return error.SkipZigTest;
+
+    const ctx: RouteContext = .{ .cluster = &node, .join_token = null };
+
+    const apply_request = http.Request{
+        .method = .POST,
+        .path = "/apps/apply",
+        .path_only = "/apps/apply",
+        .query = "",
+        .headers_raw = "",
+        .body = apply_body,
+        .content_length = apply_body.len,
+    };
+    const apply_response = deploy_routes.handleAppApply(alloc, apply_request, ctx);
+    defer if (apply_response.allocated) alloc.free(apply_response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, apply_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"trigger\":\"apply\"") != null);
+
+    const source_release_id = json_helpers.extractJsonString(apply_response.body, "release_id").?;
+
+    const rollback_body = try std.fmt.allocPrint(alloc, "{{\"release_id\":\"{s}\"}}", .{source_release_id});
+    defer alloc.free(rollback_body);
+
+    const rollback_request = http.Request{
+        .method = .POST,
+        .path = "/apps/demo-app/rollback",
+        .path_only = "/apps/demo-app/rollback",
+        .query = "",
+        .headers_raw = "",
+        .body = rollback_body,
+        .content_length = rollback_body.len,
+    };
+    const rollback_response = handleAppRollback(alloc, "demo-app", rollback_request, ctx);
+    defer if (rollback_response.allocated) alloc.free(rollback_response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, rollback_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, rollback_response.body, "\"trigger\":\"rollback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rollback_response.body, "\"source_release_id\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rollback_response.body, source_release_id) != null);
+
+    const status_response = handleAppStatus(alloc, "demo-app", ctx);
+    defer if (status_response.allocated) alloc.free(status_response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, status_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"trigger\":\"rollback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"source_release_id\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, source_release_id) != null);
+
+    const history_response = handleAppHistory(alloc, "demo-app", ctx);
+    defer if (history_response.allocated) alloc.free(history_response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, history_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"trigger\":\"rollback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"source_release_id\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, source_release_id) != null);
 }
 
 test "route rejects app rollback without cluster" {

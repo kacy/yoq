@@ -121,7 +121,7 @@ pub fn listDeployments(alloc: Allocator, service_name: []const u8) StoreError!st
     return listQueryInDb(
         db,
         alloc,
-        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC;",
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC, rowid DESC;",
         .{service_name},
     );
 }
@@ -139,7 +139,7 @@ pub fn listDeploymentsByAppInDb(
     return listQueryInDb(
         db,
         alloc,
-        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? ORDER BY created_at DESC;",
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? ORDER BY created_at DESC, rowid DESC;",
         .{app_name},
     );
 }
@@ -165,7 +165,7 @@ pub fn updateDeploymentStatusInDb(
 pub fn getLatestDeployment(alloc: Allocator, service_name: []const u8) StoreError!DeploymentRecord {
     return queryOne(
         alloc,
-        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC LIMIT 1;",
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1;",
         .{service_name},
     );
 }
@@ -183,7 +183,7 @@ pub fn getLatestDeploymentByAppInDb(
     return queryOneInDb(
         db,
         alloc,
-        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? ORDER BY created_at DESC LIMIT 1;",
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1;",
         .{app_name},
     );
 }
@@ -191,7 +191,7 @@ pub fn getLatestDeploymentByAppInDb(
 pub fn getLastSuccessfulDeployment(alloc: Allocator, service_name: []const u8) StoreError!DeploymentRecord {
     return queryOne(
         alloc,
-        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? AND status = 'completed' ORDER BY created_at DESC LIMIT 1;",
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? AND status = 'completed' ORDER BY created_at DESC, rowid DESC LIMIT 1;",
         .{service_name},
     );
 }
@@ -199,7 +199,7 @@ pub fn getLastSuccessfulDeployment(alloc: Allocator, service_name: []const u8) S
 pub fn getLastSuccessfulDeploymentByApp(alloc: Allocator, app_name: []const u8) StoreError!DeploymentRecord {
     return queryOne(
         alloc,
-        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? AND status = 'completed' ORDER BY created_at DESC LIMIT 1;",
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? AND status = 'completed' ORDER BY created_at DESC, rowid DESC LIMIT 1;",
         .{app_name},
     );
 }
@@ -259,7 +259,7 @@ test "deployment list ordered by timestamp desc" {
     db.exec("INSERT INTO deployments (id, app_name, service_name, manifest_hash, config_snapshot, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);", .{}, .{ "dep-new", "demo-app", "web", "sha256:new", "{}", "completed", @as(i64, 200) }) catch unreachable;
 
     const alloc = std.testing.allocator;
-    var stmt = db.prepare("SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC;") catch unreachable;
+    var stmt = db.prepare("SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC, rowid DESC;") catch unreachable;
     defer stmt.deinit();
 
     var results: std.ArrayList(DeploymentRecord) = .empty;
@@ -304,7 +304,7 @@ test "deployment latest returns most recent" {
     db.exec("INSERT INTO deployments (id, app_name, service_name, manifest_hash, config_snapshot, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);", .{}, .{ "dep-2", "demo-app", "web", "sha256:second", "{}", "in_progress", @as(i64, 200) }) catch unreachable;
 
     const alloc = std.testing.allocator;
-    const row = (db.oneAlloc(DeploymentRow, alloc, "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC LIMIT 1;", .{}, .{"web"}) catch unreachable).?;
+    const row = (db.oneAlloc(DeploymentRow, alloc, "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1;", .{}, .{"web"}) catch unreachable).?;
     const record = rowToRecord(row);
     defer record.deinit(alloc);
 
@@ -330,10 +330,35 @@ test "deployment app queries return only matching app records" {
     db.exec("INSERT INTO deployments (id, app_name, service_name, manifest_hash, config_snapshot, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);", .{}, .{ "dep-b", "app-b", "api", "sha256:b", "{}", "completed", @as(i64, 200) }) catch unreachable;
 
     const alloc = std.testing.allocator;
-    const row = (db.oneAlloc(DeploymentRow, alloc, "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? ORDER BY created_at DESC LIMIT 1;", .{}, .{"app-a"}) catch unreachable).?;
+    const row = (db.oneAlloc(DeploymentRow, alloc, "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1;", .{}, .{"app-a"}) catch unreachable).?;
     const record = rowToRecord(row);
     defer record.deinit(alloc);
 
     try std.testing.expectEqualStrings("dep-a", record.id);
     try std.testing.expectEqualStrings("app-a", record.app_name.?);
+}
+
+test "deployment latest prefers later insert when timestamps tie" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec("INSERT INTO deployments (id, app_name, service_name, manifest_hash, config_snapshot, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);", .{}, .{ "dep-1", "demo-app", "demo-app", "sha256:first", "{}", "completed", @as(i64, 100) }) catch unreachable;
+    db.exec("INSERT INTO deployments (id, app_name, service_name, manifest_hash, config_snapshot, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);", .{}, .{ "dep-2", "demo-app", "demo-app", "sha256:second", "{}", "completed", @as(i64, 100) }) catch unreachable;
+
+    const alloc = std.testing.allocator;
+
+    var deployments = try listDeploymentsByAppInDb(&db, alloc, "demo-app");
+    defer {
+        for (deployments.items) |record| record.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    try std.testing.expectEqualStrings("dep-2", deployments.items[0].id);
+    try std.testing.expectEqualStrings("dep-1", deployments.items[1].id);
+
+    const latest = try getLatestDeploymentByAppInDb(&db, alloc, "demo-app");
+    defer latest.deinit(alloc);
+
+    try std.testing.expectEqualStrings("dep-2", latest.id);
 }

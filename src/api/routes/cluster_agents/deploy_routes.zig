@@ -30,7 +30,7 @@ const ClusterReleaseTracker = struct {
     config_snapshot: []const u8,
     context: apply_release.ApplyContext = .{},
 
-    fn begin(self: *const ClusterReleaseTracker) !?[]const u8 {
+    pub fn begin(self: *const ClusterReleaseTracker) !?[]const u8 {
         const name = self.app_name orelse return null;
         const manifest_hash = deployment_store.computeManifestHash(self.alloc, self.config_snapshot) catch return ClusterApplyError.InternalError;
         defer self.alloc.free(manifest_hash);
@@ -52,13 +52,13 @@ const ClusterReleaseTracker = struct {
         return id;
     }
 
-    fn mark(self: *const ClusterReleaseTracker, id: []const u8, status: @import("../../../manifest/update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+    pub fn mark(self: *const ClusterReleaseTracker, id: []const u8, status: @import("../../../manifest/update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
         const resolved_message = apply_release.materializeMessage(self.alloc, self.context, status, message) catch return ClusterApplyError.InternalError;
         defer if (resolved_message) |msg| self.alloc.free(msg);
         deployment_store.updateDeploymentStatusInDb(self.db, id, status, resolved_message) catch return ClusterApplyError.InternalError;
     }
 
-    fn freeReleaseId(self: *const ClusterReleaseTracker, id: []const u8) void {
+    pub fn freeReleaseId(self: *const ClusterReleaseTracker, id: []const u8) void {
         self.alloc.free(id);
     }
 };
@@ -69,7 +69,7 @@ const ClusterApplyBackend = struct {
     requests: []scheduler.PlacementRequest,
     agents: []agent_registry.AgentRecord,
 
-    fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
+    pub fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
         var placed: usize = 0;
         var failed: usize = 0;
 
@@ -165,10 +165,10 @@ const ClusterApplyBackend = struct {
         };
     }
 
-    fn failureMessage(_: *const ClusterApplyBackend, err: ClusterApplyError) ?[]const u8 {
+    pub fn failureMessage(_: *const ClusterApplyBackend, err: ClusterApplyError) ?[]const u8 {
         return switch (err) {
-            .NotLeader => "leadership changed during apply",
-            .InternalError => "scheduler error during apply",
+            error.NotLeader => "leadership changed during apply",
+            error.InternalError => "scheduler error during apply",
         };
     }
 };
