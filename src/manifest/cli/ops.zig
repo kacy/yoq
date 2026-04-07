@@ -167,15 +167,7 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         var w = json_out.JsonWriter{};
         w.beginArray();
         for (deployments.items) |dep| {
-            writeHistoryJsonObject(&w, .{
-                .id = dep.id,
-                .app = dep.app_name,
-                .service = dep.service_name,
-                .status = dep.status,
-                .manifest_hash = dep.manifest_hash,
-                .created_at = dep.created_at,
-                .message = dep.message,
-            });
+            writeHistoryJsonObject(&w, historyEntryFromDeployment(dep));
         }
         w.endArray();
         w.flush();
@@ -194,15 +186,7 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     writeHistoryHeader();
 
     for (deployments.items) |dep| {
-        writeHistoryRow(.{
-            .id = dep.id,
-            .app = dep.app_name,
-            .service = dep.service_name,
-            .status = dep.status,
-            .manifest_hash = dep.manifest_hash,
-            .created_at = dep.created_at,
-            .message = dep.message,
-        });
+        writeHistoryRow(historyEntryFromDeployment(dep));
     }
 }
 
@@ -259,6 +243,18 @@ const HistoryEntryView = struct {
     created_at: i64,
     message: ?[]const u8,
 };
+
+fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
+    return .{
+        .id = dep.id,
+        .app = dep.app_name,
+        .service = dep.service_name,
+        .status = dep.status,
+        .manifest_hash = dep.manifest_hash,
+        .created_at = dep.created_at,
+        .message = dep.message,
+    };
+}
 
 fn parseHistoryObject(obj: []const u8) HistoryEntryView {
     return .{
@@ -345,6 +341,56 @@ test "parseHistoryObject extracts app release fields" {
     try std.testing.expectEqualStrings("sha256:123", entry.manifest_hash);
     try std.testing.expectEqual(@as(i64, 42), entry.created_at);
     try std.testing.expect(entry.message == null);
+}
+
+test "historyEntryFromDeployment matches remote app history shape" {
+    const dep = store.DeploymentRecord{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:123",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = "healthy",
+        .created_at = 42,
+    };
+
+    const local = historyEntryFromDeployment(dep);
+    const remote = parseHistoryObject(
+        \\{"id":"dep-1","app":"demo-app","service":"demo-app","status":"completed","manifest_hash":"sha256:123","created_at":42,"message":"healthy"}
+    );
+
+    try std.testing.expectEqualStrings(local.id, remote.id);
+    try std.testing.expectEqualStrings(local.app.?, remote.app.?);
+    try std.testing.expectEqualStrings(local.service, remote.service);
+    try std.testing.expectEqualStrings(local.status, remote.status);
+    try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
+    try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expectEqualStrings(local.message.?, remote.message.?);
+}
+
+test "writeHistoryJsonObject round-trips through remote parser" {
+    const entry = HistoryEntryView{
+        .id = "dep-1",
+        .app = "demo-app",
+        .service = "demo-app",
+        .status = "completed",
+        .manifest_hash = "sha256:123",
+        .created_at = 42,
+        .message = "healthy",
+    };
+
+    var w = json_out.JsonWriter{};
+    writeHistoryJsonObject(&w, entry);
+
+    const parsed = parseHistoryObject(w.getWritten());
+    try std.testing.expectEqualStrings(entry.id, parsed.id);
+    try std.testing.expectEqualStrings(entry.app.?, parsed.app.?);
+    try std.testing.expectEqualStrings(entry.service, parsed.service);
+    try std.testing.expectEqualStrings(entry.status, parsed.status);
+    try std.testing.expectEqualStrings(entry.manifest_hash, parsed.manifest_hash);
+    try std.testing.expectEqual(entry.created_at, parsed.created_at);
+    try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
 }
 
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {

@@ -120,15 +120,7 @@ fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!vo
     };
     defer latest.deinit(alloc);
 
-    const snapshot: AppStatusSnapshot = .{
-        .app_name = latest.app_name orelse latest.service_name,
-        .release_id = latest.id,
-        .status = latest.status,
-        .manifest_hash = latest.manifest_hash,
-        .created_at = latest.created_at,
-        .service_count = countServices(latest.config_snapshot),
-        .message = latest.message,
-    };
+    const snapshot = appStatusFromDeployment(latest);
     printAppStatus(snapshot);
 }
 
@@ -237,14 +229,7 @@ fn statusRemoteApp(alloc: std.mem.Allocator, addr: [4]u8, port: u16, app_name: [
 fn printAppStatus(snapshot: AppStatusSnapshot) void {
     if (cli.output_mode == .json) {
         var w = json_out.JsonWriter{};
-        w.beginObject();
-        w.stringField("app_name", snapshot.app_name);
-        w.stringField("release_id", snapshot.release_id);
-        w.stringField("status", snapshot.status);
-        w.stringField("manifest_hash", snapshot.manifest_hash);
-        w.intField("created_at", snapshot.created_at);
-        w.uintField("service_count", snapshot.service_count);
-        if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+        writeAppStatusJsonObject(&w, snapshot);
         w.endObject();
         w.flush();
         return;
@@ -280,6 +265,29 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .created_at = extractJsonInt(json, "created_at") orelse 0,
         .service_count = @intCast(@max(0, extractJsonInt(json, "service_count") orelse 0)),
         .message = extractJsonString(json, "message"),
+    };
+}
+
+fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot) void {
+    w.beginObject();
+    w.stringField("app_name", snapshot.app_name);
+    w.stringField("release_id", snapshot.release_id);
+    w.stringField("status", snapshot.status);
+    w.stringField("manifest_hash", snapshot.manifest_hash);
+    w.intField("created_at", snapshot.created_at);
+    w.uintField("service_count", snapshot.service_count);
+    if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+}
+
+fn appStatusFromDeployment(latest: store.DeploymentRecord) AppStatusSnapshot {
+    return .{
+        .app_name = latest.app_name orelse latest.service_name,
+        .release_id = latest.id,
+        .status = latest.status,
+        .manifest_hash = latest.manifest_hash,
+        .created_at = latest.created_at,
+        .service_count = countServices(latest.config_snapshot),
+        .message = latest.message,
     };
 }
 
@@ -415,4 +423,54 @@ test "countServices counts service objects in app snapshot" {
         \\{"app_name":"demo-app","services":[{"name":"web"},{"name":"db"},{"name":"worker"}]}
     ;
     try std.testing.expectEqual(@as(usize, 3), countServices(snapshot));
+}
+
+test "appStatusFromDeployment matches remote app status shape" {
+    const latest = store.DeploymentRecord{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .status = "completed",
+        .message = "all placements healthy",
+        .created_at = 200,
+    };
+
+    const local = appStatusFromDeployment(latest);
+    const remote = parseAppStatusResponse(
+        \\{"app_name":"demo-app","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"message":"all placements healthy"}
+    );
+
+    try std.testing.expectEqualStrings(local.app_name, remote.app_name);
+    try std.testing.expectEqualStrings(local.release_id, remote.release_id);
+    try std.testing.expectEqualStrings(local.status, remote.status);
+    try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
+    try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expectEqual(local.service_count, remote.service_count);
+    try std.testing.expectEqualStrings(local.message.?, remote.message.?);
+}
+
+test "writeAppStatusJsonObject round-trips through remote parser" {
+    const snapshot = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .release_id = "dep-2",
+        .status = "completed",
+        .manifest_hash = "sha256:222",
+        .created_at = 200,
+        .service_count = 2,
+        .message = "all placements healthy",
+    };
+
+    var w = json_out.JsonWriter{};
+    writeAppStatusJsonObject(&w, snapshot);
+
+    const parsed = parseAppStatusResponse(w.getWritten());
+    try std.testing.expectEqualStrings(snapshot.app_name, parsed.app_name);
+    try std.testing.expectEqualStrings(snapshot.release_id, parsed.release_id);
+    try std.testing.expectEqualStrings(snapshot.status, parsed.status);
+    try std.testing.expectEqualStrings(snapshot.manifest_hash, parsed.manifest_hash);
+    try std.testing.expectEqual(snapshot.created_at, parsed.created_at);
+    try std.testing.expectEqual(snapshot.service_count, parsed.service_count);
+    try std.testing.expectEqualStrings(snapshot.message.?, parsed.message.?);
 }
