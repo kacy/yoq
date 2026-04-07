@@ -1,6 +1,9 @@
 const std = @import("std");
+const sqlite = @import("sqlite");
 const scheduler = @import("../../../cluster/scheduler.zig");
+const cluster_node = @import("../../../cluster/node.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
+const apply_release = @import("../../../manifest/apply_release.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const deployment_store = @import("../../../manifest/update/deployment_store.zig");
@@ -15,6 +18,158 @@ const extractJsonArray = json_helpers.extractJsonArray;
 const ResponseMode = enum {
     legacy,
     app,
+};
+
+const ClusterApplyError = error{
+    NotLeader,
+    InternalError,
+};
+
+const ClusterReleaseTracker = struct {
+    alloc: std.mem.Allocator,
+    db: *sqlite.Db,
+    app_name: ?[]const u8,
+    config_snapshot: []const u8,
+
+    fn begin(self: *const ClusterReleaseTracker) !?[]const u8 {
+        const name = self.app_name orelse return null;
+        const manifest_hash = deployment_store.computeManifestHash(self.alloc, self.config_snapshot) catch return ClusterApplyError.InternalError;
+        defer self.alloc.free(manifest_hash);
+
+        const id = deployment_store.generateDeploymentId(self.alloc) catch return ClusterApplyError.InternalError;
+        errdefer self.alloc.free(id);
+
+        deployment_store.recordDeploymentInDb(
+            self.db,
+            id,
+            name,
+            name,
+            manifest_hash,
+            self.config_snapshot,
+            .in_progress,
+            null,
+        ) catch return ClusterApplyError.InternalError;
+
+        return id;
+    }
+
+    fn mark(self: *const ClusterReleaseTracker, id: []const u8, status: @import("../../../manifest/update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+        deployment_store.updateDeploymentStatusInDb(self.db, id, status, message) catch return ClusterApplyError.InternalError;
+    }
+
+    fn freeReleaseId(self: *const ClusterReleaseTracker, id: []const u8) void {
+        self.alloc.free(id);
+    }
+};
+
+const ClusterApplyBackend = struct {
+    alloc: std.mem.Allocator,
+    node: *cluster_node.Node,
+    requests: []scheduler.PlacementRequest,
+    agents: []agent_registry.AgentRecord,
+
+    fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
+        var placed: usize = 0;
+        var failed: usize = 0;
+
+        for (self.requests) |req| {
+            if (req.gang_world_size > 0) {
+                const gang_placements = scheduler.scheduleGang(self.alloc, req, self.agents) catch {
+                    failed += 1;
+                    continue;
+                };
+
+                if (gang_placements) |gps| {
+                    defer self.alloc.free(gps);
+
+                    var gang_ok = true;
+                    for (gps) |gp| {
+                        var id_buf: [12]u8 = undefined;
+                        scheduler.generateAssignmentId(&id_buf);
+
+                        var sql_buf: [2048]u8 = undefined;
+                        const sql = scheduler.assignmentSqlGang(
+                            &sql_buf,
+                            &id_buf,
+                            gp.agent_id,
+                            req,
+                            std.time.timestamp(),
+                            gp,
+                        ) catch {
+                            gang_ok = false;
+                            break;
+                        };
+
+                        _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
+                    }
+
+                    if (gang_ok) {
+                        placed += gps.len;
+                    } else {
+                        failed += req.gang_world_size;
+                    }
+                } else {
+                    failed += req.gang_world_size;
+                }
+            }
+        }
+
+        var normal_requests: std.ArrayListUnmanaged(scheduler.PlacementRequest) = .empty;
+        defer normal_requests.deinit(self.alloc);
+        for (self.requests) |req| {
+            if (req.gang_world_size == 0) {
+                normal_requests.append(self.alloc, req) catch {
+                    failed += 1;
+                    continue;
+                };
+            }
+        }
+
+        if (normal_requests.items.len > 0) {
+            const placements = scheduler.schedule(self.alloc, normal_requests.items, self.agents) catch {
+                return ClusterApplyError.InternalError;
+            };
+            defer self.alloc.free(placements);
+
+            for (placements) |maybe_placement| {
+                if (maybe_placement) |placement| {
+                    var id_buf: [12]u8 = undefined;
+                    scheduler.generateAssignmentId(&id_buf);
+
+                    var sql_buf: [1024]u8 = undefined;
+                    const sql = scheduler.assignmentSql(
+                        &sql_buf,
+                        &id_buf,
+                        placement.agent_id,
+                        normal_requests.items[placement.request_idx],
+                        std.time.timestamp(),
+                    ) catch {
+                        failed += 1;
+                        continue;
+                    };
+
+                    _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
+                    placed += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+        }
+
+        return .{
+            .status = if (failed == 0) .completed else .failed,
+            .message = if (failed == 0) null else "one or more placements failed",
+            .placed = placed,
+            .failed = failed,
+        };
+    }
+
+    fn failureMessage(_: *const ClusterApplyBackend, err: ClusterApplyError) ?[]const u8 {
+        return switch (err) {
+            .NotLeader => "leadership changed during apply",
+            .InternalError => "scheduler error during apply",
+        };
+    }
 };
 
 fn extractJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const u8) !?[]u8 {
@@ -153,136 +308,35 @@ fn handleApply(
         return .{ .status = .bad_request, .body = "{\"error\":\"no agents available\"}", .allocated = false };
     }
 
-    var release_id: ?[]const u8 = null;
+    var tracker = ClusterReleaseTracker{
+        .alloc = alloc,
+        .db = db,
+        .app_name = app_name,
+        .config_snapshot = request.body,
+    };
+    var backend = ClusterApplyBackend{
+        .alloc = alloc,
+        .node = node,
+        .requests = requests.items,
+        .agents = agents,
+    };
+    const apply_result = apply_release.execute(&tracker, &backend) catch |err| switch (err) {
+        ClusterApplyError.NotLeader => return common.notLeader(alloc, node),
+        ClusterApplyError.InternalError => return common.internalError(),
+    };
+    const release_id = apply_result.release_id;
     defer if (release_id) |id| alloc.free(id);
-    if (app_name) |name| {
-        const manifest_hash = deployment_store.computeManifestHash(alloc, request.body) catch return common.internalError();
-        defer alloc.free(manifest_hash);
-
-        release_id = recordClusterReleaseStart(alloc, db, name, manifest_hash, request.body) catch return common.internalError();
-    }
-
-    var placed: usize = 0;
-    var failed: usize = 0;
-
-    for (requests.items) |req| {
-        if (req.gang_world_size > 0) {
-            const gang_placements = scheduler.scheduleGang(alloc, req, agents) catch {
-                failed += 1;
-                continue;
-            };
-
-            if (gang_placements) |gps| {
-                defer alloc.free(gps);
-
-                var gang_ok = true;
-                for (gps) |gp| {
-                    var id_buf: [12]u8 = undefined;
-                    scheduler.generateAssignmentId(&id_buf);
-
-                    var sql_buf: [2048]u8 = undefined;
-                    const sql = scheduler.assignmentSqlGang(
-                        &sql_buf,
-                        &id_buf,
-                        gp.agent_id,
-                        req,
-                        std.time.timestamp(),
-                        gp,
-                    ) catch {
-                        gang_ok = false;
-                        break;
-                    };
-
-                    _ = node.propose(sql) catch {
-                        if (release_id) |id| {
-                            deployment_store.updateDeploymentStatusInDb(db, id, .failed, "leadership changed during apply") catch {};
-                        }
-                        return common.notLeader(alloc, node);
-                    };
-                }
-
-                if (gang_ok) {
-                    placed += gps.len;
-                } else {
-                    failed += req.gang_world_size;
-                }
-            } else {
-                failed += req.gang_world_size;
-            }
-        }
-    }
-
-    var normal_requests: std.ArrayListUnmanaged(scheduler.PlacementRequest) = .empty;
-    defer normal_requests.deinit(alloc);
-    for (requests.items) |req| {
-        if (req.gang_world_size == 0) {
-            normal_requests.append(alloc, req) catch {
-                failed += 1;
-                continue;
-            };
-        }
-    }
-
-    if (normal_requests.items.len > 0) {
-        const placements = scheduler.schedule(alloc, normal_requests.items, agents) catch {
-            if (release_id) |id| {
-                deployment_store.updateDeploymentStatusInDb(db, id, .failed, "scheduler error during apply") catch {};
-            }
-            return common.internalError();
-        };
-        defer alloc.free(placements);
-
-        for (placements) |maybe_placement| {
-            if (maybe_placement) |placement| {
-                var id_buf: [12]u8 = undefined;
-                scheduler.generateAssignmentId(&id_buf);
-
-                var sql_buf: [1024]u8 = undefined;
-                const sql = scheduler.assignmentSql(
-                    &sql_buf,
-                    &id_buf,
-                    placement.agent_id,
-                    normal_requests.items[placement.request_idx],
-                    std.time.timestamp(),
-                ) catch {
-                    failed += 1;
-                    continue;
-                };
-
-                _ = node.propose(sql) catch {
-                    if (release_id) |id| {
-                        deployment_store.updateDeploymentStatusInDb(db, id, .failed, "leadership changed during apply") catch {};
-                    }
-                    return common.notLeader(alloc, node);
-                };
-                placed += 1;
-            } else {
-                failed += 1;
-            }
-        }
-    }
-
-    const status = if (failed == 0) "completed" else "failed";
-    if (release_id) |id| {
-        const message: ?[]const u8 = if (failed == 0) null else "one or more placements failed";
-        deployment_store.updateDeploymentStatusInDb(
-            db,
-            id,
-            if (failed == 0) .completed else .failed,
-            message,
-        ) catch return common.internalError();
-    }
 
     const body = switch (response_mode) {
-        .legacy => formatLegacyApplyResponse(alloc, placed, failed) catch return common.internalError(),
+        .legacy => formatLegacyApplyResponse(alloc, apply_result.outcome.placed, apply_result.outcome.failed) catch return common.internalError(),
         .app => formatAppApplyResponse(
             alloc,
             app_name.?,
             release_id orelse "",
-            status,
+            apply_result.outcome.status.toString(),
             requests.items.len,
-            placed,
-            failed,
+            apply_result.outcome.placed,
+            apply_result.outcome.failed,
         ) catch return common.internalError(),
     };
     return .{ .status = .ok, .body = body, .allocated = true };
@@ -294,30 +348,6 @@ pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig
 
 pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
     return handleApply(alloc, request, ctx, .legacy);
-}
-
-fn recordClusterReleaseStart(
-    alloc: std.mem.Allocator,
-    db: anytype,
-    app_name: []const u8,
-    manifest_hash: []const u8,
-    config_snapshot: []const u8,
-) ![]const u8 {
-    const id = try deployment_store.generateDeploymentId(alloc);
-    errdefer alloc.free(id);
-
-    try deployment_store.recordDeploymentInDb(
-        db,
-        id,
-        app_name,
-        app_name,
-        manifest_hash,
-        config_snapshot,
-        .in_progress,
-        null,
-    );
-
-    return id;
 }
 
 fn formatLegacyApplyResponse(alloc: std.mem.Allocator, placed: usize, failed: usize) ![]u8 {

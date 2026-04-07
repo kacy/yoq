@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
+const apply_release = @import("../apply_release.zig");
 const app_spec = @import("../app_spec.zig");
 const release_history = @import("../release_history.zig");
 const release_plan = @import("../release_plan.zig");
@@ -27,6 +28,43 @@ const DeployError = error{
     StoreError,
     OutOfMemory,
     UnknownService,
+};
+
+const LocalReleaseTracker = struct {
+    plan: *const release_plan.ReleasePlan,
+
+    fn begin(self: *const LocalReleaseTracker) !?[]const u8 {
+        return release_history.recordAppReleaseStart(self.plan) catch null;
+    }
+
+    fn mark(_: *const LocalReleaseTracker, id: []const u8, status: @import("../update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+        switch (status) {
+            .completed => release_history.markAppReleaseCompleted(id) catch {},
+            .failed => release_history.markAppReleaseFailed(id, message) catch {},
+            else => {},
+        }
+    }
+
+    fn freeReleaseId(self: *const LocalReleaseTracker, id: []const u8) void {
+        self.plan.alloc.free(id);
+    }
+};
+
+const LocalApplyBackend = struct {
+    orch: *orchestrator.Orchestrator,
+    release: *const release_plan.ReleasePlan,
+
+    fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
+        try self.orch.startAll();
+        return .{
+            .status = .completed,
+            .placed = self.release.resolvedServiceCount(),
+        };
+    }
+
+    fn failureMessage(_: *const LocalApplyBackend, _: anytype) ?[]const u8 {
+        return "service startup failed";
+    }
 };
 
 pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
@@ -86,9 +124,6 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return;
     }
 
-    const release_id = release_history.recordAppReleaseStart(&release) catch null;
-    defer if (release_id) |id| alloc.free(id);
-
     if (service_names.items.len > 0) {
         writeErr("starting", .{});
         for (service_names.items, 0..) |name, i| {
@@ -132,17 +167,17 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     defer proxy_control_plane.stopSyncLoop();
     orchestrator.installSignalHandlers();
 
-    orch.startAll() catch |err| {
-        if (release_id) |id| {
-            release_history.markAppReleaseFailed(id, "service startup failed") catch {};
-        }
+    var release_tracker = LocalReleaseTracker{ .plan = &release };
+    var apply_backend = LocalApplyBackend{
+        .orch = &orch,
+        .release = &release,
+    };
+    const apply_result = apply_release.execute(&release_tracker, &apply_backend) catch |err| {
         writeErr("failed to start services: {}\n", .{err});
         return DeployError.DeploymentFailed;
     };
-
-    if (release_id) |id| {
-        release_history.markAppReleaseCompleted(id) catch {};
-    }
+    const release_id = apply_result.release_id;
+    defer if (release_id) |id| alloc.free(id);
 
     var watcher: ?watcher_mod.Watcher = null;
     var watcher_thread: ?std.Thread = null;
