@@ -24,13 +24,41 @@ const OpsError = error{
 pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var target_name: ?[]const u8 = null;
     var app_mode = false;
+    var server_addr: ?[]const u8 = null;
+    var release_id: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--app")) {
             app_mode = true;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                return OpsError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--release")) {
+            release_id = args.next() orelse {
+                writeErr("--release requires a release id\n", .{});
+                return OpsError.InvalidArgument;
+            };
         } else {
             target_name = arg;
         }
+    }
+
+    if (server_addr != null) {
+        if (!app_mode) {
+            writeErr("remote rollback currently requires --app [name]\n", .{});
+            return OpsError.InvalidArgument;
+        }
+        const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+        defer if (owned_app_name) |name| alloc.free(name);
+        const app_name = target_name orelse owned_app_name.?;
+        const id = release_id orelse {
+            writeErr("remote rollback requires --release <id>\n", .{});
+            return OpsError.InvalidArgument;
+        };
+        try rollbackRemoteApp(alloc, server_addr.?, app_name, id);
+        return;
     }
 
     const config = if (app_mode) blk: {
@@ -45,6 +73,7 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
         const service_name = target_name orelse {
             writeErr("usage: yoq rollback <service>\n", .{});
             writeErr("   or: yoq rollback --app [name]\n", .{});
+            writeErr("   or: yoq rollback --app [name] --server host:port --release <id>\n", .{});
             return OpsError.InvalidArgument;
         };
 
@@ -239,6 +268,36 @@ fn writeHistoryRow(obj: []const u8) void {
         ts_str,
         truncate(message, 40),
     });
+}
+
+fn rollbackRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8, release_id: []const u8) !void {
+    if (release_id.len == 0) {
+        writeErr("remote rollback requires a release id\n", .{});
+        return OpsError.InvalidArgument;
+    }
+
+    const server = cli.parseServerAddr(addr_str);
+    const path = std.fmt.allocPrint(alloc, "/apps/{s}/rollback", .{app_name}) catch return OpsError.StoreError;
+    defer alloc.free(path);
+    const body = std.fmt.allocPrint(alloc, "{{\"release_id\":\"{s}\"}}", .{release_id}) catch return OpsError.StoreError;
+    defer alloc.free(body);
+
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiToken(&token_buf);
+
+    var resp = http_client.postWithAuth(alloc, server.ip, server.port, path, body, token) catch |err| {
+        writeErr("failed to connect to cluster server: {}\n", .{err});
+        writeErr("hint: is the server running? try 'yoq serve' or 'yoq init-server'\n", .{});
+        return OpsError.ConnectionFailed;
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("rollback failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+        return OpsError.StoreError;
+    }
+
+    write("{s}\n", .{resp.body});
 }
 
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {

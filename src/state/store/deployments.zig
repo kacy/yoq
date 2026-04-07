@@ -112,6 +112,10 @@ pub fn getDeployment(alloc: Allocator, id: []const u8) StoreError!DeploymentReco
     return queryOne(alloc, "SELECT " ++ deployment_columns ++ " FROM deployments WHERE id = ?;", .{id});
 }
 
+pub fn getDeploymentInDb(db: *sqlite.Db, alloc: Allocator, id: []const u8) StoreError!DeploymentRecord {
+    return queryOneInDb(db, alloc, "SELECT " ++ deployment_columns ++ " FROM deployments WHERE id = ?;", .{id});
+}
+
 pub fn listDeployments(alloc: Allocator, service_name: []const u8) StoreError!std.ArrayList(DeploymentRecord) {
     const db = try common.getDb();
     return listQueryInDb(

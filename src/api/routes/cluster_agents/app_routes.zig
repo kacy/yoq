@@ -1,7 +1,9 @@
 const std = @import("std");
+const http = @import("../../http.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
+const deploy_routes = @import("deploy_routes.zig");
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
@@ -22,6 +24,12 @@ pub fn route(request: @import("../../http.zig").Request, alloc: std.mem.Allocato
         if (!common.validateClusterInput(app_name)) return common.badRequest("invalid app name");
         if (request.method != .GET) return common.methodNotAllowed();
         return handleAppStatus(alloc, app_name, ctx);
+    }
+
+    if (common.matchSubpath(rest, "/rollback")) |app_name| {
+        if (!common.validateClusterInput(app_name)) return common.badRequest("invalid app name");
+        if (request.method != .POST) return common.methodNotAllowed();
+        return handleAppRollback(alloc, app_name, request, ctx);
     }
 
     return null;
@@ -51,6 +59,39 @@ pub fn handleAppStatus(alloc: std.mem.Allocator, app_name: []const u8, ctx: Rout
     const body = formatAppStatusResponse(alloc, latest, countServices(latest.config_snapshot)) catch
         return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+pub fn handleAppRollback(
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    request: http.Request,
+    ctx: RouteContext,
+) Response {
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    const release_id = json_helpers.extractJsonString(request.body, "release_id") orelse
+        return common.badRequest("missing release_id");
+    if (!common.validateContainerId(release_id)) return common.badRequest("invalid release_id");
+
+    const release = store.getDeploymentInDb(node.stateMachineDb(), alloc, release_id) catch |err| return switch (err) {
+        error.NotFound => common.notFound(),
+        else => common.internalError(),
+    };
+    defer release.deinit(alloc);
+
+    if (release.app_name == null or !std.mem.eql(u8, release.app_name.?, app_name)) {
+        return common.notFound();
+    }
+
+    const apply_request = http.Request{
+        .method = .POST,
+        .path = "/apps/apply",
+        .path_only = "/apps/apply",
+        .query = "",
+        .headers_raw = request.headers_raw,
+        .body = release.config_snapshot,
+        .content_length = release.config_snapshot.len,
+    };
+    return deploy_routes.handleAppApply(alloc, apply_request, ctx);
 }
 
 fn countServices(snapshot: []const u8) usize {
@@ -183,4 +224,21 @@ test "formatAppStatusResponse summarizes latest release" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
+}
+
+test "route rejects app rollback without cluster" {
+    const body = "{\"release_id\":\"abc123def456\"}";
+    const request = http.Request{
+        .method = .POST,
+        .path = "/apps/demo-app/rollback",
+        .path_only = "/apps/demo-app/rollback",
+        .query = "",
+        .headers_raw = "",
+        .body = body,
+        .content_length = body.len,
+    };
+    const ctx: RouteContext = .{ .cluster = null, .join_token = null };
+
+    const response = route(request, std.testing.allocator, ctx).?;
+    try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
 }
