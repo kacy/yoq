@@ -436,6 +436,82 @@ test "app apply then rollback routes preserve release transition metadata" {
     try std.testing.expect(std.mem.indexOf(u8, history_response.body, source_release_id) != null);
 }
 
+test "app apply route preserves failed release metadata across reads" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"],"cpu_limit":999999,"memory_limit_mb":999999}]}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [512]u8 = undefined;
+    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+
+    var node = cluster_node.Node.init(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = tmp_path,
+    }) catch return error.SkipZigTest;
+    defer node.deinit();
+
+    node.raft.role = .leader;
+    node.leader_id = node.config.id;
+
+    const db = node.stateMachineDb();
+    db.exec(
+        "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "abc123def456", "10.0.0.2:7701", "active", @as(i64, 4), @as(i64, 8192), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "" },
+    ) catch return error.SkipZigTest;
+
+    const ctx: RouteContext = .{ .cluster = &node, .join_token = null };
+
+    const apply_request = http.Request{
+        .method = .POST,
+        .path = "/apps/apply",
+        .path_only = "/apps/apply",
+        .query = "",
+        .headers_raw = "",
+        .body = apply_body,
+        .content_length = apply_body.len,
+    };
+    const apply_response = deploy_routes.handleAppApply(alloc, apply_request, ctx);
+    defer if (apply_response.allocated) alloc.free(apply_response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, apply_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"trigger\":\"apply\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"status\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"failed\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"source_release_id\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, apply_response.body, "\"message\":\"one or more placements failed\"") != null);
+
+    const release_id = json_helpers.extractJsonString(apply_response.body, "release_id").?;
+
+    const status_response = handleAppStatus(alloc, "demo-app", ctx);
+    defer if (status_response.allocated) alloc.free(status_response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, status_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"release_id\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, release_id) != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"trigger\":\"apply\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"status\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"source_release_id\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_response.body, "\"message\":\"one or more placements failed\"") != null);
+
+    const history_response = handleAppHistory(alloc, "demo-app", ctx);
+    defer if (history_response.allocated) alloc.free(history_response.body);
+
+    try std.testing.expectEqual(http.StatusCode.ok, history_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"id\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, release_id) != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"trigger\":\"apply\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"status\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"source_release_id\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_response.body, "\"message\":\"one or more placements failed\"") != null);
+}
+
 test "route rejects app rollback without cluster" {
     const body = "{\"release_id\":\"abc123def456\"}";
     const request = http.Request{
