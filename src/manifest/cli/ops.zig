@@ -1,11 +1,13 @@
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
+const json_helpers = @import("../../lib/json_helpers.zig");
 const json_out = @import("../../lib/json_output.zig");
 const manifest_loader = @import("../loader.zig");
 const orchestrator = @import("../orchestrator.zig");
 const release_history = @import("../release_history.zig");
 const update = @import("../update.zig");
 const store = @import("../../state/store.zig");
+const http_client = @import("../../cluster/http_client.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -77,15 +79,26 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
 pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var target_name: ?[]const u8 = null;
     var app_mode = false;
+    var server_addr: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             cli.output_mode = .json;
         } else if (std.mem.eql(u8, arg, "--app")) {
             app_mode = true;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                return OpsError.InvalidArgument;
+            };
         } else {
             target_name = arg;
         }
+    }
+
+    if (server_addr != null and !app_mode) {
+        writeErr("remote history currently requires --app [name]\n", .{});
+        return OpsError.InvalidArgument;
     }
 
     const owned_label = if (app_mode and target_name == null) try currentAppNameAlloc(alloc) else null;
@@ -96,9 +109,14 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     else
         target_name orelse {
             writeErr("usage: yoq history <service> [--json]\n", .{});
-            writeErr("   or: yoq history --app [name] [--json]\n", .{});
+            writeErr("   or: yoq history --app [name] [--server host:port] [--json]\n", .{});
             return OpsError.InvalidArgument;
         };
+
+    if (server_addr) |addr| {
+        try printRemoteAppHistory(alloc, addr, label);
+        return;
+    }
 
     var deployments = if (app_mode)
         release_history.listAppReleases(alloc, label) catch |err| {
@@ -164,6 +182,63 @@ fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
     const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return OpsError.StoreError;
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return OpsError.StoreError;
+}
+
+fn printRemoteAppHistory(alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8) !void {
+    const server = cli.parseServerAddr(addr_str);
+    const path = std.fmt.allocPrint(alloc, "/apps/{s}/history", .{app_name}) catch return OpsError.StoreError;
+    defer alloc.free(path);
+
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiToken(&token_buf);
+
+    var resp = http_client.getWithAuth(alloc, server.ip, server.port, path, token) catch |err| {
+        writeErr("failed to connect to cluster server: {}\n", .{err});
+        writeErr("hint: is the server running? try 'yoq serve' or 'yoq init-server'\n", .{});
+        return OpsError.ConnectionFailed;
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("history failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+        return OpsError.StoreError;
+    }
+
+    if (cli.output_mode == .json) {
+        write("{s}\n", .{resp.body});
+        return;
+    }
+
+    var iter = json_helpers.extractJsonObjects(resp.body);
+    const first = iter.next() orelse {
+        write("no releases found for app {s}\n", .{app_name});
+        return;
+    };
+
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{ "ID", "STATUS", "HASH", "TIMESTAMP", "MESSAGE" });
+    writeHistoryRow(first);
+    while (iter.next()) |obj| {
+        writeHistoryRow(obj);
+    }
+}
+
+fn writeHistoryRow(obj: []const u8) void {
+    const id = json_helpers.extractJsonString(obj, "id") orelse "?";
+    const status = json_helpers.extractJsonString(obj, "status") orelse "?";
+    const manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?";
+    const created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0;
+    const message = json_helpers.extractJsonString(obj, "message") orelse "";
+
+    var ts_buf: [20]u8 = undefined;
+    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{created_at}) catch "?";
+
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{
+        truncate(id, 12),
+        status,
+        truncate(manifest_hash, 12),
+        ts_str,
+        truncate(message, 40),
+    });
 }
 
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {

@@ -76,11 +76,36 @@ pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!v
     ) catch return StoreError.WriteFailed;
 }
 
-fn queryOne(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!DeploymentRecord {
-    const db = try common.getDb();
+fn queryOneInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    comptime query: []const u8,
+    args: anytype,
+) StoreError!DeploymentRecord {
     const row = (db.oneAlloc(DeploymentRow, alloc, query, .{}, args) catch return StoreError.ReadFailed) orelse
         return StoreError.NotFound;
     return rowToRecord(row);
+}
+
+fn queryOne(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!DeploymentRecord {
+    const db = try common.getDb();
+    return queryOneInDb(db, alloc, query, args);
+}
+
+fn listQueryInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    comptime query: []const u8,
+    args: anytype,
+) StoreError!std.ArrayList(DeploymentRecord) {
+    var deployments: std.ArrayList(DeploymentRecord) = .empty;
+    var stmt = db.prepare(query) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(DeploymentRow, args) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        deployments.append(alloc, rowToRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return deployments;
 }
 
 pub fn getDeployment(alloc: Allocator, id: []const u8) StoreError!DeploymentRecord {
@@ -89,30 +114,30 @@ pub fn getDeployment(alloc: Allocator, id: []const u8) StoreError!DeploymentReco
 
 pub fn listDeployments(alloc: Allocator, service_name: []const u8) StoreError!std.ArrayList(DeploymentRecord) {
     const db = try common.getDb();
-    var deployments: std.ArrayList(DeploymentRecord) = .empty;
-    var stmt = db.prepare(
+    return listQueryInDb(
+        db,
+        alloc,
         "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(DeploymentRow, .{service_name}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        deployments.append(alloc, rowToRecord(row)) catch return StoreError.ReadFailed;
-    }
-    return deployments;
+        .{service_name},
+    );
 }
 
 pub fn listDeploymentsByApp(alloc: Allocator, app_name: []const u8) StoreError!std.ArrayList(DeploymentRecord) {
     const db = try common.getDb();
-    var deployments: std.ArrayList(DeploymentRecord) = .empty;
-    var stmt = db.prepare(
+    return listDeploymentsByAppInDb(db, alloc, app_name);
+}
+
+pub fn listDeploymentsByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+) StoreError!std.ArrayList(DeploymentRecord) {
+    return listQueryInDb(
+        db,
+        alloc,
         "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? ORDER BY created_at DESC;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(DeploymentRow, .{app_name}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        deployments.append(alloc, rowToRecord(row)) catch return StoreError.ReadFailed;
-    }
-    return deployments;
+        .{app_name},
+    );
 }
 
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
@@ -142,7 +167,17 @@ pub fn getLatestDeployment(alloc: Allocator, service_name: []const u8) StoreErro
 }
 
 pub fn getLatestDeploymentByApp(alloc: Allocator, app_name: []const u8) StoreError!DeploymentRecord {
-    return queryOne(
+    const db = try common.getDb();
+    return getLatestDeploymentByAppInDb(db, alloc, app_name);
+}
+
+pub fn getLatestDeploymentByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+) StoreError!DeploymentRecord {
+    return queryOneInDb(
+        db,
         alloc,
         "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? ORDER BY created_at DESC LIMIT 1;",
         .{app_name},

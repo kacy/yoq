@@ -82,10 +82,12 @@ pub const saveDeploymentInDb = @import("store/deployments.zig").saveDeploymentIn
 pub const getDeployment = @import("store/deployments.zig").getDeployment;
 pub const listDeployments = @import("store/deployments.zig").listDeployments;
 pub const listDeploymentsByApp = @import("store/deployments.zig").listDeploymentsByApp;
+pub const listDeploymentsByAppInDb = @import("store/deployments.zig").listDeploymentsByAppInDb;
 pub const updateDeploymentStatus = @import("store/deployments.zig").updateDeploymentStatus;
 pub const updateDeploymentStatusInDb = @import("store/deployments.zig").updateDeploymentStatusInDb;
 pub const getLatestDeployment = @import("store/deployments.zig").getLatestDeployment;
 pub const getLatestDeploymentByApp = @import("store/deployments.zig").getLatestDeploymentByApp;
+pub const getLatestDeploymentByAppInDb = @import("store/deployments.zig").getLatestDeploymentByAppInDb;
 pub const getLastSuccessfulDeployment = @import("store/deployments.zig").getLastSuccessfulDeployment;
 pub const getLastSuccessfulDeploymentByApp = @import("store/deployments.zig").getLastSuccessfulDeploymentByApp;
 

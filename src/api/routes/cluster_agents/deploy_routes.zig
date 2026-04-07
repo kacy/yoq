@@ -10,53 +10,12 @@ const Response = common.Response;
 const RouteContext = common.RouteContext;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
+const extractJsonArray = json_helpers.extractJsonArray;
 
 const ResponseMode = enum {
     legacy,
     app,
 };
-
-fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {
-    var search_buf: [128]u8 = undefined;
-    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":[", .{key}) catch return null;
-    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
-
-    const array_start = start_pos + needle.len - 1;
-    var pos = array_start;
-    var depth: usize = 0;
-    var in_string = false;
-    var escape = false;
-
-    while (pos < json.len) : (pos += 1) {
-        const c = json[pos];
-
-        if (escape) {
-            escape = false;
-            continue;
-        }
-
-        if (c == '\\' and in_string) {
-            escape = true;
-            continue;
-        }
-
-        if (c == '"') {
-            in_string = !in_string;
-            continue;
-        }
-
-        if (in_string) continue;
-
-        if (c == '[') {
-            depth += 1;
-        } else if (c == ']') {
-            depth -= 1;
-            if (depth == 0) return json[array_start .. pos + 1];
-        }
-    }
-
-    return null;
-}
 
 fn extractJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const u8) !?[]u8 {
     const array_json = extractJsonArray(json, key) orelse return null;
@@ -305,7 +264,7 @@ fn handleApply(
 
     const status = if (failed == 0) "completed" else "failed";
     if (release_id) |id| {
-        const message = if (failed == 0) null else "one or more placements failed";
+        const message: ?[]const u8 = if (failed == 0) null else "one or more placements failed";
         deployment_store.updateDeploymentStatusInDb(
             db,
             id,
@@ -343,7 +302,7 @@ fn recordClusterReleaseStart(
     app_name: []const u8,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
-) ![]u8 {
+) ![]const u8 {
     const id = try deployment_store.generateDeploymentId(alloc);
     errdefer alloc.free(id);
 
