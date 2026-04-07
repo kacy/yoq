@@ -37,6 +37,29 @@ pub const ApplyReport = struct {
     pub fn deinit(self: ApplyReport, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
     }
+
+    pub fn summaryText(self: ApplyReport, alloc: std.mem.Allocator) ![]u8 {
+        const status_text = self.status.toString();
+        const message = self.message orelse switch (self.status) {
+            .completed => "apply completed",
+            .failed => "apply failed",
+            else => status_text,
+        };
+
+        if (self.release_id) |id| {
+            return std.fmt.allocPrint(
+                alloc,
+                "release {s} {s}: {s} ({d} placed, {d} failed, {d} services)",
+                .{ id, status_text, message, self.placed, self.failed, self.service_count },
+            );
+        }
+
+        return std.fmt.allocPrint(
+            alloc,
+            "{s}: {s} ({d} placed, {d} failed, {d} services)",
+            .{ status_text, message, self.placed, self.failed, self.service_count },
+        );
+    }
 };
 
 pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
@@ -171,4 +194,25 @@ test "ApplyResult projects to shared apply report" {
     try std.testing.expectEqual(@as(usize, 3), report.placed);
     try std.testing.expectEqual(@as(usize, 0), report.failed);
     try std.testing.expect(report.message == null);
+}
+
+test "ApplyReport summaryText includes release status and counts" {
+    const alloc = std.testing.allocator;
+    const report = ApplyReport{
+        .app_name = "demo-app",
+        .release_id = "dep789",
+        .status = .completed,
+        .service_count = 3,
+        .placed = 3,
+        .failed = 0,
+        .message = "all requested services started",
+    };
+
+    const summary = try report.summaryText(alloc);
+    defer alloc.free(summary);
+
+    try std.testing.expectEqualStrings(
+        "release dep789 completed: all requested services started (3 placed, 0 failed, 3 services)",
+        summary,
+    );
 }

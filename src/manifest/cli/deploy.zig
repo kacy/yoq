@@ -105,6 +105,10 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
     defer apply_report.deinit(alloc);
 
+    const apply_summary = apply_report.summaryText(alloc) catch return DeployError.OutOfMemory;
+    defer alloc.free(apply_summary);
+    writeErr("{s}\n", .{apply_summary});
+
     var watcher = local_apply_backend.DevWatcherRuntime{};
 
     if (dev_mode) {

@@ -156,7 +156,7 @@ const ClusterApplyBackend = struct {
 
         return .{
             .status = if (failed == 0) .completed else .failed,
-            .message = if (failed == 0) null else "one or more placements failed",
+            .message = if (failed == 0) "all placements succeeded" else "one or more placements failed",
             .placed = placed,
             .failed = failed,
         };
@@ -262,6 +262,13 @@ fn formatAppApplyResponse(alloc: std.mem.Allocator, report: apply_release.ApplyR
         report.placed,
         report.failed,
     });
+    if (report.message) |message| {
+        try writer.writeAll(",\"message\":\"");
+        try json_helpers.writeJsonEscaped(writer, message);
+        try writer.writeByte('"');
+    } else {
+        try writer.writeAll(",\"message\":null");
+    }
     try writer.writeByte('}');
 
     return json_buf.toOwnedSlice(alloc);
@@ -285,6 +292,7 @@ test "formatAppApplyResponse includes app release metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":null") != null);
 }
 
 test "formatLegacyApplyResponse preserves compact deploy shape" {

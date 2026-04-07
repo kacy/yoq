@@ -160,6 +160,7 @@ const LocalApplyBackend = struct {
         try self.orch.startAll();
         return .{
             .status = .completed,
+            .message = "all requested services started",
             .placed = self.release.resolvedServiceCount(),
         };
     }
