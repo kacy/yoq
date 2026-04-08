@@ -227,6 +227,61 @@ fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const r
     }
 }
 
+fn runReplacementPlan(
+    runner: anytype,
+    alloc: std.mem.Allocator,
+    new_indexes: []const usize,
+    replacement_indexes: []const usize,
+) !apply_release.ApplyOutcome {
+    var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
+    defer completed_workers.deinit(alloc);
+
+    var placed: usize = 0;
+    var failed: usize = 0;
+    var mutated = false;
+
+    for (new_indexes) |idx| {
+        runner.start(idx, &completed_workers) catch {
+            failed += 1;
+            if (!mutated) return error.StartFailed;
+            continue;
+        };
+        placed += 1;
+        mutated = true;
+    }
+
+    for (replacement_indexes) |idx| {
+        runner.stop(idx);
+        mutated = true;
+        runner.start(idx, &completed_workers) catch {
+            failed += 1;
+            continue;
+        };
+        placed += 1;
+    }
+
+    runner.finish();
+
+    if (failed > 0) {
+        return .{
+            .status = .partially_failed,
+            .message = "one or more local service replacements failed",
+            .placed = placed,
+            .failed = failed,
+        };
+    }
+
+    return .{
+        .status = .completed,
+        .message = if (replacement_indexes.len > 0)
+            "all requested services replaced"
+        else
+            "all requested services started",
+        .placed = placed,
+        .failed = 0,
+    };
+}
+
 pub const DevWatcherRuntime = struct {
     watcher: ?watcher_mod.Watcher = null,
     thread: ?std.Thread = null,
@@ -278,9 +333,6 @@ const LocalApplyBackend = struct {
     fn applyReplacementCandidate(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
         syncExistingServiceStates(self.orch, self.release);
 
-        var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
-        defer completed_workers.deinit(self.orch.alloc);
-
         var new_indexes = try classifyServiceIndexes(
             self.orch.alloc,
             self.orch.manifest,
@@ -299,50 +351,28 @@ const LocalApplyBackend = struct {
         );
         defer replacement_indexes.deinit(self.orch.alloc);
 
-        var placed: usize = 0;
-        var failed: usize = 0;
-        var mutated = false;
+        var runner = struct {
+            orch: *orchestrator.Orchestrator,
 
-        for (new_indexes.items) |idx| {
-            self.orch.startServiceByIndex(idx, &completed_workers) catch {
-                failed += 1;
-                if (!mutated) return error.StartFailed;
-                continue;
-            };
-            placed += 1;
-            mutated = true;
-        }
+            fn start(runner_self: *@This(), idx: usize, completed_workers: *std.StringHashMapUnmanaged(void)) !void {
+                try runner_self.orch.startServiceByIndex(idx, completed_workers);
+            }
 
-        for (replacement_indexes.items) |idx| {
-            self.orch.stopServiceByIndex(idx);
-            mutated = true;
-            self.orch.startServiceByIndex(idx, &completed_workers) catch {
-                failed += 1;
-                continue;
-            };
-            placed += 1;
-        }
+            fn stop(runner_self: *@This(), idx: usize) void {
+                runner_self.orch.stopServiceByIndex(idx);
+            }
 
-        self.orch.startTlsProxy();
+            fn finish(runner_self: *@This()) void {
+                runner_self.orch.startTlsProxy();
+            }
+        }{ .orch = self.orch };
 
-        if (failed > 0) {
-            return .{
-                .status = .partially_failed,
-                .message = "one or more local service replacements failed",
-                .placed = placed,
-                .failed = failed,
-            };
-        }
-
-        return .{
-            .status = .completed,
-            .message = if (replacement_indexes.items.len > 0)
-                "all requested services replaced"
-            else
-                "all requested services started",
-            .placed = placed,
-            .failed = 0,
-        };
+        return runReplacementPlan(
+            &runner,
+            self.orch.alloc,
+            new_indexes.items,
+            replacement_indexes.items,
+        );
     }
 
     pub fn failureMessage(_: *const LocalApplyBackend, _: anytype) ?[]const u8 {
@@ -518,4 +548,88 @@ test "syncExistingServiceStates marks selected running services" {
     try std.testing.expectEqual(orchestrator.ServiceState.Status.pending, prepared.orch.states[0].status);
     try std.testing.expectEqual(orchestrator.ServiceState.Status.running, prepared.orch.states[1].status);
     try std.testing.expectEqualStrings("abcdef123456", prepared.orch.states[1].container_id[0..]);
+}
+
+test "runReplacementPlan counts started and replaced services" {
+    const alloc = std.testing.allocator;
+
+    const Runner = struct {
+        started: std.ArrayList(usize),
+        stopped: std.ArrayList(usize),
+        tls_started: bool = false,
+
+        fn start(self: *@This(), idx: usize, _: *std.StringHashMapUnmanaged(void)) !void {
+            try self.started.append(alloc, idx);
+        }
+
+        fn stop(self: *@This(), idx: usize) void {
+            self.stopped.append(alloc, idx) catch unreachable;
+        }
+
+        fn finish(self: *@This()) void {
+            self.tls_started = true;
+        }
+    };
+
+    var runner = Runner{
+        .started = .empty,
+        .stopped = .empty,
+    };
+    defer runner.started.deinit(alloc);
+    defer runner.stopped.deinit(alloc);
+
+    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1});
+
+    try std.testing.expectEqual(@as(usize, 2), outcome.placed);
+    try std.testing.expectEqual(@as(usize, 0), outcome.failed);
+    try std.testing.expectEqual(@import("update/common.zig").DeploymentStatus.completed, outcome.status);
+    try std.testing.expectEqualStrings("all requested services replaced", outcome.message.?);
+    try std.testing.expect(runner.tls_started);
+    try std.testing.expectEqual(@as(usize, 2), runner.started.items.len);
+    try std.testing.expectEqual(@as(usize, 1), runner.stopped.items.len);
+    try std.testing.expectEqual(@as(usize, 0), runner.started.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), runner.started.items[1]);
+    try std.testing.expectEqual(@as(usize, 1), runner.stopped.items[0]);
+}
+
+test "runReplacementPlan reports partial failure after mutation" {
+    const alloc = std.testing.allocator;
+
+    const Runner = struct {
+        fail_index: usize,
+        started: std.ArrayList(usize),
+        stopped: std.ArrayList(usize),
+        tls_started: bool = false,
+
+        fn start(self: *@This(), idx: usize, _: *std.StringHashMapUnmanaged(void)) !void {
+            if (idx == self.fail_index) return error.StartFailed;
+            try self.started.append(alloc, idx);
+        }
+
+        fn stop(self: *@This(), idx: usize) void {
+            self.stopped.append(alloc, idx) catch unreachable;
+        }
+
+        fn finish(self: *@This()) void {
+            self.tls_started = true;
+        }
+    };
+
+    var runner = Runner{
+        .fail_index = 1,
+        .started = .empty,
+        .stopped = .empty,
+    };
+    defer runner.started.deinit(alloc);
+    defer runner.stopped.deinit(alloc);
+
+    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1});
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.placed);
+    try std.testing.expectEqual(@as(usize, 1), outcome.failed);
+    try std.testing.expectEqual(@import("update/common.zig").DeploymentStatus.partially_failed, outcome.status);
+    try std.testing.expectEqualStrings("one or more local service replacements failed", outcome.message.?);
+    try std.testing.expect(runner.tls_started);
+    try std.testing.expectEqual(@as(usize, 1), runner.started.items.len);
+    try std.testing.expectEqual(@as(usize, 1), runner.stopped.items.len);
 }
