@@ -95,6 +95,14 @@ pub const PreparedLocalApply = struct {
         return apply_result.toReport(self.release.app.app_name, self.release.resolvedServiceCount(), context);
     }
 
+    pub fn replacementServiceIndexes(self: *const PreparedLocalApply, alloc: std.mem.Allocator) !std.ArrayList(usize) {
+        return classifyServiceIndexes(alloc, self.manifest, self.release, self.scope, true);
+    }
+
+    pub fn newServiceIndexes(self: *const PreparedLocalApply, alloc: std.mem.Allocator) !std.ArrayList(usize) {
+        return classifyServiceIndexes(alloc, self.manifest, self.release, self.scope, false);
+    }
+
     pub fn startDevWatcher(self: *PreparedLocalApply) DevWatcherRuntime {
         var runtime = DevWatcherRuntime{};
         runtime.watcher = watcher_mod.Watcher.init(self.alloc) catch |e| blk: {
@@ -167,6 +175,41 @@ fn detectApplyScope(alloc: std.mem.Allocator, release: *const release_plan.Relea
         .existing_target_count = existing_target_count,
         .new_target_count = new_target_count,
     };
+}
+
+fn classifyServiceIndexes(
+    alloc: std.mem.Allocator,
+    manifest: *const spec.Manifest,
+    release: *const release_plan.ReleasePlan,
+    scope: LocalApplyScope,
+    want_existing: bool,
+) !std.ArrayList(usize) {
+    var indexes: std.ArrayList(usize) = .empty;
+
+    for (manifest.services, 0..) |svc, idx| {
+        if (!release.includesService(svc.name)) continue;
+        if (scope.mode == .fresh) {
+            if (!want_existing) try indexes.append(alloc, idx);
+            continue;
+        }
+
+        const record = store.findAppContainer(alloc, release.app.app_name, svc.name) catch {
+            if (!want_existing) try indexes.append(alloc, idx);
+            continue;
+        };
+
+        if (record) |container| {
+            defer container.deinit(alloc);
+            const is_existing = !std.mem.eql(u8, container.status, "stopped");
+            if (is_existing == want_existing) {
+                try indexes.append(alloc, idx);
+            }
+        } else if (!want_existing) {
+            try indexes.append(alloc, idx);
+        }
+    }
+
+    return indexes;
 }
 
 pub const DevWatcherRuntime = struct {
@@ -289,4 +332,54 @@ test "PreparedLocalApply detects replacement candidates from existing app contai
     try std.testing.expectEqual(LocalApplyMode.replacement_candidate, prepared.scope.mode);
     try std.testing.expectEqual(@as(usize, 1), prepared.scope.existing_target_count);
     try std.testing.expectEqual(@as(usize, 1), prepared.scope.new_target_count);
+}
+
+test "PreparedLocalApply classifies replacement and new service indexes" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const loader = @import("loader.zig");
+    const app_spec = @import("app_spec.zig");
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.db]
+        \\image = "postgres:latest"
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["db"]
+    );
+    defer manifest.deinit();
+
+    var app = try app_spec.fromManifest(alloc, "demo-app", &manifest);
+    defer app.deinit();
+
+    var release = try release_plan.ReleasePlan.fromAppSpec(alloc, &app, &.{"web"});
+    defer release.deinit();
+
+    try store.save(.{
+        .id = "abcdef123456",
+        .rootfs = "/tmp/rootfs",
+        .command = "/bin/sh",
+        .hostname = "web",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+
+    var prepared = try PreparedLocalApply.init(alloc, &manifest, &release, false);
+    defer prepared.deinit();
+
+    var replacement_indexes = try prepared.replacementServiceIndexes(alloc);
+    defer replacement_indexes.deinit(alloc);
+    var new_indexes = try prepared.newServiceIndexes(alloc);
+    defer new_indexes.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), replacement_indexes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), new_indexes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), replacement_indexes.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), new_indexes.items[0]);
 }
