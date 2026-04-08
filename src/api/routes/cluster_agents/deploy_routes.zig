@@ -158,7 +158,12 @@ const ClusterApplyBackend = struct {
         }
 
         return .{
-            .status = if (failed == 0) .completed else .failed,
+            .status = if (failed == 0)
+                .completed
+            else if (placed > 0)
+                .partially_failed
+            else
+                .failed,
             .message = if (failed == 0) "all placements succeeded" else "one or more placements failed",
             .placed = placed,
             .failed = failed,
@@ -335,6 +340,25 @@ test "formatAppApplyResponse includes rollback trigger metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":\"dep-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"rollback to dep-1 completed: all placements succeeded\"") != null);
+}
+
+test "formatAppApplyResponse includes partially failed status" {
+    const alloc = std.testing.allocator;
+    const json = try formatAppApplyResponse(alloc, .{
+        .app_name = "demo-app",
+        .release_id = "dep-3",
+        .status = .partially_failed,
+        .service_count = 2,
+        .placed = 1,
+        .failed = 1,
+        .message = "one or more placements failed",
+    });
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"partially_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"one or more placements failed\"") != null);
 }
 
 test "formatLegacyApplyResponse preserves compact deploy shape" {

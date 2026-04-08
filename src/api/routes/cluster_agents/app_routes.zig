@@ -530,6 +530,51 @@ test "app apply route preserves failed release metadata across reads" {
     try expectJsonContains(history_response.body, "\"message\":\"one or more placements failed\"");
 }
 
+test "app apply route preserves partially failed release metadata across reads" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"]},{"name":"db","image":"alpine","command":["echo","db"],"cpu_limit":999999,"memory_limit_mb":999999}]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const apply_response = harness.appApply(apply_body);
+    defer freeResponse(alloc, apply_response);
+
+    try expectResponseOk(apply_response);
+    try expectJsonContains(apply_response.body, "\"trigger\":\"apply\"");
+    try expectJsonContains(apply_response.body, "\"status\":\"partially_failed\"");
+    try expectJsonContains(apply_response.body, "\"placed\":1");
+    try expectJsonContains(apply_response.body, "\"failed\":1");
+    try expectJsonContains(apply_response.body, "\"source_release_id\":null");
+    try expectJsonContains(apply_response.body, "\"message\":\"one or more placements failed\"");
+
+    const release_id = json_helpers.extractJsonString(apply_response.body, "release_id").?;
+
+    const status_response = harness.status("demo-app");
+    defer freeResponse(alloc, status_response);
+
+    try expectResponseOk(status_response);
+    try expectJsonContains(status_response.body, "\"release_id\":\"");
+    try expectJsonContains(status_response.body, release_id);
+    try expectJsonContains(status_response.body, "\"trigger\":\"apply\"");
+    try expectJsonContains(status_response.body, "\"status\":\"partially_failed\"");
+    try expectJsonContains(status_response.body, "\"source_release_id\":null");
+    try expectJsonContains(status_response.body, "\"message\":\"one or more placements failed\"");
+
+    const history_response = harness.history("demo-app");
+    defer freeResponse(alloc, history_response);
+
+    try expectResponseOk(history_response);
+    try expectJsonContains(history_response.body, "\"id\":\"");
+    try expectJsonContains(history_response.body, release_id);
+    try expectJsonContains(history_response.body, "\"trigger\":\"apply\"");
+    try expectJsonContains(history_response.body, "\"status\":\"partially_failed\"");
+    try expectJsonContains(history_response.body, "\"source_release_id\":null");
+    try expectJsonContains(history_response.body, "\"message\":\"one or more placements failed\"");
+}
+
 test "route rejects app rollback without cluster" {
     const body = "{\"release_id\":\"abc123def456\"}";
     const request = http.Request{

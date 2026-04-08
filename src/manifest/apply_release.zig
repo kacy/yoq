@@ -148,6 +148,7 @@ pub fn materializeMessage(
             try alloc.dupe(u8, message)
         else switch (status) {
             .completed => try alloc.dupe(u8, "apply completed"),
+            .partially_failed => try alloc.dupe(u8, "apply partially failed"),
             .failed => try alloc.dupe(u8, "apply failed"),
             else => try alloc.dupe(u8, status_text),
         },
