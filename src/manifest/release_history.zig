@@ -14,7 +14,7 @@ pub fn recordAppReleaseStart(plan: *const release_plan.ReleasePlan) ![]const u8 
         plan.app.app_name,
         plan.manifest_hash,
         plan.config_snapshot,
-        .in_progress,
+        .pending,
         null,
     );
     return id;
@@ -74,7 +74,7 @@ test "recordAppReleaseStart stores app-scoped deployment metadata" {
     try std.testing.expectEqual(@as(usize, 1), deployments.items.len);
     try std.testing.expectEqualStrings("demo-app", deployments.items[0].app_name.?);
     try std.testing.expectEqualStrings("demo-app", deployments.items[0].service_name);
-    try std.testing.expectEqualStrings("in_progress", deployments.items[0].status);
+    try std.testing.expectEqualStrings("pending", deployments.items[0].status);
 }
 
 test "markAppReleaseStatus persists partially failed state" {

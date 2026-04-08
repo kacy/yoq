@@ -174,20 +174,29 @@ fn countServices(snapshot: []const u8) usize {
     return count;
 }
 
+fn markReleaseIfPresent(
+    tracker: anytype,
+    release_id: ?[]const u8,
+    status: update_common.DeploymentStatus,
+    message: ?[]const u8,
+) !void {
+    if (release_id) |id| {
+        try tracker.mark(id, status, message);
+    }
+}
+
 pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
     const release_id = try tracker.begin();
+    errdefer if (release_id) |id| tracker.freeReleaseId(id);
+
+    try markReleaseIfPresent(tracker, release_id, .in_progress, null);
 
     const outcome = backend.apply() catch |err| {
-        if (release_id) |id| {
-            try tracker.mark(id, .failed, backend.failureMessage(err));
-            tracker.freeReleaseId(id);
-        }
+        try markReleaseIfPresent(tracker, release_id, .failed, backend.failureMessage(err));
         return err;
     };
 
-    if (release_id) |id| {
-        try tracker.mark(id, outcome.status, outcome.message);
-    }
+    try markReleaseIfPresent(tracker, release_id, outcome.status, outcome.message);
 
     return .{
         .release_id = release_id,
@@ -195,29 +204,49 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
     };
 }
 
+const TestTracker = struct {
+    alloc: std.mem.Allocator,
+    release_id: []const u8,
+    statuses: [2]?update_common.DeploymentStatus = [_]?update_common.DeploymentStatus{null} ** 2,
+    messages: [2]?[]const u8 = [_]?[]const u8{null} ** 2,
+    mark_count: usize = 0,
+
+    fn begin(self: *@This()) !?[]const u8 {
+        const id = try self.alloc.dupe(u8, self.release_id);
+        return id;
+    }
+
+    fn mark(self: *@This(), id: []const u8, status: update_common.DeploymentStatus, message: ?[]const u8) !void {
+        try std.testing.expectEqualStrings(self.release_id, id);
+        self.statuses[self.mark_count] = status;
+        self.messages[self.mark_count] = message;
+        self.mark_count += 1;
+    }
+
+    fn freeReleaseId(self: *@This(), id: []const u8) void {
+        self.alloc.free(id);
+    }
+};
+
+fn expectTrackedStatuses(
+    tracker: *const TestTracker,
+    first_status: update_common.DeploymentStatus,
+    second_status: update_common.DeploymentStatus,
+    second_message: ?[]const u8,
+) !void {
+    try std.testing.expectEqual(@as(usize, 2), tracker.mark_count);
+    try std.testing.expectEqual(first_status, tracker.statuses[0].?);
+    try std.testing.expect(tracker.messages[0] == null);
+    try std.testing.expectEqual(second_status, tracker.statuses[1].?);
+    if (second_message) |message| {
+        try std.testing.expectEqualStrings(message, tracker.messages[1].?);
+    } else {
+        try std.testing.expect(tracker.messages[1] == null);
+    }
+}
+
 test "execute marks completed releases on backend success" {
     const alloc = std.testing.allocator;
-
-    const Tracker = struct {
-        alloc: std.mem.Allocator,
-        last_status: ?update_common.DeploymentStatus = null,
-        last_message: ?[]const u8 = null,
-
-        fn begin(self: *@This()) !?[]const u8 {
-            const id = try self.alloc.dupe(u8, "dep123");
-            return id;
-        }
-
-        fn mark(self: *@This(), id: []const u8, status: update_common.DeploymentStatus, message: ?[]const u8) !void {
-            try std.testing.expectEqualStrings("dep123", id);
-            self.last_status = status;
-            self.last_message = message;
-        }
-
-        fn freeReleaseId(self: *@This(), id: []const u8) void {
-            self.alloc.free(id);
-        }
-    };
 
     const Backend = struct {
         fn apply(_: *@This()) !ApplyOutcome {
@@ -229,7 +258,7 @@ test "execute marks completed releases on backend success" {
         }
     };
 
-    var tracker = Tracker{ .alloc = alloc };
+    var tracker = TestTracker{ .alloc = alloc, .release_id = "dep123" };
     var backend = Backend{};
 
     const result = try execute(&tracker, &backend);
@@ -237,35 +266,13 @@ test "execute marks completed releases on backend success" {
 
     try std.testing.expectEqualStrings("dep123", result.release_id.?);
     try std.testing.expectEqual(update_common.DeploymentStatus.completed, result.outcome.status);
-    try std.testing.expectEqual(update_common.DeploymentStatus.completed, tracker.last_status.?);
-    try std.testing.expect(tracker.last_message == null);
+    try expectTrackedStatuses(&tracker, .in_progress, .completed, null);
 }
 
 test "execute marks failed releases on backend error" {
     const alloc = std.testing.allocator;
 
     const BackendError = error{StartupFailed};
-
-    const Tracker = struct {
-        alloc: std.mem.Allocator,
-        last_status: ?update_common.DeploymentStatus = null,
-        last_message: ?[]const u8 = null,
-
-        fn begin(self: *@This()) !?[]const u8 {
-            const id = try self.alloc.dupe(u8, "dep456");
-            return id;
-        }
-
-        fn mark(self: *@This(), id: []const u8, status: update_common.DeploymentStatus, message: ?[]const u8) !void {
-            try std.testing.expectEqualStrings("dep456", id);
-            self.last_status = status;
-            self.last_message = message;
-        }
-
-        fn freeReleaseId(self: *@This(), id: []const u8) void {
-            self.alloc.free(id);
-        }
-    };
 
     const Backend = struct {
         fn apply(_: *@This()) BackendError!ApplyOutcome {
@@ -279,12 +286,11 @@ test "execute marks failed releases on backend error" {
         }
     };
 
-    var tracker = Tracker{ .alloc = alloc };
+    var tracker = TestTracker{ .alloc = alloc, .release_id = "dep456" };
     var backend = Backend{};
 
     try std.testing.expectError(BackendError.StartupFailed, execute(&tracker, &backend));
-    try std.testing.expectEqual(update_common.DeploymentStatus.failed, tracker.last_status.?);
-    try std.testing.expectEqualStrings("service startup failed", tracker.last_message.?);
+    try expectTrackedStatuses(&tracker, .in_progress, .failed, "service startup failed");
 }
 
 test "ApplyResult projects to shared apply report" {

@@ -45,7 +45,7 @@ const ClusterReleaseTracker = struct {
             name,
             manifest_hash,
             self.config_snapshot,
-            .in_progress,
+            .pending,
             null,
         ) catch return ClusterApplyError.InternalError;
 
