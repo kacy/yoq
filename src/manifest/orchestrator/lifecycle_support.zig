@@ -184,31 +184,40 @@ pub fn stopAll(self: anytype) void {
     var i: usize = services.len;
     while (i > 0) {
         i -= 1;
-        if (self.states[i].status != .running and self.states[i].status != .starting) continue;
+        stopServiceByIndex(self, i);
+    }
+}
 
-        const id = self.states[i].container_id;
-        writeErr("stopping {s}...\n", .{services[i].name});
+pub fn stopServiceByIndex(self: anytype, idx: usize) void {
+    if (self.states[idx].status != .running and self.states[idx].status != .starting) return;
 
-        const record = store.load(self.alloc, id[0..]) catch {
-            log.warn("orchestrator: failed to load container for shutdown: {s}", .{services[i].name});
-            continue;
-        };
-        defer record.deinit(self.alloc);
+    const svc = self.manifest.services[idx];
+    health.unregisterService(svc.name);
 
-        if (record.pid) |pid| {
-            process.terminate(pid) catch {
-                process.kill(pid) catch {};
-            };
+    const id = self.states[idx].container_id;
+    writeErr("stopping {s}...\n", .{svc.name});
+
+    const record = store.load(self.alloc, id[0..]) catch {
+        log.warn("orchestrator: failed to load container for shutdown: {s}", .{svc.name});
+        self.states[idx].status = .stopped;
+        if (self.states[idx].thread) |thread| {
+            thread.join();
+            self.states[idx].thread = null;
         }
+        return;
+    };
+    defer record.deinit(self.alloc);
 
-        self.states[i].status = .stopped;
+    if (record.pid) |pid| {
+        process.terminate(pid) catch {
+            process.kill(pid) catch {};
+        };
     }
 
-    for (self.states) |*state| {
-        if (state.thread) |thread| {
-            thread.join();
-            state.thread = null;
-        }
+    self.states[idx].status = .stopped;
+    if (self.states[idx].thread) |thread| {
+        thread.join();
+        self.states[idx].thread = null;
     }
 }
 

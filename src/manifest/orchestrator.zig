@@ -592,6 +592,8 @@ fn fakeStartServiceThread(orch: *Orchestrator, idx: usize) void {
     orch.states[idx].status = .running;
 }
 
+fn fakeJoinableThread(_: *Orchestrator, _: usize) void {}
+
 test "startServiceByIndex launches a single service thread" {
     const alloc = std.testing.allocator;
 
@@ -631,4 +633,56 @@ test "startServiceByIndex launches a single service thread" {
 
     try std.testing.expectEqual(ServiceState.Status.running, orch.states[0].status);
     try std.testing.expect(orch.states[0].thread != null);
+}
+
+test "stopServiceByIndex marks running service stopped without pid" {
+    const alloc = std.testing.allocator;
+    try @import("../state/store.zig").initTestDb();
+    defer @import("../state/store.zig").deinitTestDb();
+
+    var services = [_]spec.Service{
+        testSvc("web", &.{}),
+    };
+    var manifest = spec.Manifest{
+        .services = &services,
+        .workers = &.{},
+        .crons = &.{},
+        .training_jobs = &.{},
+        .volumes = &.{},
+        .alloc = alloc,
+    };
+
+    const states = try alloc.alloc(ServiceState, 1);
+    defer alloc.free(states);
+    for (states) |*s| s.* = .{ .container_id = "abcdef123456".*, .thread = null, .status = .running };
+
+    const flags = try alloc.alloc(std.atomic.Value(bool), 1);
+    defer alloc.free(flags);
+    for (flags) |*f| f.* = std.atomic.Value(bool).init(false);
+
+    var orch = Orchestrator{
+        .alloc = alloc,
+        .manifest = &manifest,
+        .app_name = "test",
+        .states = states,
+        .restart_requested = flags,
+    };
+
+    try @import("../state/store.zig").save(.{
+        .id = "abcdef123456",
+        .rootfs = "/tmp/rootfs",
+        .command = "/bin/sh",
+        .hostname = "web",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "test",
+        .created_at = 100,
+    });
+
+    orch.states[0].thread = try std.Thread.spawn(.{}, fakeJoinableThread, .{ &orch, 0 });
+    lifecycle_support.stopServiceByIndex(&orch, 0);
+
+    try std.testing.expectEqual(ServiceState.Status.stopped, orch.states[0].status);
+    try std.testing.expect(orch.states[0].thread == null);
 }
