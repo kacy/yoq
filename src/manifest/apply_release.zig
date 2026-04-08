@@ -147,10 +147,12 @@ pub fn materializeMessage(
         .apply => if (explicit) |message|
             try alloc.dupe(u8, message)
         else switch (status) {
+            .pending => try alloc.dupe(u8, "apply pending"),
+            .in_progress => try alloc.dupe(u8, "apply in progress"),
             .completed => try alloc.dupe(u8, "apply completed"),
             .partially_failed => try alloc.dupe(u8, "apply partially failed"),
             .failed => try alloc.dupe(u8, "apply failed"),
-            else => try alloc.dupe(u8, status_text),
+            .rolled_back => try alloc.dupe(u8, "apply rolled back"),
         },
         .rollback => if (context.source_release_id) |source_id|
             if (explicit) |message|
@@ -341,6 +343,22 @@ test "materializeMessage contextualizes rollback transitions" {
         "rollback to dep100 completed: all placements succeeded",
         message.?,
     );
+}
+
+test "materializeMessage defaults are operator friendly for orchestration states" {
+    const alloc = std.testing.allocator;
+
+    const pending = try materializeMessage(alloc, .{}, .pending, null);
+    defer alloc.free(pending.?);
+    try std.testing.expectEqualStrings("apply pending", pending.?);
+
+    const partial = try materializeMessage(alloc, .{}, .partially_failed, null);
+    defer alloc.free(partial.?);
+    try std.testing.expectEqualStrings("apply partially failed", partial.?);
+
+    const rolled_back = try materializeMessage(alloc, .{}, .rolled_back, null);
+    defer alloc.free(rolled_back.?);
+    try std.testing.expectEqualStrings("apply rolled back", rolled_back.?);
 }
 
 test "reportFromDeployment preserves release metadata and counts services" {

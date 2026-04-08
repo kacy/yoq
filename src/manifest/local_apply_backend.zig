@@ -147,11 +147,7 @@ const LocalReleaseTracker = struct {
         const resolved_message = try apply_release.materializeMessage(self.plan.alloc, self.context, status, message);
         defer if (resolved_message) |msg| self.plan.alloc.free(msg);
 
-        switch (status) {
-            .completed => release_history.markAppReleaseCompleted(id, resolved_message) catch {},
-            .failed => release_history.markAppReleaseFailed(id, resolved_message) catch {},
-            else => {},
-        }
+        release_history.markAppReleaseStatus(id, status, resolved_message) catch {};
     }
 
     pub fn freeReleaseId(self: *const LocalReleaseTracker, id: []const u8) void {
