@@ -5,6 +5,7 @@ const release_history = @import("release_history.zig");
 const release_plan = @import("release_plan.zig");
 const orchestrator = @import("orchestrator.zig");
 const startup_runtime = @import("orchestrator/startup_runtime.zig");
+const store = @import("../state/store.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const spec = @import("spec.zig");
 const proxy_control_plane = @import("../network/proxy/control_plane.zig");
@@ -14,10 +15,22 @@ const listener_runtime = @import("../network/proxy/listener_runtime.zig");
 
 const writeErr = cli.writeErr;
 
+pub const LocalApplyMode = enum {
+    fresh,
+    replacement_candidate,
+};
+
+pub const LocalApplyScope = struct {
+    mode: LocalApplyMode,
+    existing_target_count: usize,
+    new_target_count: usize,
+};
+
 pub const PreparedLocalApply = struct {
     alloc: std.mem.Allocator,
     manifest: *spec.Manifest,
     release: *const release_plan.ReleasePlan,
+    scope: LocalApplyScope,
     orch: orchestrator.Orchestrator,
     runtime_started: bool = false,
 
@@ -27,6 +40,7 @@ pub const PreparedLocalApply = struct {
         release: *const release_plan.ReleasePlan,
         dev_mode: bool,
     ) !PreparedLocalApply {
+        const scope = detectApplyScope(alloc, release);
         var orch = try orchestrator.Orchestrator.init(alloc, manifest, release.app.app_name);
         errdefer orch.deinit();
 
@@ -42,6 +56,7 @@ pub const PreparedLocalApply = struct {
             .alloc = alloc,
             .manifest = manifest,
             .release = release,
+            .scope = scope,
             .orch = orch,
         };
     }
@@ -125,6 +140,35 @@ pub const PreparedLocalApply = struct {
     }
 };
 
+fn detectApplyScope(alloc: std.mem.Allocator, release: *const release_plan.ReleasePlan) LocalApplyScope {
+    var existing_target_count: usize = 0;
+    var new_target_count: usize = 0;
+
+    for (release.app.services) |svc| {
+        const record = store.findAppContainer(alloc, release.app.app_name, svc.name) catch {
+            new_target_count += 1;
+            continue;
+        };
+
+        if (record) |container| {
+            defer container.deinit(alloc);
+            if (!std.mem.eql(u8, container.status, "stopped")) {
+                existing_target_count += 1;
+            } else {
+                new_target_count += 1;
+            }
+        } else {
+            new_target_count += 1;
+        }
+    }
+
+    return .{
+        .mode = if (existing_target_count > 0) .replacement_candidate else .fresh,
+        .existing_target_count = existing_target_count,
+        .new_target_count = new_target_count,
+    };
+}
+
 pub const DevWatcherRuntime = struct {
     watcher: ?watcher_mod.Watcher = null,
     thread: ?std.Thread = null,
@@ -201,4 +245,48 @@ test "PreparedLocalApply init resolves filtered start set" {
     try std.testing.expectEqual(@as(usize, 2), start_set.count());
     try std.testing.expect(start_set.contains("db"));
     try std.testing.expect(start_set.contains("web"));
+}
+
+test "PreparedLocalApply detects replacement candidates from existing app containers" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const loader = @import("loader.zig");
+    const app_spec = @import("app_spec.zig");
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.db]
+        \\image = "postgres:latest"
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["db"]
+    );
+    defer manifest.deinit();
+
+    var app = try app_spec.fromManifest(alloc, "demo-app", &manifest);
+    defer app.deinit();
+
+    var release = try release_plan.ReleasePlan.fromAppSpec(alloc, &app, &.{"web"});
+    defer release.deinit();
+
+    try store.save(.{
+        .id = "abcdef123456",
+        .rootfs = "/tmp/rootfs",
+        .command = "/bin/sh",
+        .hostname = "web",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+
+    var prepared = try PreparedLocalApply.init(alloc, &manifest, &release, false);
+    defer prepared.deinit();
+
+    try std.testing.expectEqual(LocalApplyMode.replacement_candidate, prepared.scope.mode);
+    try std.testing.expectEqual(@as(usize, 1), prepared.scope.existing_target_count);
+    try std.testing.expectEqual(@as(usize, 1), prepared.scope.new_target_count);
 }
