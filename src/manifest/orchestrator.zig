@@ -154,6 +154,14 @@ pub const Orchestrator = struct {
         return lifecycle_support.startAll(self, OrchestratorError, serviceThread);
     }
 
+    pub fn startServiceByIndex(
+        self: *Orchestrator,
+        idx: usize,
+        completed_workers: *std.StringHashMapUnmanaged(void),
+    ) OrchestratorError!void {
+        return lifecycle_support.startServiceByIndex(self, OrchestratorError, idx, completed_workers, serviceThread);
+    }
+
     /// register services for health checking and start the checker thread.
     pub fn registerHealthChecks(self: *Orchestrator) void {
         startup_runtime.registerHealthChecks(
@@ -183,6 +191,10 @@ pub const Orchestrator = struct {
     /// stop all running services in reverse dependency order.
     pub fn stopAll(self: *Orchestrator) void {
         lifecycle_support.stopAll(self);
+    }
+
+    pub fn stopServiceByIndex(self: *Orchestrator, idx: usize) void {
+        lifecycle_support.stopServiceByIndex(self, idx);
     }
 
     /// block until shutdown is requested (SIGINT/SIGTERM) or all services exit.

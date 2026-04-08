@@ -90,6 +90,7 @@ pub const PreparedLocalApply = struct {
         var apply_backend = LocalApplyBackend{
             .orch = &self.orch,
             .release = self.release,
+            .scope = self.scope,
         };
         const apply_result = try apply_release.execute(&release_tracker, &apply_backend);
         return apply_result.toReport(self.release.app.app_name, self.release.resolvedServiceCount(), context);
@@ -212,6 +213,20 @@ fn classifyServiceIndexes(
     return indexes;
 }
 
+fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const release_plan.ReleasePlan) void {
+    for (orch.manifest.services, 0..) |svc, idx| {
+        if (!release.includesService(svc.name)) continue;
+        const record = store.findAppContainer(orch.alloc, release.app.app_name, svc.name) catch continue;
+        if (record) |container| {
+            defer container.deinit(orch.alloc);
+            if (std.mem.eql(u8, container.status, "stopped")) continue;
+            if (container.id.len != orch.states[idx].container_id.len) continue;
+            @memcpy(&orch.states[idx].container_id, container.id);
+            orch.states[idx].status = .running;
+        }
+    }
+}
+
 pub const DevWatcherRuntime = struct {
     watcher: ?watcher_mod.Watcher = null,
     thread: ?std.Thread = null,
@@ -245,13 +260,88 @@ const LocalReleaseTracker = struct {
 const LocalApplyBackend = struct {
     orch: *orchestrator.Orchestrator,
     release: *const release_plan.ReleasePlan,
+    scope: LocalApplyScope,
 
     pub fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
+        if (self.scope.mode == .replacement_candidate) {
+            return self.applyReplacementCandidate();
+        }
+
         try self.orch.startAll();
         return .{
             .status = .completed,
             .message = "all requested services started",
             .placed = self.release.resolvedServiceCount(),
+        };
+    }
+
+    fn applyReplacementCandidate(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
+        syncExistingServiceStates(self.orch, self.release);
+
+        var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
+        defer completed_workers.deinit(self.orch.alloc);
+
+        var new_indexes = try classifyServiceIndexes(
+            self.orch.alloc,
+            self.orch.manifest,
+            self.release,
+            self.scope,
+            false,
+        );
+        defer new_indexes.deinit(self.orch.alloc);
+
+        var replacement_indexes = try classifyServiceIndexes(
+            self.orch.alloc,
+            self.orch.manifest,
+            self.release,
+            self.scope,
+            true,
+        );
+        defer replacement_indexes.deinit(self.orch.alloc);
+
+        var placed: usize = 0;
+        var failed: usize = 0;
+        var mutated = false;
+
+        for (new_indexes.items) |idx| {
+            self.orch.startServiceByIndex(idx, &completed_workers) catch {
+                failed += 1;
+                if (!mutated) return error.StartFailed;
+                continue;
+            };
+            placed += 1;
+            mutated = true;
+        }
+
+        for (replacement_indexes.items) |idx| {
+            self.orch.stopServiceByIndex(idx);
+            mutated = true;
+            self.orch.startServiceByIndex(idx, &completed_workers) catch {
+                failed += 1;
+                continue;
+            };
+            placed += 1;
+        }
+
+        self.orch.startTlsProxy();
+
+        if (failed > 0) {
+            return .{
+                .status = .partially_failed,
+                .message = "one or more local service replacements failed",
+                .placed = placed,
+                .failed = failed,
+            };
+        }
+
+        return .{
+            .status = .completed,
+            .message = if (replacement_indexes.items.len > 0)
+                "all requested services replaced"
+            else
+                "all requested services started",
+            .placed = placed,
+            .failed = 0,
         };
     }
 
@@ -382,4 +472,50 @@ test "PreparedLocalApply classifies replacement and new service indexes" {
     try std.testing.expectEqual(@as(usize, 1), new_indexes.items.len);
     try std.testing.expectEqual(@as(usize, 1), replacement_indexes.items[0]);
     try std.testing.expectEqual(@as(usize, 0), new_indexes.items[0]);
+}
+
+test "syncExistingServiceStates marks selected running services" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const loader = @import("loader.zig");
+    const app_spec = @import("app_spec.zig");
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.db]
+        \\image = "postgres:latest"
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["db"]
+    );
+    defer manifest.deinit();
+
+    var app = try app_spec.fromManifest(alloc, "demo-app", &manifest);
+    defer app.deinit();
+
+    var release = try release_plan.ReleasePlan.fromAppSpec(alloc, &app, &.{"web"});
+    defer release.deinit();
+
+    try store.save(.{
+        .id = "abcdef123456",
+        .rootfs = "/tmp/rootfs",
+        .command = "/bin/sh",
+        .hostname = "web",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+
+    var prepared = try PreparedLocalApply.init(alloc, &manifest, &release, false);
+    defer prepared.deinit();
+
+    syncExistingServiceStates(&prepared.orch, &release);
+
+    try std.testing.expectEqual(orchestrator.ServiceState.Status.pending, prepared.orch.states[0].status);
+    try std.testing.expectEqual(orchestrator.ServiceState.Status.running, prepared.orch.states[1].status);
+    try std.testing.expectEqualStrings("abcdef123456", prepared.orch.states[1].container_id[0..]);
 }
