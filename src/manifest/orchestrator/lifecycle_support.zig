@@ -76,63 +76,10 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
 
     for (services, 0..) |svc, i| {
         if (!shouldStart(self, svc.name)) continue;
-
-        for (svc.depends_on) |dep_name| {
-            if (self.manifest.workerByName(dep_name)) |worker| {
-                if (!completed_workers.contains(dep_name)) {
-                    writeErr("running worker {s}...\n", .{dep_name});
-                    if (!service_runtime.runOneShot(
-                        self.alloc,
-                        worker.image,
-                        worker.command,
-                        worker.env,
-                        worker.volumes,
-                        worker.working_dir,
-                        dep_name,
-                        self.manifest.volumes,
-                        self.app_name,
-                    )) {
-                        writeErr("worker '{s}' failed\n", .{dep_name});
-                        self.stopAll();
-                        return OrchestratorError.StartFailed;
-                    }
-                    completed_workers.put(self.alloc, dep_name, {}) catch {};
-                    writeErr("  worker {s} completed\n", .{dep_name});
-                }
-            } else {
-                const dep_idx = serviceIndex(self, dep_name) orelse continue;
-                if (!waitForRunning(self, dep_idx)) {
-                    writeErr("dependency '{s}' failed to start\n", .{dep_name});
-                    self.stopAll();
-                    return OrchestratorError.StartFailed;
-                }
-            }
-        }
-
-        self.states[i].status = .starting;
-        container.generateId(&self.states[i].container_id) catch {
-            writeErr("failed to generate container ID for {s}\n", .{svc.name});
-            self.states[i].status = .failed;
+        startServiceByIndex(self, OrchestratorError, i, &completed_workers, serviceThreadFn) catch |err| {
             self.stopAll();
-            return OrchestratorError.StartFailed;
+            return err;
         };
-
-        const thread = std.Thread.spawn(.{}, serviceThreadFn, .{ self, i }) catch {
-            writeErr("failed to spawn thread for {s}\n", .{svc.name});
-            self.states[i].status = .failed;
-            self.stopAll();
-            return OrchestratorError.StartFailed;
-        };
-        self.states[i].thread = thread;
-
-        if (!waitForRunning(self, i)) {
-            writeErr("service '{s}' failed to start\n", .{svc.name});
-            self.stopAll();
-            return OrchestratorError.StartFailed;
-        }
-
-        const id = self.states[i].container_id;
-        writeErr("started {s} ({s})\n", .{ svc.name, id[0..] });
     }
 
     self.registerHealthChecks();
@@ -152,6 +99,68 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
         cs.start();
         writeErr("{d} cron(s) scheduled\n", .{self.manifest.crons.len});
     }
+}
+
+pub fn startServiceByIndex(
+    self: anytype,
+    comptime OrchestratorError: type,
+    idx: usize,
+    completed_workers: *std.StringHashMapUnmanaged(void),
+    serviceThreadFn: anytype,
+) OrchestratorError!void {
+    const svc = self.manifest.services[idx];
+
+    for (svc.depends_on) |dep_name| {
+        if (self.manifest.workerByName(dep_name)) |worker| {
+            if (!completed_workers.contains(dep_name)) {
+                writeErr("running worker {s}...\n", .{dep_name});
+                if (!service_runtime.runOneShot(
+                    self.alloc,
+                    worker.image,
+                    worker.command,
+                    worker.env,
+                    worker.volumes,
+                    worker.working_dir,
+                    dep_name,
+                    self.manifest.volumes,
+                    self.app_name,
+                )) {
+                    writeErr("worker '{s}' failed\n", .{dep_name});
+                    return OrchestratorError.StartFailed;
+                }
+                completed_workers.put(self.alloc, dep_name, {}) catch {};
+                writeErr("  worker {s} completed\n", .{dep_name});
+            }
+        } else {
+            const dep_idx = serviceIndex(self, dep_name) orelse continue;
+            if (!waitForRunning(self, dep_idx)) {
+                writeErr("dependency '{s}' failed to start\n", .{dep_name});
+                return OrchestratorError.StartFailed;
+            }
+        }
+    }
+
+    self.states[idx].status = .starting;
+    container.generateId(&self.states[idx].container_id) catch {
+        writeErr("failed to generate container ID for {s}\n", .{svc.name});
+        self.states[idx].status = .failed;
+        return OrchestratorError.StartFailed;
+    };
+
+    const thread = std.Thread.spawn(.{}, serviceThreadFn, .{ self, idx }) catch {
+        writeErr("failed to spawn thread for {s}\n", .{svc.name});
+        self.states[idx].status = .failed;
+        return OrchestratorError.StartFailed;
+    };
+    self.states[idx].thread = thread;
+
+    if (!waitForRunning(self, idx)) {
+        writeErr("service '{s}' failed to start\n", .{svc.name});
+        return OrchestratorError.StartFailed;
+    }
+
+    const id = self.states[idx].container_id;
+    writeErr("started {s} ({s})\n", .{ svc.name, id[0..] });
 }
 
 pub fn stopAll(self: anytype) void {

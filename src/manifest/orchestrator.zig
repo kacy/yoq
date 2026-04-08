@@ -587,3 +587,48 @@ test "computeStartSet: no filter starts everything" {
     try std.testing.expect(orch.shouldStart("db"));
     try std.testing.expect(orch.shouldStart("anything"));
 }
+
+fn fakeStartServiceThread(orch: *Orchestrator, idx: usize) void {
+    orch.states[idx].status = .running;
+}
+
+test "startServiceByIndex launches a single service thread" {
+    const alloc = std.testing.allocator;
+
+    var services = [_]spec.Service{
+        testSvc("web", &.{}),
+    };
+    var manifest = spec.Manifest{
+        .services = &services,
+        .workers = &.{},
+        .crons = &.{},
+        .training_jobs = &.{},
+        .volumes = &.{},
+        .alloc = alloc,
+    };
+
+    const states = try alloc.alloc(ServiceState, 1);
+    defer alloc.free(states);
+    for (states) |*s| s.* = .{ .container_id = undefined, .thread = null, .status = .pending };
+
+    const flags = try alloc.alloc(std.atomic.Value(bool), 1);
+    defer alloc.free(flags);
+    for (flags) |*f| f.* = std.atomic.Value(bool).init(false);
+
+    var orch = Orchestrator{
+        .alloc = alloc,
+        .manifest = &manifest,
+        .app_name = "test",
+        .states = states,
+        .restart_requested = flags,
+    };
+
+    var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
+    defer completed_workers.deinit(alloc);
+
+    try lifecycle_support.startServiceByIndex(&orch, OrchestratorError, 0, &completed_workers, fakeStartServiceThread);
+    defer if (orch.states[0].thread) |thread| thread.join();
+
+    try std.testing.expectEqual(ServiceState.Status.running, orch.states[0].status);
+    try std.testing.expect(orch.states[0].thread != null);
+}
