@@ -411,6 +411,34 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
 }
 
+test "historyEntryFromDeployment preserves partially failed local release state" {
+    const dep = store.DeploymentRecord{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:333",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .status = "partially_failed",
+        .message = "one or more placements failed",
+        .created_at = 300,
+    };
+
+    const local = historyEntryFromDeployment(dep);
+    const remote = parseHistoryObject(
+        \\{"id":"dep-3","app":"demo-app","service":"demo-app","trigger":"apply","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"source_release_id":null,"message":"one or more placements failed"}
+    );
+
+    try std.testing.expectEqualStrings(local.id, remote.id);
+    try std.testing.expectEqualStrings(local.app.?, remote.app.?);
+    try std.testing.expectEqualStrings(local.service, remote.service);
+    try std.testing.expectEqualStrings(local.trigger, remote.trigger);
+    try std.testing.expectEqualStrings(local.status, remote.status);
+    try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
+    try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expect(local.source_release_id == null);
+    try std.testing.expectEqualStrings(local.message.?, remote.message.?);
+}
+
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var worker_name: ?[]const u8 = null;
