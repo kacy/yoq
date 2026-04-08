@@ -282,6 +282,13 @@ fn runReplacementPlan(
     };
 }
 
+fn runScopedApply(scope: LocalApplyScope, runner: anytype) !apply_release.ApplyOutcome {
+    return switch (scope.mode) {
+        .fresh => runner.runFresh(),
+        .replacement_candidate => runner.runReplacement(),
+    };
+}
+
 pub const DevWatcherRuntime = struct {
     watcher: ?watcher_mod.Watcher = null,
     thread: ?std.Thread = null,
@@ -318,16 +325,23 @@ const LocalApplyBackend = struct {
     scope: LocalApplyScope,
 
     pub fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
-        if (self.scope.mode == .replacement_candidate) {
-            return self.applyReplacementCandidate();
-        }
+        var runner = struct {
+            backend: *const LocalApplyBackend,
 
-        try self.orch.startAll();
-        return .{
-            .status = .completed,
-            .message = "all requested services started",
-            .placed = self.release.resolvedServiceCount(),
+            fn runFresh(runner_self: *@This()) !apply_release.ApplyOutcome {
+                try runner_self.backend.orch.startAll();
+                return .{
+                    .status = .completed,
+                    .message = "all requested services started",
+                    .placed = runner_self.backend.release.resolvedServiceCount(),
+                };
+            }
+
+            fn runReplacement(runner_self: *@This()) !apply_release.ApplyOutcome {
+                return runner_self.backend.applyReplacementCandidate();
+            }
         };
+        return runScopedApply(self.scope, &runner);
     }
 
     fn applyReplacementCandidate(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
@@ -632,4 +646,32 @@ test "runReplacementPlan reports partial failure after mutation" {
     try std.testing.expect(runner.tls_started);
     try std.testing.expectEqual(@as(usize, 1), runner.started.items.len);
     try std.testing.expectEqual(@as(usize, 1), runner.stopped.items.len);
+}
+
+test "runScopedApply chooses replacement branch for replacement candidates" {
+    const Runner = struct {
+        fresh_calls: usize = 0,
+        replacement_calls: usize = 0,
+
+        fn runFresh(self: *@This()) !apply_release.ApplyOutcome {
+            self.fresh_calls += 1;
+            return .{ .status = .completed, .placed = 1 };
+        }
+
+        fn runReplacement(self: *@This()) !apply_release.ApplyOutcome {
+            self.replacement_calls += 1;
+            return .{ .status = .completed, .placed = 2 };
+        }
+    };
+
+    var runner = Runner{};
+    const outcome = try runScopedApply(.{
+        .mode = .replacement_candidate,
+        .existing_target_count = 1,
+        .new_target_count = 0,
+    }, &runner);
+
+    try std.testing.expectEqual(@as(usize, 0), runner.fresh_calls);
+    try std.testing.expectEqual(@as(usize, 1), runner.replacement_calls);
+    try std.testing.expectEqual(@as(usize, 2), outcome.placed);
 }
