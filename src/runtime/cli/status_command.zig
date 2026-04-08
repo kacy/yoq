@@ -477,3 +477,31 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(snapshot.source_release_id.?, parsed.source_release_id.?);
     try std.testing.expectEqualStrings(snapshot.message.?, parsed.message.?);
 }
+
+test "appStatusFromReport preserves partially failed local release state" {
+    const dep = store.DeploymentRecord{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:333",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .status = "partially_failed",
+        .message = "one or more placements failed",
+        .created_at = 300,
+    };
+
+    const local = appStatusFromReport(apply_release.reportFromDeployment(dep));
+    const remote = parseAppStatusResponse(
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-3","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"service_count":2,"source_release_id":null,"message":"one or more placements failed"}
+    );
+
+    try std.testing.expectEqualStrings(local.app_name, remote.app_name);
+    try std.testing.expectEqualStrings(local.trigger, remote.trigger);
+    try std.testing.expectEqualStrings(local.release_id, remote.release_id);
+    try std.testing.expectEqualStrings(local.status, remote.status);
+    try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
+    try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expectEqual(local.service_count, remote.service_count);
+    try std.testing.expect(local.source_release_id == null);
+    try std.testing.expectEqualStrings(local.message.?, remote.message.?);
+}

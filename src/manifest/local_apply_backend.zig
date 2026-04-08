@@ -5,6 +5,7 @@ const release_history = @import("release_history.zig");
 const release_plan = @import("release_plan.zig");
 const orchestrator = @import("orchestrator.zig");
 const startup_runtime = @import("orchestrator/startup_runtime.zig");
+const store = @import("../state/store.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const spec = @import("spec.zig");
 const proxy_control_plane = @import("../network/proxy/control_plane.zig");
@@ -14,10 +15,27 @@ const listener_runtime = @import("../network/proxy/listener_runtime.zig");
 
 const writeErr = cli.writeErr;
 
+pub const LocalApplyMode = enum {
+    fresh,
+    replacement_candidate,
+};
+
+pub const LocalApplyScope = struct {
+    mode: LocalApplyMode,
+    existing_target_count: usize,
+    new_target_count: usize,
+};
+
+const ExistingServiceState = enum {
+    active,
+    inactive,
+};
+
 pub const PreparedLocalApply = struct {
     alloc: std.mem.Allocator,
     manifest: *spec.Manifest,
     release: *const release_plan.ReleasePlan,
+    scope: LocalApplyScope,
     orch: orchestrator.Orchestrator,
     runtime_started: bool = false,
 
@@ -27,6 +45,7 @@ pub const PreparedLocalApply = struct {
         release: *const release_plan.ReleasePlan,
         dev_mode: bool,
     ) !PreparedLocalApply {
+        const scope = detectApplyScope(alloc, release);
         var orch = try orchestrator.Orchestrator.init(alloc, manifest, release.app.app_name);
         errdefer orch.deinit();
 
@@ -42,6 +61,7 @@ pub const PreparedLocalApply = struct {
             .alloc = alloc,
             .manifest = manifest,
             .release = release,
+            .scope = scope,
             .orch = orch,
         };
     }
@@ -75,9 +95,18 @@ pub const PreparedLocalApply = struct {
         var apply_backend = LocalApplyBackend{
             .orch = &self.orch,
             .release = self.release,
+            .scope = self.scope,
         };
         const apply_result = try apply_release.execute(&release_tracker, &apply_backend);
         return apply_result.toReport(self.release.app.app_name, self.release.resolvedServiceCount(), context);
+    }
+
+    pub fn replacementServiceIndexes(self: *const PreparedLocalApply, alloc: std.mem.Allocator) !std.ArrayList(usize) {
+        return classifyServiceIndexes(alloc, self.manifest, self.release, self.scope, true);
+    }
+
+    pub fn newServiceIndexes(self: *const PreparedLocalApply, alloc: std.mem.Allocator) !std.ArrayList(usize) {
+        return classifyServiceIndexes(alloc, self.manifest, self.release, self.scope, false);
     }
 
     pub fn startDevWatcher(self: *PreparedLocalApply) DevWatcherRuntime {
@@ -125,6 +154,134 @@ pub const PreparedLocalApply = struct {
     }
 };
 
+fn detectApplyScope(alloc: std.mem.Allocator, release: *const release_plan.ReleasePlan) LocalApplyScope {
+    var existing_target_count: usize = 0;
+    var new_target_count: usize = 0;
+
+    for (release.app.services) |svc| {
+        switch (existingServiceState(alloc, release.app.app_name, svc.name)) {
+            .active => existing_target_count += 1,
+            .inactive => new_target_count += 1,
+        }
+    }
+
+    return .{
+        .mode = if (existing_target_count > 0) .replacement_candidate else .fresh,
+        .existing_target_count = existing_target_count,
+        .new_target_count = new_target_count,
+    };
+}
+
+fn classifyServiceIndexes(
+    alloc: std.mem.Allocator,
+    manifest: *const spec.Manifest,
+    release: *const release_plan.ReleasePlan,
+    scope: LocalApplyScope,
+    want_existing: bool,
+) !std.ArrayList(usize) {
+    var indexes: std.ArrayList(usize) = .empty;
+
+    for (manifest.services, 0..) |svc, idx| {
+        if (!release.includesService(svc.name)) continue;
+        if (scope.mode == .fresh) {
+            if (!want_existing) try indexes.append(alloc, idx);
+            continue;
+        }
+
+        const is_existing = existingServiceState(alloc, release.app.app_name, svc.name) == .active;
+        if (is_existing == want_existing) {
+            try indexes.append(alloc, idx);
+        }
+    }
+
+    return indexes;
+}
+
+fn existingServiceState(alloc: std.mem.Allocator, app_name: []const u8, service_name: []const u8) ExistingServiceState {
+    const record = store.findAppContainer(alloc, app_name, service_name) catch return .inactive;
+    if (record) |container| {
+        defer container.deinit(alloc);
+        return if (std.mem.eql(u8, container.status, "stopped")) .inactive else .active;
+    }
+    return .inactive;
+}
+
+fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const release_plan.ReleasePlan) void {
+    for (orch.manifest.services, 0..) |svc, idx| {
+        if (!release.includesService(svc.name)) continue;
+        const record = store.findAppContainer(orch.alloc, release.app.app_name, svc.name) catch continue;
+        if (record) |container| {
+            defer container.deinit(orch.alloc);
+            if (std.mem.eql(u8, container.status, "stopped")) continue;
+            if (container.id.len != orch.states[idx].container_id.len) continue;
+            @memcpy(&orch.states[idx].container_id, container.id);
+            orch.states[idx].status = .running;
+        }
+    }
+}
+
+fn runReplacementPlan(
+    runner: anytype,
+    alloc: std.mem.Allocator,
+    new_indexes: []const usize,
+    replacement_indexes: []const usize,
+) !apply_release.ApplyOutcome {
+    var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
+    defer completed_workers.deinit(alloc);
+
+    var placed: usize = 0;
+    var failed: usize = 0;
+    var mutated = false;
+
+    for (new_indexes) |idx| {
+        runner.start(idx, &completed_workers) catch {
+            failed += 1;
+            if (!mutated) return error.StartFailed;
+            continue;
+        };
+        placed += 1;
+        mutated = true;
+    }
+
+    for (replacement_indexes) |idx| {
+        runner.stop(idx);
+        mutated = true;
+        runner.start(idx, &completed_workers) catch {
+            failed += 1;
+            continue;
+        };
+        placed += 1;
+    }
+
+    runner.finish();
+
+    if (failed > 0) {
+        return .{
+            .status = .partially_failed,
+            .message = "one or more local service replacements failed",
+            .placed = placed,
+            .failed = failed,
+        };
+    }
+
+    return .{
+        .status = .completed,
+        .message = if (replacement_indexes.len > 0)
+            "all requested services replaced"
+        else
+            "all requested services started",
+        .placed = placed,
+        .failed = 0,
+    };
+}
+
+fn runScopedApply(scope: LocalApplyScope, runner: anytype) !apply_release.ApplyOutcome {
+    return switch (scope.mode) {
+        .fresh => runner.runFresh(),
+        .replacement_candidate => runner.runReplacement(),
+    };
+}
+
 pub const DevWatcherRuntime = struct {
     watcher: ?watcher_mod.Watcher = null,
     thread: ?std.Thread = null,
@@ -147,11 +304,7 @@ const LocalReleaseTracker = struct {
         const resolved_message = try apply_release.materializeMessage(self.plan.alloc, self.context, status, message);
         defer if (resolved_message) |msg| self.plan.alloc.free(msg);
 
-        switch (status) {
-            .completed => release_history.markAppReleaseCompleted(id, resolved_message) catch {},
-            .failed => release_history.markAppReleaseFailed(id, resolved_message) catch {},
-            else => {},
-        }
+        release_history.markAppReleaseStatus(id, status, resolved_message) catch {};
     }
 
     pub fn freeReleaseId(self: *const LocalReleaseTracker, id: []const u8) void {
@@ -162,18 +315,77 @@ const LocalReleaseTracker = struct {
 const LocalApplyBackend = struct {
     orch: *orchestrator.Orchestrator,
     release: *const release_plan.ReleasePlan,
+    scope: LocalApplyScope,
 
     pub fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
-        try self.orch.startAll();
-        return .{
-            .status = .completed,
-            .message = "all requested services started",
-            .placed = self.release.resolvedServiceCount(),
-        };
+        var runner = ScopedApplyRunner{ .backend = self };
+        return runScopedApply(self.scope, &runner);
+    }
+
+    fn applyReplacementCandidate(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
+        syncExistingServiceStates(self.orch, self.release);
+
+        var new_indexes = try classifyServiceIndexes(
+            self.orch.alloc,
+            self.orch.manifest,
+            self.release,
+            self.scope,
+            false,
+        );
+        defer new_indexes.deinit(self.orch.alloc);
+
+        var replacement_indexes = try classifyServiceIndexes(
+            self.orch.alloc,
+            self.orch.manifest,
+            self.release,
+            self.scope,
+            true,
+        );
+        defer replacement_indexes.deinit(self.orch.alloc);
+
+        var runner = struct {
+            orch: *orchestrator.Orchestrator,
+
+            fn start(runner_self: *@This(), idx: usize, completed_workers: *std.StringHashMapUnmanaged(void)) !void {
+                try runner_self.orch.startServiceByIndex(idx, completed_workers);
+            }
+
+            fn stop(runner_self: *@This(), idx: usize) void {
+                runner_self.orch.stopServiceByIndex(idx);
+            }
+
+            fn finish(runner_self: *@This()) void {
+                runner_self.orch.startTlsProxy();
+            }
+        }{ .orch = self.orch };
+
+        return runReplacementPlan(
+            &runner,
+            self.orch.alloc,
+            new_indexes.items,
+            replacement_indexes.items,
+        );
     }
 
     pub fn failureMessage(_: *const LocalApplyBackend, _: anytype) ?[]const u8 {
         return "service startup failed";
+    }
+};
+
+const ScopedApplyRunner = struct {
+    backend: *const LocalApplyBackend,
+
+    fn runFresh(self: *@This()) !apply_release.ApplyOutcome {
+        try self.backend.orch.startAll();
+        return .{
+            .status = .completed,
+            .message = "all requested services started",
+            .placed = self.backend.release.resolvedServiceCount(),
+        };
+    }
+
+    fn runReplacement(self: *@This()) !apply_release.ApplyOutcome {
+        return self.backend.applyReplacementCandidate();
     }
 };
 
@@ -205,4 +417,256 @@ test "PreparedLocalApply init resolves filtered start set" {
     try std.testing.expectEqual(@as(usize, 2), start_set.count());
     try std.testing.expect(start_set.contains("db"));
     try std.testing.expect(start_set.contains("web"));
+}
+
+test "PreparedLocalApply detects replacement candidates from existing app containers" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const loader = @import("loader.zig");
+    const app_spec = @import("app_spec.zig");
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.db]
+        \\image = "postgres:latest"
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["db"]
+    );
+    defer manifest.deinit();
+
+    var app = try app_spec.fromManifest(alloc, "demo-app", &manifest);
+    defer app.deinit();
+
+    var release = try release_plan.ReleasePlan.fromAppSpec(alloc, &app, &.{"web"});
+    defer release.deinit();
+
+    try store.save(.{
+        .id = "abcdef123456",
+        .rootfs = "/tmp/rootfs",
+        .command = "/bin/sh",
+        .hostname = "web",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+
+    var prepared = try PreparedLocalApply.init(alloc, &manifest, &release, false);
+    defer prepared.deinit();
+
+    try std.testing.expectEqual(LocalApplyMode.replacement_candidate, prepared.scope.mode);
+    try std.testing.expectEqual(@as(usize, 1), prepared.scope.existing_target_count);
+    try std.testing.expectEqual(@as(usize, 1), prepared.scope.new_target_count);
+}
+
+test "PreparedLocalApply classifies replacement and new service indexes" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const loader = @import("loader.zig");
+    const app_spec = @import("app_spec.zig");
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.db]
+        \\image = "postgres:latest"
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["db"]
+    );
+    defer manifest.deinit();
+
+    var app = try app_spec.fromManifest(alloc, "demo-app", &manifest);
+    defer app.deinit();
+
+    var release = try release_plan.ReleasePlan.fromAppSpec(alloc, &app, &.{"web"});
+    defer release.deinit();
+
+    try store.save(.{
+        .id = "abcdef123456",
+        .rootfs = "/tmp/rootfs",
+        .command = "/bin/sh",
+        .hostname = "web",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+
+    var prepared = try PreparedLocalApply.init(alloc, &manifest, &release, false);
+    defer prepared.deinit();
+
+    var replacement_indexes = try prepared.replacementServiceIndexes(alloc);
+    defer replacement_indexes.deinit(alloc);
+    var new_indexes = try prepared.newServiceIndexes(alloc);
+    defer new_indexes.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), replacement_indexes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), new_indexes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), replacement_indexes.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), new_indexes.items[0]);
+}
+
+test "syncExistingServiceStates marks selected running services" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const loader = @import("loader.zig");
+    const app_spec = @import("app_spec.zig");
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.db]
+        \\image = "postgres:latest"
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\depends_on = ["db"]
+    );
+    defer manifest.deinit();
+
+    var app = try app_spec.fromManifest(alloc, "demo-app", &manifest);
+    defer app.deinit();
+
+    var release = try release_plan.ReleasePlan.fromAppSpec(alloc, &app, &.{"web"});
+    defer release.deinit();
+
+    try store.save(.{
+        .id = "abcdef123456",
+        .rootfs = "/tmp/rootfs",
+        .command = "/bin/sh",
+        .hostname = "web",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+
+    var prepared = try PreparedLocalApply.init(alloc, &manifest, &release, false);
+    defer prepared.deinit();
+
+    syncExistingServiceStates(&prepared.orch, &release);
+
+    try std.testing.expectEqual(orchestrator.ServiceState.Status.pending, prepared.orch.states[0].status);
+    try std.testing.expectEqual(orchestrator.ServiceState.Status.running, prepared.orch.states[1].status);
+    try std.testing.expectEqualStrings("abcdef123456", prepared.orch.states[1].container_id[0..]);
+}
+
+test "runReplacementPlan counts started and replaced services" {
+    const alloc = std.testing.allocator;
+
+    const Runner = struct {
+        started: std.ArrayList(usize),
+        stopped: std.ArrayList(usize),
+        tls_started: bool = false,
+
+        fn start(self: *@This(), idx: usize, _: *std.StringHashMapUnmanaged(void)) !void {
+            try self.started.append(alloc, idx);
+        }
+
+        fn stop(self: *@This(), idx: usize) void {
+            self.stopped.append(alloc, idx) catch unreachable;
+        }
+
+        fn finish(self: *@This()) void {
+            self.tls_started = true;
+        }
+    };
+
+    var runner = Runner{
+        .started = .empty,
+        .stopped = .empty,
+    };
+    defer runner.started.deinit(alloc);
+    defer runner.stopped.deinit(alloc);
+
+    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1});
+
+    try std.testing.expectEqual(@as(usize, 2), outcome.placed);
+    try std.testing.expectEqual(@as(usize, 0), outcome.failed);
+    try std.testing.expectEqual(@import("update/common.zig").DeploymentStatus.completed, outcome.status);
+    try std.testing.expectEqualStrings("all requested services replaced", outcome.message.?);
+    try std.testing.expect(runner.tls_started);
+    try std.testing.expectEqual(@as(usize, 2), runner.started.items.len);
+    try std.testing.expectEqual(@as(usize, 1), runner.stopped.items.len);
+    try std.testing.expectEqual(@as(usize, 0), runner.started.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), runner.started.items[1]);
+    try std.testing.expectEqual(@as(usize, 1), runner.stopped.items[0]);
+}
+
+test "runReplacementPlan reports partial failure after mutation" {
+    const alloc = std.testing.allocator;
+
+    const Runner = struct {
+        fail_index: usize,
+        started: std.ArrayList(usize),
+        stopped: std.ArrayList(usize),
+        tls_started: bool = false,
+
+        fn start(self: *@This(), idx: usize, _: *std.StringHashMapUnmanaged(void)) !void {
+            if (idx == self.fail_index) return error.StartFailed;
+            try self.started.append(alloc, idx);
+        }
+
+        fn stop(self: *@This(), idx: usize) void {
+            self.stopped.append(alloc, idx) catch unreachable;
+        }
+
+        fn finish(self: *@This()) void {
+            self.tls_started = true;
+        }
+    };
+
+    var runner = Runner{
+        .fail_index = 1,
+        .started = .empty,
+        .stopped = .empty,
+    };
+    defer runner.started.deinit(alloc);
+    defer runner.stopped.deinit(alloc);
+
+    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1});
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.placed);
+    try std.testing.expectEqual(@as(usize, 1), outcome.failed);
+    try std.testing.expectEqual(@import("update/common.zig").DeploymentStatus.partially_failed, outcome.status);
+    try std.testing.expectEqualStrings("one or more local service replacements failed", outcome.message.?);
+    try std.testing.expect(runner.tls_started);
+    try std.testing.expectEqual(@as(usize, 1), runner.started.items.len);
+    try std.testing.expectEqual(@as(usize, 1), runner.stopped.items.len);
+}
+
+test "runScopedApply chooses replacement branch for replacement candidates" {
+    const Runner = struct {
+        fresh_calls: usize = 0,
+        replacement_calls: usize = 0,
+
+        fn runFresh(self: *@This()) !apply_release.ApplyOutcome {
+            self.fresh_calls += 1;
+            return .{ .status = .completed, .placed = 1 };
+        }
+
+        fn runReplacement(self: *@This()) !apply_release.ApplyOutcome {
+            self.replacement_calls += 1;
+            return .{ .status = .completed, .placed = 2 };
+        }
+    };
+
+    var runner = Runner{};
+    const outcome = try runScopedApply(.{
+        .mode = .replacement_candidate,
+        .existing_target_count = 1,
+        .new_target_count = 0,
+    }, &runner);
+
+    try std.testing.expectEqual(@as(usize, 0), runner.fresh_calls);
+    try std.testing.expectEqual(@as(usize, 1), runner.replacement_calls);
+    try std.testing.expectEqual(@as(usize, 2), outcome.placed);
 }

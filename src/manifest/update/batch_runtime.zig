@@ -3,6 +3,10 @@ const log = @import("../../lib/log.zig");
 const deployment_store = @import("deployment_store.zig");
 const common = @import("common.zig");
 
+pub fn pausedFailureStatus(progress: *const common.UpdateProgress) common.DeploymentStatus {
+    return if (progress.replaced > 0) .partially_failed else .failed;
+}
+
 pub fn handleBatchFailure(
     strategy: common.UpdateStrategy,
     context: *const common.UpdateContext,
@@ -33,12 +37,13 @@ pub fn handleBatchFailure(
             return common.UpdateError.BatchFailed;
         },
         .pause => {
-            progress.status = .failed;
+            const status = pausedFailureStatus(progress);
+            progress.status = status;
             progress.message = reason;
 
             if (deployment_id) |id| {
-                deployment_store.updateDeploymentStatus(id, .failed, reason) catch |e| {
-                    log.warn("failed to update deployment status to failed: {}", .{e});
+                deployment_store.updateDeploymentStatus(id, status, reason) catch |e| {
+                    log.warn("failed to update deployment status to {s}: {}", .{ status.toString(), e });
                 };
             }
 

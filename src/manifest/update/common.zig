@@ -8,6 +8,7 @@ pub const FailureAction = enum {
 pub const DeploymentStatus = enum {
     pending,
     in_progress,
+    partially_failed,
     completed,
     failed,
     rolled_back,
@@ -16,6 +17,7 @@ pub const DeploymentStatus = enum {
         return switch (self) {
             .pending => "pending",
             .in_progress => "in_progress",
+            .partially_failed => "partially_failed",
             .completed => "completed",
             .failed => "failed",
             .rolled_back => "rolled_back",
@@ -25,6 +27,7 @@ pub const DeploymentStatus = enum {
     pub fn fromString(s: []const u8) ?DeploymentStatus {
         if (std.mem.eql(u8, s, "pending")) return .pending;
         if (std.mem.eql(u8, s, "in_progress")) return .in_progress;
+        if (std.mem.eql(u8, s, "partially_failed")) return .partially_failed;
         if (std.mem.eql(u8, s, "completed")) return .completed;
         if (std.mem.eql(u8, s, "failed")) return .failed;
         if (std.mem.eql(u8, s, "rolled_back")) return .rolled_back;

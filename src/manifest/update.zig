@@ -153,6 +153,7 @@ pub fn performRollingUpdate(
             );
 
             if (!all_healthy) {
+                progress.failed += batch_new_ids.items.len;
                 return batch_runtime.handleBatchFailure(
                     strategy,
                     context,
@@ -270,11 +271,13 @@ const test_callbacks = UpdateCallbacks{
 test "deployment status round-trip" {
     try std.testing.expectEqualStrings("pending", DeploymentStatus.pending.toString());
     try std.testing.expectEqualStrings("in_progress", DeploymentStatus.in_progress.toString());
+    try std.testing.expectEqualStrings("partially_failed", DeploymentStatus.partially_failed.toString());
     try std.testing.expectEqualStrings("completed", DeploymentStatus.completed.toString());
     try std.testing.expectEqualStrings("failed", DeploymentStatus.failed.toString());
     try std.testing.expectEqualStrings("rolled_back", DeploymentStatus.rolled_back.toString());
 
     try std.testing.expectEqual(DeploymentStatus.pending, DeploymentStatus.fromString("pending").?);
+    try std.testing.expectEqual(DeploymentStatus.partially_failed, DeploymentStatus.fromString("partially_failed").?);
     try std.testing.expectEqual(DeploymentStatus.completed, DeploymentStatus.fromString("completed").?);
     try std.testing.expect(DeploymentStatus.fromString("unknown") == null);
 }
@@ -398,6 +401,67 @@ test "start failure triggers pause when configured" {
 
     const result = performRollingUpdate(alloc, strategy, &context);
     try std.testing.expectError(UpdateError.UpdatePaused, result);
+}
+
+test "pause failure stays failed before any replacement" {
+    var progress = UpdateProgress{
+        .total_containers = 2,
+        .replaced = 0,
+        .failed = 1,
+        .status = .in_progress,
+        .message = null,
+    };
+    var new_container_ids = std.ArrayList([12]u8).empty;
+    const context = UpdateContext{
+        .service_name = "web",
+        .manifest_hash = "sha256:bad",
+        .config_snapshot = "{}",
+        .old_container_ids = &.{ "old-1", "old-2" },
+        .callbacks = test_callbacks,
+    };
+
+    const result = batch_runtime.handleBatchFailure(
+        .{ .failure_action = .pause },
+        &context,
+        null,
+        &new_container_ids,
+        &progress,
+        "one or more containers failed to start",
+    );
+
+    try std.testing.expectEqual(UpdateError.UpdatePaused, result);
+    try std.testing.expectEqual(DeploymentStatus.failed, progress.status);
+}
+
+test "pause failure after cutover becomes partially failed" {
+    var progress = UpdateProgress{
+        .total_containers = 2,
+        .replaced = 1,
+        .failed = 1,
+        .status = .in_progress,
+        .message = null,
+    };
+    var new_container_ids = std.ArrayList([12]u8).empty;
+    const context = UpdateContext{
+        .service_name = "web",
+        .manifest_hash = "sha256:partial",
+        .config_snapshot = "{}",
+        .old_container_ids = &.{ "old-1", "old-2" },
+        .callbacks = test_callbacks,
+    };
+
+    const result = batch_runtime.handleBatchFailure(
+        .{ .failure_action = .pause },
+        &context,
+        null,
+        &new_container_ids,
+        &progress,
+        "health checks failed for new containers",
+    );
+
+    try std.testing.expectEqual(UpdateError.UpdatePaused, result);
+    try std.testing.expectEqual(DeploymentStatus.partially_failed, progress.status);
+    try std.testing.expectEqualStrings("health checks failed for new containers", progress.message.?);
 }
 
 test "partial batch start failure rolls back before stopping old containers" {
