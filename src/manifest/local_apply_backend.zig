@@ -26,6 +26,11 @@ pub const LocalApplyScope = struct {
     new_target_count: usize,
 };
 
+const ExistingServiceState = enum {
+    active,
+    inactive,
+};
+
 pub const PreparedLocalApply = struct {
     alloc: std.mem.Allocator,
     manifest: *spec.Manifest,
@@ -154,20 +159,9 @@ fn detectApplyScope(alloc: std.mem.Allocator, release: *const release_plan.Relea
     var new_target_count: usize = 0;
 
     for (release.app.services) |svc| {
-        const record = store.findAppContainer(alloc, release.app.app_name, svc.name) catch {
-            new_target_count += 1;
-            continue;
-        };
-
-        if (record) |container| {
-            defer container.deinit(alloc);
-            if (!std.mem.eql(u8, container.status, "stopped")) {
-                existing_target_count += 1;
-            } else {
-                new_target_count += 1;
-            }
-        } else {
-            new_target_count += 1;
+        switch (existingServiceState(alloc, release.app.app_name, svc.name)) {
+            .active => existing_target_count += 1,
+            .inactive => new_target_count += 1,
         }
     }
 
@@ -194,23 +188,22 @@ fn classifyServiceIndexes(
             continue;
         }
 
-        const record = store.findAppContainer(alloc, release.app.app_name, svc.name) catch {
-            if (!want_existing) try indexes.append(alloc, idx);
-            continue;
-        };
-
-        if (record) |container| {
-            defer container.deinit(alloc);
-            const is_existing = !std.mem.eql(u8, container.status, "stopped");
-            if (is_existing == want_existing) {
-                try indexes.append(alloc, idx);
-            }
-        } else if (!want_existing) {
+        const is_existing = existingServiceState(alloc, release.app.app_name, svc.name) == .active;
+        if (is_existing == want_existing) {
             try indexes.append(alloc, idx);
         }
     }
 
     return indexes;
+}
+
+fn existingServiceState(alloc: std.mem.Allocator, app_name: []const u8, service_name: []const u8) ExistingServiceState {
+    const record = store.findAppContainer(alloc, app_name, service_name) catch return .inactive;
+    if (record) |container| {
+        defer container.deinit(alloc);
+        return if (std.mem.eql(u8, container.status, "stopped")) .inactive else .active;
+    }
+    return .inactive;
 }
 
 fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const release_plan.ReleasePlan) void {
@@ -325,22 +318,7 @@ const LocalApplyBackend = struct {
     scope: LocalApplyScope,
 
     pub fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
-        var runner = struct {
-            backend: *const LocalApplyBackend,
-
-            fn runFresh(runner_self: *@This()) !apply_release.ApplyOutcome {
-                try runner_self.backend.orch.startAll();
-                return .{
-                    .status = .completed,
-                    .message = "all requested services started",
-                    .placed = runner_self.backend.release.resolvedServiceCount(),
-                };
-            }
-
-            fn runReplacement(runner_self: *@This()) !apply_release.ApplyOutcome {
-                return runner_self.backend.applyReplacementCandidate();
-            }
-        };
+        var runner = ScopedApplyRunner{ .backend = self };
         return runScopedApply(self.scope, &runner);
     }
 
@@ -391,6 +369,23 @@ const LocalApplyBackend = struct {
 
     pub fn failureMessage(_: *const LocalApplyBackend, _: anytype) ?[]const u8 {
         return "service startup failed";
+    }
+};
+
+const ScopedApplyRunner = struct {
+    backend: *const LocalApplyBackend,
+
+    fn runFresh(self: *@This()) !apply_release.ApplyOutcome {
+        try self.backend.orch.startAll();
+        return .{
+            .status = .completed,
+            .message = "all requested services started",
+            .placed = self.backend.release.resolvedServiceCount(),
+        };
+    }
+
+    fn runReplacement(self: *@This()) !apply_release.ApplyOutcome {
+        return self.backend.applyReplacementCandidate();
     }
 };
 
