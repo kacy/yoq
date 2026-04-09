@@ -10,6 +10,8 @@ pub const DeploymentRecord = struct {
     id: []const u8,
     app_name: ?[]const u8 = null,
     service_name: []const u8,
+    trigger: ?[]const u8 = null,
+    source_release_id: ?[]const u8 = null,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
     status: []const u8,
@@ -20,6 +22,8 @@ pub const DeploymentRecord = struct {
         alloc.free(self.id);
         if (self.app_name) |app_name| alloc.free(app_name);
         alloc.free(self.service_name);
+        if (self.trigger) |trigger| alloc.free(trigger);
+        if (self.source_release_id) |source_release_id| alloc.free(source_release_id);
         alloc.free(self.manifest_hash);
         alloc.free(self.config_snapshot);
         alloc.free(self.status);
@@ -28,12 +32,14 @@ pub const DeploymentRecord = struct {
 };
 
 const deployment_columns =
-    "id, app_name, service_name, manifest_hash, config_snapshot, status, message, created_at";
+    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, status, message, created_at";
 
 const DeploymentRow = struct {
     id: sqlite.Text,
     app_name: ?sqlite.Text,
     service_name: sqlite.Text,
+    trigger: ?sqlite.Text,
+    source_release_id: ?sqlite.Text,
     manifest_hash: sqlite.Text,
     config_snapshot: sqlite.Text,
     status: sqlite.Text,
@@ -46,6 +52,8 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
         .id = row.id.data,
         .app_name = if (row.app_name) |app_name| app_name.data else null,
         .service_name = row.service_name.data,
+        .trigger = if (row.trigger) |trigger| trigger.data else null,
+        .source_release_id = if (row.source_release_id) |source_release_id| source_release_id.data else null,
         .manifest_hash = row.manifest_hash.data,
         .config_snapshot = row.config_snapshot.data,
         .status = row.status.data,
@@ -61,12 +69,14 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
             record.app_name,
             record.service_name,
+            record.trigger,
+            record.source_release_id,
             record.manifest_hash,
             record.config_snapshot,
             record.status,
@@ -210,9 +220,9 @@ test "deployment record round-trip via sqlite" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep001", "demo-app", "web", "sha256:abc", "{\"image\":\"nginx:latest\"}", "completed", "initial deploy", @as(i64, 1000) },
+        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", "completed", "initial deploy", @as(i64, 1000) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -223,6 +233,8 @@ test "deployment record round-trip via sqlite" {
     try std.testing.expectEqualStrings("dep001", record.id);
     try std.testing.expectEqualStrings("demo-app", record.app_name.?);
     try std.testing.expectEqualStrings("web", record.service_name);
+    try std.testing.expectEqualStrings("apply", record.trigger.?);
+    try std.testing.expect(record.source_release_id == null);
     try std.testing.expectEqualStrings("sha256:abc", record.manifest_hash);
     try std.testing.expectEqualStrings("{\"image\":\"nginx:latest\"}", record.config_snapshot);
     try std.testing.expectEqualStrings("completed", record.status);
@@ -248,6 +260,28 @@ test "deployment with null message" {
 
     try std.testing.expect(record.message == null);
     try std.testing.expect(record.app_name == null);
+    try std.testing.expectEqualStrings("apply", record.trigger.?);
+    try std.testing.expect(record.source_release_id == null);
+}
+
+test "deployment stores rollback transition metadata" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    db.exec(
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", "completed", "rollback completed", @as(i64, 2100) },
+    ) catch unreachable;
+
+    const alloc = std.testing.allocator;
+    const row = (db.oneAlloc(DeploymentRow, alloc, "SELECT " ++ deployment_columns ++ " FROM deployments WHERE id = ?;", .{}, .{"dep-rb"}) catch unreachable).?;
+    const record = rowToRecord(row);
+    defer record.deinit(alloc);
+
+    try std.testing.expectEqualStrings("rollback", record.trigger.?);
+    try std.testing.expectEqualStrings("dep-1", record.source_release_id.?);
 }
 
 test "deployment list ordered by timestamp desc" {

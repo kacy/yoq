@@ -98,7 +98,7 @@ pub const ApplyReport = struct {
 };
 
 pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
-    const inferred = inferContextFromStoredMessage(dep.message);
+    const context = deploymentContext(dep);
     return .{
         .app_name = dep.app_name orelse dep.service_name,
         .release_id = dep.id,
@@ -109,9 +109,30 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .message = dep.message,
         .manifest_hash = dep.manifest_hash,
         .created_at = dep.created_at,
-        .trigger = inferred.trigger,
-        .source_release_id = inferred.source_release_id,
+        .trigger = context.trigger,
+        .source_release_id = context.source_release_id,
     };
+}
+
+fn deploymentContext(dep: store.DeploymentRecord) ApplyContext {
+    if (dep.trigger) |trigger| {
+        const structured_trigger: ApplyTrigger = if (std.mem.eql(u8, trigger, ApplyTrigger.rollback.toString()))
+            .rollback
+        else
+            .apply;
+        if (structured_trigger == .rollback or dep.source_release_id != null) {
+            return .{
+                .trigger = structured_trigger,
+                .source_release_id = dep.source_release_id,
+            };
+        }
+
+        const inferred = inferContextFromStoredMessage(dep.message);
+        if (inferred.trigger == .rollback) return inferred;
+
+        return .{ .trigger = structured_trigger };
+    }
+    return inferContextFromStoredMessage(dep.message);
 }
 
 fn inferContextFromStoredMessage(message: ?[]const u8) ApplyContext {
@@ -372,6 +393,7 @@ test "reportFromDeployment preserves release metadata and counts services" {
         .id = "dep-22",
         .app_name = "demo-app",
         .service_name = "demo-app",
+        .trigger = "apply",
         .manifest_hash = "sha256:xyz",
         .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
         .status = "completed",
@@ -391,11 +413,31 @@ test "reportFromDeployment preserves release metadata and counts services" {
     try std.testing.expect(report.source_release_id == null);
 }
 
-test "reportFromDeployment infers rollback context from stored message" {
+test "reportFromDeployment preserves structured rollback context" {
     const dep = store.DeploymentRecord{
         .id = "dep-23",
         .app_name = "demo-app",
         .service_name = "demo-app",
+        .trigger = "rollback",
+        .source_release_id = "dep-11",
+        .manifest_hash = "sha256:zzz",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .status = "completed",
+        .message = "rollback to dep-11 completed: all placements succeeded",
+        .created_at = 230,
+    };
+
+    const report = reportFromDeployment(dep);
+    try std.testing.expectEqual(ApplyTrigger.rollback, report.trigger);
+    try std.testing.expectEqualStrings("dep-11", report.source_release_id.?);
+}
+
+test "reportFromDeployment falls back to rollback context inferred from legacy message" {
+    const dep = store.DeploymentRecord{
+        .id = "dep-24",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
         .manifest_hash = "sha256:zzz",
         .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
         .status = "completed",
