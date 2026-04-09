@@ -43,9 +43,11 @@ const ClusterReleaseTracker = struct {
             id,
             name,
             name,
+            self.context.trigger.toString(),
+            self.context.source_release_id,
             manifest_hash,
             self.config_snapshot,
-            .in_progress,
+            .pending,
             null,
         ) catch return ClusterApplyError.InternalError;
 

@@ -162,6 +162,8 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    id TEXT PRIMARY KEY,
         \\    app_name TEXT,
         \\    service_name TEXT NOT NULL,
+        \\    trigger TEXT NOT NULL DEFAULT 'apply',
+        \\    source_release_id TEXT,
         \\    manifest_hash TEXT NOT NULL,
         \\    config_snapshot TEXT NOT NULL DEFAULT '',
         \\    status TEXT NOT NULL DEFAULT 'pending',

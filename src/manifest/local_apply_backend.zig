@@ -297,7 +297,7 @@ const LocalReleaseTracker = struct {
     context: apply_release.ApplyContext = .{},
 
     pub fn begin(self: *const LocalReleaseTracker) !?[]const u8 {
-        return release_history.recordAppReleaseStart(self.plan) catch null;
+        return release_history.recordAppReleaseStart(self.plan, self.context) catch null;
     }
 
     pub fn mark(self: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {

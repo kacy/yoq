@@ -77,6 +77,8 @@ pub fn performRollingUpdate(
             did,
             null,
             context.service_name,
+            "apply",
+            null,
             context.manifest_hash,
             context.config_snapshot,
             .in_progress,

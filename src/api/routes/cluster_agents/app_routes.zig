@@ -313,17 +313,39 @@ test "formatAppStatusResponse summarizes latest release" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
 }
 
-test "formatAppStatusResponse includes rollback metadata inferred from stored release message" {
+test "formatAppStatusResponse includes structured rollback metadata" {
     const alloc = std.testing.allocator;
     const latest = store.DeploymentRecord{
         .id = "dep-3",
         .app_name = "demo-app",
         .service_name = "demo-app",
+        .trigger = "rollback",
+        .source_release_id = "dep-1",
         .manifest_hash = "sha256:333",
         .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
         .status = "completed",
         .message = "rollback to dep-1 completed: all placements succeeded",
         .created_at = 300,
+    };
+
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest));
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":\"dep-1\"") != null);
+}
+
+test "formatAppStatusResponse falls back to rollback metadata inferred from legacy message" {
+    const alloc = std.testing.allocator;
+    const latest = store.DeploymentRecord{
+        .id = "dep-4",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .manifest_hash = "sha256:444",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .status = "completed",
+        .message = "rollback to dep-1 completed: all placements succeeded",
+        .created_at = 400,
     };
 
     const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest));
@@ -354,6 +376,8 @@ test "app status and history surface rollback release metadata from persisted ro
         .id = "dep-2",
         .app_name = "demo-app",
         .service_name = "demo-app",
+        .trigger = "rollback",
+        .source_release_id = "dep-1",
         .manifest_hash = "sha256:222",
         .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
         .status = "completed",
@@ -468,6 +492,12 @@ test "app apply then rollback routes preserve release transition metadata" {
     try expectJsonContains(rollback_response.body, "\"trigger\":\"rollback\"");
     try expectJsonContains(rollback_response.body, "\"source_release_id\":\"");
     try expectJsonContains(rollback_response.body, source_release_id);
+
+    const latest = try store.getLatestDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer latest.deinit(alloc);
+
+    try std.testing.expectEqualStrings("rollback", latest.trigger.?);
+    try std.testing.expectEqualStrings(source_release_id, latest.source_release_id.?);
 
     const status_response = harness.status("demo-app");
     defer freeResponse(alloc, status_response);

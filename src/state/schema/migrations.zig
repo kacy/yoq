@@ -128,6 +128,9 @@ fn migrateServices(db: *sqlite.Db) void {
 
 fn migrateDeployments(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN app_name TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN trigger TEXT NOT NULL DEFAULT 'apply';") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN source_release_id TEXT;") catch {};
+    db.exec("UPDATE deployments SET trigger = 'apply' WHERE trigger IS NULL OR trigger = '';", .{}, .{}) catch {};
 }
 
 fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {
@@ -174,5 +177,32 @@ test "migrateServices adds http proxy columns" {
         "SELECT service_name, route_name, host FROM service_http_routes WHERE service_name = ?;",
         .{},
         .{"api"},
+    ) catch unreachable;
+}
+
+test "migrateDeployments adds release transition columns" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    db.exec(
+        "CREATE TABLE deployments (" ++
+            "id TEXT PRIMARY KEY, " ++
+            "service_name TEXT NOT NULL, " ++
+            "manifest_hash TEXT NOT NULL, " ++
+            "config_snapshot TEXT NOT NULL DEFAULT '', " ++
+            "status TEXT NOT NULL DEFAULT 'pending', " ++
+            "message TEXT, " ++
+            "created_at INTEGER NOT NULL" ++
+            ");",
+        .{},
+        .{},
+    ) catch unreachable;
+
+    try apply(&db);
+
+    db.exec(
+        "INSERT INTO deployments (id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "dep-1", "demo-app", "demo-app", "rollback", "dep-0", "sha256:test", "{}", "completed", "rollback completed", @as(i64, 100) },
     ) catch unreachable;
 }
