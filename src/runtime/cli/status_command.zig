@@ -368,8 +368,8 @@ fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
 }
 
 fn printAppStatusHeader() void {
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s:<14} {s}\n", .{
-        "APP", "RELEASE", "STATUS", "TIMESTAMP", "PROGRESS", "PREV OK", "MESSAGE",
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<22} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "TIMESTAMP", "TARGETS", "PREV OK", "MESSAGE",
     });
 }
 
@@ -378,26 +378,40 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
     const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{snapshot.created_at}) catch "?";
     const msg = snapshot.message orelse "";
 
-    var count_buf: [32]u8 = undefined;
-    const count_str = std.fmt.bufPrint(&count_buf, "{d}/{d}", .{
-        snapshot.completed_targets,
-        snapshot.service_count,
-    }) catch "?";
+    var progress_buf: [64]u8 = undefined;
+    const progress_str = formatAppProgress(&progress_buf, snapshot);
 
     const previous_successful = if (snapshot.previous_successful_release_id) |release_id|
         cli.truncate(release_id, 12)
     else
         "-";
 
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s:<14} {s}\n", .{
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<22} {s:<14} {s}\n", .{
         snapshot.app_name,
         cli.truncate(snapshot.release_id, 12),
         snapshot.status,
         ts_str,
-        count_str,
+        progress_str,
         previous_successful,
         cli.truncate(msg, 40),
     });
+}
+
+fn formatAppProgress(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
+    if (snapshot.failed_targets == 0 and snapshot.remaining_targets == 0) {
+        return std.fmt.bufPrint(buf, "{d} ok", .{snapshot.completed_targets}) catch "?";
+    }
+    if (snapshot.remaining_targets == 0) {
+        return std.fmt.bufPrint(buf, "{d} ok, {d} fail", .{
+            snapshot.completed_targets,
+            snapshot.failed_targets,
+        }) catch "?";
+    }
+    return std.fmt.bufPrint(buf, "{d} ok, {d} fail, {d} left", .{
+        snapshot.completed_targets,
+        snapshot.failed_targets,
+        snapshot.remaining_targets,
+    }) catch "?";
 }
 
 fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
@@ -711,4 +725,65 @@ test "appStatusFromReport preserves partially failed local release state" {
     try std.testing.expectEqualStrings(local.previous_successful_manifest_hash.?, remote.previous_successful_manifest_hash.?);
     try std.testing.expectEqual(local.previous_successful_created_at.?, remote.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
+}
+
+test "formatAppProgress summarizes in-flight and partial outcomes" {
+    var buf: [64]u8 = undefined;
+
+    const in_progress = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-2",
+        .status = "in_progress",
+        .manifest_hash = "sha256:222",
+        .created_at = 200,
+        .service_count = 4,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 2,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = "apply in progress",
+    };
+    try std.testing.expectEqualStrings("1 ok, 1 fail, 2 left", formatAppProgress(&buf, in_progress));
+
+    const partial = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-3",
+        .status = "partially_failed",
+        .manifest_hash = "sha256:333",
+        .created_at = 300,
+        .service_count = 2,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 0,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = "one or more placements failed",
+    };
+    try std.testing.expectEqualStrings("1 ok, 1 fail", formatAppProgress(&buf, partial));
+
+    const completed = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-4",
+        .status = "completed",
+        .manifest_hash = "sha256:444",
+        .created_at = 400,
+        .service_count = 2,
+        .completed_targets = 2,
+        .failed_targets = 0,
+        .remaining_targets = 0,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = "apply completed",
+    };
+    try std.testing.expectEqualStrings("2 ok", formatAppProgress(&buf, completed));
 }
