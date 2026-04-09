@@ -25,6 +25,8 @@ pub const ApplyOutcome = struct {
     message: ?[]const u8 = null,
     placed: usize = 0,
     failed: usize = 0,
+    completed_targets: usize = 0,
+    failed_targets: usize = 0,
 };
 
 pub const ApplyResult = struct {
@@ -39,6 +41,8 @@ pub const ApplyResult = struct {
             .service_count = service_count,
             .placed = self.outcome.placed,
             .failed = self.outcome.failed,
+            .completed_targets = self.outcome.completed_targets,
+            .failed_targets = self.outcome.failed_targets,
             .message = self.outcome.message,
             .manifest_hash = "",
             .created_at = 0,
@@ -55,6 +59,8 @@ pub const ApplyReport = struct {
     service_count: usize,
     placed: usize,
     failed: usize,
+    completed_targets: usize,
+    failed_targets: usize,
     message: ?[]const u8 = null,
     manifest_hash: []const u8 = "",
     created_at: i64 = 0,
@@ -74,6 +80,11 @@ pub const ApplyReport = struct {
 
     pub fn resolvedMessage(self: ApplyReport, alloc: std.mem.Allocator) !?[]u8 {
         return materializeMessage(alloc, self.context(), self.status, self.message);
+    }
+
+    pub fn remainingTargets(self: ApplyReport) usize {
+        const accounted = @min(self.service_count, self.completed_targets + self.failed_targets);
+        return self.service_count - accounted;
     }
 
     pub fn summaryText(self: ApplyReport, alloc: std.mem.Allocator) ![]u8 {
@@ -106,6 +117,8 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .service_count = countServices(dep.config_snapshot),
         .placed = 0,
         .failed = 0,
+        .completed_targets = dep.completed_targets,
+        .failed_targets = dep.failed_targets,
         .message = dep.message,
         .manifest_hash = dep.manifest_hash,
         .created_at = dep.created_at,
@@ -200,9 +213,15 @@ fn markReleaseIfPresent(
     release_id: ?[]const u8,
     status: update_common.DeploymentStatus,
     message: ?[]const u8,
+    completed_targets: usize,
+    failed_targets: usize,
 ) !void {
     if (release_id) |id| {
-        try tracker.mark(id, status, message);
+        if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgress")) {
+            try tracker.markProgress(id, status, message, completed_targets, failed_targets);
+        } else {
+            try tracker.mark(id, status, message);
+        }
     }
 }
 
@@ -210,14 +229,21 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
     const release_id = try tracker.begin();
     errdefer if (release_id) |id| tracker.freeReleaseId(id);
 
-    try markReleaseIfPresent(tracker, release_id, .in_progress, null);
+    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0);
 
     const outcome = backend.apply() catch |err| {
-        try markReleaseIfPresent(tracker, release_id, .failed, backend.failureMessage(err));
+        try markReleaseIfPresent(tracker, release_id, .failed, backend.failureMessage(err), 0, 0);
         return err;
     };
 
-    try markReleaseIfPresent(tracker, release_id, outcome.status, outcome.message);
+    try markReleaseIfPresent(
+        tracker,
+        release_id,
+        outcome.status,
+        outcome.message,
+        outcome.completed_targets,
+        outcome.failed_targets,
+    );
 
     return .{
         .release_id = release_id,
@@ -322,6 +348,8 @@ test "ApplyResult projects to shared apply report" {
             .message = null,
             .placed = 3,
             .failed = 0,
+            .completed_targets = 3,
+            .failed_targets = 0,
         },
     };
 
@@ -332,6 +360,8 @@ test "ApplyResult projects to shared apply report" {
     try std.testing.expectEqual(@as(usize, 3), report.service_count);
     try std.testing.expectEqual(@as(usize, 3), report.placed);
     try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expectEqual(@as(usize, 3), report.completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), report.failed_targets);
     try std.testing.expect(report.message == null);
     try std.testing.expectEqual(ApplyTrigger.apply, report.trigger);
     try std.testing.expect(report.source_release_id == null);
@@ -346,6 +376,8 @@ test "ApplyReport summaryText includes release status and counts" {
         .service_count = 3,
         .placed = 3,
         .failed = 0,
+        .completed_targets = 3,
+        .failed_targets = 0,
         .message = "all requested services started",
     };
 

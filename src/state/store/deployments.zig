@@ -14,6 +14,8 @@ pub const DeploymentRecord = struct {
     source_release_id: ?[]const u8 = null,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
+    completed_targets: usize = 0,
+    failed_targets: usize = 0,
     status: []const u8,
     message: ?[]const u8,
     created_at: i64,
@@ -32,7 +34,7 @@ pub const DeploymentRecord = struct {
 };
 
 const deployment_columns =
-    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, status, message, created_at";
+    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, created_at";
 
 const DeploymentRow = struct {
     id: sqlite.Text,
@@ -42,6 +44,8 @@ const DeploymentRow = struct {
     source_release_id: ?sqlite.Text,
     manifest_hash: sqlite.Text,
     config_snapshot: sqlite.Text,
+    completed_targets: i64,
+    failed_targets: i64,
     status: sqlite.Text,
     message: ?sqlite.Text,
     created_at: i64,
@@ -56,6 +60,8 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
         .source_release_id = if (row.source_release_id) |source_release_id| source_release_id.data else null,
         .manifest_hash = row.manifest_hash.data,
         .config_snapshot = row.config_snapshot.data,
+        .completed_targets = @intCast(@max(@as(i64, 0), row.completed_targets)),
+        .failed_targets = @intCast(@max(@as(i64, 0), row.failed_targets)),
         .status = row.status.data,
         .message = if (row.message) |message| message.data else null,
         .created_at = row.created_at,
@@ -69,7 +75,7 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -79,6 +85,8 @@ pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!v
             record.source_release_id,
             record.manifest_hash,
             record.config_snapshot,
+            @as(i64, @intCast(record.completed_targets)),
+            @as(i64, @intCast(record.failed_targets)),
             record.status,
             record.message,
             record.created_at,
@@ -165,10 +173,32 @@ pub fn updateDeploymentStatusInDb(
     status: []const u8,
     message: ?[]const u8,
 ) StoreError!void {
+    return updateDeploymentProgressInDb(db, id, status, message, 0, 0);
+}
+
+pub fn updateDeploymentProgress(
+    id: []const u8,
+    status: []const u8,
+    message: ?[]const u8,
+    completed_targets: usize,
+    failed_targets: usize,
+) StoreError!void {
+    const db = try common.getDb();
+    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets);
+}
+
+pub fn updateDeploymentProgressInDb(
+    db: *sqlite.Db,
+    id: []const u8,
+    status: []const u8,
+    message: ?[]const u8,
+    completed_targets: usize,
+    failed_targets: usize,
+) StoreError!void {
     db.exec(
-        "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
+        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ? WHERE id = ?;",
         .{},
-        .{ status, message, id },
+        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), id },
     ) catch return StoreError.WriteFailed;
 }
 
@@ -220,9 +250,9 @@ test "deployment record round-trip via sqlite" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", "completed", "initial deploy", @as(i64, 1000) },
+        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", @as(i64, 1000) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -237,6 +267,8 @@ test "deployment record round-trip via sqlite" {
     try std.testing.expect(record.source_release_id == null);
     try std.testing.expectEqualStrings("sha256:abc", record.manifest_hash);
     try std.testing.expectEqualStrings("{\"image\":\"nginx:latest\"}", record.config_snapshot);
+    try std.testing.expectEqual(@as(usize, 1), record.completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
     try std.testing.expectEqualStrings("completed", record.status);
     try std.testing.expectEqualStrings("initial deploy", record.message.?);
     try std.testing.expectEqual(@as(i64, 1000), record.created_at);
@@ -270,9 +302,9 @@ test "deployment stores rollback transition metadata" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", "completed", "rollback completed", @as(i64, 2100) },
+        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", @as(i64, 2100) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -282,6 +314,8 @@ test "deployment stores rollback transition metadata" {
 
     try std.testing.expectEqualStrings("rollback", record.trigger.?);
     try std.testing.expectEqualStrings("dep-1", record.source_release_id.?);
+    try std.testing.expectEqual(@as(usize, 1), record.completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
 }
 
 test "deployment list ordered by timestamp desc" {

@@ -261,6 +261,8 @@ fn runReplacementPlan(
             .message = "one or more local service replacements failed",
             .placed = placed,
             .failed = failed,
+            .completed_targets = placed,
+            .failed_targets = failed,
         };
     }
 
@@ -272,6 +274,8 @@ fn runReplacementPlan(
             "all requested services started",
         .placed = placed,
         .failed = 0,
+        .completed_targets = placed,
+        .failed_targets = 0,
     };
 }
 
@@ -301,10 +305,27 @@ const LocalReleaseTracker = struct {
     }
 
     pub fn mark(self: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+        try self.markProgress(id, status, message, 0, 0);
+    }
+
+    pub fn markProgress(
+        self: *const LocalReleaseTracker,
+        id: []const u8,
+        status: @import("update/common.zig").DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+    ) !void {
         const resolved_message = try apply_release.materializeMessage(self.plan.alloc, self.context, status, message);
         defer if (resolved_message) |msg| self.plan.alloc.free(msg);
 
-        release_history.markAppReleaseStatus(id, status, resolved_message) catch {};
+        @import("update/deployment_store.zig").updateDeploymentProgress(
+            id,
+            status,
+            resolved_message,
+            completed_targets,
+            failed_targets,
+        ) catch {};
     }
 
     pub fn freeReleaseId(self: *const LocalReleaseTracker, id: []const u8) void {
@@ -381,6 +402,8 @@ const ScopedApplyRunner = struct {
             .status = .completed,
             .message = "all requested services started",
             .placed = self.backend.release.resolvedServiceCount(),
+            .completed_targets = self.backend.release.resolvedServiceCount(),
+            .failed_targets = 0,
         };
     }
 

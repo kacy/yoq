@@ -17,6 +17,8 @@ pub fn recordAppReleaseStart(plan: *const release_plan.ReleasePlan, context: app
         context.source_release_id,
         plan.manifest_hash,
         plan.config_snapshot,
+        0,
+        0,
         .pending,
         null,
     );

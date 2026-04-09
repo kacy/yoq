@@ -243,6 +243,9 @@ const HistoryEntryView = struct {
     status: []const u8,
     manifest_hash: []const u8,
     created_at: i64,
+    completed_targets: usize,
+    failed_targets: usize,
+    remaining_targets: usize,
     source_release_id: ?[]const u8,
     message: ?[]const u8,
 };
@@ -257,6 +260,9 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .status = report.status.toString(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
+        .completed_targets = report.completed_targets,
+        .failed_targets = report.failed_targets,
+        .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
         .message = report.message,
     };
@@ -271,6 +277,9 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .status = json_helpers.extractJsonString(obj, "status") orelse "?",
         .manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?",
         .created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0,
+        .completed_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "completed_targets") orelse 0)),
+        .failed_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "failed_targets") orelse 0)),
+        .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "remaining_targets") orelse 0)),
         .source_release_id = json_helpers.extractJsonString(obj, "source_release_id"),
         .message = json_helpers.extractJsonString(obj, "message"),
     };
@@ -304,6 +313,9 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.stringField("status", entry.status);
     w.stringField("manifest_hash", entry.manifest_hash);
     w.intField("created_at", entry.created_at);
+    w.uintField("completed_targets", entry.completed_targets);
+    w.uintField("failed_targets", entry.failed_targets);
+    w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     w.endObject();
@@ -369,7 +381,7 @@ test "historyEntryFromDeployment matches remote app history shape" {
 
     const local = historyEntryFromDeployment(dep);
     const remote = parseHistoryObject(
-        \\{"id":"dep-1","app":"demo-app","service":"demo-app","trigger":"apply","status":"completed","manifest_hash":"sha256:123","created_at":42,"source_release_id":null,"message":"healthy"}
+        \\{"id":"dep-1","app":"demo-app","service":"demo-app","trigger":"apply","status":"completed","manifest_hash":"sha256:123","created_at":42,"completed_targets":0,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":"healthy"}
     );
 
     try std.testing.expectEqualStrings(local.id, remote.id);
@@ -379,6 +391,9 @@ test "historyEntryFromDeployment matches remote app history shape" {
     try std.testing.expectEqualStrings(local.status, remote.status);
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expectEqual(local.completed_targets, remote.completed_targets);
+    try std.testing.expectEqual(local.failed_targets, remote.failed_targets);
+    try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
     try std.testing.expect(local.source_release_id == null);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
 }
@@ -392,6 +407,9 @@ test "writeHistoryJsonObject round-trips through remote parser" {
         .status = "completed",
         .manifest_hash = "sha256:123",
         .created_at = 42,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .remaining_targets = 0,
         .source_release_id = "dep-0",
         .message = "healthy",
     };
@@ -407,6 +425,9 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(entry.status, parsed.status);
     try std.testing.expectEqualStrings(entry.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(entry.created_at, parsed.created_at);
+    try std.testing.expectEqual(entry.completed_targets, parsed.completed_targets);
+    try std.testing.expectEqual(entry.failed_targets, parsed.failed_targets);
+    try std.testing.expectEqual(entry.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(entry.source_release_id.?, parsed.source_release_id.?);
     try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
 }
@@ -418,6 +439,8 @@ test "historyEntryFromDeployment preserves partially failed local release state"
         .service_name = "demo-app",
         .manifest_hash = "sha256:333",
         .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .completed_targets = 1,
+        .failed_targets = 1,
         .status = "partially_failed",
         .message = "one or more placements failed",
         .created_at = 300,
@@ -425,7 +448,7 @@ test "historyEntryFromDeployment preserves partially failed local release state"
 
     const local = historyEntryFromDeployment(dep);
     const remote = parseHistoryObject(
-        \\{"id":"dep-3","app":"demo-app","service":"demo-app","trigger":"apply","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"source_release_id":null,"message":"one or more placements failed"}
+        \\{"id":"dep-3","app":"demo-app","service":"demo-app","trigger":"apply","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"completed_targets":1,"failed_targets":1,"remaining_targets":0,"source_release_id":null,"message":"one or more placements failed"}
     );
 
     try std.testing.expectEqualStrings(local.id, remote.id);
@@ -435,6 +458,9 @@ test "historyEntryFromDeployment preserves partially failed local release state"
     try std.testing.expectEqualStrings(local.status, remote.status);
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expectEqual(local.completed_targets, remote.completed_targets);
+    try std.testing.expectEqual(local.failed_targets, remote.failed_targets);
+    try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
     try std.testing.expect(local.source_release_id == null);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
 }

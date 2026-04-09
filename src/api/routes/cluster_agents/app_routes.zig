@@ -120,6 +120,11 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
         try writer.print(",\"created_at\":{d}", .{report.created_at});
+        try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+            report.completed_targets,
+            report.failed_targets,
+            report.remainingTargets(),
+        });
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
         try writer.writeByte(',');
@@ -148,9 +153,12 @@ fn formatAppStatusResponse(
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
-    try writer.print(",\"created_at\":{d},\"service_count\":{d}", .{
+    try writer.print(",\"created_at\":{d},\"service_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.created_at,
         report.service_count,
+        report.completed_targets,
+        report.failed_targets,
+        report.remainingTargets(),
     });
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
@@ -310,6 +318,9 @@ test "formatAppStatusResponse summarizes latest release" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"apply\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"completed_targets\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failed_targets\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_targets\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
 }
 
@@ -323,6 +334,8 @@ test "formatAppStatusResponse includes structured rollback metadata" {
         .source_release_id = "dep-1",
         .manifest_hash = "sha256:333",
         .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
         .status = "completed",
         .message = "rollback to dep-1 completed: all placements succeeded",
         .created_at = 300,
@@ -333,6 +346,8 @@ test "formatAppStatusResponse includes structured rollback metadata" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":\"dep-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"completed_targets\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_targets\":0") != null);
 }
 
 test "formatAppStatusResponse falls back to rollback metadata inferred from legacy message" {
