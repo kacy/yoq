@@ -154,19 +154,13 @@ fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!vo
     };
     defer latest.deinit(alloc);
 
-    const previous_successful = store.getPreviousSuccessfulDeploymentByApp(alloc, app_name, latest.id) catch |err| switch (err) {
-        error.NotFound => null,
-        else => {
-            writeErr("failed to read app status\n", .{});
-            return StatusError.StoreError;
-        },
+    const previous_successful = loadPreviousSuccessfulDeployment(alloc, app_name, latest.id) catch {
+        writeErr("failed to read app status\n", .{});
+        return StatusError.StoreError;
     };
     defer if (previous_successful) |dep| dep.deinit(alloc);
 
-    const snapshot = appStatusFromReports(
-        apply_release.reportFromDeployment(latest),
-        if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
-    );
+    const snapshot = snapshotFromDeployments(latest, previous_successful);
     printAppStatus(snapshot);
 }
 
@@ -286,22 +280,27 @@ fn appsLocal(alloc: std.mem.Allocator) StatusError!void {
     defer snapshots.deinit(alloc);
 
     for (latest.items) |dep| {
-        const previous_successful = store.getPreviousSuccessfulDeploymentByApp(alloc, dep.app_name.?, dep.id) catch |err| switch (err) {
-            error.NotFound => null,
-            else => {
-                writeErr("failed to read app list\n", .{});
-                return StatusError.StoreError;
-            },
+        const previous_successful = loadPreviousSuccessfulDeployment(alloc, dep.app_name.?, dep.id) catch {
+            writeErr("failed to read app list\n", .{});
+            return StatusError.StoreError;
         };
         defer if (previous_successful) |prev| prev.deinit(alloc);
 
-        snapshots.append(alloc, appStatusFromReports(
-            apply_release.reportFromDeployment(dep),
-            if (previous_successful) |prev| apply_release.reportFromDeployment(prev) else null,
-        )) catch return StatusError.OutOfMemory;
+        snapshots.append(alloc, snapshotFromDeployments(dep, previous_successful)) catch return StatusError.OutOfMemory;
     }
 
     printAppStatuses(snapshots.items);
+}
+
+fn loadPreviousSuccessfulDeployment(
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    exclude_release_id: []const u8,
+) !?store.DeploymentRecord {
+    return store.getPreviousSuccessfulDeploymentByApp(alloc, app_name, exclude_release_id) catch |err| switch (err) {
+        error.NotFound => null,
+        else => return err,
+    };
 }
 
 fn appsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) StatusError!void {
@@ -474,6 +473,16 @@ fn appStatusFromReports(
         .previous_successful_created_at = if (previous_successful) |prev| prev.created_at else null,
         .message = report.message,
     };
+}
+
+fn snapshotFromDeployments(
+    latest: store.DeploymentRecord,
+    previous_successful: ?store.DeploymentRecord,
+) AppStatusSnapshot {
+    return appStatusFromReports(
+        apply_release.reportFromDeployment(latest),
+        if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
+    );
 }
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {

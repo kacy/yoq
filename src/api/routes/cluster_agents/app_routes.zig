@@ -75,18 +75,15 @@ pub fn handleAppStatus(alloc: std.mem.Allocator, app_name: []const u8, ctx: Rout
     };
     defer latest.deinit(alloc);
 
-    const previous_successful = store.getPreviousSuccessfulDeploymentByAppInDb(node.stateMachineDb(), alloc, app_name, latest.id) catch |err| switch (err) {
-        error.NotFound => null,
-        else => return common.internalError(),
-    };
+    const previous_successful = loadPreviousSuccessfulDeployment(
+        node.stateMachineDb(),
+        alloc,
+        app_name,
+        latest.id,
+    ) catch return common.internalError();
     defer if (previous_successful) |dep| dep.deinit(alloc);
 
-    const body = formatAppStatusResponse(
-        alloc,
-        apply_release.reportFromDeployment(latest),
-        if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
-    ) catch
-        return common.internalError();
+    const body = formatAppStatusResponseFromDeployments(alloc, latest, previous_successful) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -134,23 +131,40 @@ fn formatAppsResponse(
 
     try writer.writeByte('[');
     for (latest_deployments, 0..) |latest, i| {
-        const previous_successful = store.getPreviousSuccessfulDeploymentByAppInDb(db, alloc, latest.app_name.?, latest.id) catch |err| switch (err) {
-            error.NotFound => null,
-            else => return err,
-        };
+        const previous_successful = try loadPreviousSuccessfulDeployment(db, alloc, latest.app_name.?, latest.id);
         defer if (previous_successful) |dep| dep.deinit(alloc);
 
         if (i > 0) try writer.writeByte(',');
-        const json = try formatAppStatusResponse(
-            alloc,
-            apply_release.reportFromDeployment(latest),
-            if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
-        );
+        const json = try formatAppStatusResponseFromDeployments(alloc, latest, previous_successful);
         defer alloc.free(json);
         try writer.writeAll(json);
     }
     try writer.writeByte(']');
     return json_buf.toOwnedSlice(alloc);
+}
+
+fn loadPreviousSuccessfulDeployment(
+    db: *sqlite.Db,
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    exclude_release_id: []const u8,
+) !?store.DeploymentRecord {
+    return store.getPreviousSuccessfulDeploymentByAppInDb(db, alloc, app_name, exclude_release_id) catch |err| switch (err) {
+        error.NotFound => null,
+        else => return err,
+    };
+}
+
+fn formatAppStatusResponseFromDeployments(
+    alloc: std.mem.Allocator,
+    latest: store.DeploymentRecord,
+    previous_successful: ?store.DeploymentRecord,
+) ![]u8 {
+    return formatAppStatusResponse(
+        alloc,
+        apply_release.reportFromDeployment(latest),
+        if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
+    );
 }
 
 fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store.DeploymentRecord) ![]u8 {
