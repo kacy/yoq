@@ -14,6 +14,8 @@ pub const DeploymentRecord = struct {
     source_release_id: ?[]const u8 = null,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
+    completed_targets: usize = 0,
+    failed_targets: usize = 0,
     status: []const u8,
     message: ?[]const u8,
     created_at: i64,
@@ -32,7 +34,7 @@ pub const DeploymentRecord = struct {
 };
 
 const deployment_columns =
-    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, status, message, created_at";
+    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, created_at";
 
 const DeploymentRow = struct {
     id: sqlite.Text,
@@ -42,6 +44,8 @@ const DeploymentRow = struct {
     source_release_id: ?sqlite.Text,
     manifest_hash: sqlite.Text,
     config_snapshot: sqlite.Text,
+    completed_targets: i64,
+    failed_targets: i64,
     status: sqlite.Text,
     message: ?sqlite.Text,
     created_at: i64,
@@ -56,6 +60,8 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
         .source_release_id = if (row.source_release_id) |source_release_id| source_release_id.data else null,
         .manifest_hash = row.manifest_hash.data,
         .config_snapshot = row.config_snapshot.data,
+        .completed_targets = @intCast(@max(@as(i64, 0), row.completed_targets)),
+        .failed_targets = @intCast(@max(@as(i64, 0), row.failed_targets)),
         .status = row.status.data,
         .message = if (row.message) |message| message.data else null,
         .created_at = row.created_at,
@@ -69,7 +75,7 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -79,6 +85,8 @@ pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!v
             record.source_release_id,
             record.manifest_hash,
             record.config_snapshot,
+            @as(i64, @intCast(record.completed_targets)),
+            @as(i64, @intCast(record.failed_targets)),
             record.status,
             record.message,
             record.created_at,
@@ -154,6 +162,53 @@ pub fn listDeploymentsByAppInDb(
     );
 }
 
+pub fn listLatestDeploymentsByApp(alloc: Allocator) StoreError!std.ArrayList(DeploymentRecord) {
+    const db = try common.getDb();
+    return listLatestDeploymentsByAppInDb(db, alloc);
+}
+
+pub fn listLatestDeploymentsByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+) StoreError!std.ArrayList(DeploymentRecord) {
+    var deployments: std.ArrayList(DeploymentRecord) = .empty;
+    errdefer {
+        for (deployments.items) |dep| dep.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(alloc);
+
+    var stmt = db.prepare(
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name IS NOT NULL ORDER BY created_at DESC, rowid DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(DeploymentRow, .{}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        const record = rowToRecord(row);
+        const app_name = record.app_name orelse {
+            record.deinit(alloc);
+            continue;
+        };
+        const gop = seen.getOrPut(alloc, app_name) catch {
+            record.deinit(alloc);
+            return StoreError.ReadFailed;
+        };
+        if (gop.found_existing) {
+            record.deinit(alloc);
+            continue;
+        }
+        deployments.append(alloc, record) catch {
+            record.deinit(alloc);
+            return StoreError.ReadFailed;
+        };
+    }
+
+    return deployments;
+}
+
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try common.getDb();
     return updateDeploymentStatusInDb(db, id, status, message);
@@ -165,10 +220,32 @@ pub fn updateDeploymentStatusInDb(
     status: []const u8,
     message: ?[]const u8,
 ) StoreError!void {
+    return updateDeploymentProgressInDb(db, id, status, message, 0, 0);
+}
+
+pub fn updateDeploymentProgress(
+    id: []const u8,
+    status: []const u8,
+    message: ?[]const u8,
+    completed_targets: usize,
+    failed_targets: usize,
+) StoreError!void {
+    const db = try common.getDb();
+    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets);
+}
+
+pub fn updateDeploymentProgressInDb(
+    db: *sqlite.Db,
+    id: []const u8,
+    status: []const u8,
+    message: ?[]const u8,
+    completed_targets: usize,
+    failed_targets: usize,
+) StoreError!void {
     db.exec(
-        "UPDATE deployments SET status = ?, message = ? WHERE id = ?;",
+        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ? WHERE id = ?;",
         .{},
-        .{ status, message, id },
+        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), id },
     ) catch return StoreError.WriteFailed;
 }
 
@@ -214,15 +291,38 @@ pub fn getLastSuccessfulDeploymentByApp(alloc: Allocator, app_name: []const u8) 
     );
 }
 
+pub fn getPreviousSuccessfulDeploymentByApp(
+    alloc: Allocator,
+    app_name: []const u8,
+    exclude_id: []const u8,
+) StoreError!DeploymentRecord {
+    const db = try common.getDb();
+    return getPreviousSuccessfulDeploymentByAppInDb(db, alloc, app_name, exclude_id);
+}
+
+pub fn getPreviousSuccessfulDeploymentByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+    exclude_id: []const u8,
+) StoreError!DeploymentRecord {
+    return queryOneInDb(
+        db,
+        alloc,
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? AND status = 'completed' AND id != ? ORDER BY created_at DESC, rowid DESC LIMIT 1;",
+        .{ app_name, exclude_id },
+    );
+}
+
 test "deployment record round-trip via sqlite" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", "completed", "initial deploy", @as(i64, 1000) },
+        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", @as(i64, 1000) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -237,6 +337,8 @@ test "deployment record round-trip via sqlite" {
     try std.testing.expect(record.source_release_id == null);
     try std.testing.expectEqualStrings("sha256:abc", record.manifest_hash);
     try std.testing.expectEqualStrings("{\"image\":\"nginx:latest\"}", record.config_snapshot);
+    try std.testing.expectEqual(@as(usize, 1), record.completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
     try std.testing.expectEqualStrings("completed", record.status);
     try std.testing.expectEqualStrings("initial deploy", record.message.?);
     try std.testing.expectEqual(@as(i64, 1000), record.created_at);
@@ -270,9 +372,9 @@ test "deployment stores rollback transition metadata" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", "completed", "rollback completed", @as(i64, 2100) },
+        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", @as(i64, 2100) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -282,6 +384,117 @@ test "deployment stores rollback transition metadata" {
 
     try std.testing.expectEqualStrings("rollback", record.trigger.?);
     try std.testing.expectEqualStrings("dep-1", record.source_release_id.?);
+    try std.testing.expectEqual(@as(usize, 1), record.completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
+}
+
+test "getPreviousSuccessfulDeploymentByAppInDb excludes current release" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 100,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{}",
+        .status = "failed",
+        .message = null,
+        .created_at = 200,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:333",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 300,
+    });
+
+    const previous = try getPreviousSuccessfulDeploymentByAppInDb(&db, std.testing.allocator, "demo-app", "dep-3");
+    defer previous.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("dep-1", previous.id);
+    try std.testing.expectEqualStrings("completed", previous.status);
+}
+
+test "listLatestDeploymentsByAppInDb returns one latest row per app" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a1",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 100,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "app-b",
+        .service_name = "app-b",
+        .trigger = "apply",
+        .manifest_hash = "sha256:b1",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 150,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-3",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a2",
+        .config_snapshot = "{}",
+        .status = "failed",
+        .message = null,
+        .created_at = 200,
+    });
+
+    var latest = try listLatestDeploymentsByAppInDb(&db, std.testing.allocator);
+    defer {
+        for (latest.items) |dep| dep.deinit(std.testing.allocator);
+        latest.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), latest.items.len);
+    try std.testing.expectEqualStrings("dep-3", latest.items[0].id);
+    try std.testing.expectEqualStrings("app-a", latest.items[0].app_name.?);
+    try std.testing.expectEqualStrings("dep-2", latest.items[1].id);
+    try std.testing.expectEqualStrings("app-b", latest.items[1].app_name.?);
+}
+
+test "listLatestDeploymentsByAppInDb returns empty list when no app releases exist" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    var latest = try listLatestDeploymentsByAppInDb(&db, std.testing.allocator);
+    defer latest.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), latest.items.len);
 }
 
 test "deployment list ordered by timestamp desc" {

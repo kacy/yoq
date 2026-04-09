@@ -81,6 +81,8 @@ pub fn performRollingUpdate(
             null,
             context.manifest_hash,
             context.config_snapshot,
+            0,
+            0,
             .in_progress,
             null,
         ) catch {

@@ -141,12 +141,13 @@ the `--server` flag tells yoq to submit the manifest to the cluster API instead 
 after deploy, use the app-first day-2 commands:
 
 ```
+yoq apps --server 10.0.0.1:7700
 yoq status --app [name] --server 10.0.0.1:7700
 yoq history --app [name] --server 10.0.0.1:7700
 yoq rollback --app [name] --server 10.0.0.1:7700 --release <release-id>
 ```
 
-`status --app` shows the latest release metadata, `history --app` lists prior releases, and remote `rollback --app ... --release` re-applies a stored app snapshot.
+`yoq apps` shows the latest release summary for every app, `status --app` shows the latest release metadata for one app, `history --app` lists prior releases, and remote `rollback --app ... --release` re-applies a stored app snapshot.
 
 ---
 
@@ -344,6 +345,7 @@ for app operations, the important write paths are:
 
 the important read paths are:
 
+- `GET /apps`
 - `GET /apps/<name>/status`
 - `GET /apps/<name>/history`
 

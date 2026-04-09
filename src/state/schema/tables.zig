@@ -166,6 +166,8 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    source_release_id TEXT,
         \\    manifest_hash TEXT NOT NULL,
         \\    config_snapshot TEXT NOT NULL DEFAULT '',
+        \\    completed_targets INTEGER NOT NULL DEFAULT 0,
+        \\    failed_targets INTEGER NOT NULL DEFAULT 0,
         \\    status TEXT NOT NULL DEFAULT 'pending',
         \\    message TEXT,
         \\    created_at INTEGER NOT NULL

@@ -32,6 +32,8 @@ pub fn recordDeployment(
     source_release_id: ?[]const u8,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
+    completed_targets: usize,
+    failed_targets: usize,
     status: common.DeploymentStatus,
     message: ?[]const u8,
 ) !void {
@@ -43,6 +45,8 @@ pub fn recordDeployment(
         .source_release_id = source_release_id,
         .manifest_hash = manifest_hash,
         .config_snapshot = config_snapshot,
+        .completed_targets = completed_targets,
+        .failed_targets = failed_targets,
         .status = status.toString(),
         .message = message,
         .created_at = std.time.timestamp(),
@@ -58,6 +62,8 @@ pub fn recordDeploymentInDb(
     source_release_id: ?[]const u8,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
+    completed_targets: usize,
+    failed_targets: usize,
     status: common.DeploymentStatus,
     message: ?[]const u8,
 ) !void {
@@ -69,6 +75,8 @@ pub fn recordDeploymentInDb(
         .source_release_id = source_release_id,
         .manifest_hash = manifest_hash,
         .config_snapshot = config_snapshot,
+        .completed_targets = completed_targets,
+        .failed_targets = failed_targets,
         .status = status.toString(),
         .message = message,
         .created_at = std.time.timestamp(),
@@ -80,7 +88,7 @@ pub fn updateDeploymentStatus(
     status: common.DeploymentStatus,
     message: ?[]const u8,
 ) !void {
-    store.updateDeploymentStatus(id, status.toString(), message) catch return error.StoreFailed;
+    try updateDeploymentProgress(id, status, message, 0, 0);
 }
 
 pub fn updateDeploymentStatusInDb(
@@ -89,5 +97,26 @@ pub fn updateDeploymentStatusInDb(
     status: common.DeploymentStatus,
     message: ?[]const u8,
 ) !void {
-    store.updateDeploymentStatusInDb(db, id, status.toString(), message) catch return error.StoreFailed;
+    try updateDeploymentProgressInDb(db, id, status, message, 0, 0);
+}
+
+pub fn updateDeploymentProgress(
+    id: []const u8,
+    status: common.DeploymentStatus,
+    message: ?[]const u8,
+    completed_targets: usize,
+    failed_targets: usize,
+) !void {
+    store.updateDeploymentProgress(id, status.toString(), message, completed_targets, failed_targets) catch return error.StoreFailed;
+}
+
+pub fn updateDeploymentProgressInDb(
+    db: *sqlite.Db,
+    id: []const u8,
+    status: common.DeploymentStatus,
+    message: ?[]const u8,
+    completed_targets: usize,
+    failed_targets: usize,
+) !void {
+    store.updateDeploymentProgressInDb(db, id, status.toString(), message, completed_targets, failed_targets) catch return error.StoreFailed;
 }

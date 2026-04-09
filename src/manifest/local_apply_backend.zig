@@ -236,11 +236,13 @@ fn runReplacementPlan(
     for (new_indexes) |idx| {
         runner.start(idx, &completed_workers) catch {
             failed += 1;
+            reportProgressIfSupported(runner, placed, failed);
             if (!mutated) return error.StartFailed;
             continue;
         };
         placed += 1;
         mutated = true;
+        reportProgressIfSupported(runner, placed, failed);
     }
 
     for (replacement_indexes) |idx| {
@@ -248,9 +250,11 @@ fn runReplacementPlan(
         mutated = true;
         runner.start(idx, &completed_workers) catch {
             failed += 1;
+            reportProgressIfSupported(runner, placed, failed);
             continue;
         };
         placed += 1;
+        reportProgressIfSupported(runner, placed, failed);
     }
 
     runner.finish();
@@ -261,6 +265,8 @@ fn runReplacementPlan(
             .message = "one or more local service replacements failed",
             .placed = placed,
             .failed = failed,
+            .completed_targets = placed,
+            .failed_targets = failed,
         };
     }
 
@@ -272,7 +278,15 @@ fn runReplacementPlan(
             "all requested services started",
         .placed = placed,
         .failed = 0,
+        .completed_targets = placed,
+        .failed_targets = 0,
     };
+}
+
+fn reportProgressIfSupported(runner: anytype, completed_targets: usize, failed_targets: usize) void {
+    if (@hasDecl(std.meta.Child(@TypeOf(runner)), "reportProgress")) {
+        runner.reportProgress(completed_targets, failed_targets);
+    }
 }
 
 fn runScopedApply(scope: LocalApplyScope, runner: anytype) !apply_release.ApplyOutcome {
@@ -301,10 +315,27 @@ const LocalReleaseTracker = struct {
     }
 
     pub fn mark(self: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+        try self.markProgress(id, status, message, 0, 0);
+    }
+
+    pub fn markProgress(
+        self: *const LocalReleaseTracker,
+        id: []const u8,
+        status: @import("update/common.zig").DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+    ) !void {
         const resolved_message = try apply_release.materializeMessage(self.plan.alloc, self.context, status, message);
         defer if (resolved_message) |msg| self.plan.alloc.free(msg);
 
-        release_history.markAppReleaseStatus(id, status, resolved_message) catch {};
+        @import("update/deployment_store.zig").updateDeploymentProgress(
+            id,
+            status,
+            resolved_message,
+            completed_targets,
+            failed_targets,
+        ) catch {};
     }
 
     pub fn freeReleaseId(self: *const LocalReleaseTracker, id: []const u8) void {
@@ -316,6 +347,11 @@ const LocalApplyBackend = struct {
     orch: *orchestrator.Orchestrator,
     release: *const release_plan.ReleasePlan,
     scope: LocalApplyScope,
+    progress: ?apply_release.ProgressRecorder = null,
+
+    pub fn attachProgressRecorder(self: *@This(), recorder: apply_release.ProgressRecorder) void {
+        self.progress = recorder;
+    }
 
     pub fn apply(self: *const LocalApplyBackend) !apply_release.ApplyOutcome {
         var runner = ScopedApplyRunner{ .backend = self };
@@ -345,6 +381,7 @@ const LocalApplyBackend = struct {
 
         var runner = struct {
             orch: *orchestrator.Orchestrator,
+            progress: ?apply_release.ProgressRecorder,
 
             fn start(runner_self: *@This(), idx: usize, completed_workers: *std.StringHashMapUnmanaged(void)) !void {
                 try runner_self.orch.startServiceByIndex(idx, completed_workers);
@@ -357,7 +394,13 @@ const LocalApplyBackend = struct {
             fn finish(runner_self: *@This()) void {
                 runner_self.orch.startTlsProxy();
             }
-        }{ .orch = self.orch };
+
+            fn reportProgress(runner_self: *@This(), completed_targets: usize, failed_targets: usize) void {
+                if (runner_self.progress) |progress| {
+                    progress.mark(.in_progress, null, completed_targets, failed_targets) catch {};
+                }
+            }
+        }{ .orch = self.orch, .progress = self.progress };
 
         return runReplacementPlan(
             &runner,
@@ -377,10 +420,15 @@ const ScopedApplyRunner = struct {
 
     fn runFresh(self: *@This()) !apply_release.ApplyOutcome {
         try self.backend.orch.startAll();
+        if (self.backend.progress) |progress| {
+            progress.mark(.in_progress, null, self.backend.release.resolvedServiceCount(), 0) catch {};
+        }
         return .{
             .status = .completed,
             .message = "all requested services started",
             .placed = self.backend.release.resolvedServiceCount(),
+            .completed_targets = self.backend.release.resolvedServiceCount(),
+            .failed_targets = 0,
         };
     }
 
@@ -641,6 +689,50 @@ test "runReplacementPlan reports partial failure after mutation" {
     try std.testing.expect(runner.tls_started);
     try std.testing.expectEqual(@as(usize, 1), runner.started.items.len);
     try std.testing.expectEqual(@as(usize, 1), runner.stopped.items.len);
+}
+
+test "runReplacementPlan emits live target progress after each update" {
+    const alloc = std.testing.allocator;
+
+    const Progress = struct {
+        completed_targets: usize,
+        failed_targets: usize,
+    };
+
+    const Runner = struct {
+        started: std.ArrayList(usize),
+        progress_updates: std.ArrayList(Progress),
+
+        fn start(self: *@This(), idx: usize, _: *std.StringHashMapUnmanaged(void)) !void {
+            try self.started.append(alloc, idx);
+        }
+
+        fn stop(_: *@This(), _: usize) void {}
+
+        fn finish(_: *@This()) void {}
+
+        fn reportProgress(self: *@This(), completed_targets: usize, failed_targets: usize) void {
+            self.progress_updates.append(alloc, .{
+                .completed_targets = completed_targets,
+                .failed_targets = failed_targets,
+            }) catch unreachable;
+        }
+    };
+
+    var runner = Runner{
+        .started = .empty,
+        .progress_updates = .empty,
+    };
+    defer runner.started.deinit(alloc);
+    defer runner.progress_updates.deinit(alloc);
+
+    _ = try runReplacementPlan(&runner, alloc, &.{0}, &.{1});
+
+    try std.testing.expectEqual(@as(usize, 2), runner.progress_updates.items.len);
+    try std.testing.expectEqual(@as(usize, 1), runner.progress_updates.items[0].completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), runner.progress_updates.items[0].failed_targets);
+    try std.testing.expectEqual(@as(usize, 2), runner.progress_updates.items[1].completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), runner.progress_updates.items[1].failed_targets);
 }
 
 test "runScopedApply chooses replacement branch for replacement candidates" {

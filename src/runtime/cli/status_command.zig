@@ -74,6 +74,31 @@ pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     try statusLocal(alloc, verbose);
 }
 
+pub fn apps(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    var server: ?cli.ServerAddr = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            const addr_str = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                return StatusError.InvalidArgument;
+            };
+            server = cli.parseServerAddr(addr_str);
+        } else {
+            writeErr("usage: yoq apps [--server host:port] [--json]\n", .{});
+            return StatusError.InvalidArgument;
+        }
+    }
+
+    if (server) |s| {
+        try appsRemote(alloc, s.ip, s.port);
+    } else {
+        try appsLocal(alloc);
+    }
+}
+
 fn statusLocal(alloc: std.mem.Allocator, verbose: bool) StatusError!void {
     var records = store.listAll(alloc) catch {
         writeErr("failed to list containers\n", .{});
@@ -106,7 +131,13 @@ const AppStatusSnapshot = struct {
     manifest_hash: []const u8,
     created_at: i64,
     service_count: usize,
+    completed_targets: usize,
+    failed_targets: usize,
+    remaining_targets: usize,
     source_release_id: ?[]const u8,
+    previous_successful_release_id: ?[]const u8,
+    previous_successful_manifest_hash: ?[]const u8,
+    previous_successful_created_at: ?i64,
     message: ?[]const u8,
 };
 
@@ -123,7 +154,13 @@ fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!vo
     };
     defer latest.deinit(alloc);
 
-    const snapshot = appStatusFromReport(apply_release.reportFromDeployment(latest));
+    const previous_successful = loadPreviousSuccessfulDeployment(alloc, app_name, latest.id) catch {
+        writeErr("failed to read app status\n", .{});
+        return StatusError.StoreError;
+    };
+    defer if (previous_successful) |dep| dep.deinit(alloc);
+
+    const snapshot = snapshotFromDeployments(latest, previous_successful);
     printAppStatus(snapshot);
 }
 
@@ -229,6 +266,69 @@ fn statusRemoteApp(alloc: std.mem.Allocator, addr: [4]u8, port: u16, app_name: [
     printAppStatus(snapshot);
 }
 
+fn appsLocal(alloc: std.mem.Allocator) StatusError!void {
+    var latest = store.listLatestDeploymentsByApp(alloc) catch {
+        writeErr("failed to read app list\n", .{});
+        return StatusError.StoreError;
+    };
+    defer {
+        for (latest.items) |dep| dep.deinit(alloc);
+        latest.deinit(alloc);
+    }
+
+    var snapshots: std.ArrayList(AppStatusSnapshot) = .empty;
+    defer snapshots.deinit(alloc);
+
+    for (latest.items) |dep| {
+        const previous_successful = loadPreviousSuccessfulDeployment(alloc, dep.app_name.?, dep.id) catch {
+            writeErr("failed to read app list\n", .{});
+            return StatusError.StoreError;
+        };
+        defer if (previous_successful) |prev| prev.deinit(alloc);
+
+        snapshots.append(alloc, snapshotFromDeployments(dep, previous_successful)) catch return StatusError.OutOfMemory;
+    }
+
+    printAppStatuses(snapshots.items);
+}
+
+fn loadPreviousSuccessfulDeployment(
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    exclude_release_id: []const u8,
+) !?store.DeploymentRecord {
+    return store.getPreviousSuccessfulDeploymentByApp(alloc, app_name, exclude_release_id) catch |err| switch (err) {
+        error.NotFound => null,
+        else => return err,
+    };
+}
+
+fn appsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) StatusError!void {
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiToken(&token_buf);
+
+    var resp = http_client.getWithAuth(alloc, addr, port, "/apps", token) catch {
+        writeErr("failed to connect to server\n", .{});
+        return StatusError.ConnectionFailed;
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("server returned status {d}\n", .{resp.status_code});
+        return StatusError.ServerError;
+    }
+
+    var snapshots: std.ArrayList(AppStatusSnapshot) = .empty;
+    defer snapshots.deinit(alloc);
+
+    var iter = json_helpers.extractJsonObjects(resp.body);
+    while (iter.next()) |obj| {
+        snapshots.append(alloc, parseAppStatusResponse(obj)) catch return StatusError.OutOfMemory;
+    }
+
+    printAppStatuses(snapshots.items);
+}
+
 fn printAppStatus(snapshot: AppStatusSnapshot) void {
     if (cli.output_mode == .json) {
         var w = json_out.JsonWriter{};
@@ -238,25 +338,79 @@ fn printAppStatus(snapshot: AppStatusSnapshot) void {
         return;
     }
 
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s}\n", .{
-        "APP", "RELEASE", "STATUS", "TIMESTAMP", "SERVICES", "MESSAGE",
-    });
+    printAppStatusHeader();
+    printAppStatusRow(snapshot);
+}
 
+fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
+    if (cli.output_mode == .json) {
+        var w = json_out.JsonWriter{};
+        w.beginArray();
+        for (snapshots) |snapshot| {
+            writeAppStatusJsonObject(&w, snapshot);
+            w.endObject();
+        }
+        w.endArray();
+        w.flush();
+        return;
+    }
+
+    if (snapshots.len == 0) {
+        write("no app releases found\n", .{});
+        return;
+    }
+
+    printAppStatusHeader();
+    for (snapshots) |snapshot| {
+        printAppStatusRow(snapshot);
+    }
+}
+
+fn printAppStatusHeader() void {
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<22} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "TIMESTAMP", "TARGETS", "PREV OK", "MESSAGE",
+    });
+}
+
+fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
     var ts_buf: [20]u8 = undefined;
     const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{snapshot.created_at}) catch "?";
     const msg = snapshot.message orelse "";
 
-    var count_buf: [16]u8 = undefined;
-    const count_str = std.fmt.bufPrint(&count_buf, "{d}", .{snapshot.service_count}) catch "?";
+    var progress_buf: [64]u8 = undefined;
+    const progress_str = formatAppProgress(&progress_buf, snapshot);
 
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s}\n", .{
+    const previous_successful = if (snapshot.previous_successful_release_id) |release_id|
+        cli.truncate(release_id, 12)
+    else
+        "-";
+
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<22} {s:<14} {s}\n", .{
         snapshot.app_name,
         cli.truncate(snapshot.release_id, 12),
         snapshot.status,
         ts_str,
-        count_str,
+        progress_str,
+        previous_successful,
         cli.truncate(msg, 40),
     });
+}
+
+fn formatAppProgress(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
+    if (snapshot.failed_targets == 0 and snapshot.remaining_targets == 0) {
+        return std.fmt.bufPrint(buf, "{d} ok", .{snapshot.completed_targets}) catch "?";
+    }
+    if (snapshot.remaining_targets == 0) {
+        return std.fmt.bufPrint(buf, "{d} ok, {d} fail", .{
+            snapshot.completed_targets,
+            snapshot.failed_targets,
+        }) catch "?";
+    }
+    return std.fmt.bufPrint(buf, "{d} ok, {d} fail, {d} left", .{
+        snapshot.completed_targets,
+        snapshot.failed_targets,
+        snapshot.remaining_targets,
+    }) catch "?";
 }
 
 fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
@@ -268,7 +422,13 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .manifest_hash = extractJsonString(json, "manifest_hash") orelse "?",
         .created_at = extractJsonInt(json, "created_at") orelse 0,
         .service_count = @intCast(@max(0, extractJsonInt(json, "service_count") orelse 0)),
+        .completed_targets = @intCast(@max(0, extractJsonInt(json, "completed_targets") orelse 0)),
+        .failed_targets = @intCast(@max(0, extractJsonInt(json, "failed_targets") orelse 0)),
+        .remaining_targets = @intCast(@max(0, extractJsonInt(json, "remaining_targets") orelse 0)),
         .source_release_id = extractJsonString(json, "source_release_id"),
+        .previous_successful_release_id = extractJsonString(json, "previous_successful_release_id"),
+        .previous_successful_manifest_hash = extractJsonString(json, "previous_successful_manifest_hash"),
+        .previous_successful_created_at = extractJsonInt(json, "previous_successful_created_at"),
         .message = extractJsonString(json, "message"),
     };
 }
@@ -282,11 +442,20 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.stringField("manifest_hash", snapshot.manifest_hash);
     w.intField("created_at", snapshot.created_at);
     w.uintField("service_count", snapshot.service_count);
+    w.uintField("completed_targets", snapshot.completed_targets);
+    w.uintField("failed_targets", snapshot.failed_targets);
+    w.uintField("remaining_targets", snapshot.remaining_targets);
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (snapshot.previous_successful_release_id) |release_id| w.stringField("previous_successful_release_id", release_id) else w.nullField("previous_successful_release_id");
+    if (snapshot.previous_successful_manifest_hash) |manifest_hash| w.stringField("previous_successful_manifest_hash", manifest_hash) else w.nullField("previous_successful_manifest_hash");
+    if (snapshot.previous_successful_created_at) |created_at| w.intField("previous_successful_created_at", created_at) else w.nullField("previous_successful_created_at");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
 }
 
-fn appStatusFromReport(report: apply_release.ApplyReport) AppStatusSnapshot {
+fn appStatusFromReports(
+    report: apply_release.ApplyReport,
+    previous_successful: ?apply_release.ApplyReport,
+) AppStatusSnapshot {
     return .{
         .app_name = report.app_name,
         .trigger = report.trigger.toString(),
@@ -295,9 +464,25 @@ fn appStatusFromReport(report: apply_release.ApplyReport) AppStatusSnapshot {
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
         .service_count = report.service_count,
+        .completed_targets = report.completed_targets,
+        .failed_targets = report.failed_targets,
+        .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
+        .previous_successful_release_id = if (previous_successful) |prev| prev.release_id else null,
+        .previous_successful_manifest_hash = if (previous_successful) |prev| prev.manifest_hash else null,
+        .previous_successful_created_at = if (previous_successful) |prev| prev.created_at else null,
         .message = report.message,
     };
+}
+
+fn snapshotFromDeployments(
+    latest: store.DeploymentRecord,
+    previous_successful: ?store.DeploymentRecord,
+) AppStatusSnapshot {
+    return appStatusFromReports(
+        apply_release.reportFromDeployment(latest),
+        if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
+    );
 }
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
@@ -407,7 +592,7 @@ fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8
 
 test "parseAppStatusResponse extracts app fields" {
     const snapshot = parseAppStatusResponse(
-        \\{"app_name":"demo-app","trigger":"apply","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"source_release_id":null,"message":null}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":null}
     );
 
     try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
@@ -417,7 +602,13 @@ test "parseAppStatusResponse extracts app fields" {
     try std.testing.expectEqualStrings("sha256:123", snapshot.manifest_hash);
     try std.testing.expectEqual(@as(i64, 42), snapshot.created_at);
     try std.testing.expectEqual(@as(usize, 2), snapshot.service_count);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.failed_targets);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.remaining_targets);
     try std.testing.expect(snapshot.source_release_id == null);
+    try std.testing.expect(snapshot.previous_successful_release_id == null);
+    try std.testing.expect(snapshot.previous_successful_manifest_hash == null);
+    try std.testing.expect(snapshot.previous_successful_created_at == null);
     try std.testing.expect(snapshot.message == null);
 }
 
@@ -429,14 +620,16 @@ test "appStatusFromReport matches remote app status shape" {
         .service_count = 2,
         .placed = 2,
         .failed = 0,
+        .completed_targets = 2,
+        .failed_targets = 0,
         .message = "all placements healthy",
         .manifest_hash = "sha256:222",
         .created_at = 200,
     };
 
-    const local = appStatusFromReport(report);
+    const local = appStatusFromReports(report, null);
     const remote = parseAppStatusResponse(
-        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"source_release_id":null,"message":"all placements healthy"}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":"all placements healthy"}
     );
 
     try std.testing.expectEqualStrings(local.app_name, remote.app_name);
@@ -446,7 +639,11 @@ test "appStatusFromReport matches remote app status shape" {
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
     try std.testing.expectEqual(local.service_count, remote.service_count);
+    try std.testing.expectEqual(local.completed_targets, remote.completed_targets);
+    try std.testing.expectEqual(local.failed_targets, remote.failed_targets);
+    try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
     try std.testing.expect(local.source_release_id == null);
+    try std.testing.expect(local.previous_successful_release_id == null);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
 }
 
@@ -459,7 +656,13 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
         .manifest_hash = "sha256:222",
         .created_at = 200,
         .service_count = 2,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 0,
         .source_release_id = "dep-1",
+        .previous_successful_release_id = "dep-0",
+        .previous_successful_manifest_hash = "sha256:111",
+        .previous_successful_created_at = 100,
         .message = "all placements healthy",
     };
 
@@ -474,7 +677,13 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(snapshot.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(snapshot.created_at, parsed.created_at);
     try std.testing.expectEqual(snapshot.service_count, parsed.service_count);
+    try std.testing.expectEqual(snapshot.completed_targets, parsed.completed_targets);
+    try std.testing.expectEqual(snapshot.failed_targets, parsed.failed_targets);
+    try std.testing.expectEqual(snapshot.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(snapshot.source_release_id.?, parsed.source_release_id.?);
+    try std.testing.expectEqualStrings(snapshot.previous_successful_release_id.?, parsed.previous_successful_release_id.?);
+    try std.testing.expectEqualStrings(snapshot.previous_successful_manifest_hash.?, parsed.previous_successful_manifest_hash.?);
+    try std.testing.expectEqual(snapshot.previous_successful_created_at.?, parsed.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(snapshot.message.?, parsed.message.?);
 }
 
@@ -485,14 +694,29 @@ test "appStatusFromReport preserves partially failed local release state" {
         .service_name = "demo-app",
         .manifest_hash = "sha256:333",
         .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .completed_targets = 1,
+        .failed_targets = 1,
         .status = "partially_failed",
         .message = "one or more placements failed",
         .created_at = 300,
     };
 
-    const local = appStatusFromReport(apply_release.reportFromDeployment(dep));
+    const previous_successful = apply_release.ApplyReport{
+        .app_name = "demo-app",
+        .release_id = "dep-2",
+        .status = .completed,
+        .service_count = 2,
+        .placed = 2,
+        .failed = 0,
+        .completed_targets = 2,
+        .failed_targets = 0,
+        .manifest_hash = "sha256:222",
+        .created_at = 200,
+    };
+
+    const local = appStatusFromReports(apply_release.reportFromDeployment(dep), previous_successful);
     const remote = parseAppStatusResponse(
-        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-3","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"service_count":2,"source_release_id":null,"message":"one or more placements failed"}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-3","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"service_count":2,"completed_targets":1,"failed_targets":1,"remaining_targets":0,"source_release_id":null,"previous_successful_release_id":"dep-2","previous_successful_manifest_hash":"sha256:222","previous_successful_created_at":200,"message":"one or more placements failed"}
     );
 
     try std.testing.expectEqualStrings(local.app_name, remote.app_name);
@@ -502,6 +726,73 @@ test "appStatusFromReport preserves partially failed local release state" {
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
     try std.testing.expectEqual(local.service_count, remote.service_count);
+    try std.testing.expectEqual(local.completed_targets, remote.completed_targets);
+    try std.testing.expectEqual(local.failed_targets, remote.failed_targets);
+    try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
     try std.testing.expect(local.source_release_id == null);
+    try std.testing.expectEqualStrings(local.previous_successful_release_id.?, remote.previous_successful_release_id.?);
+    try std.testing.expectEqualStrings(local.previous_successful_manifest_hash.?, remote.previous_successful_manifest_hash.?);
+    try std.testing.expectEqual(local.previous_successful_created_at.?, remote.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
+}
+
+test "formatAppProgress summarizes in-flight and partial outcomes" {
+    var buf: [64]u8 = undefined;
+
+    const in_progress = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-2",
+        .status = "in_progress",
+        .manifest_hash = "sha256:222",
+        .created_at = 200,
+        .service_count = 4,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 2,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = "apply in progress",
+    };
+    try std.testing.expectEqualStrings("1 ok, 1 fail, 2 left", formatAppProgress(&buf, in_progress));
+
+    const partial = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-3",
+        .status = "partially_failed",
+        .manifest_hash = "sha256:333",
+        .created_at = 300,
+        .service_count = 2,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 0,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = "one or more placements failed",
+    };
+    try std.testing.expectEqualStrings("1 ok, 1 fail", formatAppProgress(&buf, partial));
+
+    const completed = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-4",
+        .status = "completed",
+        .manifest_hash = "sha256:444",
+        .created_at = 400,
+        .service_count = 2,
+        .completed_targets = 2,
+        .failed_targets = 0,
+        .remaining_targets = 0,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = "apply completed",
+    };
+    try std.testing.expectEqualStrings("2 ok", formatAppProgress(&buf, completed));
 }

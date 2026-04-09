@@ -47,6 +47,8 @@ const ClusterReleaseTracker = struct {
             self.context.source_release_id,
             manifest_hash,
             self.config_snapshot,
+            0,
+            0,
             .pending,
             null,
         ) catch return ClusterApplyError.InternalError;
@@ -55,9 +57,27 @@ const ClusterReleaseTracker = struct {
     }
 
     pub fn mark(self: *const ClusterReleaseTracker, id: []const u8, status: @import("../../../manifest/update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
+        try self.markProgress(id, status, message, 0, 0);
+    }
+
+    pub fn markProgress(
+        self: *const ClusterReleaseTracker,
+        id: []const u8,
+        status: @import("../../../manifest/update/common.zig").DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+    ) !void {
         const resolved_message = apply_release.materializeMessage(self.alloc, self.context, status, message) catch return ClusterApplyError.InternalError;
         defer if (resolved_message) |msg| self.alloc.free(msg);
-        deployment_store.updateDeploymentStatusInDb(self.db, id, status, resolved_message) catch return ClusterApplyError.InternalError;
+        deployment_store.updateDeploymentProgressInDb(
+            self.db,
+            id,
+            status,
+            resolved_message,
+            completed_targets,
+            failed_targets,
+        ) catch return ClusterApplyError.InternalError;
     }
 
     pub fn freeReleaseId(self: *const ClusterReleaseTracker, id: []const u8) void {
@@ -70,15 +90,24 @@ const ClusterApplyBackend = struct {
     node: *cluster_node.Node,
     requests: []scheduler.PlacementRequest,
     agents: []agent_registry.AgentRecord,
+    progress: ?apply_release.ProgressRecorder = null,
+
+    pub fn attachProgressRecorder(self: *@This(), recorder: apply_release.ProgressRecorder) void {
+        self.progress = recorder;
+    }
 
     pub fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
         var placed: usize = 0;
         var failed: usize = 0;
+        var completed_targets: usize = 0;
+        var failed_targets: usize = 0;
 
         for (self.requests) |req| {
             if (req.gang_world_size > 0) {
                 const gang_placements = scheduler.scheduleGang(self.alloc, req, self.agents) catch {
                     failed += 1;
+                    failed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                     continue;
                 };
 
@@ -108,11 +137,17 @@ const ClusterApplyBackend = struct {
 
                     if (gang_ok) {
                         placed += gps.len;
+                        completed_targets += 1;
+                        self.reportProgress(completed_targets, failed_targets);
                     } else {
                         failed += req.gang_world_size;
+                        failed_targets += 1;
+                        self.reportProgress(completed_targets, failed_targets);
                     }
                 } else {
                     failed += req.gang_world_size;
+                    failed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                 }
             }
         }
@@ -123,6 +158,8 @@ const ClusterApplyBackend = struct {
             if (req.gang_world_size == 0) {
                 normal_requests.append(self.alloc, req) catch {
                     failed += 1;
+                    failed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                     continue;
                 };
             }
@@ -148,28 +185,42 @@ const ClusterApplyBackend = struct {
                         std.time.timestamp(),
                     ) catch {
                         failed += 1;
+                        failed_targets += 1;
+                        self.reportProgress(completed_targets, failed_targets);
                         continue;
                     };
 
                     _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
                     placed += 1;
+                    completed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                 } else {
                     failed += 1;
+                    failed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                 }
             }
         }
 
         return .{
-            .status = if (failed == 0)
+            .status = if (failed_targets == 0)
                 .completed
-            else if (placed > 0)
+            else if (completed_targets > 0)
                 .partially_failed
             else
                 .failed,
             .message = if (failed == 0) "all placements succeeded" else "one or more placements failed",
             .placed = placed,
             .failed = failed,
+            .completed_targets = completed_targets,
+            .failed_targets = failed_targets,
         };
+    }
+
+    fn reportProgress(self: *const ClusterApplyBackend, completed_targets: usize, failed_targets: usize) void {
+        if (self.progress) |progress| {
+            progress.mark(.in_progress, null, completed_targets, failed_targets) catch {};
+        }
     }
 
     pub fn failureMessage(_: *const ClusterApplyBackend, err: ClusterApplyError) ?[]const u8 {
@@ -283,10 +334,13 @@ fn formatAppApplyResponse(alloc: std.mem.Allocator, report: apply_release.ApplyR
     try json_helpers.writeJsonStringField(writer, "release_id", report.release_id orelse "");
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
-    try writer.print(",\"service_count\":{d},\"placed\":{d},\"failed\":{d}", .{
+    try writer.print(",\"service_count\":{d},\"placed\":{d},\"failed\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.service_count,
         report.placed,
         report.failed,
+        report.completed_targets,
+        report.failed_targets,
+        report.remainingTargets(),
     });
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
@@ -310,6 +364,8 @@ test "formatAppApplyResponse includes app release metadata" {
         .service_count = 2,
         .placed = 2,
         .failed = 0,
+        .completed_targets = 2,
+        .failed_targets = 0,
     });
     defer alloc.free(json);
 
@@ -320,6 +376,9 @@ test "formatAppApplyResponse includes app release metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"completed_targets\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failed_targets\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_targets\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"apply completed\"") != null);
 }
@@ -333,6 +392,8 @@ test "formatAppApplyResponse includes rollback trigger metadata" {
         .service_count = 2,
         .placed = 2,
         .failed = 0,
+        .completed_targets = 2,
+        .failed_targets = 0,
         .message = "all placements succeeded",
         .trigger = .rollback,
         .source_release_id = "dep-1",
@@ -353,6 +414,8 @@ test "formatAppApplyResponse includes partially failed status" {
         .service_count = 2,
         .placed = 1,
         .failed = 1,
+        .completed_targets = 1,
+        .failed_targets = 1,
         .message = "one or more placements failed",
     });
     defer alloc.free(json);

@@ -25,6 +25,8 @@ pub const ApplyOutcome = struct {
     message: ?[]const u8 = null,
     placed: usize = 0,
     failed: usize = 0,
+    completed_targets: usize = 0,
+    failed_targets: usize = 0,
 };
 
 pub const ApplyResult = struct {
@@ -39,6 +41,8 @@ pub const ApplyResult = struct {
             .service_count = service_count,
             .placed = self.outcome.placed,
             .failed = self.outcome.failed,
+            .completed_targets = self.outcome.completed_targets,
+            .failed_targets = self.outcome.failed_targets,
             .message = self.outcome.message,
             .manifest_hash = "",
             .created_at = 0,
@@ -55,6 +59,8 @@ pub const ApplyReport = struct {
     service_count: usize,
     placed: usize,
     failed: usize,
+    completed_targets: usize,
+    failed_targets: usize,
     message: ?[]const u8 = null,
     manifest_hash: []const u8 = "",
     created_at: i64 = 0,
@@ -74,6 +80,11 @@ pub const ApplyReport = struct {
 
     pub fn resolvedMessage(self: ApplyReport, alloc: std.mem.Allocator) !?[]u8 {
         return materializeMessage(alloc, self.context(), self.status, self.message);
+    }
+
+    pub fn remainingTargets(self: ApplyReport) usize {
+        const accounted = @min(self.service_count, self.completed_targets + self.failed_targets);
+        return self.service_count - accounted;
     }
 
     pub fn summaryText(self: ApplyReport, alloc: std.mem.Allocator) ![]u8 {
@@ -106,6 +117,8 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .service_count = countServices(dep.config_snapshot),
         .placed = 0,
         .failed = 0,
+        .completed_targets = dep.completed_targets,
+        .failed_targets = dep.failed_targets,
         .message = dep.message,
         .manifest_hash = dep.manifest_hash,
         .created_at = dep.created_at,
@@ -200,24 +213,116 @@ fn markReleaseIfPresent(
     release_id: ?[]const u8,
     status: update_common.DeploymentStatus,
     message: ?[]const u8,
+    completed_targets: usize,
+    failed_targets: usize,
 ) !void {
     if (release_id) |id| {
-        try tracker.mark(id, status, message);
+        if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgress")) {
+            try tracker.markProgress(id, status, message, completed_targets, failed_targets);
+        } else {
+            try tracker.mark(id, status, message);
+        }
+    }
+}
+
+pub const ProgressRecorder = struct {
+    ctx: *anyopaque,
+    release_id: []const u8,
+    completed_targets_ptr: ?*usize = null,
+    failed_targets_ptr: ?*usize = null,
+    markFn: *const fn (
+        ctx: *anyopaque,
+        release_id: []const u8,
+        status: update_common.DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+    ) anyerror!void,
+
+    pub fn mark(
+        self: ProgressRecorder,
+        status: update_common.DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+    ) !void {
+        if (self.completed_targets_ptr) |ptr| ptr.* = completed_targets;
+        if (self.failed_targets_ptr) |ptr| ptr.* = failed_targets;
+        try self.markFn(self.ctx, self.release_id, status, message, completed_targets, failed_targets);
+    }
+};
+
+fn makeProgressRecorder(
+    tracker: anytype,
+    release_id: []const u8,
+    completed_targets_ptr: *usize,
+    failed_targets_ptr: *usize,
+) ProgressRecorder {
+    const TrackerPtr = @TypeOf(tracker);
+    const Adapter = struct {
+        fn mark(
+            ctx: *anyopaque,
+            id: []const u8,
+            status: update_common.DeploymentStatus,
+            message: ?[]const u8,
+            completed_targets: usize,
+            failed_targets: usize,
+        ) anyerror!void {
+            const typed: TrackerPtr = @ptrCast(@alignCast(ctx));
+            try markReleaseIfPresent(typed, id, status, message, completed_targets, failed_targets);
+        }
+    };
+
+    return .{
+        .ctx = @ptrCast(tracker),
+        .release_id = release_id,
+        .completed_targets_ptr = completed_targets_ptr,
+        .failed_targets_ptr = failed_targets_ptr,
+        .markFn = Adapter.mark,
+    };
+}
+
+fn attachProgressRecorderIfSupported(backend: anytype, recorder: ProgressRecorder) void {
+    if (@hasDecl(std.meta.Child(@TypeOf(backend)), "attachProgressRecorder")) {
+        backend.attachProgressRecorder(recorder);
     }
 }
 
 pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
     const release_id = try tracker.begin();
     errdefer if (release_id) |id| tracker.freeReleaseId(id);
+    var completed_targets: usize = 0;
+    var failed_targets: usize = 0;
 
-    try markReleaseIfPresent(tracker, release_id, .in_progress, null);
+    if (release_id) |id| {
+        attachProgressRecorderIfSupported(
+            backend,
+            makeProgressRecorder(tracker, id, &completed_targets, &failed_targets),
+        );
+    }
+
+    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0);
 
     const outcome = backend.apply() catch |err| {
-        try markReleaseIfPresent(tracker, release_id, .failed, backend.failureMessage(err));
+        try markReleaseIfPresent(
+            tracker,
+            release_id,
+            .failed,
+            backend.failureMessage(err),
+            completed_targets,
+            failed_targets,
+        );
         return err;
     };
 
-    try markReleaseIfPresent(tracker, release_id, outcome.status, outcome.message);
+    try markReleaseIfPresent(
+        tracker,
+        release_id,
+        outcome.status,
+        outcome.message,
+        outcome.completed_targets,
+        outcome.failed_targets,
+    );
 
     return .{
         .release_id = release_id,
@@ -228,8 +333,10 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
 const TestTracker = struct {
     alloc: std.mem.Allocator,
     release_id: []const u8,
-    statuses: [2]?update_common.DeploymentStatus = [_]?update_common.DeploymentStatus{null} ** 2,
-    messages: [2]?[]const u8 = [_]?[]const u8{null} ** 2,
+    statuses: [4]?update_common.DeploymentStatus = [_]?update_common.DeploymentStatus{null} ** 4,
+    messages: [4]?[]const u8 = [_]?[]const u8{null} ** 4,
+    completed_targets: [4]usize = [_]usize{0} ** 4,
+    failed_targets: [4]usize = [_]usize{0} ** 4,
     mark_count: usize = 0,
 
     fn begin(self: *@This()) !?[]const u8 {
@@ -242,6 +349,19 @@ const TestTracker = struct {
         self.statuses[self.mark_count] = status;
         self.messages[self.mark_count] = message;
         self.mark_count += 1;
+    }
+
+    fn markProgress(
+        self: *@This(),
+        id: []const u8,
+        status: update_common.DeploymentStatus,
+        message: ?[]const u8,
+        completed: usize,
+        failed: usize,
+    ) !void {
+        try self.mark(id, status, message);
+        self.completed_targets[self.mark_count - 1] = completed;
+        self.failed_targets[self.mark_count - 1] = failed;
     }
 
     fn freeReleaseId(self: *@This(), id: []const u8) void {
@@ -314,6 +434,81 @@ test "execute marks failed releases on backend error" {
     try expectTrackedStatuses(&tracker, .in_progress, .failed, "service startup failed");
 }
 
+test "execute attaches a live progress recorder when backend supports it" {
+    const alloc = std.testing.allocator;
+
+    const Backend = struct {
+        attached: bool = false,
+        progress: ?ProgressRecorder = null,
+
+        fn attachProgressRecorder(self: *@This(), recorder: ProgressRecorder) void {
+            self.attached = true;
+            self.progress = recorder;
+        }
+
+        fn apply(self: *@This()) !ApplyOutcome {
+            try self.progress.?.mark(.in_progress, null, 1, 0);
+            return .{
+                .status = .completed,
+                .completed_targets = 1,
+            };
+        }
+
+        fn failureMessage(_: *@This(), _: anytype) ?[]const u8 {
+            return "backend failed";
+        }
+    };
+
+    var tracker = TestTracker{ .alloc = alloc, .release_id = "dep789" };
+    var backend = Backend{};
+
+    const result = try execute(&tracker, &backend);
+    defer alloc.free(result.release_id.?);
+
+    try std.testing.expect(backend.attached);
+    try std.testing.expectEqual(@as(usize, 3), tracker.mark_count);
+    try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[0].?);
+    try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[1].?);
+    try std.testing.expectEqual(update_common.DeploymentStatus.completed, tracker.statuses[2].?);
+}
+
+test "execute preserves live progress counts when backend fails after mutation" {
+    const alloc = std.testing.allocator;
+
+    const Backend = struct {
+        progress: ?ProgressRecorder = null,
+
+        fn attachProgressRecorder(self: *@This(), recorder: ProgressRecorder) void {
+            self.progress = recorder;
+        }
+
+        fn apply(self: *@This()) anyerror!ApplyOutcome {
+            try self.progress.?.mark(.in_progress, null, 1, 0);
+            return error.StartupFailed;
+        }
+
+        fn failureMessage(_: *@This(), err: anyerror) ?[]const u8 {
+            return switch (err) {
+                error.StartupFailed => "service startup failed",
+                else => "backend failed",
+            };
+        }
+    };
+
+    var tracker = TestTracker{ .alloc = alloc, .release_id = "dep999" };
+    var backend = Backend{};
+
+    try std.testing.expectError(error.StartupFailed, execute(&tracker, &backend));
+    try std.testing.expectEqual(@as(usize, 3), tracker.mark_count);
+    try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[0].?);
+    try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[1].?);
+    try std.testing.expectEqual(@as(usize, 1), tracker.completed_targets[1]);
+    try std.testing.expectEqual(update_common.DeploymentStatus.failed, tracker.statuses[2].?);
+    try std.testing.expectEqualStrings("service startup failed", tracker.messages[2].?);
+    try std.testing.expectEqual(@as(usize, 1), tracker.completed_targets[2]);
+    try std.testing.expectEqual(@as(usize, 0), tracker.failed_targets[2]);
+}
+
 test "ApplyResult projects to shared apply report" {
     const result = ApplyResult{
         .release_id = "dep789",
@@ -322,6 +517,8 @@ test "ApplyResult projects to shared apply report" {
             .message = null,
             .placed = 3,
             .failed = 0,
+            .completed_targets = 3,
+            .failed_targets = 0,
         },
     };
 
@@ -332,6 +529,8 @@ test "ApplyResult projects to shared apply report" {
     try std.testing.expectEqual(@as(usize, 3), report.service_count);
     try std.testing.expectEqual(@as(usize, 3), report.placed);
     try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expectEqual(@as(usize, 3), report.completed_targets);
+    try std.testing.expectEqual(@as(usize, 0), report.failed_targets);
     try std.testing.expect(report.message == null);
     try std.testing.expectEqual(ApplyTrigger.apply, report.trigger);
     try std.testing.expect(report.source_release_id == null);
@@ -346,6 +545,8 @@ test "ApplyReport summaryText includes release status and counts" {
         .service_count = 3,
         .placed = 3,
         .failed = 0,
+        .completed_targets = 3,
+        .failed_targets = 0,
         .message = "all requested services started",
     };
 
