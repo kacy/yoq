@@ -225,9 +225,65 @@ fn markReleaseIfPresent(
     }
 }
 
+pub const ProgressRecorder = struct {
+    ctx: *anyopaque,
+    release_id: []const u8,
+    markFn: *const fn (
+        ctx: *anyopaque,
+        release_id: []const u8,
+        status: update_common.DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+    ) anyerror!void,
+
+    pub fn mark(
+        self: ProgressRecorder,
+        status: update_common.DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+    ) !void {
+        try self.markFn(self.ctx, self.release_id, status, message, completed_targets, failed_targets);
+    }
+};
+
+fn makeProgressRecorder(tracker: anytype, release_id: []const u8) ProgressRecorder {
+    const TrackerPtr = @TypeOf(tracker);
+    const Adapter = struct {
+        fn mark(
+            ctx: *anyopaque,
+            id: []const u8,
+            status: update_common.DeploymentStatus,
+            message: ?[]const u8,
+            completed_targets: usize,
+            failed_targets: usize,
+        ) anyerror!void {
+            const typed: TrackerPtr = @ptrCast(@alignCast(ctx));
+            try markReleaseIfPresent(typed, id, status, message, completed_targets, failed_targets);
+        }
+    };
+
+    return .{
+        .ctx = @ptrCast(tracker),
+        .release_id = release_id,
+        .markFn = Adapter.mark,
+    };
+}
+
+fn attachProgressRecorderIfSupported(backend: anytype, recorder: ProgressRecorder) void {
+    if (@hasDecl(std.meta.Child(@TypeOf(backend)), "attachProgressRecorder")) {
+        backend.attachProgressRecorder(recorder);
+    }
+}
+
 pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
     const release_id = try tracker.begin();
     errdefer if (release_id) |id| tracker.freeReleaseId(id);
+
+    if (release_id) |id| {
+        attachProgressRecorderIfSupported(backend, makeProgressRecorder(tracker, id));
+    }
 
     try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0);
 
@@ -254,8 +310,8 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
 const TestTracker = struct {
     alloc: std.mem.Allocator,
     release_id: []const u8,
-    statuses: [2]?update_common.DeploymentStatus = [_]?update_common.DeploymentStatus{null} ** 2,
-    messages: [2]?[]const u8 = [_]?[]const u8{null} ** 2,
+    statuses: [4]?update_common.DeploymentStatus = [_]?update_common.DeploymentStatus{null} ** 4,
+    messages: [4]?[]const u8 = [_]?[]const u8{null} ** 4,
     mark_count: usize = 0,
 
     fn begin(self: *@This()) !?[]const u8 {
@@ -338,6 +394,44 @@ test "execute marks failed releases on backend error" {
 
     try std.testing.expectError(BackendError.StartupFailed, execute(&tracker, &backend));
     try expectTrackedStatuses(&tracker, .in_progress, .failed, "service startup failed");
+}
+
+test "execute attaches a live progress recorder when backend supports it" {
+    const alloc = std.testing.allocator;
+
+    const Backend = struct {
+        attached: bool = false,
+        progress: ?ProgressRecorder = null,
+
+        fn attachProgressRecorder(self: *@This(), recorder: ProgressRecorder) void {
+            self.attached = true;
+            self.progress = recorder;
+        }
+
+        fn apply(self: *@This()) !ApplyOutcome {
+            try self.progress.?.mark(.in_progress, null, 1, 0);
+            return .{
+                .status = .completed,
+                .completed_targets = 1,
+            };
+        }
+
+        fn failureMessage(_: *@This(), _: anytype) ?[]const u8 {
+            return "backend failed";
+        }
+    };
+
+    var tracker = TestTracker{ .alloc = alloc, .release_id = "dep789" };
+    var backend = Backend{};
+
+    const result = try execute(&tracker, &backend);
+    defer alloc.free(result.release_id.?);
+
+    try std.testing.expect(backend.attached);
+    try std.testing.expectEqual(@as(usize, 3), tracker.mark_count);
+    try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[0].?);
+    try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[1].?);
+    try std.testing.expectEqual(update_common.DeploymentStatus.completed, tracker.statuses[2].?);
 }
 
 test "ApplyResult projects to shared apply report" {

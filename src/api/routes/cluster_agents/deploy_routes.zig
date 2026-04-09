@@ -90,6 +90,11 @@ const ClusterApplyBackend = struct {
     node: *cluster_node.Node,
     requests: []scheduler.PlacementRequest,
     agents: []agent_registry.AgentRecord,
+    progress: ?apply_release.ProgressRecorder = null,
+
+    pub fn attachProgressRecorder(self: *@This(), recorder: apply_release.ProgressRecorder) void {
+        self.progress = recorder;
+    }
 
     pub fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
         var placed: usize = 0;
@@ -102,6 +107,7 @@ const ClusterApplyBackend = struct {
                 const gang_placements = scheduler.scheduleGang(self.alloc, req, self.agents) catch {
                     failed += 1;
                     failed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                     continue;
                 };
 
@@ -132,13 +138,16 @@ const ClusterApplyBackend = struct {
                     if (gang_ok) {
                         placed += gps.len;
                         completed_targets += 1;
+                        self.reportProgress(completed_targets, failed_targets);
                     } else {
                         failed += req.gang_world_size;
                         failed_targets += 1;
+                        self.reportProgress(completed_targets, failed_targets);
                     }
                 } else {
                     failed += req.gang_world_size;
                     failed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                 }
             }
         }
@@ -150,6 +159,7 @@ const ClusterApplyBackend = struct {
                 normal_requests.append(self.alloc, req) catch {
                     failed += 1;
                     failed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                     continue;
                 };
             }
@@ -176,15 +186,18 @@ const ClusterApplyBackend = struct {
                     ) catch {
                         failed += 1;
                         failed_targets += 1;
+                        self.reportProgress(completed_targets, failed_targets);
                         continue;
                     };
 
                     _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
                     placed += 1;
                     completed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                 } else {
                     failed += 1;
                     failed_targets += 1;
+                    self.reportProgress(completed_targets, failed_targets);
                 }
             }
         }
@@ -202,6 +215,12 @@ const ClusterApplyBackend = struct {
             .completed_targets = completed_targets,
             .failed_targets = failed_targets,
         };
+    }
+
+    fn reportProgress(self: *const ClusterApplyBackend, completed_targets: usize, failed_targets: usize) void {
+        if (self.progress) |progress| {
+            progress.mark(.in_progress, null, completed_targets, failed_targets) catch {};
+        }
     }
 
     pub fn failureMessage(_: *const ClusterApplyBackend, err: ClusterApplyError) ?[]const u8 {
