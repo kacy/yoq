@@ -38,9 +38,13 @@ pub fn markAppReleaseFailed(id: []const u8, message: ?[]const u8) !void {
 }
 
 pub fn rollbackApp(alloc: std.mem.Allocator, app_name: []const u8) ![]const u8 {
-    const prev = try store.getLastSuccessfulDeploymentByApp(alloc, app_name);
-    defer prev.deinit(alloc);
-    return alloc.dupe(u8, prev.config_snapshot);
+    const latest = try store.getLatestDeploymentByApp(alloc, app_name);
+    defer latest.deinit(alloc);
+
+    const previous_successful = try store.getPreviousSuccessfulDeploymentByApp(alloc, app_name, latest.id);
+    defer previous_successful.deinit(alloc);
+
+    return alloc.dupe(u8, previous_successful.config_snapshot);
 }
 
 pub fn listAppReleases(alloc: std.mem.Allocator, app_name: []const u8) !std.ArrayList(store.DeploymentRecord) {
@@ -146,4 +150,78 @@ test "recordAppReleaseStart persists rollback transition metadata" {
 
     try std.testing.expectEqualStrings("rollback", dep.trigger.?);
     try std.testing.expectEqualStrings("dep-1", dep.source_release_id.?);
+}
+
+test "rollbackApp returns previous successful snapshot instead of current successful release" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    try store.saveDeployment(.{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:1\"}]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeployment(.{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:2\"}]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 200,
+    });
+
+    const config = try rollbackApp(alloc, "demo-app");
+    defer alloc.free(config);
+
+    try std.testing.expectEqualStrings(
+        "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:1\"}]}",
+        config,
+    );
+}
+
+test "rollbackApp returns last successful snapshot when latest release failed" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    try store.saveDeployment(.{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:1\"}]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeployment(.{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:2\"}]}",
+        .status = "failed",
+        .message = "apply failed",
+        .created_at = 200,
+    });
+
+    const config = try rollbackApp(alloc, "demo-app");
+    defer alloc.free(config);
+
+    try std.testing.expectEqualStrings(
+        "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:1\"}]}",
+        config,
+    );
 }

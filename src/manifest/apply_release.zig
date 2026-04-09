@@ -228,6 +228,8 @@ fn markReleaseIfPresent(
 pub const ProgressRecorder = struct {
     ctx: *anyopaque,
     release_id: []const u8,
+    completed_targets_ptr: ?*usize = null,
+    failed_targets_ptr: ?*usize = null,
     markFn: *const fn (
         ctx: *anyopaque,
         release_id: []const u8,
@@ -244,11 +246,18 @@ pub const ProgressRecorder = struct {
         completed_targets: usize,
         failed_targets: usize,
     ) !void {
+        if (self.completed_targets_ptr) |ptr| ptr.* = completed_targets;
+        if (self.failed_targets_ptr) |ptr| ptr.* = failed_targets;
         try self.markFn(self.ctx, self.release_id, status, message, completed_targets, failed_targets);
     }
 };
 
-fn makeProgressRecorder(tracker: anytype, release_id: []const u8) ProgressRecorder {
+fn makeProgressRecorder(
+    tracker: anytype,
+    release_id: []const u8,
+    completed_targets_ptr: *usize,
+    failed_targets_ptr: *usize,
+) ProgressRecorder {
     const TrackerPtr = @TypeOf(tracker);
     const Adapter = struct {
         fn mark(
@@ -267,6 +276,8 @@ fn makeProgressRecorder(tracker: anytype, release_id: []const u8) ProgressRecord
     return .{
         .ctx = @ptrCast(tracker),
         .release_id = release_id,
+        .completed_targets_ptr = completed_targets_ptr,
+        .failed_targets_ptr = failed_targets_ptr,
         .markFn = Adapter.mark,
     };
 }
@@ -280,15 +291,27 @@ fn attachProgressRecorderIfSupported(backend: anytype, recorder: ProgressRecorde
 pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
     const release_id = try tracker.begin();
     errdefer if (release_id) |id| tracker.freeReleaseId(id);
+    var completed_targets: usize = 0;
+    var failed_targets: usize = 0;
 
     if (release_id) |id| {
-        attachProgressRecorderIfSupported(backend, makeProgressRecorder(tracker, id));
+        attachProgressRecorderIfSupported(
+            backend,
+            makeProgressRecorder(tracker, id, &completed_targets, &failed_targets),
+        );
     }
 
     try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0);
 
     const outcome = backend.apply() catch |err| {
-        try markReleaseIfPresent(tracker, release_id, .failed, backend.failureMessage(err), 0, 0);
+        try markReleaseIfPresent(
+            tracker,
+            release_id,
+            .failed,
+            backend.failureMessage(err),
+            completed_targets,
+            failed_targets,
+        );
         return err;
     };
 
@@ -312,6 +335,8 @@ const TestTracker = struct {
     release_id: []const u8,
     statuses: [4]?update_common.DeploymentStatus = [_]?update_common.DeploymentStatus{null} ** 4,
     messages: [4]?[]const u8 = [_]?[]const u8{null} ** 4,
+    completed_targets: [4]usize = [_]usize{0} ** 4,
+    failed_targets: [4]usize = [_]usize{0} ** 4,
     mark_count: usize = 0,
 
     fn begin(self: *@This()) !?[]const u8 {
@@ -324,6 +349,19 @@ const TestTracker = struct {
         self.statuses[self.mark_count] = status;
         self.messages[self.mark_count] = message;
         self.mark_count += 1;
+    }
+
+    fn markProgress(
+        self: *@This(),
+        id: []const u8,
+        status: update_common.DeploymentStatus,
+        message: ?[]const u8,
+        completed: usize,
+        failed: usize,
+    ) !void {
+        try self.mark(id, status, message);
+        self.completed_targets[self.mark_count - 1] = completed;
+        self.failed_targets[self.mark_count - 1] = failed;
     }
 
     fn freeReleaseId(self: *@This(), id: []const u8) void {
@@ -432,6 +470,43 @@ test "execute attaches a live progress recorder when backend supports it" {
     try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[0].?);
     try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[1].?);
     try std.testing.expectEqual(update_common.DeploymentStatus.completed, tracker.statuses[2].?);
+}
+
+test "execute preserves live progress counts when backend fails after mutation" {
+    const alloc = std.testing.allocator;
+
+    const Backend = struct {
+        progress: ?ProgressRecorder = null,
+
+        fn attachProgressRecorder(self: *@This(), recorder: ProgressRecorder) void {
+            self.progress = recorder;
+        }
+
+        fn apply(self: *@This()) anyerror!ApplyOutcome {
+            try self.progress.?.mark(.in_progress, null, 1, 0);
+            return error.StartupFailed;
+        }
+
+        fn failureMessage(_: *@This(), err: anyerror) ?[]const u8 {
+            return switch (err) {
+                error.StartupFailed => "service startup failed",
+                else => "backend failed",
+            };
+        }
+    };
+
+    var tracker = TestTracker{ .alloc = alloc, .release_id = "dep999" };
+    var backend = Backend{};
+
+    try std.testing.expectError(error.StartupFailed, execute(&tracker, &backend));
+    try std.testing.expectEqual(@as(usize, 3), tracker.mark_count);
+    try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[0].?);
+    try std.testing.expectEqual(update_common.DeploymentStatus.in_progress, tracker.statuses[1].?);
+    try std.testing.expectEqual(@as(usize, 1), tracker.completed_targets[1]);
+    try std.testing.expectEqual(update_common.DeploymentStatus.failed, tracker.statuses[2].?);
+    try std.testing.expectEqualStrings("service startup failed", tracker.messages[2].?);
+    try std.testing.expectEqual(@as(usize, 1), tracker.completed_targets[2]);
+    try std.testing.expectEqual(@as(usize, 0), tracker.failed_targets[2]);
 }
 
 test "ApplyResult projects to shared apply report" {
