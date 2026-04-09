@@ -205,6 +205,8 @@ yoq status [--verbose]               show service status and resources
 yoq status --app [name]              show local app release status
 yoq status --app [name] --server host:port
                                      show remote app release status
+yoq apps [--json]                    list local app release summaries
+yoq apps --server host:port [--json] list remote app release summaries
 yoq metrics [service]                show service metrics
 yoq metrics --pairs                  show service-to-service metrics
 yoq policy deny <src> <tgt>          block traffic between services

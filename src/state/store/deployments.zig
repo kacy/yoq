@@ -486,6 +486,17 @@ test "listLatestDeploymentsByAppInDb returns one latest row per app" {
     try std.testing.expectEqualStrings("app-b", latest.items[1].app_name.?);
 }
 
+test "listLatestDeploymentsByAppInDb returns empty list when no app releases exist" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    var latest = try listLatestDeploymentsByAppInDb(&db, std.testing.allocator);
+    defer latest.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), latest.items.len);
+}
+
 test "deployment list ordered by timestamp desc" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();

@@ -169,6 +169,7 @@ this gives the operator one app-first day-2 model:
 - `yoq history --app [name]` — app release history
 - `yoq rollback --app [name]` — print the last successful local app snapshot
 - `yoq rollback --app [name] --server host:port --release <id>` — re-apply a prior remote app release
+- `yoq apps` — list app release summaries across all known apps
 
 ### dev mode
 
@@ -220,6 +221,7 @@ cluster manifest deploys now use `POST /apps/apply` as the canonical write path.
 
 the cluster API also exposes app-scoped day-2 reads and rollback:
 
+- `GET /apps` — latest release summary per app
 - `GET /apps/<name>/status` — latest app release metadata
 - `GET /apps/<name>/history` — app release history
 - `POST /apps/<name>/rollback` with `{"release_id":"..."}` — re-apply a stored app release snapshot

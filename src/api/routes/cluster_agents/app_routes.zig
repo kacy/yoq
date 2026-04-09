@@ -461,6 +461,19 @@ test "formatAppsResponse emits one latest summary per app" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
 }
 
+test "formatAppsResponse returns empty array when no app releases exist" {
+    const alloc = std.testing.allocator;
+
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    const json = try formatAppsResponse(alloc, &db, &.{});
+    defer alloc.free(json);
+
+    try std.testing.expectEqualStrings("[]", json);
+}
+
 test "formatAppStatusResponse includes structured rollback metadata" {
     const alloc = std.testing.allocator;
     const latest = store.DeploymentRecord{
