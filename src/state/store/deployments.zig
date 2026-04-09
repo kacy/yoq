@@ -162,6 +162,53 @@ pub fn listDeploymentsByAppInDb(
     );
 }
 
+pub fn listLatestDeploymentsByApp(alloc: Allocator) StoreError!std.ArrayList(DeploymentRecord) {
+    const db = try common.getDb();
+    return listLatestDeploymentsByAppInDb(db, alloc);
+}
+
+pub fn listLatestDeploymentsByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+) StoreError!std.ArrayList(DeploymentRecord) {
+    var deployments: std.ArrayList(DeploymentRecord) = .empty;
+    errdefer {
+        for (deployments.items) |dep| dep.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(alloc);
+
+    var stmt = db.prepare(
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name IS NOT NULL ORDER BY created_at DESC, rowid DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+
+    var iter = stmt.iterator(DeploymentRow, .{}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        const record = rowToRecord(row);
+        const app_name = record.app_name orelse {
+            record.deinit(alloc);
+            continue;
+        };
+        const gop = seen.getOrPut(alloc, app_name) catch {
+            record.deinit(alloc);
+            return StoreError.ReadFailed;
+        };
+        if (gop.found_existing) {
+            record.deinit(alloc);
+            continue;
+        }
+        deployments.append(alloc, record) catch {
+            record.deinit(alloc);
+            return StoreError.ReadFailed;
+        };
+    }
+
+    return deployments;
+}
+
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try common.getDb();
     return updateDeploymentStatusInDb(db, id, status, message);
@@ -385,6 +432,58 @@ test "getPreviousSuccessfulDeploymentByAppInDb excludes current release" {
 
     try std.testing.expectEqualStrings("dep-1", previous.id);
     try std.testing.expectEqualStrings("completed", previous.status);
+}
+
+test "listLatestDeploymentsByAppInDb returns one latest row per app" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a1",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 100,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "app-b",
+        .service_name = "app-b",
+        .trigger = "apply",
+        .manifest_hash = "sha256:b1",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 150,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-3",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a2",
+        .config_snapshot = "{}",
+        .status = "failed",
+        .message = null,
+        .created_at = 200,
+    });
+
+    var latest = try listLatestDeploymentsByAppInDb(&db, std.testing.allocator);
+    defer {
+        for (latest.items) |dep| dep.deinit(std.testing.allocator);
+        latest.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), latest.items.len);
+    try std.testing.expectEqualStrings("dep-3", latest.items[0].id);
+    try std.testing.expectEqualStrings("app-a", latest.items[0].app_name.?);
+    try std.testing.expectEqualStrings("dep-2", latest.items[1].id);
+    try std.testing.expectEqualStrings("app-b", latest.items[1].app_name.?);
 }
 
 test "deployment list ordered by timestamp desc" {

@@ -12,6 +12,10 @@ pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     return status_command.status(args, alloc);
 }
 
+pub fn apps(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    return status_command.apps(args, alloc);
+}
+
 pub fn metrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     return metrics_command.metrics(args, alloc);
 }

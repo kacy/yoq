@@ -203,6 +203,18 @@ test "route rejects app status without cluster" {
     }
 }
 
+test "route rejects app list without cluster" {
+    const ctx: RouteContext = .{ .cluster = null, .join_token = null };
+    const req = testRequest(.GET, "/apps");
+
+    const response = route(req, testing.allocator, ctx);
+    try testing.expect(response != null);
+    if (response) |resp| {
+        try testing.expectEqual(http.StatusCode.bad_request, resp.status);
+        if (resp.allocated) testing.allocator.free(resp.body);
+    }
+}
+
 test "route validates agent ID format" {
     const ctx: RouteContext = .{ .cluster = null, .join_token = null };
 

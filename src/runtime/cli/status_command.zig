@@ -74,6 +74,31 @@ pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     try statusLocal(alloc, verbose);
 }
 
+pub fn apps(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    var server: ?cli.ServerAddr = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            cli.output_mode = .json;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            const addr_str = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                return StatusError.InvalidArgument;
+            };
+            server = cli.parseServerAddr(addr_str);
+        } else {
+            writeErr("usage: yoq apps [--server host:port] [--json]\n", .{});
+            return StatusError.InvalidArgument;
+        }
+    }
+
+    if (server) |s| {
+        try appsRemote(alloc, s.ip, s.port);
+    } else {
+        try appsLocal(alloc);
+    }
+}
+
 fn statusLocal(alloc: std.mem.Allocator, verbose: bool) StatusError!void {
     var records = store.listAll(alloc) catch {
         writeErr("failed to list containers\n", .{});
@@ -247,6 +272,64 @@ fn statusRemoteApp(alloc: std.mem.Allocator, addr: [4]u8, port: u16, app_name: [
     printAppStatus(snapshot);
 }
 
+fn appsLocal(alloc: std.mem.Allocator) StatusError!void {
+    var latest = store.listLatestDeploymentsByApp(alloc) catch {
+        writeErr("failed to read app list\n", .{});
+        return StatusError.StoreError;
+    };
+    defer {
+        for (latest.items) |dep| dep.deinit(alloc);
+        latest.deinit(alloc);
+    }
+
+    var snapshots: std.ArrayList(AppStatusSnapshot) = .empty;
+    defer snapshots.deinit(alloc);
+
+    for (latest.items) |dep| {
+        const previous_successful = store.getPreviousSuccessfulDeploymentByApp(alloc, dep.app_name.?, dep.id) catch |err| switch (err) {
+            error.NotFound => null,
+            else => {
+                writeErr("failed to read app list\n", .{});
+                return StatusError.StoreError;
+            },
+        };
+        defer if (previous_successful) |prev| prev.deinit(alloc);
+
+        snapshots.append(alloc, appStatusFromReports(
+            apply_release.reportFromDeployment(dep),
+            if (previous_successful) |prev| apply_release.reportFromDeployment(prev) else null,
+        )) catch return StatusError.OutOfMemory;
+    }
+
+    printAppStatuses(snapshots.items);
+}
+
+fn appsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) StatusError!void {
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiToken(&token_buf);
+
+    var resp = http_client.getWithAuth(alloc, addr, port, "/apps", token) catch {
+        writeErr("failed to connect to server\n", .{});
+        return StatusError.ConnectionFailed;
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("server returned status {d}\n", .{resp.status_code});
+        return StatusError.ServerError;
+    }
+
+    var snapshots: std.ArrayList(AppStatusSnapshot) = .empty;
+    defer snapshots.deinit(alloc);
+
+    var iter = json_helpers.extractJsonObjects(resp.body);
+    while (iter.next()) |obj| {
+        snapshots.append(alloc, parseAppStatusResponse(obj)) catch return StatusError.OutOfMemory;
+    }
+
+    printAppStatuses(snapshots.items);
+}
+
 fn printAppStatus(snapshot: AppStatusSnapshot) void {
     if (cli.output_mode == .json) {
         var w = json_out.JsonWriter{};
@@ -256,10 +339,41 @@ fn printAppStatus(snapshot: AppStatusSnapshot) void {
         return;
     }
 
+    printAppStatusHeader();
+    printAppStatusRow(snapshot);
+}
+
+fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
+    if (cli.output_mode == .json) {
+        var w = json_out.JsonWriter{};
+        w.beginArray();
+        for (snapshots) |snapshot| {
+            writeAppStatusJsonObject(&w, snapshot);
+            w.endObject();
+        }
+        w.endArray();
+        w.flush();
+        return;
+    }
+
+    if (snapshots.len == 0) {
+        write("no app releases found\n", .{});
+        return;
+    }
+
+    printAppStatusHeader();
+    for (snapshots) |snapshot| {
+        printAppStatusRow(snapshot);
+    }
+}
+
+fn printAppStatusHeader() void {
     write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s:<14} {s}\n", .{
         "APP", "RELEASE", "STATUS", "TIMESTAMP", "PROGRESS", "PREV OK", "MESSAGE",
     });
+}
 
+fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
     var ts_buf: [20]u8 = undefined;
     const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{snapshot.created_at}) catch "?";
     const msg = snapshot.message orelse "";

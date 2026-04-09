@@ -13,6 +13,9 @@ const Response = common.Response;
 const RouteContext = common.RouteContext;
 
 pub fn route(request: @import("../../http.zig").Request, alloc: std.mem.Allocator, ctx: RouteContext) ?Response {
+    if (request.method == .GET and std.mem.eql(u8, request.path_only, "/apps")) {
+        return handleListApps(alloc, ctx);
+    }
     if (!std.mem.startsWith(u8, request.path_only, "/apps/")) return null;
 
     const rest = request.path_only["/apps/".len..];
@@ -37,6 +40,18 @@ pub fn route(request: @import("../../http.zig").Request, alloc: std.mem.Allocato
     }
 
     return null;
+}
+
+pub fn handleListApps(alloc: std.mem.Allocator, ctx: RouteContext) Response {
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    var latest = store.listLatestDeploymentsByAppInDb(node.stateMachineDb(), alloc) catch return common.internalError();
+    defer {
+        for (latest.items) |dep| dep.deinit(alloc);
+        latest.deinit(alloc);
+    }
+
+    const body = formatAppsResponse(alloc, node.stateMachineDb(), latest.items) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 pub fn handleAppHistory(alloc: std.mem.Allocator, app_name: []const u8, ctx: RouteContext) Response {
@@ -106,6 +121,36 @@ pub fn handleAppRollback(
         .content_length = release.config_snapshot.len,
     };
     return deploy_routes.handleAppRollbackApply(alloc, apply_request, ctx, release_id);
+}
+
+fn formatAppsResponse(
+    alloc: std.mem.Allocator,
+    db: *sqlite.Db,
+    latest_deployments: []const store.DeploymentRecord,
+) ![]u8 {
+    var json_buf: std.ArrayList(u8) = .empty;
+    errdefer json_buf.deinit(alloc);
+    const writer = json_buf.writer(alloc);
+
+    try writer.writeByte('[');
+    for (latest_deployments, 0..) |latest, i| {
+        const previous_successful = store.getPreviousSuccessfulDeploymentByAppInDb(db, alloc, latest.app_name.?, latest.id) catch |err| switch (err) {
+            error.NotFound => null,
+            else => return err,
+        };
+        defer if (previous_successful) |dep| dep.deinit(alloc);
+
+        if (i > 0) try writer.writeByte(',');
+        const json = try formatAppStatusResponse(
+            alloc,
+            apply_release.reportFromDeployment(latest),
+            if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
+        );
+        defer alloc.free(json);
+        try writer.writeAll(json);
+    }
+    try writer.writeByte(']');
+    return json_buf.toOwnedSlice(alloc);
 }
 
 fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store.DeploymentRecord) ![]u8 {
@@ -343,6 +388,63 @@ test "formatAppStatusResponse summarizes latest release" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_targets\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release_id\":null") != null);
+}
+
+test "formatAppsResponse emits one latest summary per app" {
+    const alloc = std.testing.allocator;
+
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try store.saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a1",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"}]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "app-b",
+        .service_name = "app-b",
+        .trigger = "apply",
+        .manifest_hash = "sha256:b1",
+        .config_snapshot = "{\"app_name\":\"app-b\",\"services\":[{\"name\":\"api\"}]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 150,
+    });
+    try store.saveDeploymentInDb(&db, .{
+        .id = "dep-3",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a2",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .status = "failed",
+        .message = "scheduler error during apply",
+        .created_at = 200,
+    });
+
+    var latest = try store.listLatestDeploymentsByAppInDb(&db, alloc);
+    defer {
+        for (latest.items) |dep| dep.deinit(alloc);
+        latest.deinit(alloc);
+    }
+
+    const json = try formatAppsResponse(alloc, &db, latest.items);
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"app-a\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release_id\":\"dep-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"app-b\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
 }
 
 test "formatAppStatusResponse includes structured rollback metadata" {

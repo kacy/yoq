@@ -44,6 +44,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "restart", .group = .runtime, .usage = "restart <id|name>", .description = "restart a container", .handler = container_cmds.restart },
     .{ .name = "exec", .group = .runtime, .usage = "exec <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
     .{ .name = "status", .group = .runtime, .usage = "status [--app [name]] [--verbose] [--server h:p]", .description = "show service or app status", .handler = runtime_cmds.status },
+    .{ .name = "apps", .group = .runtime, .usage = "apps [--server h:p] [--json]", .description = "list app release summaries", .handler = runtime_cmds.apps },
     .{ .name = "metrics", .group = .runtime, .usage = "metrics [service] [--server h:p]", .description = "show per-service network metrics", .handler = runtime_cmds.metrics },
     .{ .name = "gpu", .group = .runtime, .usage = "gpu <topo|bench> [--json]", .description = "GPU topology, diagnostics, and benchmarking", .handler = gpu_cmds.gpu },
 
