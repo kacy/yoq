@@ -93,6 +93,8 @@ pub const getLatestDeploymentByApp = @import("store/deployments.zig").getLatestD
 pub const getLatestDeploymentByAppInDb = @import("store/deployments.zig").getLatestDeploymentByAppInDb;
 pub const getLastSuccessfulDeployment = @import("store/deployments.zig").getLastSuccessfulDeployment;
 pub const getLastSuccessfulDeploymentByApp = @import("store/deployments.zig").getLastSuccessfulDeploymentByApp;
+pub const getPreviousSuccessfulDeploymentByApp = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByApp;
+pub const getPreviousSuccessfulDeploymentByAppInDb = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByAppInDb;
 
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
 pub const updateTrainingJobState = @import("store/training.zig").updateTrainingJobState;

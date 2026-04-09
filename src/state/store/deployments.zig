@@ -244,6 +244,29 @@ pub fn getLastSuccessfulDeploymentByApp(alloc: Allocator, app_name: []const u8) 
     );
 }
 
+pub fn getPreviousSuccessfulDeploymentByApp(
+    alloc: Allocator,
+    app_name: []const u8,
+    exclude_id: []const u8,
+) StoreError!DeploymentRecord {
+    const db = try common.getDb();
+    return getPreviousSuccessfulDeploymentByAppInDb(db, alloc, app_name, exclude_id);
+}
+
+pub fn getPreviousSuccessfulDeploymentByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+    exclude_id: []const u8,
+) StoreError!DeploymentRecord {
+    return queryOneInDb(
+        db,
+        alloc,
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? AND status = 'completed' AND id != ? ORDER BY created_at DESC, rowid DESC LIMIT 1;",
+        .{ app_name, exclude_id },
+    );
+}
+
 test "deployment record round-trip via sqlite" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
@@ -316,6 +339,52 @@ test "deployment stores rollback transition metadata" {
     try std.testing.expectEqualStrings("dep-1", record.source_release_id.?);
     try std.testing.expectEqual(@as(usize, 1), record.completed_targets);
     try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
+}
+
+test "getPreviousSuccessfulDeploymentByAppInDb excludes current release" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 100,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{}",
+        .status = "failed",
+        .message = null,
+        .created_at = 200,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:333",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 300,
+    });
+
+    const previous = try getPreviousSuccessfulDeploymentByAppInDb(&db, std.testing.allocator, "demo-app", "dep-3");
+    defer previous.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("dep-1", previous.id);
+    try std.testing.expectEqualStrings("completed", previous.status);
 }
 
 test "deployment list ordered by timestamp desc" {

@@ -110,6 +110,9 @@ const AppStatusSnapshot = struct {
     failed_targets: usize,
     remaining_targets: usize,
     source_release_id: ?[]const u8,
+    previous_successful_release_id: ?[]const u8,
+    previous_successful_manifest_hash: ?[]const u8,
+    previous_successful_created_at: ?i64,
     message: ?[]const u8,
 };
 
@@ -126,7 +129,19 @@ fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!vo
     };
     defer latest.deinit(alloc);
 
-    const snapshot = appStatusFromReport(apply_release.reportFromDeployment(latest));
+    const previous_successful = store.getPreviousSuccessfulDeploymentByApp(alloc, app_name, latest.id) catch |err| switch (err) {
+        error.NotFound => null,
+        else => {
+            writeErr("failed to read app status\n", .{});
+            return StatusError.StoreError;
+        },
+    };
+    defer if (previous_successful) |dep| dep.deinit(alloc);
+
+    const snapshot = appStatusFromReports(
+        apply_release.reportFromDeployment(latest),
+        if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
+    );
     printAppStatus(snapshot);
 }
 
@@ -241,8 +256,8 @@ fn printAppStatus(snapshot: AppStatusSnapshot) void {
         return;
     }
 
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s}\n", .{
-        "APP", "RELEASE", "STATUS", "TIMESTAMP", "PROGRESS", "MESSAGE",
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "TIMESTAMP", "PROGRESS", "PREV OK", "MESSAGE",
     });
 
     var ts_buf: [20]u8 = undefined;
@@ -255,12 +270,18 @@ fn printAppStatus(snapshot: AppStatusSnapshot) void {
         snapshot.service_count,
     }) catch "?";
 
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s}\n", .{
+    const previous_successful = if (snapshot.previous_successful_release_id) |release_id|
+        cli.truncate(release_id, 12)
+    else
+        "-";
+
+    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<14} {s:<14} {s}\n", .{
         snapshot.app_name,
         cli.truncate(snapshot.release_id, 12),
         snapshot.status,
         ts_str,
         count_str,
+        previous_successful,
         cli.truncate(msg, 40),
     });
 }
@@ -278,6 +299,9 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .failed_targets = @intCast(@max(0, extractJsonInt(json, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, extractJsonInt(json, "remaining_targets") orelse 0)),
         .source_release_id = extractJsonString(json, "source_release_id"),
+        .previous_successful_release_id = extractJsonString(json, "previous_successful_release_id"),
+        .previous_successful_manifest_hash = extractJsonString(json, "previous_successful_manifest_hash"),
+        .previous_successful_created_at = extractJsonInt(json, "previous_successful_created_at"),
         .message = extractJsonString(json, "message"),
     };
 }
@@ -295,10 +319,16 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (snapshot.previous_successful_release_id) |release_id| w.stringField("previous_successful_release_id", release_id) else w.nullField("previous_successful_release_id");
+    if (snapshot.previous_successful_manifest_hash) |manifest_hash| w.stringField("previous_successful_manifest_hash", manifest_hash) else w.nullField("previous_successful_manifest_hash");
+    if (snapshot.previous_successful_created_at) |created_at| w.intField("previous_successful_created_at", created_at) else w.nullField("previous_successful_created_at");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
 }
 
-fn appStatusFromReport(report: apply_release.ApplyReport) AppStatusSnapshot {
+fn appStatusFromReports(
+    report: apply_release.ApplyReport,
+    previous_successful: ?apply_release.ApplyReport,
+) AppStatusSnapshot {
     return .{
         .app_name = report.app_name,
         .trigger = report.trigger.toString(),
@@ -311,6 +341,9 @@ fn appStatusFromReport(report: apply_release.ApplyReport) AppStatusSnapshot {
         .failed_targets = report.failed_targets,
         .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
+        .previous_successful_release_id = if (previous_successful) |prev| prev.release_id else null,
+        .previous_successful_manifest_hash = if (previous_successful) |prev| prev.manifest_hash else null,
+        .previous_successful_created_at = if (previous_successful) |prev| prev.created_at else null,
         .message = report.message,
     };
 }
@@ -436,6 +469,9 @@ test "parseAppStatusResponse extracts app fields" {
     try std.testing.expectEqual(@as(usize, 0), snapshot.failed_targets);
     try std.testing.expectEqual(@as(usize, 0), snapshot.remaining_targets);
     try std.testing.expect(snapshot.source_release_id == null);
+    try std.testing.expect(snapshot.previous_successful_release_id == null);
+    try std.testing.expect(snapshot.previous_successful_manifest_hash == null);
+    try std.testing.expect(snapshot.previous_successful_created_at == null);
     try std.testing.expect(snapshot.message == null);
 }
 
@@ -454,7 +490,7 @@ test "appStatusFromReport matches remote app status shape" {
         .created_at = 200,
     };
 
-    const local = appStatusFromReport(report);
+    const local = appStatusFromReports(report, null);
     const remote = parseAppStatusResponse(
         \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":"all placements healthy"}
     );
@@ -470,6 +506,7 @@ test "appStatusFromReport matches remote app status shape" {
     try std.testing.expectEqual(local.failed_targets, remote.failed_targets);
     try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
     try std.testing.expect(local.source_release_id == null);
+    try std.testing.expect(local.previous_successful_release_id == null);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
 }
 
@@ -486,6 +523,9 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
         .failed_targets = 1,
         .remaining_targets = 0,
         .source_release_id = "dep-1",
+        .previous_successful_release_id = "dep-0",
+        .previous_successful_manifest_hash = "sha256:111",
+        .previous_successful_created_at = 100,
         .message = "all placements healthy",
     };
 
@@ -504,6 +544,9 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqual(snapshot.failed_targets, parsed.failed_targets);
     try std.testing.expectEqual(snapshot.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(snapshot.source_release_id.?, parsed.source_release_id.?);
+    try std.testing.expectEqualStrings(snapshot.previous_successful_release_id.?, parsed.previous_successful_release_id.?);
+    try std.testing.expectEqualStrings(snapshot.previous_successful_manifest_hash.?, parsed.previous_successful_manifest_hash.?);
+    try std.testing.expectEqual(snapshot.previous_successful_created_at.?, parsed.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(snapshot.message.?, parsed.message.?);
 }
 
@@ -521,9 +564,22 @@ test "appStatusFromReport preserves partially failed local release state" {
         .created_at = 300,
     };
 
-    const local = appStatusFromReport(apply_release.reportFromDeployment(dep));
+    const previous_successful = apply_release.ApplyReport{
+        .app_name = "demo-app",
+        .release_id = "dep-2",
+        .status = .completed,
+        .service_count = 2,
+        .placed = 2,
+        .failed = 0,
+        .completed_targets = 2,
+        .failed_targets = 0,
+        .manifest_hash = "sha256:222",
+        .created_at = 200,
+    };
+
+    const local = appStatusFromReports(apply_release.reportFromDeployment(dep), previous_successful);
     const remote = parseAppStatusResponse(
-        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-3","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"service_count":2,"completed_targets":1,"failed_targets":1,"remaining_targets":0,"source_release_id":null,"message":"one or more placements failed"}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-3","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"service_count":2,"completed_targets":1,"failed_targets":1,"remaining_targets":0,"source_release_id":null,"previous_successful_release_id":"dep-2","previous_successful_manifest_hash":"sha256:222","previous_successful_created_at":200,"message":"one or more placements failed"}
     );
 
     try std.testing.expectEqualStrings(local.app_name, remote.app_name);
@@ -537,5 +593,8 @@ test "appStatusFromReport preserves partially failed local release state" {
     try std.testing.expectEqual(local.failed_targets, remote.failed_targets);
     try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
     try std.testing.expect(local.source_release_id == null);
+    try std.testing.expectEqualStrings(local.previous_successful_release_id.?, remote.previous_successful_release_id.?);
+    try std.testing.expectEqualStrings(local.previous_successful_manifest_hash.?, remote.previous_successful_manifest_hash.?);
+    try std.testing.expectEqual(local.previous_successful_created_at.?, remote.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
 }
