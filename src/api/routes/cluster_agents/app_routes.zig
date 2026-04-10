@@ -428,7 +428,7 @@ test "formatAppsResponse emits one latest summary per app" {
         .service_name = "app-a",
         .trigger = "apply",
         .manifest_hash = "sha256:a1",
-        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"}]}",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
         .status = "completed",
         .message = "apply completed",
         .created_at = 100,
@@ -439,7 +439,7 @@ test "formatAppsResponse emits one latest summary per app" {
         .service_name = "app-b",
         .trigger = "apply",
         .manifest_hash = "sha256:b1",
-        .config_snapshot = "{\"app_name\":\"app-b\",\"services\":[{\"name\":\"api\"}]}",
+        .config_snapshot = "{\"app_name\":\"app-b\",\"services\":[{\"name\":\"api\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
         .status = "completed",
         .message = "apply completed",
         .created_at = 150,
@@ -450,7 +450,7 @@ test "formatAppsResponse emits one latest summary per app" {
         .service_name = "app-a",
         .trigger = "apply",
         .manifest_hash = "sha256:a2",
-        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}],\"workers\":[{\"name\":\"migrate\"}],\"crons\":[{\"name\":\"nightly\"}],\"training_jobs\":[{\"name\":\"finetune\"}]}",
         .status = "failed",
         .message = "scheduler error during apply",
         .created_at = 200,
@@ -468,6 +468,9 @@ test "formatAppsResponse emits one latest summary per app" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"app-a\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-3\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release_id\":\"dep-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"worker_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cron_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"training_job_count\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"app-b\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
 }
