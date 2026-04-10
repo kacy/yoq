@@ -711,6 +711,49 @@ test "app apply then rollback routes preserve release transition metadata" {
     try expectJsonContains(history_response.body, source_release_id);
 }
 
+test "app rollback restores worker and training workload snapshot" {
+    const alloc = std.testing.allocator;
+    const first_apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[{"name":"migrate","image":"alpine","command":["/bin/sh","-c","echo first"]}],"crons":[],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["python","train.py"],"gpus":1}]}
+    ;
+    const second_apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[{"name":"compact","image":"alpine","command":["/bin/sh","-c","echo second"]}],"crons":[{"name":"nightly","schedule":"0 2 * * *","command":["/bin/sh","-c","echo cron"]}],"training_jobs":[]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const first_apply_response = harness.appApply(first_apply_body);
+    defer freeResponse(alloc, first_apply_response);
+    try expectResponseOk(first_apply_response);
+
+    const source_release_id = json_helpers.extractJsonString(first_apply_response.body, "release_id").?;
+
+    const second_apply_response = harness.appApply(second_apply_body);
+    defer freeResponse(alloc, second_apply_response);
+    try expectResponseOk(second_apply_response);
+
+    const rollback_response = try harness.rollback("demo-app", source_release_id);
+    defer freeResponse(alloc, rollback_response);
+    try expectResponseOk(rollback_response);
+
+    const latest = try store.getLatestDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer latest.deinit(alloc);
+
+    try std.testing.expectEqualStrings("rollback", latest.trigger.?);
+    try std.testing.expectEqualStrings(source_release_id, latest.source_release_id.?);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"workers\":[{\"name\":\"migrate\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"training_jobs\":[{\"name\":\"finetune\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"crons\":[]") != null);
+
+    const status_response = harness.status("demo-app");
+    defer freeResponse(alloc, status_response);
+    try expectResponseOk(status_response);
+    try expectJsonContains(status_response.body, "\"worker_count\":1");
+    try expectJsonContains(status_response.body, "\"training_job_count\":1");
+    try expectJsonContains(status_response.body, "\"cron_count\":0");
+}
+
 test "app apply route preserves failed release metadata across reads" {
     const alloc = std.testing.allocator;
     const apply_body =
