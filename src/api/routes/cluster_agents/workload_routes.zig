@@ -224,33 +224,42 @@ fn handleTrainingLogs(
     ctx: RouteContext,
 ) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
-    const rank = if (common.extractQueryValue(request.query, "rank")) |rank_str|
-        std.fmt.parseInt(u32, rank_str, 10) catch 0
-    else
-        0;
+    const rank = parseTrainingLogRank(request.query) catch return common.badRequest("invalid rank");
+    var hostname_buf: [128]u8 = undefined;
+    const hostname = trainingRankHostname(&hostname_buf, job_name, rank) catch return common.internalError();
+    const record = store.findAppContainer(alloc, app_name, hostname) catch return common.internalError();
+    if (record) |local_record| {
+        defer local_record.deinit(alloc);
+        return readTrainingLogsResponse(alloc, local_record.id);
+    }
 
     if (proxyTrainingLogsFromHostingAgent(alloc, node, ctx.join_token, app_name, job_name, rank)) |result| {
         return result;
     }
 
-    var hostname_buf: [128]u8 = undefined;
-    const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ job_name, rank }) catch return common.internalError();
-    const record = store.findAppContainer(alloc, app_name, hostname) catch return common.internalError();
-    if (record == null) {
-        const scheduled = agent_registry.countAssignmentsForWorkload(node.stateMachineDb(), app_name, "training", job_name) catch return common.internalError();
-        if (scheduled > 0) {
-            return .{
-                .status = .bad_request,
-                .body = "{\"error\":\"training logs are only available on the hosting agent\"}",
-                .allocated = false,
-            };
-        }
-        return common.notFound();
+    const scheduled = agent_registry.countAssignmentsForWorkload(node.stateMachineDb(), app_name, "training", job_name) catch return common.internalError();
+    if (scheduled > 0) {
+        return .{
+            .status = .bad_request,
+            .body = "{\"error\":\"training logs are only available on the hosting agent\"}",
+            .allocated = false,
+        };
     }
-    defer record.?.deinit(alloc);
+    return common.notFound();
+}
 
-    const logs = @import("../../../runtime/logs.zig");
-    const data = logs.readLogs(alloc, record.?.id) catch return common.notFound();
+fn parseTrainingLogRank(query: []const u8) !u32 {
+    const rank_str = common.extractQueryValue(query, "rank") orelse return 0;
+    return std.fmt.parseInt(u32, rank_str, 10) catch error.InvalidRank;
+}
+
+fn trainingRankHostname(buf: []u8, job_name: []const u8, rank: u32) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}-rank-{d}", .{ job_name, rank });
+}
+
+fn readTrainingLogsResponse(alloc: std.mem.Allocator, container_id: []const u8) Response {
+    const runtime_logs = @import("../../../runtime/logs.zig");
+    const data = runtime_logs.readLogs(alloc, container_id) catch return common.notFound();
     return .{ .status = .ok, .body = data, .allocated = true, .content_type = "text/plain" };
 }
 
@@ -569,6 +578,22 @@ fn updateHarnessAgentEndpoint(harness: *RouteFlowHarness, address: []const u8, p
     ) catch return error.SkipZigTest;
 }
 
+fn clearHarnessAgentEndpoint(harness: *RouteFlowHarness) !void {
+    harness.node.stateMachineDb().exec(
+        "UPDATE agents SET agent_api_port = NULL WHERE id = ?;",
+        .{},
+        .{"abc123def456"},
+    ) catch return error.SkipZigTest;
+}
+
+fn seedTrainingAssignment(harness: *RouteFlowHarness, app_name: []const u8, job_name: []const u8, rank: u32) !void {
+    harness.node.stateMachineDb().exec(
+        "INSERT INTO assignments (id, agent_id, image, command, status, app_name, workload_kind, workload_name, gang_rank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "assign12345678", "abc123def456", "pytorch:latest", "python train.py", "running", app_name, "training", job_name, @as(i64, rank), @as(i64, 100) },
+    ) catch return error.SkipZigTest;
+}
+
 test "route rejects worker run without cluster" {
     const ctx: RouteContext = .{ .cluster = null, .join_token = null };
     const req = makeRequest(.POST, "/apps/demo-app/workers/migrate/run", "", "");
@@ -754,6 +779,56 @@ test "training logs route reports remote-hosted ranks explicitly" {
 
     try std.testing.expectEqual(http.StatusCode.bad_request, logs_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, logs_resp.body, "hosting agent") != null);
+}
+
+test "training logs route rejects invalid rank query" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const logs_resp = route(
+        makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=abc"),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, logs_resp);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, logs_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, logs_resp.body, "invalid rank") != null);
+}
+
+test "training logs route prefers local logs when available" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try store.save(.{
+        .id = "abc123def456",
+        .rootfs = "/tmp/rootfs",
+        .command = "python train.py",
+        .hostname = "finetune-rank-0",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+    var file = try @import("../../../runtime/logs.zig").createLogFile("abc123def456");
+    try file.writeAll("local rank logs\n");
+    file.close();
+
+    try seedTrainingAssignment(&harness, "demo-app", "finetune", 0);
+    try clearHarnessAgentEndpoint(&harness);
+
+    const logs_resp = route(
+        makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=0"),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, logs_resp);
+
+    try std.testing.expectEqual(http.StatusCode.ok, logs_resp.status);
+    try std.testing.expectEqualStrings("local rank logs\n", logs_resp.body);
 }
 
 test "training logs route proxies logs from hosting agent" {

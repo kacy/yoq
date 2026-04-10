@@ -80,10 +80,10 @@ fn handleConnection(self: *LogServer, client_fd: posix.fd_t) void {
             sendError(client_fd, .bad_request, "invalid app or training job name");
             return;
         }
-        const rank = if (common.extractQueryValue(request.query, "rank")) |rank_str|
-            std.fmt.parseInt(u32, rank_str, 10) catch 0
-        else
-            0;
+        const rank = parseRankQuery(request.query) catch {
+            sendError(client_fd, .bad_request, "invalid rank");
+            return;
+        };
         serveTrainingLogs(self.alloc, client_fd, path.app_name, path.job_name, rank);
         return;
     }
@@ -107,6 +107,11 @@ fn matchTrainingLogs(path: []const u8) ?TrainingLogsPath {
     if (!std.mem.eql(u8, after_app[slash2..], "/logs")) return null;
     if (app_name.len == 0 or job_name.len == 0) return null;
     return .{ .app_name = app_name, .job_name = job_name };
+}
+
+fn parseRankQuery(query: []const u8) !u32 {
+    const rank_str = common.extractQueryValue(query, "rank") orelse return 0;
+    return std.fmt.parseInt(u32, rank_str, 10) catch error.InvalidRank;
 }
 
 fn serveTrainingLogs(alloc: std.mem.Allocator, client_fd: posix.fd_t, app_name: []const u8, job_name: []const u8, rank: u32) void {
