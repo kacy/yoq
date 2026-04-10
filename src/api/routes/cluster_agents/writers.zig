@@ -9,7 +9,12 @@ pub fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void 
     try json_helpers.writeJsonEscaped(writer, agent.address);
     try writer.writeAll("\",\"status\":\"");
     try writer.writeAll(agent.status);
-    try writer.writeAll("\",\"cpu_cores\":");
+    try writer.writeByte('"');
+    if (agent.agent_api_port) |port| {
+        try writer.writeAll(",\"agent_api_port\":");
+        try std.fmt.format(writer, "{d}", .{port});
+    }
+    try writer.writeAll(",\"cpu_cores\":");
     try std.fmt.format(writer, "{d}", .{agent.cpu_cores});
     try writer.writeAll(",\"memory_mb\":");
     try std.fmt.format(writer, "{d}", .{agent.memory_mb});

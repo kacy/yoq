@@ -65,6 +65,7 @@ pub const AgentResources = struct {
 pub const AgentRecord = struct {
     id: []const u8,
     address: []const u8,
+    agent_api_port: ?i64 = null,
     status: []const u8,
     cpu_cores: i64,
     memory_mb: i64,

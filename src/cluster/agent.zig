@@ -33,6 +33,7 @@ const resource_support = @import("agent/resource_support.zig");
 const gossip_support = @import("agent/gossip_support.zig");
 const assignment_runtime = @import("agent/assignment_runtime.zig");
 const loop_runtime = @import("agent/loop_runtime.zig");
+const log_server_mod = @import("agent/log_server.zig");
 
 const Allocator = std.mem.Allocator;
 const AgentResources = agent_types.AgentResources;
@@ -64,8 +65,11 @@ pub const Agent = struct {
     server_port: u16,
     token: []const u8,
     owned_token: ?[]u8 = null,
+    agent_api_port: u16 = 7701,
     running: std.atomic.Value(bool),
     loop_thread: ?std.Thread,
+    log_server: ?log_server_mod.LogServer = null,
+    log_server_thread: ?std.Thread = null,
 
     /// tracks assignment_id → local container state.
     /// protected by mutex since container threads update it.
@@ -129,7 +133,7 @@ pub const Agent = struct {
         var local_ip_buf: [16]u8 = undefined;
         const local_ip = resource_support.detectLocalIp(self.server_addr, &local_ip_buf);
 
-        const body = request_support.buildRegisterBody(self.alloc, self.token, local_ip, resources, pub_key, self.wg_listen_port, self.role, self.region) catch
+        const body = request_support.buildRegisterBody(self.alloc, self.token, local_ip, self.agent_api_port, resources, pub_key, self.wg_listen_port, self.role, self.region) catch
             return AgentError.RegisterFailed;
         defer self.alloc.free(body);
 

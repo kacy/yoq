@@ -123,6 +123,7 @@ comptime {
     _ = @import("cluster/registry.zig");
     _ = @import("cluster/http_client.zig");
     _ = @import("cluster/agent.zig");
+    _ = @import("cluster/agent/log_server.zig");
     _ = @import("cluster/scheduler.zig");
     _ = @import("cluster/commands.zig");
     _ = @import("tls/commands.zig");

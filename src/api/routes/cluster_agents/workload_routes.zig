@@ -223,17 +223,21 @@ fn handleTrainingLogs(
     request: http.Request,
     ctx: RouteContext,
 ) Response {
-    _ = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     const rank = if (common.extractQueryValue(request.query, "rank")) |rank_str|
         std.fmt.parseInt(u32, rank_str, 10) catch 0
     else
         0;
 
+    if (proxyTrainingLogsFromHostingAgent(alloc, node, ctx.join_token, app_name, job_name, rank)) |result| {
+        return result;
+    }
+
     var hostname_buf: [128]u8 = undefined;
     const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ job_name, rank }) catch return common.internalError();
     const record = store.findAppContainer(alloc, app_name, hostname) catch return common.internalError();
     if (record == null) {
-        const scheduled = agent_registry.countAssignmentsForWorkload(ctx.cluster.?.stateMachineDb(), app_name, "training", job_name) catch return common.internalError();
+        const scheduled = agent_registry.countAssignmentsForWorkload(node.stateMachineDb(), app_name, "training", job_name) catch return common.internalError();
         if (scheduled > 0) {
             return .{
                 .status = .bad_request,
@@ -248,6 +252,64 @@ fn handleTrainingLogs(
     const logs = @import("../../../runtime/logs.zig");
     const data = logs.readLogs(alloc, record.?.id) catch return common.notFound();
     return .{ .status = .ok, .body = data, .allocated = true, .content_type = "text/plain" };
+}
+
+fn proxyTrainingLogsFromHostingAgent(
+    alloc: std.mem.Allocator,
+    node: *cluster_node.Node,
+    join_token: ?[]const u8,
+    app_name: []const u8,
+    job_name: []const u8,
+    rank: u32,
+) ?Response {
+    const token = join_token orelse return null;
+    const host = agent_registry.findWorkloadHostByRank(alloc, node.stateMachineDb(), app_name, "training", job_name, rank) catch
+        return common.internalError();
+    if (host == null) return null;
+    defer host.?.deinit(alloc);
+    const port = host.?.agent_api_port orelse {
+        return .{
+            .status = .service_unavailable,
+            .body = "{\"error\":\"hosting agent does not expose training logs\"}",
+            .allocated = false,
+        };
+    };
+    if (port <= 0 or port > 65535) {
+        return common.internalError();
+    }
+
+    const ip = @import("../../../network/ip.zig").parseIp(host.?.address) orelse {
+        return .{
+            .status = .service_unavailable,
+            .body = "{\"error\":\"hosting agent address is invalid\"}",
+            .allocated = false,
+        };
+    };
+
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/training/{s}/{s}/logs?rank={d}", .{ app_name, job_name, rank }) catch
+        return common.internalError();
+
+    var resp = @import("../../../cluster/http_client.zig").getWithAuth(alloc, ip, @intCast(port), path, token) catch {
+        return .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"failed to fetch training logs from hosting agent\"}",
+            .allocated = false,
+        };
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code == 200) {
+        const body = alloc.dupe(u8, resp.body) catch return common.internalError();
+        return .{ .status = .ok, .body = body, .allocated = true, .content_type = "text/plain" };
+    }
+    if (resp.status_code == 404) return null;
+    if (resp.status_code == 401) return common.unauthorized();
+    return .{
+        .status = .bad_gateway,
+        .body = "{\"error\":\"failed to fetch training logs from hosting agent\"}",
+        .allocated = false,
+    };
 }
 
 fn scheduleTrainingJob(
@@ -451,9 +513,9 @@ const RouteFlowHarness = struct {
 
     fn seedActiveAgent(self: *RouteFlowHarness) !void {
         self.node.stateMachineDb().exec(
-            "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO agents (id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             .{},
-            .{ "abc123def456", "10.0.0.2:7701", "active", @as(i64, 8), @as(i64, 16384), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "", @as(i64, 4), @as(i64, 0), "L4", @as(i64, 24576) },
+            .{ "abc123def456", "10.0.0.2", @as(i64, 7701), "active", @as(i64, 8), @as(i64, 16384), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "", @as(i64, 4), @as(i64, 0), "L4", @as(i64, 24576) },
         ) catch return error.SkipZigTest;
     }
 
@@ -497,6 +559,14 @@ fn countTrainingAssignments(db: *sqlite.Db, app_name: []const u8, job_name: []co
         .{ app_name, job_name },
     ) catch unreachable) orelse unreachable;
     return @intCast(row.count);
+}
+
+fn updateHarnessAgentEndpoint(harness: *RouteFlowHarness, address: []const u8, port: u16) !void {
+    harness.node.stateMachineDb().exec(
+        "UPDATE agents SET address = ?, agent_api_port = ? WHERE id = ?;",
+        .{},
+        .{ address, @as(i64, port), "abc123def456" },
+    ) catch return error.SkipZigTest;
 }
 
 test "route rejects worker run without cluster" {
@@ -684,4 +754,60 @@ test "training logs route reports remote-hosted ranks explicitly" {
 
     try std.testing.expectEqual(http.StatusCode.bad_request, logs_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, logs_resp.body, "hosting agent") != null);
+}
+
+test "training logs route proxies logs from hosting agent" {
+    const alloc = std.testing.allocator;
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "abc123def456",
+        .rootfs = "/tmp/rootfs",
+        .command = "python train.py",
+        .hostname = "finetune-rank-0",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+    var file = try @import("../../../runtime/logs.zig").createLogFile("abc123def456");
+    try file.writeAll("proxied rank logs\n");
+    file.close();
+
+    var agent_log_server = try @import("../../../cluster/agent/log_server.zig").LogServer.init(alloc, 0, "join-token");
+    const log_thread = try std.Thread.spawn(.{}, @import("../../../cluster/agent/log_server.zig").LogServer.run, .{&agent_log_server});
+    defer {
+        agent_log_server.deinit();
+        log_thread.join();
+    }
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+    try updateHarnessAgentEndpoint(&harness, "127.0.0.1", agent_log_server.port);
+
+    try harness.seedLatestRelease(
+        "demo-app",
+        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
+    );
+
+    const start_resp = route(
+        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
+        alloc,
+        .{ .cluster = &harness.node, .join_token = "join-token" },
+    ).?;
+    defer freeResponse(alloc, start_resp);
+    try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
+    harness.applyCommitted();
+
+    const logs_resp = route(
+        makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=0"),
+        alloc,
+        .{ .cluster = &harness.node, .join_token = "join-token" },
+    ).?;
+    defer freeResponse(alloc, logs_resp);
+
+    try std.testing.expectEqual(http.StatusCode.ok, logs_resp.status);
+    try std.testing.expectEqualStrings("proxied rank logs\n", logs_resp.body);
 }

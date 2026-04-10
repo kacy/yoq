@@ -1,0 +1,197 @@
+const std = @import("std");
+const posix = std.posix;
+const http = @import("../../api/http.zig");
+const connection_runtime = @import("../../api/server/connection_runtime.zig");
+const common = @import("../../api/routes/common.zig");
+const store = @import("../../state/store.zig");
+const logs = @import("../../runtime/logs.zig");
+
+pub const LogServer = struct {
+    alloc: std.mem.Allocator,
+    listen_fd: posix.fd_t,
+    token: []const u8,
+    port: u16,
+    running: std.atomic.Value(bool),
+
+    pub fn init(alloc: std.mem.Allocator, port: u16, token: []const u8) !LogServer {
+        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+        errdefer posix.close(fd);
+
+        const one: c_int = 1;
+        _ = posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
+
+        const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+        try posix.bind(fd, &addr.any, addr.getOsSockLen());
+        try posix.listen(fd, 32);
+
+        var actual_addr: posix.sockaddr.in = undefined;
+        var actual_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+        try posix.getsockname(fd, @ptrCast(&actual_addr), &actual_len);
+
+        return .{
+            .alloc = alloc,
+            .listen_fd = fd,
+            .token = token,
+            .port = std.mem.bigToNative(u16, actual_addr.port),
+            .running = std.atomic.Value(bool).init(true),
+        };
+    }
+
+    pub fn deinit(self: *LogServer) void {
+        self.running.store(false, .release);
+        posix.close(self.listen_fd);
+    }
+
+    pub fn run(self: *LogServer) void {
+        while (self.running.load(.acquire)) {
+            const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| switch (err) {
+                error.WouldBlock => {
+                    std.Thread.sleep(50 * std.time.ns_per_ms);
+                    continue;
+                },
+                else => return,
+            };
+            handleConnection(self, client_fd);
+        }
+    }
+};
+
+fn handleConnection(self: *LogServer, client_fd: posix.fd_t) void {
+    defer posix.close(client_fd);
+
+    const owned_request = connection_runtime.readRequestAlloc(self.alloc, client_fd) catch {
+        sendError(client_fd, .bad_request, "malformed request");
+        return;
+    };
+    defer owned_request.deinit(self.alloc);
+
+    const request = owned_request.request;
+    if (!common.hasValidBearerToken(&request, self.token)) {
+        sendError(client_fd, .unauthorized, "unauthorized");
+        return;
+    }
+    if (request.method != .GET) {
+        sendError(client_fd, .method_not_allowed, "method not allowed");
+        return;
+    }
+
+    if (matchTrainingLogs(request.path_only)) |path| {
+        if (!common.validateClusterInput(path.app_name) or !common.validateClusterInput(path.job_name)) {
+            sendError(client_fd, .bad_request, "invalid app or training job name");
+            return;
+        }
+        const rank = if (common.extractQueryValue(request.query, "rank")) |rank_str|
+            std.fmt.parseInt(u32, rank_str, 10) catch 0
+        else
+            0;
+        serveTrainingLogs(self.alloc, client_fd, path.app_name, path.job_name, rank);
+        return;
+    }
+
+    sendError(client_fd, .not_found, "not found");
+}
+
+const TrainingLogsPath = struct {
+    app_name: []const u8,
+    job_name: []const u8,
+};
+
+fn matchTrainingLogs(path: []const u8) ?TrainingLogsPath {
+    if (!std.mem.startsWith(u8, path, "/training/")) return null;
+    const tail = path["/training/".len..];
+    const slash = std.mem.indexOfScalar(u8, tail, '/') orelse return null;
+    const app_name = tail[0..slash];
+    const after_app = tail[slash + 1 ..];
+    const slash2 = std.mem.indexOfScalar(u8, after_app, '/') orelse return null;
+    const job_name = after_app[0..slash2];
+    if (!std.mem.eql(u8, after_app[slash2..], "/logs")) return null;
+    if (app_name.len == 0 or job_name.len == 0) return null;
+    return .{ .app_name = app_name, .job_name = job_name };
+}
+
+fn serveTrainingLogs(alloc: std.mem.Allocator, client_fd: posix.fd_t, app_name: []const u8, job_name: []const u8, rank: u32) void {
+    var hostname_buf: [128]u8 = undefined;
+    const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ job_name, rank }) catch {
+        sendError(client_fd, .internal_server_error, "response formatting failed");
+        return;
+    };
+    const record = store.findAppContainer(alloc, app_name, hostname) catch {
+        sendError(client_fd, .internal_server_error, "container lookup failed");
+        return;
+    };
+    if (record == null) {
+        sendError(client_fd, .not_found, "not found");
+        return;
+    }
+    defer record.?.deinit(alloc);
+
+    const data = logs.readLogs(alloc, record.?.id) catch {
+        sendError(client_fd, .not_found, "not found");
+        return;
+    };
+    defer alloc.free(data);
+
+    writeResponse(client_fd, .ok, "text/plain", data);
+}
+
+fn sendError(fd: posix.fd_t, status: http.StatusCode, message: []const u8) void {
+    var resp_buf: [1024]u8 = undefined;
+    const resp = http.formatError(&resp_buf, status, message);
+    writeAll(fd, resp);
+}
+
+fn writeResponse(fd: posix.fd_t, status: http.StatusCode, content_type: []const u8, body: []const u8) void {
+    var header_buf: [512]u8 = undefined;
+    const headers = http.formatResponseHeaders(&header_buf, status, content_type, body.len);
+    writeAll(fd, headers);
+    if (body.len > 0) writeAll(fd, body);
+}
+
+fn writeAll(fd: posix.fd_t, data: []const u8) void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const bytes_written = posix.write(fd, data[written..]) catch return;
+        if (bytes_written == 0) return;
+        written += bytes_written;
+    }
+}
+
+test "log server serves remote training logs with auth" {
+    store.initTestDb() catch return error.SkipZigTest;
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "abc123def456",
+        .rootfs = "/tmp/rootfs",
+        .command = "python train.py",
+        .hostname = "finetune-rank-0",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .app_name = "demo-app",
+        .created_at = 100,
+    });
+
+    var file = try logs.createLogFile("abc123def456");
+    defer file.close();
+    try file.writeAll("rank zero logs\n");
+
+    var server = try LogServer.init(std.testing.allocator, 0, "join-token");
+    const thread = try std.Thread.spawn(.{}, LogServer.run, .{&server});
+    defer {
+        server.deinit();
+        thread.join();
+    }
+
+    var resp = try @import("../http_client.zig").getWithAuth(
+        std.testing.allocator,
+        .{ 127, 0, 0, 1 },
+        server.port,
+        "/training/demo-app/finetune/logs?rank=0",
+        "join-token",
+    );
+    defer resp.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
+    try std.testing.expectEqualStrings("rank zero logs\n", resp.body);
+}

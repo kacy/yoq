@@ -17,6 +17,7 @@ fn migrateContainers(db: *sqlite.Db) void {
 }
 
 fn migrateAgents(db: *sqlite.Db) void {
+    addColumnIfMissing(db, "ALTER TABLE agents ADD COLUMN agent_api_port INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE agents ADD COLUMN node_id INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE agents ADD COLUMN wg_public_key TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE agents ADD COLUMN overlay_ip TEXT;") catch {};

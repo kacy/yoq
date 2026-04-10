@@ -3,6 +3,7 @@ const setup = @import("../../network/setup.zig");
 const agent_store = @import("../agent_store.zig");
 const cluster_config = @import("../config.zig");
 const agent_mod = @import("../agent.zig");
+const log_server = @import("log_server.zig");
 const loop_runtime = @import("loop_runtime.zig");
 
 pub fn init(alloc: std.mem.Allocator, server_addr: [4]u8, server_port: u16, token: []const u8, owned_token: ?[]u8) agent_mod.Agent {
@@ -13,8 +14,11 @@ pub fn init(alloc: std.mem.Allocator, server_addr: [4]u8, server_port: u16, toke
         .server_port = server_port,
         .token = if (owned_token) |owned| owned else token,
         .owned_token = owned_token,
+        .agent_api_port = 7701,
         .running = std.atomic.Value(bool).init(false),
         .loop_thread = null,
+        .log_server = null,
+        .log_server_thread = null,
         .local_containers = std.StringHashMap(agent_mod.ContainerState).init(alloc),
         .container_lock = .{},
         .node_id = null,
@@ -38,10 +42,31 @@ pub fn initOwned(alloc: std.mem.Allocator, server_addr: [4]u8, server_port: u16,
 
 pub fn start(self: anytype) !void {
     self.running.store(true, .release);
-    self.loop_thread = std.Thread.spawn(.{}, loop_runtime.agentLoop, .{self}) catch {
+    self.log_server = try log_server.LogServer.init(self.alloc, self.agent_api_port, self.token);
+    errdefer {
+        if (self.log_server) |*server| server.deinit();
+        self.log_server = null;
+    }
+    self.log_server_thread = std.Thread.spawn(.{}, runLogServer, .{self}) catch {
+        if (self.log_server) |*server| server.deinit();
+        self.log_server = null;
         self.running.store(false, .release);
         return error.ThreadSpawnFailed;
     };
+    self.loop_thread = std.Thread.spawn(.{}, loop_runtime.agentLoop, .{self}) catch {
+        if (self.log_server) |*server| server.deinit();
+        if (self.log_server_thread) |t| {
+            t.join();
+            self.log_server_thread = null;
+        }
+        self.log_server = null;
+        self.running.store(false, .release);
+        return error.ThreadSpawnFailed;
+    };
+}
+
+fn runLogServer(self: anytype) void {
+    if (self.log_server) |*server| server.run();
 }
 
 pub fn stop(self: anytype) void {
@@ -50,6 +75,14 @@ pub fn stop(self: anytype) void {
         t.join();
         self.loop_thread = null;
     }
+    if (self.log_server) |*server| {
+        server.deinit();
+    }
+    if (self.log_server_thread) |t| {
+        t.join();
+        self.log_server_thread = null;
+    }
+    self.log_server = null;
 
     if (self.node_id != null) {
         setup.teardownClusterNetworking();
@@ -65,6 +98,14 @@ pub fn wait(self: anytype) void {
         t.join();
         self.loop_thread = null;
     }
+    if (self.log_server) |*server| {
+        server.deinit();
+    }
+    if (self.log_server_thread) |t| {
+        t.join();
+        self.log_server_thread = null;
+    }
+    self.log_server = null;
 }
 
 pub fn deinit(self: anytype) void {

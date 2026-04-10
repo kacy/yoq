@@ -11,6 +11,7 @@ pub fn buildRegisterBody(
     alloc: Allocator,
     token: []const u8,
     address: []const u8,
+    agent_api_port: u16,
     resources: AgentResources,
     pub_key: []const u8,
     wg_listen_port: u16,
@@ -25,7 +26,9 @@ pub fn buildRegisterBody(
     try json_helpers.writeJsonEscaped(writer, token);
     try writer.writeAll("\",\"address\":\"");
     try json_helpers.writeJsonEscaped(writer, address);
-    try writer.writeAll("\",\"cpu_cores\":");
+    try writer.writeAll("\",\"agent_api_port\":");
+    try writer.print("{d}", .{agent_api_port});
+    try writer.writeAll(",\"cpu_cores\":");
     try writer.print("{d}", .{resources.cpu_cores});
     try writer.writeAll(",\"memory_mb\":");
     try writer.print("{d}", .{resources.memory_mb});

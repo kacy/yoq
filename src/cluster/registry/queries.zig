@@ -79,6 +79,7 @@ fn queryWireguardPeers(alloc: Allocator, db: *sqlite.Db, sql: []const u8) ![]Wir
 const AgentRow = struct {
     id: sqlite.Text,
     address: sqlite.Text,
+    agent_api_port: ?i64,
     status: sqlite.Text,
     cpu_cores: i64,
     memory_mb: i64,
@@ -100,12 +101,13 @@ const AgentRow = struct {
     rdma_capable: ?i64,
 };
 
-const agent_select_cols = "id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb, rdma_capable";
+const agent_select_cols = "id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb, rdma_capable";
 
 fn agentRowToRecord(row: AgentRow) AgentRecord {
     return .{
         .id = row.id.data,
         .address = row.address.data,
+        .agent_api_port = row.agent_api_port,
         .status = row.status.data,
         .cpu_cores = row.cpu_cores,
         .memory_mb = row.memory_mb,
@@ -184,6 +186,53 @@ pub fn countAssignmentsForWorkload(db: *sqlite.Db, app_name: []const u8, workloa
         .{ app_name, workload_kind, workload_name },
     ) catch return error.QueryFailed) orelse return 0;
     return @intCast(row.count);
+}
+
+pub const WorkloadHost = struct {
+    agent_id: []const u8,
+    address: []const u8,
+    agent_api_port: ?i64,
+
+    pub fn deinit(self: WorkloadHost, alloc: Allocator) void {
+        alloc.free(self.agent_id);
+        alloc.free(self.address);
+    }
+};
+
+pub fn findWorkloadHostByRank(
+    alloc: Allocator,
+    db: *sqlite.Db,
+    app_name: []const u8,
+    workload_kind: []const u8,
+    workload_name: []const u8,
+    rank: u32,
+) !?WorkloadHost {
+    const Row = struct {
+        agent_id: sqlite.Text,
+        address: sqlite.Text,
+        agent_api_port: ?i64,
+    };
+    const row = (db.oneAlloc(
+        Row,
+        alloc,
+        \\SELECT agents.id AS agent_id, agents.address, agents.agent_api_port
+        \\FROM assignments
+        \\JOIN agents ON assignments.agent_id = agents.id
+        \\WHERE assignments.app_name = ?
+        \\  AND assignments.workload_kind = ?
+        \\  AND assignments.workload_name = ?
+        \\  AND COALESCE(assignments.gang_rank, 0) = ?
+        \\ORDER BY assignments.created_at DESC, assignments.id DESC
+        \\LIMIT 1;
+        ,
+        .{},
+        .{ app_name, workload_kind, workload_name, @as(i64, rank) },
+    ) catch return error.QueryFailed) orelse return null;
+    return .{
+        .agent_id = row.agent_id.data,
+        .address = row.address.data,
+        .agent_api_port = row.agent_api_port,
+    };
 }
 
 const AssignmentRow = struct {

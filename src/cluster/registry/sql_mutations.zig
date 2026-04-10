@@ -5,6 +5,7 @@ const sql_escape = @import("../../lib/sql.zig");
 pub const AgentResources = agent_types.AgentResources;
 
 pub const RegisterOpts = struct {
+    agent_api_port: ?u16 = null,
     node_id: ?u16 = null,
     wg_public_key: ?[]const u8 = null,
     overlay_ip: ?[]const u8 = null,
@@ -32,6 +33,7 @@ pub fn registerSqlFull(
     opts: RegisterOpts,
 ) ![]const u8 {
     const node_id = opts.node_id;
+    const agent_api_port = opts.agent_api_port;
     const wg_public_key = opts.wg_public_key;
     const overlay_ip = opts.overlay_ip;
     const role = opts.role;
@@ -78,16 +80,16 @@ pub fn registerSqlFull(
             const reg_esc = try sql_escape.escapeSqlString(&region_esc_buf, region_val);
             return std.fmt.bufPrint(
                 buf,
-                "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels{s})" ++
-                    " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}', '{s}'{s});",
-                .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, reg_esc, labels_esc, gpu_vals },
+                "INSERT INTO agents (id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, region, labels{s})" ++
+                    " VALUES ('{s}', '{s}', {any}, 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}', '{s}'{s});",
+                .{ gpu_cols, id_esc, addr_esc, agent_api_port, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, reg_esc, labels_esc, gpu_vals },
             );
         }
         return std.fmt.bufPrint(
             buf,
-            "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, labels{s})" ++
-                " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}'{s});",
-            .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, labels_esc, gpu_vals },
+            "INSERT INTO agents (id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, node_id, wg_public_key, overlay_ip, role, labels{s})" ++
+                " VALUES ('{s}', '{s}', {any}, 'active', {d}, {d}, 0, 0, 0, {d}, {d}, {d}, '{s}', '{s}', '{s}', '{s}'{s});",
+            .{ gpu_cols, id_esc, addr_esc, agent_api_port, resources.cpu_cores, resources.memory_mb, now, now, nid, key_esc, ip_esc, role_esc, labels_esc, gpu_vals },
         );
     }
 
@@ -95,17 +97,17 @@ pub fn registerSqlFull(
         const reg_esc = try sql_escape.escapeSqlString(&region_esc_buf, region_val);
         return std.fmt.bufPrint(
             buf,
-            "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, region, labels{s})" ++
-                " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}', '{s}'{s});",
-            .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, reg_esc, labels_esc, gpu_vals },
+            "INSERT INTO agents (id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, region, labels{s})" ++
+                " VALUES ('{s}', '{s}', {any}, 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}', '{s}'{s});",
+            .{ gpu_cols, id_esc, addr_esc, agent_api_port, resources.cpu_cores, resources.memory_mb, now, now, role_esc, reg_esc, labels_esc, gpu_vals },
         );
     }
 
     return std.fmt.bufPrint(
         buf,
-        "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels{s})" ++
-            " VALUES ('{s}', '{s}', 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}'{s});",
-        .{ gpu_cols, id_esc, addr_esc, resources.cpu_cores, resources.memory_mb, now, now, role_esc, labels_esc, gpu_vals },
+        "INSERT INTO agents (id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels{s})" ++
+            " VALUES ('{s}', '{s}', {any}, 'active', {d}, {d}, 0, 0, 0, {d}, {d}, '{s}', '{s}'{s});",
+        .{ gpu_cols, id_esc, addr_esc, agent_api_port, resources.cpu_cores, resources.memory_mb, now, now, role_esc, labels_esc, gpu_vals },
     );
 }
 
