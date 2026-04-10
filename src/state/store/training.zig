@@ -240,8 +240,15 @@ pub fn summarizeTrainingJobsByAppInDb(
         records.deinit(alloc);
     }
 
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(alloc);
+
     var summary: TrainingJobSummary = .{};
     for (records.items) |record| {
+        const gop = seen.getOrPut(alloc, record.name) catch return StoreError.ReadFailed;
+        if (gop.found_existing) continue;
+        gop.value_ptr.* = {};
+
         if (std.mem.eql(u8, record.state, "running") or std.mem.eql(u8, record.state, "scheduling")) {
             summary.active += 1;
         } else if (std.mem.eql(u8, record.state, "paused")) {
@@ -364,4 +371,45 @@ test "summarizeTrainingJobsByAppInDb groups active paused and failed states" {
     try std.testing.expectEqual(@as(usize, 2), summary.active);
     try std.testing.expectEqual(@as(usize, 1), summary.paused);
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
+}
+
+test "summarizeTrainingJobsByAppInDb keeps only the latest row per job name" {
+    const alloc = std.testing.allocator;
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../schema.zig").init(&db);
+
+    try saveTrainingJobInDb(&db, .{
+        .id = "job-old",
+        .name = "finetune",
+        .app_name = "demo-app",
+        .state = "failed",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 100,
+        .updated_at = 100,
+    });
+    try saveTrainingJobInDb(&db, .{
+        .id = "job-new",
+        .name = "finetune",
+        .app_name = "demo-app",
+        .state = "running",
+        .image = "trainer:v2",
+        .gpus = 2,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 1,
+        .created_at = 200,
+        .updated_at = 200,
+    });
+
+    const summary = try summarizeTrainingJobsByAppInDb(&db, alloc, "demo-app");
+    try std.testing.expectEqual(@as(usize, 1), summary.active);
+    try std.testing.expectEqual(@as(usize, 0), summary.paused);
+    try std.testing.expectEqual(@as(usize, 0), summary.failed);
 }
