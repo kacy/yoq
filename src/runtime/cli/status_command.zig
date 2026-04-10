@@ -615,7 +615,7 @@ fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8
 
 test "parseAppStatusResponse extracts app fields" {
     const snapshot = parseAppStatusResponse(
-        \\{"app_name":"demo-app","trigger":"apply","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":null}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"worker_count":1,"cron_count":3,"training_job_count":4,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":null}
     );
 
     try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
@@ -625,6 +625,9 @@ test "parseAppStatusResponse extracts app fields" {
     try std.testing.expectEqualStrings("sha256:123", snapshot.manifest_hash);
     try std.testing.expectEqual(@as(i64, 42), snapshot.created_at);
     try std.testing.expectEqual(@as(usize, 2), snapshot.service_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.worker_count);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.cron_count);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.training_job_count);
     try std.testing.expectEqual(@as(usize, 2), snapshot.completed_targets);
     try std.testing.expectEqual(@as(usize, 0), snapshot.failed_targets);
     try std.testing.expectEqual(@as(usize, 0), snapshot.remaining_targets);
@@ -679,6 +682,9 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
         .manifest_hash = "sha256:222",
         .created_at = 200,
         .service_count = 2,
+        .worker_count = 1,
+        .cron_count = 2,
+        .training_job_count = 3,
         .completed_targets = 1,
         .failed_targets = 1,
         .remaining_targets = 0,
@@ -700,6 +706,9 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(snapshot.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(snapshot.created_at, parsed.created_at);
     try std.testing.expectEqual(snapshot.service_count, parsed.service_count);
+    try std.testing.expectEqual(snapshot.worker_count, parsed.worker_count);
+    try std.testing.expectEqual(snapshot.cron_count, parsed.cron_count);
+    try std.testing.expectEqual(snapshot.training_job_count, parsed.training_job_count);
     try std.testing.expectEqual(snapshot.completed_targets, parsed.completed_targets);
     try std.testing.expectEqual(snapshot.failed_targets, parsed.failed_targets);
     try std.testing.expectEqual(snapshot.remaining_targets, parsed.remaining_targets);

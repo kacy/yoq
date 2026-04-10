@@ -371,7 +371,7 @@ fn rollbackRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: [
 
 test "parseHistoryObject extracts app release fields" {
     const entry = parseHistoryObject(
-        \\{"id":"dep-1","app":"demo-app","service":"demo-app","trigger":"apply","status":"completed","manifest_hash":"sha256:123","created_at":42,"source_release_id":null,"message":null}
+        \\{"id":"dep-1","app":"demo-app","service":"demo-app","trigger":"apply","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"worker_count":1,"cron_count":3,"training_job_count":4,"completed_targets":0,"failed_targets":0,"remaining_targets":2,"source_release_id":null,"message":null}
     );
 
     try std.testing.expectEqualStrings("dep-1", entry.id);
@@ -381,6 +381,10 @@ test "parseHistoryObject extracts app release fields" {
     try std.testing.expectEqualStrings("completed", entry.status);
     try std.testing.expectEqualStrings("sha256:123", entry.manifest_hash);
     try std.testing.expectEqual(@as(i64, 42), entry.created_at);
+    try std.testing.expectEqual(@as(usize, 2), entry.service_count);
+    try std.testing.expectEqual(@as(usize, 1), entry.worker_count);
+    try std.testing.expectEqual(@as(usize, 3), entry.cron_count);
+    try std.testing.expectEqual(@as(usize, 4), entry.training_job_count);
     try std.testing.expect(entry.source_release_id == null);
     try std.testing.expect(entry.message == null);
 }
@@ -427,6 +431,9 @@ test "writeHistoryJsonObject round-trips through remote parser" {
         .manifest_hash = "sha256:123",
         .created_at = 42,
         .service_count = 1,
+        .worker_count = 2,
+        .cron_count = 3,
+        .training_job_count = 4,
         .completed_targets = 1,
         .failed_targets = 0,
         .remaining_targets = 0,
@@ -446,6 +453,9 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(entry.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(entry.created_at, parsed.created_at);
     try std.testing.expectEqual(entry.service_count, parsed.service_count);
+    try std.testing.expectEqual(entry.worker_count, parsed.worker_count);
+    try std.testing.expectEqual(entry.cron_count, parsed.cron_count);
+    try std.testing.expectEqual(entry.training_job_count, parsed.training_job_count);
     try std.testing.expectEqual(entry.completed_targets, parsed.completed_targets);
     try std.testing.expectEqual(entry.failed_targets, parsed.failed_targets);
     try std.testing.expectEqual(entry.remaining_targets, parsed.remaining_targets);

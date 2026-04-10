@@ -375,28 +375,155 @@ fn formatTrainingRecordJson(
     return json_buf.toOwnedSlice(alloc);
 }
 
-fn testRequest(method: http.Method, path: []const u8) http.Request {
+const RouteFlowHarness = struct {
+    alloc: std.mem.Allocator,
+    tmp: std.testing.TmpDir,
+    node: cluster_node.Node,
+
+    fn init(alloc: std.mem.Allocator) !RouteFlowHarness {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+
+        var path_buf: [512]u8 = undefined;
+        const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+
+        var node = cluster_node.Node.init(alloc, .{
+            .id = 1,
+            .port = 0,
+            .peers = &.{},
+            .data_dir = tmp_path,
+        }) catch return error.SkipZigTest;
+        errdefer node.deinit();
+
+        node.raft.role = .leader;
+        node.leader_id = node.config.id;
+
+        var harness = RouteFlowHarness{
+            .alloc = alloc,
+            .tmp = tmp,
+            .node = node,
+        };
+        try harness.seedActiveAgent();
+        return harness;
+    }
+
+    fn deinit(self: *RouteFlowHarness) void {
+        self.node.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn ctx(self: *RouteFlowHarness) RouteContext {
+        return .{ .cluster = &self.node, .join_token = null };
+    }
+
+    fn seedActiveAgent(self: *RouteFlowHarness) !void {
+        self.node.stateMachineDb().exec(
+            "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            .{},
+            .{ "abc123def456", "10.0.0.2:7701", "active", @as(i64, 8), @as(i64, 16384), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "", @as(i64, 4), @as(i64, 0), "L4", @as(i64, 24576) },
+        ) catch return error.SkipZigTest;
+    }
+
+    fn seedLatestRelease(self: *RouteFlowHarness, app_name: []const u8, snapshot: []const u8) !void {
+        try store.saveDeploymentInDb(self.node.stateMachineDb(), .{
+            .id = "dep-seed",
+            .app_name = app_name,
+            .service_name = app_name,
+            .trigger = "apply",
+            .manifest_hash = "sha256:seed",
+            .config_snapshot = snapshot,
+            .status = "completed",
+            .message = "apply completed",
+            .created_at = 100,
+        });
+    }
+};
+
+fn makeRequest(method: http.Method, path: []const u8, body: []const u8, query: []const u8) http.Request {
     return .{
         .method = method,
         .path = path,
         .path_only = path,
-        .query = "",
+        .query = query,
         .headers_raw = "",
-        .body = "",
-        .content_length = 0,
+        .body = body,
+        .content_length = body.len,
     };
+}
+
+fn freeResponse(alloc: std.mem.Allocator, response: Response) void {
+    if (response.allocated) alloc.free(response.body);
 }
 
 test "route rejects worker run without cluster" {
     const ctx: RouteContext = .{ .cluster = null, .join_token = null };
-    const req = testRequest(.POST, "/apps/demo-app/workers/migrate/run");
+    const req = makeRequest(.POST, "/apps/demo-app/workers/migrate/run", "", "");
     const resp = route(req, std.testing.allocator, ctx).?;
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
 }
 
 test "route rejects training status without cluster" {
     const ctx: RouteContext = .{ .cluster = null, .join_token = null };
-    const req = testRequest(.GET, "/apps/demo-app/training/finetune/status");
+    const req = makeRequest(.GET, "/apps/demo-app/training/finetune/status", "", "");
     const resp = route(req, std.testing.allocator, ctx).?;
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
+}
+
+test "worker run route schedules worker from latest app snapshot" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try harness.seedLatestRelease(
+        "demo-app",
+        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[{\"name\":\"migrate\",\"image\":\"alpine:latest\",\"command\":[\"/bin/sh\",\"-c\",\"echo ok\"],\"gpu_limit\":0,\"required_labels\":[]}],\"crons\":[],\"training_jobs\":[]}",
+    );
+
+    const resp = route(
+        makeRequest(.POST, "/apps/demo-app/workers/migrate/run", "", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, resp);
+
+    try std.testing.expectEqual(http.StatusCode.ok, resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"app_name\":\"demo-app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"worker\":\"migrate\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"placed\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"failed\":0") != null);
+}
+
+test "training start and status routes persist job state from app snapshot" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try harness.seedLatestRelease(
+        "demo-app",
+        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
+    );
+
+    const start_resp = route(
+        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, start_resp);
+
+    try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "\"app_name\":\"demo-app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "\"training_job\":\"finetune\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "\"state\":\"running\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "\"gpus\":1") != null);
+
+    const status_resp = route(
+        makeRequest(.GET, "/apps/demo-app/training/finetune/status", "", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, status_resp);
+
+    try std.testing.expectEqual(http.StatusCode.ok, status_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, status_resp.body, "\"state\":\"running\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_resp.body, "\"training_job\":\"finetune\"") != null);
 }
