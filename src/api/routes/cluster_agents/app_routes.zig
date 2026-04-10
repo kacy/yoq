@@ -461,6 +461,48 @@ test "formatAppsResponse emits one latest summary per app" {
         .message = "scheduler error during apply",
         .created_at = 200,
     });
+    try store.saveTrainingJobInDb(&db, .{
+        .id = "job-1",
+        .name = "finetune-a",
+        .app_name = "app-a",
+        .state = "running",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 210,
+        .updated_at = 210,
+    });
+    try store.saveTrainingJobInDb(&db, .{
+        .id = "job-2",
+        .name = "finetune-b",
+        .app_name = "app-a",
+        .state = "paused",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 220,
+        .updated_at = 220,
+    });
+    try store.saveTrainingJobInDb(&db, .{
+        .id = "job-3",
+        .name = "finetune-c",
+        .app_name = "app-a",
+        .state = "failed",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 230,
+        .updated_at = 230,
+    });
 
     var latest = try store.listLatestDeploymentsByAppInDb(&db, alloc);
     defer {
@@ -477,6 +519,9 @@ test "formatAppsResponse emits one latest summary per app" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"worker_count\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"cron_count\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"training_job_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"active_training_jobs\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"paused_training_jobs\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failed_training_jobs\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"app-b\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
 }

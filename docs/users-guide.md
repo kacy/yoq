@@ -173,6 +173,8 @@ this gives the operator one app-first day-2 model:
 - `yoq run-worker [--server host:port] <name>` — run a worker from the current app release
 - `yoq train start|status|stop|pause|resume|scale|logs [--server host:port] <name>` — manage training jobs from the current app release
 
+`yoq apps` and `yoq status --app` now show both the desired workload mix from the latest app release and the current training runtime summary for that app. On clustered applies, cron definitions from the app snapshot are also registered in cluster state, so rollback restores the active cron schedule set along with the rest of the app snapshot.
+
 ### dev mode
 
 `yoq up --dev` bind-mounts source directories and watches for file changes via inotify. changed files trigger a container restart with 500ms debounce. logs are multiplexed with colored service name prefixes.
@@ -230,6 +232,8 @@ the cluster API also exposes app-scoped day-2 reads and rollback:
 - `POST /apps/<app>/workers/<name>/run` — run a worker from the current app release
 - `POST /apps/<app>/training/<name>/start|stop|pause|resume|scale` — manage training jobs for the current app release
 - `GET /apps/<app>/training/<name>/status|logs` — inspect training jobs for the current app release
+
+The app status surfaces (`GET /apps`, `GET /apps/<name>/status`, `yoq apps`, and `yoq status --app`) also report live training runtime counts for the app: active, paused, and failed jobs.
 
 ### rolling upgrades
 

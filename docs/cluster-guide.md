@@ -147,7 +147,7 @@ yoq history --app [name] --server 10.0.0.1:7700
 yoq rollback --app [name] --server 10.0.0.1:7700 --release <release-id>
 ```
 
-`yoq apps` shows the latest release summary for every app, `status --app` shows the latest release metadata for one app, `history --app` lists prior releases, and remote `rollback --app ... --release` re-applies a stored app snapshot. `yoq run-worker --server ...` and `yoq train ... --server ...` now resolve workers and training jobs from the current app release on the server.
+`yoq apps` shows the latest release summary for every app, `status --app` shows the latest release metadata for one app, `history --app` lists prior releases, and remote `rollback --app ... --release` re-applies a stored app snapshot. `yoq run-worker --server ...` and `yoq train ... --server ...` now resolve workers and training jobs from the current app release on the server. Clustered app applies also register cron schedules from the current app snapshot, and the app summary/status views include live training runtime counts for the app.
 
 ---
 

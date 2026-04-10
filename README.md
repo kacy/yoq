@@ -292,6 +292,7 @@ Notes:
 - crons defined in the manifest start automatically with `yoq up`.
 - deployment, metrics, and certificate commands also support `--server host:port`.
 - clustered manifest deploys now go through the app-first `/apps/apply` API and carry services, workers, crons, and training definitions in one app snapshot. the older `/deploy` route remains as a compatibility shim for legacy callers.
+- remote app applies now register active cron schedules in cluster state, and `yoq apps` / `yoq status --app` include live training runtime summaries for the current app.
 
 ## current status
 
