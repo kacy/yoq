@@ -43,6 +43,12 @@ pub const CheckpointRecord = struct {
     }
 };
 
+pub const TrainingJobSummary = struct {
+    active: usize = 0,
+    paused: usize = 0,
+    failed: usize = 0,
+};
+
 const training_job_columns =
     "id, name, app_name, state, image, gpus, checkpoint_path, checkpoint_interval, checkpoint_keep, restart_count, created_at, updated_at";
 
@@ -196,6 +202,57 @@ pub fn getTrainingJobInDb(db: *sqlite.Db, alloc: Allocator, id: []const u8) Stor
     return trainingJobRowToRecord(row);
 }
 
+pub fn listTrainingJobsByApp(alloc: Allocator, app_name: []const u8) StoreError!std.ArrayList(TrainingJobRecord) {
+    const db = try common.getDb();
+    return listTrainingJobsByAppInDb(db, alloc, app_name);
+}
+
+pub fn listTrainingJobsByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+) StoreError!std.ArrayList(TrainingJobRecord) {
+    var records: std.ArrayList(TrainingJobRecord) = .empty;
+    var stmt = db.prepare(
+        "SELECT " ++ training_job_columns ++ " FROM training_jobs WHERE app_name = ? ORDER BY updated_at DESC, created_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(TrainingJobRow, .{app_name}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        records.append(alloc, trainingJobRowToRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return records;
+}
+
+pub fn summarizeTrainingJobsByApp(alloc: Allocator, app_name: []const u8) StoreError!TrainingJobSummary {
+    const db = try common.getDb();
+    return summarizeTrainingJobsByAppInDb(db, alloc, app_name);
+}
+
+pub fn summarizeTrainingJobsByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+) StoreError!TrainingJobSummary {
+    var records = try listTrainingJobsByAppInDb(db, alloc, app_name);
+    defer {
+        for (records.items) |record| record.deinit(alloc);
+        records.deinit(alloc);
+    }
+
+    var summary: TrainingJobSummary = .{};
+    for (records.items) |record| {
+        if (std.mem.eql(u8, record.state, "running") or std.mem.eql(u8, record.state, "scheduling")) {
+            summary.active += 1;
+        } else if (std.mem.eql(u8, record.state, "paused")) {
+            summary.paused += 1;
+        } else if (std.mem.eql(u8, record.state, "failed")) {
+            summary.failed += 1;
+        }
+    }
+    return summary;
+}
+
 pub fn saveCheckpoint(job_id: []const u8, step: i64, path: []const u8, size_bytes: i64, now: i64) StoreError!void {
     const db = try common.getDb();
     db.exec(
@@ -238,4 +295,73 @@ pub fn deleteCheckpoint(id: i64) StoreError!void {
         .{},
         .{id},
     ) catch return StoreError.WriteFailed;
+}
+
+test "summarizeTrainingJobsByAppInDb groups active paused and failed states" {
+    const alloc = std.testing.allocator;
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../schema.zig").init(&db);
+
+    try saveTrainingJobInDb(&db, .{
+        .id = "job-1",
+        .name = "a",
+        .app_name = "demo-app",
+        .state = "running",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 100,
+        .updated_at = 100,
+    });
+    try saveTrainingJobInDb(&db, .{
+        .id = "job-2",
+        .name = "b",
+        .app_name = "demo-app",
+        .state = "paused",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 110,
+        .updated_at = 110,
+    });
+    try saveTrainingJobInDb(&db, .{
+        .id = "job-3",
+        .name = "c",
+        .app_name = "demo-app",
+        .state = "failed",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 120,
+        .updated_at = 120,
+    });
+    try saveTrainingJobInDb(&db, .{
+        .id = "job-4",
+        .name = "d",
+        .app_name = "demo-app",
+        .state = "scheduling",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 130,
+        .updated_at = 130,
+    });
+
+    const summary = try summarizeTrainingJobsByAppInDb(&db, alloc, "demo-app");
+    try std.testing.expectEqual(@as(usize, 2), summary.active);
+    try std.testing.expectEqual(@as(usize, 1), summary.paused);
+    try std.testing.expectEqual(@as(usize, 1), summary.failed);
 }

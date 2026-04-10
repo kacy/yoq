@@ -135,6 +135,9 @@ const AppStatusSnapshot = struct {
     worker_count: usize = 0,
     cron_count: usize = 0,
     training_job_count: usize = 0,
+    active_training_jobs: usize = 0,
+    paused_training_jobs: usize = 0,
+    failed_training_jobs: usize = 0,
     completed_targets: usize,
     failed_targets: usize,
     remaining_targets: usize,
@@ -371,8 +374,8 @@ fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
 }
 
 fn printAppStatusHeader() void {
-    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<20} {s:<22} {s:<14} {s}\n", .{
-        "APP", "RELEASE", "STATUS", "KINDS", "TIMESTAMP", "TARGETS", "PREV OK", "MESSAGE",
+    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<20} {s:<22} {s:<18} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "KINDS", "TIMESTAMP", "TARGETS", "TRAINING", "PREV OK", "MESSAGE",
     });
 }
 
@@ -390,19 +393,22 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
         snapshot.cron_count,
         snapshot.training_job_count,
     }) catch "?";
+    var training_buf: [48]u8 = undefined;
+    const training_str = formatTrainingRuntime(&training_buf, snapshot);
 
     const previous_successful = if (snapshot.previous_successful_release_id) |release_id|
         cli.truncate(release_id, 12)
     else
         "-";
 
-    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<20} {s:<22} {s:<14} {s}\n", .{
+    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<20} {s:<22} {s:<18} {s:<14} {s}\n", .{
         snapshot.app_name,
         cli.truncate(snapshot.release_id, 12),
         snapshot.status,
         kinds_str,
         ts_str,
         progress_str,
+        training_str,
         previous_successful,
         cli.truncate(msg, 40),
     });
@@ -425,6 +431,17 @@ fn formatAppProgress(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
     }) catch "?";
 }
 
+fn formatTrainingRuntime(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
+    if (snapshot.active_training_jobs == 0 and snapshot.paused_training_jobs == 0 and snapshot.failed_training_jobs == 0) {
+        return "-";
+    }
+    return std.fmt.bufPrint(buf, "{d} act, {d} pause, {d} fail", .{
+        snapshot.active_training_jobs,
+        snapshot.paused_training_jobs,
+        snapshot.failed_training_jobs,
+    }) catch "?";
+}
+
 fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
     return .{
         .app_name = extractJsonString(json, "app_name") orelse "?",
@@ -437,6 +454,9 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .worker_count = @intCast(@max(0, extractJsonInt(json, "worker_count") orelse 0)),
         .cron_count = @intCast(@max(0, extractJsonInt(json, "cron_count") orelse 0)),
         .training_job_count = @intCast(@max(0, extractJsonInt(json, "training_job_count") orelse 0)),
+        .active_training_jobs = @intCast(@max(0, extractJsonInt(json, "active_training_jobs") orelse 0)),
+        .paused_training_jobs = @intCast(@max(0, extractJsonInt(json, "paused_training_jobs") orelse 0)),
+        .failed_training_jobs = @intCast(@max(0, extractJsonInt(json, "failed_training_jobs") orelse 0)),
         .completed_targets = @intCast(@max(0, extractJsonInt(json, "completed_targets") orelse 0)),
         .failed_targets = @intCast(@max(0, extractJsonInt(json, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, extractJsonInt(json, "remaining_targets") orelse 0)),
@@ -460,6 +480,9 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("worker_count", snapshot.worker_count);
     w.uintField("cron_count", snapshot.cron_count);
     w.uintField("training_job_count", snapshot.training_job_count);
+    w.uintField("active_training_jobs", snapshot.active_training_jobs);
+    w.uintField("paused_training_jobs", snapshot.paused_training_jobs);
+    w.uintField("failed_training_jobs", snapshot.failed_training_jobs);
     w.uintField("completed_targets", snapshot.completed_targets);
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
@@ -474,6 +497,7 @@ fn appStatusFromReports(
     report: apply_release.ApplyReport,
     previous_successful: ?apply_release.ApplyReport,
     summary: app_snapshot.Summary,
+    training_summary: store.TrainingJobSummary,
 ) AppStatusSnapshot {
     return .{
         .app_name = report.app_name,
@@ -486,6 +510,9 @@ fn appStatusFromReports(
         .worker_count = summary.worker_count,
         .cron_count = summary.cron_count,
         .training_job_count = summary.training_job_count,
+        .active_training_jobs = training_summary.active,
+        .paused_training_jobs = training_summary.paused,
+        .failed_training_jobs = training_summary.failed,
         .completed_targets = report.completed_targets,
         .failed_targets = report.failed_targets,
         .remaining_targets = report.remainingTargets(),
@@ -505,6 +532,7 @@ fn snapshotFromDeployments(
         apply_release.reportFromDeployment(latest),
         if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
         app_snapshot.summarize(latest.config_snapshot),
+        store.summarizeTrainingJobsByApp(latest.app_name.?) catch .{},
     );
 }
 
@@ -615,7 +643,7 @@ fn parsePsiFromJson(json: []const u8, some_key: []const u8, full_key: []const u8
 
 test "parseAppStatusResponse extracts app fields" {
     const snapshot = parseAppStatusResponse(
-        \\{"app_name":"demo-app","trigger":"apply","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"worker_count":1,"cron_count":3,"training_job_count":4,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":null}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"abc123def456","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"worker_count":1,"cron_count":3,"training_job_count":4,"active_training_jobs":2,"paused_training_jobs":1,"failed_training_jobs":1,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":null}
     );
 
     try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
@@ -628,6 +656,9 @@ test "parseAppStatusResponse extracts app fields" {
     try std.testing.expectEqual(@as(usize, 1), snapshot.worker_count);
     try std.testing.expectEqual(@as(usize, 3), snapshot.cron_count);
     try std.testing.expectEqual(@as(usize, 4), snapshot.training_job_count);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.active_training_jobs);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.paused_training_jobs);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.failed_training_jobs);
     try std.testing.expectEqual(@as(usize, 2), snapshot.completed_targets);
     try std.testing.expectEqual(@as(usize, 0), snapshot.failed_targets);
     try std.testing.expectEqual(@as(usize, 0), snapshot.remaining_targets);
@@ -653,7 +684,7 @@ test "appStatusFromReport matches remote app status shape" {
         .created_at = 200,
     };
 
-    const local = appStatusFromReports(report, null);
+    const local = appStatusFromReports(report, null, .{ .service_count = 2 }, .{});
     const remote = parseAppStatusResponse(
         \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":"all placements healthy"}
     );
@@ -685,6 +716,9 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
         .worker_count = 1,
         .cron_count = 2,
         .training_job_count = 3,
+        .active_training_jobs = 1,
+        .paused_training_jobs = 1,
+        .failed_training_jobs = 1,
         .completed_targets = 1,
         .failed_targets = 1,
         .remaining_targets = 0,
@@ -709,6 +743,9 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqual(snapshot.worker_count, parsed.worker_count);
     try std.testing.expectEqual(snapshot.cron_count, parsed.cron_count);
     try std.testing.expectEqual(snapshot.training_job_count, parsed.training_job_count);
+    try std.testing.expectEqual(snapshot.active_training_jobs, parsed.active_training_jobs);
+    try std.testing.expectEqual(snapshot.paused_training_jobs, parsed.paused_training_jobs);
+    try std.testing.expectEqual(snapshot.failed_training_jobs, parsed.failed_training_jobs);
     try std.testing.expectEqual(snapshot.completed_targets, parsed.completed_targets);
     try std.testing.expectEqual(snapshot.failed_targets, parsed.failed_targets);
     try std.testing.expectEqual(snapshot.remaining_targets, parsed.remaining_targets);
@@ -746,7 +783,7 @@ test "appStatusFromReport preserves partially failed local release state" {
         .created_at = 200,
     };
 
-    const local = appStatusFromReports(apply_release.reportFromDeployment(dep), previous_successful);
+    const local = appStatusFromReports(apply_release.reportFromDeployment(dep), previous_successful, .{ .service_count = 2 }, .{});
     const remote = parseAppStatusResponse(
         \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-3","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"service_count":2,"completed_targets":1,"failed_targets":1,"remaining_targets":0,"source_release_id":null,"previous_successful_release_id":"dep-2","previous_successful_manifest_hash":"sha256:222","previous_successful_created_at":200,"message":"one or more placements failed"}
     );
@@ -827,4 +864,47 @@ test "formatAppProgress summarizes in-flight and partial outcomes" {
         .message = "apply completed",
     };
     try std.testing.expectEqualStrings("2 ok", formatAppProgress(&buf, completed));
+}
+
+test "formatTrainingRuntime summarizes active paused and failed jobs" {
+    var buf: [48]u8 = undefined;
+
+    const empty = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-1",
+        .status = "completed",
+        .manifest_hash = "sha256:111",
+        .created_at = 100,
+        .completed_targets = 0,
+        .failed_targets = 0,
+        .remaining_targets = 0,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = null,
+    };
+    try std.testing.expectEqualStrings("-", formatTrainingRuntime(&buf, empty));
+
+    const active = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-2",
+        .status = "completed",
+        .manifest_hash = "sha256:222",
+        .created_at = 200,
+        .active_training_jobs = 2,
+        .paused_training_jobs = 1,
+        .failed_training_jobs = 1,
+        .completed_targets = 0,
+        .failed_targets = 0,
+        .remaining_targets = 0,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = null,
+    };
+    try std.testing.expectEqualStrings("2 act, 1 pause, 1 fail", formatTrainingRuntime(&buf, active));
 }

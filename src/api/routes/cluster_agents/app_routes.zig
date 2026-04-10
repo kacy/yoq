@@ -84,7 +84,7 @@ pub fn handleAppStatus(alloc: std.mem.Allocator, app_name: []const u8, ctx: Rout
     ) catch return common.internalError();
     defer if (previous_successful) |dep| dep.deinit(alloc);
 
-    const body = formatAppStatusResponseFromDeployments(alloc, latest, previous_successful) catch return common.internalError();
+    const body = formatAppStatusResponseFromDeployments(alloc, node.stateMachineDb(), latest, previous_successful) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -136,7 +136,7 @@ fn formatAppsResponse(
         defer if (previous_successful) |dep| dep.deinit(alloc);
 
         if (i > 0) try writer.writeByte(',');
-        const json = try formatAppStatusResponseFromDeployments(alloc, latest, previous_successful);
+        const json = try formatAppStatusResponseFromDeployments(alloc, db, latest, previous_successful);
         defer alloc.free(json);
         try writer.writeAll(json);
     }
@@ -158,6 +158,7 @@ fn loadPreviousSuccessfulDeployment(
 
 fn formatAppStatusResponseFromDeployments(
     alloc: std.mem.Allocator,
+    db: *sqlite.Db,
     latest: store.DeploymentRecord,
     previous_successful: ?store.DeploymentRecord,
 ) ![]u8 {
@@ -166,6 +167,7 @@ fn formatAppStatusResponseFromDeployments(
         apply_release.reportFromDeployment(latest),
         if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
         app_snapshot.summarize(latest.config_snapshot),
+        store.summarizeTrainingJobsByAppInDb(db, alloc, latest.app_name.?) catch .{},
     );
 }
 
@@ -216,6 +218,7 @@ fn formatAppStatusResponse(
     report: apply_release.ApplyReport,
     previous_successful: ?apply_release.ApplyReport,
     summary: app_snapshot.Summary,
+    training_summary: store.TrainingJobSummary,
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
@@ -231,12 +234,15 @@ fn formatAppStatusResponse(
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
-    try writer.print(",\"created_at\":{d},\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+    try writer.print(",\"created_at\":{d},\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"active_training_jobs\":{d},\"paused_training_jobs\":{d},\"failed_training_jobs\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.created_at,
         summary.service_count,
         summary.worker_count,
         summary.cron_count,
         summary.training_job_count,
+        training_summary.active,
+        training_summary.paused,
+        training_summary.failed,
         report.completed_targets,
         report.failed_targets,
         report.remainingTargets(),
@@ -401,7 +407,7 @@ test "formatAppStatusResponse summarizes latest release" {
         .created_at = 200,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot));
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot), .{});
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
@@ -505,7 +511,7 @@ test "formatAppStatusResponse includes structured rollback metadata" {
         .created_at = 300,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot));
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot), .{});
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
@@ -527,7 +533,7 @@ test "formatAppStatusResponse falls back to rollback metadata inferred from lega
         .created_at = 400,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot));
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot), .{});
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
@@ -590,6 +596,8 @@ test "app status and history surface rollback release metadata from persisted ro
         alloc,
         apply_release.reportFromDeployment(latest),
         apply_release.reportFromDeployment(previous_successful),
+        app_snapshot.summarize(latest.config_snapshot),
+        .{},
     );
     defer alloc.free(status_json);
 
@@ -654,6 +662,8 @@ test "app status and history surface failed apply metadata from persisted rows" 
         alloc,
         apply_release.reportFromDeployment(latest),
         apply_release.reportFromDeployment(previous_successful),
+        app_snapshot.summarize(latest.config_snapshot),
+        .{},
     );
     defer alloc.free(status_json);
 

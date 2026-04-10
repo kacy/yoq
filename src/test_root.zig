@@ -21,6 +21,7 @@ comptime {
     _ = @import("state/store.zig");
     _ = @import("state/store/crons.zig");
     _ = @import("state/store/deployments.zig");
+    _ = @import("state/store/training.zig");
     _ = @import("state/schema.zig");
     _ = @import("state/commands.zig");
     _ = @import("state/volumes.zig");
