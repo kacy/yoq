@@ -6,6 +6,7 @@ pub const SchemaError = error{InitFailed};
 pub fn apply(db: *sqlite.Db) SchemaError!void {
     migrateContainers(db);
     migrateAgents(db);
+    migrateAssignments(db);
     migrateServices(db);
     migrateDeployments(db);
     migrateCronSchedules(db);
@@ -148,6 +149,12 @@ fn migrateCronSchedules(db: *sqlite.Db) void {
         \\    PRIMARY KEY (app_name, name)
         \\);
     ) catch {};
+}
+
+fn migrateAssignments(db: *sqlite.Db) void {
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN app_name TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_kind TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_name TEXT;") catch {};
 }
 
 fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {

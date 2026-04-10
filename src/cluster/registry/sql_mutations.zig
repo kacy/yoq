@@ -200,6 +200,25 @@ pub fn deleteAgentAssignmentsSql(buf: []u8, agent_id: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "DELETE FROM assignments WHERE agent_id = '{s}';", .{id_esc});
 }
 
+pub fn deleteAssignmentsForWorkloadSql(
+    buf: []u8,
+    app_name: []const u8,
+    workload_kind: []const u8,
+    workload_name: []const u8,
+) ![]const u8 {
+    var app_esc_buf: [256]u8 = undefined;
+    const app_esc = try sql_escape.escapeSqlString(&app_esc_buf, app_name);
+    var kind_esc_buf: [64]u8 = undefined;
+    const kind_esc = try sql_escape.escapeSqlString(&kind_esc_buf, workload_kind);
+    var name_esc_buf: [256]u8 = undefined;
+    const name_esc = try sql_escape.escapeSqlString(&name_esc_buf, workload_name);
+    return std.fmt.bufPrint(
+        buf,
+        "DELETE FROM assignments WHERE app_name = '{s}' AND workload_kind = '{s}' AND workload_name = '{s}';",
+        .{ app_esc, kind_esc, name_esc },
+    );
+}
+
 pub fn wireguardPeerSql(
     buf: []u8,
     node_id: u16,

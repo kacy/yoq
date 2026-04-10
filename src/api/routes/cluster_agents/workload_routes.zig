@@ -1,4 +1,5 @@
 const std = @import("std");
+const sqlite = @import("sqlite");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const cluster_node = @import("../../../cluster/node.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
@@ -190,6 +191,10 @@ fn handleTrainingStateChange(
     if (rec == null) return common.notFound();
     defer rec.?.deinit(alloc);
 
+    clearTrainingAssignments(node, app_name, job_name) catch |err| return switch (err) {
+        error.NotLeader => common.notLeader(alloc, node),
+        else => common.internalError(),
+    };
     store.updateTrainingJobStateInDb(node.stateMachineDb(), rec.?.id, new_state, std.time.timestamp()) catch return common.internalError();
     const updated = store.getTrainingJobInDb(node.stateMachineDb(), alloc, rec.?.id) catch return common.internalError();
     defer updated.deinit(alloc);
@@ -265,6 +270,11 @@ fn scheduleTrainingJob(
     defer if (existing) |rec| rec.deinit(alloc);
     const restarts = if (existing) |rec| rec.restart_count else 0;
 
+    clearTrainingAssignments(node, app_name, job_name) catch |err| return switch (err) {
+        error.NotLeader => common.notLeader(alloc, node),
+        else => common.internalError(),
+    };
+
     store.saveTrainingJobInDb(node.stateMachineDb(), .{
         .id = job_id,
         .name = job_name,
@@ -285,6 +295,9 @@ fn scheduleTrainingJob(
         .command = job.?.command,
         .cpu_limit = job.?.cpu_limit,
         .memory_limit_mb = job.?.memory_limit_mb,
+        .app_name = app_name,
+        .workload_kind = "training",
+        .workload_name = job_name,
         .gpu_limit = if (gpus_override) |gpus| gpus else job.?.gpus,
         .gpu_model = job.?.gpu_type,
         .gang_world_size = if (gpus_override) |gpus| gpus else job.?.gpus,
@@ -306,6 +319,12 @@ fn scheduleTrainingJob(
         final_state,
         if (std.mem.eql(u8, final_state, "running")) "training job scheduled" else "training job scheduling failed",
     );
+}
+
+fn clearTrainingAssignments(node: *cluster_node.Node, app_name: []const u8, job_name: []const u8) !void {
+    var sql_buf: [512]u8 = undefined;
+    const sql = try agent_registry.deleteAssignmentsForWorkloadSql(&sql_buf, app_name, "training", job_name);
+    _ = try node.propose(sql);
 }
 
 fn runPlacementRequests(
@@ -416,6 +435,10 @@ const RouteFlowHarness = struct {
         return .{ .cluster = &self.node, .join_token = null };
     }
 
+    fn applyCommitted(self: *RouteFlowHarness) void {
+        self.node.state_machine.applyUpTo(&self.node.log, self.alloc, self.node.log.lastIndex());
+    }
+
     fn seedActiveAgent(self: *RouteFlowHarness) !void {
         self.node.stateMachineDb().exec(
             "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
@@ -453,6 +476,17 @@ fn makeRequest(method: http.Method, path: []const u8, body: []const u8, query: [
 
 fn freeResponse(alloc: std.mem.Allocator, response: Response) void {
     if (response.allocated) alloc.free(response.body);
+}
+
+fn countTrainingAssignments(db: *sqlite.Db, app_name: []const u8, job_name: []const u8) usize {
+    const Row = struct { count: i64 };
+    const row = (db.one(
+        Row,
+        "SELECT COUNT(*) AS count FROM assignments WHERE app_name = ? AND workload_kind = 'training' AND workload_name = ?;",
+        .{},
+        .{ app_name, job_name },
+    ) catch unreachable) orelse unreachable;
+    return @intCast(row.count);
 }
 
 test "route rejects worker run without cluster" {
@@ -526,4 +560,88 @@ test "training start and status routes persist job state from app snapshot" {
     try std.testing.expectEqual(http.StatusCode.ok, status_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, status_resp.body, "\"state\":\"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, status_resp.body, "\"training_job\":\"finetune\"") != null);
+}
+
+test "training start tags assignments with workload metadata" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try harness.seedLatestRelease(
+        "demo-app",
+        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":2,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
+    );
+
+    const start_resp = route(
+        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, start_resp);
+    try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
+    harness.applyCommitted();
+    try std.testing.expectEqual(@as(usize, 2), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
+}
+
+test "training pause route clears scheduled assignments" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try harness.seedLatestRelease(
+        "demo-app",
+        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":2,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
+    );
+
+    const start_resp = route(
+        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, start_resp);
+    try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
+
+    const pause_resp = route(
+        makeRequest(.POST, "/apps/demo-app/training/finetune/pause", "", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, pause_resp);
+    harness.applyCommitted();
+
+    try std.testing.expectEqual(http.StatusCode.ok, pause_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, pause_resp.body, "\"state\":\"paused\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
+}
+
+test "training scale route replaces prior scheduled assignments" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try harness.seedLatestRelease(
+        "demo-app",
+        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
+    );
+
+    const start_resp = route(
+        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, start_resp);
+    try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
+
+    const scale_resp = route(
+        makeRequest(.POST, "/apps/demo-app/training/finetune/scale", "{\"gpus\":2}", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, scale_resp);
+    harness.applyCommitted();
+
+    try std.testing.expectEqual(http.StatusCode.ok, scale_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, scale_resp.body, "\"state\":\"running\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scale_resp.body, "\"gpus\":2") != null);
+    try std.testing.expectEqual(@as(usize, 2), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
 }
