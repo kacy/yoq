@@ -357,6 +357,8 @@ the important read paths are:
 - `GET /apps/<app>/training/<name>/status`
 - `GET /apps/<app>/training/<name>/logs`
 
+`GET /apps/<app>/training/<name>/logs` is currently direct-read only. If the hosting rank's logs are not locally readable from the control-plane host, the route returns an explicit hosting-agent error.
+
 ### draining a node
 
 before taking a node offline for maintenance:

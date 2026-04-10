@@ -270,6 +270,8 @@ yoq train scale [--server host:port] <name> --gpus <n>   scale training ranks
 yoq train logs [--server host:port] <name> [--rank N]    show logs for a training rank
 ```
 
+For clustered training logs, the control plane returns an explicit hosting-agent error when the selected rank's logs are not directly readable on the control-plane host.
+
 ### diagnostics
 
 ```text
