@@ -82,23 +82,30 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
         };
     }
 
+    finishRuntimeSetup(self);
+}
+
+pub fn finishRuntimeSetup(self: anytype) void {
     self.registerHealthChecks();
     self.startTlsProxy();
+    startCronSchedulerIfNeeded(self);
+}
 
-    if (self.service_filter == null and self.manifest.crons.len > 0) {
-        const cs = self.alloc.create(cron_scheduler.CronScheduler) catch {
-            writeErr("failed to allocate cron scheduler\n", .{});
-            return;
-        };
-        cs.* = cron_scheduler.CronScheduler.init(self.alloc, self.manifest.crons, self.manifest.volumes, self.app_name) catch {
-            self.alloc.destroy(cs);
-            writeErr("failed to init cron scheduler\n", .{});
-            return;
-        };
-        self.cron_sched = cs;
-        cs.start();
-        writeErr("{d} cron(s) scheduled\n", .{self.manifest.crons.len});
-    }
+fn startCronSchedulerIfNeeded(self: anytype) void {
+    if (self.service_filter != null or self.manifest.crons.len == 0 or self.cron_sched != null) return;
+
+    const cs = self.alloc.create(cron_scheduler.CronScheduler) catch {
+        writeErr("failed to allocate cron scheduler\n", .{});
+        return;
+    };
+    cs.* = cron_scheduler.CronScheduler.init(self.alloc, self.manifest.crons, self.manifest.volumes, self.app_name) catch {
+        self.alloc.destroy(cs);
+        writeErr("failed to init cron scheduler\n", .{});
+        return;
+    };
+    self.cron_sched = cs;
+    cs.start();
+    writeErr("{d} cron(s) scheduled\n", .{self.manifest.crons.len});
 }
 
 pub fn startServiceByIndex(
