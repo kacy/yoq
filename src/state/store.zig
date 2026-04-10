@@ -99,11 +99,17 @@ pub const getPreviousSuccessfulDeploymentByApp = @import("store/deployments.zig"
 pub const getPreviousSuccessfulDeploymentByAppInDb = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByAppInDb;
 
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
+pub const saveTrainingJobInDb = @import("store/training.zig").saveTrainingJobInDb;
 pub const updateTrainingJobState = @import("store/training.zig").updateTrainingJobState;
+pub const updateTrainingJobStateInDb = @import("store/training.zig").updateTrainingJobStateInDb;
 pub const incrementTrainingJobRestarts = @import("store/training.zig").incrementTrainingJobRestarts;
+pub const incrementTrainingJobRestartsInDb = @import("store/training.zig").incrementTrainingJobRestartsInDb;
 pub const updateTrainingJobGpus = @import("store/training.zig").updateTrainingJobGpus;
+pub const updateTrainingJobGpusInDb = @import("store/training.zig").updateTrainingJobGpusInDb;
 pub const findTrainingJob = @import("store/training.zig").findTrainingJob;
+pub const findTrainingJobInDb = @import("store/training.zig").findTrainingJobInDb;
 pub const getTrainingJob = @import("store/training.zig").getTrainingJob;
+pub const getTrainingJobInDb = @import("store/training.zig").getTrainingJobInDb;
 pub const saveCheckpoint = @import("store/training.zig").saveCheckpoint;
 pub const getLatestCheckpoint = @import("store/training.zig").getLatestCheckpoint;
 pub const listCheckpoints = @import("store/training.zig").listCheckpoints;

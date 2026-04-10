@@ -136,7 +136,7 @@ port = 3000
 yoq up --server
 ```
 
-the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. under the hood the CLI now sends a canonical app snapshot to `POST /apps/apply`; the older `/deploy` route remains only for compatibility. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard overlay and eBPF.
+the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. under the hood the CLI now sends a canonical app snapshot to `POST /apps/apply`; that snapshot carries services, workers, crons, and training jobs together. the older `/deploy` route remains only for compatibility. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard overlay and eBPF.
 
 after deploy, use the app-first day-2 commands:
 
@@ -147,7 +147,7 @@ yoq history --app [name] --server 10.0.0.1:7700
 yoq rollback --app [name] --server 10.0.0.1:7700 --release <release-id>
 ```
 
-`yoq apps` shows the latest release summary for every app, `status --app` shows the latest release metadata for one app, `history --app` lists prior releases, and remote `rollback --app ... --release` re-applies a stored app snapshot.
+`yoq apps` shows the latest release summary for every app, `status --app` shows the latest release metadata for one app, `history --app` lists prior releases, and remote `rollback --app ... --release` re-applies a stored app snapshot. `yoq run-worker --server ...` and `yoq train ... --server ...` now resolve workers and training jobs from the current app release on the server.
 
 ---
 
@@ -342,12 +342,20 @@ for app operations, the important write paths are:
 
 - `POST /apps/apply`
 - `POST /apps/<name>/rollback`
+- `POST /apps/<app>/workers/<name>/run`
+- `POST /apps/<app>/training/<name>/start`
+- `POST /apps/<app>/training/<name>/stop`
+- `POST /apps/<app>/training/<name>/pause`
+- `POST /apps/<app>/training/<name>/resume`
+- `POST /apps/<app>/training/<name>/scale`
 
 the important read paths are:
 
 - `GET /apps`
 - `GET /apps/<name>/status`
 - `GET /apps/<name>/history`
+- `GET /apps/<app>/training/<name>/status`
+- `GET /apps/<app>/training/<name>/logs`
 
 ### draining a node
 

@@ -4,6 +4,7 @@ const scheduler = @import("../../../cluster/scheduler.zig");
 const cluster_node = @import("../../../cluster/node.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
+const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const apply_request = @import("apply_request.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
@@ -18,7 +19,7 @@ const ResponseMode = enum {
     app,
 };
 
-const ClusterApplyError = error{
+pub const ClusterApplyError = error{
     NotLeader,
     InternalError,
 };
@@ -85,7 +86,7 @@ const ClusterReleaseTracker = struct {
     }
 };
 
-const ClusterApplyBackend = struct {
+pub const ClusterApplyBackend = struct {
     alloc: std.mem.Allocator,
     node: *cluster_node.Node,
     requests: []scheduler.PlacementRequest,
@@ -260,13 +261,16 @@ fn handleApply(
 
     parsed.setVolumeConstraints(vol_constraints);
 
-    const agents = agent_registry.listAgents(alloc, db) catch return common.internalError();
+    const agents = if (parsed.requests.items.len > 0)
+        agent_registry.listAgents(alloc, db) catch return common.internalError()
+    else
+        alloc.alloc(agent_registry.AgentRecord, 0) catch return common.internalError();
     defer {
         for (agents) |a| a.deinit(alloc);
         alloc.free(agents);
     }
 
-    if (agents.len == 0) {
+    if (parsed.requests.items.len > 0 and agents.len == 0) {
         return .{ .status = .bad_request, .body = "{\"error\":\"no agents available\"}", .allocated = false };
     }
 
@@ -292,7 +296,7 @@ fn handleApply(
 
     const body = switch (response_mode) {
         .legacy => formatLegacyApplyResponse(alloc, apply_report.placed, apply_report.failed) catch return common.internalError(),
-        .app => formatAppApplyResponse(alloc, apply_report) catch return common.internalError(),
+        .app => formatAppApplyResponse(alloc, apply_report, parsed.summary) catch return common.internalError(),
     };
     return .{ .status = .ok, .body = body, .allocated = true };
 }
@@ -321,7 +325,11 @@ fn formatLegacyApplyResponse(alloc: std.mem.Allocator, placed: usize, failed: us
     return std.fmt.allocPrint(alloc, "{{\"placed\":{d},\"failed\":{d}}}", .{ placed, failed });
 }
 
-fn formatAppApplyResponse(alloc: std.mem.Allocator, report: apply_release.ApplyReport) ![]u8 {
+fn formatAppApplyResponse(
+    alloc: std.mem.Allocator,
+    report: apply_release.ApplyReport,
+    summary: app_snapshot.Summary,
+) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
     const writer = json_buf.writer(alloc);
@@ -334,8 +342,11 @@ fn formatAppApplyResponse(alloc: std.mem.Allocator, report: apply_release.ApplyR
     try json_helpers.writeJsonStringField(writer, "release_id", report.release_id orelse "");
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
-    try writer.print(",\"service_count\":{d},\"placed\":{d},\"failed\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-        report.service_count,
+    try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"placed\":{d},\"failed\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+        summary.service_count,
+        summary.worker_count,
+        summary.cron_count,
+        summary.training_job_count,
         report.placed,
         report.failed,
         report.completed_targets,
@@ -366,7 +377,7 @@ test "formatAppApplyResponse includes app release metadata" {
         .failed = 0,
         .completed_targets = 2,
         .failed_targets = 0,
-    });
+    }, .{ .service_count = 2 });
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
@@ -374,6 +385,7 @@ test "formatAppApplyResponse includes app release metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"abc123def456\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"completed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"worker_count\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"completed_targets\":2") != null);
@@ -397,7 +409,7 @@ test "formatAppApplyResponse includes rollback trigger metadata" {
         .message = "all placements succeeded",
         .trigger = .rollback,
         .source_release_id = "dep-1",
-    });
+    }, .{ .service_count = 2 });
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
@@ -417,7 +429,7 @@ test "formatAppApplyResponse includes partially failed status" {
         .completed_targets = 1,
         .failed_targets = 1,
         .message = "one or more placements failed",
-    });
+    }, .{ .service_count = 2 });
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"partially_failed\"") != null);
@@ -432,4 +444,27 @@ test "formatLegacyApplyResponse preserves compact deploy shape" {
     defer alloc.free(json);
 
     try std.testing.expectEqualStrings("{\"placed\":1,\"failed\":1}", json);
+}
+
+test "formatAppApplyResponse includes non-service workload counts" {
+    const alloc = std.testing.allocator;
+    const json = try formatAppApplyResponse(alloc, .{
+        .app_name = "demo-app",
+        .release_id = "dep-4",
+        .status = .completed,
+        .service_count = 0,
+        .placed = 0,
+        .failed = 0,
+        .completed_targets = 0,
+        .failed_targets = 0,
+    }, .{
+        .worker_count = 1,
+        .cron_count = 2,
+        .training_job_count = 1,
+    });
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"worker_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cron_count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"training_job_count\":1") != null);
 }

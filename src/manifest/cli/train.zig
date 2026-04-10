@@ -4,6 +4,7 @@ const manifest_loader = @import("../loader.zig");
 const manifest_spec = @import("../spec.zig");
 const store = @import("../../state/store.zig");
 const training = @import("../training.zig");
+const http_client = @import("../../cluster/http_client.zig");
 const logs = @import("../../runtime/logs.zig");
 
 const write = cli.write;
@@ -62,6 +63,13 @@ fn trainStart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return TrainError.InvalidArgument;
     };
 
+    if (server_addr) |addr| {
+        const body = try remoteTrainingPost(alloc, addr, name, "start", "{}");
+        defer alloc.free(body);
+        write("{s}\n", .{body});
+        return;
+    }
+
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
         writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
         return TrainError.ManifestLoadFailed;
@@ -104,11 +112,17 @@ fn trainStart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 fn trainStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var job_name: ?[]const u8 = null;
+    var server_addr: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f")) {
             manifest_path = args.next() orelse {
                 writeErr("-f requires a manifest path\n", .{});
+                return TrainError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
                 return TrainError.InvalidArgument;
             };
         } else {
@@ -117,9 +131,14 @@ fn trainStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 
     const name = job_name orelse {
-        writeErr("usage: yoq train status [-f manifest.toml] <name>\n", .{});
+        writeErr("usage: yoq train status [-f manifest.toml] [--server host:port] <name>\n", .{});
         return TrainError.InvalidArgument;
     };
+
+    if (server_addr) |addr| {
+        try remoteTrainingGetStatus(alloc, addr, name);
+        return;
+    }
 
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
         writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
@@ -220,16 +239,80 @@ fn parseTrainArgs(args: *std.process.ArgIterator) TrainArgs {
     return result;
 }
 
+fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return TrainError.StoreError;
+    return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return TrainError.DeploymentFailed;
+}
+
+fn remoteTrainingPath(
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    job_name: []const u8,
+    action: []const u8,
+) ![]u8 {
+    return std.fmt.allocPrint(alloc, "/apps/{s}/training/{s}/{s}", .{ app_name, job_name, action });
+}
+
+fn remoteTrainingPost(
+    alloc: std.mem.Allocator,
+    server_addr: []const u8,
+    job_name: []const u8,
+    action: []const u8,
+    body: []const u8,
+) ![]u8 {
+    const app_name = try currentAppNameAlloc(alloc);
+    defer alloc.free(app_name);
+    const path = try remoteTrainingPath(alloc, app_name, job_name, action);
+    defer alloc.free(path);
+
+    const server = cli.parseServerAddr(server_addr);
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiToken(&token_buf);
+    var resp = http_client.postWithAuth(alloc, server.ip, server.port, path, body, token) catch return TrainError.DeploymentFailed;
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("training {s} failed (status {d}): {s}\n", .{ action, resp.status_code, resp.body });
+        return TrainError.DeploymentFailed;
+    }
+    return alloc.dupe(u8, resp.body) catch return TrainError.DeploymentFailed;
+}
+
+fn remoteTrainingGetStatus(alloc: std.mem.Allocator, server_addr: []const u8, job_name: []const u8) !void {
+    const app_name = try currentAppNameAlloc(alloc);
+    defer alloc.free(app_name);
+    const path = try remoteTrainingPath(alloc, app_name, job_name, "status");
+    defer alloc.free(path);
+
+    const server = cli.parseServerAddr(server_addr);
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiToken(&token_buf);
+    var resp = http_client.getWithAuth(alloc, server.ip, server.port, path, token) catch return TrainError.DeploymentFailed;
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("training status failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+        return TrainError.DeploymentFailed;
+    }
+    write("{s}\n", .{resp.body});
+}
+
 fn loadTrainJobContext(args: *std.process.ArgIterator, alloc: std.mem.Allocator, comptime usage: []const u8) !TrainJobContext {
     const parsed = parseTrainArgs(args);
+    return loadTrainJobContextFromParsed(parsed, alloc, usage);
+}
+
+fn loadTrainJobContextFromParsed(parsed: TrainArgs, alloc: std.mem.Allocator, comptime usage: []const u8) !TrainJobContext {
+    const manifest_path = parsed.manifest_path;
 
     const name = parsed.job_name orelse {
         writeErr("usage: {s}\n", .{usage});
         return TrainError.InvalidArgument;
     };
 
-    var manifest = manifest_loader.load(alloc, parsed.manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})", .{ parsed.manifest_path, err });
+    var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
+        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
         return TrainError.ManifestLoadFailed;
     };
     errdefer manifest.deinit();
@@ -254,7 +337,20 @@ fn loadTrainJobContext(args: *std.process.ArgIterator, alloc: std.mem.Allocator,
 }
 
 fn trainStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    var ctx = try loadTrainJobContext(args, alloc, "yoq train stop [-f manifest.toml] <name>");
+    const parsed = parseTrainArgs(args);
+    const name = parsed.job_name orelse {
+        writeErr("usage: yoq train stop [-f manifest.toml] [--server host:port] <name>\n", .{});
+        return TrainError.InvalidArgument;
+    };
+
+    if (parsed.server_addr) |addr| {
+        const body = try remoteTrainingPost(alloc, addr, name, "stop", "{}");
+        defer alloc.free(body);
+        write("{s}\n", .{body});
+        return;
+    }
+
+    var ctx = try loadTrainJobContextFromParsed(parsed, alloc, "yoq train stop [-f manifest.toml] <name>");
     defer ctx.deinit();
 
     if (!ctx.ctrl.loadFromStore()) {
@@ -272,7 +368,20 @@ fn trainStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 }
 
 fn trainPause(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    var ctx = try loadTrainJobContext(args, alloc, "yoq train pause [-f manifest.toml] <name>");
+    const parsed = parseTrainArgs(args);
+    const name = parsed.job_name orelse {
+        writeErr("usage: yoq train pause [-f manifest.toml] [--server host:port] <name>\n", .{});
+        return TrainError.InvalidArgument;
+    };
+
+    if (parsed.server_addr) |addr| {
+        const body = try remoteTrainingPost(alloc, addr, name, "pause", "{}");
+        defer alloc.free(body);
+        write("{s}\n", .{body});
+        return;
+    }
+
+    var ctx = try loadTrainJobContextFromParsed(parsed, alloc, "yoq train pause [-f manifest.toml] <name>");
     defer ctx.deinit();
 
     if (!ctx.ctrl.loadFromStore()) {
@@ -295,7 +404,20 @@ fn trainPause(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 }
 
 fn trainResume(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    var ctx = try loadTrainJobContext(args, alloc, "yoq train resume [-f manifest.toml] [--server host:port] <name>");
+    const parsed = parseTrainArgs(args);
+    const name = parsed.job_name orelse {
+        writeErr("usage: yoq train resume [-f manifest.toml] [--server host:port] <name>\n", .{});
+        return TrainError.InvalidArgument;
+    };
+
+    if (parsed.server_addr) |addr| {
+        const body = try remoteTrainingPost(alloc, addr, name, "resume", "{}");
+        defer alloc.free(body);
+        write("{s}\n", .{body});
+        return;
+    }
+
+    var ctx = try loadTrainJobContextFromParsed(parsed, alloc, "yoq train resume [-f manifest.toml] [--server host:port] <name>");
     defer ctx.deinit();
 
     if (!ctx.ctrl.loadFromStore()) {
@@ -378,6 +500,15 @@ fn trainScale(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
         return TrainError.InvalidArgument;
     }
 
+    if (server_addr) |addr| {
+        const body_json = std.fmt.allocPrint(alloc, "{{\"gpus\":{d}}}", .{gpus}) catch return TrainError.DeploymentFailed;
+        defer alloc.free(body_json);
+        const body = try remoteTrainingPost(alloc, addr, name, "scale", body_json);
+        defer alloc.free(body);
+        write("{s}\n", .{body});
+        return;
+    }
+
     var manifest = manifest_loader.load(alloc, manifest_loader.default_filename) catch |err| {
         writeErr("failed to load manifest ({})\n", .{err});
         return TrainError.ManifestLoadFailed;
@@ -450,6 +581,7 @@ fn trainScale(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 fn trainLogs(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var job_name: ?[]const u8 = null;
     var rank: u32 = 0;
+    var server_addr: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--rank")) {
@@ -461,15 +593,40 @@ fn trainLogs(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
                 writeErr("invalid rank number: {s}\n", .{rank_str});
                 return TrainError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                return TrainError.InvalidArgument;
+            };
         } else {
             job_name = arg;
         }
     }
 
     const name = job_name orelse {
-        writeErr("usage: yoq train logs [--rank N] <name>\n", .{});
+        writeErr("usage: yoq train logs [--server host:port] [--rank N] <name>\n", .{});
         return TrainError.InvalidArgument;
     };
+
+    if (server_addr) |addr| {
+        const app_name = try currentAppNameAlloc(alloc);
+        defer alloc.free(app_name);
+        const path = std.fmt.allocPrint(alloc, "/apps/{s}/training/{s}/logs?rank={d}", .{ app_name, name, rank }) catch return TrainError.DeploymentFailed;
+        defer alloc.free(path);
+
+        const server = cli.parseServerAddr(addr);
+        var token_buf: [64]u8 = undefined;
+        const token = cli.readApiToken(&token_buf);
+        var resp = http_client.getWithAuth(alloc, server.ip, server.port, path, token) catch return TrainError.DeploymentFailed;
+        defer resp.deinit(alloc);
+
+        if (resp.status_code != 200) {
+            writeErr("training logs failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+            return TrainError.DeploymentFailed;
+        }
+        write("{s}", .{resp.body});
+        return;
+    }
 
     var hostname_buf: [128]u8 = undefined;
     const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ name, rank }) catch {

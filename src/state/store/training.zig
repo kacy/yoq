@@ -100,6 +100,10 @@ fn checkpointRowToRecord(row: CheckpointRow) CheckpointRecord {
 
 pub fn saveTrainingJob(record: TrainingJobRecord) StoreError!void {
     const db = try common.getDb();
+    return saveTrainingJobInDb(db, record);
+}
+
+pub fn saveTrainingJobInDb(db: *sqlite.Db, record: TrainingJobRecord) StoreError!void {
     db.exec(
         "INSERT OR REPLACE INTO training_jobs (" ++ training_job_columns ++ ")" ++
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
@@ -123,6 +127,10 @@ pub fn saveTrainingJob(record: TrainingJobRecord) StoreError!void {
 
 pub fn updateTrainingJobState(id: []const u8, state: []const u8, now: i64) StoreError!void {
     const db = try common.getDb();
+    return updateTrainingJobStateInDb(db, id, state, now);
+}
+
+pub fn updateTrainingJobStateInDb(db: *sqlite.Db, id: []const u8, state: []const u8, now: i64) StoreError!void {
     db.exec(
         "UPDATE training_jobs SET state = ?, updated_at = ? WHERE id = ?;",
         .{},
@@ -132,6 +140,10 @@ pub fn updateTrainingJobState(id: []const u8, state: []const u8, now: i64) Store
 
 pub fn incrementTrainingJobRestarts(id: []const u8, now: i64) StoreError!void {
     const db = try common.getDb();
+    return incrementTrainingJobRestartsInDb(db, id, now);
+}
+
+pub fn incrementTrainingJobRestartsInDb(db: *sqlite.Db, id: []const u8, now: i64) StoreError!void {
     db.exec(
         "UPDATE training_jobs SET restart_count = restart_count + 1, updated_at = ? WHERE id = ?;",
         .{},
@@ -141,6 +153,10 @@ pub fn incrementTrainingJobRestarts(id: []const u8, now: i64) StoreError!void {
 
 pub fn updateTrainingJobGpus(id: []const u8, gpus: u32, now: i64) StoreError!void {
     const db = try common.getDb();
+    return updateTrainingJobGpusInDb(db, id, gpus, now);
+}
+
+pub fn updateTrainingJobGpusInDb(db: *sqlite.Db, id: []const u8, gpus: u32, now: i64) StoreError!void {
     db.exec(
         "UPDATE training_jobs SET gpus = ?, updated_at = ? WHERE id = ?;",
         .{},
@@ -150,6 +166,10 @@ pub fn updateTrainingJobGpus(id: []const u8, gpus: u32, now: i64) StoreError!voi
 
 pub fn findTrainingJob(alloc: Allocator, app_name: []const u8, name: []const u8) StoreError!?TrainingJobRecord {
     const db = try common.getDb();
+    return findTrainingJobInDb(db, alloc, app_name, name);
+}
+
+pub fn findTrainingJobInDb(db: *sqlite.Db, alloc: Allocator, app_name: []const u8, name: []const u8) StoreError!?TrainingJobRecord {
     const row = (db.oneAlloc(
         TrainingJobRow,
         alloc,
@@ -162,6 +182,10 @@ pub fn findTrainingJob(alloc: Allocator, app_name: []const u8, name: []const u8)
 
 pub fn getTrainingJob(alloc: Allocator, id: []const u8) StoreError!TrainingJobRecord {
     const db = try common.getDb();
+    return getTrainingJobInDb(db, alloc, id);
+}
+
+pub fn getTrainingJobInDb(db: *sqlite.Db, alloc: Allocator, id: []const u8) StoreError!TrainingJobRecord {
     const row = (db.oneAlloc(
         TrainingJobRow,
         alloc,

@@ -4,6 +4,7 @@ const sqlite = @import("sqlite");
 const cluster_node = @import("../../../cluster/node.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
+const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const schema = @import("../../../state/schema.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
@@ -164,6 +165,7 @@ fn formatAppStatusResponseFromDeployments(
         alloc,
         apply_release.reportFromDeployment(latest),
         if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
+        app_snapshot.summarize(latest.config_snapshot),
     );
 }
 
@@ -175,6 +177,7 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
     try writer.writeByte('[');
     for (deployments, 0..) |dep, i| {
         const report = apply_release.reportFromDeployment(dep);
+        const summary = app_snapshot.summarize(dep.config_snapshot);
         if (i > 0) try writer.writeByte(',');
         try writer.writeByte('{');
         try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
@@ -189,7 +192,11 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
         try writer.print(",\"created_at\":{d}", .{report.created_at});
-        try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+        try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+            summary.service_count,
+            summary.worker_count,
+            summary.cron_count,
+            summary.training_job_count,
             report.completed_targets,
             report.failed_targets,
             report.remainingTargets(),
@@ -208,6 +215,7 @@ fn formatAppStatusResponse(
     alloc: std.mem.Allocator,
     report: apply_release.ApplyReport,
     previous_successful: ?apply_release.ApplyReport,
+    summary: app_snapshot.Summary,
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
@@ -223,9 +231,12 @@ fn formatAppStatusResponse(
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
-    try writer.print(",\"created_at\":{d},\"service_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+    try writer.print(",\"created_at\":{d},\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.created_at,
-        report.service_count,
+        summary.service_count,
+        summary.worker_count,
+        summary.cron_count,
+        summary.training_job_count,
         report.completed_targets,
         report.failed_targets,
         report.remainingTargets(),
@@ -390,7 +401,7 @@ test "formatAppStatusResponse summarizes latest release" {
         .created_at = 200,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null);
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot));
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
@@ -491,7 +502,7 @@ test "formatAppStatusResponse includes structured rollback metadata" {
         .created_at = 300,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null);
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot));
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
@@ -513,7 +524,7 @@ test "formatAppStatusResponse falls back to rollback metadata inferred from lega
         .created_at = 400,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null);
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot));
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);

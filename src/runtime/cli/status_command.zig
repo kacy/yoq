@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const json_out = @import("../../lib/json_output.zig");
 const apply_release = @import("../../manifest/apply_release.zig");
+const app_snapshot = @import("../../manifest/app_snapshot.zig");
 const store = @import("../../state/store.zig");
 const monitor = @import("../monitor.zig");
 const cgroups = @import("../cgroups.zig");
@@ -130,7 +131,10 @@ const AppStatusSnapshot = struct {
     status: []const u8,
     manifest_hash: []const u8,
     created_at: i64,
-    service_count: usize,
+    service_count: usize = 0,
+    worker_count: usize = 0,
+    cron_count: usize = 0,
+    training_job_count: usize = 0,
     completed_targets: usize,
     failed_targets: usize,
     remaining_targets: usize,
@@ -367,8 +371,8 @@ fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
 }
 
 fn printAppStatusHeader() void {
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<22} {s:<14} {s}\n", .{
-        "APP", "RELEASE", "STATUS", "TIMESTAMP", "TARGETS", "PREV OK", "MESSAGE",
+    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<20} {s:<22} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "KINDS", "TIMESTAMP", "TARGETS", "PREV OK", "MESSAGE",
     });
 }
 
@@ -379,16 +383,24 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
 
     var progress_buf: [64]u8 = undefined;
     const progress_str = formatAppProgress(&progress_buf, snapshot);
+    var kinds_buf: [32]u8 = undefined;
+    const kinds_str = std.fmt.bufPrint(&kinds_buf, "{d}/{d}/{d}/{d}", .{
+        snapshot.service_count,
+        snapshot.worker_count,
+        snapshot.cron_count,
+        snapshot.training_job_count,
+    }) catch "?";
 
     const previous_successful = if (snapshot.previous_successful_release_id) |release_id|
         cli.truncate(release_id, 12)
     else
         "-";
 
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s:<22} {s:<14} {s}\n", .{
+    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<20} {s:<22} {s:<14} {s}\n", .{
         snapshot.app_name,
         cli.truncate(snapshot.release_id, 12),
         snapshot.status,
+        kinds_str,
         ts_str,
         progress_str,
         previous_successful,
@@ -422,6 +434,9 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .manifest_hash = extractJsonString(json, "manifest_hash") orelse "?",
         .created_at = extractJsonInt(json, "created_at") orelse 0,
         .service_count = @intCast(@max(0, extractJsonInt(json, "service_count") orelse 0)),
+        .worker_count = @intCast(@max(0, extractJsonInt(json, "worker_count") orelse 0)),
+        .cron_count = @intCast(@max(0, extractJsonInt(json, "cron_count") orelse 0)),
+        .training_job_count = @intCast(@max(0, extractJsonInt(json, "training_job_count") orelse 0)),
         .completed_targets = @intCast(@max(0, extractJsonInt(json, "completed_targets") orelse 0)),
         .failed_targets = @intCast(@max(0, extractJsonInt(json, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, extractJsonInt(json, "remaining_targets") orelse 0)),
@@ -442,6 +457,9 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.stringField("manifest_hash", snapshot.manifest_hash);
     w.intField("created_at", snapshot.created_at);
     w.uintField("service_count", snapshot.service_count);
+    w.uintField("worker_count", snapshot.worker_count);
+    w.uintField("cron_count", snapshot.cron_count);
+    w.uintField("training_job_count", snapshot.training_job_count);
     w.uintField("completed_targets", snapshot.completed_targets);
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
@@ -455,6 +473,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
 fn appStatusFromReports(
     report: apply_release.ApplyReport,
     previous_successful: ?apply_release.ApplyReport,
+    summary: app_snapshot.Summary,
 ) AppStatusSnapshot {
     return .{
         .app_name = report.app_name,
@@ -463,7 +482,10 @@ fn appStatusFromReports(
         .status = report.status.toString(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
-        .service_count = report.service_count,
+        .service_count = summary.service_count,
+        .worker_count = summary.worker_count,
+        .cron_count = summary.cron_count,
+        .training_job_count = summary.training_job_count,
         .completed_targets = report.completed_targets,
         .failed_targets = report.failed_targets,
         .remaining_targets = report.remainingTargets(),
@@ -482,6 +504,7 @@ fn snapshotFromDeployments(
     return appStatusFromReports(
         apply_release.reportFromDeployment(latest),
         if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
+        app_snapshot.summarize(latest.config_snapshot),
     );
 }
 

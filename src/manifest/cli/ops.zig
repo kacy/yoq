@@ -3,6 +3,7 @@ const cli = @import("../../lib/cli.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const json_out = @import("../../lib/json_output.zig");
 const apply_release = @import("../apply_release.zig");
+const app_snapshot = @import("../app_snapshot.zig");
 const manifest_loader = @import("../loader.zig");
 const orchestrator = @import("../orchestrator.zig");
 const release_history = @import("../release_history.zig");
@@ -243,6 +244,10 @@ const HistoryEntryView = struct {
     status: []const u8,
     manifest_hash: []const u8,
     created_at: i64,
+    service_count: usize = 0,
+    worker_count: usize = 0,
+    cron_count: usize = 0,
+    training_job_count: usize = 0,
     completed_targets: usize,
     failed_targets: usize,
     remaining_targets: usize,
@@ -252,6 +257,7 @@ const HistoryEntryView = struct {
 
 fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
     const report = apply_release.reportFromDeployment(dep);
+    const summary = app_snapshot.summarize(dep.config_snapshot);
     return .{
         .id = report.release_id orelse dep.id,
         .app = dep.app_name,
@@ -260,6 +266,10 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .status = report.status.toString(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
+        .service_count = summary.service_count,
+        .worker_count = summary.worker_count,
+        .cron_count = summary.cron_count,
+        .training_job_count = summary.training_job_count,
         .completed_targets = report.completed_targets,
         .failed_targets = report.failed_targets,
         .remaining_targets = report.remainingTargets(),
@@ -277,6 +287,10 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .status = json_helpers.extractJsonString(obj, "status") orelse "?",
         .manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?",
         .created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0,
+        .service_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "service_count") orelse 0)),
+        .worker_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "worker_count") orelse 0)),
+        .cron_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "cron_count") orelse 0)),
+        .training_job_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "training_job_count") orelse 0)),
         .completed_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "completed_targets") orelse 0)),
         .failed_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "remaining_targets") orelse 0)),
@@ -313,6 +327,10 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.stringField("status", entry.status);
     w.stringField("manifest_hash", entry.manifest_hash);
     w.intField("created_at", entry.created_at);
+    w.uintField("service_count", entry.service_count);
+    w.uintField("worker_count", entry.worker_count);
+    w.uintField("cron_count", entry.cron_count);
+    w.uintField("training_job_count", entry.training_job_count);
     w.uintField("completed_targets", entry.completed_targets);
     w.uintField("failed_targets", entry.failed_targets);
     w.uintField("remaining_targets", entry.remaining_targets);
@@ -380,9 +398,9 @@ test "historyEntryFromDeployment matches remote app history shape" {
     };
 
     const local = historyEntryFromDeployment(dep);
-    const remote = parseHistoryObject(
-        \\{"id":"dep-1","app":"demo-app","service":"demo-app","trigger":"apply","status":"completed","manifest_hash":"sha256:123","created_at":42,"completed_targets":0,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":"healthy"}
-    );
+    var w = json_out.JsonWriter{};
+    writeHistoryJsonObject(&w, local);
+    const remote = parseHistoryObject(w.getWritten());
 
     try std.testing.expectEqualStrings(local.id, remote.id);
     try std.testing.expectEqualStrings(local.app.?, remote.app.?);
@@ -391,6 +409,7 @@ test "historyEntryFromDeployment matches remote app history shape" {
     try std.testing.expectEqualStrings(local.status, remote.status);
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expectEqual(local.service_count, remote.service_count);
     try std.testing.expectEqual(local.completed_targets, remote.completed_targets);
     try std.testing.expectEqual(local.failed_targets, remote.failed_targets);
     try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
@@ -407,6 +426,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
         .status = "completed",
         .manifest_hash = "sha256:123",
         .created_at = 42,
+        .service_count = 1,
         .completed_targets = 1,
         .failed_targets = 0,
         .remaining_targets = 0,
@@ -425,6 +445,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(entry.status, parsed.status);
     try std.testing.expectEqualStrings(entry.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(entry.created_at, parsed.created_at);
+    try std.testing.expectEqual(entry.service_count, parsed.service_count);
     try std.testing.expectEqual(entry.completed_targets, parsed.completed_targets);
     try std.testing.expectEqual(entry.failed_targets, parsed.failed_targets);
     try std.testing.expectEqual(entry.remaining_targets, parsed.remaining_targets);
@@ -447,9 +468,9 @@ test "historyEntryFromDeployment preserves partially failed local release state"
     };
 
     const local = historyEntryFromDeployment(dep);
-    const remote = parseHistoryObject(
-        \\{"id":"dep-3","app":"demo-app","service":"demo-app","trigger":"apply","status":"partially_failed","manifest_hash":"sha256:333","created_at":300,"completed_targets":1,"failed_targets":1,"remaining_targets":0,"source_release_id":null,"message":"one or more placements failed"}
-    );
+    var w = json_out.JsonWriter{};
+    writeHistoryJsonObject(&w, local);
+    const remote = parseHistoryObject(w.getWritten());
 
     try std.testing.expectEqualStrings(local.id, remote.id);
     try std.testing.expectEqualStrings(local.app.?, remote.app.?);
@@ -458,6 +479,7 @@ test "historyEntryFromDeployment preserves partially failed local release state"
     try std.testing.expectEqualStrings(local.status, remote.status);
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
+    try std.testing.expectEqual(local.service_count, remote.service_count);
     try std.testing.expectEqual(local.completed_targets, remote.completed_targets);
     try std.testing.expectEqual(local.failed_targets, remote.failed_targets);
     try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
@@ -468,11 +490,17 @@ test "historyEntryFromDeployment preserves partially failed local release state"
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var worker_name: ?[]const u8 = null;
+    var server_addr: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-f")) {
             manifest_path = args.next() orelse {
                 writeErr("-f requires a manifest path\n", .{});
+                return OpsError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
                 return OpsError.InvalidArgument;
             };
         } else {
@@ -481,9 +509,34 @@ pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
     }
 
     const name = worker_name orelse {
-        writeErr("usage: yoq run-worker [-f manifest.toml] <name>\n", .{});
+        writeErr("usage: yoq run-worker [-f manifest.toml] [--server host:port] <name>\n", .{});
         return OpsError.InvalidArgument;
     };
+
+    if (server_addr) |addr_str| {
+        const app_name = try currentAppNameAlloc(alloc);
+        defer alloc.free(app_name);
+
+        const server = cli.parseServerAddr(addr_str);
+        const path = std.fmt.allocPrint(alloc, "/apps/{s}/workers/{s}/run", .{ app_name, name }) catch return OpsError.StoreError;
+        defer alloc.free(path);
+
+        var token_buf: [64]u8 = undefined;
+        const token = cli.readApiToken(&token_buf);
+        var resp = http_client.postWithAuth(alloc, server.ip, server.port, path, "{}", token) catch {
+            writeErr("failed to connect to cluster server\n", .{});
+            return OpsError.ConnectionFailed;
+        };
+        defer resp.deinit(alloc);
+
+        if (resp.status_code != 200) {
+            writeErr("worker run failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+            return OpsError.DeploymentFailed;
+        }
+
+        write("{s}\n", .{resp.body});
+        return;
+    }
 
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
         writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });

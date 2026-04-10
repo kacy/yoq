@@ -76,6 +76,7 @@ comptime {
     _ = @import("build/commands.zig");
     _ = @import("manifest/spec.zig");
     _ = @import("manifest/app_spec.zig");
+    _ = @import("manifest/app_snapshot.zig");
     _ = @import("manifest/apply_release.zig");
     _ = @import("manifest/local_apply_backend.zig");
     _ = @import("manifest/release_plan.zig");
@@ -100,6 +101,7 @@ comptime {
     _ = @import("api/routes/cluster_agents/apply_request.zig");
     _ = @import("api/routes/cluster_agents/app_routes.zig");
     _ = @import("api/routes/cluster_agents/deploy_routes.zig");
+    _ = @import("api/routes/cluster_agents/workload_routes.zig");
     _ = @import("api/routes/status_metrics.zig");
     _ = @import("api/server.zig");
     _ = @import("api/server/connection_runtime.zig");

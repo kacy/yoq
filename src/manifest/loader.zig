@@ -107,11 +107,6 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
-    if (services.items.len == 0 and training_jobs.items.len == 0) {
-        log.err("manifest: no services or training jobs defined", .{});
-        return LoadError.NoServices;
-    }
-
     // parse workers from [worker.*] subtables
     var workers: std.ArrayListUnmanaged(spec.Worker) = .empty;
     defer {
@@ -148,6 +143,11 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
                 else => {},
             }
         }
+    }
+
+    if (services.items.len == 0 and workers.items.len == 0 and crons.items.len == 0 and training_jobs.items.len == 0) {
+        log.err("manifest: no services, workers, crons, or training jobs defined", .{});
+        return LoadError.NoServices;
     }
 
     var volumes: std.ArrayListUnmanaged(spec.Volume) = .empty;
@@ -1929,6 +1929,33 @@ test "training job — manifest with only training jobs is valid" {
 
     try std.testing.expectEqual(@as(usize, 0), manifest.services.len);
     try std.testing.expectEqual(@as(usize, 1), manifest.training_jobs.len);
+}
+
+test "worker-only manifest is valid" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[worker.migrate]
+        \\image = "alpine:latest"
+        \\command = ["sh", "-c", "migrate"]
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), manifest.services.len);
+    try std.testing.expectEqual(@as(usize, 1), manifest.workers.len);
+}
+
+test "cron-only manifest is valid" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[cron.cleanup]
+        \\image = "busybox"
+        \\command = ["sh", "-c", "cleanup"]
+        \\every = "1h"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), manifest.services.len);
+    try std.testing.expectEqual(@as(usize, 1), manifest.crons.len);
 }
 
 test "training job — checkpoint interval default" {

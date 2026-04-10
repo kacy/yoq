@@ -62,16 +62,17 @@ const command_meta = [_]CommandMeta{
     .{ .name = "validate", .flags = &.{ "-f", "-q", "--quiet" } },
     .{ .name = "up", .flags = &.{ "-f", "--dev", "--server" } },
     .{ .name = "down", .flags = &.{"-f"} },
-    .{ .name = "run-worker", .flags = &.{"-f"} },
+    .{ .name = "run-worker", .flags = &.{ "-f", "--server" } },
     .{ .name = "rollback", .flags = &.{ "--app", "--server", "--release" } },
     .{ .name = "history", .flags = &.{ "--app", "--server", "--json" } },
     .{ .name = "train", .flags = &.{ "-f", "--server", "--rank" }, .subcommands = &.{
         .{ .name = "start", .flags = &.{ "-f", "--server" } },
-        .{ .name = "status", .flags = &.{"-f"} },
-        .{ .name = "stop" },
-        .{ .name = "pause" },
-        .{ .name = "resume" },
-        .{ .name = "logs", .flags = &.{"--rank"} },
+        .{ .name = "status", .flags = &.{ "-f", "--server" } },
+        .{ .name = "stop", .flags = &.{ "-f", "--server" } },
+        .{ .name = "pause", .flags = &.{ "-f", "--server" } },
+        .{ .name = "resume", .flags = &.{ "-f", "--server" } },
+        .{ .name = "scale", .flags = &.{ "--gpus", "--server" } },
+        .{ .name = "logs", .flags = &.{ "--rank", "--server" } },
     } },
 
     // cluster
