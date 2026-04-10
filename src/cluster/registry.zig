@@ -47,6 +47,7 @@ pub const listAgents = queries.listAgents;
 pub const getAgent = queries.getAgent;
 pub const getAssignments = queries.getAssignments;
 pub const getOrphanedAssignments = queries.getOrphanedAssignments;
+pub const countAssignmentsForWorkload = queries.countAssignmentsForWorkload;
 
 // -- tests --
 

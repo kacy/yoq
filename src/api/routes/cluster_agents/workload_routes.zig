@@ -232,7 +232,17 @@ fn handleTrainingLogs(
     var hostname_buf: [128]u8 = undefined;
     const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ job_name, rank }) catch return common.internalError();
     const record = store.findAppContainer(alloc, app_name, hostname) catch return common.internalError();
-    if (record == null) return common.notFound();
+    if (record == null) {
+        const scheduled = agent_registry.countAssignmentsForWorkload(ctx.cluster.?.stateMachineDb(), app_name, "training", job_name) catch return common.internalError();
+        if (scheduled > 0) {
+            return .{
+                .status = .bad_request,
+                .body = "{\"error\":\"training logs are only available on the hosting agent\"}",
+                .allocated = false,
+            };
+        }
+        return common.notFound();
+    }
     defer record.?.deinit(alloc);
 
     const logs = @import("../../../runtime/logs.zig");
@@ -644,4 +654,34 @@ test "training scale route replaces prior scheduled assignments" {
     try std.testing.expect(std.mem.indexOf(u8, scale_resp.body, "\"state\":\"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, scale_resp.body, "\"gpus\":2") != null);
     try std.testing.expectEqual(@as(usize, 2), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
+}
+
+test "training logs route reports remote-hosted ranks explicitly" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try harness.seedLatestRelease(
+        "demo-app",
+        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
+    );
+
+    const start_resp = route(
+        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, start_resp);
+    try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
+    harness.applyCommitted();
+
+    const logs_resp = route(
+        makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=0"),
+        alloc,
+        harness.ctx(),
+    ).?;
+    defer freeResponse(alloc, logs_resp);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, logs_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, logs_resp.body, "hosting agent") != null);
 }

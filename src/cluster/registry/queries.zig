@@ -161,7 +161,7 @@ pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![
     return queryAssignmentRows(
         alloc,
         db,
-        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = ?;",
+        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = ?;",
         .{agent_id},
     );
 }
@@ -170,9 +170,20 @@ pub fn getOrphanedAssignments(alloc: Allocator, db: *sqlite.Db) ![]Assignment {
     return queryAssignmentRows(
         alloc,
         db,
-        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = '' AND status = 'pending';",
+        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = '' AND status = 'pending';",
         .{},
     );
+}
+
+pub fn countAssignmentsForWorkload(db: *sqlite.Db, app_name: []const u8, workload_kind: []const u8, workload_name: []const u8) !usize {
+    const Row = struct { count: i64 };
+    const row = (db.one(
+        Row,
+        "SELECT COUNT(*) AS count FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ?;",
+        .{},
+        .{ app_name, workload_kind, workload_name },
+    ) catch return error.QueryFailed) orelse return 0;
+    return @intCast(row.count);
 }
 
 const AssignmentRow = struct {
@@ -183,6 +194,9 @@ const AssignmentRow = struct {
     status: sqlite.Text,
     cpu_limit: i64,
     memory_limit_mb: i64,
+    app_name: ?sqlite.Text,
+    workload_kind: ?sqlite.Text,
+    workload_name: ?sqlite.Text,
     gang_rank: ?i64,
     gang_world_size: ?i64,
     gang_master_addr: ?sqlite.Text,
@@ -209,6 +223,9 @@ fn queryAssignmentRows(alloc: Allocator, db: *sqlite.Db, comptime query: []const
             .status = row.status.data,
             .cpu_limit = row.cpu_limit,
             .memory_limit_mb = row.memory_limit_mb,
+            .app_name = if (row.app_name) |app_name| app_name.data else null,
+            .workload_kind = if (row.workload_kind) |workload_kind| workload_kind.data else null,
+            .workload_name = if (row.workload_name) |workload_name| workload_name.data else null,
             .gang_rank = row.gang_rank,
             .gang_world_size = row.gang_world_size,
             .gang_master_addr = if (row.gang_master_addr) |addr| addr.data else null,

@@ -20,6 +20,12 @@ pub const GangInfo = struct {
     master_port: u16,
 };
 
+const AssignmentMeta = struct {
+    app_name: ?[]const u8 = null,
+    workload_kind: ?[]const u8 = null,
+    workload_name: ?[]const u8 = null,
+};
+
 pub fn reconcile(self: anytype) void {
     var resp = fetchAssignments(self) orelse {
         reconcileFromCache(self);
@@ -36,6 +42,9 @@ pub fn reconcile(self: anytype) void {
         const command = extractJsonString(obj, "command") orelse "";
         const cpu_limit = extractJsonInt(obj, "cpu_limit") orelse 1000;
         const memory_limit_mb = extractJsonInt(obj, "memory_limit_mb") orelse 256;
+        const app_name = extractJsonString(obj, "app_name");
+        const workload_kind = extractJsonString(obj, "workload_kind");
+        const workload_name = extractJsonString(obj, "workload_name");
         const gang_rank = extractJsonInt(obj, "gang_rank");
         const gang_world_size = extractJsonInt(obj, "gang_world_size");
         const gang_master_addr = extractJsonString(obj, "gang_master_addr");
@@ -63,7 +72,11 @@ pub fn reconcile(self: anytype) void {
                 .master_addr = gang_master_addr.?,
                 .master_port = if (gang_master_port) |port| @intCast(@max(0, port)) else 29500,
             } else null;
-            startPendingAssignment(self, assignment_id, image, command, gang_info);
+            startPendingAssignment(self, assignment_id, image, command, gang_info, .{
+                .app_name = app_name,
+                .workload_kind = workload_kind,
+                .workload_name = workload_name,
+            });
         }
     }
 }
@@ -78,11 +91,11 @@ fn reconcileFromCache(self: anytype) void {
     if (cached.len == 0) return;
     log.warn("server unreachable, reconciling from cache ({d} assignments)", .{cached.len});
     for (cached) |assignment| {
-        startPendingAssignment(self, assignment.id, assignment.image, assignment.command, null);
+        startPendingAssignment(self, assignment.id, assignment.image, assignment.command, null, .{});
     }
 }
 
-fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo) void {
+fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
     self.container_lock.lock();
     const already_tracked = self.local_containers.contains(id);
     self.container_lock.unlock();
@@ -98,11 +111,44 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         self.alloc.free(image_copy);
         return;
     };
+    const app_name_copy = if (meta.app_name) |app_name|
+        self.alloc.dupe(u8, app_name) catch {
+            self.alloc.free(id_copy);
+            self.alloc.free(image_copy);
+            self.alloc.free(command_copy);
+            return;
+        }
+    else
+        null;
+    const workload_kind_copy = if (meta.workload_kind) |workload_kind|
+        self.alloc.dupe(u8, workload_kind) catch {
+            self.alloc.free(id_copy);
+            self.alloc.free(image_copy);
+            self.alloc.free(command_copy);
+            if (app_name_copy) |app_name| self.alloc.free(app_name);
+            return;
+        }
+    else
+        null;
+    const workload_name_copy = if (meta.workload_name) |workload_name|
+        self.alloc.dupe(u8, workload_name) catch {
+            self.alloc.free(id_copy);
+            self.alloc.free(image_copy);
+            self.alloc.free(command_copy);
+            if (app_name_copy) |app_name| self.alloc.free(app_name);
+            if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
+            return;
+        }
+    else
+        null;
     const gang_copy: ?GangInfo = if (gang_info) |gang| blk: {
         const addr_copy = self.alloc.dupe(u8, gang.master_addr) catch {
             self.alloc.free(id_copy);
             self.alloc.free(image_copy);
             self.alloc.free(command_copy);
+            if (app_name_copy) |app_name| self.alloc.free(app_name);
+            if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
+            if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
             return;
         };
         break :blk .{
@@ -119,6 +165,9 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         self.alloc.free(id_copy);
         self.alloc.free(image_copy);
         self.alloc.free(command_copy);
+        if (app_name_copy) |app_name| self.alloc.free(app_name);
+        if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
+        if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
         if (gang_copy) |gang| self.alloc.free(gang.master_addr);
         return;
     };
@@ -130,7 +179,11 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
     }
 
-    _ = std.Thread.spawn(.{}, runAssignment, .{ self, id_copy, image_copy, command_copy, gang_copy }) catch {
+    _ = std.Thread.spawn(.{}, runAssignment, .{ self, id_copy, image_copy, command_copy, gang_copy, AssignmentMeta{
+        .app_name = app_name_copy,
+        .workload_kind = workload_kind_copy,
+        .workload_name = workload_name_copy,
+    } }) catch {
         log.warn("failed to spawn thread for assignment {s}", .{id_copy});
         self.container_lock.lock();
         _ = self.local_containers.remove(id_copy);
@@ -138,6 +191,9 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         self.alloc.free(id_copy);
         self.alloc.free(image_copy);
         self.alloc.free(command_copy);
+        if (app_name_copy) |app_name| self.alloc.free(app_name);
+        if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
+        if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
         if (gang_copy) |gang| self.alloc.free(gang.master_addr);
     };
 }
@@ -148,10 +204,13 @@ fn fetchAssignments(self: anytype) ?http_client.Response {
     return http_client.getWithAuth(self.alloc, self.server_addr, self.server_port, path, self.token) catch return null;
 }
 
-fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo) void {
+fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
     defer {
         self.alloc.free(image);
         self.alloc.free(command);
+        if (meta.app_name) |app_name| self.alloc.free(app_name);
+        if (meta.workload_kind) |workload_kind| self.alloc.free(workload_kind);
+        if (meta.workload_name) |workload_name| self.alloc.free(workload_name);
         if (gang_info) |gang| self.alloc.free(gang.master_addr);
     }
 
@@ -186,14 +245,18 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     };
     const container_id = id_buf[0..];
 
+    var hostname_buf: [128]u8 = undefined;
+    const hostname = buildAssignmentHostname(&hostname_buf, meta, gang_info);
+
     store.save(.{
         .id = container_id,
         .rootfs = rootfs,
         .command = if (command.len > 0) command else "/bin/sh",
-        .hostname = "agent",
+        .hostname = hostname,
         .status = "created",
         .pid = null,
         .exit_code = null,
+        .app_name = meta.app_name,
         .created_at = std.time.timestamp(),
     }) catch {
         log.warn("failed to save container record for assignment {s}", .{assignment_id});
@@ -271,6 +334,17 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         reportStatus(self, assignment_id, "failed");
     }
     cleanup(container_id);
+}
+
+fn buildAssignmentHostname(buf: []u8, meta: AssignmentMeta, gang_info: ?GangInfo) []const u8 {
+    if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "training")) {
+        if (gang_info) |gang| {
+            return std.fmt.bufPrint(buf, "{s}-rank-{d}", .{ meta.workload_name.?, gang.rank }) catch meta.workload_name.?;
+        }
+        return meta.workload_name.?;
+    }
+    if (meta.workload_name) |workload_name| return workload_name;
+    return "agent";
 }
 
 fn reportStatus(self: anytype, assignment_id: []const u8, status: []const u8) void {
