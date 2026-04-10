@@ -23,14 +23,69 @@ pub const ApplicationServiceSpec = struct {
     required_labels: []const u8 = "",
 };
 
+pub const ApplicationWorkerSpec = struct {
+    name: []const u8,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    depends_on: []const []const u8,
+    working_dir: ?[]const u8,
+    volumes: []const spec.VolumeMount,
+    gpu: ?spec.GpuSpec,
+    gpu_mesh: ?spec.GpuMeshSpec,
+    required_labels: []const u8 = "",
+};
+
+pub const ApplicationCronSpec = struct {
+    name: []const u8,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    working_dir: ?[]const u8,
+    volumes: []const spec.VolumeMount,
+    every: u64,
+};
+
+pub const ApplicationTrainingJobSpec = struct {
+    name: []const u8,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    working_dir: ?[]const u8,
+    volumes: []const spec.VolumeMount,
+    gpus: u32,
+    gpu_type: ?[]const u8,
+    data: ?spec.DataSpec,
+    checkpoint: ?spec.CheckpointSpec,
+    resources: spec.TrainingResourceSpec,
+    fault_tolerance: spec.FaultToleranceSpec,
+};
+
+pub const WorkloadCounts = struct {
+    services: usize = 0,
+    workers: usize = 0,
+    crons: usize = 0,
+    training_jobs: usize = 0,
+
+    pub fn hasAny(self: WorkloadCounts) bool {
+        return self.services + self.workers + self.crons + self.training_jobs > 0;
+    }
+};
+
 pub const ApplicationSpec = struct {
     app_name: []const u8,
     services: []const ApplicationServiceSpec,
+    workers: []const ApplicationWorkerSpec,
+    crons: []const ApplicationCronSpec,
+    training_jobs: []const ApplicationTrainingJobSpec,
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *ApplicationSpec) void {
         self.alloc.free(self.app_name);
         self.alloc.free(self.services);
+        self.alloc.free(self.workers);
+        self.alloc.free(self.crons);
+        self.alloc.free(self.training_jobs);
     }
 
     pub fn serviceByName(self: *const ApplicationSpec, name: []const u8) ?*const ApplicationServiceSpec {
@@ -38,6 +93,29 @@ pub const ApplicationSpec = struct {
             if (std.mem.eql(u8, svc.name, name)) return svc;
         }
         return null;
+    }
+
+    pub fn workerByName(self: *const ApplicationSpec, name: []const u8) ?*const ApplicationWorkerSpec {
+        for (self.workers) |*worker| {
+            if (std.mem.eql(u8, worker.name, name)) return worker;
+        }
+        return null;
+    }
+
+    pub fn trainingJobByName(self: *const ApplicationSpec, name: []const u8) ?*const ApplicationTrainingJobSpec {
+        for (self.training_jobs) |*job| {
+            if (std.mem.eql(u8, job.name, name)) return job;
+        }
+        return null;
+    }
+
+    pub fn workloadCounts(self: *const ApplicationSpec) WorkloadCounts {
+        return .{
+            .services = self.services.len,
+            .workers = self.workers.len,
+            .crons = self.crons.len,
+            .training_jobs = self.training_jobs.len,
+        };
     }
 
     pub fn selectServices(self: *const ApplicationSpec, alloc: std.mem.Allocator, targets: []const []const u8) !ApplicationSpec {
@@ -79,9 +157,19 @@ pub const ApplicationSpec = struct {
             out_idx += 1;
         }
 
+        const workers = try alloc.dupe(ApplicationWorkerSpec, self.workers);
+        errdefer alloc.free(workers);
+        const crons = try alloc.dupe(ApplicationCronSpec, self.crons);
+        errdefer alloc.free(crons);
+        const training_jobs = try alloc.dupe(ApplicationTrainingJobSpec, self.training_jobs);
+        errdefer alloc.free(training_jobs);
+
         return .{
             .app_name = try alloc.dupe(u8, self.app_name),
             .services = services,
+            .workers = workers,
+            .crons = crons,
+            .training_jobs = training_jobs,
             .alloc = alloc,
         };
     }
@@ -89,10 +177,19 @@ pub const ApplicationSpec = struct {
     pub fn clone(self: *const ApplicationSpec, alloc: std.mem.Allocator) !ApplicationSpec {
         const services = try alloc.dupe(ApplicationServiceSpec, self.services);
         errdefer alloc.free(services);
+        const workers = try alloc.dupe(ApplicationWorkerSpec, self.workers);
+        errdefer alloc.free(workers);
+        const crons = try alloc.dupe(ApplicationCronSpec, self.crons);
+        errdefer alloc.free(crons);
+        const training_jobs = try alloc.dupe(ApplicationTrainingJobSpec, self.training_jobs);
+        errdefer alloc.free(training_jobs);
 
         return .{
             .app_name = try alloc.dupe(u8, self.app_name),
             .services = services,
+            .workers = workers,
+            .crons = crons,
+            .training_jobs = training_jobs,
             .alloc = alloc,
         };
     }
@@ -162,65 +259,25 @@ pub const ApplicationSpec = struct {
 
         for (self.services, 0..) |svc, i| {
             if (i > 0) try writer.writeByte(',');
-            try writer.writeAll("{\"name\":\"");
-            try json_helpers.writeJsonEscaped(writer, svc.name);
-            try writer.writeAll("\",\"image\":\"");
-            try json_helpers.writeJsonEscaped(writer, svc.image);
-            try writer.writeAll("\",\"command\":");
-            try writeJsonStringArray(writer, svc.command);
-            try writer.writeAll(",\"ports\":");
-            try writeJsonPorts(writer, svc.ports);
-            try writer.writeAll(",\"env\":");
-            try writeJsonStringArray(writer, svc.env);
-            try writer.writeAll(",\"depends_on\":");
-            try writeJsonStringArray(writer, svc.depends_on);
-            try writer.print(",\"cpu_limit\":{d},\"memory_limit_mb\":{d}", .{
-                svc.cpu_limit,
-                svc.memory_limit_mb,
-            });
+            try writeJsonService(writer, svc);
+        }
 
-            if (svc.working_dir) |working_dir| {
-                try writer.writeAll(",\"working_dir\":\"");
-                try json_helpers.writeJsonEscaped(writer, working_dir);
-                try writer.writeByte('"');
-            }
+        try writer.writeAll("],\"workers\":[");
+        for (self.workers, 0..) |worker, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonWorker(writer, worker);
+        }
 
-            try writer.writeAll(",\"volumes\":");
-            try writeJsonVolumes(writer, svc.volumes);
-            try writer.writeAll(",\"restart\":\"");
-            try writer.writeAll(restartPolicyString(svc.restart));
-            try writer.writeByte('"');
+        try writer.writeAll("],\"crons\":[");
+        for (self.crons, 0..) |cron, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonCron(writer, cron);
+        }
 
-            if (svc.health_check) |health_check| {
-                try writer.writeAll(",\"health_check\":");
-                try writeJsonHealthCheck(writer, health_check);
-            }
-
-            if (svc.tls) |tls| {
-                try writer.writeAll(",\"tls\":");
-                try writeJsonTls(writer, tls);
-            }
-
-            try writer.writeAll(",\"http_routes\":");
-            try writeJsonHttpRoutes(writer, svc.http_routes);
-
-            if (svc.gpu) |gpu| {
-                try writer.writeAll(",\"gpu\":");
-                try writeJsonGpu(writer, gpu);
-            }
-
-            if (svc.gpu_mesh) |mesh| {
-                try writer.writeAll(",\"gpu_mesh\":");
-                try writeJsonGpuMesh(writer, mesh);
-            }
-
-            if (svc.required_labels.len > 0) {
-                try writer.writeAll(",\"required_labels\":\"");
-                try json_helpers.writeJsonEscaped(writer, svc.required_labels);
-                try writer.writeByte('"');
-            }
-
-            try writer.writeByte('}');
+        try writer.writeAll("],\"training_jobs\":[");
+        for (self.training_jobs, 0..) |job, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonTrainingJob(writer, job);
         }
 
         try writer.writeAll("]}");
@@ -231,6 +288,12 @@ pub const ApplicationSpec = struct {
 pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *const spec.Manifest) !ApplicationSpec {
     const services = try alloc.alloc(ApplicationServiceSpec, manifest.services.len);
     errdefer alloc.free(services);
+    const workers = try alloc.alloc(ApplicationWorkerSpec, manifest.workers.len);
+    errdefer alloc.free(workers);
+    const crons = try alloc.alloc(ApplicationCronSpec, manifest.crons.len);
+    errdefer alloc.free(crons);
+    const training_jobs = try alloc.alloc(ApplicationTrainingJobSpec, manifest.training_jobs.len);
+    errdefer alloc.free(training_jobs);
 
     for (manifest.services, 0..) |svc, i| {
         services[i] = .{
@@ -251,9 +314,55 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
         };
     }
 
+    for (manifest.workers, 0..) |worker, i| {
+        workers[i] = .{
+            .name = worker.name,
+            .image = worker.image,
+            .command = worker.command,
+            .env = worker.env,
+            .depends_on = worker.depends_on,
+            .working_dir = worker.working_dir,
+            .volumes = worker.volumes,
+            .gpu = worker.gpu,
+            .gpu_mesh = worker.gpu_mesh,
+        };
+    }
+
+    for (manifest.crons, 0..) |cron, i| {
+        crons[i] = .{
+            .name = cron.name,
+            .image = cron.image,
+            .command = cron.command,
+            .env = cron.env,
+            .working_dir = cron.working_dir,
+            .volumes = cron.volumes,
+            .every = cron.every,
+        };
+    }
+
+    for (manifest.training_jobs, 0..) |job, i| {
+        training_jobs[i] = .{
+            .name = job.name,
+            .image = job.image,
+            .command = job.command,
+            .env = job.env,
+            .working_dir = job.working_dir,
+            .volumes = job.volumes,
+            .gpus = job.gpus,
+            .gpu_type = job.gpu_type,
+            .data = job.data,
+            .checkpoint = job.checkpoint,
+            .resources = job.resources,
+            .fault_tolerance = job.fault_tolerance,
+        };
+    }
+
     return .{
         .app_name = try alloc.dupe(u8, app_name),
         .services = services,
+        .workers = workers,
+        .crons = crons,
+        .training_jobs = training_jobs,
         .alloc = alloc,
     };
 }
@@ -301,6 +410,165 @@ fn writeJsonVolumes(writer: anytype, volumes: []const spec.VolumeMount) !void {
         try writer.writeAll("\"}");
     }
     try writer.writeByte(']');
+}
+
+fn writeJsonService(writer: anytype, svc: ApplicationServiceSpec) !void {
+    try writer.writeAll("{\"name\":\"");
+    try json_helpers.writeJsonEscaped(writer, svc.name);
+    try writer.writeAll("\",\"image\":\"");
+    try json_helpers.writeJsonEscaped(writer, svc.image);
+    try writer.writeAll("\",\"command\":");
+    try writeJsonStringArray(writer, svc.command);
+    try writer.writeAll(",\"ports\":");
+    try writeJsonPorts(writer, svc.ports);
+    try writer.writeAll(",\"env\":");
+    try writeJsonStringArray(writer, svc.env);
+    try writer.writeAll(",\"depends_on\":");
+    try writeJsonStringArray(writer, svc.depends_on);
+    try writer.print(",\"cpu_limit\":{d},\"memory_limit_mb\":{d}", .{
+        svc.cpu_limit,
+        svc.memory_limit_mb,
+    });
+
+    if (svc.working_dir) |working_dir| {
+        try writer.writeAll(",\"working_dir\":\"");
+        try json_helpers.writeJsonEscaped(writer, working_dir);
+        try writer.writeByte('"');
+    }
+
+    try writer.writeAll(",\"volumes\":");
+    try writeJsonVolumes(writer, svc.volumes);
+    try writer.writeAll(",\"restart\":\"");
+    try writer.writeAll(restartPolicyString(svc.restart));
+    try writer.writeByte('"');
+
+    if (svc.health_check) |health_check| {
+        try writer.writeAll(",\"health_check\":");
+        try writeJsonHealthCheck(writer, health_check);
+    }
+
+    if (svc.tls) |tls| {
+        try writer.writeAll(",\"tls\":");
+        try writeJsonTls(writer, tls);
+    }
+
+    try writer.writeAll(",\"http_routes\":");
+    try writeJsonHttpRoutes(writer, svc.http_routes);
+
+    if (svc.gpu) |gpu| {
+        try writer.writeAll(",\"gpu\":");
+        try writeJsonGpu(writer, gpu);
+    }
+
+    if (svc.gpu_mesh) |mesh| {
+        try writer.writeAll(",\"gpu_mesh\":");
+        try writeJsonGpuMesh(writer, mesh);
+    }
+
+    if (svc.required_labels.len > 0) {
+        try writer.writeAll(",\"required_labels\":\"");
+        try json_helpers.writeJsonEscaped(writer, svc.required_labels);
+        try writer.writeByte('"');
+    }
+
+    try writer.writeByte('}');
+}
+
+fn writeJsonWorker(writer: anytype, worker: ApplicationWorkerSpec) !void {
+    try writer.writeAll("{\"name\":\"");
+    try json_helpers.writeJsonEscaped(writer, worker.name);
+    try writer.writeAll("\",\"image\":\"");
+    try json_helpers.writeJsonEscaped(writer, worker.image);
+    try writer.writeAll("\",\"command\":");
+    try writeJsonStringArray(writer, worker.command);
+    try writer.writeAll(",\"env\":");
+    try writeJsonStringArray(writer, worker.env);
+    try writer.writeAll(",\"depends_on\":");
+    try writeJsonStringArray(writer, worker.depends_on);
+    if (worker.working_dir) |working_dir| {
+        try writer.writeAll(",\"working_dir\":\"");
+        try json_helpers.writeJsonEscaped(writer, working_dir);
+        try writer.writeByte('"');
+    }
+    try writer.writeAll(",\"volumes\":");
+    try writeJsonVolumes(writer, worker.volumes);
+    if (worker.gpu) |gpu| {
+        try writer.writeAll(",\"gpu\":");
+        try writeJsonGpu(writer, gpu);
+    }
+    if (worker.gpu_mesh) |mesh| {
+        try writer.writeAll(",\"gpu_mesh\":");
+        try writeJsonGpuMesh(writer, mesh);
+    }
+    if (worker.required_labels.len > 0) {
+        try writer.writeAll(",\"required_labels\":\"");
+        try json_helpers.writeJsonEscaped(writer, worker.required_labels);
+        try writer.writeByte('"');
+    }
+    try writer.writeByte('}');
+}
+
+fn writeJsonCron(writer: anytype, cron: ApplicationCronSpec) !void {
+    try writer.writeAll("{\"name\":\"");
+    try json_helpers.writeJsonEscaped(writer, cron.name);
+    try writer.writeAll("\",\"image\":\"");
+    try json_helpers.writeJsonEscaped(writer, cron.image);
+    try writer.writeAll("\",\"command\":");
+    try writeJsonStringArray(writer, cron.command);
+    try writer.writeAll(",\"env\":");
+    try writeJsonStringArray(writer, cron.env);
+    if (cron.working_dir) |working_dir| {
+        try writer.writeAll(",\"working_dir\":\"");
+        try json_helpers.writeJsonEscaped(writer, working_dir);
+        try writer.writeByte('"');
+    }
+    try writer.writeAll(",\"volumes\":");
+    try writeJsonVolumes(writer, cron.volumes);
+    try writer.print(",\"every\":{d}", .{cron.every});
+    try writer.writeByte('}');
+}
+
+fn writeJsonTrainingJob(writer: anytype, job: ApplicationTrainingJobSpec) !void {
+    try writer.writeAll("{\"name\":\"");
+    try json_helpers.writeJsonEscaped(writer, job.name);
+    try writer.writeAll("\",\"image\":\"");
+    try json_helpers.writeJsonEscaped(writer, job.image);
+    try writer.writeAll("\",\"command\":");
+    try writeJsonStringArray(writer, job.command);
+    try writer.writeAll(",\"env\":");
+    try writeJsonStringArray(writer, job.env);
+    if (job.working_dir) |working_dir| {
+        try writer.writeAll(",\"working_dir\":\"");
+        try json_helpers.writeJsonEscaped(writer, working_dir);
+        try writer.writeByte('"');
+    }
+    try writer.writeAll(",\"volumes\":");
+    try writeJsonVolumes(writer, job.volumes);
+    try writer.print(",\"gpus\":{d}", .{job.gpus});
+    if (job.gpu_type) |gpu_type| {
+        try writer.writeAll(",\"gpu_type\":\"");
+        try json_helpers.writeJsonEscaped(writer, gpu_type);
+        try writer.writeByte('"');
+    }
+    try writer.print(",\"cpu_limit\":{d},\"memory_limit_mb\":{d},\"ib_required\":{}", .{
+        job.resources.cpu,
+        job.resources.memory_mb,
+        job.resources.ib_required,
+    });
+    try writer.print(",\"spare_ranks\":{d},\"auto_restart\":{},\"max_restarts\":{d}", .{
+        job.fault_tolerance.spare_ranks,
+        job.fault_tolerance.auto_restart,
+        job.fault_tolerance.max_restarts,
+    });
+    if (job.data) |data| {
+        try writer.writeAll(",\"data\":");
+        try writeJsonTrainingData(writer, data);
+    }
+    if (job.checkpoint) |checkpoint| {
+        try writer.writeAll(",\"checkpoint\":");
+        try writeJsonCheckpoint(writer, checkpoint);
+    }
+    try writer.writeByte('}');
 }
 
 fn writeJsonHealthCheck(writer: anytype, health_check: spec.HealthCheck) !void {
@@ -442,6 +710,29 @@ fn writeJsonGpuMesh(writer: anytype, mesh: spec.GpuMeshSpec) !void {
     );
 }
 
+fn writeJsonTrainingData(writer: anytype, data: spec.DataSpec) !void {
+    try writer.writeAll("{\"dataset\":\"");
+    try json_helpers.writeJsonEscaped(writer, data.dataset);
+    try writer.writeAll("\",\"sharding\":\"");
+    try json_helpers.writeJsonEscaped(writer, data.sharding);
+    try writer.writeByte('"');
+    if (data.preprocessing) |preprocessing| {
+        try writer.writeAll(",\"preprocessing\":\"");
+        try json_helpers.writeJsonEscaped(writer, preprocessing);
+        try writer.writeByte('"');
+    }
+    try writer.writeByte('}');
+}
+
+fn writeJsonCheckpoint(writer: anytype, checkpoint: spec.CheckpointSpec) !void {
+    try writer.writeAll("{\"path\":\"");
+    try json_helpers.writeJsonEscaped(writer, checkpoint.path);
+    try writer.print("\",\"interval_secs\":{d},\"keep\":{d}}}", .{
+        checkpoint.interval_secs,
+        checkpoint.keep,
+    });
+}
+
 fn restartPolicyString(restart: spec.RestartPolicy) []const u8 {
     return switch (restart) {
         .none => "none",
@@ -457,7 +748,7 @@ fn volumeKindString(kind: spec.VolumeMount.Kind) []const u8 {
     };
 }
 
-test "fromManifest builds canonical service app spec" {
+test "fromManifest builds canonical workload app spec" {
     const alloc = std.testing.allocator;
 
     var manifest = try loader.loadFromString(alloc,
@@ -481,6 +772,25 @@ test "fromManifest builds canonical service app spec" {
         \\
         \\[service.db]
         \\image = "postgres:16"
+        \\
+        \\[worker.migrate]
+        \\image = "alpine:latest"
+        \\command = ["sh", "-c", "migrate"]
+        \\depends_on = ["db"]
+        \\
+        \\[cron.cleanup]
+        \\image = "busybox"
+        \\command = ["sh", "-c", "cleanup"]
+        \\every = "1h"
+        \\
+        \\[training.finetune]
+        \\image = "trainer:v1"
+        \\command = ["torchrun", "train.py"]
+        \\gpus = 4
+        \\
+        \\[training.finetune.resources]
+        \\cpu = 2000
+        \\memory_mb = 131072
     );
     defer manifest.deinit();
 
@@ -489,17 +799,15 @@ test "fromManifest builds canonical service app spec" {
 
     try std.testing.expectEqualStrings("demo-app", app.app_name);
     try std.testing.expectEqual(@as(usize, 2), app.services.len);
+    try std.testing.expectEqual(@as(usize, 1), app.workers.len);
+    try std.testing.expectEqual(@as(usize, 1), app.crons.len);
+    try std.testing.expectEqual(@as(usize, 1), app.training_jobs.len);
     try std.testing.expectEqualStrings("web", app.services[1].name);
-    try std.testing.expectEqualStrings("nginx:latest", app.services[1].image);
-    try std.testing.expectEqual(@as(usize, 3), app.services[1].command.len);
-    try std.testing.expectEqual(@as(usize, 1), app.services[1].ports.len);
-    try std.testing.expectEqual(@as(usize, 1), app.services[1].env.len);
-    try std.testing.expectEqual(@as(usize, 1), app.services[1].depends_on.len);
-    try std.testing.expectEqualStrings("/app", app.services[1].working_dir.?);
-    try std.testing.expectEqual(@as(usize, 1), app.services[1].volumes.len);
-    try std.testing.expectEqual(@as(u32, 1), app.services[1].gpu.?.count);
-    try std.testing.expectEqual(@as(u32, 4), app.services[1].gpu_mesh.?.world_size);
-    try std.testing.expectEqual(@as(u32, 2), app.services[1].gpu_mesh.?.gpus_per_rank);
+    try std.testing.expectEqualStrings("migrate", app.workers[0].name);
+    try std.testing.expectEqualStrings("cleanup", app.crons[0].name);
+    try std.testing.expectEqualStrings("finetune", app.training_jobs[0].name);
+    try std.testing.expectEqual(@as(u32, 4), app.training_jobs[0].gpus);
+    try std.testing.expectEqual(@as(u32, 2000), app.training_jobs[0].resources.cpu);
 }
 
 test "toLegacyDeployJson preserves service semantics needed by deploy shim" {
@@ -552,6 +860,10 @@ test "selectServices includes transitive dependencies in manifest order" {
         \\
         \\[service.db]
         \\image = "postgres:16"
+        \\
+        \\[worker.migrate]
+        \\image = "alpine:latest"
+        \\command = ["sh", "-c", "migrate"]
     );
     defer manifest.deinit();
 
@@ -562,12 +874,13 @@ test "selectServices includes transitive dependencies in manifest order" {
     defer filtered.deinit();
 
     try std.testing.expectEqual(@as(usize, 3), filtered.services.len);
+    try std.testing.expectEqual(@as(usize, 1), filtered.workers.len);
     try std.testing.expectEqualStrings("db", filtered.services[0].name);
     try std.testing.expectEqualStrings("api", filtered.services[1].name);
     try std.testing.expectEqualStrings("web", filtered.services[2].name);
 }
 
-test "toApplyJson preserves structured command and service metadata" {
+test "toApplyJson preserves structured workload metadata" {
     const alloc = std.testing.allocator;
 
     var manifest = try loader.loadFromString(alloc,
@@ -583,6 +896,20 @@ test "toApplyJson preserves structured command and service metadata" {
         \\
         \\[service.db]
         \\image = "postgres:16"
+        \\
+        \\[worker.migrate]
+        \\image = "alpine:latest"
+        \\command = ["sh", "-c", "migrate"]
+        \\
+        \\[cron.cleanup]
+        \\image = "busybox"
+        \\command = ["sh", "-c", "cleanup"]
+        \\every = "1h"
+        \\
+        \\[training.finetune]
+        \\image = "trainer:v1"
+        \\command = ["torchrun", "train.py"]
+        \\gpus = 4
     );
     defer manifest.deinit();
 
@@ -594,9 +921,8 @@ test "toApplyJson preserves structured command and service metadata" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"command\":[\"nginx\",\"-g\",\"daemon off;\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"ports\":[{\"host_port\":8080,\"container_port\":80}]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"env\":[\"MODE=prod\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"depends_on\":[\"db\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"working_dir\":\"/app\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"restart\":\"always\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workers\":[{\"name\":\"migrate\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"crons\":[{\"name\":\"cleanup\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"training_jobs\":[{\"name\":\"finetune\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"gpus\":4") != null);
 }

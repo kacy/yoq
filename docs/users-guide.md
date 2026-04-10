@@ -170,6 +170,12 @@ this gives the operator one app-first day-2 model:
 - `yoq rollback --app [name]` — print the last successful local app snapshot
 - `yoq rollback --app [name] --server host:port --release <id>` — re-apply a prior remote app release
 - `yoq apps` — list app release summaries across all known apps
+- `yoq run-worker [--server host:port] <name>` — run a worker from the current app release
+- `yoq train start|status|stop|pause|resume|scale|logs [--server host:port] <name>` — manage training jobs from the current app release
+
+`yoq apps` and `yoq status --app` now show both the desired workload mix from the latest app release and the current training runtime summary for that app. On clustered applies, cron definitions from the app snapshot are also registered in cluster state, so rollback restores the active cron schedule set along with the rest of the app snapshot.
+
+Remote `yoq train logs --server ...` now proxies the request to the agent that hosts the selected rank. If that agent is unreachable or does not expose the log endpoint, the API returns an explicit hosting-agent error instead of a misleading empty or missing result.
 
 ### dev mode
 
@@ -217,7 +223,7 @@ if the leader changes, agents follow automatically — heartbeat responses inclu
 
 ### app-first control plane
 
-cluster manifest deploys now use `POST /apps/apply` as the canonical write path. the older `POST /deploy` route is still accepted as a compatibility shim, but new CLI work targets the app-first route.
+cluster manifest deploys now use `POST /apps/apply` as the canonical write path. the app snapshot includes services, workers, crons, and training jobs. the older `POST /deploy` route is still accepted as a compatibility shim, but new CLI work targets the app-first route.
 
 the cluster API also exposes app-scoped day-2 reads and rollback:
 
@@ -225,6 +231,12 @@ the cluster API also exposes app-scoped day-2 reads and rollback:
 - `GET /apps/<name>/status` — latest app release metadata
 - `GET /apps/<name>/history` — app release history
 - `POST /apps/<name>/rollback` with `{"release_id":"..."}` — re-apply a stored app release snapshot
+- `POST /apps/<app>/workers/<name>/run` — run a worker from the current app release
+- `POST /apps/<app>/training/<name>/start|stop|pause|resume|scale` — manage training jobs for the current app release
+- `GET /apps/<app>/training/<name>/status|logs` — inspect training jobs for the current app release
+
+The app status surfaces (`GET /apps`, `GET /apps/<name>/status`, `yoq apps`, and `yoq status --app`) also report live training runtime counts for the app: active, paused, and failed jobs.
+For `GET /apps/<app>/training/<name>/logs`, the control plane now proxies the request to the hosting agent for the selected rank. If that agent is unreachable or does not expose the log endpoint, the route returns an explicit hosting-agent error.
 
 ### rolling upgrades
 

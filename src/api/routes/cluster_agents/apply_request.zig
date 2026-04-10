@@ -2,6 +2,7 @@ const std = @import("std");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
+const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const common = @import("../common.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
@@ -10,6 +11,7 @@ const extractJsonArray = json_helpers.extractJsonArray;
 
 pub const ApplyRequest = struct {
     app_name: ?[]const u8,
+    summary: app_snapshot.Summary,
     requests: std.ArrayListUnmanaged(scheduler.PlacementRequest) = .empty,
 
     pub fn deinit(self: *ApplyRequest, alloc: std.mem.Allocator) void {
@@ -36,6 +38,7 @@ pub const ParseError = error{
 pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool) ParseError!ApplyRequest {
     var parsed: ApplyRequest = .{
         .app_name = extractJsonString(body, "app_name") orelse extractJsonString(body, "volume_app"),
+        .summary = app_snapshot.summarize(body),
     };
     errdefer parsed.deinit(alloc);
 
@@ -43,41 +46,46 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
         return ParseError.MissingAppName;
     }
 
-    const services_json = extractJsonArray(body, "services") orelse return ParseError.MissingServicesArray;
+    if (extractJsonArray(body, "services")) |services_json| {
+        var iter = json_helpers.extractJsonObjects(services_json);
+        while (iter.next()) |block| {
+            const image = extractJsonString(block, "image") orelse continue;
+            const command = extractCommandString(alloc, block) catch return ParseError.OutOfMemory;
+            errdefer alloc.free(command);
 
-    var iter = json_helpers.extractJsonObjects(services_json);
-    while (iter.next()) |block| {
-        const image = extractJsonString(block, "image") orelse continue;
-        const command = extractCommandString(alloc, block) catch return ParseError.OutOfMemory;
-        errdefer alloc.free(command);
+            if (!common.validateClusterInput(image)) {
+                alloc.free(command);
+                continue;
+            }
+            if (command.len > 0 and !common.validateClusterInput(command)) {
+                alloc.free(command);
+                continue;
+            }
 
-        if (!common.validateClusterInput(image)) {
-            alloc.free(command);
-            continue;
+            parsed.requests.append(alloc, .{
+                .image = image,
+                .command = command,
+                .cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000,
+                .memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256,
+                .gpu_limit = extractJsonInt(block, "gpu_limit") orelse 0,
+                .gpu_model = extractJsonString(block, "gpu_model"),
+                .gpu_vram_min_mb = if (extractJsonInt(block, "gpu_vram_min_mb")) |v| @as(u64, @intCast(@max(0, v))) else null,
+                .required_labels = extractJsonString(block, "required_labels") orelse "",
+                .gang_world_size = if (extractJsonInt(block, "gang_world_size")) |v| @intCast(@max(0, v)) else 0,
+                .gpus_per_rank = if (extractJsonInt(block, "gpus_per_rank")) |v| @intCast(@max(1, v)) else 1,
+            }) catch {
+                alloc.free(command);
+                return ParseError.OutOfMemory;
+            };
         }
-        if (command.len > 0 and !common.validateClusterInput(command)) {
-            alloc.free(command);
-            continue;
-        }
-
-        parsed.requests.append(alloc, .{
-            .image = image,
-            .command = command,
-            .cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000,
-            .memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256,
-            .gpu_limit = extractJsonInt(block, "gpu_limit") orelse 0,
-            .gpu_model = extractJsonString(block, "gpu_model"),
-            .gpu_vram_min_mb = if (extractJsonInt(block, "gpu_vram_min_mb")) |v| @as(u64, @intCast(@max(0, v))) else null,
-            .required_labels = extractJsonString(block, "required_labels") orelse "",
-            .gang_world_size = if (extractJsonInt(block, "gang_world_size")) |v| @intCast(@max(0, v)) else 0,
-            .gpus_per_rank = if (extractJsonInt(block, "gpus_per_rank")) |v| @intCast(@max(1, v)) else 1,
-        }) catch {
-            alloc.free(command);
-            return ParseError.OutOfMemory;
-        };
+    } else if (parsed.summary.hasAny()) {
+        return parsed;
     }
 
-    if (parsed.requests.items.len == 0) return ParseError.NoServices;
+    if (parsed.requests.items.len == 0) {
+        if (parsed.summary.hasAny()) return parsed;
+        return ParseError.NoServices;
+    }
     return parsed;
 }
 
@@ -153,4 +161,18 @@ test "parse joins structured command arrays" {
     try std.testing.expectEqualStrings("demo-app", parsed.app_name.?);
     try std.testing.expectEqual(@as(usize, 1), parsed.requests.items.len);
     try std.testing.expectEqualStrings("nginx -g daemon off", parsed.requests.items[0].command);
+}
+
+test "parse accepts training-only app apply payloads" {
+    const alloc = std.testing.allocator;
+    const json =
+        \\{"app_name":"demo-app","workers":[],"crons":[],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["torchrun","train.py"],"gpus":4}],"services":[]}
+    ;
+
+    var parsed = try parse(alloc, json, true);
+    defer parsed.deinit(alloc);
+
+    try std.testing.expectEqualStrings("demo-app", parsed.app_name.?);
+    try std.testing.expectEqual(@as(usize, 0), parsed.requests.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.summary.training_job_count);
 }

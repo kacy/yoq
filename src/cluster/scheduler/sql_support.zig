@@ -27,20 +27,41 @@ pub fn assignmentSqlGang(
     const img_esc = try sql_escape.escapeSqlString(&img_esc_buf, request.image);
     var cmd_esc_buf: [512]u8 = undefined;
     const cmd_esc = try sql_escape.escapeSqlString(&cmd_esc_buf, request.command);
+    var app_esc_buf: [256]u8 = undefined;
+    var kind_esc_buf: [64]u8 = undefined;
+    var name_esc_buf: [256]u8 = undefined;
+    var metadata_vals_buf: [768]u8 = undefined;
+
+    const metadata_cols = if (request.app_name != null and request.workload_kind != null and request.workload_name != null)
+        ", app_name, workload_kind, workload_name"
+    else
+        "";
+    const metadata_vals = if (request.app_name != null and request.workload_kind != null and request.workload_name != null)
+        try std.fmt.bufPrint(
+            &metadata_vals_buf,
+            ", '{s}', '{s}', '{s}'",
+            .{
+                try sql_escape.escapeSqlString(&app_esc_buf, request.app_name.?),
+                try sql_escape.escapeSqlString(&kind_esc_buf, request.workload_kind.?),
+                try sql_escape.escapeSqlString(&name_esc_buf, request.workload_name.?),
+            },
+        )
+    else
+        "";
 
     if (gang) |placement| {
         var master_esc_buf: [256]u8 = undefined;
         const master_esc = try sql_escape.escapeSqlString(&master_esc_buf, placement.master_addr);
         return std.fmt.bufPrint(buf,
-            \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port, created_at)
-            \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d}, {d}, '{s}', {d}, {d});
-        , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, placement.rank, placement.world_size, master_esc, placement.master_port, now });
+            \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, gang_rank, gang_world_size, gang_master_addr, gang_master_port, created_at{s})
+            \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d}, {d}, '{s}', {d}, {d}{s});
+        , .{ metadata_cols, id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, placement.rank, placement.world_size, master_esc, placement.master_port, now, metadata_vals });
     }
 
     return std.fmt.bufPrint(buf,
-        \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at)
-        \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d});
-    , .{ id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, now });
+        \\INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at{s})
+        \\ VALUES ('{s}', '{s}', '{s}', '{s}', 'pending', {d}, {d}, {d}{s});
+    , .{ metadata_cols, id, agent_id, img_esc, cmd_esc, request.cpu_limit, request.memory_limit_mb, now, metadata_vals });
 }
 
 pub fn generateAssignmentId(buf: *[12]u8) void {

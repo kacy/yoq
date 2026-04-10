@@ -188,6 +188,10 @@ pub const Orchestrator = struct {
         self.proxy = resources.proxy;
     }
 
+    pub fn finishRuntimeSetup(self: *Orchestrator) void {
+        lifecycle_support.finishRuntimeSetup(self);
+    }
+
     /// stop all running services in reverse dependency order.
     pub fn stopAll(self: *Orchestrator) void {
         lifecycle_support.stopAll(self);
@@ -697,4 +701,29 @@ test "stopServiceByIndex marks running service stopped without pid" {
 
     try std.testing.expectEqual(ServiceState.Status.stopped, orch.states[0].status);
     try std.testing.expect(orch.states[0].thread == null);
+}
+
+test "finishRuntimeSetup starts cron scheduler when crons are present" {
+    const alloc = std.testing.allocator;
+    const loader = @import("loader.zig");
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[cron.cleanup]
+        \\image = "alpine:latest"
+        \\command = ["/bin/sh", "-c", "echo cleanup"]
+        \\every = "1h"
+    );
+    defer manifest.deinit();
+
+    var orch = try Orchestrator.init(alloc, &manifest, "demo-app");
+    defer orch.deinit();
+
+    orch.finishRuntimeSetup();
+
+    try std.testing.expect(orch.cron_sched != null);
+    orch.stopAll();
+    try std.testing.expect(orch.cron_sched != null);
 }

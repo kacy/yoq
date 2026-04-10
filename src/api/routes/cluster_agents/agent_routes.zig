@@ -2,6 +2,7 @@ const std = @import("std");
 const http = @import("../../http.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const cluster_config = @import("../../../cluster/config.zig");
+const request_support = @import("../../../cluster/agent/request_support.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const common = @import("../common.zig");
 const writers = @import("writers.zig");
@@ -18,10 +19,14 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     const token = extractJsonString(request.body, "token") orelse return common.badRequest("missing token field");
     const address = extractJsonString(request.body, "address") orelse return common.badRequest("missing address field");
+    const agent_api_port = extractJsonInt(request.body, "agent_api_port");
     const cpu_cores = extractJsonInt(request.body, "cpu_cores") orelse return common.badRequest("missing cpu_cores field");
     const memory_mb = extractJsonInt(request.body, "memory_mb") orelse return common.badRequest("missing memory_mb field");
     if (cpu_cores <= 0 or cpu_cores > 10000) return common.badRequest("invalid cpu_cores");
     if (memory_mb <= 0 or memory_mb > 10_000_000) return common.badRequest("invalid memory_mb");
+    if (agent_api_port) |port| {
+        if (port <= 0 or port > 65535) return common.badRequest("invalid agent_api_port");
+    }
     if (cpu_cores > std.math.maxInt(u32)) return common.badRequest("cpu_cores too large");
     if (memory_mb > std.math.maxInt(u64)) return common.badRequest("memory_mb too large");
 
@@ -42,7 +47,6 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
     var container_subnet_buf: [20]u8 = undefined;
     var container_subnet: ?[]const u8 = null;
     var endpoint_buf: [64]u8 = undefined;
-    var endpoint: ?[]const u8 = null;
     var peer_sql: ?[]const u8 = null;
     var peer_sql_buf: [1024]u8 = undefined;
 
@@ -76,15 +80,18 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
             if (p <= 0 or p > 65535) return common.badRequest("invalid wg_listen_port");
             break :blk @intCast(p);
         } else 51820;
-        endpoint = std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;
+        const endpoint_host = if (request_support.parseHostPort(address)) |hp|
+            std.fmt.bufPrint(&endpoint_buf, "{d}.{d}.{d}.{d}:{d}", .{ hp.addr[0], hp.addr[1], hp.addr[2], hp.addr[3], port }) catch null
+        else
+            std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;
 
-        if (endpoint != null and overlay_ip_str != null and container_subnet != null) {
+        if (endpoint_host != null and overlay_ip_str != null and container_subnet != null) {
             peer_sql = agent_registry.wireguardPeerSql(
                 &peer_sql_buf,
                 nid,
                 &id_buf,
                 pub_key,
-                endpoint.?,
+                endpoint_host.?,
                 overlay_ip_str.?,
                 container_subnet.?,
             ) catch return common.internalError();
@@ -117,6 +124,7 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
         std.time.timestamp(),
         .{
             .node_id = assigned_node_id,
+            .agent_api_port = if (agent_api_port) |port| @intCast(port) else null,
             .wg_public_key = wg_public_key,
             .overlay_ip = overlay_ip_str,
             .role = role_str,

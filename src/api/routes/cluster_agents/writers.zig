@@ -9,7 +9,12 @@ pub fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void 
     try json_helpers.writeJsonEscaped(writer, agent.address);
     try writer.writeAll("\",\"status\":\"");
     try writer.writeAll(agent.status);
-    try writer.writeAll("\",\"cpu_cores\":");
+    try writer.writeByte('"');
+    if (agent.agent_api_port) |port| {
+        try writer.writeAll(",\"agent_api_port\":");
+        try std.fmt.format(writer, "{d}", .{port});
+    }
+    try writer.writeAll(",\"cpu_cores\":");
     try std.fmt.format(writer, "{d}", .{agent.cpu_cores});
     try writer.writeAll(",\"memory_mb\":");
     try std.fmt.format(writer, "{d}", .{agent.memory_mb});
@@ -90,6 +95,21 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
     try std.fmt.format(writer, "{d}", .{assignment.cpu_limit});
     try writer.writeAll(",\"memory_limit_mb\":");
     try std.fmt.format(writer, "{d}", .{assignment.memory_limit_mb});
+    if (assignment.app_name) |app_name| {
+        try writer.writeAll(",\"app_name\":\"");
+        try json_helpers.writeJsonEscaped(writer, app_name);
+        try writer.writeByte('"');
+    }
+    if (assignment.workload_kind) |workload_kind| {
+        try writer.writeAll(",\"workload_kind\":\"");
+        try json_helpers.writeJsonEscaped(writer, workload_kind);
+        try writer.writeByte('"');
+    }
+    if (assignment.workload_name) |workload_name| {
+        try writer.writeAll(",\"workload_name\":\"");
+        try json_helpers.writeJsonEscaped(writer, workload_name);
+        try writer.writeByte('"');
+    }
     if (assignment.gang_rank) |rank| {
         try writer.writeAll(",\"gang_rank\":");
         try std.fmt.format(writer, "{d}", .{rank});

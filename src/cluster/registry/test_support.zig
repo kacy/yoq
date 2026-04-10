@@ -2,6 +2,7 @@ pub const agents_schema =
     \\CREATE TABLE agents (
     \\    id TEXT PRIMARY KEY,
     \\    address TEXT NOT NULL,
+    \\    agent_api_port INTEGER,
     \\    status TEXT NOT NULL DEFAULT 'active',
     \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
     \\    memory_mb INTEGER NOT NULL DEFAULT 0,

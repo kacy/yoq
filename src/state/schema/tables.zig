@@ -180,6 +180,7 @@ pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
         \\CREATE TABLE IF NOT EXISTS agents (
         \\    id TEXT PRIMARY KEY,
         \\    address TEXT NOT NULL,
+        \\    agent_api_port INTEGER,
         \\    status TEXT NOT NULL DEFAULT 'active',
         \\    cpu_cores INTEGER NOT NULL DEFAULT 0,
         \\    memory_mb INTEGER NOT NULL DEFAULT 0,
@@ -199,6 +200,9 @@ pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
         \\    status TEXT NOT NULL DEFAULT 'pending',
         \\    cpu_limit INTEGER NOT NULL DEFAULT 1000,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 256,
+        \\    app_name TEXT,
+        \\    workload_kind TEXT,
+        \\    workload_name TEXT,
         \\    gang_rank INTEGER,
         \\    gang_world_size INTEGER,
         \\    gang_master_addr TEXT,
@@ -224,6 +228,17 @@ pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
         \\    overlay_ip TEXT NOT NULL,
         \\    container_subnet TEXT NOT NULL,
         \\    PRIMARY KEY (node_id)
+        \\);
+    );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS cron_schedules (
+        \\    app_name TEXT NOT NULL,
+        \\    name TEXT NOT NULL,
+        \\    every INTEGER NOT NULL,
+        \\    spec_json TEXT NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (app_name, name)
         \\);
     );
 }

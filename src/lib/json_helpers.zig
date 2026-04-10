@@ -164,6 +164,49 @@ pub fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+/// extract a top-level object value from a JSON object: {"key":{...}}
+pub fn extractJsonObject(json: []const u8, key: []const u8) ?[]const u8 {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":{{", .{key}) catch return null;
+    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
+
+    const object_start = start_pos + needle.len - 1;
+    var pos = object_start;
+    var depth: usize = 0;
+    var in_string = false;
+    var escape = false;
+
+    while (pos < json.len) : (pos += 1) {
+        const c = json[pos];
+
+        if (escape) {
+            escape = false;
+            continue;
+        }
+
+        if (c == '\\' and in_string) {
+            escape = true;
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+
+        if (in_string) continue;
+
+        if (c == '{') {
+            depth += 1;
+        } else if (c == '}') {
+            depth -= 1;
+            if (depth == 0) return json[object_start .. pos + 1];
+        }
+    }
+
+    return null;
+}
+
 // -- JSON array iteration --
 // iterate over top-level objects in a JSON array like [{...},{...}].
 // returns slices into the original buffer — no allocation needed.

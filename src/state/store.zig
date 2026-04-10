@@ -23,7 +23,9 @@ pub const ServiceEndpointRecord = @import("store/services.zig").ServiceEndpointR
 pub const ServiceNameRecord = @import("store/services.zig").ServiceNameRecord;
 pub const NetworkPolicyRecord = @import("store/services.zig").NetworkPolicyRecord;
 pub const DeploymentRecord = @import("store/deployments.zig").DeploymentRecord;
+pub const CronScheduleRecord = @import("store/crons.zig").CronScheduleRecord;
 pub const TrainingJobRecord = @import("store/training.zig").TrainingJobRecord;
+pub const TrainingJobSummary = @import("store/training.zig").TrainingJobSummary;
 pub const CheckpointRecord = @import("store/training.zig").CheckpointRecord;
 
 pub const initTestDb = common.initTestDb;
@@ -98,12 +100,27 @@ pub const getLastSuccessfulDeploymentByApp = @import("store/deployments.zig").ge
 pub const getPreviousSuccessfulDeploymentByApp = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByApp;
 pub const getPreviousSuccessfulDeploymentByAppInDb = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByAppInDb;
 
+pub const replaceCronSchedulesForApp = @import("store/crons.zig").replaceCronSchedulesForApp;
+pub const replaceCronSchedulesForAppInDb = @import("store/crons.zig").replaceCronSchedulesForAppInDb;
+pub const listCronSchedulesByApp = @import("store/crons.zig").listCronSchedulesByApp;
+pub const listCronSchedulesByAppInDb = @import("store/crons.zig").listCronSchedulesByAppInDb;
+
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
+pub const saveTrainingJobInDb = @import("store/training.zig").saveTrainingJobInDb;
 pub const updateTrainingJobState = @import("store/training.zig").updateTrainingJobState;
+pub const updateTrainingJobStateInDb = @import("store/training.zig").updateTrainingJobStateInDb;
 pub const incrementTrainingJobRestarts = @import("store/training.zig").incrementTrainingJobRestarts;
+pub const incrementTrainingJobRestartsInDb = @import("store/training.zig").incrementTrainingJobRestartsInDb;
 pub const updateTrainingJobGpus = @import("store/training.zig").updateTrainingJobGpus;
+pub const updateTrainingJobGpusInDb = @import("store/training.zig").updateTrainingJobGpusInDb;
 pub const findTrainingJob = @import("store/training.zig").findTrainingJob;
+pub const findTrainingJobInDb = @import("store/training.zig").findTrainingJobInDb;
 pub const getTrainingJob = @import("store/training.zig").getTrainingJob;
+pub const getTrainingJobInDb = @import("store/training.zig").getTrainingJobInDb;
+pub const listTrainingJobsByApp = @import("store/training.zig").listTrainingJobsByApp;
+pub const listTrainingJobsByAppInDb = @import("store/training.zig").listTrainingJobsByAppInDb;
+pub const summarizeTrainingJobsByApp = @import("store/training.zig").summarizeTrainingJobsByApp;
+pub const summarizeTrainingJobsByAppInDb = @import("store/training.zig").summarizeTrainingJobsByAppInDb;
 pub const saveCheckpoint = @import("store/training.zig").saveCheckpoint;
 pub const getLatestCheckpoint = @import("store/training.zig").getLatestCheckpoint;
 pub const listCheckpoints = @import("store/training.zig").listCheckpoints;

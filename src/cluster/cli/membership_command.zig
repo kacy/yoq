@@ -21,6 +21,7 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var server_host: ?[]const u8 = null;
     var token: ?[]const u8 = null;
     var api_port: u16 = 7700;
+    var agent_api_port: u16 = 7701;
     var role: cluster_config.NodeRole = .both;
     var region: ?[]const u8 = null;
 
@@ -37,6 +38,15 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
             };
             api_port = std.fmt.parseInt(u16, port_str, 10) catch {
                 writeErr("invalid port: {s}\n", .{port_str});
+                return MembershipError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--agent-port")) {
+            const port_str = args.next() orelse {
+                writeErr("--agent-port requires a port number\n", .{});
+                return MembershipError.InvalidArgument;
+            };
+            agent_api_port = std.fmt.parseInt(u16, port_str, 10) catch {
+                writeErr("invalid agent port: {s}\n", .{port_str});
                 return MembershipError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--role")) {
@@ -78,6 +88,7 @@ pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     var agent = try cluster_agent.Agent.initOwned(alloc, server_addr, api_port, join_token);
     defer agent.deinit();
+    agent.agent_api_port = agent_api_port;
     agent.role = role;
     agent.region = region;
 

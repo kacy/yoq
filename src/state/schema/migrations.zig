@@ -6,8 +6,10 @@ pub const SchemaError = error{InitFailed};
 pub fn apply(db: *sqlite.Db) SchemaError!void {
     migrateContainers(db);
     migrateAgents(db);
+    migrateAssignments(db);
     migrateServices(db);
     migrateDeployments(db);
+    migrateCronSchedules(db);
 }
 
 fn migrateContainers(db: *sqlite.Db) void {
@@ -15,6 +17,7 @@ fn migrateContainers(db: *sqlite.Db) void {
 }
 
 fn migrateAgents(db: *sqlite.Db) void {
+    addColumnIfMissing(db, "ALTER TABLE agents ADD COLUMN agent_api_port INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE agents ADD COLUMN node_id INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE agents ADD COLUMN wg_public_key TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE agents ADD COLUMN overlay_ip TEXT;") catch {};
@@ -133,6 +136,26 @@ fn migrateDeployments(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN completed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     db.exec("UPDATE deployments SET trigger = 'apply' WHERE trigger IS NULL OR trigger = '';", .{}, .{}) catch {};
+}
+
+fn migrateCronSchedules(db: *sqlite.Db) void {
+    createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS cron_schedules (
+        \\    app_name TEXT NOT NULL,
+        \\    name TEXT NOT NULL,
+        \\    every INTEGER NOT NULL,
+        \\    spec_json TEXT NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (app_name, name)
+        \\);
+    ) catch {};
+}
+
+fn migrateAssignments(db: *sqlite.Db) void {
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN app_name TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_kind TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_name TEXT;") catch {};
 }
 
 fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {

@@ -392,7 +392,7 @@ const LocalApplyBackend = struct {
             }
 
             fn finish(runner_self: *@This()) void {
-                runner_self.orch.startTlsProxy();
+                runner_self.orch.finishRuntimeSetup();
             }
 
             fn reportProgress(runner_self: *@This(), completed_targets: usize, failed_targets: usize) void {

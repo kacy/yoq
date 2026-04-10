@@ -186,6 +186,7 @@ yoq up --dev                         watch and hot-restart on changes
 yoq up --server host:port            deploy to a cluster
 yoq down [-f manifest.toml]          stop services from a manifest
 yoq run-worker <name>                run a one-shot worker
+yoq run-worker --server host:port <name>
 yoq init [-f path]                   scaffold a manifest
 yoq validate [-f manifest.toml] [-q] validate a manifest
 ```
@@ -260,14 +261,16 @@ yoq gpu bench [--gpus N]             GPU-to-GPU bandwidth benchmark
 ### training
 
 ```text
-yoq train start <name>              start a training job
-yoq train status <name>             show training job status
-yoq train stop <name>               stop a training job
-yoq train pause <name>              pause a training job
-yoq train resume <name>             resume a paused job
-yoq train scale <name>              scale training ranks
-yoq train logs <name> [--rank N]    show logs for a training rank
+yoq train start [--server host:port] <name>              start a training job
+yoq train status [--server host:port] <name>             show training job status
+yoq train stop [--server host:port] <name>               stop a training job
+yoq train pause [--server host:port] <name>              pause a training job
+yoq train resume [--server host:port] <name>             resume a paused job
+yoq train scale [--server host:port] <name> --gpus <n>   scale training ranks
+yoq train logs [--server host:port] <name> [--rank N]    show logs for a training rank
 ```
+
+For clustered training logs, the control plane now proxies log reads to the agent that hosts the selected rank. If that agent is unreachable or does not expose the log endpoint, the API returns an explicit hosting-agent error instead of a misleading empty result.
 
 ### diagnostics
 
@@ -290,7 +293,8 @@ Notes:
 - `--json` is available on `ps`, `images`, `prune`, `version`, `gpu topo`, and `doctor`.
 - crons defined in the manifest start automatically with `yoq up`.
 - deployment, metrics, and certificate commands also support `--server host:port`.
-- clustered manifest deploys now go through the app-first `/apps/apply` API. the older `/deploy` route remains as a compatibility shim for legacy callers.
+- clustered manifest deploys now go through the app-first `/apps/apply` API and carry services, workers, crons, and training definitions in one app snapshot. the older `/deploy` route remains as a compatibility shim for legacy callers.
+- remote app applies now register active cron schedules in cluster state, and `yoq apps` / `yoq status --app` include live training runtime summaries for the current app.
 
 ## current status
 

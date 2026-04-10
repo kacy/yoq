@@ -30,6 +30,7 @@ pub const removeSql = sql_mutations.removeSql;
 pub const orphanAssignmentsSql = sql_mutations.orphanAssignmentsSql;
 pub const reassignSql = sql_mutations.reassignSql;
 pub const deleteAgentAssignmentsSql = sql_mutations.deleteAgentAssignmentsSql;
+pub const deleteAssignmentsForWorkloadSql = sql_mutations.deleteAssignmentsForWorkloadSql;
 pub const wireguardPeerSql = sql_mutations.wireguardPeerSql;
 pub const removeWireguardPeerSql = sql_mutations.removeWireguardPeerSql;
 
@@ -46,6 +47,9 @@ pub const listAgents = queries.listAgents;
 pub const getAgent = queries.getAgent;
 pub const getAssignments = queries.getAssignments;
 pub const getOrphanedAssignments = queries.getOrphanedAssignments;
+pub const countAssignmentsForWorkload = queries.countAssignmentsForWorkload;
+pub const WorkloadHost = queries.WorkloadHost;
+pub const findWorkloadHostByRank = queries.findWorkloadHostByRank;
 
 // -- tests --
 
@@ -431,6 +435,16 @@ test "deleteAgentAssignmentsSql generates valid SQL" {
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "DELETE FROM assignments") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "agent1234567") != null);
+}
+
+test "deleteAssignmentsForWorkloadSql generates valid SQL" {
+    var buf: [512]u8 = undefined;
+    const sql = try deleteAssignmentsForWorkloadSql(&buf, "demo-app", "training", "finetune");
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "DELETE FROM assignments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "demo-app") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "training") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "finetune") != null);
 }
 
 test "assignNodeId returns 1 for empty table" {

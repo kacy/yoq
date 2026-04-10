@@ -6,6 +6,7 @@ const testing = std.testing;
 const cluster_routes = @import("cluster_agents/cluster_routes.zig");
 const agent_routes = @import("cluster_agents/agent_routes.zig");
 const app_routes = @import("cluster_agents/app_routes.zig");
+const workload_routes = @import("cluster_agents/workload_routes.zig");
 const deploy_routes = @import("cluster_agents/deploy_routes.zig");
 const writers = @import("cluster_agents/writers.zig");
 
@@ -37,6 +38,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
     }
 
     if (app_routes.route(request, alloc, ctx)) |resp| return resp;
+    if (workload_routes.route(request, alloc, ctx)) |resp| return resp;
 
     if (path.len > "/agents/".len and std.mem.startsWith(u8, path, "/agents/")) {
         const rest = path["/agents/".len..];

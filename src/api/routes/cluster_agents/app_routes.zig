@@ -4,6 +4,7 @@ const sqlite = @import("sqlite");
 const cluster_node = @import("../../../cluster/node.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
+const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const schema = @import("../../../state/schema.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
@@ -83,7 +84,7 @@ pub fn handleAppStatus(alloc: std.mem.Allocator, app_name: []const u8, ctx: Rout
     ) catch return common.internalError();
     defer if (previous_successful) |dep| dep.deinit(alloc);
 
-    const body = formatAppStatusResponseFromDeployments(alloc, latest, previous_successful) catch return common.internalError();
+    const body = formatAppStatusResponseFromDeployments(alloc, node.stateMachineDb(), latest, previous_successful) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -135,7 +136,7 @@ fn formatAppsResponse(
         defer if (previous_successful) |dep| dep.deinit(alloc);
 
         if (i > 0) try writer.writeByte(',');
-        const json = try formatAppStatusResponseFromDeployments(alloc, latest, previous_successful);
+        const json = try formatAppStatusResponseFromDeployments(alloc, db, latest, previous_successful);
         defer alloc.free(json);
         try writer.writeAll(json);
     }
@@ -157,6 +158,7 @@ fn loadPreviousSuccessfulDeployment(
 
 fn formatAppStatusResponseFromDeployments(
     alloc: std.mem.Allocator,
+    db: *sqlite.Db,
     latest: store.DeploymentRecord,
     previous_successful: ?store.DeploymentRecord,
 ) ![]u8 {
@@ -164,6 +166,8 @@ fn formatAppStatusResponseFromDeployments(
         alloc,
         apply_release.reportFromDeployment(latest),
         if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
+        app_snapshot.summarize(latest.config_snapshot),
+        store.summarizeTrainingJobsByAppInDb(db, alloc, latest.app_name.?) catch .{},
     );
 }
 
@@ -175,6 +179,7 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
     try writer.writeByte('[');
     for (deployments, 0..) |dep, i| {
         const report = apply_release.reportFromDeployment(dep);
+        const summary = app_snapshot.summarize(dep.config_snapshot);
         if (i > 0) try writer.writeByte(',');
         try writer.writeByte('{');
         try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
@@ -189,7 +194,11 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
         try writer.print(",\"created_at\":{d}", .{report.created_at});
-        try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+        try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+            summary.service_count,
+            summary.worker_count,
+            summary.cron_count,
+            summary.training_job_count,
             report.completed_targets,
             report.failed_targets,
             report.remainingTargets(),
@@ -208,6 +217,8 @@ fn formatAppStatusResponse(
     alloc: std.mem.Allocator,
     report: apply_release.ApplyReport,
     previous_successful: ?apply_release.ApplyReport,
+    summary: app_snapshot.Summary,
+    training_summary: store.TrainingJobSummary,
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
@@ -223,9 +234,15 @@ fn formatAppStatusResponse(
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
-    try writer.print(",\"created_at\":{d},\"service_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+    try writer.print(",\"created_at\":{d},\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"active_training_jobs\":{d},\"paused_training_jobs\":{d},\"failed_training_jobs\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.created_at,
-        report.service_count,
+        summary.service_count,
+        summary.worker_count,
+        summary.cron_count,
+        summary.training_job_count,
+        training_summary.active,
+        training_summary.paused,
+        training_summary.failed,
         report.completed_targets,
         report.failed_targets,
         report.remainingTargets(),
@@ -390,7 +407,7 @@ test "formatAppStatusResponse summarizes latest release" {
         .created_at = 200,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null);
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot), .{});
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
@@ -417,7 +434,7 @@ test "formatAppsResponse emits one latest summary per app" {
         .service_name = "app-a",
         .trigger = "apply",
         .manifest_hash = "sha256:a1",
-        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"}]}",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
         .status = "completed",
         .message = "apply completed",
         .created_at = 100,
@@ -428,7 +445,7 @@ test "formatAppsResponse emits one latest summary per app" {
         .service_name = "app-b",
         .trigger = "apply",
         .manifest_hash = "sha256:b1",
-        .config_snapshot = "{\"app_name\":\"app-b\",\"services\":[{\"name\":\"api\"}]}",
+        .config_snapshot = "{\"app_name\":\"app-b\",\"services\":[{\"name\":\"api\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
         .status = "completed",
         .message = "apply completed",
         .created_at = 150,
@@ -439,10 +456,52 @@ test "formatAppsResponse emits one latest summary per app" {
         .service_name = "app-a",
         .trigger = "apply",
         .manifest_hash = "sha256:a2",
-        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}],\"workers\":[{\"name\":\"migrate\"}],\"crons\":[{\"name\":\"nightly\"}],\"training_jobs\":[{\"name\":\"finetune\"}]}",
         .status = "failed",
         .message = "scheduler error during apply",
         .created_at = 200,
+    });
+    try store.saveTrainingJobInDb(&db, .{
+        .id = "job-1",
+        .name = "finetune-a",
+        .app_name = "app-a",
+        .state = "running",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 210,
+        .updated_at = 210,
+    });
+    try store.saveTrainingJobInDb(&db, .{
+        .id = "job-2",
+        .name = "finetune-b",
+        .app_name = "app-a",
+        .state = "paused",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 220,
+        .updated_at = 220,
+    });
+    try store.saveTrainingJobInDb(&db, .{
+        .id = "job-3",
+        .name = "finetune-c",
+        .app_name = "app-a",
+        .state = "failed",
+        .image = "trainer:v1",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 230,
+        .updated_at = 230,
     });
 
     var latest = try store.listLatestDeploymentsByAppInDb(&db, alloc);
@@ -457,6 +516,12 @@ test "formatAppsResponse emits one latest summary per app" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"app-a\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-3\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release_id\":\"dep-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"worker_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cron_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"training_job_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"active_training_jobs\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"paused_training_jobs\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failed_training_jobs\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"app-b\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
 }
@@ -491,7 +556,7 @@ test "formatAppStatusResponse includes structured rollback metadata" {
         .created_at = 300,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null);
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot), .{});
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
@@ -513,7 +578,7 @@ test "formatAppStatusResponse falls back to rollback metadata inferred from lega
         .created_at = 400,
     };
 
-    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null);
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot), .{});
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
@@ -576,6 +641,8 @@ test "app status and history surface rollback release metadata from persisted ro
         alloc,
         apply_release.reportFromDeployment(latest),
         apply_release.reportFromDeployment(previous_successful),
+        app_snapshot.summarize(latest.config_snapshot),
+        .{},
     );
     defer alloc.free(status_json);
 
@@ -640,6 +707,8 @@ test "app status and history surface failed apply metadata from persisted rows" 
         alloc,
         apply_release.reportFromDeployment(latest),
         apply_release.reportFromDeployment(previous_successful),
+        app_snapshot.summarize(latest.config_snapshot),
+        .{},
     );
     defer alloc.free(status_json);
 
@@ -698,6 +767,118 @@ test "app apply then rollback routes preserve release transition metadata" {
     try expectJsonContains(history_response.body, "\"trigger\":\"rollback\"");
     try expectJsonContains(history_response.body, "\"source_release_id\":\"");
     try expectJsonContains(history_response.body, source_release_id);
+}
+
+test "app apply registers cluster cron schedules from snapshot" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[],"crons":[{"name":"nightly","image":"alpine","command":["/bin/sh","-c","echo cron"],"every":3600}],"training_jobs":[]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const apply_response = harness.appApply(apply_body);
+    defer freeResponse(alloc, apply_response);
+
+    try expectResponseOk(apply_response);
+    try expectJsonContains(apply_response.body, "\"cron_count\":1");
+
+    var schedules = try store.listCronSchedulesByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer {
+        for (schedules.items) |schedule| schedule.deinit(alloc);
+        schedules.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), schedules.items.len);
+    try std.testing.expectEqualStrings("nightly", schedules.items[0].name);
+    try std.testing.expectEqual(@as(i64, 3600), schedules.items[0].every);
+}
+
+test "app rollback restores worker and training workload snapshot" {
+    const alloc = std.testing.allocator;
+    const first_apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[{"name":"migrate","image":"alpine","command":["/bin/sh","-c","echo first"]}],"crons":[],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["python","train.py"],"gpus":1}]}
+    ;
+    const second_apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[{"name":"compact","image":"alpine","command":["/bin/sh","-c","echo second"]}],"crons":[{"name":"nightly","schedule":"0 2 * * *","command":["/bin/sh","-c","echo cron"]}],"training_jobs":[]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const first_apply_response = harness.appApply(first_apply_body);
+    defer freeResponse(alloc, first_apply_response);
+    try expectResponseOk(first_apply_response);
+
+    const source_release_id = json_helpers.extractJsonString(first_apply_response.body, "release_id").?;
+
+    const second_apply_response = harness.appApply(second_apply_body);
+    defer freeResponse(alloc, second_apply_response);
+    try expectResponseOk(second_apply_response);
+
+    const rollback_response = try harness.rollback("demo-app", source_release_id);
+    defer freeResponse(alloc, rollback_response);
+    try expectResponseOk(rollback_response);
+
+    const latest = try store.getLatestDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer latest.deinit(alloc);
+
+    try std.testing.expectEqualStrings("rollback", latest.trigger.?);
+    try std.testing.expectEqualStrings(source_release_id, latest.source_release_id.?);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"workers\":[{\"name\":\"migrate\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"training_jobs\":[{\"name\":\"finetune\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"crons\":[]") != null);
+
+    var schedules = try store.listCronSchedulesByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer {
+        for (schedules.items) |schedule| schedule.deinit(alloc);
+        schedules.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 0), schedules.items.len);
+
+    const status_response = harness.status("demo-app");
+    defer freeResponse(alloc, status_response);
+    try expectResponseOk(status_response);
+    try expectJsonContains(status_response.body, "\"worker_count\":1");
+    try expectJsonContains(status_response.body, "\"training_job_count\":1");
+    try expectJsonContains(status_response.body, "\"cron_count\":0");
+}
+
+test "app rollback restores cluster cron schedules from selected release" {
+    const alloc = std.testing.allocator;
+    const first_apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[],"crons":[{"name":"cleanup","image":"alpine","command":["/bin/sh","-c","echo first"],"every":60}],"training_jobs":[]}
+    ;
+    const second_apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[],"crons":[{"name":"backup","image":"alpine","command":["/bin/sh","-c","echo second"],"every":3600}],"training_jobs":[]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const first_apply_response = harness.appApply(first_apply_body);
+    defer freeResponse(alloc, first_apply_response);
+    try expectResponseOk(first_apply_response);
+    const source_release_id = json_helpers.extractJsonString(first_apply_response.body, "release_id").?;
+
+    const second_apply_response = harness.appApply(second_apply_body);
+    defer freeResponse(alloc, second_apply_response);
+    try expectResponseOk(second_apply_response);
+
+    const rollback_response = try harness.rollback("demo-app", source_release_id);
+    defer freeResponse(alloc, rollback_response);
+    try expectResponseOk(rollback_response);
+
+    var schedules = try store.listCronSchedulesByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer {
+        for (schedules.items) |schedule| schedule.deinit(alloc);
+        schedules.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), schedules.items.len);
+    try std.testing.expectEqualStrings("cleanup", schedules.items[0].name);
+    try std.testing.expectEqual(@as(i64, 60), schedules.items[0].every);
 }
 
 test "app apply route preserves failed release metadata across reads" {
