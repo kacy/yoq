@@ -8,6 +8,7 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
     migrateAgents(db);
     migrateServices(db);
     migrateDeployments(db);
+    migrateCronSchedules(db);
 }
 
 fn migrateContainers(db: *sqlite.Db) void {
@@ -133,6 +134,20 @@ fn migrateDeployments(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN completed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     db.exec("UPDATE deployments SET trigger = 'apply' WHERE trigger IS NULL OR trigger = '';", .{}, .{}) catch {};
+}
+
+fn migrateCronSchedules(db: *sqlite.Db) void {
+    createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS cron_schedules (
+        \\    app_name TEXT NOT NULL,
+        \\    name TEXT NOT NULL,
+        \\    every INTEGER NOT NULL,
+        \\    spec_json TEXT NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (app_name, name)
+        \\);
+    ) catch {};
 }
 
 fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {

@@ -714,6 +714,32 @@ test "app apply then rollback routes preserve release transition metadata" {
     try expectJsonContains(history_response.body, source_release_id);
 }
 
+test "app apply registers cluster cron schedules from snapshot" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[],"crons":[{"name":"nightly","image":"alpine","command":["/bin/sh","-c","echo cron"],"every":3600}],"training_jobs":[]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const apply_response = harness.appApply(apply_body);
+    defer freeResponse(alloc, apply_response);
+
+    try expectResponseOk(apply_response);
+    try expectJsonContains(apply_response.body, "\"cron_count\":1");
+
+    var schedules = try store.listCronSchedulesByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer {
+        for (schedules.items) |schedule| schedule.deinit(alloc);
+        schedules.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), schedules.items.len);
+    try std.testing.expectEqualStrings("nightly", schedules.items[0].name);
+    try std.testing.expectEqual(@as(i64, 3600), schedules.items[0].every);
+}
+
 test "app rollback restores worker and training workload snapshot" {
     const alloc = std.testing.allocator;
     const first_apply_body =
@@ -749,12 +775,55 @@ test "app rollback restores worker and training workload snapshot" {
     try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"training_jobs\":[{\"name\":\"finetune\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"crons\":[]") != null);
 
+    var schedules = try store.listCronSchedulesByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer {
+        for (schedules.items) |schedule| schedule.deinit(alloc);
+        schedules.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 0), schedules.items.len);
+
     const status_response = harness.status("demo-app");
     defer freeResponse(alloc, status_response);
     try expectResponseOk(status_response);
     try expectJsonContains(status_response.body, "\"worker_count\":1");
     try expectJsonContains(status_response.body, "\"training_job_count\":1");
     try expectJsonContains(status_response.body, "\"cron_count\":0");
+}
+
+test "app rollback restores cluster cron schedules from selected release" {
+    const alloc = std.testing.allocator;
+    const first_apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[],"crons":[{"name":"cleanup","image":"alpine","command":["/bin/sh","-c","echo first"],"every":60}],"training_jobs":[]}
+    ;
+    const second_apply_body =
+        \\{"app_name":"demo-app","services":[],"workers":[],"crons":[{"name":"backup","image":"alpine","command":["/bin/sh","-c","echo second"],"every":3600}],"training_jobs":[]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const first_apply_response = harness.appApply(first_apply_body);
+    defer freeResponse(alloc, first_apply_response);
+    try expectResponseOk(first_apply_response);
+    const source_release_id = json_helpers.extractJsonString(first_apply_response.body, "release_id").?;
+
+    const second_apply_response = harness.appApply(second_apply_body);
+    defer freeResponse(alloc, second_apply_response);
+    try expectResponseOk(second_apply_response);
+
+    const rollback_response = try harness.rollback("demo-app", source_release_id);
+    defer freeResponse(alloc, rollback_response);
+    try expectResponseOk(rollback_response);
+
+    var schedules = try store.listCronSchedulesByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer {
+        for (schedules.items) |schedule| schedule.deinit(alloc);
+        schedules.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), schedules.items.len);
+    try std.testing.expectEqualStrings("cleanup", schedules.items[0].name);
+    try std.testing.expectEqual(@as(i64, 60), schedules.items[0].every);
 }
 
 test "app apply route preserves failed release metadata across reads" {

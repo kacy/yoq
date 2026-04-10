@@ -23,6 +23,7 @@ pub const ServiceEndpointRecord = @import("store/services.zig").ServiceEndpointR
 pub const ServiceNameRecord = @import("store/services.zig").ServiceNameRecord;
 pub const NetworkPolicyRecord = @import("store/services.zig").NetworkPolicyRecord;
 pub const DeploymentRecord = @import("store/deployments.zig").DeploymentRecord;
+pub const CronScheduleRecord = @import("store/crons.zig").CronScheduleRecord;
 pub const TrainingJobRecord = @import("store/training.zig").TrainingJobRecord;
 pub const CheckpointRecord = @import("store/training.zig").CheckpointRecord;
 
@@ -97,6 +98,11 @@ pub const getLastSuccessfulDeployment = @import("store/deployments.zig").getLast
 pub const getLastSuccessfulDeploymentByApp = @import("store/deployments.zig").getLastSuccessfulDeploymentByApp;
 pub const getPreviousSuccessfulDeploymentByApp = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByApp;
 pub const getPreviousSuccessfulDeploymentByAppInDb = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByAppInDb;
+
+pub const replaceCronSchedulesForApp = @import("store/crons.zig").replaceCronSchedulesForApp;
+pub const replaceCronSchedulesForAppInDb = @import("store/crons.zig").replaceCronSchedulesForAppInDb;
+pub const listCronSchedulesByApp = @import("store/crons.zig").listCronSchedulesByApp;
+pub const listCronSchedulesByAppInDb = @import("store/crons.zig").listCronSchedulesByAppInDb;
 
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
 pub const saveTrainingJobInDb = @import("store/training.zig").saveTrainingJobInDb;

@@ -41,6 +41,17 @@ pub const TrainingJobSpec = struct {
     }
 };
 
+pub const CronScheduleSpec = struct {
+    name: []const u8,
+    every: u64,
+    spec_json: []const u8,
+
+    pub fn deinit(self: CronScheduleSpec, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.spec_json);
+    }
+};
+
 pub fn summarize(json: []const u8) Summary {
     return .{
         .service_count = countArrayObjects(json, "services"),
@@ -101,6 +112,28 @@ pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []c
         .memory_limit_mb = json_helpers.extractJsonInt(obj, "memory_limit_mb") orelse 65536,
         .checkpoint_path = checkpoint_path,
     };
+}
+
+pub fn listCronSchedules(alloc: std.mem.Allocator, json: []const u8) !std.ArrayList(CronScheduleSpec) {
+    var specs: std.ArrayList(CronScheduleSpec) = .empty;
+    errdefer {
+        for (specs.items) |spec| spec.deinit(alloc);
+        specs.deinit(alloc);
+    }
+
+    const array = json_helpers.extractJsonArray(json, "crons") orelse return specs;
+    var iter = json_helpers.extractJsonObjects(array);
+    while (iter.next()) |obj| {
+        const name = json_helpers.extractJsonString(obj, "name") orelse continue;
+        const every = json_helpers.extractJsonInt(obj, "every") orelse continue;
+        try specs.append(alloc, .{
+            .name = try alloc.dupe(u8, name),
+            .every = @intCast(@max(@as(i64, 0), every)),
+            .spec_json = try alloc.dupe(u8, obj),
+        });
+    }
+
+    return specs;
 }
 
 fn countArrayObjects(json: []const u8, key: []const u8) usize {
@@ -210,4 +243,21 @@ test "findTrainingJobSpec extracts training scheduler fields" {
     try std.testing.expectEqual(@as(i64, 2000), job.cpu_limit);
     try std.testing.expectEqual(@as(i64, 131072), job.memory_limit_mb);
     try std.testing.expectEqualStrings("/ckpt", job.checkpoint_path.?);
+}
+
+test "listCronSchedules extracts cron registration specs" {
+    const alloc = std.testing.allocator;
+    var schedules = try listCronSchedules(
+        alloc,
+        \\{"app_name":"demo","services":[],"workers":[],"crons":[{"name":"cleanup","image":"alpine","command":["/bin/sh"],"every":60},{"name":"backup","image":"postgres","command":["/bin/sh"],"every":3600}],"training_jobs":[]}
+    );
+    defer {
+        for (schedules.items) |schedule| schedule.deinit(alloc);
+        schedules.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), schedules.items.len);
+    try std.testing.expectEqualStrings("cleanup", schedules.items[0].name);
+    try std.testing.expectEqual(@as(u64, 60), schedules.items[0].every);
+    try std.testing.expect(std.mem.indexOf(u8, schedules.items[1].spec_json, "\"name\":\"backup\"") != null);
 }

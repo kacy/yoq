@@ -226,6 +226,17 @@ pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
         \\    PRIMARY KEY (node_id)
         \\);
     );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS cron_schedules (
+        \\    app_name TEXT NOT NULL,
+        \\    name TEXT NOT NULL,
+        \\    every INTEGER NOT NULL,
+        \\    spec_json TEXT NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    PRIMARY KEY (app_name, name)
+        \\);
+    );
 }
 
 pub fn initSecurityTables(db: *sqlite.Db) SchemaError!void {

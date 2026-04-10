@@ -9,6 +9,7 @@ const apply_request = @import("apply_request.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const deployment_store = @import("../../../manifest/update/deployment_store.zig");
+const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
 
 const Response = common.Response;
@@ -294,11 +295,33 @@ fn handleApply(
     const apply_report = apply_result.toReport(parsed.app_name orelse "", parsed.requests.items.len, apply_context);
     defer apply_report.deinit(alloc);
 
+    if (parsed.app_name) |app_name| {
+        if (apply_result.outcome.status != .failed) {
+            reconcileCronSchedules(db, alloc, app_name, request.body) catch return common.internalError();
+        }
+    }
+
     const body = switch (response_mode) {
         .legacy => formatLegacyApplyResponse(alloc, apply_report.placed, apply_report.failed) catch return common.internalError(),
         .app => formatAppApplyResponse(alloc, apply_report, parsed.summary) catch return common.internalError(),
     };
     return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn reconcileCronSchedules(db: *sqlite.Db, alloc: std.mem.Allocator, app_name: []const u8, config_snapshot: []const u8) !void {
+    var schedules = try app_snapshot.listCronSchedules(alloc, config_snapshot);
+    defer {
+        for (schedules.items) |schedule| schedule.deinit(alloc);
+        schedules.deinit(alloc);
+    }
+
+    try store.replaceCronSchedulesForAppInDb(
+        db,
+        alloc,
+        app_name,
+        schedules.items,
+        std.time.timestamp(),
+    );
 }
 
 pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
