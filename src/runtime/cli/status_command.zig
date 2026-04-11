@@ -77,6 +77,7 @@ pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
 pub fn apps(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     var server: ?cli.ServerAddr = null;
+    var filters = AppListFilters{};
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
@@ -87,18 +88,33 @@ pub fn apps(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
                 return StatusError.InvalidArgument;
             };
             server = cli.parseServerAddr(addr_str);
+        } else if (std.mem.eql(u8, arg, "--status")) {
+            filters.status = args.next() orelse {
+                writeErr("--status requires a rollout status\n", .{});
+                return StatusError.InvalidArgument;
+            };
+        } else if (std.mem.eql(u8, arg, "--failed")) {
+            filters.failed_only = true;
+        } else if (std.mem.eql(u8, arg, "--in-progress")) {
+            filters.in_progress_only = true;
         } else {
-            writeErr("usage: yoq apps [--server host:port] [--json]\n", .{});
+            writeErr("usage: yoq apps [--server host:port] [--json] [--status <status>] [--failed] [--in-progress]\n", .{});
             return StatusError.InvalidArgument;
         }
     }
 
     if (server) |s| {
-        try appsRemote(alloc, s.ip, s.port);
+        try appsRemote(alloc, s.ip, s.port, filters);
     } else {
-        try appsLocal(alloc);
+        try appsLocal(alloc, filters);
     }
 }
+
+const AppListFilters = struct {
+    status: ?[]const u8 = null,
+    failed_only: bool = false,
+    in_progress_only: bool = false,
+};
 
 fn statusLocal(alloc: std.mem.Allocator, verbose: bool) StatusError!void {
     var records = store.listAll(alloc) catch {
@@ -141,11 +157,18 @@ const AppStatusSnapshot = struct {
     completed_targets: usize,
     failed_targets: usize,
     remaining_targets: usize,
-    source_release_id: ?[]const u8,
-    previous_successful_release_id: ?[]const u8,
-    previous_successful_manifest_hash: ?[]const u8,
-    previous_successful_created_at: ?i64,
-    message: ?[]const u8,
+    source_release_id: ?[]const u8 = null,
+    previous_successful_release_id: ?[]const u8 = null,
+    previous_successful_trigger: ?[]const u8 = null,
+    previous_successful_status: ?[]const u8 = null,
+    previous_successful_manifest_hash: ?[]const u8 = null,
+    previous_successful_created_at: ?i64 = null,
+    previous_successful_completed_targets: usize = 0,
+    previous_successful_failed_targets: usize = 0,
+    previous_successful_remaining_targets: usize = 0,
+    previous_successful_source_release_id: ?[]const u8 = null,
+    previous_successful_message: ?[]const u8 = null,
+    message: ?[]const u8 = null,
 };
 
 fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!void {
@@ -273,7 +296,7 @@ fn statusRemoteApp(alloc: std.mem.Allocator, addr: [4]u8, port: u16, app_name: [
     printAppStatus(snapshot);
 }
 
-fn appsLocal(alloc: std.mem.Allocator) StatusError!void {
+fn appsLocal(alloc: std.mem.Allocator, filters: AppListFilters) StatusError!void {
     var latest = store.listLatestDeploymentsByApp(alloc) catch {
         writeErr("failed to read app list\n", .{});
         return StatusError.StoreError;
@@ -293,7 +316,10 @@ fn appsLocal(alloc: std.mem.Allocator) StatusError!void {
         };
         defer if (previous_successful) |prev| prev.deinit(alloc);
 
-        snapshots.append(alloc, snapshotFromDeployments(dep, previous_successful)) catch return StatusError.OutOfMemory;
+        const snapshot = snapshotFromDeployments(dep, previous_successful);
+        if (appMatchesFilters(snapshot, filters)) {
+            snapshots.append(alloc, snapshot) catch return StatusError.OutOfMemory;
+        }
     }
 
     printAppStatuses(snapshots.items);
@@ -310,7 +336,7 @@ fn loadPreviousSuccessfulDeployment(
     };
 }
 
-fn appsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) StatusError!void {
+fn appsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, filters: AppListFilters) StatusError!void {
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
@@ -330,7 +356,10 @@ fn appsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) StatusError!void
 
     var iter = json_helpers.extractJsonObjects(resp.body);
     while (iter.next()) |obj| {
-        snapshots.append(alloc, parseAppStatusResponse(obj)) catch return StatusError.OutOfMemory;
+        const snapshot = parseAppStatusResponse(obj);
+        if (appMatchesFilters(snapshot, filters)) {
+            snapshots.append(alloc, snapshot) catch return StatusError.OutOfMemory;
+        }
     }
 
     printAppStatuses(snapshots.items);
@@ -374,14 +403,12 @@ fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
 }
 
 fn printAppStatusHeader() void {
-    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<20} {s:<22} {s:<18} {s:<14} {s}\n", .{
-        "APP", "RELEASE", "STATUS", "KINDS", "TIMESTAMP", "TARGETS", "TRAINING", "PREV OK", "MESSAGE",
+    write("{s:<14} {s:<14} {s:<14} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "TRIGGER", "WORKLOADS", "TARGETS", "TRAINING", "PREV OK", "MESSAGE",
     });
 }
 
 fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
-    var ts_buf: [20]u8 = undefined;
-    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{snapshot.created_at}) catch "?";
     const msg = snapshot.message orelse "";
 
     var progress_buf: [64]u8 = undefined;
@@ -401,16 +428,16 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
     else
         "-";
 
-    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<20} {s:<22} {s:<18} {s:<14} {s}\n", .{
+    write("{s:<14} {s:<14} {s:<14} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
         snapshot.app_name,
         cli.truncate(snapshot.release_id, 12),
         snapshot.status,
+        snapshot.trigger,
         kinds_str,
-        ts_str,
         progress_str,
         training_str,
         previous_successful,
-        cli.truncate(msg, 40),
+        cli.truncate(msg, 48),
     });
 }
 
@@ -462,8 +489,15 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .remaining_targets = @intCast(@max(0, extractJsonInt(json, "remaining_targets") orelse 0)),
         .source_release_id = extractJsonString(json, "source_release_id"),
         .previous_successful_release_id = extractJsonString(json, "previous_successful_release_id"),
+        .previous_successful_trigger = extractJsonString(json, "previous_successful_trigger"),
+        .previous_successful_status = extractJsonString(json, "previous_successful_status"),
         .previous_successful_manifest_hash = extractJsonString(json, "previous_successful_manifest_hash"),
         .previous_successful_created_at = extractJsonInt(json, "previous_successful_created_at"),
+        .previous_successful_completed_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_completed_targets") orelse 0)),
+        .previous_successful_failed_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_failed_targets") orelse 0)),
+        .previous_successful_remaining_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_remaining_targets") orelse 0)),
+        .previous_successful_source_release_id = extractJsonString(json, "previous_successful_source_release_id"),
+        .previous_successful_message = extractJsonString(json, "previous_successful_message"),
         .message = extractJsonString(json, "message"),
     };
 }
@@ -488,9 +522,55 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("remaining_targets", snapshot.remaining_targets);
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (snapshot.previous_successful_release_id) |release_id| w.stringField("previous_successful_release_id", release_id) else w.nullField("previous_successful_release_id");
+    if (snapshot.previous_successful_trigger) |trigger| w.stringField("previous_successful_trigger", trigger) else w.nullField("previous_successful_trigger");
+    if (snapshot.previous_successful_status) |status_text| w.stringField("previous_successful_status", status_text) else w.nullField("previous_successful_status");
     if (snapshot.previous_successful_manifest_hash) |manifest_hash| w.stringField("previous_successful_manifest_hash", manifest_hash) else w.nullField("previous_successful_manifest_hash");
     if (snapshot.previous_successful_created_at) |created_at| w.intField("previous_successful_created_at", created_at) else w.nullField("previous_successful_created_at");
+    w.uintField("previous_successful_completed_targets", snapshot.previous_successful_completed_targets);
+    w.uintField("previous_successful_failed_targets", snapshot.previous_successful_failed_targets);
+    w.uintField("previous_successful_remaining_targets", snapshot.previous_successful_remaining_targets);
+    if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("previous_successful_source_release_id", source_release_id) else w.nullField("previous_successful_source_release_id");
+    if (snapshot.previous_successful_message) |message| w.stringField("previous_successful_message", message) else w.nullField("previous_successful_message");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+    w.beginObjectField("current_release");
+    w.stringField("id", snapshot.release_id);
+    w.stringField("trigger", snapshot.trigger);
+    w.stringField("status", snapshot.status);
+    w.stringField("manifest_hash", snapshot.manifest_hash);
+    w.intField("created_at", snapshot.created_at);
+    w.uintField("completed_targets", snapshot.completed_targets);
+    w.uintField("failed_targets", snapshot.failed_targets);
+    w.uintField("remaining_targets", snapshot.remaining_targets);
+    if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+    w.endObject();
+    if (snapshot.previous_successful_release_id) |release_id| {
+        w.beginObjectField("previous_successful_release");
+        w.stringField("id", release_id);
+        w.stringField("trigger", snapshot.previous_successful_trigger orelse "apply");
+        w.stringField("status", snapshot.previous_successful_status orelse "completed");
+        if (snapshot.previous_successful_manifest_hash) |manifest_hash| w.stringField("manifest_hash", manifest_hash) else w.nullField("manifest_hash");
+        if (snapshot.previous_successful_created_at) |created_at| w.intField("created_at", created_at) else w.nullField("created_at");
+        w.uintField("completed_targets", snapshot.previous_successful_completed_targets);
+        w.uintField("failed_targets", snapshot.previous_successful_failed_targets);
+        w.uintField("remaining_targets", snapshot.previous_successful_remaining_targets);
+        if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+        if (snapshot.previous_successful_message) |message| w.stringField("message", message) else w.nullField("message");
+        w.endObject();
+    } else {
+        w.nullField("previous_successful_release");
+    }
+    w.beginObjectField("workloads");
+    w.uintField("services", snapshot.service_count);
+    w.uintField("workers", snapshot.worker_count);
+    w.uintField("crons", snapshot.cron_count);
+    w.uintField("training_jobs", snapshot.training_job_count);
+    w.endObject();
+    w.beginObjectField("training_runtime");
+    w.uintField("active", snapshot.active_training_jobs);
+    w.uintField("paused", snapshot.paused_training_jobs);
+    w.uintField("failed", snapshot.failed_training_jobs);
+    w.endObject();
 }
 
 fn appStatusFromReports(
@@ -518,8 +598,15 @@ fn appStatusFromReports(
         .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
         .previous_successful_release_id = if (previous_successful) |prev| prev.release_id else null,
+        .previous_successful_trigger = if (previous_successful) |prev| prev.trigger.toString() else null,
+        .previous_successful_status = if (previous_successful) |prev| prev.status.toString() else null,
         .previous_successful_manifest_hash = if (previous_successful) |prev| prev.manifest_hash else null,
         .previous_successful_created_at = if (previous_successful) |prev| prev.created_at else null,
+        .previous_successful_completed_targets = if (previous_successful) |prev| prev.completed_targets else 0,
+        .previous_successful_failed_targets = if (previous_successful) |prev| prev.failed_targets else 0,
+        .previous_successful_remaining_targets = if (previous_successful) |prev| prev.remainingTargets() else 0,
+        .previous_successful_source_release_id = if (previous_successful) |prev| prev.source_release_id else null,
+        .previous_successful_message = if (previous_successful) |prev| prev.message else null,
         .message = report.message,
     };
 }
@@ -540,6 +627,23 @@ fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
     const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return StatusError.StoreError;
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return StatusError.OutOfMemory;
+}
+
+fn appMatchesFilters(snapshot: AppStatusSnapshot, filters: AppListFilters) bool {
+    if (filters.status) |status_filter| {
+        if (!std.mem.eql(u8, snapshot.status, status_filter)) return false;
+    }
+    if (filters.failed_only and !isFailedLikeRollout(snapshot.status)) return false;
+    if (filters.in_progress_only and !isInProgressRollout(snapshot.status)) return false;
+    return true;
+}
+
+fn isFailedLikeRollout(status_text: []const u8) bool {
+    return std.mem.eql(u8, status_text, "failed") or std.mem.eql(u8, status_text, "partially_failed");
+}
+
+fn isInProgressRollout(status_text: []const u8) bool {
+    return std.mem.eql(u8, status_text, "pending") or std.mem.eql(u8, status_text, "in_progress");
 }
 
 fn printStatusTable(snapshots: []const monitor.ServiceSnapshot, verbose: bool) void {
@@ -754,6 +858,81 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(snapshot.previous_successful_manifest_hash.?, parsed.previous_successful_manifest_hash.?);
     try std.testing.expectEqual(snapshot.previous_successful_created_at.?, parsed.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(snapshot.message.?, parsed.message.?);
+}
+
+test "writeAppStatusJsonObject includes nested release and workload views" {
+    const snapshot = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "rollback",
+        .release_id = "dep-2",
+        .status = "completed",
+        .manifest_hash = "sha256:222",
+        .created_at = 200,
+        .service_count = 2,
+        .worker_count = 1,
+        .cron_count = 2,
+        .training_job_count = 3,
+        .active_training_jobs = 1,
+        .paused_training_jobs = 1,
+        .failed_training_jobs = 1,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 0,
+        .source_release_id = "dep-1",
+        .previous_successful_release_id = "dep-0",
+        .previous_successful_manifest_hash = "sha256:111",
+        .previous_successful_created_at = 100,
+        .message = "all placements healthy",
+    };
+
+    var w = json_out.JsonWriter{};
+    writeAppStatusJsonObject(&w, snapshot);
+    const json = w.getWritten();
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"current_release\":{\"id\":\"dep-2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release\":{\"id\":\"dep-0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"workers\":1,\"crons\":2,\"training_jobs\":3}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"training_runtime\":{\"active\":1,\"paused\":1,\"failed\":1}") != null);
+}
+
+test "appMatchesFilters applies failed and in-progress filters" {
+    const failed_snapshot = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-1",
+        .status = "partially_failed",
+        .manifest_hash = "sha256:111",
+        .created_at = 100,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 0,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = null,
+    };
+    const pending_snapshot = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-2",
+        .status = "in_progress",
+        .manifest_hash = "sha256:222",
+        .created_at = 200,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .remaining_targets = 1,
+        .source_release_id = null,
+        .previous_successful_release_id = null,
+        .previous_successful_manifest_hash = null,
+        .previous_successful_created_at = null,
+        .message = null,
+    };
+
+    try std.testing.expect(appMatchesFilters(failed_snapshot, .{ .failed_only = true }));
+    try std.testing.expect(!appMatchesFilters(failed_snapshot, .{ .in_progress_only = true }));
+    try std.testing.expect(appMatchesFilters(pending_snapshot, .{ .in_progress_only = true }));
+    try std.testing.expect(!appMatchesFilters(pending_snapshot, .{ .status = "completed" }));
 }
 
 test "appStatusFromReport preserves partially failed local release state" {

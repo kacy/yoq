@@ -121,6 +121,20 @@ pub fn extractJsonFloat(json: []const u8, key: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, json[pos..end]) catch null;
 }
 
+/// extract a boolean value from a JSON object: {"key":true}
+pub fn extractJsonBool(json: []const u8, key: []const u8) ?bool {
+    var search_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{key}) catch return null;
+
+    const start_pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    var pos = start_pos + needle.len;
+    while (pos < json.len and json[pos] == ' ') : (pos += 1) {}
+
+    if (std.mem.startsWith(u8, json[pos..], "true")) return true;
+    if (std.mem.startsWith(u8, json[pos..], "false")) return false;
+    return null;
+}
+
 /// extract a top-level array value from a JSON object: {"key":[...]}
 pub fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {
     var search_buf: [128]u8 = undefined;

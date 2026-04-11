@@ -38,13 +38,14 @@ pub fn markAppReleaseFailed(id: []const u8, message: ?[]const u8) !void {
 }
 
 pub fn rollbackApp(alloc: std.mem.Allocator, app_name: []const u8) ![]const u8 {
-    const latest = try store.getLatestDeploymentByApp(alloc, app_name);
-    defer latest.deinit(alloc);
+    return rollbackAppToRelease(alloc, app_name, null);
+}
 
-    const previous_successful = try store.getPreviousSuccessfulDeploymentByApp(alloc, app_name, latest.id);
-    defer previous_successful.deinit(alloc);
+pub fn rollbackAppToRelease(alloc: std.mem.Allocator, app_name: []const u8, explicit_release_id: ?[]const u8) ![]const u8 {
+    const target = try store.getRollbackTargetDeploymentByApp(alloc, app_name, explicit_release_id);
+    defer target.deinit(alloc);
 
-    return alloc.dupe(u8, previous_successful.config_snapshot);
+    return alloc.dupe(u8, target.config_snapshot);
 }
 
 pub fn listAppReleases(alloc: std.mem.Allocator, app_name: []const u8) !std.ArrayList(store.DeploymentRecord) {

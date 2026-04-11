@@ -4,6 +4,8 @@ const json_helpers = @import("../../lib/json_helpers.zig");
 const json_out = @import("../../lib/json_output.zig");
 const apply_release = @import("../apply_release.zig");
 const app_snapshot = @import("../app_snapshot.zig");
+const rollback_snapshot = @import("../rollback_snapshot.zig");
+const local_apply_backend = @import("../local_apply_backend.zig");
 const manifest_loader = @import("../loader.zig");
 const orchestrator = @import("../orchestrator.zig");
 const release_history = @import("../release_history.zig");
@@ -29,6 +31,7 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
     var app_mode = false;
     var server_addr: ?[]const u8 = null;
     var release_id: ?[]const u8 = null;
+    var print_only = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--app")) {
@@ -43,6 +46,8 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
                 writeErr("--release requires a release id\n", .{});
                 return OpsError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--print")) {
+            print_only = true;
         } else {
             target_name = arg;
         }
@@ -56,27 +61,23 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
         const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
         defer if (owned_app_name) |name| alloc.free(name);
         const app_name = target_name orelse owned_app_name.?;
-        const id = release_id orelse {
-            writeErr("remote rollback requires --release <id>\n", .{});
-            return OpsError.InvalidArgument;
-        };
-        try rollbackRemoteApp(alloc, server_addr.?, app_name, id);
+        try rollbackRemoteApp(alloc, server_addr.?, app_name, release_id, print_only);
         return;
     }
 
-    const config = if (app_mode) blk: {
+    if (app_mode) {
         const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
         defer if (owned_app_name) |name| alloc.free(name);
         const app_name = target_name orelse owned_app_name.?;
-        break :blk release_history.rollbackApp(alloc, app_name) catch {
-            writeErr("no previous deployment found for app {s}\n", .{app_name});
-            return OpsError.StoreError;
-        };
-    } else blk: {
+        try rollbackLocalApp(alloc, app_name, release_id, print_only);
+        return;
+    }
+
+    const config = blk: {
         const service_name = target_name orelse {
             writeErr("usage: yoq rollback <service>\n", .{});
-            writeErr("   or: yoq rollback --app [name]\n", .{});
-            writeErr("   or: yoq rollback --app [name] --server host:port --release <id>\n", .{});
+            writeErr("   or: yoq rollback --app [name] [--print] [--release <id>]\n", .{});
+            writeErr("   or: yoq rollback --app [name] [--server host:port] [--release <id>] [--print]\n", .{});
             return OpsError.InvalidArgument;
         };
 
@@ -97,15 +98,84 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
     };
     defer alloc.free(config);
 
-    if (app_mode) {
-        const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
-        defer if (owned_app_name) |name| alloc.free(name);
-        const app_name = target_name orelse owned_app_name.?;
-        write("rollback config for app {s}:\n{s}\n", .{ app_name, config });
-    } else {
-        write("rollback config for {s}:\n{s}\n", .{ target_name.?, config });
-    }
+    write("rollback config for {s}:\n{s}\n", .{ target_name.?, config });
     write("\nto apply this rollback, redeploy with this config using 'yoq up'\n", .{});
+}
+
+const RollbackSummary = struct {
+    app_name: []const u8,
+    release_id: []const u8,
+    trigger: []const u8,
+    status: []const u8,
+    completed_targets: usize,
+    failed_targets: usize,
+    remaining_targets: usize,
+    source_release_id: ?[]const u8,
+    message: ?[]const u8,
+    is_current: bool = false,
+    is_previous_successful: bool = false,
+};
+
+fn rollbackLocalApp(
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    release_id: ?[]const u8,
+    print_only: bool,
+) !void {
+    const target = store.getRollbackTargetDeploymentByApp(alloc, app_name, release_id) catch {
+        writeErr("no previous deployment found for app {s}\n", .{app_name});
+        return OpsError.StoreError;
+    };
+    defer target.deinit(alloc);
+
+    if (print_only) {
+        write("rollback snapshot for app {s}:\n{s}\n", .{ app_name, target.config_snapshot });
+        return;
+    }
+
+    var loaded = rollback_snapshot.loadLocalRollbackSnapshot(alloc, target.config_snapshot) catch |err| {
+        writeErr("failed to load rollback snapshot: {}\n", .{err});
+        return OpsError.StoreError;
+    };
+    defer loaded.deinit();
+
+    var prepared = local_apply_backend.PreparedLocalApply.init(alloc, &loaded.manifest, &loaded.release, false) catch |err| {
+        writeErr("failed to initialize rollback runtime: {}\n", .{err});
+        return OpsError.DeploymentFailed;
+    };
+    defer prepared.deinit();
+    prepared.beginRuntime();
+
+    const apply_report = prepared.startRelease(.{
+        .trigger = .rollback,
+        .source_release_id = target.id,
+    }) catch |err| {
+        writeErr("rollback failed: {}\n", .{err});
+        return OpsError.DeploymentFailed;
+    };
+    defer apply_report.deinit(alloc);
+
+    printRollbackSummary(.{
+        .app_name = app_name,
+        .release_id = apply_report.release_id orelse "?",
+        .trigger = apply_report.trigger.toString(),
+        .status = apply_report.status.toString(),
+        .completed_targets = apply_report.completed_targets,
+        .failed_targets = apply_report.failed_targets,
+        .remaining_targets = apply_report.remainingTargets(),
+        .source_release_id = apply_report.source_release_id,
+        .message = apply_report.message,
+    });
+
+    if (loaded.release.resolvedServiceCount() == 0) {
+        return;
+    }
+
+    writeErr("rollback applied. services running. press ctrl-c to stop.\n", .{});
+    prepared.orch.waitForShutdown();
+    writeErr("\nshutting down...\n", .{});
+    prepared.orch.stopAll();
+    writeErr("stopped\n", .{});
 }
 
 pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
@@ -168,8 +238,12 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     if (cli.output_mode == .json) {
         var w = json_out.JsonWriter{};
         w.beginArray();
-        for (deployments.items) |dep| {
-            writeHistoryJsonObject(&w, historyEntryFromDeployment(dep));
+        const previous_successful_id = previousSuccessfulReleaseId(deployments.items);
+        for (deployments.items, 0..) |dep, i| {
+            var entry = historyEntryFromDeployment(dep);
+            entry.is_current = i == 0;
+            entry.is_previous_successful = previous_successful_id != null and std.mem.eql(u8, entry.id, previous_successful_id.?);
+            writeHistoryJsonObject(&w, entry);
         }
         w.endArray();
         w.flush();
@@ -187,8 +261,12 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     writeHistoryHeader();
 
-    for (deployments.items) |dep| {
-        writeHistoryRow(historyEntryFromDeployment(dep));
+    const previous_successful_id = previousSuccessfulReleaseId(deployments.items);
+    for (deployments.items, 0..) |dep, i| {
+        var entry = historyEntryFromDeployment(dep);
+        entry.is_current = i == 0;
+        entry.is_previous_successful = previous_successful_id != null and std.mem.eql(u8, entry.id, previous_successful_id.?);
+        writeHistoryRow(entry);
     }
 }
 
@@ -223,17 +301,31 @@ fn printRemoteAppHistory(alloc: std.mem.Allocator, addr_str: []const u8, app_nam
         return;
     }
 
+    var entries: std.ArrayList(HistoryEntryView) = .empty;
+    defer entries.deinit(alloc);
+
     var iter = json_helpers.extractJsonObjects(resp.body);
-    const first = iter.next() orelse {
+    while (iter.next()) |obj| {
+        entries.append(alloc, parseHistoryObject(obj)) catch return OpsError.StoreError;
+    }
+
+    if (entries.items.len == 0) {
         write("no releases found for app {s}\n", .{app_name});
         return;
-    };
+    }
 
     writeHistoryHeader();
-    writeHistoryRow(parseHistoryObject(first));
-    while (iter.next()) |obj| {
-        writeHistoryRow(parseHistoryObject(obj));
+    for (entries.items) |entry| {
+        writeHistoryRow(entry);
     }
+}
+
+fn previousSuccessfulReleaseId(deployments: []const store.DeploymentRecord) ?[]const u8 {
+    if (deployments.len == 0) return null;
+    for (deployments[1..]) |dep| {
+        if (std.mem.eql(u8, dep.status, "completed")) return dep.id;
+    }
+    return null;
 }
 
 const HistoryEntryView = struct {
@@ -253,6 +345,8 @@ const HistoryEntryView = struct {
     remaining_targets: usize,
     source_release_id: ?[]const u8,
     message: ?[]const u8,
+    is_current: bool = false,
+    is_previous_successful: bool = false,
 };
 
 fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
@@ -275,6 +369,8 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
         .message = report.message,
+        .is_current = false,
+        .is_previous_successful = false,
     };
 }
 
@@ -296,25 +392,36 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "remaining_targets") orelse 0)),
         .source_release_id = json_helpers.extractJsonString(obj, "source_release_id"),
         .message = json_helpers.extractJsonString(obj, "message"),
+        .is_current = json_helpers.extractJsonBool(obj, "is_current") orelse false,
+        .is_previous_successful = json_helpers.extractJsonBool(obj, "is_previous_successful") orelse false,
     };
 }
 
 fn writeHistoryHeader() void {
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{ "ID", "STATUS", "HASH", "TIMESTAMP", "MESSAGE" });
+    write("{s:<8} {s:<14} {s:<14} {s:<10} {s:<14} {s:<16} {s}\n", .{
+        "MARK", "ID", "STATUS", "TRIGGER", "HASH", "TARGETS", "MESSAGE",
+    });
 }
 
 fn writeHistoryRow(entry: HistoryEntryView) void {
     const message = entry.message orelse "";
+    const mark = if (entry.is_current)
+        "current"
+    else if (entry.is_previous_successful)
+        "prev-ok"
+    else
+        "";
+    var progress_buf: [64]u8 = undefined;
+    const progress = formatProgressCounts(&progress_buf, entry.completed_targets, entry.failed_targets, entry.remaining_targets);
 
-    var ts_buf: [20]u8 = undefined;
-    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{entry.created_at}) catch "?";
-
-    write("{s:<14} {s:<14} {s:<14} {s:<20} {s}\n", .{
+    write("{s:<8} {s:<14} {s:<14} {s:<10} {s:<14} {s:<16} {s}\n", .{
+        mark,
         truncate(entry.id, 12),
         entry.status,
+        entry.trigger,
         truncate(entry.manifest_hash, 12),
-        ts_str,
-        truncate(message, 40),
+        progress,
+        truncate(message, 36),
     });
 }
 
@@ -336,19 +443,45 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
+    w.boolField("is_current", entry.is_current);
+    w.boolField("is_previous_successful", entry.is_previous_successful);
+    w.beginObjectField("release");
+    w.stringField("id", entry.id);
+    w.stringField("trigger", entry.trigger);
+    w.stringField("status", entry.status);
+    w.stringField("manifest_hash", entry.manifest_hash);
+    w.intField("created_at", entry.created_at);
+    w.uintField("completed_targets", entry.completed_targets);
+    w.uintField("failed_targets", entry.failed_targets);
+    w.uintField("remaining_targets", entry.remaining_targets);
+    if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
+    w.boolField("current", entry.is_current);
+    w.boolField("previous_successful", entry.is_previous_successful);
+    w.endObject();
+    w.beginObjectField("workloads");
+    w.uintField("services", entry.service_count);
+    w.uintField("workers", entry.worker_count);
+    w.uintField("crons", entry.cron_count);
+    w.uintField("training_jobs", entry.training_job_count);
+    w.endObject();
     w.endObject();
 }
 
-fn rollbackRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8, release_id: []const u8) !void {
-    if (release_id.len == 0) {
-        writeErr("remote rollback requires a release id\n", .{});
-        return OpsError.InvalidArgument;
-    }
-
+fn rollbackRemoteApp(
+    alloc: std.mem.Allocator,
+    addr_str: []const u8,
+    app_name: []const u8,
+    release_id: ?[]const u8,
+    print_only: bool,
+) !void {
     const server = cli.parseServerAddr(addr_str);
     const path = std.fmt.allocPrint(alloc, "/apps/{s}/rollback", .{app_name}) catch return OpsError.StoreError;
     defer alloc.free(path);
-    const body = std.fmt.allocPrint(alloc, "{{\"release_id\":\"{s}\"}}", .{release_id}) catch return OpsError.StoreError;
+    const body = if (release_id) |id|
+        std.fmt.allocPrint(alloc, "{{\"release_id\":\"{s}\",\"print\":{}}}", .{ id, print_only }) catch return OpsError.StoreError
+    else
+        std.fmt.allocPrint(alloc, "{{\"print\":{}}}", .{print_only}) catch return OpsError.StoreError;
     defer alloc.free(body);
 
     var token_buf: [64]u8 = undefined;
@@ -366,7 +499,56 @@ fn rollbackRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: [
         return OpsError.StoreError;
     }
 
-    write("{s}\n", .{resp.body});
+    if (print_only) {
+        write("rollback snapshot for app {s}:\n{s}\n", .{ app_name, resp.body });
+        return;
+    }
+
+    printRollbackSummary(parseRollbackSummary(resp.body));
+}
+
+fn parseRollbackSummary(json: []const u8) RollbackSummary {
+    return .{
+        .app_name = json_helpers.extractJsonString(json, "app_name") orelse "?",
+        .release_id = json_helpers.extractJsonString(json, "release_id") orelse "?",
+        .trigger = json_helpers.extractJsonString(json, "trigger") orelse "rollback",
+        .status = json_helpers.extractJsonString(json, "status") orelse "unknown",
+        .completed_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "completed_targets") orelse 0)),
+        .failed_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "failed_targets") orelse 0)),
+        .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "remaining_targets") orelse 0)),
+        .source_release_id = json_helpers.extractJsonString(json, "source_release_id"),
+        .message = json_helpers.extractJsonString(json, "message"),
+    };
+}
+
+fn printRollbackSummary(summary: RollbackSummary) void {
+    write("app: {s}\n", .{summary.app_name});
+    write("release: {s}\n", .{summary.release_id});
+    write("trigger: {s}\n", .{summary.trigger});
+    write("source_release_id: {s}\n", .{summary.source_release_id orelse "-"});
+    write("status: {s}\n", .{summary.status});
+
+    var progress_buf: [64]u8 = undefined;
+    const progress = formatProgressCounts(&progress_buf, summary.completed_targets, summary.failed_targets, summary.remaining_targets);
+    write("targets: {s}\n", .{progress});
+
+    if (summary.message) |message| {
+        write("message: {s}\n", .{message});
+    }
+}
+
+fn formatProgressCounts(buf: []u8, completed_targets: usize, failed_targets: usize, remaining_targets: usize) []const u8 {
+    if (failed_targets == 0 and remaining_targets == 0) {
+        return std.fmt.bufPrint(buf, "{d} ok", .{completed_targets}) catch "?";
+    }
+    if (remaining_targets == 0) {
+        return std.fmt.bufPrint(buf, "{d} ok, {d} fail", .{ completed_targets, failed_targets }) catch "?";
+    }
+    return std.fmt.bufPrint(buf, "{d} ok, {d} fail, {d} left", .{
+        completed_targets,
+        failed_targets,
+        remaining_targets,
+    }) catch "?";
 }
 
 test "parseHistoryObject extracts app release fields" {
@@ -461,6 +643,38 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqual(entry.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(entry.source_release_id.?, parsed.source_release_id.?);
     try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
+}
+
+test "writeHistoryJsonObject includes nested release markers" {
+    const entry = HistoryEntryView{
+        .id = "dep-1",
+        .app = "demo-app",
+        .service = "demo-app",
+        .trigger = "rollback",
+        .status = "completed",
+        .manifest_hash = "sha256:123",
+        .created_at = 42,
+        .service_count = 1,
+        .worker_count = 2,
+        .cron_count = 3,
+        .training_job_count = 4,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .remaining_targets = 0,
+        .source_release_id = "dep-0",
+        .message = "healthy",
+        .is_current = true,
+        .is_previous_successful = false,
+    };
+
+    var w = json_out.JsonWriter{};
+    writeHistoryJsonObject(&w, entry);
+    const json = w.getWritten();
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"is_current\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"release\":{\"id\":\"dep-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"current\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":1,\"workers\":2,\"crons\":3,\"training_jobs\":4}") != null);
 }
 
 test "historyEntryFromDeployment preserves partially failed local release state" {
