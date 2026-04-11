@@ -195,9 +195,9 @@ yoq validate [-f manifest.toml] [-q] validate a manifest
 
 ```text
 yoq rollback <service>               roll back a service deployment
-yoq rollback --app [name]            print the last app release snapshot
-yoq rollback --app [name] --server host:port --release <id>
-                                     re-apply a prior app release remotely
+yoq rollback --app [name]            re-apply the previous successful app release
+yoq rollback --app [name] [--release <id>] [--print]
+yoq rollback --app [name] --server host:port [--release <id>] [--print]
 yoq history <service>                show service deployment history
 yoq history --app [name]             show local app release history
 yoq history --app [name] --server host:port [--json]
@@ -206,8 +206,10 @@ yoq status [--verbose]               show service status and resources
 yoq status --app [name]              show local app release status
 yoq status --app [name] --server host:port
                                      show remote app release status
-yoq apps [--json]                    list local app release summaries
-yoq apps --server host:port [--json] list remote app release summaries
+yoq apps [--json] [--status s|--failed|--in-progress]
+                                     list local app release summaries
+yoq apps --server host:port [--json] [--status s|--failed|--in-progress]
+                                     list remote app release summaries
 yoq metrics [service]                show service metrics
 yoq metrics --pairs                  show service-to-service metrics
 yoq policy deny <src> <tgt>          block traffic between services
@@ -234,6 +236,8 @@ yoq cert rm <domain>                 remove a certificate
 ```
 
 If `--email` is omitted for the standalone ACME flow, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
+
+For app rollbacks, omitting `--release` picks the previous successful release before the current one. Use `--print` to inspect the selected stored app snapshot without applying it.
 
 ### server and cluster
 

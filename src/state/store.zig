@@ -99,6 +99,8 @@ pub const getLastSuccessfulDeployment = @import("store/deployments.zig").getLast
 pub const getLastSuccessfulDeploymentByApp = @import("store/deployments.zig").getLastSuccessfulDeploymentByApp;
 pub const getPreviousSuccessfulDeploymentByApp = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByApp;
 pub const getPreviousSuccessfulDeploymentByAppInDb = @import("store/deployments.zig").getPreviousSuccessfulDeploymentByAppInDb;
+pub const getRollbackTargetDeploymentByApp = @import("store/deployments.zig").getRollbackTargetDeploymentByApp;
+pub const getRollbackTargetDeploymentByAppInDb = @import("store/deployments.zig").getRollbackTargetDeploymentByAppInDb;
 
 pub const replaceCronSchedulesForApp = @import("store/crons.zig").replaceCronSchedulesForApp;
 pub const replaceCronSchedulesForAppInDb = @import("store/crons.zig").replaceCronSchedulesForAppInDb;

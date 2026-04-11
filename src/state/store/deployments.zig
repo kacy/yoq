@@ -314,6 +314,35 @@ pub fn getPreviousSuccessfulDeploymentByAppInDb(
     );
 }
 
+pub fn getRollbackTargetDeploymentByApp(
+    alloc: Allocator,
+    app_name: []const u8,
+    explicit_release_id: ?[]const u8,
+) StoreError!DeploymentRecord {
+    const db = try common.getDb();
+    return getRollbackTargetDeploymentByAppInDb(db, alloc, app_name, explicit_release_id);
+}
+
+pub fn getRollbackTargetDeploymentByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+    explicit_release_id: ?[]const u8,
+) StoreError!DeploymentRecord {
+    if (explicit_release_id) |release_id| {
+        const dep = try getDeploymentInDb(db, alloc, release_id);
+        errdefer dep.deinit(alloc);
+        if (dep.app_name == null or !std.mem.eql(u8, dep.app_name.?, app_name)) {
+            return StoreError.NotFound;
+        }
+        return dep;
+    }
+
+    const latest = try getLatestDeploymentByAppInDb(db, alloc, app_name);
+    defer latest.deinit(alloc);
+    return getPreviousSuccessfulDeploymentByAppInDb(db, alloc, app_name, latest.id);
+}
+
 test "deployment record round-trip via sqlite" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
@@ -432,6 +461,75 @@ test "getPreviousSuccessfulDeploymentByAppInDb excludes current release" {
 
     try std.testing.expectEqualStrings("dep-1", previous.id);
     try std.testing.expectEqualStrings("completed", previous.status);
+}
+
+test "getRollbackTargetDeploymentByAppInDb defaults to the previous successful release" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:1\"}]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:2\"}]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 200,
+    });
+
+    const target = try getRollbackTargetDeploymentByAppInDb(&db, std.testing.allocator, "demo-app", null);
+    defer target.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("dep-1", target.id);
+}
+
+test "getRollbackTargetDeploymentByAppInDb honors an explicit release id" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "rollback",
+        .source_release_id = "dep-1",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = "rollback completed",
+        .created_at = 200,
+    });
+
+    const target = try getRollbackTargetDeploymentByAppInDb(&db, std.testing.allocator, "demo-app", "dep-2");
+    defer target.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("dep-2", target.id);
 }
 
 test "listLatestDeploymentsByAppInDb returns one latest row per app" {

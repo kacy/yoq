@@ -167,13 +167,16 @@ this gives the operator one app-first day-2 model:
 
 - `yoq status --app [name]` — current app release status
 - `yoq history --app [name]` — app release history
-- `yoq rollback --app [name]` — print the last successful local app snapshot
-- `yoq rollback --app [name] --server host:port --release <id>` — re-apply a prior remote app release
-- `yoq apps` — list app release summaries across all known apps
+- `yoq rollback --app [name]` — re-apply the previous successful app release
+- `yoq rollback --app [name] [--release <id>] [--print]` — target a specific stored release or print the selected app snapshot without applying it
+- `yoq rollback --app [name] --server host:port [--release <id>] [--print]` — do the same against a cluster
+- `yoq apps [--status <status> | --failed | --in-progress]` — list app release summaries across all known apps with optional rollout filtering
 - `yoq run-worker [--server host:port] <name>` — run a worker from the current app release
 - `yoq train start|status|stop|pause|resume|scale|logs [--server host:port] <name>` — manage training jobs from the current app release
 
-`yoq apps` and `yoq status --app` now show both the desired workload mix from the latest app release and the current training runtime summary for that app. On clustered applies, cron definitions from the app snapshot are also registered in cluster state, so rollback restores the active cron schedule set along with the rest of the app snapshot.
+`yoq apps` and `yoq status --app` now show the current release, previous successful release, desired workload mix, rollout target counts, and the current training runtime summary for each app. On clustered applies, cron definitions from the app snapshot are also registered in cluster state, so rollback restores the active cron schedule set along with the rest of the app snapshot.
+
+When `--app` is present and you omit the app name, yoq defaults to the current working directory name for `status --app`, `history --app`, and `rollback --app`. When `rollback --app` omits `--release`, yoq selects the previous successful release before the current one.
 
 Remote `yoq train logs --server ...` now proxies the request to the agent that hosts the selected rank. If that agent is unreachable or does not expose the log endpoint, the API returns an explicit hosting-agent error instead of a misleading empty or missing result.
 
@@ -230,12 +233,12 @@ the cluster API also exposes app-scoped day-2 reads and rollback:
 - `GET /apps` — latest release summary per app
 - `GET /apps/<name>/status` — latest app release metadata
 - `GET /apps/<name>/history` — app release history
-- `POST /apps/<name>/rollback` with `{"release_id":"..."}` — re-apply a stored app release snapshot
+- `POST /apps/<name>/rollback` with optional `{"release_id":"...","print":true|false}` — re-apply or print a stored app release snapshot
 - `POST /apps/<app>/workers/<name>/run` — run a worker from the current app release
 - `POST /apps/<app>/training/<name>/start|stop|pause|resume|scale` — manage training jobs for the current app release
 - `GET /apps/<app>/training/<name>/status|logs` — inspect training jobs for the current app release
 
-The app status surfaces (`GET /apps`, `GET /apps/<name>/status`, `yoq apps`, and `yoq status --app`) also report live training runtime counts for the app: active, paused, and failed jobs.
+The app status surfaces (`GET /apps`, `GET /apps/<name>/status`, `yoq apps`, and `yoq status --app`) also report live training runtime counts for the app: active, paused, and failed jobs. Their JSON output now includes nested `current_release`, `previous_successful_release`, `workloads`, and `training_runtime` sections while keeping the older top-level fields for compatibility.
 For `GET /apps/<app>/training/<name>/logs`, the control plane now proxies the request to the hosting agent for the selected rank. If that agent is unreachable or does not expose the log endpoint, the route returns an explicit hosting-agent error.
 
 ### rolling upgrades

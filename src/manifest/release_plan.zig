@@ -23,6 +23,17 @@ pub const ReleasePlan = struct {
         app: *const app_spec.ApplicationSpec,
         targets: []const []const u8,
     ) !ReleasePlan {
+        const config_snapshot = try makeConfigSnapshot(alloc, app, targets);
+        defer alloc.free(config_snapshot);
+        return fromAppSpecWithSnapshot(alloc, app, targets, config_snapshot);
+    }
+
+    pub fn fromAppSpecWithSnapshot(
+        alloc: std.mem.Allocator,
+        app: *const app_spec.ApplicationSpec,
+        targets: []const []const u8,
+        config_snapshot: []const u8,
+    ) !ReleasePlan {
         var planned_app = if (targets.len == 0)
             try app.clone(alloc)
         else
@@ -39,16 +50,16 @@ pub const ReleasePlan = struct {
             service_filter = filter;
         }
 
-        const config_snapshot = try planned_app.toApplyJson(alloc);
-        errdefer alloc.free(config_snapshot);
-        const manifest_hash = try deployment_store.computeManifestHash(alloc, config_snapshot);
+        const owned_snapshot = try alloc.dupe(u8, config_snapshot);
+        errdefer alloc.free(owned_snapshot);
+        const manifest_hash = try deployment_store.computeManifestHash(alloc, owned_snapshot);
         errdefer alloc.free(manifest_hash);
 
         return .{
             .app = planned_app,
             .service_filter = service_filter,
             .manifest_hash = manifest_hash,
-            .config_snapshot = config_snapshot,
+            .config_snapshot = owned_snapshot,
             .requested_target_count = targets.len,
             .alloc = alloc,
         };
@@ -67,6 +78,15 @@ pub const ReleasePlan = struct {
         return alloc.dupe(u8, self.config_snapshot);
     }
 };
+
+fn makeConfigSnapshot(alloc: std.mem.Allocator, app: *const app_spec.ApplicationSpec, targets: []const []const u8) ![]u8 {
+    var planned_app = if (targets.len == 0)
+        try app.clone(alloc)
+    else
+        try app.selectServices(alloc, targets);
+    defer planned_app.deinit();
+    return planned_app.toApplyJson(alloc);
+}
 
 test "full release plan clones full app without a service filter" {
     const alloc = std.testing.allocator;
