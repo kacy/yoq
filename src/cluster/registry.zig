@@ -31,6 +31,7 @@ pub const orphanAssignmentsSql = sql_mutations.orphanAssignmentsSql;
 pub const reassignSql = sql_mutations.reassignSql;
 pub const deleteAgentAssignmentsSql = sql_mutations.deleteAgentAssignmentsSql;
 pub const deleteAssignmentsForWorkloadSql = sql_mutations.deleteAssignmentsForWorkloadSql;
+pub const deleteOtherAssignmentsForWorkloadSql = sql_mutations.deleteOtherAssignmentsForWorkloadSql;
 pub const wireguardPeerSql = sql_mutations.wireguardPeerSql;
 pub const removeWireguardPeerSql = sql_mutations.removeWireguardPeerSql;
 
@@ -63,6 +64,23 @@ test "registerSql generates valid SQL" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "INSERT INTO agents") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "10.0.0.5:7701") != null);
+}
+
+test "deleteOtherAssignmentsForWorkloadSql keeps new assignment ids" {
+    var buf: [512]u8 = undefined;
+    const sql = try deleteOtherAssignmentsForWorkloadSql(
+        &buf,
+        "demo-app",
+        "service",
+        "web",
+        &.{ "new123", "new456" },
+    );
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "DELETE FROM assignments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "app_name = 'demo-app'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "workload_kind = 'service'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "workload_name = 'web'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "id NOT IN ('new123', 'new456')") != null);
 }
 
 test "registerSqlFull includes wireguard columns" {

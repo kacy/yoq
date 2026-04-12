@@ -221,6 +221,41 @@ pub fn deleteAssignmentsForWorkloadSql(
     );
 }
 
+pub fn deleteOtherAssignmentsForWorkloadSql(
+    buf: []u8,
+    app_name: []const u8,
+    workload_kind: []const u8,
+    workload_name: []const u8,
+    keep_ids: []const []const u8,
+) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    var app_esc_buf: [256]u8 = undefined;
+    const app_esc = try sql_escape.escapeSqlString(&app_esc_buf, app_name);
+    var kind_esc_buf: [64]u8 = undefined;
+    const kind_esc = try sql_escape.escapeSqlString(&kind_esc_buf, workload_kind);
+    var name_esc_buf: [256]u8 = undefined;
+    const name_esc = try sql_escape.escapeSqlString(&name_esc_buf, workload_name);
+
+    try writer.print(
+        "DELETE FROM assignments WHERE app_name = '{s}' AND workload_kind = '{s}' AND workload_name = '{s}'",
+        .{ app_esc, kind_esc, name_esc },
+    );
+    if (keep_ids.len > 0) {
+        try writer.writeAll(" AND id NOT IN (");
+        for (keep_ids, 0..) |id, i| {
+            if (i > 0) try writer.writeAll(", ");
+            var id_esc_buf: [64]u8 = undefined;
+            const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+            try writer.print("'{s}'", .{id_esc});
+        }
+        try writer.writeByte(')');
+    }
+    try writer.writeByte(';');
+    return stream.getWritten();
+}
+
 pub fn wireguardPeerSql(
     buf: []u8,
     node_id: u16,

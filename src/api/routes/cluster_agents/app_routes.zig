@@ -420,6 +420,12 @@ const RouteFlowHarness = struct {
         return .{ .cluster = &self.node, .join_token = null };
     }
 
+    fn applyCommitted(self: *RouteFlowHarness) void {
+        self.node.state_machine.applyUpTo(&self.node.log, self.alloc, self.node.log.lastIndex());
+        self.node.raft.role = .leader;
+        self.node.leader_id = self.node.config.id;
+    }
+
     fn seedActiveAgent(self: *RouteFlowHarness) !void {
         self.node.stateMachineDb().exec(
             "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
@@ -915,6 +921,7 @@ test "app rollback defaults to the previous successful release when release id i
 
     const first_apply_response = harness.appApply(first_apply_body);
     defer freeResponse(alloc, first_apply_response);
+    std.debug.print("first_apply_response={s}\n", .{first_apply_response.body});
     try expectResponseOk(first_apply_response);
     const source_release_id = json_helpers.extractJsonString(first_apply_response.body, "release_id").?;
 

@@ -34,6 +34,7 @@ pub const Service = struct {
     volumes: []const shared_types.VolumeMount,
     health_check: ?shared_types.HealthCheck = null,
     restart: shared_types.RestartPolicy = .none,
+    rollout: shared_types.RolloutPolicy = .{},
     tls: ?shared_types.TlsConfig = null,
     http_routes: []const shared_types.HttpProxyRoute = &.{},
     gpu: ?shared_types.GpuSpec = null,

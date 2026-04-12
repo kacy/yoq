@@ -32,6 +32,14 @@ const JsonTls = struct {
     email: ?[]const u8 = null,
 };
 
+const JsonRollout = struct {
+    strategy: []const u8 = "rolling",
+    parallelism: u32 = 1,
+    delay_between_batches: u32 = 0,
+    failure_action: []const u8 = "rollback",
+    health_check_timeout: u32 = 60,
+};
+
 const JsonMethodMatch = struct {
     method: []const u8,
 };
@@ -88,6 +96,7 @@ const JsonService = struct {
     volumes: []const JsonVolume = &.{},
     health_check: ?JsonHealthCheck = null,
     restart: []const u8 = "none",
+    rollout: JsonRollout = .{},
     tls: ?JsonTls = null,
     http_routes: []const JsonHttpRoute = &.{},
     gpu: ?JsonGpu = null,
@@ -161,6 +170,7 @@ fn serviceFromSnapshot(alloc: std.mem.Allocator, svc: JsonService) !spec.Service
         .volumes = try dupVolumes(alloc, svc.volumes),
         .health_check = if (svc.health_check) |health_check| try dupHealthCheck(alloc, health_check) else null,
         .restart = parseRestartPolicy(svc.restart),
+        .rollout = parseRolloutPolicy(svc.rollout),
         .tls = if (svc.tls) |tls| try dupTls(alloc, tls) else null,
         .http_routes = try dupHttpRoutes(alloc, svc.http_routes),
         .gpu = if (svc.gpu) |gpu| try dupGpu(alloc, gpu) else null,
@@ -242,6 +252,16 @@ fn dupTls(alloc: std.mem.Allocator, tls: JsonTls) !spec.TlsConfig {
     };
 }
 
+fn parseRolloutPolicy(rollout: JsonRollout) spec.RolloutPolicy {
+    return .{
+        .strategy = if (std.mem.eql(u8, rollout.strategy, "rolling")) .rolling else .rolling,
+        .parallelism = @max(1, rollout.parallelism),
+        .delay_between_batches = rollout.delay_between_batches,
+        .failure_action = if (std.mem.eql(u8, rollout.failure_action, "pause")) .pause else .rollback,
+        .health_check_timeout = rollout.health_check_timeout,
+    };
+}
+
 fn dupHttpRoutes(alloc: std.mem.Allocator, routes: []const JsonHttpRoute) ![]const spec.HttpProxyRoute {
     const out = try alloc.alloc(spec.HttpProxyRoute, routes.len);
     errdefer alloc.free(out);
@@ -318,7 +338,7 @@ fn parseRestartPolicy(text: []const u8) spec.RestartPolicy {
 test "loadLocalRollbackSnapshot preserves service runtime fields while keeping original snapshot" {
     const alloc = std.testing.allocator;
     const snapshot =
-        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","command":["nginx","-g","daemon off"],"ports":[{"host_port":8080,"container_port":80}],"env":["MODE=prod"],"depends_on":["db"],"working_dir":"/srv/app","volumes":[{"source":"./src","target":"/app","kind":"bind"}],"health_check":{"kind":"http","path":"/health","port":8080,"interval":11,"timeout":6,"retries":4,"start_period":2},"restart":"always","tls":{"domain":"demo.internal","acme":true,"email":"ops@example.com"},"http_routes":[{"name":"default","host":"demo.internal","path_prefix":"/","retries":2,"connect_timeout_ms":1500,"request_timeout_ms":6000,"http2_idle_timeout_ms":30000,"preserve_host":false,"retry_on_5xx":true,"circuit_breaker_threshold":3,"circuit_breaker_timeout_ms":30000,"match_methods":[{"method":"GET"}],"match_headers":[{"name":"x-env","value":"prod"}],"backend_services":[{"service_name":"web","weight":100}]}],"gpu":{"count":1,"model":"L4","vram_min_mb":24576},"gpu_mesh":{"world_size":2,"gpus_per_rank":1,"master_port":29501}}],"workers":[{"name":"migrate"}],"crons":[{"name":"nightly"}],"training_jobs":[{"name":"finetune"}]}
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","command":["nginx","-g","daemon off"],"ports":[{"host_port":8080,"container_port":80}],"env":["MODE=prod"],"depends_on":["db"],"working_dir":"/srv/app","volumes":[{"source":"./src","target":"/app","kind":"bind"}],"health_check":{"kind":"http","path":"/health","port":8080,"interval":11,"timeout":6,"retries":4,"start_period":2},"restart":"always","rollout":{"strategy":"rolling","parallelism":2,"delay_between_batches":3,"failure_action":"pause","health_check_timeout":12},"tls":{"domain":"demo.internal","acme":true,"email":"ops@example.com"},"http_routes":[{"name":"default","host":"demo.internal","path_prefix":"/","retries":2,"connect_timeout_ms":1500,"request_timeout_ms":6000,"http2_idle_timeout_ms":30000,"preserve_host":false,"retry_on_5xx":true,"circuit_breaker_threshold":3,"circuit_breaker_timeout_ms":30000,"match_methods":[{"method":"GET"}],"match_headers":[{"name":"x-env","value":"prod"}],"backend_services":[{"service_name":"web","weight":100}]}],"gpu":{"count":1,"model":"L4","vram_min_mb":24576},"gpu_mesh":{"world_size":2,"gpus_per_rank":1,"master_port":29501}}],"workers":[{"name":"migrate"}],"crons":[{"name":"nightly"}],"training_jobs":[{"name":"finetune"}]}
     ;
 
     var loaded = try loadLocalRollbackSnapshot(alloc, snapshot);
@@ -331,6 +351,8 @@ test "loadLocalRollbackSnapshot preserves service runtime fields while keeping o
     try std.testing.expectEqualStrings("nginx", loaded.manifest.services[0].command[0]);
     try std.testing.expectEqual(@as(u16, 8080), loaded.manifest.services[0].ports[0].host_port);
     try std.testing.expectEqual(spec.RestartPolicy.always, loaded.manifest.services[0].restart);
+    try std.testing.expectEqual(@as(u32, 2), loaded.manifest.services[0].rollout.parallelism);
+    try std.testing.expectEqual(spec.RolloutFailureAction.pause, loaded.manifest.services[0].rollout.failure_action);
     try std.testing.expectEqualStrings("demo.internal", loaded.manifest.services[0].tls.?.domain);
     try std.testing.expectEqual(@as(usize, 1), loaded.manifest.services[0].http_routes.len);
     try std.testing.expectEqual(@as(u32, 2), loaded.manifest.services[0].gpu_mesh.?.world_size);

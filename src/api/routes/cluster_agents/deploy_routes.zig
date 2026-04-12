@@ -9,6 +9,7 @@ const apply_request = @import("apply_request.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const deployment_store = @import("../../../manifest/update/deployment_store.zig");
+const rollout_spec = @import("../../../manifest/spec.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
 
@@ -90,7 +91,7 @@ const ClusterReleaseTracker = struct {
 pub const ClusterApplyBackend = struct {
     alloc: std.mem.Allocator,
     node: *cluster_node.Node,
-    requests: []scheduler.PlacementRequest,
+    requests: []apply_request.ServiceRequest,
     agents: []agent_registry.AgentRecord,
     progress: ?apply_release.ProgressRecorder = null,
 
@@ -99,109 +100,26 @@ pub const ClusterApplyBackend = struct {
     }
 
     pub fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
+        const strategy = effectiveClusterRollout(self.requests);
         var placed: usize = 0;
         var failed: usize = 0;
         var completed_targets: usize = 0;
         var failed_targets: usize = 0;
 
-        for (self.requests) |req| {
-            if (req.gang_world_size > 0) {
-                const gang_placements = scheduler.scheduleGang(self.alloc, req, self.agents) catch {
-                    failed += 1;
-                    failed_targets += 1;
-                    self.reportProgress(completed_targets, failed_targets);
-                    continue;
-                };
+        const batch_size = @max(@as(usize, 1), @as(usize, strategy.parallelism));
+        var batch_start: usize = 0;
+        while (batch_start < self.requests.len) {
+            const batch_end = @min(batch_start + batch_size, self.requests.len);
+            const batch = self.requests[batch_start..batch_end];
+            const batch_failed_before = failed_targets;
 
-                if (gang_placements) |gps| {
-                    defer self.alloc.free(gps);
+            try self.applyBatch(batch, &placed, &failed, &completed_targets, &failed_targets);
 
-                    var gang_ok = true;
-                    for (gps) |gp| {
-                        var id_buf: [12]u8 = undefined;
-                        scheduler.generateAssignmentId(&id_buf);
-
-                        var sql_buf: [2048]u8 = undefined;
-                        const sql = scheduler.assignmentSqlGang(
-                            &sql_buf,
-                            &id_buf,
-                            gp.agent_id,
-                            req,
-                            std.time.timestamp(),
-                            gp,
-                        ) catch {
-                            gang_ok = false;
-                            break;
-                        };
-
-                        _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
-                    }
-
-                    if (gang_ok) {
-                        placed += gps.len;
-                        completed_targets += 1;
-                        self.reportProgress(completed_targets, failed_targets);
-                    } else {
-                        failed += req.gang_world_size;
-                        failed_targets += 1;
-                        self.reportProgress(completed_targets, failed_targets);
-                    }
-                } else {
-                    failed += req.gang_world_size;
-                    failed_targets += 1;
-                    self.reportProgress(completed_targets, failed_targets);
-                }
+            if (failed_targets > batch_failed_before) break;
+            if (strategy.delay_between_batches > 0 and batch_end < self.requests.len) {
+                std.Thread.sleep(@as(u64, strategy.delay_between_batches) * std.time.ns_per_s);
             }
-        }
-
-        var normal_requests: std.ArrayListUnmanaged(scheduler.PlacementRequest) = .empty;
-        defer normal_requests.deinit(self.alloc);
-        for (self.requests) |req| {
-            if (req.gang_world_size == 0) {
-                normal_requests.append(self.alloc, req) catch {
-                    failed += 1;
-                    failed_targets += 1;
-                    self.reportProgress(completed_targets, failed_targets);
-                    continue;
-                };
-            }
-        }
-
-        if (normal_requests.items.len > 0) {
-            const placements = scheduler.schedule(self.alloc, normal_requests.items, self.agents) catch {
-                return ClusterApplyError.InternalError;
-            };
-            defer self.alloc.free(placements);
-
-            for (placements) |maybe_placement| {
-                if (maybe_placement) |placement| {
-                    var id_buf: [12]u8 = undefined;
-                    scheduler.generateAssignmentId(&id_buf);
-
-                    var sql_buf: [1024]u8 = undefined;
-                    const sql = scheduler.assignmentSql(
-                        &sql_buf,
-                        &id_buf,
-                        placement.agent_id,
-                        normal_requests.items[placement.request_idx],
-                        std.time.timestamp(),
-                    ) catch {
-                        failed += 1;
-                        failed_targets += 1;
-                        self.reportProgress(completed_targets, failed_targets);
-                        continue;
-                    };
-
-                    _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
-                    placed += 1;
-                    completed_targets += 1;
-                    self.reportProgress(completed_targets, failed_targets);
-                } else {
-                    failed += 1;
-                    failed_targets += 1;
-                    self.reportProgress(completed_targets, failed_targets);
-                }
-            }
+            batch_start = batch_end;
         }
 
         return .{
@@ -219,6 +137,117 @@ pub const ClusterApplyBackend = struct {
         };
     }
 
+    fn applyBatch(
+        self: *const ClusterApplyBackend,
+        batch: []const apply_request.ServiceRequest,
+        placed: *usize,
+        failed: *usize,
+        completed_targets: *usize,
+        failed_targets: *usize,
+    ) ClusterApplyError!void {
+        for (batch) |req| {
+            if (req.request.gang_world_size > 0) {
+                try self.applyGangRequest(req, placed, failed, completed_targets, failed_targets);
+            } else {
+                try self.applySingleRequest(req, placed, failed, completed_targets, failed_targets);
+            }
+        }
+    }
+
+    fn applyGangRequest(
+        self: *const ClusterApplyBackend,
+        req: apply_request.ServiceRequest,
+        placed: *usize,
+        failed: *usize,
+        completed_targets: *usize,
+        failed_targets: *usize,
+    ) ClusterApplyError!void {
+        const gang_placements = scheduler.scheduleGang(self.alloc, req.request, self.agents) catch {
+            failed.* += 1;
+            failed_targets.* += 1;
+            self.reportProgress(completed_targets.*, failed_targets.*);
+            return;
+        };
+
+        if (gang_placements) |gps| {
+            defer self.alloc.free(gps);
+
+            var keep_ids = std.ArrayList([]const u8).empty;
+            defer keep_ids.deinit(self.alloc);
+
+            for (gps) |gp| {
+                const owned_id = generateOwnedAssignmentId(self.alloc) catch return ClusterApplyError.InternalError;
+                errdefer self.alloc.free(owned_id);
+                keep_ids.append(self.alloc, owned_id) catch return ClusterApplyError.InternalError;
+
+                var sql_buf: [2048]u8 = undefined;
+                const sql = scheduler.assignmentSqlGang(
+                    &sql_buf,
+                    owned_id,
+                    gp.agent_id,
+                    req.request,
+                    std.time.timestamp(),
+                    gp,
+                ) catch return ClusterApplyError.InternalError;
+
+                _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
+            }
+
+            try reconcilePriorAssignments(self.node, req.request, keep_ids.items);
+            for (keep_ids.items) |id| self.alloc.free(id);
+
+            placed.* += gps.len;
+            completed_targets.* += 1;
+            self.reportProgress(completed_targets.*, failed_targets.*);
+            return;
+        }
+
+        failed.* += req.request.gang_world_size;
+        failed_targets.* += 1;
+        self.reportProgress(completed_targets.*, failed_targets.*);
+    }
+
+    fn applySingleRequest(
+        self: *const ClusterApplyBackend,
+        req: apply_request.ServiceRequest,
+        placed: *usize,
+        failed: *usize,
+        completed_targets: *usize,
+        failed_targets: *usize,
+    ) ClusterApplyError!void {
+        const placements = scheduler.schedule(self.alloc, &[_]scheduler.PlacementRequest{req.request}, self.agents) catch {
+            return ClusterApplyError.InternalError;
+        };
+        defer self.alloc.free(placements);
+
+        if (placements.len == 0 or placements[0] == null) {
+            failed.* += 1;
+            failed_targets.* += 1;
+            self.reportProgress(completed_targets.*, failed_targets.*);
+            return;
+        }
+
+        const placement = placements[0].?;
+        const owned_id = generateOwnedAssignmentId(self.alloc) catch return ClusterApplyError.InternalError;
+        defer self.alloc.free(owned_id);
+
+        var sql_buf: [1024]u8 = undefined;
+        const sql = scheduler.assignmentSql(
+            &sql_buf,
+            owned_id,
+            placement.agent_id,
+            req.request,
+            std.time.timestamp(),
+        ) catch return ClusterApplyError.InternalError;
+
+        _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
+        try reconcilePriorAssignments(self.node, req.request, &.{owned_id});
+
+        placed.* += 1;
+        completed_targets.* += 1;
+        self.reportProgress(completed_targets.*, failed_targets.*);
+    }
+
     fn reportProgress(self: *const ClusterApplyBackend, completed_targets: usize, failed_targets: usize) void {
         if (self.progress) |progress| {
             progress.mark(.in_progress, null, completed_targets, failed_targets) catch {};
@@ -232,6 +261,46 @@ pub const ClusterApplyBackend = struct {
         };
     }
 };
+
+fn effectiveClusterRollout(requests: []const apply_request.ServiceRequest) rollout_spec.RolloutPolicy {
+    var strategy: rollout_spec.RolloutPolicy = .{};
+    if (requests.len == 0) return strategy;
+
+    strategy = requests[0].rollout;
+    for (requests[1..]) |req| {
+        strategy.parallelism = @min(strategy.parallelism, req.rollout.parallelism);
+        strategy.delay_between_batches = @max(strategy.delay_between_batches, req.rollout.delay_between_batches);
+        strategy.health_check_timeout = @max(strategy.health_check_timeout, req.rollout.health_check_timeout);
+        if (req.rollout.failure_action == .pause) strategy.failure_action = .pause;
+    }
+    return strategy;
+}
+
+fn generateOwnedAssignmentId(alloc: std.mem.Allocator) ![]u8 {
+    var id_buf: [12]u8 = undefined;
+    scheduler.generateAssignmentId(&id_buf);
+    return alloc.dupe(u8, id_buf[0..]);
+}
+
+fn reconcilePriorAssignments(
+    node: *cluster_node.Node,
+    request: scheduler.PlacementRequest,
+    keep_ids: []const []const u8,
+) ClusterApplyError!void {
+    const app_name = request.app_name orelse return;
+    const workload_kind = request.workload_kind orelse return;
+    const workload_name = request.workload_name orelse return;
+
+    var sql_buf: [2048]u8 = undefined;
+    const sql = agent_registry.deleteOtherAssignmentsForWorkloadSql(
+        &sql_buf,
+        app_name,
+        workload_kind,
+        workload_name,
+        keep_ids,
+    ) catch return ClusterApplyError.InternalError;
+    _ = node.propose(sql) catch return ClusterApplyError.NotLeader;
+}
 
 fn handleApply(
     alloc: std.mem.Allocator,
@@ -490,4 +559,42 @@ test "formatAppApplyResponse includes non-service workload counts" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"worker_count\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"cron_count\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"training_job_count\":1") != null);
+}
+
+test "effectiveClusterRollout chooses conservative service rollout settings" {
+    const requests = [_]apply_request.ServiceRequest{
+        .{
+            .request = .{
+                .image = "nginx:1",
+                .command = "echo first",
+                .cpu_limit = 1000,
+                .memory_limit_mb = 256,
+            },
+            .rollout = .{
+                .parallelism = 3,
+                .delay_between_batches = 2,
+                .health_check_timeout = 5,
+            },
+        },
+        .{
+            .request = .{
+                .image = "nginx:2",
+                .command = "echo second",
+                .cpu_limit = 1000,
+                .memory_limit_mb = 256,
+            },
+            .rollout = .{
+                .parallelism = 2,
+                .delay_between_batches = 4,
+                .failure_action = .pause,
+                .health_check_timeout = 12,
+            },
+        },
+    };
+
+    const rollout = effectiveClusterRollout(&requests);
+    try std.testing.expectEqual(@as(u32, 2), rollout.parallelism);
+    try std.testing.expectEqual(@as(u32, 4), rollout.delay_between_batches);
+    try std.testing.expectEqual(@as(u32, 12), rollout.health_check_timeout);
+    try std.testing.expectEqual(rollout_spec.RolloutFailureAction.pause, rollout.failure_action);
 }

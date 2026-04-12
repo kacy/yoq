@@ -1,5 +1,6 @@
 const std = @import("std");
 const spec = @import("spec.zig");
+const update_common = @import("update/common.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
 const loader = @import("loader.zig");
 
@@ -14,6 +15,7 @@ pub const ApplicationServiceSpec = struct {
     volumes: []const spec.VolumeMount,
     health_check: ?spec.HealthCheck,
     restart: spec.RestartPolicy,
+    rollout: spec.RolloutPolicy = .{},
     tls: ?spec.TlsConfig,
     http_routes: []const spec.HttpProxyRoute,
     gpu: ?spec.GpuSpec,
@@ -307,6 +309,7 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
             .volumes = svc.volumes,
             .health_check = svc.health_check,
             .restart = svc.restart,
+            .rollout = svc.rollout,
             .tls = svc.tls,
             .http_routes = svc.http_routes,
             .gpu = svc.gpu,
@@ -441,6 +444,8 @@ fn writeJsonService(writer: anytype, svc: ApplicationServiceSpec) !void {
     try writer.writeAll(",\"restart\":\"");
     try writer.writeAll(restartPolicyString(svc.restart));
     try writer.writeByte('"');
+    try writer.writeAll(",\"rollout\":");
+    try writeJsonRollout(writer, svc.rollout);
 
     if (svc.health_check) |health_check| {
         try writer.writeAll(",\"health_check\":");
@@ -604,6 +609,19 @@ fn writeJsonHealthCheck(writer: anytype, health_check: spec.HealthCheck) !void {
     try writer.writeByte('}');
 }
 
+fn writeJsonRollout(writer: anytype, rollout: spec.RolloutPolicy) !void {
+    try writer.print(
+        "{{\"strategy\":\"{s}\",\"parallelism\":{d},\"delay_between_batches\":{d},\"failure_action\":\"{s}\",\"health_check_timeout\":{d}}}",
+        .{
+            rolloutStrategyString(rollout.strategy),
+            rollout.parallelism,
+            rollout.delay_between_batches,
+            rolloutFailureActionString(rollout.failure_action),
+            rollout.health_check_timeout,
+        },
+    );
+}
+
 fn writeJsonTls(writer: anytype, tls: spec.TlsConfig) !void {
     try writer.writeAll("{\"domain\":\"");
     try json_helpers.writeJsonEscaped(writer, tls.domain);
@@ -738,6 +756,31 @@ fn restartPolicyString(restart: spec.RestartPolicy) []const u8 {
         .none => "none",
         .always => "always",
         .on_failure => "on_failure",
+    };
+}
+
+fn rolloutStrategyString(strategy: spec.RolloutStrategy) []const u8 {
+    return switch (strategy) {
+        .rolling => "rolling",
+    };
+}
+
+fn rolloutFailureActionString(action: spec.RolloutFailureAction) []const u8 {
+    return switch (action) {
+        .rollback => "rollback",
+        .pause => "pause",
+    };
+}
+
+pub fn rolloutPolicyToUpdateStrategy(rollout: spec.RolloutPolicy) update_common.UpdateStrategy {
+    return .{
+        .parallelism = rollout.parallelism,
+        .delay_between_batches = rollout.delay_between_batches,
+        .failure_action = switch (rollout.failure_action) {
+            .rollback => .rollback,
+            .pause => .pause,
+        },
+        .health_check_timeout = rollout.health_check_timeout,
     };
 }
 
@@ -894,6 +937,12 @@ test "toApplyJson preserves structured workload metadata" {
         \\volumes = ["./src:/app"]
         \\restart = "always"
         \\
+        \\[service.web.rollout]
+        \\parallelism = 2
+        \\delay_between_batches = "3s"
+        \\failure_action = "pause"
+        \\health_check_timeout = "12s"
+        \\
         \\[service.db]
         \\image = "postgres:16"
         \\
@@ -921,8 +970,23 @@ test "toApplyJson preserves structured workload metadata" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"app_name\":\"demo-app\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"command\":[\"nginx\",\"-g\",\"daemon off;\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"strategy\":\"rolling\",\"parallelism\":2,\"delay_between_batches\":3,\"failure_action\":\"pause\",\"health_check_timeout\":12}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"workers\":[{\"name\":\"migrate\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"crons\":[{\"name\":\"cleanup\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"training_jobs\":[{\"name\":\"finetune\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"gpus\":4") != null);
+}
+
+test "rolloutPolicyToUpdateStrategy preserves rollout controls" {
+    const strategy = rolloutPolicyToUpdateStrategy(.{
+        .parallelism = 3,
+        .delay_between_batches = 5,
+        .failure_action = .pause,
+        .health_check_timeout = 42,
+    });
+
+    try std.testing.expectEqual(@as(u32, 3), strategy.parallelism);
+    try std.testing.expectEqual(@as(u32, 5), strategy.delay_between_batches);
+    try std.testing.expectEqual(update_common.FailureAction.pause, strategy.failure_action);
+    try std.testing.expectEqual(@as(u32, 42), strategy.health_check_timeout);
 }

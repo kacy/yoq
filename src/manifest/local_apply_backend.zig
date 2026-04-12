@@ -5,9 +5,12 @@ const release_history = @import("release_history.zig");
 const release_plan = @import("release_plan.zig");
 const orchestrator = @import("orchestrator.zig");
 const startup_runtime = @import("orchestrator/startup_runtime.zig");
+const health = @import("health.zig");
 const store = @import("../state/store.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const spec = @import("spec.zig");
+const update_common = @import("update/common.zig");
+const app_spec = @import("app_spec.zig");
 const proxy_control_plane = @import("../network/proxy/control_plane.zig");
 const service_rollout = @import("../network/service_rollout.zig");
 const service_reconciler = @import("../network/service_reconciler.zig");
@@ -206,6 +209,21 @@ fn existingServiceState(alloc: std.mem.Allocator, app_name: []const u8, service_
     return .inactive;
 }
 
+fn effectiveReplacementStrategy(release: *const release_plan.ReleasePlan) update_common.UpdateStrategy {
+    var strategy = update_common.UpdateStrategy{};
+    if (release.app.services.len == 0) return strategy;
+
+    strategy = app_spec.rolloutPolicyToUpdateStrategy(release.app.services[0].rollout);
+    for (release.app.services[1..]) |svc| {
+        const service_strategy = app_spec.rolloutPolicyToUpdateStrategy(svc.rollout);
+        strategy.parallelism = @min(strategy.parallelism, service_strategy.parallelism);
+        strategy.delay_between_batches = @max(strategy.delay_between_batches, service_strategy.delay_between_batches);
+        strategy.health_check_timeout = @max(strategy.health_check_timeout, service_strategy.health_check_timeout);
+        if (service_strategy.failure_action == .pause) strategy.failure_action = .pause;
+    }
+    return strategy;
+}
+
 fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const release_plan.ReleasePlan) void {
     for (orch.manifest.services, 0..) |svc, idx| {
         if (!release.includesService(svc.name)) continue;
@@ -225,6 +243,7 @@ fn runReplacementPlan(
     alloc: std.mem.Allocator,
     new_indexes: []const usize,
     replacement_indexes: []const usize,
+    strategy: update_common.UpdateStrategy,
 ) !apply_release.ApplyOutcome {
     var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
     defer completed_workers.deinit(alloc);
@@ -233,42 +252,74 @@ fn runReplacementPlan(
     var failed: usize = 0;
     var mutated = false;
 
-    for (new_indexes) |idx| {
-        runner.start(idx, &completed_workers) catch {
-            failed += 1;
-            reportProgressIfSupported(runner, placed, failed);
-            if (!mutated) return error.StartFailed;
-            continue;
-        };
-        placed += 1;
-        mutated = true;
+    const batch_size = @max(@as(usize, 1), @as(usize, strategy.parallelism));
+
+    var new_start: usize = 0;
+    while (new_start < new_indexes.len) {
+        const batch_end = @min(new_start + batch_size, new_indexes.len);
+        const batch = new_indexes[new_start..batch_end];
+
+        var batch_started: usize = 0;
+        for (batch) |idx| {
+            runner.start(idx, &completed_workers) catch {
+                failed += 1;
+                reportProgressIfSupported(runner, placed, failed);
+                if (!mutated) return error.StartFailed;
+                continue;
+            };
+            batch_started += 1;
+            mutated = true;
+        }
+
+        if (batch_started > 0 and !waitHealthyIfSupported(runner, batch, strategy.health_check_timeout)) {
+            failed += batch_started;
+            if (mutated) runner.finish();
+            return replacementFailureOutcome(strategy, placed, failed);
+        }
+
+        placed += batch_started;
         reportProgressIfSupported(runner, placed, failed);
+        maybeDelayBetweenBatches(strategy.delay_between_batches, batch_end < new_indexes.len);
+        new_start = batch_end;
     }
 
-    for (replacement_indexes) |idx| {
-        runner.stop(idx);
-        mutated = true;
-        runner.start(idx, &completed_workers) catch {
-            failed += 1;
-            reportProgressIfSupported(runner, placed, failed);
-            continue;
-        };
-        placed += 1;
+    var replacement_start: usize = 0;
+    while (replacement_start < replacement_indexes.len) {
+        const batch_end = @min(replacement_start + batch_size, replacement_indexes.len);
+        const batch = replacement_indexes[replacement_start..batch_end];
+
+        for (batch) |idx| runner.stop(idx);
+        if (batch.len > 0) mutated = true;
+
+        var batch_started: usize = 0;
+        for (batch) |idx| {
+            runner.start(idx, &completed_workers) catch {
+                failed += 1;
+                reportProgressIfSupported(runner, placed, failed);
+                continue;
+            };
+            batch_started += 1;
+        }
+
+        if (batch_started > 0 and !waitHealthyIfSupported(runner, batch, strategy.health_check_timeout)) {
+            failed += batch_started;
+            if (mutated) runner.finish();
+            return replacementFailureOutcome(strategy, placed, failed);
+        }
+
+        placed += batch_started;
         reportProgressIfSupported(runner, placed, failed);
+
+        if (failed > 0) {
+            if (mutated) runner.finish();
+            return replacementFailureOutcome(strategy, placed, failed);
+        }
+
+        maybeDelayBetweenBatches(strategy.delay_between_batches, batch_end < replacement_indexes.len);
+        replacement_start = batch_end;
     }
 
-    runner.finish();
-
-    if (failed > 0) {
-        return .{
-            .status = .partially_failed,
-            .message = "one or more local service replacements failed",
-            .placed = placed,
-            .failed = failed,
-            .completed_targets = placed,
-            .failed_targets = failed,
-        };
-    }
+    if (mutated) runner.finish();
 
     return .{
         .status = .completed,
@@ -287,6 +338,41 @@ fn reportProgressIfSupported(runner: anytype, completed_targets: usize, failed_t
     if (@hasDecl(std.meta.Child(@TypeOf(runner)), "reportProgress")) {
         runner.reportProgress(completed_targets, failed_targets);
     }
+}
+
+fn waitHealthyIfSupported(runner: anytype, indexes: []const usize, timeout: u32) bool {
+    if (timeout == 0) return true;
+    if (@hasDecl(std.meta.Child(@TypeOf(runner)), "waitHealthy")) {
+        return runner.waitHealthy(indexes, timeout);
+    }
+    return true;
+}
+
+fn maybeDelayBetweenBatches(delay_seconds: u32, should_delay: bool) void {
+    if (!should_delay or delay_seconds == 0) return;
+    std.Thread.sleep(@as(u64, delay_seconds) * std.time.ns_per_s);
+}
+
+fn replacementFailureOutcome(
+    strategy: update_common.UpdateStrategy,
+    placed: usize,
+    failed: usize,
+) apply_release.ApplyOutcome {
+    const status: update_common.DeploymentStatus = switch (strategy.failure_action) {
+        .pause => .partially_failed,
+        .rollback => if (placed > 0) .partially_failed else .failed,
+    };
+    return .{
+        .status = status,
+        .message = switch (strategy.failure_action) {
+            .pause => "replacement paused after failed rollout batch",
+            .rollback => "replacement failed during rollout batch",
+        },
+        .placed = placed,
+        .failed = failed,
+        .completed_targets = placed,
+        .failed_targets = failed,
+    };
 }
 
 fn runScopedApply(scope: LocalApplyScope, runner: anytype) !apply_release.ApplyOutcome {
@@ -400,6 +486,32 @@ const LocalApplyBackend = struct {
                     progress.mark(.in_progress, null, completed_targets, failed_targets) catch {};
                 }
             }
+
+            fn waitHealthy(runner_self: *@This(), indexes: []const usize, timeout: u32) bool {
+                const deadline = @as(u64, @intCast(@max(0, std.time.timestamp()))) + timeout;
+                while (@as(u64, @intCast(@max(0, std.time.timestamp()))) < deadline) {
+                    var all_healthy = true;
+                    for (indexes) |idx| {
+                        const svc = runner_self.orch.manifest.services[idx];
+                        if (svc.health_check == null) continue;
+                        const status = health.getStatus(svc.name) orelse {
+                            all_healthy = false;
+                            break;
+                        };
+                        switch (status) {
+                            .healthy => {},
+                            .unhealthy => return false,
+                            .starting => {
+                                all_healthy = false;
+                                break;
+                            },
+                        }
+                    }
+                    if (all_healthy) return true;
+                    std.Thread.sleep(100 * std.time.ns_per_ms);
+                }
+                return false;
+            }
         }{ .orch = self.orch, .progress = self.progress };
 
         return runReplacementPlan(
@@ -407,6 +519,7 @@ const LocalApplyBackend = struct {
             self.orch.alloc,
             new_indexes.items,
             replacement_indexes.items,
+            effectiveReplacementStrategy(self.release),
         );
     }
 
@@ -440,7 +553,6 @@ const ScopedApplyRunner = struct {
 test "PreparedLocalApply init resolves filtered start set" {
     const alloc = std.testing.allocator;
     const loader = @import("loader.zig");
-    const app_spec = @import("app_spec.zig");
 
     var manifest = try loader.loadFromString(alloc,
         \\[service.db]
@@ -473,7 +585,6 @@ test "PreparedLocalApply detects replacement candidates from existing app contai
     defer store.deinitTestDb();
 
     const loader = @import("loader.zig");
-    const app_spec = @import("app_spec.zig");
 
     var manifest = try loader.loadFromString(alloc,
         \\[service.db]
@@ -517,7 +628,6 @@ test "PreparedLocalApply classifies replacement and new service indexes" {
     defer store.deinitTestDb();
 
     const loader = @import("loader.zig");
-    const app_spec = @import("app_spec.zig");
 
     var manifest = try loader.loadFromString(alloc,
         \\[service.db]
@@ -567,7 +677,6 @@ test "syncExistingServiceStates marks selected running services" {
     defer store.deinitTestDb();
 
     const loader = @import("loader.zig");
-    const app_spec = @import("app_spec.zig");
 
     var manifest = try loader.loadFromString(alloc,
         \\[service.db]
@@ -635,7 +744,7 @@ test "runReplacementPlan counts started and replaced services" {
     defer runner.started.deinit(alloc);
     defer runner.stopped.deinit(alloc);
 
-    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1});
+    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
 
     try std.testing.expectEqual(@as(usize, 2), outcome.placed);
     try std.testing.expectEqual(@as(usize, 0), outcome.failed);
@@ -680,12 +789,12 @@ test "runReplacementPlan reports partial failure after mutation" {
     defer runner.started.deinit(alloc);
     defer runner.stopped.deinit(alloc);
 
-    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1});
+    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
 
     try std.testing.expectEqual(@as(usize, 1), outcome.placed);
     try std.testing.expectEqual(@as(usize, 1), outcome.failed);
     try std.testing.expectEqual(@import("update/common.zig").DeploymentStatus.partially_failed, outcome.status);
-    try std.testing.expectEqualStrings("one or more local service replacements failed", outcome.message.?);
+    try std.testing.expectEqualStrings("replacement failed during rollout batch", outcome.message.?);
     try std.testing.expect(runner.tls_started);
     try std.testing.expectEqual(@as(usize, 1), runner.started.items.len);
     try std.testing.expectEqual(@as(usize, 1), runner.stopped.items.len);
@@ -726,13 +835,47 @@ test "runReplacementPlan emits live target progress after each update" {
     defer runner.started.deinit(alloc);
     defer runner.progress_updates.deinit(alloc);
 
-    _ = try runReplacementPlan(&runner, alloc, &.{0}, &.{1});
+    _ = try runReplacementPlan(&runner, alloc, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
 
     try std.testing.expectEqual(@as(usize, 2), runner.progress_updates.items.len);
     try std.testing.expectEqual(@as(usize, 1), runner.progress_updates.items[0].completed_targets);
     try std.testing.expectEqual(@as(usize, 0), runner.progress_updates.items[0].failed_targets);
     try std.testing.expectEqual(@as(usize, 2), runner.progress_updates.items[1].completed_targets);
     try std.testing.expectEqual(@as(usize, 0), runner.progress_updates.items[1].failed_targets);
+}
+
+test "effectiveReplacementStrategy chooses conservative rollout settings" {
+    const alloc = std.testing.allocator;
+    const loader = @import("loader.zig");
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.api]
+        \\image = "alpine:latest"
+        \\[service.api.rollout]
+        \\parallelism = 3
+        \\delay_between_batches = "2s"
+        \\health_check_timeout = "15s"
+        \\
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\[service.web.rollout]
+        \\parallelism = 2
+        \\failure_action = "pause"
+        \\health_check_timeout = "5s"
+    );
+    defer manifest.deinit();
+
+    var app = try app_spec.fromManifest(alloc, "demo-app", &manifest);
+    defer app.deinit();
+
+    var release = try release_plan.ReleasePlan.fromAppSpec(alloc, &app, &.{});
+    defer release.deinit();
+
+    const strategy = effectiveReplacementStrategy(&release);
+    try std.testing.expectEqual(@as(u32, 2), strategy.parallelism);
+    try std.testing.expectEqual(@as(u32, 2), strategy.delay_between_batches);
+    try std.testing.expectEqual(@as(u32, 15), strategy.health_check_timeout);
+    try std.testing.expectEqual(update_common.FailureAction.pause, strategy.failure_action);
 }
 
 test "runScopedApply chooses replacement branch for replacement candidates" {

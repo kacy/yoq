@@ -65,6 +65,7 @@ pub fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const to
     errdefer if (health_check) |hc| hc.deinit(alloc);
 
     const restart = try fields.parseRestartPolicy(name, table.getString("restart"));
+    const rollout = try fields.parseRolloutPolicy(name, table.getTable("rollout"));
 
     const tls_config = try fields.parseTlsConfig(alloc, name, table.getTable("tls"));
     errdefer if (tls_config) |tls_config_value| tls_config_value.deinit(alloc);
@@ -91,6 +92,7 @@ pub fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const to
         .volumes = parsed_common.volumes,
         .health_check = health_check,
         .restart = restart,
+        .rollout = rollout,
         .tls = tls_config,
         .http_routes = http_routes,
         .gpu = gpu_spec,
