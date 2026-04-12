@@ -221,3 +221,16 @@ test "parse preserves service workload metadata and rollout policy" {
     try std.testing.expectEqual(spec.RolloutFailureAction.pause, parsed.requests.items[0].rollout.failure_action);
     try std.testing.expectEqual(@as(u32, 12), parsed.requests.items[0].rollout.health_check_timeout);
 }
+
+test "parse defaults rollout health gate to disabled when omitted" {
+    const alloc = std.testing.allocator;
+    const json =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx","command":["nginx","-g","daemon off"],"rollout":{"parallelism":2}}]}
+    ;
+
+    var parsed = try parse(alloc, json, true);
+    defer parsed.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.requests.items.len);
+    try std.testing.expectEqual(@as(u32, 0), parsed.requests.items[0].rollout.health_check_timeout);
+}
