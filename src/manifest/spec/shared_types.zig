@@ -83,7 +83,7 @@ pub const RolloutPolicy = struct {
     parallelism: u32 = 1,
     delay_between_batches: u32 = 0,
     failure_action: RolloutFailureAction = .rollback,
-    health_check_timeout: u32 = 60,
+    health_check_timeout: u32 = 0,
 };
 
 pub const CheckType = union(enum) {

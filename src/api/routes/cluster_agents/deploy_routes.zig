@@ -113,7 +113,7 @@ pub const ClusterApplyBackend = struct {
             const batch = self.requests[batch_start..batch_end];
             const batch_failed_before = failed_targets;
 
-            try self.applyBatch(batch, &placed, &failed, &completed_targets, &failed_targets);
+            try self.applyBatch(batch, strategy, &placed, &failed, &completed_targets, &failed_targets);
 
             if (failed_targets > batch_failed_before) break;
             if (strategy.delay_between_batches > 0 and batch_end < self.requests.len) {
@@ -129,7 +129,12 @@ pub const ClusterApplyBackend = struct {
                 .partially_failed
             else
                 .failed,
-            .message = if (failed == 0) "all placements succeeded" else "one or more placements failed",
+            .message = if (failed_targets > 0 and failed == 0)
+                "one or more rollout targets failed readiness checks"
+            else if (failed == 0)
+                "all placements succeeded"
+            else
+                "one or more placements failed",
             .placed = placed,
             .failed = failed,
             .completed_targets = completed_targets,
@@ -140,27 +145,54 @@ pub const ClusterApplyBackend = struct {
     fn applyBatch(
         self: *const ClusterApplyBackend,
         batch: []const apply_request.ServiceRequest,
+        strategy: rollout_spec.RolloutPolicy,
         placed: *usize,
         failed: *usize,
         completed_targets: *usize,
         failed_targets: *usize,
     ) ClusterApplyError!void {
+        var scheduled_targets: std.ArrayListUnmanaged(ScheduledTarget) = .empty;
+        defer {
+            for (scheduled_targets.items) |*target| target.deinit(self.alloc);
+            scheduled_targets.deinit(self.alloc);
+        }
+
         for (batch) |req| {
             if (req.request.gang_world_size > 0) {
-                try self.applyGangRequest(req, placed, failed, completed_targets, failed_targets);
+                try self.applyGangRequest(req, failed, completed_targets, failed_targets, &scheduled_targets);
             } else {
-                try self.applySingleRequest(req, placed, failed, completed_targets, failed_targets);
+                try self.applySingleRequest(req, failed, completed_targets, failed_targets, &scheduled_targets);
             }
+        }
+
+        if (scheduled_targets.items.len == 0) return;
+
+        if (strategy.health_check_timeout > 0) {
+            try self.finalizeBatchTargets(
+                scheduled_targets.items,
+                strategy.health_check_timeout,
+                placed,
+                failed,
+                completed_targets,
+                failed_targets,
+            );
+            return;
+        }
+
+        for (scheduled_targets.items) |target| {
+            placed.* += target.placement_count;
+            completed_targets.* += 1;
+            self.reportProgress(completed_targets.*, failed_targets.*);
         }
     }
 
     fn applyGangRequest(
         self: *const ClusterApplyBackend,
         req: apply_request.ServiceRequest,
-        placed: *usize,
         failed: *usize,
         completed_targets: *usize,
         failed_targets: *usize,
+        scheduled_targets: *std.ArrayListUnmanaged(ScheduledTarget),
     ) ClusterApplyError!void {
         const gang_placements = scheduler.scheduleGang(self.alloc, req.request, self.agents) catch {
             failed.* += 1;
@@ -173,7 +205,10 @@ pub const ClusterApplyBackend = struct {
             defer self.alloc.free(gps);
 
             var keep_ids = std.ArrayList([]const u8).empty;
-            defer keep_ids.deinit(self.alloc);
+            errdefer {
+                for (keep_ids.items) |id| self.alloc.free(id);
+                keep_ids.deinit(self.alloc);
+            }
 
             for (gps) |gp| {
                 const owned_id = generateOwnedAssignmentId(self.alloc) catch return ClusterApplyError.InternalError;
@@ -194,11 +229,11 @@ pub const ClusterApplyBackend = struct {
             }
 
             try reconcilePriorAssignments(self.node, req.request, keep_ids.items);
-            for (keep_ids.items) |id| self.alloc.free(id);
-
-            placed.* += gps.len;
-            completed_targets.* += 1;
-            self.reportProgress(completed_targets.*, failed_targets.*);
+            scheduled_targets.append(self.alloc, .{
+                .assignment_ids = keep_ids.toOwnedSlice(self.alloc) catch return ClusterApplyError.InternalError,
+                .placement_count = gps.len,
+            }) catch return ClusterApplyError.InternalError;
+            keep_ids.deinit(self.alloc);
             return;
         }
 
@@ -210,10 +245,10 @@ pub const ClusterApplyBackend = struct {
     fn applySingleRequest(
         self: *const ClusterApplyBackend,
         req: apply_request.ServiceRequest,
-        placed: *usize,
         failed: *usize,
         completed_targets: *usize,
         failed_targets: *usize,
+        scheduled_targets: *std.ArrayListUnmanaged(ScheduledTarget),
     ) ClusterApplyError!void {
         const placements = scheduler.schedule(self.alloc, &[_]scheduler.PlacementRequest{req.request}, self.agents) catch {
             return ClusterApplyError.InternalError;
@@ -229,7 +264,6 @@ pub const ClusterApplyBackend = struct {
 
         const placement = placements[0].?;
         const owned_id = generateOwnedAssignmentId(self.alloc) catch return ClusterApplyError.InternalError;
-        defer self.alloc.free(owned_id);
 
         var sql_buf: [1024]u8 = undefined;
         const sql = scheduler.assignmentSql(
@@ -242,10 +276,19 @@ pub const ClusterApplyBackend = struct {
 
         _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
         try reconcilePriorAssignments(self.node, req.request, &.{owned_id});
+        errdefer self.alloc.free(owned_id);
 
-        placed.* += 1;
-        completed_targets.* += 1;
-        self.reportProgress(completed_targets.*, failed_targets.*);
+        const assignment_ids = self.alloc.alloc([]const u8, 1) catch return ClusterApplyError.InternalError;
+        assignment_ids[0] = owned_id;
+        errdefer {
+            self.alloc.free(owned_id);
+            self.alloc.free(assignment_ids);
+        }
+
+        scheduled_targets.append(self.alloc, .{
+            .assignment_ids = assignment_ids,
+            .placement_count = 1,
+        }) catch return ClusterApplyError.InternalError;
     }
 
     fn reportProgress(self: *const ClusterApplyBackend, completed_targets: usize, failed_targets: usize) void {
@@ -260,7 +303,118 @@ pub const ClusterApplyBackend = struct {
             error.InternalError => "scheduler error during apply",
         };
     }
+
+    fn finalizeBatchTargets(
+        self: *const ClusterApplyBackend,
+        targets: []ScheduledTarget,
+        timeout_secs: u32,
+        placed: *usize,
+        failed: *usize,
+        completed_targets: *usize,
+        failed_targets: *usize,
+    ) ClusterApplyError!void {
+        const db = self.node.stateMachineDb();
+        const states = resolveTargetReadinessStates(self.alloc, db, targets, timeout_secs) catch return ClusterApplyError.InternalError;
+        defer self.alloc.free(states);
+
+        for (targets, states) |target, state| {
+            switch (state) {
+                .ready => {
+                    placed.* += target.placement_count;
+                    completed_targets.* += 1;
+                    self.reportProgress(completed_targets.*, failed_targets.*);
+                },
+                .failed, .pending => {
+                    failed_targets.* += 1;
+                    self.reportProgress(completed_targets.*, failed_targets.*);
+                },
+            }
+        }
+        _ = failed;
+    }
 };
+
+const ScheduledTarget = struct {
+    assignment_ids: []const []const u8,
+    placement_count: usize,
+
+    fn deinit(self: *const ScheduledTarget, alloc: std.mem.Allocator) void {
+        for (self.assignment_ids) |id| alloc.free(id);
+        alloc.free(self.assignment_ids);
+    }
+};
+
+const TargetReadiness = enum {
+    pending,
+    ready,
+    failed,
+};
+
+fn resolveTargetReadinessStates(
+    alloc: std.mem.Allocator,
+    db: *sqlite.Db,
+    targets: []const ScheduledTarget,
+    timeout_secs: u32,
+) ![]TargetReadiness {
+    var states = try alloc.alloc(TargetReadiness, targets.len);
+    errdefer alloc.free(states);
+    @memset(states, .pending);
+
+    const deadline_ns: i128 = std.time.nanoTimestamp() + (@as(i128, timeout_secs) * std.time.ns_per_s);
+    var remaining = targets.len;
+
+    while (remaining > 0) {
+        for (targets, 0..) |target, i| {
+            if (states[i] != .pending) continue;
+
+            const state = try queryTargetReadiness(alloc, db, target.assignment_ids);
+            if (state == .pending) continue;
+
+            states[i] = state;
+            remaining -= 1;
+        }
+
+        if (remaining == 0) return states;
+        if (std.time.nanoTimestamp() >= deadline_ns) break;
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+    }
+
+    for (states) |*state| {
+        if (state.* == .pending) state.* = .failed;
+    }
+    return states;
+}
+
+fn queryTargetReadiness(alloc: std.mem.Allocator, db: *sqlite.Db, assignment_ids: []const []const u8) !TargetReadiness {
+    if (assignment_ids.len == 0) return .failed;
+
+    var all_running = true;
+    for (assignment_ids) |assignment_id| {
+        const status = try loadAssignmentStatus(alloc, db, assignment_id) orelse {
+            all_running = false;
+            continue;
+        };
+        defer alloc.free(status);
+
+        if (std.mem.eql(u8, status, "running")) continue;
+        if (std.mem.eql(u8, status, "failed") or std.mem.eql(u8, status, "stopped")) return .failed;
+        all_running = false;
+    }
+
+    return if (all_running) .ready else .pending;
+}
+
+fn loadAssignmentStatus(alloc: std.mem.Allocator, db: *sqlite.Db, assignment_id: []const u8) !?[]const u8 {
+    const Row = struct { status: sqlite.Text };
+    const row = (db.oneAlloc(
+        Row,
+        alloc,
+        "SELECT status FROM assignments WHERE id = ?;",
+        .{},
+        .{assignment_id},
+    ) catch return error.QueryFailed) orelse return null;
+    return row.status.data;
+}
 
 fn effectiveClusterRollout(requests: []const apply_request.ServiceRequest) rollout_spec.RolloutPolicy {
     var strategy: rollout_spec.RolloutPolicy = .{};
@@ -597,4 +751,84 @@ test "effectiveClusterRollout chooses conservative service rollout settings" {
     try std.testing.expectEqual(@as(u32, 4), rollout.delay_between_batches);
     try std.testing.expectEqual(@as(u32, 12), rollout.health_check_timeout);
     try std.testing.expectEqual(rollout_spec.RolloutFailureAction.pause, rollout.failure_action);
+}
+
+test "queryTargetReadiness returns ready when all assignments are running" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../../state/schema.zig").init(&db);
+
+    db.exec(
+        "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);",
+        .{},
+        .{
+            "a1", "agent1", "nginx:1", "running", @as(i64, 1),
+            "a2", "agent1", "nginx:1", "running", @as(i64, 1),
+        },
+    ) catch unreachable;
+
+    try std.testing.expectEqual(
+        TargetReadiness.ready,
+        try queryTargetReadiness(std.testing.allocator, &db, &.{ "a1", "a2" }),
+    );
+}
+
+test "queryTargetReadiness returns pending when assignments are not ready yet" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../../state/schema.zig").init(&db);
+
+    db.exec(
+        "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "a1", "agent1", "nginx:1", "pending", @as(i64, 1) },
+    ) catch unreachable;
+
+    try std.testing.expectEqual(
+        TargetReadiness.pending,
+        try queryTargetReadiness(std.testing.allocator, &db, &.{"a1"}),
+    );
+}
+
+test "queryTargetReadiness returns failed when any assignment is terminal" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../../state/schema.zig").init(&db);
+
+    db.exec(
+        "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);",
+        .{},
+        .{
+            "a1", "agent1", "nginx:1", "running", @as(i64, 1),
+            "a2", "agent1", "nginx:1", "failed", @as(i64, 1),
+        },
+    ) catch unreachable;
+
+    try std.testing.expectEqual(
+        TargetReadiness.failed,
+        try queryTargetReadiness(std.testing.allocator, &db, &.{ "a1", "a2" }),
+    );
+}
+
+test "resolveTargetReadinessStates marks pending targets failed when timeout elapses" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../../state/schema.zig").init(&db);
+
+    db.exec(
+        "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ "a1", "agent1", "nginx:1", "pending", @as(i64, 1) },
+    ) catch unreachable;
+
+    const ids = [_][]const u8{"a1"};
+    const targets = [_]ScheduledTarget{
+        .{ .assignment_ids = ids[0..], .placement_count = 1 },
+    };
+
+    const states = try resolveTargetReadinessStates(std.testing.allocator, &db, &targets, 0);
+    defer std.testing.allocator.free(states);
+
+    try std.testing.expectEqual(@as(usize, 1), states.len);
+    try std.testing.expectEqual(TargetReadiness.failed, states[0]);
 }

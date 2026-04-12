@@ -111,7 +111,7 @@ fn parseRolloutPolicy(block: []const u8) spec.RolloutPolicy {
             if (std.mem.eql(u8, action, "pause")) spec.RolloutFailureAction.pause else spec.RolloutFailureAction.rollback
         else
             .rollback,
-        .health_check_timeout = if (extractJsonInt(rollout_json, "health_check_timeout")) |v| @intCast(@max(@as(i64, 0), v)) else 60,
+        .health_check_timeout = if (extractJsonInt(rollout_json, "health_check_timeout")) |v| @intCast(@max(@as(i64, 0), v)) else 0,
     };
 }
 
