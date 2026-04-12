@@ -383,7 +383,7 @@ fn findPreviousSuccessfulReleaseId(deployments: []const store.DeploymentRecord) 
 const RouteFlowHarness = struct {
     alloc: std.mem.Allocator,
     tmp: std.testing.TmpDir,
-    node: cluster_node.Node,
+    node: *cluster_node.Node,
 
     fn init(alloc: std.mem.Allocator) !RouteFlowHarness {
         var tmp = std.testing.tmpDir(.{});
@@ -392,7 +392,10 @@ const RouteFlowHarness = struct {
         var path_buf: [512]u8 = undefined;
         const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
 
-        var node = cluster_node.Node.init(alloc, .{
+        const node = try alloc.create(cluster_node.Node);
+        errdefer alloc.destroy(node);
+
+        node.* = cluster_node.Node.init(alloc, .{
             .id = 1,
             .port = 0,
             .peers = &.{},
@@ -414,11 +417,12 @@ const RouteFlowHarness = struct {
 
     fn deinit(self: *RouteFlowHarness) void {
         self.node.deinit();
+        self.alloc.destroy(self.node);
         self.tmp.cleanup();
     }
 
     fn ctx(self: *RouteFlowHarness) RouteContext {
-        return .{ .cluster = &self.node, .join_token = null };
+        return .{ .cluster = self.node, .join_token = null };
     }
 
     fn applyCommitted(self: *RouteFlowHarness) void {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
+const gpu_scheduler = @import("../../../gpu/scheduler.zig");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const cluster_node = @import("../../../cluster/node.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
@@ -101,6 +102,14 @@ pub const ClusterApplyBackend = struct {
 
     pub fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
         const strategy = effectiveClusterRollout(self.requests);
+        var rollback_state_storage: RollbackState = undefined;
+        var rollback_state: ?*RollbackState = null;
+        if (strategy.failure_action == .rollback) {
+            rollback_state_storage = try RollbackState.capture(self.alloc, self.node.stateMachineDb(), self.requests);
+            rollback_state = &rollback_state_storage;
+        }
+        defer if (rollback_state) |state| state.deinit();
+
         var placed: usize = 0;
         var failed: usize = 0;
         var completed_targets: usize = 0;
@@ -113,7 +122,7 @@ pub const ClusterApplyBackend = struct {
             const batch = self.requests[batch_start..batch_end];
             const batch_failed_before = failed_targets;
 
-            try self.applyBatch(batch, strategy, &placed, &failed, &completed_targets, &failed_targets);
+            try self.applyBatch(batch, strategy, rollback_state, &placed, &failed, &completed_targets, &failed_targets);
 
             if (failed_targets > batch_failed_before) break;
             if (strategy.delay_between_batches > 0 and batch_end < self.requests.len) {
@@ -146,11 +155,13 @@ pub const ClusterApplyBackend = struct {
         self: *const ClusterApplyBackend,
         batch: []const apply_request.ServiceRequest,
         strategy: rollout_spec.RolloutPolicy,
+        rollback_state: ?*RollbackState,
         placed: *usize,
         failed: *usize,
         completed_targets: *usize,
         failed_targets: *usize,
     ) ClusterApplyError!void {
+        const batch_failed_before = failed_targets.*;
         var scheduled_targets: std.ArrayListUnmanaged(ScheduledTarget) = .empty;
         defer {
             for (scheduled_targets.items) |*target| target.deinit(self.alloc);
@@ -167,10 +178,22 @@ pub const ClusterApplyBackend = struct {
 
         if (scheduled_targets.items.len == 0) return;
 
+        if (strategy.failure_action == .rollback and failed_targets.* > batch_failed_before) {
+            for (scheduled_targets.items) |target| try discardTarget(self, target);
+            if (rollback_state) |state| {
+                try state.rollbackActivatedTargets(self.node);
+                completed_targets.* = 0;
+                placed.* = 0;
+                self.reportProgress(completed_targets.*, failed_targets.*);
+            }
+            return;
+        }
+
         if (strategy.health_check_timeout > 0) {
             try self.finalizeBatchTargets(
                 scheduled_targets.items,
                 strategy.failure_action,
+                rollback_state,
                 strategy.health_check_timeout,
                 placed,
                 failed,
@@ -182,6 +205,7 @@ pub const ClusterApplyBackend = struct {
 
         for (scheduled_targets.items) |target| {
             try activateTarget(self, target);
+            if (rollback_state) |state| try state.recordActivatedTarget(target);
             placed.* += target.placement_count;
             completed_targets.* += 1;
             self.reportProgress(completed_targets.*, failed_targets.*);
@@ -310,6 +334,7 @@ pub const ClusterApplyBackend = struct {
         self: *const ClusterApplyBackend,
         targets: []ScheduledTarget,
         failure_action: rollout_spec.RolloutFailureAction,
+        rollback_state: ?*RollbackState,
         timeout_secs: u32,
         placed: *usize,
         failed: *usize,
@@ -320,10 +345,31 @@ pub const ClusterApplyBackend = struct {
         const states = resolveTargetReadinessStates(self.alloc, db, targets, timeout_secs) catch return ClusterApplyError.InternalError;
         defer self.alloc.free(states);
 
+        const batch_has_failure = blk: {
+            for (states) |state| {
+                if (state != .ready) break :blk true;
+            }
+            break :blk false;
+        };
+
+        if (failure_action == .rollback and batch_has_failure) {
+            for (targets) |target| try discardTarget(self, target);
+            failed_targets.* += targets.len;
+            if (rollback_state) |state| {
+                try state.rollbackActivatedTargets(self.node);
+                completed_targets.* = 0;
+                placed.* = 0;
+            }
+            self.reportProgress(completed_targets.*, failed_targets.*);
+            _ = failed;
+            return;
+        }
+
         for (targets, states) |target, state| {
             switch (state) {
                 .ready => {
                     try activateTarget(self, target);
+                    if (rollback_state) |state_tracker| try state_tracker.recordActivatedTarget(target);
                     placed.* += target.placement_count;
                     completed_targets.* += 1;
                     self.reportProgress(completed_targets.*, failed_targets.*);
@@ -352,6 +398,107 @@ const ScheduledTarget = struct {
     }
 };
 
+const ActivatedTarget = struct {
+    request: scheduler.PlacementRequest,
+    assignment_ids: []const []const u8,
+
+    fn deinit(self: *const ActivatedTarget, alloc: std.mem.Allocator) void {
+        for (self.assignment_ids) |id| alloc.free(id);
+        alloc.free(self.assignment_ids);
+    }
+};
+
+const PriorAssignmentSnapshot = struct {
+    request: scheduler.PlacementRequest,
+    assignments: []agent_registry.Assignment,
+
+    fn deinit(self: *const PriorAssignmentSnapshot, alloc: std.mem.Allocator) void {
+        for (self.assignments) |assignment| assignment.deinit(alloc);
+        alloc.free(self.assignments);
+    }
+};
+
+const RollbackState = struct {
+    alloc: std.mem.Allocator,
+    snapshots: []PriorAssignmentSnapshot,
+    activated_targets: std.ArrayListUnmanaged(ActivatedTarget) = .empty,
+
+    fn capture(
+        alloc: std.mem.Allocator,
+        db: *sqlite.Db,
+        requests: []const apply_request.ServiceRequest,
+    ) ClusterApplyError!RollbackState {
+        var snapshots = std.ArrayListUnmanaged(PriorAssignmentSnapshot).empty;
+        errdefer {
+            for (snapshots.items) |*snapshot| snapshot.deinit(alloc);
+            snapshots.deinit(alloc);
+        }
+
+        for (requests) |req| {
+            const app_name = req.request.app_name orelse continue;
+            const workload_kind = req.request.workload_kind orelse continue;
+            const workload_name = req.request.workload_name orelse continue;
+            const assignments = agent_registry.listAssignmentsForWorkload(
+                alloc,
+                db,
+                app_name,
+                workload_kind,
+                workload_name,
+            ) catch return ClusterApplyError.InternalError;
+            snapshots.append(alloc, .{
+                .request = req.request,
+                .assignments = assignments,
+            }) catch return ClusterApplyError.InternalError;
+        }
+
+        return .{
+            .alloc = alloc,
+            .snapshots = snapshots.toOwnedSlice(alloc) catch return ClusterApplyError.InternalError,
+        };
+    }
+
+    fn deinit(self: *RollbackState) void {
+        for (self.snapshots) |*snapshot| snapshot.deinit(self.alloc);
+        self.alloc.free(self.snapshots);
+        for (self.activated_targets.items) |*target| target.deinit(self.alloc);
+        self.activated_targets.deinit(self.alloc);
+    }
+
+    fn recordActivatedTarget(self: *RollbackState, target: ScheduledTarget) ClusterApplyError!void {
+        const assignment_ids = copyAssignmentIds(self.alloc, target.assignment_ids) catch return ClusterApplyError.InternalError;
+        self.activated_targets.append(self.alloc, .{
+            .request = target.request,
+            .assignment_ids = assignment_ids,
+        }) catch return ClusterApplyError.InternalError;
+    }
+
+    fn rollbackActivatedTargets(self: *RollbackState, node: *cluster_node.Node) ClusterApplyError!void {
+        for (self.activated_targets.items) |target| {
+            try deleteAssignmentsForRequest(node, target.request);
+            if (self.findSnapshot(target.request)) |snapshot| {
+                for (snapshot.assignments) |assignment| {
+                    try restoreAssignment(node, assignment);
+                }
+            }
+        }
+    }
+
+    fn findSnapshot(self: *const RollbackState, request: scheduler.PlacementRequest) ?*const PriorAssignmentSnapshot {
+        const app_name = request.app_name orelse return null;
+        const workload_kind = request.workload_kind orelse return null;
+        const workload_name = request.workload_name orelse return null;
+        for (self.snapshots) |*snapshot| {
+            if (std.mem.eql(u8, snapshot.request.app_name orelse return null, app_name) and
+                std.mem.eql(u8, snapshot.request.workload_kind orelse return null, workload_kind) and
+                std.mem.eql(u8, snapshot.request.workload_name orelse return null, workload_name))
+            {
+                return snapshot;
+            }
+        }
+        return null;
+    }
+};
+
 fn activateTarget(self: *const ClusterApplyBackend, target: ScheduledTarget) ClusterApplyError!void {
     try reconcilePriorAssignments(self.node, target.request, target.assignment_ids);
 }
@@ -360,6 +507,75 @@ fn discardTarget(self: *const ClusterApplyBackend, target: ScheduledTarget) Clus
     var sql_buf: [2048]u8 = undefined;
     const sql = agent_registry.deleteAssignmentsByIdsSql(&sql_buf, target.assignment_ids) catch return ClusterApplyError.InternalError;
     _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
+}
+
+fn deleteAssignmentsForRequest(node: *cluster_node.Node, request: scheduler.PlacementRequest) ClusterApplyError!void {
+    const app_name = request.app_name orelse return;
+    const workload_kind = request.workload_kind orelse return;
+    const workload_name = request.workload_name orelse return;
+
+    var sql_buf: [2048]u8 = undefined;
+    const sql = agent_registry.deleteAssignmentsForWorkloadSql(
+        &sql_buf,
+        app_name,
+        workload_kind,
+        workload_name,
+    ) catch return ClusterApplyError.InternalError;
+    _ = node.propose(sql) catch return ClusterApplyError.NotLeader;
+}
+
+fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assignment) ClusterApplyError!void {
+    var sql_buf: [2048]u8 = undefined;
+    const request: scheduler.PlacementRequest = .{
+        .image = assignment.image,
+        .command = assignment.command,
+        .health_check_json = assignment.health_check_json,
+        .cpu_limit = assignment.cpu_limit,
+        .memory_limit_mb = assignment.memory_limit_mb,
+        .app_name = assignment.app_name,
+        .workload_kind = assignment.workload_kind,
+        .workload_name = assignment.workload_name,
+    };
+
+    const sql = if (assignment.gang_rank != null and assignment.gang_world_size != null and assignment.gang_master_addr != null and assignment.gang_master_port != null)
+        scheduler.assignmentSqlGang(
+            &sql_buf,
+            assignment.id,
+            assignment.agent_id,
+            request,
+            std.time.timestamp(),
+            .{
+                .agent_id = assignment.agent_id,
+                .rank = @intCast(assignment.gang_rank.?),
+                .gpu_start = 0,
+                .gpu_count = 0,
+                .world_size = @intCast(assignment.gang_world_size.?),
+                .master_addr = assignment.gang_master_addr.?,
+                .master_port = @intCast(assignment.gang_master_port.?),
+            },
+        ) catch return ClusterApplyError.InternalError
+    else
+        scheduler.assignmentSql(
+            &sql_buf,
+            assignment.id,
+            assignment.agent_id,
+            request,
+            std.time.timestamp(),
+        ) catch return ClusterApplyError.InternalError;
+
+    _ = node.propose(sql) catch return ClusterApplyError.NotLeader;
+}
+
+fn copyAssignmentIds(alloc: std.mem.Allocator, ids: []const []const u8) ![]const []const u8 {
+    const owned = try alloc.alloc([]const u8, ids.len);
+    errdefer alloc.free(owned);
+    for (ids, 0..) |id, i| {
+        owned[i] = try alloc.dupe(u8, id);
+        errdefer {
+            for (owned[0..i]) |prior| alloc.free(prior);
+        }
+    }
+    return owned;
 }
 
 const TargetReadiness = enum {
@@ -630,6 +846,52 @@ fn formatAppApplyResponse(
     return json_buf.toOwnedSlice(alloc);
 }
 
+const RolloutNodeHarness = struct {
+    alloc: std.mem.Allocator,
+    tmp: std.testing.TmpDir,
+    node: *cluster_node.Node,
+
+    fn init(alloc: std.mem.Allocator) !RolloutNodeHarness {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+
+        var path_buf: [512]u8 = undefined;
+        const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+
+        const node = try alloc.create(cluster_node.Node);
+        errdefer alloc.destroy(node);
+
+        node.* = cluster_node.Node.init(alloc, .{
+            .id = 1,
+            .port = 0,
+            .peers = &.{},
+            .data_dir = tmp_path,
+        }) catch return error.SkipZigTest;
+        errdefer node.deinit();
+
+        node.raft.role = .leader;
+        node.leader_id = node.config.id;
+
+        return .{
+            .alloc = alloc,
+            .tmp = tmp,
+            .node = node,
+        };
+    }
+
+    fn deinit(self: *RolloutNodeHarness) void {
+        self.node.deinit();
+        self.alloc.destroy(self.node);
+        self.tmp.cleanup();
+    }
+
+    fn applyCommitted(self: *RolloutNodeHarness) void {
+        self.node.state_machine.applyUpTo(&self.node.log, self.alloc, self.node.log.lastIndex());
+        self.node.raft.role = .leader;
+        self.node.leader_id = self.node.config.id;
+    }
+};
+
 test "formatAppApplyResponse includes app release metadata" {
     const alloc = std.testing.allocator;
     const json = try formatAppApplyResponse(alloc, .{
@@ -858,4 +1120,60 @@ test "resolveTargetReadinessStates marks pending targets failed when timeout ela
 
     try std.testing.expectEqual(@as(usize, 1), states.len);
     try std.testing.expectEqual(TargetReadiness.failed, states[0]);
+}
+
+test "rollback state restores prior assignments after cutover" {
+    const alloc = std.testing.allocator;
+    var harness = try RolloutNodeHarness.init(alloc);
+    defer harness.deinit();
+
+    const request: scheduler.PlacementRequest = .{
+        .image = "alpine",
+        .command = "echo web",
+        .cpu_limit = 1000,
+        .memory_limit_mb = 256,
+        .app_name = "demo-app",
+        .workload_kind = "service",
+        .workload_name = "web",
+    };
+
+    harness.node.stateMachineDb().exec(
+        "INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "old-web", "agent1", "alpine", "echo old", "running", @as(i64, 1000), @as(i64, 256), "demo-app", "service", "web", @as(i64, 1) },
+    ) catch return error.SkipZigTest;
+
+    var rollback_state = try RollbackState.capture(alloc, harness.node.stateMachineDb(), &.{.{ .request = request, .rollout = .{} }});
+    defer rollback_state.deinit();
+
+    harness.node.stateMachineDb().exec("DELETE FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ?;", .{}, .{ "demo-app", "service", "web" }) catch return error.SkipZigTest;
+    harness.node.stateMachineDb().exec(
+        "INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "new-web", "agent1", "alpine", "echo new", "running", @as(i64, 1000), @as(i64, 256), "demo-app", "service", "web", @as(i64, 2) },
+    ) catch return error.SkipZigTest;
+
+    try rollback_state.recordActivatedTarget(.{
+        .request = request,
+        .assignment_ids = &.{ "new-web" },
+        .placement_count = 1,
+    });
+    try rollback_state.rollbackActivatedTargets(harness.node);
+    harness.applyCommitted();
+
+    const assignments = try agent_registry.listAssignmentsForWorkload(
+        alloc,
+        harness.node.stateMachineDb(),
+        "demo-app",
+        "service",
+        "web",
+    );
+    defer {
+        for (assignments) |assignment| assignment.deinit(alloc);
+        alloc.free(assignments);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), assignments.len);
+    try std.testing.expectEqualStrings("old-web", assignments[0].id);
+    try std.testing.expectEqualStrings("pending", assignments[0].status);
 }

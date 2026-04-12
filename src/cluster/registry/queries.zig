@@ -177,6 +177,21 @@ pub fn getOrphanedAssignments(alloc: Allocator, db: *sqlite.Db) ![]Assignment {
     );
 }
 
+pub fn listAssignmentsForWorkload(
+    alloc: Allocator,
+    db: *sqlite.Db,
+    app_name: []const u8,
+    workload_kind: []const u8,
+    workload_name: []const u8,
+) ![]Assignment {
+    return queryAssignmentRows(
+        alloc,
+        db,
+        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, health_check_json, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ? ORDER BY created_at, id;",
+        .{ app_name, workload_kind, workload_name },
+    );
+}
+
 pub fn countAssignmentsForWorkload(db: *sqlite.Db, app_name: []const u8, workload_kind: []const u8, workload_name: []const u8) !usize {
     const Row = struct { count: i64 };
     const row = (db.one(
