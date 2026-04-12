@@ -2,6 +2,7 @@ const std = @import("std");
 const http = @import("../../http.zig");
 const sqlite = @import("sqlite");
 const cluster_node = @import("../../../cluster/node.zig");
+const agent_registry = @import("../../../cluster/registry.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
@@ -1179,6 +1180,51 @@ test "app apply route preserves partially failed release metadata across reads" 
     try expectJsonContains(history_response.body, "\"status\":\"partially_failed\"");
     try expectJsonContains(history_response.body, "\"source_release_id\":null");
     try expectJsonContains(history_response.body, "\"message\":\"one or more placements failed\"");
+}
+
+test "readiness-gated apply keeps prior assignments when cutover fails" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"],"rollout":{"health_check_timeout":1}}]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    harness.node.stateMachineDb().exec(
+        "INSERT INTO assignments (id, agent_id, image, status, created_at, app_name, workload_kind, workload_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "old-web", "abc123def456", "alpine", "running", @as(i64, 1), "demo-app", "service", "web" },
+    ) catch return error.SkipZigTest;
+
+    const before = try agent_registry.countAssignmentsForWorkload(harness.node.stateMachineDb(), "demo-app", "service", "web");
+    try std.testing.expectEqual(@as(usize, 1), before);
+
+    const apply_response = harness.appApply(apply_body);
+    defer freeResponse(alloc, apply_response);
+
+    try expectResponseOk(apply_response);
+    try expectJsonContains(apply_response.body, "\"status\":\"failed\"");
+    try expectJsonContains(apply_response.body, "\"message\":\"one or more rollout targets failed readiness checks\"");
+
+    const after = try agent_registry.countAssignmentsForWorkload(harness.node.stateMachineDb(), "demo-app", "service", "web");
+    try std.testing.expectEqual(@as(usize, 1), after);
+
+    const AssignmentRow = struct { id: sqlite.Text, status: sqlite.Text };
+    const row = (try harness.node.stateMachineDb().oneAlloc(
+        AssignmentRow,
+        alloc,
+        "SELECT id, status FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ?;",
+        .{},
+        .{ "demo-app", "service", "web" },
+    )).?;
+    defer {
+        alloc.free(row.id.data);
+        alloc.free(row.status.data);
+    }
+
+    try std.testing.expectEqualStrings("old-web", row.id.data);
+    try std.testing.expectEqualStrings("running", row.status.data);
 }
 
 test "route rejects app rollback without cluster" {

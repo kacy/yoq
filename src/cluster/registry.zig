@@ -32,6 +32,7 @@ pub const reassignSql = sql_mutations.reassignSql;
 pub const deleteAgentAssignmentsSql = sql_mutations.deleteAgentAssignmentsSql;
 pub const deleteAssignmentsForWorkloadSql = sql_mutations.deleteAssignmentsForWorkloadSql;
 pub const deleteOtherAssignmentsForWorkloadSql = sql_mutations.deleteOtherAssignmentsForWorkloadSql;
+pub const deleteAssignmentsByIdsSql = sql_mutations.deleteAssignmentsByIdsSql;
 pub const wireguardPeerSql = sql_mutations.wireguardPeerSql;
 pub const removeWireguardPeerSql = sql_mutations.removeWireguardPeerSql;
 
@@ -81,6 +82,14 @@ test "deleteOtherAssignmentsForWorkloadSql keeps new assignment ids" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "workload_kind = 'service'") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "workload_name = 'web'") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "id NOT IN ('new123', 'new456')") != null);
+}
+
+test "deleteAssignmentsByIdsSql targets only selected assignments" {
+    var buf: [256]u8 = undefined;
+    const sql = try deleteAssignmentsByIdsSql(&buf, &.{ "new123", "new456" });
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "DELETE FROM assignments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "id IN ('new123', 'new456')") != null);
 }
 
 test "registerSqlFull includes wireguard columns" {

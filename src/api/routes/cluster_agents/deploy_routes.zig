@@ -170,6 +170,7 @@ pub const ClusterApplyBackend = struct {
         if (strategy.health_check_timeout > 0) {
             try self.finalizeBatchTargets(
                 scheduled_targets.items,
+                strategy.failure_action,
                 strategy.health_check_timeout,
                 placed,
                 failed,
@@ -180,6 +181,7 @@ pub const ClusterApplyBackend = struct {
         }
 
         for (scheduled_targets.items) |target| {
+            try activateTarget(self, target);
             placed.* += target.placement_count;
             completed_targets.* += 1;
             self.reportProgress(completed_targets.*, failed_targets.*);
@@ -228,8 +230,8 @@ pub const ClusterApplyBackend = struct {
                 _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
             }
 
-            try reconcilePriorAssignments(self.node, req.request, keep_ids.items);
             scheduled_targets.append(self.alloc, .{
+                .request = req.request,
                 .assignment_ids = keep_ids.toOwnedSlice(self.alloc) catch return ClusterApplyError.InternalError,
                 .placement_count = gps.len,
             }) catch return ClusterApplyError.InternalError;
@@ -275,7 +277,6 @@ pub const ClusterApplyBackend = struct {
         ) catch return ClusterApplyError.InternalError;
 
         _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
-        try reconcilePriorAssignments(self.node, req.request, &.{owned_id});
         errdefer self.alloc.free(owned_id);
 
         const assignment_ids = self.alloc.alloc([]const u8, 1) catch return ClusterApplyError.InternalError;
@@ -286,6 +287,7 @@ pub const ClusterApplyBackend = struct {
         }
 
         scheduled_targets.append(self.alloc, .{
+            .request = req.request,
             .assignment_ids = assignment_ids,
             .placement_count = 1,
         }) catch return ClusterApplyError.InternalError;
@@ -307,6 +309,7 @@ pub const ClusterApplyBackend = struct {
     fn finalizeBatchTargets(
         self: *const ClusterApplyBackend,
         targets: []ScheduledTarget,
+        failure_action: rollout_spec.RolloutFailureAction,
         timeout_secs: u32,
         placed: *usize,
         failed: *usize,
@@ -320,11 +323,15 @@ pub const ClusterApplyBackend = struct {
         for (targets, states) |target, state| {
             switch (state) {
                 .ready => {
+                    try activateTarget(self, target);
                     placed.* += target.placement_count;
                     completed_targets.* += 1;
                     self.reportProgress(completed_targets.*, failed_targets.*);
                 },
                 .failed, .pending => {
+                    switch (failure_action) {
+                        .rollback, .pause => try discardTarget(self, target),
+                    }
                     failed_targets.* += 1;
                     self.reportProgress(completed_targets.*, failed_targets.*);
                 },
@@ -335,6 +342,7 @@ pub const ClusterApplyBackend = struct {
 };
 
 const ScheduledTarget = struct {
+    request: scheduler.PlacementRequest,
     assignment_ids: []const []const u8,
     placement_count: usize,
 
@@ -343,6 +351,16 @@ const ScheduledTarget = struct {
         alloc.free(self.assignment_ids);
     }
 };
+
+fn activateTarget(self: *const ClusterApplyBackend, target: ScheduledTarget) ClusterApplyError!void {
+    try reconcilePriorAssignments(self.node, target.request, target.assignment_ids);
+}
+
+fn discardTarget(self: *const ClusterApplyBackend, target: ScheduledTarget) ClusterApplyError!void {
+    var sql_buf: [2048]u8 = undefined;
+    const sql = agent_registry.deleteAssignmentsByIdsSql(&sql_buf, target.assignment_ids) catch return ClusterApplyError.InternalError;
+    _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
+}
 
 const TargetReadiness = enum {
     pending,
@@ -823,7 +841,16 @@ test "resolveTargetReadinessStates marks pending targets failed when timeout ela
 
     const ids = [_][]const u8{"a1"};
     const targets = [_]ScheduledTarget{
-        .{ .assignment_ids = ids[0..], .placement_count = 1 },
+        .{
+            .request = .{
+                .image = "nginx:1",
+                .command = "echo hi",
+                .cpu_limit = 1000,
+                .memory_limit_mb = 256,
+            },
+            .assignment_ids = ids[0..],
+            .placement_count = 1,
+        },
     };
 
     const states = try resolveTargetReadinessStates(std.testing.allocator, &db, &targets, 0);

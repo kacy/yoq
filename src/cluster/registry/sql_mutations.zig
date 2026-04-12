@@ -256,6 +256,30 @@ pub fn deleteOtherAssignmentsForWorkloadSql(
     return stream.getWritten();
 }
 
+pub fn deleteAssignmentsByIdsSql(
+    buf: []u8,
+    assignment_ids: []const []const u8,
+) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    try writer.writeAll("DELETE FROM assignments");
+    if (assignment_ids.len > 0) {
+        try writer.writeAll(" WHERE id IN (");
+        for (assignment_ids, 0..) |id, i| {
+            if (i > 0) try writer.writeAll(", ");
+            var id_esc_buf: [64]u8 = undefined;
+            const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+            try writer.print("'{s}'", .{id_esc});
+        }
+        try writer.writeByte(')');
+    } else {
+        try writer.writeAll(" WHERE 1 = 0");
+    }
+    try writer.writeByte(';');
+    return stream.getWritten();
+}
+
 pub fn wireguardPeerSql(
     buf: []u8,
     node_id: u16,
