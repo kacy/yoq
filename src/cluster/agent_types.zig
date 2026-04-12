@@ -119,6 +119,7 @@ pub const Assignment = struct {
     app_name: ?[]const u8 = null,
     workload_kind: ?[]const u8 = null,
     workload_name: ?[]const u8 = null,
+    health_check_json: ?[]const u8 = null,
     gang_rank: ?i64 = null,
     gang_world_size: ?i64 = null,
     gang_master_addr: ?[]const u8 = null,
@@ -133,6 +134,7 @@ pub const Assignment = struct {
         if (self.app_name) |app_name| alloc.free(app_name);
         if (self.workload_kind) |workload_kind| alloc.free(workload_kind);
         if (self.workload_name) |workload_name| alloc.free(workload_name);
+        if (self.health_check_json) |health_check_json| alloc.free(health_check_json);
         if (self.gang_master_addr) |addr| alloc.free(addr);
     }
 };

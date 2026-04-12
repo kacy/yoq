@@ -30,22 +30,38 @@ pub fn assignmentSqlGang(
     var app_esc_buf: [256]u8 = undefined;
     var kind_esc_buf: [64]u8 = undefined;
     var name_esc_buf: [256]u8 = undefined;
+    var health_esc_buf: [1024]u8 = undefined;
     var metadata_vals_buf: [768]u8 = undefined;
 
     const metadata_cols = if (request.app_name != null and request.workload_kind != null and request.workload_name != null)
-        ", app_name, workload_kind, workload_name"
+        if (request.health_check_json != null)
+            ", app_name, workload_kind, workload_name, health_check_json"
+        else
+            ", app_name, workload_kind, workload_name"
     else
         "";
     const metadata_vals = if (request.app_name != null and request.workload_kind != null and request.workload_name != null)
-        try std.fmt.bufPrint(
-            &metadata_vals_buf,
-            ", '{s}', '{s}', '{s}'",
-            .{
-                try sql_escape.escapeSqlString(&app_esc_buf, request.app_name.?),
-                try sql_escape.escapeSqlString(&kind_esc_buf, request.workload_kind.?),
-                try sql_escape.escapeSqlString(&name_esc_buf, request.workload_name.?),
-            },
-        )
+        if (request.health_check_json) |health_check_json|
+            try std.fmt.bufPrint(
+                &metadata_vals_buf,
+                ", '{s}', '{s}', '{s}', '{s}'",
+                .{
+                    try sql_escape.escapeSqlString(&app_esc_buf, request.app_name.?),
+                    try sql_escape.escapeSqlString(&kind_esc_buf, request.workload_kind.?),
+                    try sql_escape.escapeSqlString(&name_esc_buf, request.workload_name.?),
+                    try sql_escape.escapeSqlString(&health_esc_buf, health_check_json),
+                },
+            )
+        else
+            try std.fmt.bufPrint(
+                &metadata_vals_buf,
+                ", '{s}', '{s}', '{s}'",
+                .{
+                    try sql_escape.escapeSqlString(&app_esc_buf, request.app_name.?),
+                    try sql_escape.escapeSqlString(&kind_esc_buf, request.workload_kind.?),
+                    try sql_escape.escapeSqlString(&name_esc_buf, request.workload_name.?),
+                },
+            )
     else
         "";
 
@@ -72,4 +88,28 @@ pub fn generateAssignmentId(buf: *[12]u8) void {
         buf[i * 2] = hex[byte >> 4];
         buf[i * 2 + 1] = hex[byte & 0x0f];
     }
+}
+
+test "assignmentSql includes service health check metadata when present" {
+    var buf: [2048]u8 = undefined;
+    const sql = try assignmentSql(
+        &buf,
+        "assign123456",
+        "agent123456",
+        .{
+            .image = "nginx:latest",
+            .command = "nginx -g daemon off",
+            .health_check_json = "{\"kind\":\"http\",\"path\":\"/ready\",\"port\":8080}",
+            .cpu_limit = 1000,
+            .memory_limit_mb = 256,
+            .app_name = "demo-app",
+            .workload_kind = "service",
+            .workload_name = "web",
+        },
+        100,
+    );
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "health_check_json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\"kind\":\"http\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\"path\":\"/ready\"") != null);
 }

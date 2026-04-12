@@ -156,6 +156,7 @@ fn migrateAssignments(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN app_name TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_kind TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_name TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN health_check_json TEXT;") catch {};
 }
 
 fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {

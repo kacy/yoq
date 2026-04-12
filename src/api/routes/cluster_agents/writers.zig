@@ -110,6 +110,10 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
         try json_helpers.writeJsonEscaped(writer, workload_name);
         try writer.writeByte('"');
     }
+    if (assignment.health_check_json) |health_check_json| {
+        try writer.writeAll(",\"health_check\":");
+        try writer.writeAll(health_check_json);
+    }
     if (assignment.gang_rank) |rank| {
         try writer.writeAll(",\"gang_rank\":");
         try std.fmt.format(writer, "{d}", .{rank});

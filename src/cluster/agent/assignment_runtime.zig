@@ -6,6 +6,8 @@ const container = @import("../../runtime/container.zig");
 const image_registry = @import("../../image/registry.zig");
 const image_layer = @import("../../image/layer.zig");
 const image_spec = @import("../../image/spec.zig");
+const manifest_health = @import("../../manifest/health.zig");
+const manifest_spec = @import("../../manifest/spec.zig");
 const store = @import("../../state/store.zig");
 const logs = @import("../../runtime/logs.zig");
 const agent_store = @import("../agent_store.zig");
@@ -24,6 +26,7 @@ const AssignmentMeta = struct {
     app_name: ?[]const u8 = null,
     workload_kind: ?[]const u8 = null,
     workload_name: ?[]const u8 = null,
+    health_check_json: ?[]const u8 = null,
 };
 
 pub fn reconcile(self: anytype) void {
@@ -45,6 +48,7 @@ pub fn reconcile(self: anytype) void {
         const app_name = extractJsonString(obj, "app_name");
         const workload_kind = extractJsonString(obj, "workload_kind");
         const workload_name = extractJsonString(obj, "workload_name");
+        const health_check_json = json_helpers.extractJsonObject(obj, "health_check");
         const gang_rank = extractJsonInt(obj, "gang_rank");
         const gang_world_size = extractJsonInt(obj, "gang_world_size");
         const gang_master_addr = extractJsonString(obj, "gang_master_addr");
@@ -76,6 +80,7 @@ pub fn reconcile(self: anytype) void {
                 .app_name = app_name,
                 .workload_kind = workload_kind,
                 .workload_name = workload_name,
+                .health_check_json = health_check_json,
             });
         }
     }
@@ -141,6 +146,18 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         }
     else
         null;
+    const health_check_json_copy = if (meta.health_check_json) |health_check_json|
+        self.alloc.dupe(u8, health_check_json) catch {
+            self.alloc.free(id_copy);
+            self.alloc.free(image_copy);
+            self.alloc.free(command_copy);
+            if (app_name_copy) |app_name| self.alloc.free(app_name);
+            if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
+            if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
+            return;
+        }
+    else
+        null;
     const gang_copy: ?GangInfo = if (gang_info) |gang| blk: {
         const addr_copy = self.alloc.dupe(u8, gang.master_addr) catch {
             self.alloc.free(id_copy);
@@ -149,6 +166,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
             if (app_name_copy) |app_name| self.alloc.free(app_name);
             if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
             if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
+            if (health_check_json_copy) |health_check_json| self.alloc.free(health_check_json);
             return;
         };
         break :blk .{
@@ -168,6 +186,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         if (app_name_copy) |app_name| self.alloc.free(app_name);
         if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
         if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
+        if (health_check_json_copy) |health_check_json| self.alloc.free(health_check_json);
         if (gang_copy) |gang| self.alloc.free(gang.master_addr);
         return;
     };
@@ -183,6 +202,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         .app_name = app_name_copy,
         .workload_kind = workload_kind_copy,
         .workload_name = workload_name_copy,
+        .health_check_json = health_check_json_copy,
     } }) catch {
         log.warn("failed to spawn thread for assignment {s}", .{id_copy});
         self.container_lock.lock();
@@ -194,6 +214,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         if (app_name_copy) |app_name| self.alloc.free(app_name);
         if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
         if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
+        if (health_check_json_copy) |health_check_json| self.alloc.free(health_check_json);
         if (gang_copy) |gang| self.alloc.free(gang.master_addr);
     };
 }
@@ -211,6 +232,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         if (meta.app_name) |app_name| self.alloc.free(app_name);
         if (meta.workload_kind) |workload_kind| self.alloc.free(workload_kind);
         if (meta.workload_name) |workload_name| self.alloc.free(workload_name);
+        if (meta.health_check_json) |health_check_json| self.alloc.free(health_check_json);
         if (gang_info) |gang| self.alloc.free(gang.master_addr);
     }
 
@@ -320,12 +342,25 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         return;
     };
 
+    if (!waitForServiceReadiness(self.alloc, container_id, meta)) {
+        log.warn("service assignment {s} failed readiness gate", .{assignment_id});
+        _ = c.stop() catch {};
+        _ = c.wait() catch 255;
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed");
+        cleanup(container_id);
+        return;
+    }
+
     reportStatus(self, assignment_id, "running");
     setContainerState(self, assignment_id, .running);
 
     const exit_code = c.wait() catch 255;
 
     log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });
+    if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
+        manifest_health.unregisterService(meta.workload_name.?);
+    }
     if (exit_code == 0) {
         setContainerState(self, assignment_id, .stopped);
         reportStatus(self, assignment_id, "stopped");
@@ -334,6 +369,129 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         reportStatus(self, assignment_id, "failed");
     }
     cleanup(container_id);
+}
+
+fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, meta: AssignmentMeta) bool {
+    const workload_kind = meta.workload_kind orelse return true;
+    const service_name = meta.workload_name orelse return true;
+    if (!std.mem.eql(u8, workload_kind, "service")) return true;
+    const health_check_json = meta.health_check_json orelse return true;
+
+    const record = store.load(alloc, container_id) catch return false;
+    defer record.deinit(alloc);
+    const ip_address = record.ip_address orelse return false;
+    const container_ip = @import("../../network/ip.zig").parseIp(ip_address) orelse return false;
+    const health_check = parseHealthCheckJson(alloc, health_check_json) orelse return false;
+    defer health_check.deinit(alloc);
+
+    var id_buf: [12]u8 = undefined;
+    if (container_id.len != id_buf.len) return false;
+    @memcpy(&id_buf, container_id[0..id_buf.len]);
+
+    manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return false;
+    manifest_health.startChecker();
+
+    const deadline_ns = std.time.nanoTimestamp() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
+    defer {
+        const final_status = manifest_health.getStatus(service_name) orelse .starting;
+        if (final_status != .healthy) manifest_health.unregisterService(service_name);
+    }
+    while (std.time.nanoTimestamp() < deadline_ns) {
+        switch (manifest_health.getStatus(service_name) orelse .starting) {
+            .healthy => return true,
+            .unhealthy => return false,
+            .starting => std.Thread.sleep(100 * std.time.ns_per_ms),
+        }
+    }
+    return false;
+}
+
+fn estimateHealthStartupWindowSeconds(health_check: manifest_spec.HealthCheck) u32 {
+    const attempts = @max(@as(u32, 1), health_check.retries);
+    return health_check.start_period + (attempts * (health_check.interval + health_check.timeout)) + 2;
+}
+
+fn parseHealthCheckJson(alloc: std.mem.Allocator, json: []const u8) ?manifest_spec.HealthCheck {
+    const kind = extractJsonString(json, "kind") orelse return null;
+    const interval = intFieldAsU32(json, "interval", 10);
+    const timeout = intFieldAsU32(json, "timeout", 5);
+    const retries = intFieldAsU32(json, "retries", 3);
+    const start_period = intFieldAsU32(json, "start_period", 0);
+
+    const check_type: manifest_spec.CheckType = if (std.mem.eql(u8, kind, "http")) .{
+        .http = .{
+            .path = alloc.dupe(u8, extractJsonString(json, "path") orelse return null) catch return null,
+            .port = intFieldAsU16(json, "port", 0),
+        },
+    } else if (std.mem.eql(u8, kind, "tcp")) .{
+        .tcp = .{
+            .port = intFieldAsU16(json, "port", 0),
+        },
+    } else if (std.mem.eql(u8, kind, "grpc")) .{
+        .grpc = .{
+            .port = intFieldAsU16(json, "port", 0),
+            .service = if (extractJsonString(json, "service")) |service|
+                alloc.dupe(u8, service) catch return null
+            else
+                null,
+        },
+    } else if (std.mem.eql(u8, kind, "exec")) .{
+        .exec = .{
+            .command = parseJsonStringArray(alloc, json, "command") orelse return null,
+        },
+    } else return null;
+
+    return .{
+        .check_type = check_type,
+        .interval = interval,
+        .timeout = timeout,
+        .retries = retries,
+        .start_period = start_period,
+    };
+}
+
+fn parseJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const u8) ?[][]const u8 {
+    const array_json = json_helpers.extractJsonArray(json, key) orelse return null;
+    if (array_json.len < 2) return null;
+
+    var items: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (items.items) |item| alloc.free(item);
+        items.deinit(alloc);
+    }
+
+    var pos: usize = 1;
+    while (pos < array_json.len - 1) {
+        while (pos < array_json.len - 1 and (array_json[pos] == ' ' or array_json[pos] == '\n' or array_json[pos] == '\r' or array_json[pos] == '\t' or array_json[pos] == ',')) : (pos += 1) {}
+        if (pos >= array_json.len - 1) break;
+        if (array_json[pos] != '"') return null;
+        pos += 1;
+        const start = pos;
+
+        while (pos < array_json.len - 1) : (pos += 1) {
+            if (array_json[pos] == '\\') {
+                pos += 1;
+                if (pos >= array_json.len - 1) return null;
+                continue;
+            }
+            if (array_json[pos] == '"') break;
+        }
+        if (pos >= array_json.len - 1) return null;
+
+        const item = alloc.dupe(u8, array_json[start..pos]) catch return null;
+        items.append(alloc, item) catch return null;
+        pos += 1;
+    }
+
+    return items.toOwnedSlice(alloc) catch null;
+}
+
+fn intFieldAsU32(json: []const u8, key: []const u8, default_value: u32) u32 {
+    return if (extractJsonInt(json, key)) |value| @intCast(@max(@as(i64, 0), value)) else default_value;
+}
+
+fn intFieldAsU16(json: []const u8, key: []const u8, default_value: u16) u16 {
+    return if (extractJsonInt(json, key)) |value| @intCast(@max(@as(i64, 0), value)) else default_value;
 }
 
 fn buildAssignmentHostname(buf: []u8, meta: AssignmentMeta, gang_info: ?GangInfo) []const u8 {
@@ -373,4 +531,44 @@ fn cleanup(container_id: []const u8) void {
     logs.deleteLogFile(container_id);
     container.cleanupContainerDirs(container_id);
     store.remove(container_id) catch {};
+}
+
+test "parseHealthCheckJson parses http service checks" {
+    const alloc = std.testing.allocator;
+    const parsed = parseHealthCheckJson(
+        alloc,
+        "{\"kind\":\"http\",\"path\":\"/ready\",\"port\":8080,\"interval\":11,\"timeout\":6,\"retries\":4,\"start_period\":2}",
+    ).?;
+    defer parsed.deinit(alloc);
+
+    switch (parsed.check_type) {
+        .http => |http| {
+            try std.testing.expectEqualStrings("/ready", http.path);
+            try std.testing.expectEqual(@as(u16, 8080), http.port);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u32, 11), parsed.interval);
+    try std.testing.expectEqual(@as(u32, 6), parsed.timeout);
+    try std.testing.expectEqual(@as(u32, 4), parsed.retries);
+    try std.testing.expectEqual(@as(u32, 2), parsed.start_period);
+}
+
+test "parseHealthCheckJson parses exec service checks" {
+    const alloc = std.testing.allocator;
+    const parsed = parseHealthCheckJson(
+        alloc,
+        "{\"kind\":\"exec\",\"command\":[\"/bin/sh\",\"-c\",\"echo ok\"],\"interval\":5,\"timeout\":3,\"retries\":2,\"start_period\":1}",
+    ).?;
+    defer parsed.deinit(alloc);
+
+    switch (parsed.check_type) {
+        .exec => |exec| {
+            try std.testing.expectEqual(@as(usize, 3), exec.command.len);
+            try std.testing.expectEqualStrings("/bin/sh", exec.command[0]);
+            try std.testing.expectEqualStrings("-c", exec.command[1]);
+            try std.testing.expectEqualStrings("echo ok", exec.command[2]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }

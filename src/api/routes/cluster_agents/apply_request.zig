@@ -72,6 +72,7 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
                 .request = .{
                     .image = image,
                     .command = command,
+                    .health_check_json = json_helpers.extractJsonObject(block, "health_check"),
                     .app_name = parsed.app_name,
                     .workload_kind = if (parsed.app_name != null) "service" else null,
                     .workload_name = if (parsed.app_name != null) (extractJsonString(block, "name") orelse "") else null,
@@ -233,4 +234,19 @@ test "parse defaults rollout health gate to disabled when omitted" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.requests.items.len);
     try std.testing.expectEqual(@as(u32, 0), parsed.requests.items[0].rollout.health_check_timeout);
+}
+
+test "parse preserves service health checks for agent readiness" {
+    const alloc = std.testing.allocator;
+    const json =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx","command":["nginx","-g","daemon off"],"health_check":{"kind":"http","path":"/ready","port":8080,"interval":5,"timeout":2,"retries":3,"start_period":1}}]}
+    ;
+
+    var parsed = try parse(alloc, json, true);
+    defer parsed.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.requests.items.len);
+    try std.testing.expect(parsed.requests.items[0].request.health_check_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.requests.items[0].request.health_check_json.?, "\"kind\":\"http\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.requests.items[0].request.health_check_json.?, "\"path\":\"/ready\"") != null);
 }

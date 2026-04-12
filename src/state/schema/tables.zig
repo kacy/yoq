@@ -203,6 +203,7 @@ pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
         \\    app_name TEXT,
         \\    workload_kind TEXT,
         \\    workload_name TEXT,
+        \\    health_check_json TEXT,
         \\    gang_rank INTEGER,
         \\    gang_world_size INTEGER,
         \\    gang_master_addr TEXT,
