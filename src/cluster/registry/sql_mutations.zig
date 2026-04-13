@@ -140,12 +140,17 @@ pub fn drainSql(buf: []u8, id: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "UPDATE agents SET status = 'draining' WHERE id = '{s}';", .{id_esc});
 }
 
-pub fn updateAssignmentStatusSql(buf: []u8, assignment_id: []const u8, new_status: []const u8) ![]const u8 {
+pub fn updateAssignmentStatusSql(buf: []u8, assignment_id: []const u8, new_status: []const u8, reason: ?[]const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, assignment_id);
     var status_esc_buf: [64]u8 = undefined;
     const status_esc = try sql_escape.escapeSqlString(&status_esc_buf, new_status);
-    return std.fmt.bufPrint(buf, "UPDATE assignments SET status = '{s}' WHERE id = '{s}';", .{ status_esc, id_esc });
+    var reason_esc_buf: [128]u8 = undefined;
+    if (reason) |status_reason| {
+        const reason_esc = try sql_escape.escapeSqlString(&reason_esc_buf, status_reason);
+        return std.fmt.bufPrint(buf, "UPDATE assignments SET status = '{s}', status_reason = '{s}' WHERE id = '{s}';", .{ status_esc, reason_esc, id_esc });
+    }
+    return std.fmt.bufPrint(buf, "UPDATE assignments SET status = '{s}', status_reason = NULL WHERE id = '{s}';", .{ status_esc, id_esc });
 }
 
 pub fn markOfflineSql(buf: []u8, id: []const u8) ![]const u8 {

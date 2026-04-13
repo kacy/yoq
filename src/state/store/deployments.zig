@@ -18,6 +18,7 @@ pub const DeploymentRecord = struct {
     failed_targets: usize = 0,
     status: []const u8,
     message: ?[]const u8,
+    failure_details_json: ?[]const u8 = null,
     created_at: i64,
 
     pub fn deinit(self: DeploymentRecord, alloc: Allocator) void {
@@ -30,11 +31,12 @@ pub const DeploymentRecord = struct {
         alloc.free(self.config_snapshot);
         alloc.free(self.status);
         if (self.message) |message| alloc.free(message);
+        if (self.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
     }
 };
 
 const deployment_columns =
-    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, created_at";
+    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, failure_details_json, created_at";
 
 const DeploymentRow = struct {
     id: sqlite.Text,
@@ -48,6 +50,7 @@ const DeploymentRow = struct {
     failed_targets: i64,
     status: sqlite.Text,
     message: ?sqlite.Text,
+    failure_details_json: ?sqlite.Text,
     created_at: i64,
 };
 
@@ -64,6 +67,7 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
         .failed_targets = @intCast(@max(@as(i64, 0), row.failed_targets)),
         .status = row.status.data,
         .message = if (row.message) |message| message.data else null,
+        .failure_details_json = if (row.failure_details_json) |failure_details_json| failure_details_json.data else null,
         .created_at = row.created_at,
     };
 }
@@ -75,7 +79,7 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -89,6 +93,7 @@ pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!v
             @as(i64, @intCast(record.failed_targets)),
             record.status,
             record.message,
+            record.failure_details_json,
             record.created_at,
         },
     ) catch return StoreError.WriteFailed;
@@ -211,7 +216,7 @@ pub fn listLatestDeploymentsByAppInDb(
 
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try common.getDb();
-    return updateDeploymentStatusInDb(db, id, status, message);
+    return updateDeploymentStatusInDb(db, id, status, message, null);
 }
 
 pub fn updateDeploymentStatusInDb(
@@ -219,8 +224,9 @@ pub fn updateDeploymentStatusInDb(
     id: []const u8,
     status: []const u8,
     message: ?[]const u8,
+    failure_details_json: ?[]const u8,
 ) StoreError!void {
-    return updateDeploymentProgressInDb(db, id, status, message, 0, 0);
+    return updateDeploymentProgressInDb(db, id, status, message, 0, 0, failure_details_json);
 }
 
 pub fn updateDeploymentProgress(
@@ -229,9 +235,10 @@ pub fn updateDeploymentProgress(
     message: ?[]const u8,
     completed_targets: usize,
     failed_targets: usize,
+    failure_details_json: ?[]const u8,
 ) StoreError!void {
     const db = try common.getDb();
-    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets);
+    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets, failure_details_json);
 }
 
 pub fn updateDeploymentProgressInDb(
@@ -241,11 +248,12 @@ pub fn updateDeploymentProgressInDb(
     message: ?[]const u8,
     completed_targets: usize,
     failed_targets: usize,
+    failure_details_json: ?[]const u8,
 ) StoreError!void {
     db.exec(
-        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ? WHERE id = ?;",
+        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ?, failure_details_json = ? WHERE id = ?;",
         .{},
-        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), id },
+        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), failure_details_json, id },
     ) catch return StoreError.WriteFailed;
 }
 
@@ -349,9 +357,9 @@ test "deployment record round-trip via sqlite" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", @as(i64, 1000) },
+        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", null, @as(i64, 1000) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -370,6 +378,7 @@ test "deployment record round-trip via sqlite" {
     try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
     try std.testing.expectEqualStrings("completed", record.status);
     try std.testing.expectEqualStrings("initial deploy", record.message.?);
+    try std.testing.expect(record.failure_details_json == null);
     try std.testing.expectEqual(@as(i64, 1000), record.created_at);
 }
 
@@ -401,9 +410,9 @@ test "deployment stores rollback transition metadata" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", @as(i64, 2100) },
+        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", null, @as(i64, 2100) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;

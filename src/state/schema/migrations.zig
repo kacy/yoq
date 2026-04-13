@@ -135,6 +135,7 @@ fn migrateDeployments(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN source_release_id TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN completed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failure_details_json TEXT;") catch {};
     db.exec("UPDATE deployments SET trigger = 'apply' WHERE trigger IS NULL OR trigger = '';", .{}, .{}) catch {};
 }
 
@@ -153,6 +154,7 @@ fn migrateCronSchedules(db: *sqlite.Db) void {
 }
 
 fn migrateAssignments(db: *sqlite.Db) void {
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN status_reason TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN app_name TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_kind TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_name TEXT;") catch {};

@@ -49,6 +49,17 @@ pub fn writeNullableJsonStringField(writer: anytype, key: []const u8, value: ?[]
     }
 }
 
+pub fn writeNullableJsonRawField(writer: anytype, key: []const u8, value: ?[]const u8) !void {
+    try writer.writeByte('"');
+    try writer.writeAll(key);
+    if (value) |raw| {
+        try writer.writeAll("\":");
+        try writer.writeAll(raw);
+    } else {
+        try writer.writeAll("\":null");
+    }
+}
+
 // -- JSON field extraction --
 // minimal JSON field extraction for known request shapes.
 // avoids pulling in a full parser for simple key-value lookups.
@@ -283,6 +294,36 @@ pub fn extractJsonObjects(json: []const u8) JsonObjectIterator {
     return .{ .json = json, .pos = 0 };
 }
 
+pub fn summarizeFailureDetails(buf: []u8, failure_details_json: ?[]const u8) ?[]const u8 {
+    const details = failure_details_json orelse return null;
+
+    var written: usize = 0;
+    var count: usize = 0;
+    var iter = extractJsonObjects(details);
+    while (iter.next()) |obj| {
+        const workload_name = extractJsonString(obj, "workload_name") orelse continue;
+        const reason = extractJsonString(obj, "reason") orelse continue;
+
+        if (count < 2) {
+            const prefix = if (count == 0) "" else "; ";
+            const piece = std.fmt.bufPrint(buf[written..], "{s}{s}: {s}", .{
+                prefix,
+                workload_name,
+                reason,
+            }) catch break;
+            written += piece.len;
+        }
+        count += 1;
+    }
+
+    if (count == 0) return null;
+    if (count > 2) {
+        const suffix = std.fmt.bufPrint(buf[written..], "; +{d} more", .{count - 2}) catch return buf[0..written];
+        written += suffix.len;
+    }
+    return buf[0..written];
+}
+
 // -- tests --
 
 test "basic escaping" {
@@ -364,6 +405,19 @@ test "extractJsonInt basic" {
 test "extractJsonObjects empty array" {
     var iter = extractJsonObjects("[]");
     try std.testing.expect(iter.next() == null);
+}
+
+test "summarizeFailureDetails condenses workload reasons" {
+    var buf: [256]u8 = undefined;
+    const summary = summarizeFailureDetails(&buf,
+        \\[
+        \\  {"workload_kind":"service","workload_name":"web","reason":"readiness_timeout"},
+        \\  {"workload_kind":"service","workload_name":"db","reason":"placement_failed"},
+        \\  {"workload_kind":"service","workload_name":"api","reason":"readiness_failed"}
+        \\]
+    ).?;
+
+    try std.testing.expectEqualStrings("web: readiness_timeout; db: placement_failed; +1 more", summary);
 }
 
 test "extractJsonArray basic" {

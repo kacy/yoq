@@ -21,6 +21,7 @@ pub fn recordAppReleaseStart(plan: *const release_plan.ReleasePlan, context: app
         0,
         .pending,
         null,
+        null,
     );
     return id;
 }

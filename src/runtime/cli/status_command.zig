@@ -168,7 +168,9 @@ const AppStatusSnapshot = struct {
     previous_successful_remaining_targets: usize = 0,
     previous_successful_source_release_id: ?[]const u8 = null,
     previous_successful_message: ?[]const u8 = null,
+    previous_successful_failure_details_json: ?[]const u8 = null,
     message: ?[]const u8 = null,
+    failure_details_json: ?[]const u8 = null,
 };
 
 fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!void {
@@ -409,7 +411,8 @@ fn printAppStatusHeader() void {
 }
 
 fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
-    const msg = snapshot.message orelse "";
+    var message_buf: [160]u8 = undefined;
+    const msg = formatStatusMessage(&message_buf, snapshot.message, snapshot.failure_details_json);
 
     var progress_buf: [64]u8 = undefined;
     const progress_str = formatAppProgress(&progress_buf, snapshot);
@@ -439,6 +442,19 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
         previous_successful,
         cli.truncate(msg, 48),
     });
+}
+
+fn formatStatusMessage(buf: []u8, message: ?[]const u8, failure_details_json: ?[]const u8) []const u8 {
+    if (message == null or message.?.len == 0) {
+        return json_helpers.summarizeFailureDetails(buf, failure_details_json) orelse "";
+    }
+
+    const prefix = std.fmt.bufPrint(buf, "{s}", .{message.?}) catch return message.?;
+    if (failure_details_json == null) return prefix;
+
+    const sep = std.fmt.bufPrint(buf[prefix.len..], " | ", .{}) catch return prefix;
+    const summary = json_helpers.summarizeFailureDetails(buf[prefix.len + sep.len ..], failure_details_json) orelse return prefix;
+    return buf[0 .. prefix.len + sep.len + summary.len];
 }
 
 fn formatAppProgress(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
@@ -498,7 +514,9 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .previous_successful_remaining_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_remaining_targets") orelse 0)),
         .previous_successful_source_release_id = extractJsonString(json, "previous_successful_source_release_id"),
         .previous_successful_message = extractJsonString(json, "previous_successful_message"),
+        .previous_successful_failure_details_json = extractJsonArray(json, "previous_successful_failure_details"),
         .message = extractJsonString(json, "message"),
+        .failure_details_json = extractJsonArray(json, "failure_details"),
     };
 }
 
@@ -531,7 +549,9 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("previous_successful_remaining_targets", snapshot.previous_successful_remaining_targets);
     if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("previous_successful_source_release_id", source_release_id) else w.nullField("previous_successful_source_release_id");
     if (snapshot.previous_successful_message) |message| w.stringField("previous_successful_message", message) else w.nullField("previous_successful_message");
+    if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("previous_successful_failure_details", failure_details) else w.nullField("previous_successful_failure_details");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+    if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     w.beginObjectField("current_release");
     w.stringField("id", snapshot.release_id);
     w.stringField("trigger", snapshot.trigger);
@@ -543,6 +563,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("remaining_targets", snapshot.remaining_targets);
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+    if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     w.endObject();
     if (snapshot.previous_successful_release_id) |release_id| {
         w.beginObjectField("previous_successful_release");
@@ -556,6 +577,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
         w.uintField("remaining_targets", snapshot.previous_successful_remaining_targets);
         if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
         if (snapshot.previous_successful_message) |message| w.stringField("message", message) else w.nullField("message");
+        if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
         w.endObject();
     } else {
         w.nullField("previous_successful_release");
@@ -607,7 +629,9 @@ fn appStatusFromReports(
         .previous_successful_remaining_targets = if (previous_successful) |prev| prev.remainingTargets() else 0,
         .previous_successful_source_release_id = if (previous_successful) |prev| prev.source_release_id else null,
         .previous_successful_message = if (previous_successful) |prev| prev.message else null,
+        .previous_successful_failure_details_json = if (previous_successful) |prev| prev.failure_details_json else null,
         .message = report.message,
+        .failure_details_json = report.failure_details_json,
     };
 }
 
@@ -895,6 +919,29 @@ test "writeAppStatusJsonObject includes nested release and workload views" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"training_runtime\":{\"active\":1,\"paused\":1,\"failed\":1}") != null);
 }
 
+test "writeAppStatusJsonObject preserves failure details" {
+    const snapshot = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-4",
+        .status = "partially_failed",
+        .manifest_hash = "sha256:444",
+        .created_at = 400,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 0,
+        .message = "one or more rollout targets failed readiness checks",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"readiness_timeout\"}]",
+    };
+
+    var w = json_out.JsonWriter{};
+    writeAppStatusJsonObject(&w, snapshot);
+    const parsed = parseAppStatusResponse(w.getWritten());
+
+    try std.testing.expect(parsed.failure_details_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.failure_details_json.?, "\"reason\":\"readiness_timeout\"") != null);
+}
+
 test "appMatchesFilters applies failed and in-progress filters" {
     const failed_snapshot = AppStatusSnapshot{
         .app_name = "demo-app",
@@ -1043,6 +1090,17 @@ test "formatAppProgress summarizes in-flight and partial outcomes" {
         .message = "apply completed",
     };
     try std.testing.expectEqualStrings("2 ok", formatAppProgress(&buf, completed));
+}
+
+test "formatStatusMessage appends failure detail summary" {
+    var buf: [256]u8 = undefined;
+    const text = formatStatusMessage(
+        &buf,
+        "one or more rollout targets failed readiness checks",
+        "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"readiness_timeout\"}]",
+    );
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "web: readiness_timeout") != null);
 }
 
 test "formatTrainingRuntime summarizes active paused and failed jobs" {

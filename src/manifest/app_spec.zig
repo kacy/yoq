@@ -977,6 +977,25 @@ test "toApplyJson preserves structured workload metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"gpus\":4") != null);
 }
 
+test "fromManifest keeps rollout health gate disabled when omitted" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loader.loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.rollout]
+        \\parallelism = 2
+    );
+    defer manifest.deinit();
+
+    var app = try fromManifest(alloc, "demo-app", &manifest);
+    defer app.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), app.services.len);
+    try std.testing.expectEqual(@as(u32, 0), app.services[0].rollout.health_check_timeout);
+}
+
 test "rolloutPolicyToUpdateStrategy preserves rollout controls" {
     const strategy = rolloutPolicyToUpdateStrategy(.{
         .parallelism = 3,

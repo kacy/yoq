@@ -39,6 +39,7 @@ pub const ParseError = error{
     NoServices,
     OutOfMemory,
     InvalidRequest,
+    InvalidRolloutConfig,
 };
 
 pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool) ParseError!ApplyRequest {
@@ -57,7 +58,6 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
         while (iter.next()) |block| {
             const image = extractJsonString(block, "image") orelse continue;
             const command = extractCommandString(alloc, block) catch return ParseError.OutOfMemory;
-            errdefer alloc.free(command);
 
             if (!common.validateClusterInput(image)) {
                 alloc.free(command);
@@ -67,6 +67,11 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
                 alloc.free(command);
                 continue;
             }
+
+            const rollout = parseRolloutPolicy(block) catch {
+                alloc.free(command);
+                return ParseError.InvalidRolloutConfig;
+            };
 
             parsed.requests.append(alloc, .{
                 .request = .{
@@ -85,7 +90,7 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
                     .gang_world_size = if (extractJsonInt(block, "gang_world_size")) |v| @intCast(@max(0, v)) else 0,
                     .gpus_per_rank = if (extractJsonInt(block, "gpus_per_rank")) |v| @intCast(@max(1, v)) else 1,
                 },
-                .rollout = parseRolloutPolicy(block),
+                .rollout = rollout,
             }) catch {
                 alloc.free(command);
                 return ParseError.OutOfMemory;
@@ -102,17 +107,47 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     return parsed;
 }
 
-fn parseRolloutPolicy(block: []const u8) spec.RolloutPolicy {
+fn parseRolloutPolicy(block: []const u8) error{InvalidRolloutConfig}!spec.RolloutPolicy {
     const rollout_json = json_helpers.extractJsonObject(block, "rollout") orelse return .{};
-    return .{
-        .strategy = .rolling,
-        .parallelism = if (extractJsonInt(rollout_json, "parallelism")) |v| @intCast(@max(@as(i64, 1), v)) else 1,
-        .delay_between_batches = if (extractJsonInt(rollout_json, "delay_between_batches")) |v| @intCast(@max(@as(i64, 0), v)) else 0,
-        .failure_action = if (extractJsonString(rollout_json, "failure_action")) |action|
-            if (std.mem.eql(u8, action, "pause")) spec.RolloutFailureAction.pause else spec.RolloutFailureAction.rollback
+    const strategy = if (extractJsonString(rollout_json, "strategy")) |value|
+        if (std.mem.eql(u8, value, "rolling"))
+            spec.RolloutStrategy.rolling
         else
-            .rollback,
-        .health_check_timeout = if (extractJsonInt(rollout_json, "health_check_timeout")) |v| @intCast(@max(@as(i64, 0), v)) else 0,
+            return error.InvalidRolloutConfig
+    else
+        spec.RolloutStrategy.rolling;
+
+    const parallelism = if (extractJsonInt(rollout_json, "parallelism")) |v| blk: {
+        if (v < 1) return error.InvalidRolloutConfig;
+        break :blk @as(u32, @intCast(v));
+    } else 1;
+
+    const delay_between_batches = if (extractJsonInt(rollout_json, "delay_between_batches")) |v| blk: {
+        if (v < 0) return error.InvalidRolloutConfig;
+        break :blk @as(u32, @intCast(v));
+    } else 0;
+
+    const failure_action = if (extractJsonString(rollout_json, "failure_action")) |action|
+        if (std.mem.eql(u8, action, "pause"))
+            spec.RolloutFailureAction.pause
+        else if (std.mem.eql(u8, action, "rollback"))
+            spec.RolloutFailureAction.rollback
+        else
+            return error.InvalidRolloutConfig
+    else
+        spec.RolloutFailureAction.rollback;
+
+    const health_check_timeout = if (extractJsonInt(rollout_json, "health_check_timeout")) |v| blk: {
+        if (v < 0) return error.InvalidRolloutConfig;
+        break :blk @as(u32, @intCast(v));
+    } else 0;
+
+    return .{
+        .strategy = strategy,
+        .parallelism = parallelism,
+        .delay_between_batches = delay_between_batches,
+        .failure_action = failure_action,
+        .health_check_timeout = health_check_timeout,
     };
 }
 
@@ -234,6 +269,24 @@ test "parse defaults rollout health gate to disabled when omitted" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.requests.items.len);
     try std.testing.expectEqual(@as(u32, 0), parsed.requests.items[0].rollout.health_check_timeout);
+}
+
+test "parse rejects unsupported rollout strategy" {
+    const alloc = std.testing.allocator;
+    const json =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx","command":["nginx","-g","daemon off"],"rollout":{"strategy":"canary"}}]}
+    ;
+
+    try std.testing.expectError(ParseError.InvalidRolloutConfig, parse(alloc, json, true));
+}
+
+test "parse rejects invalid rollout failure action" {
+    const alloc = std.testing.allocator;
+    const json =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx","command":["nginx","-g","daemon off"],"rollout":{"failure_action":"ignore"}}]}
+    ;
+
+    try std.testing.expectError(ParseError.InvalidRolloutConfig, parse(alloc, json, true));
 }
 
 test "parse preserves service health checks for agent readiness" {

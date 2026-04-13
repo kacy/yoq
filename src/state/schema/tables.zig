@@ -170,6 +170,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    failed_targets INTEGER NOT NULL DEFAULT 0,
         \\    status TEXT NOT NULL DEFAULT 'pending',
         \\    message TEXT,
+        \\    failure_details_json TEXT,
         \\    created_at INTEGER NOT NULL
         \\);
     );
@@ -198,6 +199,7 @@ pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
         \\    image TEXT NOT NULL,
         \\    command TEXT NOT NULL DEFAULT '',
         \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    status_reason TEXT,
         \\    cpu_limit INTEGER NOT NULL DEFAULT 1000,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 256,
         \\    app_name TEXT,

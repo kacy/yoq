@@ -15,6 +15,7 @@ const proxy_control_plane = @import("../network/proxy/control_plane.zig");
 const service_rollout = @import("../network/service_rollout.zig");
 const service_reconciler = @import("../network/service_reconciler.zig");
 const listener_runtime = @import("../network/proxy/listener_runtime.zig");
+const json_helpers = @import("../lib/json_helpers.zig");
 
 const writeErr = cli.writeErr;
 
@@ -32,6 +33,73 @@ pub const LocalApplyScope = struct {
 const ExistingServiceState = enum {
     active,
     inactive,
+};
+
+const ReplacementHealthResult = enum {
+    healthy,
+    timeout,
+    failed,
+};
+
+const ReplacementFailureDetail = struct {
+    workload_kind: []const u8,
+    workload_name: []const u8,
+    reason: []const u8,
+};
+
+const ReplacementFailureDetailBuilder = struct {
+    alloc: std.mem.Allocator,
+    items: std.ArrayListUnmanaged(ReplacementFailureDetail) = .empty,
+
+    fn init(alloc: std.mem.Allocator) ReplacementFailureDetailBuilder {
+        return .{ .alloc = alloc };
+    }
+
+    fn deinit(self: *ReplacementFailureDetailBuilder) void {
+        self.items.deinit(self.alloc);
+    }
+
+    fn appendService(self: *ReplacementFailureDetailBuilder, service_name: []const u8, reason: []const u8) !void {
+        try self.items.append(self.alloc, .{
+            .workload_kind = "service",
+            .workload_name = service_name,
+            .reason = reason,
+        });
+    }
+
+    fn appendIndexes(
+        self: *ReplacementFailureDetailBuilder,
+        services: []const spec.Service,
+        indexes: []const usize,
+        reason: []const u8,
+    ) !void {
+        for (indexes) |idx| {
+            try self.appendService(services[idx].name, reason);
+        }
+    }
+
+    fn toOwnedJson(self: *ReplacementFailureDetailBuilder) !?[]u8 {
+        if (self.items.items.len == 0) return null;
+
+        var json_buf: std.ArrayList(u8) = .empty;
+        errdefer json_buf.deinit(self.alloc);
+        const writer = json_buf.writer(self.alloc);
+
+        try writer.writeByte('[');
+        for (self.items.items, 0..) |detail, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writer.writeByte('{');
+            try json_helpers.writeJsonStringField(writer, "workload_kind", detail.workload_kind);
+            try writer.writeByte(',');
+            try json_helpers.writeJsonStringField(writer, "workload_name", detail.workload_name);
+            try writer.writeByte(',');
+            try json_helpers.writeJsonStringField(writer, "reason", detail.reason);
+            try writer.writeByte('}');
+        }
+        try writer.writeByte(']');
+        const owned = try json_buf.toOwnedSlice(self.alloc);
+        return owned;
+    }
 };
 
 pub const PreparedLocalApply = struct {
@@ -241,12 +309,15 @@ fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const r
 fn runReplacementPlan(
     runner: anytype,
     alloc: std.mem.Allocator,
+    services: []const spec.Service,
     new_indexes: []const usize,
     replacement_indexes: []const usize,
     strategy: update_common.UpdateStrategy,
 ) !apply_release.ApplyOutcome {
     var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
     defer completed_workers.deinit(alloc);
+    var failure_details = ReplacementFailureDetailBuilder.init(alloc);
+    defer failure_details.deinit();
 
     var placed: usize = 0;
     var failed: usize = 0;
@@ -258,27 +329,59 @@ fn runReplacementPlan(
     while (new_start < new_indexes.len) {
         const batch_end = @min(new_start + batch_size, new_indexes.len);
         const batch = new_indexes[new_start..batch_end];
+        var started_batch = try alloc.alloc(usize, batch.len);
+        defer alloc.free(started_batch);
 
         var batch_started: usize = 0;
         for (batch) |idx| {
             runner.start(idx, &completed_workers) catch {
                 failed += 1;
+                try failure_details.appendService(services[idx].name, "start_failed");
                 reportProgressIfSupported(runner, placed, failed);
                 if (!mutated) return error.StartFailed;
                 continue;
             };
+            started_batch[batch_started] = idx;
             batch_started += 1;
             mutated = true;
         }
 
-        if (batch_started > 0 and !waitHealthyIfSupported(runner, batch, strategy.health_check_timeout)) {
-            failed += batch_started;
-            if (mutated) runner.finish();
-            return replacementFailureOutcome(strategy, placed, failed);
+        if (batch_started > 0) {
+            const health_results = try waitHealthyIfSupported(alloc, runner, started_batch[0..batch_started], strategy.health_check_timeout);
+            defer alloc.free(health_results);
+
+            var batch_completed: usize = 0;
+            var batch_failed: usize = 0;
+            for (started_batch[0..batch_started], health_results) |idx, health_result| {
+                switch (health_result) {
+                    .healthy => batch_completed += 1,
+                    .timeout, .failed => {
+                        batch_failed += 1;
+                        try failure_details.appendService(services[idx].name, switch (health_result) {
+                            .healthy => unreachable,
+                            .timeout => "readiness_timeout",
+                            .failed => "readiness_failed",
+                        });
+                    },
+                }
+            }
+
+            placed += batch_completed;
+            failed += batch_failed;
+            reportProgressIfSupported(runner, placed, failed);
+
+            if (batch_failed > 0) {
+                if (mutated) runner.finish();
+                return replacementFailureOutcome(strategy, placed, failed, try failure_details.toOwnedJson());
+            }
+        } else if (failed > 0 and !mutated) {
+            return error.StartFailed;
         }
 
-        placed += batch_started;
-        reportProgressIfSupported(runner, placed, failed);
+        if (batch_started == 0) {
+            if (mutated) runner.finish();
+            return replacementFailureOutcome(strategy, placed, failed, try failure_details.toOwnedJson());
+        }
         maybeDelayBetweenBatches(strategy.delay_between_batches, batch_end < new_indexes.len);
         new_start = batch_end;
     }
@@ -287,6 +390,8 @@ fn runReplacementPlan(
     while (replacement_start < replacement_indexes.len) {
         const batch_end = @min(replacement_start + batch_size, replacement_indexes.len);
         const batch = replacement_indexes[replacement_start..batch_end];
+        var started_batch = try alloc.alloc(usize, batch.len);
+        defer alloc.free(started_batch);
 
         for (batch) |idx| runner.stop(idx);
         if (batch.len > 0) mutated = true;
@@ -295,24 +400,52 @@ fn runReplacementPlan(
         for (batch) |idx| {
             runner.start(idx, &completed_workers) catch {
                 failed += 1;
+                try failure_details.appendService(services[idx].name, "start_failed");
                 reportProgressIfSupported(runner, placed, failed);
                 continue;
             };
+            started_batch[batch_started] = idx;
             batch_started += 1;
         }
 
-        if (batch_started > 0 and !waitHealthyIfSupported(runner, batch, strategy.health_check_timeout)) {
-            failed += batch_started;
-            if (mutated) runner.finish();
-            return replacementFailureOutcome(strategy, placed, failed);
+        if (batch_started > 0) {
+            const health_results = try waitHealthyIfSupported(alloc, runner, started_batch[0..batch_started], strategy.health_check_timeout);
+            defer alloc.free(health_results);
+
+            var batch_completed: usize = 0;
+            var batch_failed: usize = 0;
+            for (started_batch[0..batch_started], health_results) |idx, health_result| {
+                switch (health_result) {
+                    .healthy => batch_completed += 1,
+                    .timeout, .failed => {
+                        batch_failed += 1;
+                        try failure_details.appendService(services[idx].name, switch (health_result) {
+                            .healthy => unreachable,
+                            .timeout => "readiness_timeout",
+                            .failed => "readiness_failed",
+                        });
+                    },
+                }
+            }
+
+            placed += batch_completed;
+            failed += batch_failed;
+            reportProgressIfSupported(runner, placed, failed);
+
+            if (batch_failed > 0) {
+                if (mutated) runner.finish();
+                return replacementFailureOutcome(strategy, placed, failed, try failure_details.toOwnedJson());
+            }
         }
 
-        placed += batch_started;
-        reportProgressIfSupported(runner, placed, failed);
+        if (batch_started == 0) {
+            if (mutated) runner.finish();
+            return replacementFailureOutcome(strategy, placed, failed, try failure_details.toOwnedJson());
+        }
 
         if (failed > 0) {
             if (mutated) runner.finish();
-            return replacementFailureOutcome(strategy, placed, failed);
+            return replacementFailureOutcome(strategy, placed, failed, try failure_details.toOwnedJson());
         }
 
         maybeDelayBetweenBatches(strategy.delay_between_batches, batch_end < replacement_indexes.len);
@@ -331,6 +464,7 @@ fn runReplacementPlan(
         .failed = 0,
         .completed_targets = placed,
         .failed_targets = 0,
+        .failure_details_json = null,
     };
 }
 
@@ -340,12 +474,29 @@ fn reportProgressIfSupported(runner: anytype, completed_targets: usize, failed_t
     }
 }
 
-fn waitHealthyIfSupported(runner: anytype, indexes: []const usize, timeout: u32) bool {
-    if (timeout == 0) return true;
-    if (@hasDecl(std.meta.Child(@TypeOf(runner)), "waitHealthy")) {
-        return runner.waitHealthy(indexes, timeout);
+fn waitHealthyIfSupported(
+    alloc: std.mem.Allocator,
+    runner: anytype,
+    indexes: []const usize,
+    timeout: u32,
+) ![]ReplacementHealthResult {
+    const results = try alloc.alloc(ReplacementHealthResult, indexes.len);
+    errdefer alloc.free(results);
+
+    if (timeout == 0) {
+        @memset(results, .healthy);
+        return results;
     }
-    return true;
+    if (@hasDecl(std.meta.Child(@TypeOf(runner)), "waitHealthyResults")) {
+        alloc.free(results);
+        return runner.waitHealthyResults(alloc, indexes, timeout);
+    }
+    if (@hasDecl(std.meta.Child(@TypeOf(runner)), "waitHealthy")) {
+        @memset(results, runner.waitHealthy(indexes, timeout));
+        return results;
+    }
+    @memset(results, .healthy);
+    return results;
 }
 
 fn maybeDelayBetweenBatches(delay_seconds: u32, should_delay: bool) void {
@@ -357,6 +508,7 @@ fn replacementFailureOutcome(
     strategy: update_common.UpdateStrategy,
     placed: usize,
     failed: usize,
+    failure_details_json: ?[]const u8,
 ) apply_release.ApplyOutcome {
     const status: update_common.DeploymentStatus = switch (strategy.failure_action) {
         .pause => .partially_failed,
@@ -372,6 +524,7 @@ fn replacementFailureOutcome(
         .failed = failed,
         .completed_targets = placed,
         .failed_targets = failed,
+        .failure_details_json = failure_details_json,
     };
 }
 
@@ -401,7 +554,7 @@ const LocalReleaseTracker = struct {
     }
 
     pub fn mark(self: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
-        try self.markProgress(id, status, message, 0, 0);
+        try self.markProgressDetails(id, status, message, 0, 0, null);
     }
 
     pub fn markProgress(
@@ -412,6 +565,18 @@ const LocalReleaseTracker = struct {
         completed_targets: usize,
         failed_targets: usize,
     ) !void {
+        try self.markProgressDetails(id, status, message, completed_targets, failed_targets, null);
+    }
+
+    pub fn markProgressDetails(
+        self: *const LocalReleaseTracker,
+        id: []const u8,
+        status: @import("update/common.zig").DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+        failure_details_json: ?[]const u8,
+    ) !void {
         const resolved_message = try apply_release.materializeMessage(self.plan.alloc, self.context, status, message);
         defer if (resolved_message) |msg| self.plan.alloc.free(msg);
 
@@ -421,6 +586,7 @@ const LocalReleaseTracker = struct {
             resolved_message,
             completed_targets,
             failed_targets,
+            failure_details_json,
         ) catch {};
     }
 
@@ -487,36 +653,51 @@ const LocalApplyBackend = struct {
                 }
             }
 
-            fn waitHealthy(runner_self: *@This(), indexes: []const usize, timeout: u32) bool {
+            fn waitHealthyResults(
+                runner_self: *@This(),
+                alloc: std.mem.Allocator,
+                indexes: []const usize,
+                timeout: u32,
+            ) ![]ReplacementHealthResult {
+                const results = try alloc.alloc(ReplacementHealthResult, indexes.len);
+                @memset(results, .timeout);
                 const deadline = @as(u64, @intCast(@max(0, std.time.timestamp()))) + timeout;
+                var remaining = indexes.len;
                 while (@as(u64, @intCast(@max(0, std.time.timestamp()))) < deadline) {
-                    var all_healthy = true;
-                    for (indexes) |idx| {
+                    for (indexes, 0..) |idx, i| {
+                        if (results[i] != .timeout) continue;
                         const svc = runner_self.orch.manifest.services[idx];
-                        if (svc.health_check == null) continue;
+                        if (svc.health_check == null) {
+                            results[i] = .healthy;
+                            remaining -= 1;
+                            continue;
+                        }
                         const status = health.getStatus(svc.name) orelse {
-                            all_healthy = false;
                             break;
                         };
                         switch (status) {
-                            .healthy => {},
-                            .unhealthy => return false,
-                            .starting => {
-                                all_healthy = false;
-                                break;
+                            .healthy => {
+                                results[i] = .healthy;
+                                remaining -= 1;
                             },
+                            .unhealthy => {
+                                results[i] = .failed;
+                                remaining -= 1;
+                            },
+                            .starting => {},
                         }
                     }
-                    if (all_healthy) return true;
+                    if (remaining == 0) return results;
                     std.Thread.sleep(100 * std.time.ns_per_ms);
                 }
-                return false;
+                return results;
             }
         }{ .orch = self.orch, .progress = self.progress };
 
         return runReplacementPlan(
             &runner,
             self.orch.alloc,
+            self.orch.manifest.services,
             new_indexes.items,
             replacement_indexes.items,
             effectiveReplacementStrategy(self.release),
@@ -718,6 +899,10 @@ test "syncExistingServiceStates marks selected running services" {
 
 test "runReplacementPlan counts started and replaced services" {
     const alloc = std.testing.allocator;
+    const services = [_]spec.Service{
+        .{ .name = "db", .image = "postgres:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+        .{ .name = "web", .image = "nginx:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+    };
 
     const Runner = struct {
         started: std.ArrayList(usize),
@@ -744,7 +929,9 @@ test "runReplacementPlan counts started and replaced services" {
     defer runner.started.deinit(alloc);
     defer runner.stopped.deinit(alloc);
 
-    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
+    const outcome = try runReplacementPlan(&runner, alloc, &services, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
+    defer if (outcome.failure_details_json) |json| alloc.free(json);
+    defer if (outcome.failure_details_json) |json| alloc.free(json);
 
     try std.testing.expectEqual(@as(usize, 2), outcome.placed);
     try std.testing.expectEqual(@as(usize, 0), outcome.failed);
@@ -760,6 +947,10 @@ test "runReplacementPlan counts started and replaced services" {
 
 test "runReplacementPlan reports partial failure after mutation" {
     const alloc = std.testing.allocator;
+    const services = [_]spec.Service{
+        .{ .name = "db", .image = "postgres:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+        .{ .name = "web", .image = "nginx:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+    };
 
     const Runner = struct {
         fail_index: usize,
@@ -789,12 +980,16 @@ test "runReplacementPlan reports partial failure after mutation" {
     defer runner.started.deinit(alloc);
     defer runner.stopped.deinit(alloc);
 
-    const outcome = try runReplacementPlan(&runner, alloc, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
+    const outcome = try runReplacementPlan(&runner, alloc, &services, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
+    defer if (outcome.failure_details_json) |json| alloc.free(json);
 
     try std.testing.expectEqual(@as(usize, 1), outcome.placed);
     try std.testing.expectEqual(@as(usize, 1), outcome.failed);
     try std.testing.expectEqual(@import("update/common.zig").DeploymentStatus.partially_failed, outcome.status);
     try std.testing.expectEqualStrings("replacement failed during rollout batch", outcome.message.?);
+    try std.testing.expect(outcome.failure_details_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, outcome.failure_details_json.?, "\"workload_name\":\"web\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, outcome.failure_details_json.?, "\"reason\":\"start_failed\"") != null);
     try std.testing.expect(runner.tls_started);
     try std.testing.expectEqual(@as(usize, 1), runner.started.items.len);
     try std.testing.expectEqual(@as(usize, 1), runner.stopped.items.len);
@@ -802,6 +997,10 @@ test "runReplacementPlan reports partial failure after mutation" {
 
 test "runReplacementPlan emits live target progress after each update" {
     const alloc = std.testing.allocator;
+    const services = [_]spec.Service{
+        .{ .name = "db", .image = "postgres:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+        .{ .name = "web", .image = "nginx:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+    };
 
     const Progress = struct {
         completed_targets: usize,
@@ -835,13 +1034,77 @@ test "runReplacementPlan emits live target progress after each update" {
     defer runner.started.deinit(alloc);
     defer runner.progress_updates.deinit(alloc);
 
-    _ = try runReplacementPlan(&runner, alloc, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
+    _ = try runReplacementPlan(&runner, alloc, &services, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 });
 
     try std.testing.expectEqual(@as(usize, 2), runner.progress_updates.items.len);
     try std.testing.expectEqual(@as(usize, 1), runner.progress_updates.items[0].completed_targets);
     try std.testing.expectEqual(@as(usize, 0), runner.progress_updates.items[0].failed_targets);
     try std.testing.expectEqual(@as(usize, 2), runner.progress_updates.items[1].completed_targets);
     try std.testing.expectEqual(@as(usize, 0), runner.progress_updates.items[1].failed_targets);
+}
+
+test "runReplacementPlan reports readiness timeout details" {
+    const alloc = std.testing.allocator;
+    const services = [_]spec.Service{
+        .{ .name = "db", .image = "postgres:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+    };
+
+    const Runner = struct {
+        fn start(_: *@This(), _: usize, _: *std.StringHashMapUnmanaged(void)) !void {}
+        fn stop(_: *@This(), _: usize) void {}
+        fn finish(_: *@This()) void {}
+        fn waitHealthy(_: *@This(), _: []const usize, _: u32) ReplacementHealthResult {
+            return .timeout;
+        }
+    };
+
+    var runner = Runner{};
+    const outcome = try runReplacementPlan(&runner, alloc, &services, &.{0}, &.{}, .{
+        .parallelism = 1,
+        .health_check_timeout = 5,
+        .failure_action = .pause,
+    });
+    defer if (outcome.failure_details_json) |json| alloc.free(json);
+
+    try std.testing.expectEqual(update_common.DeploymentStatus.partially_failed, outcome.status);
+    try std.testing.expect(outcome.failure_details_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, outcome.failure_details_json.?, "\"workload_name\":\"db\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, outcome.failure_details_json.?, "\"reason\":\"readiness_timeout\"") != null);
+}
+
+test "runReplacementPlan tracks mixed per-target readiness outcomes" {
+    const alloc = std.testing.allocator;
+    const services = [_]spec.Service{
+        .{ .name = "db", .image = "postgres:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+        .{ .name = "web", .image = "nginx:latest", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{} },
+    };
+
+    const Runner = struct {
+        fn start(_: *@This(), _: usize, _: *std.StringHashMapUnmanaged(void)) !void {}
+        fn stop(_: *@This(), _: usize) void {}
+        fn finish(_: *@This()) void {}
+        fn waitHealthyResults(_: *@This(), alloc_inner: std.mem.Allocator, _: []const usize, _: u32) ![]ReplacementHealthResult {
+            const results = try alloc_inner.alloc(ReplacementHealthResult, 2);
+            results[0] = .healthy;
+            results[1] = .failed;
+            return results;
+        }
+    };
+
+    var runner = Runner{};
+    const outcome = try runReplacementPlan(&runner, alloc, &services, &.{0, 1}, &.{}, .{
+        .parallelism = 2,
+        .health_check_timeout = 5,
+        .failure_action = .pause,
+    });
+    defer if (outcome.failure_details_json) |json| alloc.free(json);
+
+    try std.testing.expectEqual(@as(usize, 1), outcome.placed);
+    try std.testing.expectEqual(@as(usize, 1), outcome.failed);
+    try std.testing.expectEqual(update_common.DeploymentStatus.partially_failed, outcome.status);
+    try std.testing.expect(outcome.failure_details_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, outcome.failure_details_json.?, "\"workload_name\":\"web\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, outcome.failure_details_json.?, "\"reason\":\"readiness_failed\"") != null);
 }
 
 test "effectiveReplacementStrategy chooses conservative rollout settings" {

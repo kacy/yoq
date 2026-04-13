@@ -112,6 +112,7 @@ const RollbackSummary = struct {
     remaining_targets: usize,
     source_release_id: ?[]const u8,
     message: ?[]const u8,
+    failure_details_json: ?[]const u8 = null,
     is_current: bool = false,
     is_previous_successful: bool = false,
 };
@@ -345,6 +346,7 @@ const HistoryEntryView = struct {
     remaining_targets: usize,
     source_release_id: ?[]const u8,
     message: ?[]const u8,
+    failure_details_json: ?[]const u8 = null,
     is_current: bool = false,
     is_previous_successful: bool = false,
 };
@@ -369,6 +371,7 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
         .message = report.message,
+        .failure_details_json = report.failure_details_json,
         .is_current = false,
         .is_previous_successful = false,
     };
@@ -392,6 +395,7 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "remaining_targets") orelse 0)),
         .source_release_id = json_helpers.extractJsonString(obj, "source_release_id"),
         .message = json_helpers.extractJsonString(obj, "message"),
+        .failure_details_json = json_helpers.extractJsonArray(obj, "failure_details"),
         .is_current = json_helpers.extractJsonBool(obj, "is_current") orelse false,
         .is_previous_successful = json_helpers.extractJsonBool(obj, "is_previous_successful") orelse false,
     };
@@ -404,7 +408,8 @@ fn writeHistoryHeader() void {
 }
 
 fn writeHistoryRow(entry: HistoryEntryView) void {
-    const message = entry.message orelse "";
+    var message_buf: [160]u8 = undefined;
+    const message = formatHistoryMessage(&message_buf, entry.message, entry.failure_details_json);
     const mark = if (entry.is_current)
         "current"
     else if (entry.is_previous_successful)
@@ -425,6 +430,19 @@ fn writeHistoryRow(entry: HistoryEntryView) void {
     });
 }
 
+fn formatHistoryMessage(buf: []u8, message: ?[]const u8, failure_details_json: ?[]const u8) []const u8 {
+    if (message == null or message.?.len == 0) {
+        return json_helpers.summarizeFailureDetails(buf, failure_details_json) orelse "";
+    }
+
+    const prefix = std.fmt.bufPrint(buf, "{s}", .{message.?}) catch return message.?;
+    if (failure_details_json == null) return prefix;
+
+    const sep = std.fmt.bufPrint(buf[prefix.len..], " | ", .{}) catch return prefix;
+    const summary = json_helpers.summarizeFailureDetails(buf[prefix.len + sep.len ..], failure_details_json) orelse return prefix;
+    return buf[0 .. prefix.len + sep.len + summary.len];
+}
+
 fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void {
     w.beginObject();
     w.stringField("id", entry.id);
@@ -443,6 +461,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
+    if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     w.boolField("is_current", entry.is_current);
     w.boolField("is_previous_successful", entry.is_previous_successful);
     w.beginObjectField("release");
@@ -456,6 +475,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
+    if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     w.boolField("current", entry.is_current);
     w.boolField("previous_successful", entry.is_previous_successful);
     w.endObject();
@@ -677,6 +697,31 @@ test "writeHistoryJsonObject includes nested release markers" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":1,\"workers\":2,\"crons\":3,\"training_jobs\":4}") != null);
 }
 
+test "writeHistoryJsonObject preserves failure details" {
+    const entry = HistoryEntryView{
+        .id = "dep-9",
+        .app = "demo-app",
+        .service = "demo-app",
+        .trigger = "apply",
+        .status = "failed",
+        .manifest_hash = "sha256:999",
+        .created_at = 900,
+        .completed_targets = 0,
+        .failed_targets = 1,
+        .remaining_targets = 0,
+        .source_release_id = null,
+        .message = "one or more placements failed",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]",
+    };
+
+    var w = json_out.JsonWriter{};
+    writeHistoryJsonObject(&w, entry);
+    const parsed = parseHistoryObject(w.getWritten());
+
+    try std.testing.expect(parsed.failure_details_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.failure_details_json.?, "\"reason\":\"placement_failed\"") != null);
+}
+
 test "historyEntryFromDeployment preserves partially failed local release state" {
     const dep = store.DeploymentRecord{
         .id = "dep-3",
@@ -709,6 +754,17 @@ test "historyEntryFromDeployment preserves partially failed local release state"
     try std.testing.expectEqual(local.remaining_targets, remote.remaining_targets);
     try std.testing.expect(local.source_release_id == null);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
+}
+
+test "formatHistoryMessage appends failure detail summary" {
+    var buf: [256]u8 = undefined;
+    const text = formatHistoryMessage(
+        &buf,
+        "one or more placements failed",
+        "[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]",
+    );
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "db: placement_failed") != null);
 }
 
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {

@@ -23,6 +23,7 @@ pub const ApplyContext = struct {
 pub const ApplyOutcome = struct {
     status: update_common.DeploymentStatus,
     message: ?[]const u8 = null,
+    failure_details_json: ?[]const u8 = null,
     placed: usize = 0,
     failed: usize = 0,
     completed_targets: usize = 0,
@@ -44,11 +45,17 @@ pub const ApplyResult = struct {
             .completed_targets = self.outcome.completed_targets,
             .failed_targets = self.outcome.failed_targets,
             .message = self.outcome.message,
+            .failure_details_json = self.outcome.failure_details_json,
             .manifest_hash = "",
             .created_at = 0,
             .trigger = context.trigger,
             .source_release_id = context.source_release_id,
         };
+    }
+
+    pub fn deinit(self: ApplyResult, alloc: std.mem.Allocator) void {
+        if (self.release_id) |id| alloc.free(id);
+        if (self.outcome.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
     }
 };
 
@@ -62,6 +69,7 @@ pub const ApplyReport = struct {
     completed_targets: usize,
     failed_targets: usize,
     message: ?[]const u8 = null,
+    failure_details_json: ?[]const u8 = null,
     manifest_hash: []const u8 = "",
     created_at: i64 = 0,
     trigger: ApplyTrigger = .apply,
@@ -69,6 +77,7 @@ pub const ApplyReport = struct {
 
     pub fn deinit(self: ApplyReport, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
+        if (self.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
     }
 
     pub fn context(self: ApplyReport) ApplyContext {
@@ -120,6 +129,7 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .completed_targets = dep.completed_targets,
         .failed_targets = dep.failed_targets,
         .message = dep.message,
+        .failure_details_json = dep.failure_details_json,
         .manifest_hash = dep.manifest_hash,
         .created_at = dep.created_at,
         .trigger = context.trigger,
@@ -215,9 +225,12 @@ fn markReleaseIfPresent(
     message: ?[]const u8,
     completed_targets: usize,
     failed_targets: usize,
+    failure_details_json: ?[]const u8,
 ) !void {
     if (release_id) |id| {
-        if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgress")) {
+        if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgressDetails")) {
+            try tracker.markProgressDetails(id, status, message, completed_targets, failed_targets, failure_details_json);
+        } else if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgress")) {
             try tracker.markProgress(id, status, message, completed_targets, failed_targets);
         } else {
             try tracker.mark(id, status, message);
@@ -269,7 +282,7 @@ fn makeProgressRecorder(
             failed_targets: usize,
         ) anyerror!void {
             const typed: TrackerPtr = @ptrCast(@alignCast(ctx));
-            try markReleaseIfPresent(typed, id, status, message, completed_targets, failed_targets);
+            try markReleaseIfPresent(typed, id, status, message, completed_targets, failed_targets, null);
         }
     };
 
@@ -301,7 +314,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
         );
     }
 
-    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0);
+    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0, null);
 
     const outcome = backend.apply() catch |err| {
         try markReleaseIfPresent(
@@ -311,6 +324,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
             backend.failureMessage(err),
             completed_targets,
             failed_targets,
+            null,
         );
         return err;
     };
@@ -322,6 +336,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
         outcome.message,
         outcome.completed_targets,
         outcome.failed_targets,
+        outcome.failure_details_json,
     );
 
     return .{

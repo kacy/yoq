@@ -181,7 +181,7 @@ pub fn parseRolloutPolicy(
             return common.LoadError.InvalidRolloutConfig;
         }
     else
-        60;
+        0;
 
     const failure_action_raw = rollout_table.getString("failure_action") orelse "rollback";
     const failure_action: spec.RolloutFailureAction = if (std.mem.eql(u8, failure_action_raw, "rollback"))

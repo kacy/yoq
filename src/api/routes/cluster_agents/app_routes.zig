@@ -219,6 +219,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
         try writer.print(",\"is_current\":{},\"is_previous_successful\":{}", .{ is_current, is_previous_successful });
         try writer.writeAll(",\"release\":{");
         try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
@@ -240,6 +242,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
         try writer.writeByte('}');
         try writer.print(",\"workloads\":{{\"services\":{d},\"workers\":{d},\"crons\":{d},\"training_jobs\":{d}}}", .{
             summary.service_count,
@@ -314,6 +318,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_message", if (previous_successful) |prev| prev.message else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
     try writer.writeAll(",\"current_release\":{");
     try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
     try writer.writeByte(',');
@@ -332,6 +338,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
     try writer.writeByte('}');
     try writer.writeAll(",\"previous_successful_release\":");
     if (previous_successful) |prev| {
@@ -353,6 +361,8 @@ fn formatAppStatusResponse(
         try json_helpers.writeNullableJsonStringField(writer, "source_release_id", prev.source_release_id);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", prev.message);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "failure_details", prev.failure_details_json);
         try writer.writeByte('}');
     } else {
         try writer.writeAll("null");
@@ -402,6 +412,7 @@ const RouteFlowHarness = struct {
             .data_dir = tmp_path,
         }) catch return error.SkipZigTest;
         errdefer node.deinit();
+        node.fixPointers();
 
         node.raft.role = .leader;
         node.leader_id = node.config.id;
@@ -864,6 +875,52 @@ test "app status and history surface failed apply metadata from persisted rows" 
     try std.testing.expect(std.mem.indexOf(u8, status_json, "\"message\":\"scheduler error during apply\"") != null);
 }
 
+test "app status and history preserve exact cluster failure reasons from persisted rows" {
+    const alloc = std.testing.allocator;
+
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try store.saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .status = "failed",
+        .message = "one or more rollout targets failed readiness checks",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"image_pull_failed\"}]",
+        .created_at = 100,
+    });
+
+    var deployments = try store.listDeploymentsByAppInDb(&db, alloc, "demo-app");
+    defer {
+        for (deployments.items) |dep| dep.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    const history_json = try formatAppHistoryResponse(alloc, deployments.items);
+    defer alloc.free(history_json);
+
+    try std.testing.expect(std.mem.indexOf(u8, history_json, "\"reason\":\"image_pull_failed\"") != null);
+
+    const latest = try store.getLatestDeploymentByAppInDb(&db, alloc, "demo-app");
+    defer latest.deinit(alloc);
+
+    const status_json = try formatAppStatusResponse(
+        alloc,
+        apply_release.reportFromDeployment(latest),
+        null,
+        app_snapshot.summarize(latest.config_snapshot),
+        .{},
+    );
+    defer alloc.free(status_json);
+
+    try std.testing.expect(std.mem.indexOf(u8, status_json, "\"reason\":\"image_pull_failed\"") != null);
+}
+
 test "app apply then rollback routes preserve release transition metadata" {
     const alloc = std.testing.allocator;
     const apply_body =
@@ -1210,6 +1267,10 @@ test "readiness-gated apply keeps prior assignments when cutover fails" {
     try expectResponseOk(apply_response);
     try expectJsonContains(apply_response.body, "\"status\":\"failed\"");
     try expectJsonContains(apply_response.body, "\"message\":\"one or more rollout targets failed readiness checks\"");
+    try expectJsonContains(
+        apply_response.body,
+        "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"assignment_missing\"}]",
+    );
 
     const after = try agent_registry.countAssignmentsForWorkload(harness.node.stateMachineDb(), "demo-app", "service", "web");
     try std.testing.expectEqual(@as(usize, 1), after);
@@ -1229,6 +1290,22 @@ test "readiness-gated apply keeps prior assignments when cutover fails" {
 
     try std.testing.expectEqualStrings("old-web", row.id.data);
     try std.testing.expectEqualStrings("running", row.status.data);
+}
+
+test "app apply rejects invalid rollout config" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"],"rollout":{"strategy":"canary"}}]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const response = harness.appApply(apply_body);
+    defer freeResponse(alloc, response);
+
+    try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
+    try expectJsonContains(response.body, "\"error\":\"invalid rollout config\"");
 }
 
 test "route rejects app rollback without cluster" {

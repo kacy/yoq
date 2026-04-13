@@ -96,6 +96,14 @@ pub const JsonWriter = struct {
         self.putSlice("\":null");
     }
 
+    pub fn rawField(self: *JsonWriter, key: []const u8, raw_json: []const u8) void {
+        self.maybeComma();
+        self.put('"');
+        self.putSlice(key);
+        self.putSlice("\":");
+        self.putSlice(raw_json);
+    }
+
     pub fn floatField(self: *JsonWriter, key: []const u8, value: f64) void {
         self.maybeComma();
         self.put('"');

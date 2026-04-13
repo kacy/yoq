@@ -55,13 +55,14 @@ const ClusterReleaseTracker = struct {
             0,
             .pending,
             null,
+            null,
         ) catch return ClusterApplyError.InternalError;
 
         return id;
     }
 
     pub fn mark(self: *const ClusterReleaseTracker, id: []const u8, status: @import("../../../manifest/update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
-        try self.markProgress(id, status, message, 0, 0);
+        try self.markProgressDetails(id, status, message, 0, 0, null);
     }
 
     pub fn markProgress(
@@ -72,6 +73,18 @@ const ClusterReleaseTracker = struct {
         completed_targets: usize,
         failed_targets: usize,
     ) !void {
+        try self.markProgressDetails(id, status, message, completed_targets, failed_targets, null);
+    }
+
+    pub fn markProgressDetails(
+        self: *const ClusterReleaseTracker,
+        id: []const u8,
+        status: @import("../../../manifest/update/common.zig").DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+        failure_details_json: ?[]const u8,
+    ) !void {
         const resolved_message = apply_release.materializeMessage(self.alloc, self.context, status, message) catch return ClusterApplyError.InternalError;
         defer if (resolved_message) |msg| self.alloc.free(msg);
         deployment_store.updateDeploymentProgressInDb(
@@ -81,6 +94,7 @@ const ClusterReleaseTracker = struct {
             resolved_message,
             completed_targets,
             failed_targets,
+            failure_details_json,
         ) catch return ClusterApplyError.InternalError;
     }
 
@@ -102,6 +116,8 @@ pub const ClusterApplyBackend = struct {
 
     pub fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
         const strategy = effectiveClusterRollout(self.requests);
+        var failure_details = FailureDetailBuilder.init(self.alloc);
+        defer failure_details.deinit();
         var rollback_state_storage: RollbackState = undefined;
         var rollback_state: ?*RollbackState = null;
         if (strategy.failure_action == .rollback) {
@@ -122,7 +138,7 @@ pub const ClusterApplyBackend = struct {
             const batch = self.requests[batch_start..batch_end];
             const batch_failed_before = failed_targets;
 
-            try self.applyBatch(batch, strategy, rollback_state, &placed, &failed, &completed_targets, &failed_targets);
+            try self.applyBatch(batch, strategy, rollback_state, &failure_details, &placed, &failed, &completed_targets, &failed_targets);
 
             if (failed_targets > batch_failed_before) break;
             if (strategy.delay_between_batches > 0 and batch_end < self.requests.len) {
@@ -144,6 +160,7 @@ pub const ClusterApplyBackend = struct {
                 "all placements succeeded"
             else
                 "one or more placements failed",
+            .failure_details_json = failure_details.toOwnedJson() catch return ClusterApplyError.InternalError,
             .placed = placed,
             .failed = failed,
             .completed_targets = completed_targets,
@@ -156,6 +173,7 @@ pub const ClusterApplyBackend = struct {
         batch: []const apply_request.ServiceRequest,
         strategy: rollout_spec.RolloutPolicy,
         rollback_state: ?*RollbackState,
+        failure_details: *FailureDetailBuilder,
         placed: *usize,
         failed: *usize,
         completed_targets: *usize,
@@ -170,9 +188,9 @@ pub const ClusterApplyBackend = struct {
 
         for (batch) |req| {
             if (req.request.gang_world_size > 0) {
-                try self.applyGangRequest(req, failed, completed_targets, failed_targets, &scheduled_targets);
+                try self.applyGangRequest(req, failure_details, failed, completed_targets, failed_targets, &scheduled_targets);
             } else {
-                try self.applySingleRequest(req, failed, completed_targets, failed_targets, &scheduled_targets);
+                try self.applySingleRequest(req, failure_details, failed, completed_targets, failed_targets, &scheduled_targets);
             }
         }
 
@@ -194,6 +212,7 @@ pub const ClusterApplyBackend = struct {
                 scheduled_targets.items,
                 strategy.failure_action,
                 rollback_state,
+                failure_details,
                 strategy.health_check_timeout,
                 placed,
                 failed,
@@ -215,6 +234,7 @@ pub const ClusterApplyBackend = struct {
     fn applyGangRequest(
         self: *const ClusterApplyBackend,
         req: apply_request.ServiceRequest,
+        failure_details: *FailureDetailBuilder,
         failed: *usize,
         completed_targets: *usize,
         failed_targets: *usize,
@@ -223,6 +243,7 @@ pub const ClusterApplyBackend = struct {
         const gang_placements = scheduler.scheduleGang(self.alloc, req.request, self.agents) catch {
             failed.* += 1;
             failed_targets.* += 1;
+            failure_details.appendRequest(req, "placement_failed") catch return ClusterApplyError.InternalError;
             self.reportProgress(completed_targets.*, failed_targets.*);
             return;
         };
@@ -265,12 +286,14 @@ pub const ClusterApplyBackend = struct {
 
         failed.* += req.request.gang_world_size;
         failed_targets.* += 1;
+        failure_details.appendRequest(req, "placement_failed") catch return ClusterApplyError.InternalError;
         self.reportProgress(completed_targets.*, failed_targets.*);
     }
 
     fn applySingleRequest(
         self: *const ClusterApplyBackend,
         req: apply_request.ServiceRequest,
+        failure_details: *FailureDetailBuilder,
         failed: *usize,
         completed_targets: *usize,
         failed_targets: *usize,
@@ -284,6 +307,7 @@ pub const ClusterApplyBackend = struct {
         if (placements.len == 0 or placements[0] == null) {
             failed.* += 1;
             failed_targets.* += 1;
+            failure_details.appendRequest(req, "placement_failed") catch return ClusterApplyError.InternalError;
             self.reportProgress(completed_targets.*, failed_targets.*);
             return;
         }
@@ -335,6 +359,7 @@ pub const ClusterApplyBackend = struct {
         targets: []ScheduledTarget,
         failure_action: rollout_spec.RolloutFailureAction,
         rollback_state: ?*RollbackState,
+        failure_details: *FailureDetailBuilder,
         timeout_secs: u32,
         placed: *usize,
         failed: *usize,
@@ -353,7 +378,12 @@ pub const ClusterApplyBackend = struct {
         };
 
         if (failure_action == .rollback and batch_has_failure) {
-            for (targets) |target| try discardTarget(self, target);
+            for (targets, states) |target, state| {
+                if (state != .ready) {
+                    failure_details.appendTarget(target, targetFailureReason(state)) catch return ClusterApplyError.InternalError;
+                }
+                try discardTarget(self, target);
+            }
             failed_targets.* += targets.len;
             if (rollback_state) |state| {
                 try state.rollbackActivatedTargets(self.node);
@@ -374,7 +404,20 @@ pub const ClusterApplyBackend = struct {
                     completed_targets.* += 1;
                     self.reportProgress(completed_targets.*, failed_targets.*);
                 },
-                .failed, .pending => {
+                .pending,
+                .missing,
+                .image_pull_failed,
+                .rootfs_assemble_failed,
+                .container_id_failed,
+                .container_record_failed,
+                .start_failed,
+                .readiness_timeout,
+                .readiness_failed,
+                .readiness_invalid,
+                .process_failed,
+                .failed,
+                => {
+                    failure_details.appendTarget(target, targetFailureReason(state)) catch return ClusterApplyError.InternalError;
                     switch (failure_action) {
                         .rollback, .pause => try discardTarget(self, target),
                     }
@@ -384,6 +427,64 @@ pub const ClusterApplyBackend = struct {
             }
         }
         _ = failed;
+    }
+};
+
+const FailureDetail = struct {
+    workload_kind: []const u8,
+    workload_name: []const u8,
+    reason: []const u8,
+};
+
+const FailureDetailBuilder = struct {
+    alloc: std.mem.Allocator,
+    items: std.ArrayListUnmanaged(FailureDetail) = .empty,
+
+    fn init(alloc: std.mem.Allocator) FailureDetailBuilder {
+        return .{ .alloc = alloc };
+    }
+
+    fn deinit(self: *FailureDetailBuilder) void {
+        self.items.deinit(self.alloc);
+    }
+
+    fn appendRequest(self: *FailureDetailBuilder, req: apply_request.ServiceRequest, reason: []const u8) !void {
+        try self.append(req.request.workload_kind orelse "service", req.request.workload_name orelse req.request.image, reason);
+    }
+
+    fn appendTarget(self: *FailureDetailBuilder, target: ScheduledTarget, reason: []const u8) !void {
+        try self.append(target.request.workload_kind orelse "service", target.request.workload_name orelse target.request.image, reason);
+    }
+
+    fn append(self: *FailureDetailBuilder, workload_kind: []const u8, workload_name: []const u8, reason: []const u8) !void {
+        try self.items.append(self.alloc, .{
+            .workload_kind = workload_kind,
+            .workload_name = workload_name,
+            .reason = reason,
+        });
+    }
+
+    fn toOwnedJson(self: *FailureDetailBuilder) !?[]u8 {
+        if (self.items.items.len == 0) return null;
+
+        var json_buf: std.ArrayList(u8) = .empty;
+        errdefer json_buf.deinit(self.alloc);
+        const writer = json_buf.writer(self.alloc);
+
+        try writer.writeByte('[');
+        for (self.items.items, 0..) |detail, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writer.writeByte('{');
+            try json_helpers.writeJsonStringField(writer, "workload_kind", detail.workload_kind);
+            try writer.writeByte(',');
+            try json_helpers.writeJsonStringField(writer, "workload_name", detail.workload_name);
+            try writer.writeByte(',');
+            try json_helpers.writeJsonStringField(writer, "reason", detail.reason);
+            try writer.writeByte('}');
+        }
+        try writer.writeByte(']');
+        const owned = try json_buf.toOwnedSlice(self.alloc);
+        return owned;
     }
 };
 
@@ -581,8 +682,36 @@ fn copyAssignmentIds(alloc: std.mem.Allocator, ids: []const []const u8) ![]const
 const TargetReadiness = enum {
     pending,
     ready,
+    missing,
+    image_pull_failed,
+    rootfs_assemble_failed,
+    container_id_failed,
+    container_record_failed,
+    start_failed,
+    readiness_timeout,
+    readiness_failed,
+    readiness_invalid,
+    process_failed,
     failed,
 };
+
+fn targetFailureReason(state: TargetReadiness) []const u8 {
+    return switch (state) {
+        .pending => "readiness_timeout",
+        .missing => "assignment_missing",
+        .image_pull_failed => "image_pull_failed",
+        .rootfs_assemble_failed => "rootfs_assemble_failed",
+        .container_id_failed => "container_id_failed",
+        .container_record_failed => "container_record_failed",
+        .start_failed => "start_failed",
+        .readiness_timeout => "readiness_timeout",
+        .readiness_failed => "readiness_failed",
+        .readiness_invalid => "readiness_invalid",
+        .process_failed => "process_failed",
+        .failed => "assignment_failed",
+        .ready => unreachable,
+    };
+}
 
 fn resolveTargetReadinessStates(
     alloc: std.mem.Allocator,
@@ -613,41 +742,62 @@ fn resolveTargetReadinessStates(
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 
-    for (states) |*state| {
-        if (state.* == .pending) state.* = .failed;
-    }
     return states;
 }
 
 fn queryTargetReadiness(alloc: std.mem.Allocator, db: *sqlite.Db, assignment_ids: []const []const u8) !TargetReadiness {
-    if (assignment_ids.len == 0) return .failed;
+    if (assignment_ids.len == 0) return .missing;
 
     var all_running = true;
     for (assignment_ids) |assignment_id| {
-        const status = try loadAssignmentStatus(alloc, db, assignment_id) orelse {
-            all_running = false;
-            continue;
+        const row = try loadAssignmentState(alloc, db, assignment_id) orelse {
+            return .missing;
         };
-        defer alloc.free(status);
+        defer {
+            alloc.free(row.status);
+            if (row.status_reason) |status_reason| alloc.free(status_reason);
+        }
 
-        if (std.mem.eql(u8, status, "running")) continue;
-        if (std.mem.eql(u8, status, "failed") or std.mem.eql(u8, status, "stopped")) return .failed;
+        if (std.mem.eql(u8, row.status, "running")) continue;
+        if (std.mem.eql(u8, row.status, "failed") or std.mem.eql(u8, row.status, "stopped")) {
+            if (row.status_reason) |status_reason| {
+                if (std.mem.eql(u8, status_reason, "readiness_timeout")) return .readiness_timeout;
+                if (std.mem.eql(u8, status_reason, "readiness_failed")) return .readiness_failed;
+                if (std.mem.eql(u8, status_reason, "readiness_invalid")) return .readiness_invalid;
+                if (std.mem.eql(u8, status_reason, "process_failed")) return .process_failed;
+                if (std.mem.eql(u8, status_reason, "image_pull_failed")) return .image_pull_failed;
+                if (std.mem.eql(u8, status_reason, "rootfs_assemble_failed")) return .rootfs_assemble_failed;
+                if (std.mem.eql(u8, status_reason, "container_id_failed")) return .container_id_failed;
+                if (std.mem.eql(u8, status_reason, "container_record_failed")) return .container_record_failed;
+                if (std.mem.eql(u8, status_reason, "start_failed")) return .start_failed;
+            }
+            return .failed;
+        }
         all_running = false;
     }
 
     return if (all_running) .ready else .pending;
 }
 
-fn loadAssignmentStatus(alloc: std.mem.Allocator, db: *sqlite.Db, assignment_id: []const u8) !?[]const u8 {
-    const Row = struct { status: sqlite.Text };
+fn loadAssignmentState(alloc: std.mem.Allocator, db: *sqlite.Db, assignment_id: []const u8) !?struct {
+    status: []const u8,
+    status_reason: ?[]const u8,
+} {
+    const Row = struct {
+        status: sqlite.Text,
+        status_reason: ?sqlite.Text,
+    };
     const row = (db.oneAlloc(
         Row,
         alloc,
-        "SELECT status FROM assignments WHERE id = ?;",
+        "SELECT status, status_reason FROM assignments WHERE id = ?;",
         .{},
         .{assignment_id},
     ) catch return error.QueryFailed) orelse return null;
-    return row.status.data;
+    return .{
+        .status = row.status.data,
+        .status_reason = if (row.status_reason) |status_reason| status_reason.data else null,
+    };
 }
 
 fn effectiveClusterRollout(requests: []const apply_request.ServiceRequest) rollout_spec.RolloutPolicy {
@@ -706,6 +856,7 @@ fn handleApply(
         apply_request.ParseError.NoServices => common.badRequest("no services to deploy"),
         apply_request.ParseError.OutOfMemory => common.internalError(),
         apply_request.ParseError.InvalidRequest => common.badRequest("invalid request body"),
+        apply_request.ParseError.InvalidRolloutConfig => common.badRequest("invalid rollout config"),
     };
     defer parsed.deinit(alloc);
 
@@ -841,6 +992,8 @@ fn formatAppApplyResponse(
 
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "message", resolved_message);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
     try writer.writeByte('}');
 
     return json_buf.toOwnedSlice(alloc);
@@ -868,6 +1021,7 @@ const RolloutNodeHarness = struct {
             .data_dir = tmp_path,
         }) catch return error.SkipZigTest;
         errdefer node.deinit();
+        node.fixPointers();
 
         node.raft.role = .leader;
         node.leader_id = node.config.id;
@@ -955,6 +1109,7 @@ test "formatAppApplyResponse includes partially failed status" {
         .completed_targets = 1,
         .failed_targets = 1,
         .message = "one or more placements failed",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]",
     }, .{ .service_count = 2 });
     defer alloc.free(json);
 
@@ -962,6 +1117,7 @@ test "formatAppApplyResponse includes partially failed status" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"one or more placements failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]") != null);
 }
 
 test "formatLegacyApplyResponse preserves compact deploy shape" {
@@ -1090,7 +1246,69 @@ test "queryTargetReadiness returns failed when any assignment is terminal" {
     );
 }
 
-test "resolveTargetReadinessStates marks pending targets failed when timeout elapses" {
+test "queryTargetReadiness uses explicit status reason from agent" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../../state/schema.zig").init(&db);
+
+    db.exec(
+        "INSERT INTO assignments (id, agent_id, image, status, status_reason, created_at) VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "a1", "agent1", "nginx:1", "failed", "readiness_failed", @as(i64, 1) },
+    ) catch unreachable;
+
+    try std.testing.expectEqual(
+        TargetReadiness.readiness_failed,
+        try queryTargetReadiness(std.testing.allocator, &db, &.{"a1"}),
+    );
+}
+
+test "queryTargetReadiness preserves exact startup failure reason from agent" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../../state/schema.zig").init(&db);
+
+    db.exec(
+        "INSERT INTO assignments (id, agent_id, image, status, status_reason, created_at) VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "a1", "agent1", "nginx:1", "failed", "image_pull_failed", @as(i64, 1) },
+    ) catch unreachable;
+
+    try std.testing.expectEqual(
+        TargetReadiness.image_pull_failed,
+        try queryTargetReadiness(std.testing.allocator, &db, &.{"a1"}),
+    );
+}
+
+test "queryTargetReadiness preserves process failure reason from agent" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../../state/schema.zig").init(&db);
+
+    db.exec(
+        "INSERT INTO assignments (id, agent_id, image, status, status_reason, created_at) VALUES (?, ?, ?, ?, ?, ?);",
+        .{},
+        .{ "a1", "agent1", "nginx:1", "failed", "process_failed", @as(i64, 1) },
+    ) catch unreachable;
+
+    try std.testing.expectEqual(
+        TargetReadiness.process_failed,
+        try queryTargetReadiness(std.testing.allocator, &db, &.{"a1"}),
+    );
+}
+
+test "queryTargetReadiness returns missing when assignment row disappears" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../../state/schema.zig").init(&db);
+
+    try std.testing.expectEqual(
+        TargetReadiness.missing,
+        try queryTargetReadiness(std.testing.allocator, &db, &.{"missing"}),
+    );
+}
+
+test "resolveTargetReadinessStates leaves pending targets pending when timeout elapses" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
@@ -1119,7 +1337,7 @@ test "resolveTargetReadinessStates marks pending targets failed when timeout ela
     defer std.testing.allocator.free(states);
 
     try std.testing.expectEqual(@as(usize, 1), states.len);
-    try std.testing.expectEqual(TargetReadiness.failed, states[0]);
+    try std.testing.expectEqual(TargetReadiness.pending, states[0]);
 }
 
 test "rollback state restores prior assignments after cutover" {

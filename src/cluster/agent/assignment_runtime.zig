@@ -29,6 +29,13 @@ const AssignmentMeta = struct {
     health_check_json: ?[]const u8 = null,
 };
 
+const ServiceReadinessResult = enum {
+    healthy,
+    unhealthy,
+    timeout,
+    invalid,
+};
+
 pub fn reconcile(self: anytype) void {
     var resp = fetchAssignments(self) orelse {
         reconcileFromCache(self);
@@ -240,7 +247,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     var pull_result = image_registry.pull(self.alloc, ref) catch {
         log.warn("failed to pull image {s} for assignment {s}", .{ image, assignment_id });
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed");
+        reportStatus(self, assignment_id, "failed", "image_pull_failed");
         return;
     };
     defer pull_result.deinit();
@@ -248,7 +255,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     const layer_paths = image_layer.assembleRootfs(self.alloc, pull_result.layer_digests) catch {
         log.warn("failed to assemble rootfs for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed");
+        reportStatus(self, assignment_id, "failed", "rootfs_assemble_failed");
         return;
     };
     defer {
@@ -262,7 +269,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     container.generateId(&id_buf) catch {
         log.warn("failed to generate container ID for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed");
+        reportStatus(self, assignment_id, "failed", "container_id_failed");
         return;
     };
     const container_id = id_buf[0..];
@@ -283,7 +290,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     }) catch {
         log.warn("failed to save container record for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed");
+        reportStatus(self, assignment_id, "failed", "container_record_failed");
         return;
     };
 
@@ -337,22 +344,31 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     c.start() catch {
         log.warn("container {s} failed to start for assignment {s}", .{ container_id, assignment_id });
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed");
+        reportStatus(self, assignment_id, "failed", "start_failed");
         cleanup(container_id);
         return;
     };
 
-    if (!waitForServiceReadiness(self.alloc, container_id, meta)) {
-        log.warn("service assignment {s} failed readiness gate", .{assignment_id});
-        _ = c.stop() catch {};
-        _ = c.wait() catch 255;
-        setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed");
-        cleanup(container_id);
-        return;
+    const readiness_result = waitForServiceReadiness(self.alloc, container_id, meta);
+    switch (readiness_result) {
+        .healthy => {},
+        .unhealthy, .timeout, .invalid => {
+            log.warn("service assignment {s} failed readiness gate", .{assignment_id});
+            _ = c.stop() catch {};
+            _ = c.wait() catch 255;
+            setContainerState(self, assignment_id, .failed);
+            reportStatus(self, assignment_id, "failed", switch (readiness_result) {
+                .healthy => unreachable,
+                .unhealthy => "readiness_failed",
+                .timeout => "readiness_timeout",
+                .invalid => "readiness_invalid",
+            });
+            cleanup(container_id);
+            return;
+        },
     }
 
-    reportStatus(self, assignment_id, "running");
+    reportStatus(self, assignment_id, "running", null);
     setContainerState(self, assignment_id, .running);
 
     const exit_code = c.wait() catch 255;
@@ -363,32 +379,32 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     }
     if (exit_code == 0) {
         setContainerState(self, assignment_id, .stopped);
-        reportStatus(self, assignment_id, "stopped");
+        reportStatus(self, assignment_id, "stopped", null);
     } else {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed");
+        reportStatus(self, assignment_id, "failed", "process_failed");
     }
     cleanup(container_id);
 }
 
-fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, meta: AssignmentMeta) bool {
-    const workload_kind = meta.workload_kind orelse return true;
-    const service_name = meta.workload_name orelse return true;
-    if (!std.mem.eql(u8, workload_kind, "service")) return true;
-    const health_check_json = meta.health_check_json orelse return true;
+fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, meta: AssignmentMeta) ServiceReadinessResult {
+    const workload_kind = meta.workload_kind orelse return .healthy;
+    const service_name = meta.workload_name orelse return .healthy;
+    if (!std.mem.eql(u8, workload_kind, "service")) return .healthy;
+    const health_check_json = meta.health_check_json orelse return .healthy;
 
-    const record = store.load(alloc, container_id) catch return false;
+    const record = store.load(alloc, container_id) catch return .invalid;
     defer record.deinit(alloc);
-    const ip_address = record.ip_address orelse return false;
-    const container_ip = @import("../../network/ip.zig").parseIp(ip_address) orelse return false;
-    const health_check = parseHealthCheckJson(alloc, health_check_json) orelse return false;
+    const ip_address = record.ip_address orelse return .invalid;
+    const container_ip = @import("../../network/ip.zig").parseIp(ip_address) orelse return .invalid;
+    const health_check = parseHealthCheckJson(alloc, health_check_json) orelse return .invalid;
     defer health_check.deinit(alloc);
 
     var id_buf: [12]u8 = undefined;
-    if (container_id.len != id_buf.len) return false;
+    if (container_id.len != id_buf.len) return .invalid;
     @memcpy(&id_buf, container_id[0..id_buf.len]);
 
-    manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return false;
+    manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return .invalid;
     manifest_health.startChecker();
 
     const deadline_ns = std.time.nanoTimestamp() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
@@ -398,12 +414,12 @@ fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, m
     }
     while (std.time.nanoTimestamp() < deadline_ns) {
         switch (manifest_health.getStatus(service_name) orelse .starting) {
-            .healthy => return true,
-            .unhealthy => return false,
+            .healthy => return .healthy,
+            .unhealthy => return .unhealthy,
             .starting => std.Thread.sleep(100 * std.time.ns_per_ms),
         }
     }
-    return false;
+    return .timeout;
 }
 
 fn estimateHealthStartupWindowSeconds(health_check: manifest_spec.HealthCheck) u32 {
@@ -505,12 +521,15 @@ fn buildAssignmentHostname(buf: []u8, meta: AssignmentMeta, gang_info: ?GangInfo
     return "agent";
 }
 
-fn reportStatus(self: anytype, assignment_id: []const u8, status: []const u8) void {
+fn reportStatus(self: anytype, assignment_id: []const u8, status: []const u8, reason: ?[]const u8) void {
     var path_buf: [128]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/assignments/{s}/status", .{ self.id, assignment_id }) catch return;
 
-    var body_buf: [64]u8 = undefined;
-    const body = std.fmt.bufPrint(&body_buf, "{{\"status\":\"{s}\"}}", .{status}) catch return;
+    var body_buf: [160]u8 = undefined;
+    const body = if (reason) |status_reason|
+        std.fmt.bufPrint(&body_buf, "{{\"status\":\"{s}\",\"reason\":\"{s}\"}}", .{ status, status_reason }) catch return
+    else
+        std.fmt.bufPrint(&body_buf, "{{\"status\":\"{s}\"}}", .{status}) catch return;
 
     var resp = http_client.postWithAuth(self.alloc, self.server_addr, self.server_port, path, body, self.token) catch {
         log.warn("failed to report status '{s}' for assignment {s}", .{ status, assignment_id });

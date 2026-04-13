@@ -229,19 +229,21 @@ test "drainSql generates valid SQL" {
 
 test "updateAssignmentStatusSql generates valid SQL" {
     var buf: [256]u8 = undefined;
-    const sql = try updateAssignmentStatusSql(&buf, "assign123456", "running");
+    const sql = try updateAssignmentStatusSql(&buf, "assign123456", "running", null);
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "UPDATE assignments SET status") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "running") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "assign123456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "status_reason = NULL") != null);
 }
 
 test "updateAssignmentStatusSql escapes values" {
     var buf: [512]u8 = undefined;
-    const sql = try updateAssignmentStatusSql(&buf, "id'; DROP TABLE assignments; --", "running");
+    const sql = try updateAssignmentStatusSql(&buf, "id'; DROP TABLE assignments; --", "running", "readiness_timeout");
 
     // single quote should be doubled
     try std.testing.expect(std.mem.indexOf(u8, sql, "id''; DROP TABLE assignments; --") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "readiness_timeout") != null);
 }
 
 test "validateToken correct" {
@@ -362,6 +364,7 @@ test "orphanAssignmentsSql only affects non-terminal assignments" {
         \\    image TEXT NOT NULL,
         \\    command TEXT NOT NULL DEFAULT '',
         \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    status_reason TEXT,
         \\    cpu_limit INTEGER NOT NULL DEFAULT 0,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 0,
         \\    gang_rank INTEGER,
@@ -427,6 +430,7 @@ test "getOrphanedAssignments returns only orphaned pending" {
         \\    image TEXT NOT NULL,
         \\    command TEXT NOT NULL DEFAULT '',
         \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    status_reason TEXT,
         \\    cpu_limit INTEGER NOT NULL DEFAULT 0,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 0,
         \\    gang_rank INTEGER,
