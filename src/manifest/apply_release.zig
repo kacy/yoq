@@ -96,6 +96,18 @@ pub const ApplyReport = struct {
         return self.service_count - accounted;
     }
 
+    pub fn rolloutState(self: ApplyReport) []const u8 {
+        const remaining = self.remainingTargets();
+        return switch (self.status) {
+            .pending => "pending",
+            .in_progress => if (self.completed_targets > 0 or self.failed_targets > 0) "rolling" else "starting",
+            .completed => "stable",
+            .partially_failed => if (remaining > 0) "blocked" else "degraded",
+            .failed => if (self.completed_targets > 0) "degraded" else "failed",
+            .rolled_back => "rolled_back",
+        };
+    }
+
     pub fn summaryText(self: ApplyReport, alloc: std.mem.Allocator) ![]u8 {
         const status_text = self.status.toString();
         const message = try self.resolvedMessage(alloc);
@@ -549,6 +561,7 @@ test "ApplyResult projects to shared apply report" {
     try std.testing.expect(report.message == null);
     try std.testing.expectEqual(ApplyTrigger.apply, report.trigger);
     try std.testing.expect(report.source_release_id == null);
+    try std.testing.expectEqualStrings("stable", report.rolloutState());
 }
 
 test "ApplyReport summaryText includes release status and counts" {

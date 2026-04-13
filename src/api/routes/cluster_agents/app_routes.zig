@@ -204,6 +204,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
         try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
+        try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
         try writer.print(",\"created_at\":{d}", .{report.created_at});
         try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
@@ -228,6 +230,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
         try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d},\"current\":{},\"previous_successful\":{}", .{
@@ -277,6 +281,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
     try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
+    try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
     try writer.print(",\"created_at\":{d},\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"active_training_jobs\":{d},\"paused_training_jobs\":{d},\"failed_training_jobs\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.created_at,
@@ -299,6 +305,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_trigger", if (previous_successful) |prev| prev.trigger.toString() else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_status", if (previous_successful) |prev| prev.status.toString() else null);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_rollout_state", if (previous_successful) |prev| prev.rolloutState() else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_manifest_hash", if (previous_successful) |prev| prev.manifest_hash else null);
     if (previous_successful) |prev| {
@@ -327,6 +335,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
     try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
+    try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
     try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.created_at,
@@ -349,6 +359,8 @@ fn formatAppStatusResponse(
         try json_helpers.writeJsonStringField(writer, "trigger", prev.trigger.toString());
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "status", prev.status.toString());
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "rollout_state", prev.rolloutState());
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", prev.manifest_hash);
         try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{

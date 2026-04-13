@@ -335,6 +335,7 @@ const HistoryEntryView = struct {
     service: []const u8,
     trigger: []const u8,
     status: []const u8,
+    rollout_state: []const u8 = "unknown",
     manifest_hash: []const u8,
     created_at: i64,
     service_count: usize = 0,
@@ -360,6 +361,7 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .service = dep.service_name,
         .trigger = report.trigger.toString(),
         .status = report.status.toString(),
+        .rollout_state = report.rolloutState(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
         .service_count = summary.service_count,
@@ -384,6 +386,7 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .service = json_helpers.extractJsonString(obj, "service") orelse "?",
         .trigger = json_helpers.extractJsonString(obj, "trigger") orelse "apply",
         .status = json_helpers.extractJsonString(obj, "status") orelse "?",
+        .rollout_state = json_helpers.extractJsonString(obj, "rollout_state") orelse "unknown",
         .manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?",
         .created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0,
         .service_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "service_count") orelse 0)),
@@ -402,8 +405,8 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
 }
 
 fn writeHistoryHeader() void {
-    write("{s:<8} {s:<14} {s:<14} {s:<10} {s:<14} {s:<16} {s}\n", .{
-        "MARK", "ID", "STATUS", "TRIGGER", "HASH", "TARGETS", "MESSAGE",
+    write("{s:<8} {s:<14} {s:<14} {s:<11} {s:<10} {s:<14} {s:<16} {s}\n", .{
+        "MARK", "ID", "STATUS", "ROLLOUT", "TRIGGER", "HASH", "TARGETS", "MESSAGE",
     });
 }
 
@@ -419,10 +422,11 @@ fn writeHistoryRow(entry: HistoryEntryView) void {
     var progress_buf: [64]u8 = undefined;
     const progress = formatProgressCounts(&progress_buf, entry.completed_targets, entry.failed_targets, entry.remaining_targets);
 
-    write("{s:<8} {s:<14} {s:<14} {s:<10} {s:<14} {s:<16} {s}\n", .{
+    write("{s:<8} {s:<14} {s:<14} {s:<11} {s:<10} {s:<14} {s:<16} {s}\n", .{
         mark,
         truncate(entry.id, 12),
         entry.status,
+        entry.rollout_state,
         entry.trigger,
         truncate(entry.manifest_hash, 12),
         progress,
@@ -450,6 +454,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.stringField("service", entry.service);
     w.stringField("trigger", entry.trigger);
     w.stringField("status", entry.status);
+    w.stringField("rollout_state", entry.rollout_state);
     w.stringField("manifest_hash", entry.manifest_hash);
     w.intField("created_at", entry.created_at);
     w.uintField("service_count", entry.service_count);
@@ -468,6 +473,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.stringField("id", entry.id);
     w.stringField("trigger", entry.trigger);
     w.stringField("status", entry.status);
+    w.stringField("rollout_state", entry.rollout_state);
     w.stringField("manifest_hash", entry.manifest_hash);
     w.intField("created_at", entry.created_at);
     w.uintField("completed_targets", entry.completed_targets);
@@ -613,6 +619,7 @@ test "historyEntryFromDeployment matches remote app history shape" {
     try std.testing.expectEqualStrings(local.service, remote.service);
     try std.testing.expectEqualStrings(local.trigger, remote.trigger);
     try std.testing.expectEqualStrings(local.status, remote.status);
+    try std.testing.expectEqualStrings(local.rollout_state, remote.rollout_state);
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
     try std.testing.expectEqual(local.service_count, remote.service_count);
@@ -652,6 +659,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(entry.service, parsed.service);
     try std.testing.expectEqualStrings(entry.trigger, parsed.trigger);
     try std.testing.expectEqualStrings(entry.status, parsed.status);
+    try std.testing.expectEqualStrings(entry.rollout_state, parsed.rollout_state);
     try std.testing.expectEqualStrings(entry.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(entry.created_at, parsed.created_at);
     try std.testing.expectEqual(entry.service_count, parsed.service_count);
@@ -693,6 +701,7 @@ test "writeHistoryJsonObject includes nested release markers" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"is_current\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release\":{\"id\":\"dep-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"unknown\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"current\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":1,\"workers\":2,\"crons\":3,\"training_jobs\":4}") != null);
 }
