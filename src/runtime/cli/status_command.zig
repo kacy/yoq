@@ -666,19 +666,26 @@ fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
 
 fn appMatchesFilters(snapshot: AppStatusSnapshot, filters: AppListFilters) bool {
     if (filters.status) |status_filter| {
-        if (!std.mem.eql(u8, snapshot.status, status_filter)) return false;
+        if (!std.mem.eql(u8, snapshot.status, status_filter) and !std.mem.eql(u8, snapshot.rollout_state, status_filter)) return false;
     }
-    if (filters.failed_only and !isFailedLikeRollout(snapshot.status)) return false;
-    if (filters.in_progress_only and !isInProgressRollout(snapshot.status)) return false;
+    if (filters.failed_only and !isFailedLikeRollout(snapshot.status, snapshot.rollout_state)) return false;
+    if (filters.in_progress_only and !isInProgressRollout(snapshot.status, snapshot.rollout_state)) return false;
     return true;
 }
 
-fn isFailedLikeRollout(status_text: []const u8) bool {
-    return std.mem.eql(u8, status_text, "failed") or std.mem.eql(u8, status_text, "partially_failed");
+fn isFailedLikeRollout(status_text: []const u8, rollout_state: []const u8) bool {
+    return std.mem.eql(u8, status_text, "failed") or
+        std.mem.eql(u8, status_text, "partially_failed") or
+        std.mem.eql(u8, rollout_state, "blocked") or
+        std.mem.eql(u8, rollout_state, "degraded");
 }
 
-fn isInProgressRollout(status_text: []const u8) bool {
-    return std.mem.eql(u8, status_text, "pending") or std.mem.eql(u8, status_text, "in_progress");
+fn isInProgressRollout(status_text: []const u8, rollout_state: []const u8) bool {
+    return std.mem.eql(u8, status_text, "pending") or
+        std.mem.eql(u8, status_text, "in_progress") or
+        std.mem.eql(u8, rollout_state, "pending") or
+        std.mem.eql(u8, rollout_state, "starting") or
+        std.mem.eql(u8, rollout_state, "rolling");
 }
 
 fn printStatusTable(snapshots: []const monitor.ServiceSnapshot, verbose: bool) void {
@@ -963,6 +970,7 @@ test "appMatchesFilters applies failed and in-progress filters" {
         .trigger = "apply",
         .release_id = "dep-1",
         .status = "partially_failed",
+        .rollout_state = "degraded",
         .manifest_hash = "sha256:111",
         .created_at = 100,
         .completed_targets = 1,
@@ -979,6 +987,7 @@ test "appMatchesFilters applies failed and in-progress filters" {
         .trigger = "apply",
         .release_id = "dep-2",
         .status = "in_progress",
+        .rollout_state = "rolling",
         .manifest_hash = "sha256:222",
         .created_at = 200,
         .completed_targets = 1,
@@ -993,7 +1002,9 @@ test "appMatchesFilters applies failed and in-progress filters" {
 
     try std.testing.expect(appMatchesFilters(failed_snapshot, .{ .failed_only = true }));
     try std.testing.expect(!appMatchesFilters(failed_snapshot, .{ .in_progress_only = true }));
+    try std.testing.expect(appMatchesFilters(failed_snapshot, .{ .status = "degraded" }));
     try std.testing.expect(appMatchesFilters(pending_snapshot, .{ .in_progress_only = true }));
+    try std.testing.expect(appMatchesFilters(pending_snapshot, .{ .status = "rolling" }));
     try std.testing.expect(!appMatchesFilters(pending_snapshot, .{ .status = "completed" }));
 }
 

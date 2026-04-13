@@ -973,6 +973,8 @@ fn formatAppApplyResponse(
     try json_helpers.writeJsonStringField(writer, "release_id", report.release_id orelse "");
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
     try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"placed\":{d},\"failed\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         summary.service_count,
         summary.worker_count,
@@ -1064,6 +1066,7 @@ test "formatAppApplyResponse includes app release metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"apply\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"abc123def456\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"stable\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"service_count\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"worker_count\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":2") != null);
@@ -1094,6 +1097,7 @@ test "formatAppApplyResponse includes rollback trigger metadata" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"trigger\":\"rollback\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":\"dep-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"stable\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"rollback to dep-1 completed: all placements succeeded\"") != null);
 }
 
@@ -1114,6 +1118,7 @@ test "formatAppApplyResponse includes partially failed status" {
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"partially_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"degraded\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"placed\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"one or more placements failed\"") != null);

@@ -107,6 +107,7 @@ const RollbackSummary = struct {
     release_id: []const u8,
     trigger: []const u8,
     status: []const u8,
+    rollout_state: []const u8 = "unknown",
     completed_targets: usize,
     failed_targets: usize,
     remaining_targets: usize,
@@ -161,6 +162,7 @@ fn rollbackLocalApp(
         .release_id = apply_report.release_id orelse "?",
         .trigger = apply_report.trigger.toString(),
         .status = apply_report.status.toString(),
+        .rollout_state = apply_report.rolloutState(),
         .completed_targets = apply_report.completed_targets,
         .failed_targets = apply_report.failed_targets,
         .remaining_targets = apply_report.remainingTargets(),
@@ -539,6 +541,7 @@ fn parseRollbackSummary(json: []const u8) RollbackSummary {
         .release_id = json_helpers.extractJsonString(json, "release_id") orelse "?",
         .trigger = json_helpers.extractJsonString(json, "trigger") orelse "rollback",
         .status = json_helpers.extractJsonString(json, "status") orelse "unknown",
+        .rollout_state = json_helpers.extractJsonString(json, "rollout_state") orelse "unknown",
         .completed_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "completed_targets") orelse 0)),
         .failed_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "remaining_targets") orelse 0)),
@@ -553,6 +556,7 @@ fn printRollbackSummary(summary: RollbackSummary) void {
     write("trigger: {s}\n", .{summary.trigger});
     write("source_release_id: {s}\n", .{summary.source_release_id orelse "-"});
     write("status: {s}\n", .{summary.status});
+    write("rollout_state: {s}\n", .{summary.rollout_state});
 
     var progress_buf: [64]u8 = undefined;
     const progress = formatProgressCounts(&progress_buf, summary.completed_targets, summary.failed_targets, summary.remaining_targets);
