@@ -41,6 +41,22 @@ pub fn route(request: @import("../../http.zig").Request, alloc: std.mem.Allocato
         return handleAppRollback(alloc, app_name, request, ctx);
     }
 
+    if (common.matchSubpath(rest, "/rollout/pause")) |app_name| {
+        if (!common.validateClusterInput(app_name)) return common.badRequest("invalid app name");
+        if (request.method != .POST) return common.methodNotAllowed();
+        return handleRolloutControl(alloc, app_name, "paused", ctx);
+    }
+    if (common.matchSubpath(rest, "/rollout/resume")) |app_name| {
+        if (!common.validateClusterInput(app_name)) return common.badRequest("invalid app name");
+        if (request.method != .POST) return common.methodNotAllowed();
+        return handleRolloutControl(alloc, app_name, "active", ctx);
+    }
+    if (common.matchSubpath(rest, "/rollout/cancel")) |app_name| {
+        if (!common.validateClusterInput(app_name)) return common.badRequest("invalid app name");
+        if (request.method != .POST) return common.methodNotAllowed();
+        return handleRolloutControl(alloc, app_name, "cancel_requested", ctx);
+    }
+
     return null;
 }
 
@@ -126,6 +142,28 @@ pub fn handleAppRollback(
         .content_length = release.config_snapshot.len,
     };
     return deploy_routes.handleAppRollbackApply(alloc, apply_request, ctx, release.id);
+}
+
+pub fn handleRolloutControl(
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    control_state: []const u8,
+    ctx: RouteContext,
+) Response {
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    const active = store.getActiveDeploymentByAppInDb(node.stateMachineDb(), alloc, app_name) catch |err| return switch (err) {
+        error.NotFound => common.notFound(),
+        else => common.internalError(),
+    };
+    defer active.deinit(alloc);
+
+    store.updateDeploymentRolloutControlStateInDb(node.stateMachineDb(), active.id, control_state) catch return common.internalError();
+    const body = std.fmt.allocPrint(
+        alloc,
+        "{{\"app_name\":\"{s}\",\"release_id\":\"{s}\",\"rollout_control_state\":\"{s}\"}}",
+        .{ app_name, active.id, control_state },
+    ) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 fn formatAppsResponse(
@@ -223,6 +261,20 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
+        try writer.writeAll(",\"rollout\":{");
+        try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
+        try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+            report.completed_targets,
+            report.failed_targets,
+            report.remainingTargets(),
+        });
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
+        try writer.writeByte('}');
         try writer.print(",\"is_current\":{},\"is_previous_successful\":{}", .{ is_current, is_previous_successful });
         try writer.writeAll(",\"release\":{");
         try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
@@ -248,6 +300,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
         try writer.writeByte('}');
         try writer.print(",\"workloads\":{{\"services\":{d},\"workers\":{d},\"crons\":{d},\"training_jobs\":{d}}}", .{
             summary.service_count,
@@ -325,9 +379,27 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_message", if (previous_successful) |prev| prev.message else null);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "previous_successful_failure_details", if (previous_successful) |prev| prev.failure_details_json else null);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "previous_successful_rollout_targets", if (previous_successful) |prev| prev.rollout_targets_json else null);
+    try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
+    try writer.writeAll(",\"rollout\":{");
+    try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
+    try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+        report.completed_targets,
+        report.failed_targets,
+        report.remainingTargets(),
+    });
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
+    try writer.writeByte('}');
     try writer.writeAll(",\"current_release\":{");
     try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
     try writer.writeByte(',');
@@ -350,6 +422,21 @@ fn formatAppStatusResponse(
     try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
+    try writer.writeByte(',');
+    try writer.writeAll("\"rollout\":{");
+    try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
+    try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+        report.completed_targets,
+        report.failed_targets,
+        report.remainingTargets(),
+    });
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
+    try writer.writeByte('}');
     try writer.writeByte('}');
     try writer.writeAll(",\"previous_successful_release\":");
     if (previous_successful) |prev| {
@@ -375,6 +462,21 @@ fn formatAppStatusResponse(
         try json_helpers.writeNullableJsonStringField(writer, "message", prev.message);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", prev.failure_details_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", prev.rollout_targets_json);
+        try writer.writeByte(',');
+        try writer.writeAll("\"rollout\":{");
+        try json_helpers.writeJsonStringField(writer, "state", prev.rolloutState());
+        try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+            prev.completed_targets,
+            prev.failed_targets,
+            prev.remainingTargets(),
+        });
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "failure_details", prev.failure_details_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "targets", prev.rollout_targets_json);
+        try writer.writeByte('}');
         try writer.writeByte('}');
     } else {
         try writer.writeAll("null");
@@ -492,6 +594,12 @@ const RouteFlowHarness = struct {
 
     fn history(self: *RouteFlowHarness, app_name: []const u8) Response {
         return handleAppHistory(self.alloc, app_name, self.ctx());
+    }
+
+    fn rolloutControl(self: *RouteFlowHarness, app_name: []const u8, action: []const u8) !Response {
+        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/rollout/{s}", .{ app_name, action });
+        defer self.alloc.free(path);
+        return route(makeRequest(.POST, path, "{}"), self.alloc, self.ctx()).?;
     }
 };
 
@@ -705,6 +813,56 @@ test "formatAppsResponse returns empty array when no app releases exist" {
     try std.testing.expectEqualStrings("[]", json);
 }
 
+test "handleRolloutControl updates the active release state" {
+    const alloc = std.testing.allocator;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try store.saveDeploymentInDb(harness.node.stateMachineDb(), .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .status = "in_progress",
+        .message = "apply in progress",
+        .created_at = 100,
+        .rollout_control_state = "active",
+    });
+
+    const pause_response = try harness.rolloutControl("demo-app", "pause");
+    defer freeResponse(alloc, pause_response);
+    try expectResponseOk(pause_response);
+    try expectJsonContains(pause_response.body, "\"rollout_control_state\":\"paused\"");
+    {
+        const active = try store.getActiveDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+        defer active.deinit(alloc);
+        try std.testing.expectEqualStrings("paused", active.rollout_control_state.?);
+    }
+
+    const resume_response = try harness.rolloutControl("demo-app", "resume");
+    defer freeResponse(alloc, resume_response);
+    try expectResponseOk(resume_response);
+    try expectJsonContains(resume_response.body, "\"rollout_control_state\":\"active\"");
+    {
+        const active = try store.getActiveDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+        defer active.deinit(alloc);
+        try std.testing.expectEqualStrings("active", active.rollout_control_state.?);
+    }
+
+    const cancel_response = try harness.rolloutControl("demo-app", "cancel");
+    defer freeResponse(alloc, cancel_response);
+    try expectResponseOk(cancel_response);
+    try expectJsonContains(cancel_response.body, "\"rollout_control_state\":\"cancel_requested\"");
+    {
+        const active = try store.getActiveDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+        defer active.deinit(alloc);
+        try std.testing.expectEqualStrings("cancel_requested", active.rollout_control_state.?);
+    }
+}
+
 test "formatAppStatusResponse includes structured rollback metadata" {
     const alloc = std.testing.allocator;
     const latest = store.DeploymentRecord{
@@ -729,6 +887,29 @@ test "formatAppStatusResponse includes structured rollback metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":\"dep-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"completed_targets\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_targets\":0") != null);
+}
+
+test "formatAppStatusResponse shows blocked rollout state for paused releases" {
+    const alloc = std.testing.allocator;
+    const latest = store.DeploymentRecord{
+        .id = "dep-pause",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:pause",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .completed_targets = 0,
+        .failed_targets = 0,
+        .status = "in_progress",
+        .message = "apply in progress",
+        .rollout_control_state = "paused",
+        .created_at = 350,
+    };
+
+    const json = try formatAppStatusResponse(alloc, apply_release.reportFromDeployment(latest), null, app_snapshot.summarize(latest.config_snapshot), .{});
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"blocked\"") != null);
 }
 
 test "formatAppStatusResponse falls back to rollback metadata inferred from legacy message" {
@@ -1229,6 +1410,9 @@ test "app apply route preserves partially failed release metadata across reads" 
     try expectJsonContains(apply_response.body, "\"failed\":1");
     try expectJsonContains(apply_response.body, "\"source_release_id\":null");
     try expectJsonContains(apply_response.body, "\"message\":\"one or more placements failed\"");
+    try expectJsonContains(apply_response.body, "\"rollout_targets\":[");
+    try expectJsonContains(apply_response.body, "\"workload_name\":\"web\",\"state\":\"ready\"");
+    try expectJsonContains(apply_response.body, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"");
 
     const release_id = json_helpers.extractJsonString(apply_response.body, "release_id").?;
 
@@ -1242,6 +1426,9 @@ test "app apply route preserves partially failed release metadata across reads" 
     try expectJsonContains(status_response.body, "\"status\":\"partially_failed\"");
     try expectJsonContains(status_response.body, "\"source_release_id\":null");
     try expectJsonContains(status_response.body, "\"message\":\"one or more placements failed\"");
+    try expectJsonContains(status_response.body, "\"rollout_targets\":[");
+    try expectJsonContains(status_response.body, "\"workload_name\":\"web\",\"state\":\"ready\"");
+    try expectJsonContains(status_response.body, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"");
 
     const history_response = harness.history("demo-app");
     defer freeResponse(alloc, history_response);
@@ -1253,6 +1440,9 @@ test "app apply route preserves partially failed release metadata across reads" 
     try expectJsonContains(history_response.body, "\"status\":\"partially_failed\"");
     try expectJsonContains(history_response.body, "\"source_release_id\":null");
     try expectJsonContains(history_response.body, "\"message\":\"one or more placements failed\"");
+    try expectJsonContains(history_response.body, "\"rollout_targets\":[");
+    try expectJsonContains(history_response.body, "\"workload_name\":\"web\",\"state\":\"ready\"");
+    try expectJsonContains(history_response.body, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"");
 }
 
 test "readiness-gated apply keeps prior assignments when cutover fails" {
@@ -1282,6 +1472,10 @@ test "readiness-gated apply keeps prior assignments when cutover fails" {
     try expectJsonContains(
         apply_response.body,
         "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"assignment_missing\"}]",
+    );
+    try expectJsonContains(
+        apply_response.body,
+        "\"rollout_targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"failed\",\"reason\":\"assignment_missing\"}]",
     );
 
     const after = try agent_registry.countAssignmentsForWorkload(harness.node.stateMachineDb(), "demo-app", "service", "web");

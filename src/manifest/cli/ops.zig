@@ -102,6 +102,56 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
     write("\nto apply this rollback, redeploy with this config using 'yoq up'\n", .{});
 }
 
+pub fn rollout(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    const action = args.next() orelse {
+        writeErr("usage: yoq rollout <pause|resume|cancel> --app [name] [--server host:port]\n", .{});
+        return OpsError.InvalidArgument;
+    };
+
+    var target_name: ?[]const u8 = null;
+    var app_mode = false;
+    var server_addr: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--app")) {
+            app_mode = true;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            server_addr = args.next() orelse {
+                writeErr("--server requires a host:port address\n", .{});
+                return OpsError.InvalidArgument;
+            };
+        } else {
+            target_name = arg;
+        }
+    }
+
+    if (!app_mode) {
+        writeErr("rollout control requires --app [name]\n", .{});
+        return OpsError.InvalidArgument;
+    }
+
+    const control_state = if (std.mem.eql(u8, action, "pause"))
+        "paused"
+    else if (std.mem.eql(u8, action, "resume"))
+        "active"
+    else if (std.mem.eql(u8, action, "cancel"))
+        "cancel_requested"
+    else {
+        writeErr("unknown rollout action: {s}\n", .{action});
+        return OpsError.InvalidArgument;
+    };
+
+    const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+    defer if (owned_app_name) |name| alloc.free(name);
+    const app_name = target_name orelse owned_app_name.?;
+
+    if (server_addr) |addr| {
+        try rolloutRemoteApp(alloc, addr, app_name, action);
+    } else {
+        try rolloutLocalApp(alloc, app_name, control_state);
+    }
+}
+
 const RollbackSummary = struct {
     app_name: []const u8,
     release_id: []const u8,
@@ -114,6 +164,7 @@ const RollbackSummary = struct {
     source_release_id: ?[]const u8,
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
+    rollout_targets_json: ?[]const u8 = null,
     is_current: bool = false,
     is_previous_successful: bool = false,
 };
@@ -350,6 +401,7 @@ const HistoryEntryView = struct {
     source_release_id: ?[]const u8,
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
+    rollout_targets_json: ?[]const u8 = null,
     is_current: bool = false,
     is_previous_successful: bool = false,
 };
@@ -376,6 +428,7 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .source_release_id = report.source_release_id,
         .message = report.message,
         .failure_details_json = report.failure_details_json,
+        .rollout_targets_json = report.rollout_targets_json,
         .is_current = false,
         .is_previous_successful = false,
     };
@@ -401,6 +454,7 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .source_release_id = json_helpers.extractJsonString(obj, "source_release_id"),
         .message = json_helpers.extractJsonString(obj, "message"),
         .failure_details_json = json_helpers.extractJsonArray(obj, "failure_details"),
+        .rollout_targets_json = json_helpers.extractJsonArray(obj, "rollout_targets"),
         .is_current = json_helpers.extractJsonBool(obj, "is_current") orelse false,
         .is_previous_successful = json_helpers.extractJsonBool(obj, "is_previous_successful") orelse false,
     };
@@ -469,6 +523,15 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
+    w.beginObjectField("rollout");
+    w.stringField("state", entry.rollout_state);
+    w.uintField("completed_targets", entry.completed_targets);
+    w.uintField("failed_targets", entry.failed_targets);
+    w.uintField("remaining_targets", entry.remaining_targets);
+    if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (entry.rollout_targets_json) |rollout_targets| w.rawField("targets", rollout_targets) else w.nullField("targets");
+    w.endObject();
     w.boolField("is_current", entry.is_current);
     w.boolField("is_previous_successful", entry.is_previous_successful);
     w.beginObjectField("release");
@@ -484,6 +547,15 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
+    w.beginObjectField("rollout");
+    w.stringField("state", entry.rollout_state);
+    w.uintField("completed_targets", entry.completed_targets);
+    w.uintField("failed_targets", entry.failed_targets);
+    w.uintField("remaining_targets", entry.remaining_targets);
+    if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (entry.rollout_targets_json) |rollout_targets| w.rawField("targets", rollout_targets) else w.nullField("targets");
+    w.endObject();
     w.boolField("current", entry.is_current);
     w.boolField("previous_successful", entry.is_previous_successful);
     w.endObject();
@@ -533,6 +605,39 @@ fn rollbackRemoteApp(
     }
 
     printRollbackSummary(parseRollbackSummary(resp.body));
+}
+
+fn rolloutLocalApp(alloc: std.mem.Allocator, app_name: []const u8, control_state: []const u8) !void {
+    const active = store.getActiveDeploymentByApp(alloc, app_name) catch {
+        writeErr("no active rollout found for app {s}\n", .{app_name});
+        return OpsError.StoreError;
+    };
+    defer active.deinit(alloc);
+
+    store.updateDeploymentRolloutControlState(active.id, control_state) catch return OpsError.StoreError;
+    write("rollout control updated for app {s}: {s} ({s})\n", .{ app_name, control_state, active.id });
+}
+
+fn rolloutRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8, action: []const u8) !void {
+    const server = cli.parseServerAddr(addr_str);
+    const path = std.fmt.allocPrint(alloc, "/apps/{s}/rollout/{s}", .{ app_name, action }) catch return OpsError.StoreError;
+    defer alloc.free(path);
+
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiToken(&token_buf);
+
+    var resp = http_client.postWithAuth(alloc, server.ip, server.port, path, "{}", token) catch |err| {
+        writeErr("failed to connect to cluster server: {}\n", .{err});
+        return OpsError.ConnectionFailed;
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code != 200) {
+        writeErr("rollout control failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+        return OpsError.StoreError;
+    }
+
+    write("{s}\n", .{resp.body});
 }
 
 fn parseRollbackSummary(json: []const u8) RollbackSummary {
@@ -652,6 +757,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
         .remaining_targets = 0,
         .source_release_id = "dep-0",
         .message = "healthy",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
     };
 
     var w = json_out.JsonWriter{};
@@ -675,6 +781,8 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqual(entry.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(entry.source_release_id.?, parsed.source_release_id.?);
     try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
+    try std.testing.expect(parsed.rollout_targets_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.rollout_targets_json.?, "\"workload_name\":\"web\"") != null);
 }
 
 test "writeHistoryJsonObject includes nested release markers" {
@@ -695,6 +803,7 @@ test "writeHistoryJsonObject includes nested release markers" {
         .remaining_targets = 0,
         .source_release_id = "dep-0",
         .message = "healthy",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
         .is_current = true,
         .is_previous_successful = false,
     };
@@ -706,6 +815,8 @@ test "writeHistoryJsonObject includes nested release markers" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"is_current\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release\":{\"id\":\"dep-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"unknown\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"unknown\",\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"failure_details\":null,\"targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"current\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":1,\"workers\":2,\"crons\":3,\"training_jobs\":4}") != null);
 }

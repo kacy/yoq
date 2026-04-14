@@ -153,8 +153,12 @@ pub fn parseRolloutPolicy(
     const strategy_raw = rollout_table.getString("strategy") orelse "rolling";
     const strategy: spec.RolloutStrategy = if (std.mem.eql(u8, strategy_raw, "rolling"))
         .rolling
+    else if (std.mem.eql(u8, strategy_raw, "blue_green"))
+        .blue_green
+    else if (std.mem.eql(u8, strategy_raw, "canary"))
+        .canary
     else {
-        log.err("manifest: service '{s}' has unsupported rollout strategy '{s}' (expected rolling)", .{ service_name, strategy_raw });
+        log.err("manifest: service '{s}' has unsupported rollout strategy '{s}' (expected rolling, blue_green, or canary)", .{ service_name, strategy_raw });
         return common.LoadError.InvalidRolloutConfig;
     };
 

@@ -171,8 +171,10 @@ const AppStatusSnapshot = struct {
     previous_successful_source_release_id: ?[]const u8 = null,
     previous_successful_message: ?[]const u8 = null,
     previous_successful_failure_details_json: ?[]const u8 = null,
+    previous_successful_rollout_targets_json: ?[]const u8 = null,
     message: ?[]const u8 = null,
     failure_details_json: ?[]const u8 = null,
+    rollout_targets_json: ?[]const u8 = null,
 };
 
 fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!void {
@@ -520,8 +522,10 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .previous_successful_source_release_id = extractJsonString(json, "previous_successful_source_release_id"),
         .previous_successful_message = extractJsonString(json, "previous_successful_message"),
         .previous_successful_failure_details_json = extractJsonArray(json, "previous_successful_failure_details"),
+        .previous_successful_rollout_targets_json = extractJsonArray(json, "previous_successful_rollout_targets"),
         .message = extractJsonString(json, "message"),
         .failure_details_json = extractJsonArray(json, "failure_details"),
+        .rollout_targets_json = extractJsonArray(json, "rollout_targets"),
     };
 }
 
@@ -557,8 +561,18 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("previous_successful_source_release_id", source_release_id) else w.nullField("previous_successful_source_release_id");
     if (snapshot.previous_successful_message) |message| w.stringField("previous_successful_message", message) else w.nullField("previous_successful_message");
     if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("previous_successful_failure_details", failure_details) else w.nullField("previous_successful_failure_details");
+    if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("previous_successful_rollout_targets", targets) else w.nullField("previous_successful_rollout_targets");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
     if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (snapshot.rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
+    w.beginObjectField("rollout");
+    w.stringField("state", snapshot.rollout_state);
+    w.uintField("completed_targets", snapshot.completed_targets);
+    w.uintField("failed_targets", snapshot.failed_targets);
+    w.uintField("remaining_targets", snapshot.remaining_targets);
+    if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (snapshot.rollout_targets_json) |targets| w.rawField("targets", targets) else w.nullField("targets");
+    w.endObject();
     w.beginObjectField("current_release");
     w.stringField("id", snapshot.release_id);
     w.stringField("trigger", snapshot.trigger);
@@ -572,6 +586,15 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
     if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (snapshot.rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
+    w.beginObjectField("rollout");
+    w.stringField("state", snapshot.rollout_state);
+    w.uintField("completed_targets", snapshot.completed_targets);
+    w.uintField("failed_targets", snapshot.failed_targets);
+    w.uintField("remaining_targets", snapshot.remaining_targets);
+    if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (snapshot.rollout_targets_json) |targets| w.rawField("targets", targets) else w.nullField("targets");
+    w.endObject();
     w.endObject();
     if (snapshot.previous_successful_release_id) |release_id| {
         w.beginObjectField("previous_successful_release");
@@ -587,6 +610,15 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
         if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
         if (snapshot.previous_successful_message) |message| w.stringField("message", message) else w.nullField("message");
         if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+        if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
+        w.beginObjectField("rollout");
+        w.stringField("state", snapshot.previous_successful_rollout_state orelse "unknown");
+        w.uintField("completed_targets", snapshot.previous_successful_completed_targets);
+        w.uintField("failed_targets", snapshot.previous_successful_failed_targets);
+        w.uintField("remaining_targets", snapshot.previous_successful_remaining_targets);
+        if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+        if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("targets", targets) else w.nullField("targets");
+        w.endObject();
         w.endObject();
     } else {
         w.nullField("previous_successful_release");
@@ -641,8 +673,10 @@ fn appStatusFromReports(
         .previous_successful_source_release_id = if (previous_successful) |prev| prev.source_release_id else null,
         .previous_successful_message = if (previous_successful) |prev| prev.message else null,
         .previous_successful_failure_details_json = if (previous_successful) |prev| prev.failure_details_json else null,
+        .previous_successful_rollout_targets_json = if (previous_successful) |prev| prev.rollout_targets_json else null,
         .message = report.message,
         .failure_details_json = report.failure_details_json,
+        .rollout_targets_json = report.rollout_targets_json,
     };
 }
 
@@ -875,6 +909,8 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
         .previous_successful_manifest_hash = "sha256:111",
         .previous_successful_created_at = 100,
         .message = "all placements healthy",
+        .previous_successful_rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"state\":\"ready\",\"reason\":null}]",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"failed\",\"reason\":\"readiness_timeout\"}]",
     };
 
     var w = json_out.JsonWriter{};
@@ -903,6 +939,10 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(snapshot.previous_successful_manifest_hash.?, parsed.previous_successful_manifest_hash.?);
     try std.testing.expectEqual(snapshot.previous_successful_created_at.?, parsed.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(snapshot.message.?, parsed.message.?);
+    try std.testing.expect(parsed.previous_successful_rollout_targets_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.previous_successful_rollout_targets_json.?, "\"workload_name\":\"db\"") != null);
+    try std.testing.expect(parsed.rollout_targets_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.rollout_targets_json.?, "\"workload_name\":\"web\"") != null);
 }
 
 test "writeAppStatusJsonObject includes nested release and workload views" {
@@ -928,6 +968,7 @@ test "writeAppStatusJsonObject includes nested release and workload views" {
         .previous_successful_manifest_hash = "sha256:111",
         .previous_successful_created_at = 100,
         .message = "all placements healthy",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
     };
 
     var w = json_out.JsonWriter{};
@@ -936,6 +977,8 @@ test "writeAppStatusJsonObject includes nested release and workload views" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"current_release\":{\"id\":\"dep-2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"unknown\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"unknown\",\"completed_targets\":1,\"failed_targets\":1,\"remaining_targets\":0,\"failure_details\":null,\"targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release\":{\"id\":\"dep-0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"workers\":1,\"crons\":2,\"training_jobs\":3}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"training_runtime\":{\"active\":1,\"paused\":1,\"failed\":1}") != null);

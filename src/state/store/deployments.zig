@@ -19,6 +19,8 @@ pub const DeploymentRecord = struct {
     status: []const u8,
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
+    rollout_targets_json: ?[]const u8 = null,
+    rollout_control_state: ?[]const u8 = null,
     created_at: i64,
 
     pub fn deinit(self: DeploymentRecord, alloc: Allocator) void {
@@ -32,11 +34,13 @@ pub const DeploymentRecord = struct {
         alloc.free(self.status);
         if (self.message) |message| alloc.free(message);
         if (self.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
+        if (self.rollout_targets_json) |rollout_targets_json| alloc.free(rollout_targets_json);
+        if (self.rollout_control_state) |rollout_control_state| alloc.free(rollout_control_state);
     }
 };
 
 const deployment_columns =
-    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, failure_details_json, created_at";
+    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, failure_details_json, rollout_targets_json, rollout_control_state, created_at";
 
 const DeploymentRow = struct {
     id: sqlite.Text,
@@ -51,6 +55,8 @@ const DeploymentRow = struct {
     status: sqlite.Text,
     message: ?sqlite.Text,
     failure_details_json: ?sqlite.Text,
+    rollout_targets_json: ?sqlite.Text,
+    rollout_control_state: ?sqlite.Text,
     created_at: i64,
 };
 
@@ -68,6 +74,8 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
         .status = row.status.data,
         .message = if (row.message) |message| message.data else null,
         .failure_details_json = if (row.failure_details_json) |failure_details_json| failure_details_json.data else null,
+        .rollout_targets_json = if (row.rollout_targets_json) |rollout_targets_json| rollout_targets_json.data else null,
+        .rollout_control_state = if (row.rollout_control_state) |rollout_control_state| rollout_control_state.data else null,
         .created_at = row.created_at,
     };
 }
@@ -79,7 +87,7 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -94,6 +102,8 @@ pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!v
             record.status,
             record.message,
             record.failure_details_json,
+            record.rollout_targets_json,
+            record.rollout_control_state,
             record.created_at,
         },
     ) catch return StoreError.WriteFailed;
@@ -225,8 +235,9 @@ pub fn updateDeploymentStatusInDb(
     status: []const u8,
     message: ?[]const u8,
     failure_details_json: ?[]const u8,
+    rollout_targets_json: ?[]const u8,
 ) StoreError!void {
-    return updateDeploymentProgressInDb(db, id, status, message, 0, 0, failure_details_json);
+    return updateDeploymentProgressInDb(db, id, status, message, 0, 0, failure_details_json, rollout_targets_json);
 }
 
 pub fn updateDeploymentProgress(
@@ -236,9 +247,10 @@ pub fn updateDeploymentProgress(
     completed_targets: usize,
     failed_targets: usize,
     failure_details_json: ?[]const u8,
+    rollout_targets_json: ?[]const u8,
 ) StoreError!void {
     const db = try common.getDb();
-    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets, failure_details_json);
+    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json);
 }
 
 pub fn updateDeploymentProgressInDb(
@@ -249,12 +261,48 @@ pub fn updateDeploymentProgressInDb(
     completed_targets: usize,
     failed_targets: usize,
     failure_details_json: ?[]const u8,
+    rollout_targets_json: ?[]const u8,
 ) StoreError!void {
     db.exec(
-        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ?, failure_details_json = ? WHERE id = ?;",
+        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ?, failure_details_json = ?, rollout_targets_json = ? WHERE id = ?;",
         .{},
-        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), failure_details_json, id },
+        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), failure_details_json, rollout_targets_json, id },
     ) catch return StoreError.WriteFailed;
+}
+
+pub fn updateDeploymentRolloutControlState(id: []const u8, control_state: []const u8) StoreError!void {
+    const db = try common.getDb();
+    return updateDeploymentRolloutControlStateInDb(db, id, control_state);
+}
+
+pub fn updateDeploymentRolloutControlStateInDb(
+    db: *sqlite.Db,
+    id: []const u8,
+    control_state: []const u8,
+) StoreError!void {
+    db.exec(
+        "UPDATE deployments SET rollout_control_state = ? WHERE id = ?;",
+        .{},
+        .{ control_state, id },
+    ) catch return StoreError.WriteFailed;
+}
+
+pub fn getActiveDeploymentByApp(alloc: Allocator, app_name: []const u8) StoreError!DeploymentRecord {
+    const db = try common.getDb();
+    return getActiveDeploymentByAppInDb(db, alloc, app_name);
+}
+
+pub fn getActiveDeploymentByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+) StoreError!DeploymentRecord {
+    return queryOneInDb(
+        db,
+        alloc,
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? AND status IN ('pending', 'in_progress') ORDER BY created_at DESC, rowid DESC LIMIT 1;",
+        .{app_name},
+    );
 }
 
 pub fn getLatestDeployment(alloc: Allocator, service_name: []const u8) StoreError!DeploymentRecord {
@@ -357,9 +405,9 @@ test "deployment record round-trip via sqlite" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", null, @as(i64, 1000) },
+        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", null, null, "active", @as(i64, 1000) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -410,9 +458,9 @@ test "deployment stores rollback transition metadata" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", null, @as(i64, 2100) },
+        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", null, null, "active", @as(i64, 2100) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -424,6 +472,55 @@ test "deployment stores rollback transition metadata" {
     try std.testing.expectEqualStrings("dep-1", record.source_release_id.?);
     try std.testing.expectEqual(@as(usize, 1), record.completed_targets);
     try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
+}
+
+test "getActiveDeploymentByAppInDb returns latest pending or in progress release" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 100,
+        .rollout_control_state = "active",
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{}",
+        .status = "pending",
+        .message = null,
+        .created_at = 200,
+        .rollout_control_state = "paused",
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:333",
+        .config_snapshot = "{}",
+        .status = "in_progress",
+        .message = null,
+        .created_at = 300,
+        .rollout_control_state = "active",
+    });
+
+    const active = try getActiveDeploymentByAppInDb(&db, std.testing.allocator, "demo-app");
+    defer active.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("dep-3", active.id);
+    try std.testing.expectEqualStrings("active", active.rollout_control_state.?);
 }
 
 test "getPreviousSuccessfulDeploymentByAppInDb excludes current release" {

@@ -20,10 +20,33 @@ pub const ApplyContext = struct {
     source_release_id: ?[]const u8 = null,
 };
 
+pub const RolloutControlState = enum {
+    active,
+    paused,
+    cancel_requested,
+
+    pub fn toString(self: RolloutControlState) []const u8 {
+        return switch (self) {
+            .active => "active",
+            .paused => "paused",
+            .cancel_requested => "cancel_requested",
+        };
+    }
+
+    pub fn fromString(text: ?[]const u8) RolloutControlState {
+        const value = text orelse return .active;
+        if (std.mem.eql(u8, value, "paused")) return .paused;
+        if (std.mem.eql(u8, value, "cancel_requested")) return .cancel_requested;
+        return .active;
+    }
+};
+
 pub const ApplyOutcome = struct {
     status: update_common.DeploymentStatus,
     message: ?[]const u8 = null,
     failure_details_json: ?[]const u8 = null,
+    rollout_targets_json: ?[]const u8 = null,
+    rollout_control_state: RolloutControlState = .active,
     placed: usize = 0,
     failed: usize = 0,
     completed_targets: usize = 0,
@@ -46,6 +69,8 @@ pub const ApplyResult = struct {
             .failed_targets = self.outcome.failed_targets,
             .message = self.outcome.message,
             .failure_details_json = self.outcome.failure_details_json,
+            .rollout_targets_json = self.outcome.rollout_targets_json,
+            .rollout_control_state = self.outcome.rollout_control_state,
             .manifest_hash = "",
             .created_at = 0,
             .trigger = context.trigger,
@@ -56,6 +81,7 @@ pub const ApplyResult = struct {
     pub fn deinit(self: ApplyResult, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
         if (self.outcome.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
+        if (self.outcome.rollout_targets_json) |rollout_targets_json| alloc.free(rollout_targets_json);
     }
 };
 
@@ -70,6 +96,8 @@ pub const ApplyReport = struct {
     failed_targets: usize,
     message: ?[]const u8 = null,
     failure_details_json: ?[]const u8 = null,
+    rollout_targets_json: ?[]const u8 = null,
+    rollout_control_state: RolloutControlState = .active,
     manifest_hash: []const u8 = "",
     created_at: i64 = 0,
     trigger: ApplyTrigger = .apply,
@@ -78,6 +106,7 @@ pub const ApplyReport = struct {
     pub fn deinit(self: ApplyReport, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
         if (self.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
+        if (self.rollout_targets_json) |rollout_targets_json| alloc.free(rollout_targets_json);
     }
 
     pub fn context(self: ApplyReport) ApplyContext {
@@ -100,7 +129,11 @@ pub const ApplyReport = struct {
         const remaining = self.remainingTargets();
         return switch (self.status) {
             .pending => "pending",
-            .in_progress => if (self.completed_targets > 0 or self.failed_targets > 0) "rolling" else "starting",
+            .in_progress => switch (self.rollout_control_state) {
+                .paused => "blocked",
+                .cancel_requested => "blocked",
+                .active => if (self.completed_targets > 0 or self.failed_targets > 0) "rolling" else "starting",
+            },
             .completed => "stable",
             .partially_failed => if (remaining > 0) "blocked" else "degraded",
             .failed => if (self.completed_targets > 0) "degraded" else "failed",
@@ -142,6 +175,8 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .failed_targets = dep.failed_targets,
         .message = dep.message,
         .failure_details_json = dep.failure_details_json,
+        .rollout_targets_json = dep.rollout_targets_json,
+        .rollout_control_state = RolloutControlState.fromString(dep.rollout_control_state),
         .manifest_hash = dep.manifest_hash,
         .created_at = dep.created_at,
         .trigger = context.trigger,
@@ -238,10 +273,11 @@ fn markReleaseIfPresent(
     completed_targets: usize,
     failed_targets: usize,
     failure_details_json: ?[]const u8,
+    rollout_targets_json: ?[]const u8,
 ) !void {
     if (release_id) |id| {
         if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgressDetails")) {
-            try tracker.markProgressDetails(id, status, message, completed_targets, failed_targets, failure_details_json);
+            try tracker.markProgressDetails(id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json);
         } else if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgress")) {
             try tracker.markProgress(id, status, message, completed_targets, failed_targets);
         } else {
@@ -262,6 +298,8 @@ pub const ProgressRecorder = struct {
         message: ?[]const u8,
         completed_targets: usize,
         failed_targets: usize,
+        failure_details_json: ?[]const u8,
+        rollout_targets_json: ?[]const u8,
     ) anyerror!void,
 
     pub fn mark(
@@ -271,9 +309,38 @@ pub const ProgressRecorder = struct {
         completed_targets: usize,
         failed_targets: usize,
     ) !void {
+        try self.markDetails(status, message, completed_targets, failed_targets, null, null);
+    }
+
+    pub fn markDetails(
+        self: ProgressRecorder,
+        status: update_common.DeploymentStatus,
+        message: ?[]const u8,
+        completed_targets: usize,
+        failed_targets: usize,
+        failure_details_json: ?[]const u8,
+        rollout_targets_json: ?[]const u8,
+    ) !void {
         if (self.completed_targets_ptr) |ptr| ptr.* = completed_targets;
         if (self.failed_targets_ptr) |ptr| ptr.* = failed_targets;
-        try self.markFn(self.ctx, self.release_id, status, message, completed_targets, failed_targets);
+        try self.markFn(self.ctx, self.release_id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json);
+    }
+
+    pub fn controlState(self: ProgressRecorder) RolloutControlState {
+        const dep = store.getDeployment(std.heap.page_allocator, self.release_id) catch return .active;
+        defer dep.deinit(std.heap.page_allocator);
+        return RolloutControlState.fromString(dep.rollout_control_state);
+    }
+
+    pub fn waitWhilePaused(self: ProgressRecorder) !bool {
+        while (true) {
+            const state = self.controlState();
+            switch (state) {
+                .active => return false,
+                .cancel_requested => return true,
+                .paused => std.Thread.sleep(100 * std.time.ns_per_ms),
+            }
+        }
     }
 };
 
@@ -292,9 +359,11 @@ fn makeProgressRecorder(
             message: ?[]const u8,
             completed_targets: usize,
             failed_targets: usize,
+            failure_details_json: ?[]const u8,
+            rollout_targets_json: ?[]const u8,
         ) anyerror!void {
             const typed: TrackerPtr = @ptrCast(@alignCast(ctx));
-            try markReleaseIfPresent(typed, id, status, message, completed_targets, failed_targets, null);
+            try markReleaseIfPresent(typed, id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json);
         }
     };
 
@@ -326,7 +395,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
         );
     }
 
-    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0, null);
+    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0, null, null);
 
     const outcome = backend.apply() catch |err| {
         try markReleaseIfPresent(
@@ -336,6 +405,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
             backend.failureMessage(err),
             completed_targets,
             failed_targets,
+            null,
             null,
         );
         return err;
@@ -349,6 +419,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
         outcome.completed_targets,
         outcome.failed_targets,
         outcome.failure_details_json,
+        outcome.rollout_targets_json,
     );
 
     return .{
@@ -677,4 +748,25 @@ test "reportFromDeployment falls back to rollback context inferred from legacy m
     const report = reportFromDeployment(dep);
     try std.testing.expectEqual(ApplyTrigger.rollback, report.trigger);
     try std.testing.expectEqualStrings("dep-11", report.source_release_id.?);
+}
+
+test "reportFromDeployment preserves paused control as blocked rollout state" {
+    const dep = store.DeploymentRecord{
+        .id = "dep-25",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:block",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}]}",
+        .completed_targets = 0,
+        .failed_targets = 0,
+        .status = "in_progress",
+        .message = "apply in progress",
+        .rollout_control_state = "paused",
+        .created_at = 250,
+    };
+
+    const report = reportFromDeployment(dep);
+    try std.testing.expectEqual(RolloutControlState.paused, report.rollout_control_state);
+    try std.testing.expectEqualStrings("blocked", report.rolloutState());
 }

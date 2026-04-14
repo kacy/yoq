@@ -136,7 +136,10 @@ fn migrateDeployments(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN completed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failure_details_json TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN rollout_targets_json TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN rollout_control_state TEXT DEFAULT 'active';") catch {};
     db.exec("UPDATE deployments SET trigger = 'apply' WHERE trigger IS NULL OR trigger = '';", .{}, .{}) catch {};
+    db.exec("UPDATE deployments SET rollout_control_state = 'active' WHERE rollout_control_state IS NULL OR rollout_control_state = '';", .{}, .{}) catch {};
 }
 
 fn migrateCronSchedules(db: *sqlite.Db) void {

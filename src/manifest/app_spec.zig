@@ -762,6 +762,8 @@ fn restartPolicyString(restart: spec.RestartPolicy) []const u8 {
 fn rolloutStrategyString(strategy: spec.RolloutStrategy) []const u8 {
     return switch (strategy) {
         .rolling => "rolling",
+        .blue_green => "blue_green",
+        .canary => "canary",
     };
 }
 
@@ -774,6 +776,11 @@ fn rolloutFailureActionString(action: spec.RolloutFailureAction) []const u8 {
 
 pub fn rolloutPolicyToUpdateStrategy(rollout: spec.RolloutPolicy) update_common.UpdateStrategy {
     return .{
+        .strategy = switch (rollout.strategy) {
+            .rolling => .rolling,
+            .blue_green => .blue_green,
+            .canary => .canary,
+        },
         .parallelism = rollout.parallelism,
         .delay_between_batches = rollout.delay_between_batches,
         .failure_action = switch (rollout.failure_action) {
@@ -998,12 +1005,14 @@ test "fromManifest keeps rollout health gate disabled when omitted" {
 
 test "rolloutPolicyToUpdateStrategy preserves rollout controls" {
     const strategy = rolloutPolicyToUpdateStrategy(.{
+        .strategy = .canary,
         .parallelism = 3,
         .delay_between_batches = 5,
         .failure_action = .pause,
         .health_check_timeout = 42,
     });
 
+    try std.testing.expectEqual(update_common.RolloutStrategy.canary, strategy.strategy);
     try std.testing.expectEqual(@as(u32, 3), strategy.parallelism);
     try std.testing.expectEqual(@as(u32, 5), strategy.delay_between_batches);
     try std.testing.expectEqual(update_common.FailureAction.pause, strategy.failure_action);

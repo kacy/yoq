@@ -112,6 +112,10 @@ fn parseRolloutPolicy(block: []const u8) error{InvalidRolloutConfig}!spec.Rollou
     const strategy = if (extractJsonString(rollout_json, "strategy")) |value|
         if (std.mem.eql(u8, value, "rolling"))
             spec.RolloutStrategy.rolling
+        else if (std.mem.eql(u8, value, "blue_green"))
+            spec.RolloutStrategy.blue_green
+        else if (std.mem.eql(u8, value, "canary"))
+            spec.RolloutStrategy.canary
         else
             return error.InvalidRolloutConfig
     else
@@ -271,10 +275,23 @@ test "parse defaults rollout health gate to disabled when omitted" {
     try std.testing.expectEqual(@as(u32, 0), parsed.requests.items[0].rollout.health_check_timeout);
 }
 
+test "parse accepts non-rolling rollout strategies" {
+    const alloc = std.testing.allocator;
+    const json =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx","command":["nginx","-g","daemon off"],"rollout":{"strategy":"blue_green"}},{"name":"api","image":"nginx","command":["nginx","-g","daemon off"],"rollout":{"strategy":"canary"}}]}
+    ;
+
+    var parsed = try parse(alloc, json, true);
+    defer parsed.deinit(alloc);
+
+    try std.testing.expectEqual(spec.RolloutStrategy.blue_green, parsed.requests.items[0].rollout.strategy);
+    try std.testing.expectEqual(spec.RolloutStrategy.canary, parsed.requests.items[1].rollout.strategy);
+}
+
 test "parse rejects unsupported rollout strategy" {
     const alloc = std.testing.allocator;
     const json =
-        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx","command":["nginx","-g","daemon off"],"rollout":{"strategy":"canary"}}]}
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx","command":["nginx","-g","daemon off"],"rollout":{"strategy":"wave"}}]}
     ;
 
     try std.testing.expectError(ParseError.InvalidRolloutConfig, parse(alloc, json, true));

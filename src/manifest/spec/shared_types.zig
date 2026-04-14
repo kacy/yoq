@@ -76,6 +76,8 @@ pub const RolloutFailureAction = enum {
 
 pub const RolloutStrategy = enum {
     rolling,
+    blue_green,
+    canary,
 };
 
 pub const RolloutPolicy = struct {

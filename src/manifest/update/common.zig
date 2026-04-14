@@ -5,6 +5,12 @@ pub const FailureAction = enum {
     pause,
 };
 
+pub const RolloutStrategy = enum {
+    rolling,
+    blue_green,
+    canary,
+};
+
 pub const DeploymentStatus = enum {
     pending,
     in_progress,
@@ -36,6 +42,7 @@ pub const DeploymentStatus = enum {
 };
 
 pub const UpdateStrategy = struct {
+    strategy: RolloutStrategy = .rolling,
     parallelism: u32 = 1,
     delay_between_batches: u32 = 0,
     failure_action: FailureAction = .rollback,
