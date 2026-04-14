@@ -8,6 +8,15 @@ That is the point of yoq. It collapses the usual stack into one operational mode
 
 Linux kernel 6.1+ is required.
 
+The preferred operator flow is app-first:
+
+- `yoq up`
+- `yoq apps`
+- `yoq status --app [name]`
+- `yoq history --app [name]`
+- `yoq rollback --app [name]`
+- `yoq rollout pause|resume|cancel --app [name]`
+
 ## who this is for
 
 yoq is a strong fit for:
@@ -39,7 +48,7 @@ Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't t
 
 - declarative multi-service manifests
 - dependency ordering, workers, cron jobs, and dev mode with hot restart
-- health checks, readiness probes, rollout history, rollback, and automatic rollback on failed updates
+- health checks, readiness probes, app release history, rollback, rollout policies, and automatic rollback on failed updates
 
 ### networking and discovery
 
@@ -117,6 +126,7 @@ For GPU-focused validation without running the full suite, use `zig build test-g
 For a temporary 5-node GCP validation rig that exercises cluster networking and GPU hosts, see [docs/gcp-cluster-validation.md](docs/gcp-cluster-validation.md).
 For the canonical operator evaluation flow across local runtime, HTTP routing, and clustered deployment, see [docs/golden-path.md](docs/golden-path.md).
 For cluster bootstrap, day-2 operations, and failure drills, see [docs/cluster-guide.md](docs/cluster-guide.md).
+For rollout strategies, rollout state, control state, checkpoints, and recovery, see [docs/rollouts.md](docs/rollouts.md).
 
 ### one-liner
 ```bash
@@ -148,6 +158,56 @@ depends_on = ["redis"]
 yoq up -f manifest.toml
 yoq status
 yoq down -f manifest.toml
+```
+
+### run an app-first mixed workload
+
+```toml
+[service.api]
+image = "ghcr.io/example/api:latest"
+ports = ["8080:8080"]
+depends_on = ["redis"]
+
+[service.api.health_check]
+type = "http"
+path = "/health"
+port = 8080
+
+[service.api.rollout]
+strategy = "canary"
+parallelism = 2
+delay_between_batches = "5s"
+failure_action = "rollback"
+health_check_timeout = "20s"
+
+[service.redis]
+image = "redis:7"
+ports = ["6379:6379"]
+
+[worker.migrate]
+image = "ghcr.io/example/api:latest"
+command = ["./bin/migrate"]
+depends_on = ["redis"]
+
+[cron.cleanup]
+image = "ghcr.io/example/api:latest"
+command = ["./bin/cleanup"]
+every = "1h"
+
+[training.finetune]
+image = "ghcr.io/example/trainer:latest"
+command = ["python", "train.py"]
+gpus = 4
+```
+
+```bash
+yoq up -f manifest.toml
+yoq apps
+yoq status --app
+yoq history --app
+yoq rollout pause --app
+yoq rollout resume --app
+yoq rollback --app
 ```
 
 ## command overview
@@ -210,6 +270,10 @@ yoq apps [--json] [--status s|--failed|--in-progress]
                                      list local app release summaries
 yoq apps --server host:port [--json] [--status s|--failed|--in-progress]
                                      list remote app release summaries
+yoq rollout pause --app [name]       pause an active app rollout
+yoq rollout resume --app [name]      resume an active or stored app rollout
+yoq rollout cancel --app [name]      cancel an active app rollout
+yoq rollout <...> --server host:port control remote app rollouts
 yoq metrics [service]                show service metrics
 yoq metrics --pairs                  show service-to-service metrics
 yoq policy deny <src> <tgt>          block traffic between services
@@ -238,6 +302,7 @@ yoq cert rm <domain>                 remove a certificate
 If `--email` is omitted for the standalone ACME flow, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
 
 For app rollbacks, omitting `--release` picks the previous successful release before the current one. Use `--print` to inspect the selected stored app snapshot without applying it.
+For app rollouts, status and history expose a canonical nested `rollout` view with rollout state, control state, target counts, failure details, and checkpoint data. The older top-level fields remain for compatibility.
 
 ### server and cluster
 

@@ -1,6 +1,6 @@
 # manifest.toml reference
 
-the manifest file defines multi-service applications. it describes services, workers, cron jobs, and volumes in a single TOML file.
+the manifest file defines applications. it describes services, workers, cron jobs, training jobs, and volumes in a single TOML file.
 
 ## quick example
 
@@ -16,6 +16,13 @@ depends_on = ["db"]
 type = "http"
 path = "/health"
 port = 3000
+
+[service.web.rollout]
+strategy = "rolling"
+parallelism = 2
+delay_between_batches = "5s"
+failure_action = "rollback"
+health_check_timeout = "20s"
 
 [service.db]
 image = "postgres:16"
@@ -45,6 +52,7 @@ services are long-running processes. defined under `[service.<name>]`.
 | `working_dir` | string | no | image default | working directory inside container |
 | `volumes` | array of strings | no | `[]` | volume mounts (`"source:target"`) |
 | `health_check` | table | no | none | health probe configuration |
+| `rollout` | table | no | none | rollout policy for replacement applies |
 | `http_proxy` | table | no | none | shorthand for a single HTTP routing rule |
 | `http_routes` | table of tables | no | none | named HTTP routing rules for the service |
 | `restart` | string | no | `"none"` | restart policy |
@@ -52,6 +60,8 @@ services are long-running processes. defined under `[service.<name>]`.
 | `gpu` | table | no | none | GPU passthrough configuration |
 | `gpu_mesh` | table | no | none | distributed GPU mesh configuration |
 | `alerts` | table | no | none | alert threshold configuration |
+
+services participate in app releases. local `yoq up` and remote `yoq up --server` both normalize the manifest into one app snapshot, store that snapshot in release history, and then execute the service portion of the release. services are the workload kind that roll out automatically on apply.
 
 ### ports
 
@@ -104,6 +114,44 @@ volumes = [
 ```toml
 restart = "on_failure"
 ```
+
+### rollout policy
+
+defined under `[service.<name>.rollout]`.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `strategy` | string | no | `"rolling"` | rollout mode: `"rolling"`, `"canary"`, or `"blue_green"` |
+| `parallelism` | integer | no | `1` | targets to advance at once for rolling batches |
+| `delay_between_batches` | string | no | `"0s"` | wait between rollout batches |
+| `failure_action` | string | no | `"pause"` | what to do when a later batch fails: `"pause"` or `"rollback"` |
+| `health_check_timeout` | string | no | `"0s"` | readiness gate timeout; `0s` disables rollout health gating |
+
+```toml
+[service.web.rollout]
+strategy = "canary"
+parallelism = 3
+delay_between_batches = "10s"
+failure_action = "rollback"
+health_check_timeout = "30s"
+```
+
+strategy behavior:
+
+- `rolling` updates batches using `parallelism`
+- `canary` updates one target first, then continues with the configured `parallelism`
+- `blue_green` schedules one readiness-gated full batch and cuts over only after the batch is ready
+
+failure action behavior:
+
+- `pause` leaves the rollout blocked for operator action
+- `rollback` restores earlier cut-over targets when a later batch fails
+
+readiness behavior:
+
+- when `health_check_timeout = "0s"`, rollout health gating is disabled
+- when enabled, local and cluster rollouts wait for service readiness before cutover completes
+- in cluster mode, readiness comes from assignment startup plus agent-side service health when a health check is configured
 
 ---
 
@@ -405,6 +453,8 @@ env = ["DATABASE_URL=postgres://db:5432/myapp"]
 
 run with `yoq run-worker migrate`.
 
+workers are part of the canonical app snapshot and release history, but `yoq up` does not run them automatically. use `yoq run-worker <name>` locally or `yoq run-worker --server host:port <name>` against a cluster to execute a worker from the current app release.
+
 ---
 
 ## cron jobs
@@ -436,6 +486,8 @@ every = "1h"
 | `h` | hours |
 
 examples: `"30s"`, `"5m"`, `"1h"`, `"24h"`.
+
+cron definitions are stored in the app release snapshot. local and clustered app applies register or update the active cron schedule set from the current release, and rollback restores the cron definitions from the selected release.
 
 ---
 
@@ -533,6 +585,8 @@ spare_ranks = 1
 auto_restart = true
 max_restarts = 5
 ```
+
+training definitions are part of the canonical app snapshot and release history, but `yoq up` does not auto-start training runs. use `yoq train start|status|stop|pause|resume|scale|logs <name>` locally or `yoq train ... --server host:port <name>` against a cluster to operate on training jobs from the current app release.
 
 ---
 

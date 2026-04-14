@@ -6,7 +6,7 @@ the path has three stages:
 
 1. prove the local runtime and manifest flow
 2. prove HTTP routing and observability
-3. prove clustered deployment with TLS and service discovery
+3. prove clustered deployment with app-first day-2 operations
 
 if a stage fails, stop there and fix that layer before moving on.
 
@@ -25,7 +25,9 @@ then run a local multi-service app:
 
 ```bash
 yoq up -f examples/web-app/manifest.toml
-yoq status
+yoq apps
+yoq status --app web-app
+yoq history --app web-app
 yoq metrics
 ```
 
@@ -33,7 +35,8 @@ what to verify:
 
 - services start in dependency order
 - health checks turn healthy
-- status and metrics return sensible output
+- app status/history make sense for the current release
+- metrics return sensible output
 
 ## 2. HTTP routing and observability
 
@@ -109,7 +112,9 @@ verify cluster state:
 
 ```bash
 yoq nodes --server 10.0.0.1:7700
-yoq status --server 10.0.0.1:7700
+yoq apps --server 10.0.0.1:7700
+yoq status --app cluster --server 10.0.0.1:7700
+yoq history --app cluster --server 10.0.0.1:7700
 yoq metrics --server 10.0.0.1:7700
 ```
 
@@ -119,6 +124,7 @@ what to verify:
 - joined agents heartbeat and receive work
 - service discovery works across nodes
 - the clustered manifest deploys through `yoq up --server`
+- app status/history expose current release, previous successful release, and rollout state
 
 ## 4. failure drills
 
@@ -148,6 +154,22 @@ what to verify:
 - the agent returns to `active`
 - cross-node service discovery still works after recovery
 - workloads either stay reachable or reconcile back to healthy state
+
+### rollout pause and resume
+
+for a readiness-gated service release:
+
+```bash
+yoq rollout pause --app cluster --server 10.0.0.1:7700
+yoq status --app cluster --server 10.0.0.1:7700
+yoq rollout resume --app cluster --server 10.0.0.1:7700
+```
+
+what to verify:
+
+- `ROLLOUT` shows a blocked state while paused
+- `CTRL` shows the paused control state
+- the rollout resumes from stored progress instead of starting from zero
 
 ### routing listener restart
 

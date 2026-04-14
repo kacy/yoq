@@ -145,9 +145,20 @@ yoq apps --server 10.0.0.1:7700
 yoq status --app [name] --server 10.0.0.1:7700
 yoq history --app [name] --server 10.0.0.1:7700
 yoq rollback --app [name] --server 10.0.0.1:7700 [--release <release-id>] [--print]
+yoq rollout pause --app [name] --server 10.0.0.1:7700
+yoq rollout resume --app [name] --server 10.0.0.1:7700
+yoq rollout cancel --app [name] --server 10.0.0.1:7700
 ```
 
 `yoq apps` shows the latest release summary for every app, `status --app` shows the latest release metadata for one app, `history --app` lists prior releases, and remote `rollback --app` re-applies the previous successful app release by default. Add `--release` to target a specific stored release or `--print` to inspect the selected snapshot without applying it. `yoq run-worker --server ...` and `yoq train ... --server ...` resolve workers and training jobs from the current app release on the server. Clustered app applies also register cron schedules from the current app snapshot, and the app summary/status views include live training runtime counts plus previous-successful release context for the app.
+
+clustered service applies are rollout-aware:
+
+- service rollout policy is part of the stored app snapshot
+- readiness-gated cutover waits for assignment startup and, when configured, agent-side service health checks
+- `failure_action = "rollback"` restores earlier cut-over workloads if a later batch fails
+- active rollouts persist checkpoint state and can be paused, resumed, canceled, and recovered after restart or leadership handoff
+- status/history show rollout state, control state, target counts, failure details, and checkpoint metadata
 
 ---
 
@@ -319,6 +330,62 @@ you can also query any server's API directly:
 curl http://10.0.0.1:7700/cluster/status \
   -H "Authorization: Bearer $API_TOKEN"
 ```
+
+for app-first day-2 operations, use:
+
+```bash
+yoq apps --server 10.0.0.1:7700
+yoq status --app myapp --server 10.0.0.1:7700 --json
+yoq history --app myapp --server 10.0.0.1:7700 --json
+```
+
+the JSON responses now carry canonical nested sections:
+
+- `current_release`
+- `previous_successful_release`
+- `workloads`
+- `training_runtime`
+- `rollout`
+
+the nested rollout view includes rollout state, control state, target counts, failure details, per-target state, and checkpoint data.
+
+### rollout control drill
+
+for a readiness-gated release, the basic operator drill is:
+
+```bash
+yoq rollout pause --app myapp --server 10.0.0.1:7700
+yoq status --app myapp --server 10.0.0.1:7700
+yoq history --app myapp --server 10.0.0.1:7700
+yoq rollout resume --app myapp --server 10.0.0.1:7700
+```
+
+what to verify:
+
+- `rollout_control_state` changes to `paused`, then back to `active`
+- `rollout_state` shows `blocked` while paused
+- target counts and checkpoint data continue from the stored rollout state after resume
+
+to abort instead of continuing:
+
+```bash
+yoq rollout cancel --app myapp --server 10.0.0.1:7700
+```
+
+what to verify:
+
+- the release ends in a terminal state that reflects any work already completed
+- app history preserves the canceled attempt and its checkpoint data
+
+### restart recovery
+
+cluster rollout recovery is checkpoint-aware:
+
+- active app releases persist rollout checkpoints in the state store
+- if the leader process restarts or leadership changes, the new leader can recover active rollouts from stored checkpoint state
+- resumed execution continues the same release id rather than inventing a brand-new release attempt
+
+this is still not a separate background job system. the rollout engine recovers and resumes from persisted checkpoint state when leadership returns, but it is still the same app-release execution model rather than a detached external worker queue.
 
 the response includes `leader_id` and, on non-leader nodes, a `leader` field with the leader's API address:
 

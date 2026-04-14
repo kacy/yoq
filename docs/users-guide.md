@@ -159,7 +159,7 @@ For standalone `yoq cert provision` and `yoq cert renew`, `--email` is optional.
 
 ### rolling updates
 
-deployment history is tracked in SQLite. updates proceed incrementally — if health checks fail during a rollout, yoq automatically rolls back.
+deployment history is tracked in SQLite. updates proceed as app releases, not as ad hoc service mutations.
 
 for manifest-driven app deploys, yoq now normalizes the manifest into one canonical application snapshot before execution. local `yoq up` and remote `yoq up --server` both operate on that same app-level snapshot, and app releases are recorded in SQLite with the full config snapshot and manifest hash.
 
@@ -171,6 +171,7 @@ this gives the operator one app-first day-2 model:
 - `yoq rollback --app [name] [--release <id>] [--print]` — target a specific stored release or print the selected app snapshot without applying it
 - `yoq rollback --app [name] --server host:port [--release <id>] [--print]` — do the same against a cluster
 - `yoq apps [--status <status> | --failed | --in-progress]` — list app release summaries across all known apps with optional rollout filtering
+- `yoq rollout pause|resume|cancel --app [name] [--server host:port]` — control an active rollout
 - `yoq run-worker [--server host:port] <name>` — run a worker from the current app release
 - `yoq train start|status|stop|pause|resume|scale|logs [--server host:port] <name>` — manage training jobs from the current app release
 
@@ -179,6 +180,65 @@ this gives the operator one app-first day-2 model:
 When `--app` is present and you omit the app name, yoq defaults to the current working directory name for `status --app`, `history --app`, and `rollback --app`. When `rollback --app` omits `--release`, yoq selects the previous successful release before the current one.
 
 Remote `yoq train logs --server ...` now proxies the request to the agent that hosts the selected rank. If that agent is unreachable or does not expose the log endpoint, the API returns an explicit hosting-agent error instead of a misleading empty or missing result.
+
+### app release model
+
+an app release is the stored desired snapshot for one apply attempt. releases are app-scoped and include the full canonical snapshot, manifest hash, rollout state, control state, and workload summary.
+
+important release relationships:
+
+- **current release** — the latest release row for the app
+- **previous successful release** — the last completed release before the current one
+- **rollback release** — a new release created with `trigger = rollback`
+- **superseded release** — a paused rollout that was resumed in place or replaced by a newer attempt
+
+rollback behavior is now symmetric:
+
+- local `yoq rollback --app [name]` performs a real rollback apply
+- remote `yoq rollback --app [name] --server ...` does the same
+- `--print` returns the selected stored snapshot without creating a new release
+- omitting `--release` selects the previous successful release before the current one
+
+### rollout model
+
+app status and history now expose both deployment status and rollout-specific state.
+
+the important fields are:
+
+- `status` — persisted release lifecycle such as `pending`, `in_progress`, `completed`, `partially_failed`, `failed`, `rolled_back`, or `superseded`
+- `rollout_state` — operator-facing rollout view such as `pending`, `starting`, `rolling`, `stable`, `blocked`, `degraded`, `failed`, or `rolled_back`
+- `rollout_control_state` — control intent for an active rollout: `active`, `paused`, or `cancel_requested`
+- `completed_targets`, `failed_targets`, `remaining_targets` — rollout progress counts
+- `failure_details` — structured workload-level failure causes
+- `rollout_targets` — per-target rollout state when that information is available
+- `rollout_checkpoint` — persisted checkpoint data used to inspect and recover interrupted rollouts
+
+local and clustered applies use the same high-level model:
+
+- rollout policy comes from the canonical app snapshot
+- readiness-gated cutover uses service health where available
+- `pause`, `resume`, and `cancel` act on the active rollout
+- active rollouts persist checkpoint data so status/history can explain where execution stopped
+- leader recovery on the cluster can resume active rollouts from stored checkpoint state
+
+### reading status and history JSON
+
+the canonical JSON shape is nested even though older top-level fields are still present for compatibility.
+
+status payloads expose:
+
+- `current_release`
+- `previous_successful_release`
+- `workloads`
+- `training_runtime`
+- `rollout`
+
+history entries expose:
+
+- `release`
+- `rollout`
+
+new automation should prefer those nested objects rather than the older flat fields.
 
 ### dev mode
 

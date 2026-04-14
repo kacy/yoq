@@ -124,24 +124,38 @@ key files:
 
 ### manifest (`src/manifest/`)
 
-multi-service application management — the docker-compose replacement.
+application management — the compose/orchestrator/control-plane layer.
 
-**format:** TOML manifests define `[service.*]`, `[worker.*]`, `[cron.*]`, `[volume.*]`, and `[training.*]` sections. the loader validates dependencies, expands environment variables (`${VAR:-default}`), and returns services in topological (dependency) order.
+**format:** TOML manifests define `[service.*]`, `[worker.*]`, `[cron.*]`, `[volume.*]`, and `[training.*]` sections. the loader validates dependencies, expands environment variables (`${VAR:-default}`), and normalizes the result into one canonical `ApplicationSpec`.
+
+**canonical app model:** local `yoq up` and remote `yoq up --server` both derive the same `ApplicationSpec`, then one `ReleasePlan`, then execute through the same apply/report model. this is the core architectural shift behind the app-first control plane.
 
 **orchestrator:** starts and stops services respecting dependency order. reconciles running state against desired state. handles restart policies (none, always, on_failure).
 
 **health checks:** a single checker thread polls HTTP, TCP, gRPC, or exec probes at configurable intervals. health state is stored in a fixed-size registry (64 services, mutex-protected) that the orchestrator and DNS resolver read to gate traffic.
 
-**rolling updates:** deployment history is tracked in SQLite. updates proceed incrementally with automatic rollback if health checks fail.
+**release model:** app release rows in SQLite store the canonical config snapshot, manifest hash, trigger metadata, rollout state, rollout control state, progress counts, failure details, per-target rollout state, and rollout checkpoint data. local and remote app status/history/rollback all project from that same release data.
+
+**rollouts:** service replacement applies use rollout policy carried in the app snapshot. the current engine supports `rolling`, `canary`, and `blue_green` execution semantics, readiness-gated cutover, `pause` / `resume` / `cancel`, failure-action rollback, and checkpoint-aware recovery. services are the only workload kind that automatically roll out on apply.
 
 **dev mode:** `yoq up --dev` bind-mounts source directories and watches for file changes via inotify. changed files trigger a container restart with 500ms debounce. colored log output is multiplexed with service name prefixes.
 
-**cron scheduling:** periodic tasks run at configurable intervals (e.g., `every = "1h"`).
+**workload parity:** workers, crons, and training jobs now live in the same canonical app snapshot and release history as services:
+
+- workers are stored in the current app release and run on demand
+- crons are registered from the current app release and restored on rollback
+- training definitions are stored in the app release, while training runtime state remains a separate lifecycle
+
+**cron scheduling:** periodic tasks run at configurable intervals (e.g., `every = "1h"`), with the active cron set derived from the current app release.
 
 **alerting:** services can define alert thresholds (CPU, memory, restart count, p99 latency, error rate) with webhook notifications. when a metric exceeds its threshold for consecutive checks, the configured webhook is fired.
 
 key files:
 - `spec.zig` — Service, Worker, Cron, Volume, TrainingJob, AlertSpec types
+- `app_spec.zig` — canonical `ApplicationSpec`
+- `release_plan.zig` — app release snapshot and manifest hash
+- `apply_release.zig` — shared apply executor, report, and rollout projection
+- `local_apply_backend.zig` — local fresh/replacement apply backend
 - `loader.zig` — TOML parser, dependency validation, topo sort
 - `orchestrator.zig` — start/stop/reconcile
 - `health.zig` — health check engine
@@ -166,6 +180,10 @@ multi-node orchestration via Raft consensus and SWIM gossip.
 
 **agents:** worker nodes register with the server via HTTP, then heartbeat every 5s reporting capacity. they pull assignments, download images, and start containers using the local runtime. WireGuard tunnels are set up on join for encrypted cross-node networking.
 
+**app-first control plane:** the canonical cluster write path is `POST /apps/apply`. cluster routes parse app snapshots into the same release model used locally, then execute through the cluster scheduling backend. app-scoped reads (`/apps`, `/apps/{name}/status`, `/apps/{name}/history`) and writes (`/apps/{name}/rollback`, rollout control, worker run, training control) all project from that same release/store layer.
+
+**rollout execution:** clustered service rollouts are readiness-gated and checkpoint-aware. the server batches assignments by rollout policy, waits for assignment readiness and agent-side service health where configured, cuts over only after readiness succeeds, records per-target rollout state, and can recover active rollouts in place after restart or leadership handoff.
+
 **HMAC auth:** all cluster messages (Raft RPCs, gossip protocol) are authenticated with HMAC-SHA256. the key is derived from the join token. token comparison uses constant-time operations to prevent timing side-channels and avoids leaking token length.
 
 **connection pool:** the transport layer reuses TCP connections between nodes instead of opening a new connection per RPC. this reduces latency and file descriptor churn under load.
@@ -186,7 +204,7 @@ key files:
 
 persistent storage for all yoq state.
 
-**SQLite:** the database at `~/.local/share/yoq/yoq.db` stores containers, images, service names, secrets, network policies, and deployment history. schema migrations run on startup. in cluster mode, the database is replicated via Raft.
+**SQLite:** the database at `~/.local/share/yoq/yoq.db` stores containers, images, service names, secrets, network policies, app releases, rollout progress, rollout checkpoints, training runtime state, and deployment history. schema migrations run on startup. in cluster mode, the database is replicated via Raft.
 
 **secrets:** encrypted at rest with XChaCha20-Poly1305. can be mounted as files or injected as environment variables. rotation doesn't require container restart.
 
@@ -272,7 +290,19 @@ HTTP management API for local and remote control.
 
 **server:** a blocking HTTP 1.1 server with thread pool. listens on localhost for single-node, or a specified interface for cluster mode. default port 7700. bearer token authentication with constant-time comparison.
 
-**routes:** REST endpoints for containers, images, cluster status, agents, metrics, and deployments. the CLI talks to the API server for remote operations; local operations use the runtime directly.
+**routes:** REST endpoints for containers, images, cluster status, agents, metrics, and app releases. the primary app-first surfaces are:
+
+- `POST /apps/apply`
+- `GET /apps`
+- `GET /apps/{name}/status`
+- `GET /apps/{name}/history`
+- `POST /apps/{name}/rollback`
+- `POST /apps/{name}/rollout/pause|resume|cancel`
+- `POST /apps/{app}/workers/{name}/run`
+- `POST /apps/{app}/training/{name}/start|stop|pause|resume|scale`
+- `GET /apps/{app}/training/{name}/status|logs`
+
+the CLI uses those routes for remote operations. local operations use the same app/release model directly against the runtime and store layer.
 
 key files:
 - `http.zig` — HTTP 1.1 parser (zero-copy)
@@ -328,6 +358,10 @@ key files:
 **SQLite for everything.** container state, image metadata, service names, secrets, network policies, deployment history, and Raft log all live in SQLite. in cluster mode, the database is replicated via Raft. no etcd, no separate state store.
 
 **hub-and-spoke WireGuard.** server nodes are WireGuard hubs that forward inter-agent traffic. agents connect only to servers, avoiding O(n²) peer configurations. agent join/leave is a single-peer operation on the server side.
+
+**app-first control plane.** manifests are normalized once into `ApplicationSpec`, then carried through `ReleasePlan`, apply execution, status/history, rollback, and remote `/apps/*` APIs. this removes the older split between local manifest execution and remote ad hoc deploy payloads.
+
+**structured rollout state.** rollout behavior is driven by explicit fields rather than message text: lifecycle status, rollout state, rollout control state, target counts, failure details, per-target state, and checkpoints.
 
 ## security model
 
