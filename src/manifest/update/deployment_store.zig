@@ -38,6 +38,7 @@ pub fn recordDeployment(
     message: ?[]const u8,
     failure_details_json: ?[]const u8,
     rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) !void {
     store.saveDeployment(.{
         .id = id,
@@ -53,6 +54,7 @@ pub fn recordDeployment(
         .message = message,
         .failure_details_json = failure_details_json,
         .rollout_targets_json = rollout_targets_json,
+        .rollout_checkpoint_json = rollout_checkpoint_json,
         .rollout_control_state = "active",
         .created_at = std.time.timestamp(),
     }) catch return error.StoreFailed;
@@ -73,6 +75,7 @@ pub fn recordDeploymentInDb(
     message: ?[]const u8,
     failure_details_json: ?[]const u8,
     rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) !void {
     store.saveDeploymentInDb(db, .{
         .id = id,
@@ -88,6 +91,7 @@ pub fn recordDeploymentInDb(
         .message = message,
         .failure_details_json = failure_details_json,
         .rollout_targets_json = rollout_targets_json,
+        .rollout_checkpoint_json = rollout_checkpoint_json,
         .rollout_control_state = "active",
         .created_at = std.time.timestamp(),
     }) catch return error.StoreFailed;
@@ -98,7 +102,7 @@ pub fn updateDeploymentStatus(
     status: common.DeploymentStatus,
     message: ?[]const u8,
 ) !void {
-    try updateDeploymentProgress(id, status, message, 0, 0, null, null);
+    try updateDeploymentProgress(id, status, message, 0, 0, null, null, null);
 }
 
 pub fn updateDeploymentStatusInDb(
@@ -107,7 +111,7 @@ pub fn updateDeploymentStatusInDb(
     status: common.DeploymentStatus,
     message: ?[]const u8,
 ) !void {
-    try updateDeploymentProgressInDb(db, id, status, message, 0, 0, null, null);
+    try updateDeploymentProgressInDb(db, id, status, message, 0, 0, null, null, null);
 }
 
 pub fn updateDeploymentProgress(
@@ -118,8 +122,9 @@ pub fn updateDeploymentProgress(
     failed_targets: usize,
     failure_details_json: ?[]const u8,
     rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) !void {
-    store.updateDeploymentProgress(id, status.toString(), message, completed_targets, failed_targets, failure_details_json, rollout_targets_json) catch return error.StoreFailed;
+    store.updateDeploymentProgress(id, status.toString(), message, completed_targets, failed_targets, failure_details_json, rollout_targets_json, rollout_checkpoint_json) catch return error.StoreFailed;
 }
 
 pub fn updateDeploymentProgressInDb(
@@ -131,6 +136,7 @@ pub fn updateDeploymentProgressInDb(
     failed_targets: usize,
     failure_details_json: ?[]const u8,
     rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) !void {
-    store.updateDeploymentProgressInDb(db, id, status.toString(), message, completed_targets, failed_targets, failure_details_json, rollout_targets_json) catch return error.StoreFailed;
+    store.updateDeploymentProgressInDb(db, id, status.toString(), message, completed_targets, failed_targets, failure_details_json, rollout_targets_json, rollout_checkpoint_json) catch return error.StoreFailed;
 }

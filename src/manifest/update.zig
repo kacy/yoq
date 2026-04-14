@@ -86,6 +86,7 @@ pub fn performRollingUpdate(
             .in_progress,
             null,
             null,
+            null,
         ) catch {
             log.warn("update: failed to record deployment start", .{});
         };

@@ -265,8 +265,12 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
         try writer.writeAll(",\"rollout\":{");
         try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
         try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
             report.completed_targets,
             report.failed_targets,
@@ -276,6 +280,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "checkpoint", report.rollout_checkpoint_json);
         try writer.writeByte('}');
         try writer.print(",\"is_current\":{},\"is_previous_successful\":{}", .{ is_current, is_previous_successful });
         try writer.writeAll(",\"release\":{");
@@ -306,6 +312,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
         try writer.writeByte('}');
         try writer.print(",\"workloads\":{{\"services\":{d},\"workers\":{d},\"crons\":{d},\"training_jobs\":{d}}}", .{
             summary.service_count,
@@ -391,11 +399,15 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "previous_successful_rollout_targets", if (previous_successful) |prev| prev.rollout_targets_json else null);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "previous_successful_rollout_checkpoint", if (previous_successful) |prev| prev.rollout_checkpoint_json else null);
+    try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
     try writer.writeAll(",\"rollout\":{");
     try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
     try writer.writeByte(',');
@@ -409,6 +421,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "checkpoint", report.rollout_checkpoint_json);
     try writer.writeByte('}');
     try writer.writeAll(",\"current_release\":{");
     try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
@@ -437,6 +451,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
+    try writer.writeByte(',');
     try writer.writeAll("\"rollout\":{");
     try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
     try writer.writeByte(',');
@@ -450,6 +466,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonRawField(writer, "checkpoint", report.rollout_checkpoint_json);
     try writer.writeByte('}');
     try writer.writeByte('}');
     try writer.writeAll(",\"previous_successful_release\":");
@@ -481,6 +499,8 @@ fn formatAppStatusResponse(
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", prev.rollout_targets_json);
         try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", prev.rollout_checkpoint_json);
+        try writer.writeByte(',');
         try writer.writeAll("\"rollout\":{");
         try json_helpers.writeJsonStringField(writer, "state", prev.rolloutState());
         try writer.writeByte(',');
@@ -494,6 +514,8 @@ fn formatAppStatusResponse(
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", prev.failure_details_json);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "targets", prev.rollout_targets_json);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonRawField(writer, "checkpoint", prev.rollout_checkpoint_json);
         try writer.writeByte('}');
         try writer.writeByte('}');
     } else {
@@ -895,6 +917,7 @@ test "formatAppStatusResponse includes structured rollback metadata" {
         .failed_targets = 0,
         .status = "completed",
         .message = "rollback to dep-1 completed: all placements succeeded",
+        .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"control_state\":\"active\"}",
         .created_at = 300,
     };
 
@@ -905,6 +928,8 @@ test "formatAppStatusResponse includes structured rollback metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":\"dep-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"completed_targets\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_targets\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_checkpoint\":{\"engine\":\"cluster\",\"phase\":\"cutover\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"checkpoint\":{\"engine\":\"cluster\",\"phase\":\"cutover\"") != null);
 }
 
 test "formatAppStatusResponse shows blocked rollout state for paused releases" {

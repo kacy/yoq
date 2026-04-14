@@ -172,6 +172,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    message TEXT,
         \\    failure_details_json TEXT,
         \\    rollout_targets_json TEXT,
+        \\    rollout_checkpoint_json TEXT,
         \\    rollout_control_state TEXT NOT NULL DEFAULT 'active',
         \\    created_at INTEGER NOT NULL
         \\);

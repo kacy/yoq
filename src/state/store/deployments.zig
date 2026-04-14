@@ -20,6 +20,7 @@ pub const DeploymentRecord = struct {
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
+    rollout_checkpoint_json: ?[]const u8 = null,
     rollout_control_state: ?[]const u8 = null,
     created_at: i64,
 
@@ -35,12 +36,13 @@ pub const DeploymentRecord = struct {
         if (self.message) |message| alloc.free(message);
         if (self.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
         if (self.rollout_targets_json) |rollout_targets_json| alloc.free(rollout_targets_json);
+        if (self.rollout_checkpoint_json) |rollout_checkpoint_json| alloc.free(rollout_checkpoint_json);
         if (self.rollout_control_state) |rollout_control_state| alloc.free(rollout_control_state);
     }
 };
 
 const deployment_columns =
-    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, failure_details_json, rollout_targets_json, rollout_control_state, created_at";
+    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, failure_details_json, rollout_targets_json, rollout_checkpoint_json, rollout_control_state, created_at";
 
 const DeploymentRow = struct {
     id: sqlite.Text,
@@ -56,6 +58,7 @@ const DeploymentRow = struct {
     message: ?sqlite.Text,
     failure_details_json: ?sqlite.Text,
     rollout_targets_json: ?sqlite.Text,
+    rollout_checkpoint_json: ?sqlite.Text,
     rollout_control_state: ?sqlite.Text,
     created_at: i64,
 };
@@ -75,6 +78,7 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
         .message = if (row.message) |message| message.data else null,
         .failure_details_json = if (row.failure_details_json) |failure_details_json| failure_details_json.data else null,
         .rollout_targets_json = if (row.rollout_targets_json) |rollout_targets_json| rollout_targets_json.data else null,
+        .rollout_checkpoint_json = if (row.rollout_checkpoint_json) |rollout_checkpoint_json| rollout_checkpoint_json.data else null,
         .rollout_control_state = if (row.rollout_control_state) |rollout_control_state| rollout_control_state.data else null,
         .created_at = row.created_at,
     };
@@ -87,7 +91,7 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -103,6 +107,7 @@ pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!v
             record.message,
             record.failure_details_json,
             record.rollout_targets_json,
+            record.rollout_checkpoint_json,
             record.rollout_control_state,
             record.created_at,
         },
@@ -226,7 +231,7 @@ pub fn listLatestDeploymentsByAppInDb(
 
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try common.getDb();
-    return updateDeploymentStatusInDb(db, id, status, message, null);
+    return updateDeploymentStatusInDb(db, id, status, message, null, null, null);
 }
 
 pub fn updateDeploymentStatusInDb(
@@ -236,8 +241,9 @@ pub fn updateDeploymentStatusInDb(
     message: ?[]const u8,
     failure_details_json: ?[]const u8,
     rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) StoreError!void {
-    return updateDeploymentProgressInDb(db, id, status, message, 0, 0, failure_details_json, rollout_targets_json);
+    return updateDeploymentProgressInDb(db, id, status, message, 0, 0, failure_details_json, rollout_targets_json, rollout_checkpoint_json);
 }
 
 pub fn updateDeploymentProgress(
@@ -248,9 +254,10 @@ pub fn updateDeploymentProgress(
     failed_targets: usize,
     failure_details_json: ?[]const u8,
     rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) StoreError!void {
     const db = try common.getDb();
-    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json);
+    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json, rollout_checkpoint_json);
 }
 
 pub fn updateDeploymentProgressInDb(
@@ -262,11 +269,12 @@ pub fn updateDeploymentProgressInDb(
     failed_targets: usize,
     failure_details_json: ?[]const u8,
     rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) StoreError!void {
     db.exec(
-        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ?, failure_details_json = ?, rollout_targets_json = ? WHERE id = ?;",
+        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ?, failure_details_json = ?, rollout_targets_json = ?, rollout_checkpoint_json = ? WHERE id = ?;",
         .{},
-        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), failure_details_json, rollout_targets_json, id },
+        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), failure_details_json, rollout_targets_json, rollout_checkpoint_json, id },
     ) catch return StoreError.WriteFailed;
 }
 

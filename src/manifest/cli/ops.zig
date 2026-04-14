@@ -166,6 +166,7 @@ const RollbackSummary = struct {
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
+    rollout_checkpoint_json: ?[]const u8 = null,
     is_current: bool = false,
     is_previous_successful: bool = false,
 };
@@ -405,6 +406,7 @@ const HistoryEntryView = struct {
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
+    rollout_checkpoint_json: ?[]const u8 = null,
     is_current: bool = false,
     is_previous_successful: bool = false,
 };
@@ -433,6 +435,7 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .message = report.message,
         .failure_details_json = report.failure_details_json,
         .rollout_targets_json = report.rollout_targets_json,
+        .rollout_checkpoint_json = report.rollout_checkpoint_json,
         .is_current = false,
         .is_previous_successful = false,
     };
@@ -460,6 +463,7 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .message = json_helpers.extractJsonString(obj, "message"),
         .failure_details_json = json_helpers.extractJsonArray(obj, "failure_details"),
         .rollout_targets_json = json_helpers.extractJsonArray(obj, "rollout_targets"),
+        .rollout_checkpoint_json = json_helpers.extractJsonObject(obj, "rollout_checkpoint"),
         .is_current = json_helpers.extractJsonBool(obj, "is_current") orelse false,
         .is_previous_successful = json_helpers.extractJsonBool(obj, "is_previous_successful") orelse false,
     };
@@ -532,6 +536,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
+    if (entry.rollout_checkpoint_json) |checkpoint| w.rawField("rollout_checkpoint", checkpoint) else w.nullField("rollout_checkpoint");
     w.beginObjectField("rollout");
     w.stringField("state", entry.rollout_state);
     w.stringField("control_state", entry.rollout_control_state);
@@ -540,6 +545,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("targets", rollout_targets) else w.nullField("targets");
+    if (entry.rollout_checkpoint_json) |checkpoint| w.rawField("checkpoint", checkpoint) else w.nullField("checkpoint");
     w.endObject();
     w.boolField("is_current", entry.is_current);
     w.boolField("is_previous_successful", entry.is_previous_successful);
@@ -558,6 +564,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
+    if (entry.rollout_checkpoint_json) |checkpoint| w.rawField("rollout_checkpoint", checkpoint) else w.nullField("rollout_checkpoint");
     w.beginObjectField("rollout");
     w.stringField("state", entry.rollout_state);
     w.stringField("control_state", entry.rollout_control_state);
@@ -566,6 +573,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("targets", rollout_targets) else w.nullField("targets");
+    if (entry.rollout_checkpoint_json) |checkpoint| w.rawField("checkpoint", checkpoint) else w.nullField("checkpoint");
     w.endObject();
     w.boolField("current", entry.is_current);
     w.boolField("previous_successful", entry.is_previous_successful);
@@ -777,6 +785,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
         .source_release_id = "dep-0",
         .message = "healthy",
         .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
+        .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"control_state\":\"active\"}",
     };
 
     var w = json_out.JsonWriter{};
@@ -802,6 +811,8 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
     try std.testing.expect(parsed.rollout_targets_json != null);
     try std.testing.expect(std.mem.indexOf(u8, parsed.rollout_targets_json.?, "\"workload_name\":\"web\"") != null);
+    try std.testing.expect(parsed.rollout_checkpoint_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.rollout_checkpoint_json.?, "\"phase\":\"cutover\"") != null);
 }
 
 test "writeHistoryJsonObject includes nested release markers" {
@@ -823,6 +834,7 @@ test "writeHistoryJsonObject includes nested release markers" {
         .source_release_id = "dep-0",
         .message = "healthy",
         .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
+        .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"control_state\":\"active\"}",
         .is_current = true,
         .is_previous_successful = false,
     };
@@ -835,7 +847,8 @@ test "writeHistoryJsonObject includes nested release markers" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release\":{\"id\":\"dep-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"unknown\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"unknown\",\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"failure_details\":null,\"targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_checkpoint\":{\"engine\":\"cluster\",\"phase\":\"cutover\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"unknown\",\"control_state\":\"active\",\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"failure_details\":null,\"targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}],\"checkpoint\":{\"engine\":\"cluster\",\"phase\":\"cutover\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"current\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":1,\"workers\":2,\"crons\":3,\"training_jobs\":4}") != null);
 }

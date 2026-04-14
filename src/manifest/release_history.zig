@@ -23,6 +23,7 @@ pub fn recordAppReleaseStart(plan: *const release_plan.ReleasePlan, context: app
         null,
         null,
         null,
+        null,
     );
     return id;
 }

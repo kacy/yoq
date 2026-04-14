@@ -453,7 +453,7 @@ fn runReplacementPlan(
                 failed += 1;
                 try failure_details.appendService(services[idx].name, "start_failed");
                 rollout_targets.setServiceState(services[idx].name, "failed", "start_failed");
-                reportProgressDetailsIfSupported(runner, alloc, placed, failed, &failure_details, &rollout_targets);
+                reportProgressDetailsIfSupported(runner, alloc, "start", new_start, batch_end, new_indexes.len + replacement_indexes.len, placed, failed, &failure_details, &rollout_targets);
                 if (!mutated) return error.StartFailed;
                 continue;
             };
@@ -494,7 +494,7 @@ fn runReplacementPlan(
 
             placed += batch_completed;
             failed += batch_failed;
-            reportProgressDetailsIfSupported(runner, alloc, placed, failed, &failure_details, &rollout_targets);
+            reportProgressDetailsIfSupported(runner, alloc, "start", new_start, batch_end, new_indexes.len + replacement_indexes.len, placed, failed, &failure_details, &rollout_targets);
 
             if (waitForControlIfSupported(runner)) {
                 if (mutated) runner.finish();
@@ -550,7 +550,7 @@ fn runReplacementPlan(
                 failed += 1;
                 try failure_details.appendService(services[idx].name, "start_failed");
                 rollout_targets.setServiceState(services[idx].name, "failed", "start_failed");
-                reportProgressDetailsIfSupported(runner, alloc, placed, failed, &failure_details, &rollout_targets);
+                reportProgressDetailsIfSupported(runner, alloc, "replace", replacement_start, batch_end, new_indexes.len + replacement_indexes.len, placed, failed, &failure_details, &rollout_targets);
                 continue;
             };
             started_batch[batch_started] = idx;
@@ -589,7 +589,7 @@ fn runReplacementPlan(
 
             placed += batch_completed;
             failed += batch_failed;
-            reportProgressDetailsIfSupported(runner, alloc, placed, failed, &failure_details, &rollout_targets);
+            reportProgressDetailsIfSupported(runner, alloc, "replace", replacement_start, batch_end, new_indexes.len + replacement_indexes.len, placed, failed, &failure_details, &rollout_targets);
 
             if (waitForControlIfSupported(runner)) {
                 if (mutated) runner.finish();
@@ -655,6 +655,10 @@ fn runReplacementPlan(
 fn reportProgressDetailsIfSupported(
     runner: anytype,
     alloc: std.mem.Allocator,
+    phase: []const u8,
+    batch_start: usize,
+    batch_end: usize,
+    total_targets: usize,
     completed_targets: usize,
     failed_targets: usize,
     failure_details: *ReplacementFailureDetailBuilder,
@@ -665,7 +669,23 @@ fn reportProgressDetailsIfSupported(
         defer if (failure_details_json) |json| alloc.free(json);
         const rollout_targets_json = rollout_targets.toOwnedJson() catch return;
         defer if (rollout_targets_json) |json| alloc.free(json);
-        runner.reportProgressDetails(completed_targets, failed_targets, failure_details_json, rollout_targets_json);
+        const control_state = if (@hasField(std.meta.Child(@TypeOf(runner)), "progress"))
+            if (runner.progress) |progress| progress.controlState() else apply_release.RolloutControlState.active
+        else
+            apply_release.RolloutControlState.active;
+        const checkpoint_json = apply_release.buildRolloutCheckpointJson(
+            alloc,
+            "local",
+            phase,
+            batch_start,
+            batch_end,
+            total_targets,
+            completed_targets,
+            failed_targets,
+            control_state,
+        ) catch return;
+        defer alloc.free(checkpoint_json);
+        runner.reportProgressDetails(completed_targets, failed_targets, failure_details_json, rollout_targets_json, checkpoint_json);
     } else if (@hasDecl(std.meta.Child(@TypeOf(runner)), "reportProgress")) {
         runner.reportProgress(completed_targets, failed_targets);
     }
@@ -778,7 +798,7 @@ const LocalReleaseTracker = struct {
     }
 
     pub fn mark(self: *const LocalReleaseTracker, id: []const u8, status: @import("update/common.zig").DeploymentStatus, message: ?[]const u8) !void {
-        try self.markProgressDetails(id, status, message, 0, 0, null, null);
+        try self.markProgressDetails(id, status, message, 0, 0, null, null, null);
     }
 
     pub fn markProgress(
@@ -789,7 +809,7 @@ const LocalReleaseTracker = struct {
         completed_targets: usize,
         failed_targets: usize,
     ) !void {
-        try self.markProgressDetails(id, status, message, completed_targets, failed_targets, null, null);
+        try self.markProgressDetails(id, status, message, completed_targets, failed_targets, null, null, null);
     }
 
     pub fn markProgressDetails(
@@ -801,6 +821,7 @@ const LocalReleaseTracker = struct {
         failed_targets: usize,
         failure_details_json: ?[]const u8,
         rollout_targets_json: ?[]const u8,
+        rollout_checkpoint_json: ?[]const u8,
     ) !void {
         const resolved_message = try apply_release.materializeMessage(self.plan.alloc, self.context, status, message);
         defer if (resolved_message) |msg| self.plan.alloc.free(msg);
@@ -813,6 +834,7 @@ const LocalReleaseTracker = struct {
             failed_targets,
             failure_details_json,
             rollout_targets_json,
+            rollout_checkpoint_json,
         ) catch {};
     }
 
@@ -885,6 +907,7 @@ const LocalApplyBackend = struct {
                 failed_targets: usize,
                 failure_details_json: ?[]const u8,
                 rollout_targets_json: ?[]const u8,
+                rollout_checkpoint_json: ?[]const u8,
             ) void {
                 if (runner_self.progress) |progress| {
                     progress.markDetails(
@@ -894,6 +917,7 @@ const LocalApplyBackend = struct {
                         failed_targets,
                         failure_details_json,
                         rollout_targets_json,
+                        rollout_checkpoint_json,
                     ) catch {};
                 }
             }

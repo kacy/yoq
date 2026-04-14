@@ -46,6 +46,7 @@ pub const ApplyOutcome = struct {
     message: ?[]const u8 = null,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
+    rollout_checkpoint_json: ?[]const u8 = null,
     rollout_control_state: RolloutControlState = .active,
     placed: usize = 0,
     failed: usize = 0,
@@ -70,6 +71,7 @@ pub const ApplyResult = struct {
             .message = self.outcome.message,
             .failure_details_json = self.outcome.failure_details_json,
             .rollout_targets_json = self.outcome.rollout_targets_json,
+            .rollout_checkpoint_json = self.outcome.rollout_checkpoint_json,
             .rollout_control_state = self.outcome.rollout_control_state,
             .manifest_hash = "",
             .created_at = 0,
@@ -82,6 +84,7 @@ pub const ApplyResult = struct {
         if (self.release_id) |id| alloc.free(id);
         if (self.outcome.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
         if (self.outcome.rollout_targets_json) |rollout_targets_json| alloc.free(rollout_targets_json);
+        if (self.outcome.rollout_checkpoint_json) |rollout_checkpoint_json| alloc.free(rollout_checkpoint_json);
     }
 };
 
@@ -97,6 +100,7 @@ pub const ApplyReport = struct {
     message: ?[]const u8 = null,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
+    rollout_checkpoint_json: ?[]const u8 = null,
     rollout_control_state: RolloutControlState = .active,
     manifest_hash: []const u8 = "",
     created_at: i64 = 0,
@@ -107,6 +111,7 @@ pub const ApplyReport = struct {
         if (self.release_id) |id| alloc.free(id);
         if (self.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
         if (self.rollout_targets_json) |rollout_targets_json| alloc.free(rollout_targets_json);
+        if (self.rollout_checkpoint_json) |rollout_checkpoint_json| alloc.free(rollout_checkpoint_json);
     }
 
     pub fn context(self: ApplyReport) ApplyContext {
@@ -162,6 +167,36 @@ pub const ApplyReport = struct {
     }
 };
 
+pub fn buildRolloutCheckpointJson(
+    alloc: std.mem.Allocator,
+    engine: []const u8,
+    phase: []const u8,
+    batch_start: usize,
+    batch_end: usize,
+    total_targets: usize,
+    completed_targets: usize,
+    failed_targets: usize,
+    control_state: RolloutControlState,
+) ![]u8 {
+    const accounted = @min(total_targets, completed_targets + failed_targets);
+    const remaining_targets = total_targets - accounted;
+    return std.fmt.allocPrint(
+        alloc,
+        "{{\"engine\":\"{s}\",\"phase\":\"{s}\",\"batch_start\":{d},\"batch_end\":{d},\"total_targets\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d},\"control_state\":\"{s}\"}}",
+        .{
+            engine,
+            phase,
+            batch_start,
+            batch_end,
+            total_targets,
+            completed_targets,
+            failed_targets,
+            remaining_targets,
+            control_state.toString(),
+        },
+    );
+}
+
 pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
     const context = deploymentContext(dep);
     return .{
@@ -176,6 +211,7 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .message = dep.message,
         .failure_details_json = dep.failure_details_json,
         .rollout_targets_json = dep.rollout_targets_json,
+        .rollout_checkpoint_json = dep.rollout_checkpoint_json,
         .rollout_control_state = RolloutControlState.fromString(dep.rollout_control_state),
         .manifest_hash = dep.manifest_hash,
         .created_at = dep.created_at,
@@ -274,10 +310,11 @@ fn markReleaseIfPresent(
     failed_targets: usize,
     failure_details_json: ?[]const u8,
     rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) !void {
     if (release_id) |id| {
         if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgressDetails")) {
-            try tracker.markProgressDetails(id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json);
+            try tracker.markProgressDetails(id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json, rollout_checkpoint_json);
         } else if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "markProgress")) {
             try tracker.markProgress(id, status, message, completed_targets, failed_targets);
         } else {
@@ -300,6 +337,7 @@ pub const ProgressRecorder = struct {
         failed_targets: usize,
         failure_details_json: ?[]const u8,
         rollout_targets_json: ?[]const u8,
+        rollout_checkpoint_json: ?[]const u8,
     ) anyerror!void,
 
     pub fn mark(
@@ -309,7 +347,7 @@ pub const ProgressRecorder = struct {
         completed_targets: usize,
         failed_targets: usize,
     ) !void {
-        try self.markDetails(status, message, completed_targets, failed_targets, null, null);
+        try self.markDetails(status, message, completed_targets, failed_targets, null, null, null);
     }
 
     pub fn markDetails(
@@ -320,10 +358,11 @@ pub const ProgressRecorder = struct {
         failed_targets: usize,
         failure_details_json: ?[]const u8,
         rollout_targets_json: ?[]const u8,
+        rollout_checkpoint_json: ?[]const u8,
     ) !void {
         if (self.completed_targets_ptr) |ptr| ptr.* = completed_targets;
         if (self.failed_targets_ptr) |ptr| ptr.* = failed_targets;
-        try self.markFn(self.ctx, self.release_id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json);
+        try self.markFn(self.ctx, self.release_id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json, rollout_checkpoint_json);
     }
 
     pub fn controlState(self: ProgressRecorder) RolloutControlState {
@@ -361,9 +400,10 @@ fn makeProgressRecorder(
             failed_targets: usize,
             failure_details_json: ?[]const u8,
             rollout_targets_json: ?[]const u8,
+            rollout_checkpoint_json: ?[]const u8,
         ) anyerror!void {
             const typed: TrackerPtr = @ptrCast(@alignCast(ctx));
-            try markReleaseIfPresent(typed, id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json);
+            try markReleaseIfPresent(typed, id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json, rollout_checkpoint_json);
         }
     };
 
@@ -395,7 +435,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
         );
     }
 
-    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0, null, null);
+    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0, null, null, null);
 
     const outcome = backend.apply() catch |err| {
         try markReleaseIfPresent(
@@ -405,6 +445,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
             backend.failureMessage(err),
             completed_targets,
             failed_targets,
+            null,
             null,
             null,
         );
@@ -420,6 +461,7 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
         outcome.failed_targets,
         outcome.failure_details_json,
         outcome.rollout_targets_json,
+        outcome.rollout_checkpoint_json,
     );
 
     return .{
@@ -696,6 +738,7 @@ test "reportFromDeployment preserves release metadata and counts services" {
         .trigger = "apply",
         .manifest_hash = "sha256:xyz",
         .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}]}",
+        .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":1,\"batch_end\":2,\"total_targets\":2,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":1,\"control_state\":\"active\"}",
         .status = "completed",
         .message = "all requested services started",
         .created_at = 220,
@@ -711,6 +754,8 @@ test "reportFromDeployment preserves release metadata and counts services" {
     try std.testing.expectEqualStrings("all requested services started", report.message.?);
     try std.testing.expectEqual(ApplyTrigger.apply, report.trigger);
     try std.testing.expect(report.source_release_id == null);
+    try std.testing.expect(report.rollout_checkpoint_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, report.rollout_checkpoint_json.?, "\"batch_end\":2") != null);
 }
 
 test "reportFromDeployment preserves structured rollback context" {
