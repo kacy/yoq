@@ -464,8 +464,8 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
 }
 
 fn writeHistoryHeader() void {
-    write("{s:<8} {s:<14} {s:<14} {s:<11} {s:<10} {s:<14} {s:<16} {s}\n", .{
-        "MARK", "ID", "STATUS", "ROLLOUT", "TRIGGER", "HASH", "TARGETS", "MESSAGE",
+    write("{s:<8} {s:<14} {s:<14} {s:<11} {s:<8} {s:<10} {s:<14} {s:<16} {s}\n", .{
+        "MARK", "ID", "STATUS", "ROLLOUT", "CTRL", "TRIGGER", "HASH", "TARGETS", "MESSAGE",
     });
 }
 
@@ -480,12 +480,14 @@ fn writeHistoryRow(entry: HistoryEntryView) void {
         "";
     var progress_buf: [64]u8 = undefined;
     const progress = formatProgressCounts(&progress_buf, entry.completed_targets, entry.failed_targets, entry.remaining_targets);
+    const control = formatRolloutControlState(entry.rollout_control_state);
 
-    write("{s:<8} {s:<14} {s:<14} {s:<11} {s:<10} {s:<14} {s:<16} {s}\n", .{
+    write("{s:<8} {s:<14} {s:<14} {s:<11} {s:<8} {s:<10} {s:<14} {s:<16} {s}\n", .{
         mark,
         truncate(entry.id, 12),
         entry.status,
         entry.rollout_state,
+        control,
         entry.trigger,
         truncate(entry.manifest_hash, 12),
         progress,
@@ -693,6 +695,12 @@ fn formatProgressCounts(buf: []u8, completed_targets: usize, failed_targets: usi
     }) catch "?";
 }
 
+fn formatRolloutControlState(control_state: []const u8) []const u8 {
+    if (std.mem.eql(u8, control_state, "active")) return "-";
+    if (std.mem.eql(u8, control_state, "cancel_requested")) return "cancel";
+    return control_state;
+}
+
 test "parseHistoryObject extracts app release fields" {
     const entry = parseHistoryObject(
         \\{"id":"dep-1","app":"demo-app","service":"demo-app","trigger":"apply","status":"completed","manifest_hash":"sha256:123","created_at":42,"service_count":2,"worker_count":1,"cron_count":3,"training_job_count":4,"completed_targets":0,"failed_targets":0,"remaining_targets":2,"source_release_id":null,"message":null}
@@ -879,6 +887,12 @@ test "writeHistoryJsonObject preserves rollout control state" {
     try std.testing.expectEqualStrings("paused", parsed.rollout_control_state);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_control_state\":\"paused\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"control_state\":\"paused\"") != null);
+}
+
+test "formatRolloutControlState shortens active and cancel states" {
+    try std.testing.expectEqualStrings("-", formatRolloutControlState("active"));
+    try std.testing.expectEqualStrings("paused", formatRolloutControlState("paused"));
+    try std.testing.expectEqualStrings("cancel", formatRolloutControlState("cancel_requested"));
 }
 
 test "historyEntryFromDeployment preserves partially failed local release state" {

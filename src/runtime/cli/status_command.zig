@@ -411,8 +411,8 @@ fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
 }
 
 fn printAppStatusHeader() void {
-    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
-        "APP", "RELEASE", "STATUS", "ROLLOUT", "TRIGGER", "WORKLOADS", "TARGETS", "TRAINING", "PREV OK", "MESSAGE",
+    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<8} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "ROLLOUT", "CTRL", "TRIGGER", "WORKLOADS", "TARGETS", "TRAINING", "PREV OK", "MESSAGE",
     });
 }
 
@@ -431,17 +431,19 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
     }) catch "?";
     var training_buf: [48]u8 = undefined;
     const training_str = formatTrainingRuntime(&training_buf, snapshot);
+    const control_str = formatRolloutControlState(snapshot.rollout_control_state);
 
     const previous_successful = if (snapshot.previous_successful_release_id) |release_id|
         cli.truncate(release_id, 12)
     else
         "-";
 
-    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
+    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<8} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
         snapshot.app_name,
         cli.truncate(snapshot.release_id, 12),
         snapshot.status,
         snapshot.rollout_state,
+        control_str,
         snapshot.trigger,
         kinds_str,
         progress_str,
@@ -490,6 +492,12 @@ fn formatTrainingRuntime(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
         snapshot.paused_training_jobs,
         snapshot.failed_training_jobs,
     }) catch "?";
+}
+
+fn formatRolloutControlState(control_state: []const u8) []const u8 {
+    if (std.mem.eql(u8, control_state, "active")) return "-";
+    if (std.mem.eql(u8, control_state, "cancel_requested")) return "cancel";
+    return control_state;
 }
 
 fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
@@ -1197,6 +1205,12 @@ test "formatAppProgress summarizes in-flight and partial outcomes" {
         .message = "apply completed",
     };
     try std.testing.expectEqualStrings("2 ok", formatAppProgress(&buf, completed));
+}
+
+test "formatRolloutControlState shortens active and cancel states" {
+    try std.testing.expectEqualStrings("-", formatRolloutControlState("active"));
+    try std.testing.expectEqualStrings("paused", formatRolloutControlState("paused"));
+    try std.testing.expectEqualStrings("cancel", formatRolloutControlState("cancel_requested"));
 }
 
 test "formatStatusMessage appends failure detail summary" {
