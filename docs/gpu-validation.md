@@ -46,6 +46,17 @@ The smoke script checks:
 - `yoq gpu bench --json` when at least 2 GPUs are visible
 - `zig build test-gpu`
 
+For clustered training validation, the app-first control plane now manages training definitions and remote lifecycle commands. The relevant operator path is:
+
+```bash
+yoq up --server 10.0.0.1:7700 -f manifest.toml
+yoq train start finetune --server 10.0.0.1:7700
+yoq train status finetune --server 10.0.0.1:7700
+yoq train logs finetune --server 10.0.0.1:7700
+```
+
+`yoq train logs --server ...` now proxies to the agent hosting the selected rank. If that agent is unreachable, the API returns an explicit hosting-agent error.
+
 ## recommended first cloud target
 
 Start with a single Linux GPU VM, not Kubernetes and not multi-node NCCL.
