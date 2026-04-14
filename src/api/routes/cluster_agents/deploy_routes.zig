@@ -1206,6 +1206,8 @@ fn formatAppApplyResponse(
     try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
     try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"placed\":{d},\"failed\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         summary.service_count,
         summary.worker_count,
@@ -1231,6 +1233,8 @@ fn formatAppApplyResponse(
     try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
     try writer.writeAll(",\"rollout\":{");
     try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
     try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.completed_targets,
         report.failed_targets,
@@ -1370,6 +1374,25 @@ test "formatAppApplyResponse includes partially failed status" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"one or more placements failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"degraded\",\"completed_targets\":1,\"failed_targets\":1,\"remaining_targets\":0,\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}],\"targets\":null}") != null);
+}
+
+test "formatAppApplyResponse includes rollout control state" {
+    const alloc = std.testing.allocator;
+    const json = try formatAppApplyResponse(alloc, .{
+        .app_name = "demo-app",
+        .release_id = "dep-7",
+        .status = .in_progress,
+        .service_count = 1,
+        .placed = 0,
+        .failed = 0,
+        .completed_targets = 0,
+        .failed_targets = 0,
+        .rollout_control_state = .paused,
+    }, .{ .service_count = 1 });
+    defer alloc.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_control_state\":\"paused\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"control_state\":\"paused\"") != null);
 }
 
 test "formatLegacyApplyResponse preserves compact deploy shape" {

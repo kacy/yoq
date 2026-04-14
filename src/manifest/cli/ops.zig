@@ -389,6 +389,7 @@ const HistoryEntryView = struct {
     trigger: []const u8,
     status: []const u8,
     rollout_state: []const u8 = "unknown",
+    rollout_control_state: []const u8 = "active",
     manifest_hash: []const u8,
     created_at: i64,
     service_count: usize = 0,
@@ -416,6 +417,7 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .trigger = report.trigger.toString(),
         .status = report.status.toString(),
         .rollout_state = report.rolloutState(),
+        .rollout_control_state = report.rollout_control_state.toString(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
         .service_count = summary.service_count,
@@ -442,6 +444,7 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .trigger = json_helpers.extractJsonString(obj, "trigger") orelse "apply",
         .status = json_helpers.extractJsonString(obj, "status") orelse "?",
         .rollout_state = json_helpers.extractJsonString(obj, "rollout_state") orelse "unknown",
+        .rollout_control_state = json_helpers.extractJsonString(obj, "rollout_control_state") orelse "active",
         .manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?",
         .created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0,
         .service_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "service_count") orelse 0)),
@@ -511,6 +514,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.stringField("trigger", entry.trigger);
     w.stringField("status", entry.status);
     w.stringField("rollout_state", entry.rollout_state);
+    w.stringField("rollout_control_state", entry.rollout_control_state);
     w.stringField("manifest_hash", entry.manifest_hash);
     w.intField("created_at", entry.created_at);
     w.uintField("service_count", entry.service_count);
@@ -526,6 +530,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
     w.beginObjectField("rollout");
     w.stringField("state", entry.rollout_state);
+    w.stringField("control_state", entry.rollout_control_state);
     w.uintField("completed_targets", entry.completed_targets);
     w.uintField("failed_targets", entry.failed_targets);
     w.uintField("remaining_targets", entry.remaining_targets);
@@ -539,6 +544,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.stringField("trigger", entry.trigger);
     w.stringField("status", entry.status);
     w.stringField("rollout_state", entry.rollout_state);
+    w.stringField("rollout_control_state", entry.rollout_control_state);
     w.stringField("manifest_hash", entry.manifest_hash);
     w.intField("created_at", entry.created_at);
     w.uintField("completed_targets", entry.completed_targets);
@@ -550,6 +556,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
     w.beginObjectField("rollout");
     w.stringField("state", entry.rollout_state);
+    w.stringField("control_state", entry.rollout_control_state);
     w.uintField("completed_targets", entry.completed_targets);
     w.uintField("failed_targets", entry.failed_targets);
     w.uintField("remaining_targets", entry.remaining_targets);
@@ -844,6 +851,34 @@ test "writeHistoryJsonObject preserves failure details" {
 
     try std.testing.expect(parsed.failure_details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, parsed.failure_details_json.?, "\"reason\":\"placement_failed\"") != null);
+}
+
+test "writeHistoryJsonObject preserves rollout control state" {
+    const entry = HistoryEntryView{
+        .id = "dep-6",
+        .app = "demo-app",
+        .service = "demo-app",
+        .trigger = "apply",
+        .status = "in_progress",
+        .rollout_state = "blocked",
+        .rollout_control_state = "paused",
+        .manifest_hash = "sha256:666",
+        .created_at = 600,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .remaining_targets = 1,
+        .source_release_id = null,
+        .message = "apply in progress",
+    };
+
+    var w = json_out.JsonWriter{};
+    writeHistoryJsonObject(&w, entry);
+    const json = w.getWritten();
+    const parsed = parseHistoryObject(json);
+
+    try std.testing.expectEqualStrings("paused", parsed.rollout_control_state);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_control_state\":\"paused\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"control_state\":\"paused\"") != null);
 }
 
 test "historyEntryFromDeployment preserves partially failed local release state" {

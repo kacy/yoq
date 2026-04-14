@@ -146,6 +146,7 @@ const AppStatusSnapshot = struct {
     release_id: []const u8,
     status: []const u8,
     rollout_state: []const u8 = "unknown",
+    rollout_control_state: []const u8 = "active",
     manifest_hash: []const u8,
     created_at: i64,
     service_count: usize = 0,
@@ -163,6 +164,7 @@ const AppStatusSnapshot = struct {
     previous_successful_trigger: ?[]const u8 = null,
     previous_successful_status: ?[]const u8 = null,
     previous_successful_rollout_state: ?[]const u8 = null,
+    previous_successful_rollout_control_state: ?[]const u8 = null,
     previous_successful_manifest_hash: ?[]const u8 = null,
     previous_successful_created_at: ?i64 = null,
     previous_successful_completed_targets: usize = 0,
@@ -497,6 +499,7 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .release_id = extractJsonString(json, "release_id") orelse "?",
         .status = extractJsonString(json, "status") orelse "unknown",
         .rollout_state = extractJsonString(json, "rollout_state") orelse "unknown",
+        .rollout_control_state = extractJsonString(json, "rollout_control_state") orelse "active",
         .manifest_hash = extractJsonString(json, "manifest_hash") orelse "?",
         .created_at = extractJsonInt(json, "created_at") orelse 0,
         .service_count = @intCast(@max(0, extractJsonInt(json, "service_count") orelse 0)),
@@ -514,6 +517,7 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .previous_successful_trigger = extractJsonString(json, "previous_successful_trigger"),
         .previous_successful_status = extractJsonString(json, "previous_successful_status"),
         .previous_successful_rollout_state = extractJsonString(json, "previous_successful_rollout_state"),
+        .previous_successful_rollout_control_state = extractJsonString(json, "previous_successful_rollout_control_state"),
         .previous_successful_manifest_hash = extractJsonString(json, "previous_successful_manifest_hash"),
         .previous_successful_created_at = extractJsonInt(json, "previous_successful_created_at"),
         .previous_successful_completed_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_completed_targets") orelse 0)),
@@ -536,6 +540,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.stringField("release_id", snapshot.release_id);
     w.stringField("status", snapshot.status);
     w.stringField("rollout_state", snapshot.rollout_state);
+    w.stringField("rollout_control_state", snapshot.rollout_control_state);
     w.stringField("manifest_hash", snapshot.manifest_hash);
     w.intField("created_at", snapshot.created_at);
     w.uintField("service_count", snapshot.service_count);
@@ -553,6 +558,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     if (snapshot.previous_successful_trigger) |trigger| w.stringField("previous_successful_trigger", trigger) else w.nullField("previous_successful_trigger");
     if (snapshot.previous_successful_status) |status_text| w.stringField("previous_successful_status", status_text) else w.nullField("previous_successful_status");
     if (snapshot.previous_successful_rollout_state) |state| w.stringField("previous_successful_rollout_state", state) else w.nullField("previous_successful_rollout_state");
+    if (snapshot.previous_successful_rollout_control_state) |state| w.stringField("previous_successful_rollout_control_state", state) else w.nullField("previous_successful_rollout_control_state");
     if (snapshot.previous_successful_manifest_hash) |manifest_hash| w.stringField("previous_successful_manifest_hash", manifest_hash) else w.nullField("previous_successful_manifest_hash");
     if (snapshot.previous_successful_created_at) |created_at| w.intField("previous_successful_created_at", created_at) else w.nullField("previous_successful_created_at");
     w.uintField("previous_successful_completed_targets", snapshot.previous_successful_completed_targets);
@@ -567,6 +573,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     if (snapshot.rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
     w.beginObjectField("rollout");
     w.stringField("state", snapshot.rollout_state);
+    w.stringField("control_state", snapshot.rollout_control_state);
     w.uintField("completed_targets", snapshot.completed_targets);
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
@@ -578,6 +585,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.stringField("trigger", snapshot.trigger);
     w.stringField("status", snapshot.status);
     w.stringField("rollout_state", snapshot.rollout_state);
+    w.stringField("rollout_control_state", snapshot.rollout_control_state);
     w.stringField("manifest_hash", snapshot.manifest_hash);
     w.intField("created_at", snapshot.created_at);
     w.uintField("completed_targets", snapshot.completed_targets);
@@ -589,6 +597,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     if (snapshot.rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
     w.beginObjectField("rollout");
     w.stringField("state", snapshot.rollout_state);
+    w.stringField("control_state", snapshot.rollout_control_state);
     w.uintField("completed_targets", snapshot.completed_targets);
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
@@ -602,6 +611,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
         w.stringField("trigger", snapshot.previous_successful_trigger orelse "apply");
         w.stringField("status", snapshot.previous_successful_status orelse "completed");
         w.stringField("rollout_state", snapshot.previous_successful_rollout_state orelse "unknown");
+        w.stringField("rollout_control_state", snapshot.previous_successful_rollout_control_state orelse "active");
         if (snapshot.previous_successful_manifest_hash) |manifest_hash| w.stringField("manifest_hash", manifest_hash) else w.nullField("manifest_hash");
         if (snapshot.previous_successful_created_at) |created_at| w.intField("created_at", created_at) else w.nullField("created_at");
         w.uintField("completed_targets", snapshot.previous_successful_completed_targets);
@@ -613,6 +623,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
         if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
         w.beginObjectField("rollout");
         w.stringField("state", snapshot.previous_successful_rollout_state orelse "unknown");
+        w.stringField("control_state", snapshot.previous_successful_rollout_control_state orelse "active");
         w.uintField("completed_targets", snapshot.previous_successful_completed_targets);
         w.uintField("failed_targets", snapshot.previous_successful_failed_targets);
         w.uintField("remaining_targets", snapshot.previous_successful_remaining_targets);
@@ -648,6 +659,7 @@ fn appStatusFromReports(
         .release_id = report.release_id orelse "?",
         .status = report.status.toString(),
         .rollout_state = report.rolloutState(),
+        .rollout_control_state = report.rollout_control_state.toString(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
         .service_count = summary.service_count,
@@ -665,6 +677,7 @@ fn appStatusFromReports(
         .previous_successful_trigger = if (previous_successful) |prev| prev.trigger.toString() else null,
         .previous_successful_status = if (previous_successful) |prev| prev.status.toString() else null,
         .previous_successful_rollout_state = if (previous_successful) |prev| prev.rolloutState() else null,
+        .previous_successful_rollout_control_state = if (previous_successful) |prev| prev.rollout_control_state.toString() else null,
         .previous_successful_manifest_hash = if (previous_successful) |prev| prev.manifest_hash else null,
         .previous_successful_created_at = if (previous_successful) |prev| prev.created_at else null,
         .previous_successful_completed_targets = if (previous_successful) |prev| prev.completed_targets else 0,
@@ -1005,6 +1018,31 @@ test "writeAppStatusJsonObject preserves failure details" {
 
     try std.testing.expect(parsed.failure_details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, parsed.failure_details_json.?, "\"reason\":\"readiness_timeout\"") != null);
+}
+
+test "writeAppStatusJsonObject preserves rollout control state" {
+    const snapshot = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-5",
+        .status = "in_progress",
+        .rollout_state = "blocked",
+        .rollout_control_state = "paused",
+        .manifest_hash = "sha256:555",
+        .created_at = 500,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .remaining_targets = 1,
+    };
+
+    var w = json_out.JsonWriter{};
+    writeAppStatusJsonObject(&w, snapshot);
+    const json = w.getWritten();
+    const parsed = parseAppStatusResponse(json);
+
+    try std.testing.expectEqualStrings("paused", parsed.rollout_control_state);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_control_state\":\"paused\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"control_state\":\"paused\"") != null);
 }
 
 test "appMatchesFilters applies failed and in-progress filters" {

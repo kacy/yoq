@@ -244,6 +244,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
         try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
+        try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
         try writer.print(",\"created_at\":{d}", .{report.created_at});
         try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
@@ -284,6 +286,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
         try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d},\"current\":{},\"previous_successful\":{}", .{
@@ -337,6 +341,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
     try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
+    try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
     try writer.print(",\"created_at\":{d},\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"active_training_jobs\":{d},\"paused_training_jobs\":{d},\"failed_training_jobs\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.created_at,
@@ -361,6 +367,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_status", if (previous_successful) |prev| prev.status.toString() else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_rollout_state", if (previous_successful) |prev| prev.rolloutState() else null);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_rollout_control_state", if (previous_successful) |prev| prev.rollout_control_state.toString() else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_manifest_hash", if (previous_successful) |prev| prev.manifest_hash else null);
     if (previous_successful) |prev| {
@@ -390,6 +398,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
     try writer.writeAll(",\"rollout\":{");
     try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
     try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.completed_targets,
         report.failed_targets,
@@ -409,6 +419,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
     try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
+    try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
     try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.created_at,
@@ -427,6 +439,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try writer.writeAll("\"rollout\":{");
     try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
+    try writer.writeByte(',');
+    try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
     try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.completed_targets,
         report.failed_targets,
@@ -449,6 +463,8 @@ fn formatAppStatusResponse(
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "rollout_state", prev.rolloutState());
         try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "rollout_control_state", prev.rollout_control_state.toString());
+        try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "manifest_hash", prev.manifest_hash);
         try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
             prev.created_at,
@@ -467,6 +483,8 @@ fn formatAppStatusResponse(
         try writer.writeByte(',');
         try writer.writeAll("\"rollout\":{");
         try json_helpers.writeJsonStringField(writer, "state", prev.rolloutState());
+        try writer.writeByte(',');
+        try json_helpers.writeJsonStringField(writer, "control_state", prev.rollout_control_state.toString());
         try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
             prev.completed_targets,
             prev.failed_targets,
@@ -910,6 +928,8 @@ test "formatAppStatusResponse shows blocked rollout state for paused releases" {
     defer alloc.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"blocked\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_control_state\":\"paused\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"control_state\":\"paused\"") != null);
 }
 
 test "formatAppStatusResponse falls back to rollback metadata inferred from legacy message" {
