@@ -134,6 +134,7 @@ fn migrateDeployments(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN trigger TEXT NOT NULL DEFAULT 'apply';") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN source_release_id TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN resumed_from_release_id TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN superseded_by_release_id TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN completed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failure_details_json TEXT;") catch {};

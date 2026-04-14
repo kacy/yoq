@@ -19,6 +19,7 @@ pub const ApplyContext = struct {
     trigger: ApplyTrigger = .apply,
     source_release_id: ?[]const u8 = null,
     resumed_from_release_id: ?[]const u8 = null,
+    superseded_by_release_id: ?[]const u8 = null,
 };
 
 pub const RolloutControlState = enum {
@@ -79,6 +80,7 @@ pub const ApplyResult = struct {
             .trigger = context.trigger,
             .source_release_id = context.source_release_id,
             .resumed_from_release_id = context.resumed_from_release_id,
+            .superseded_by_release_id = context.superseded_by_release_id,
         };
     }
 
@@ -109,6 +111,7 @@ pub const ApplyReport = struct {
     trigger: ApplyTrigger = .apply,
     source_release_id: ?[]const u8 = null,
     resumed_from_release_id: ?[]const u8 = null,
+    superseded_by_release_id: ?[]const u8 = null,
 
     pub fn deinit(self: ApplyReport, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
@@ -122,6 +125,7 @@ pub const ApplyReport = struct {
             .trigger = self.trigger,
             .source_release_id = self.source_release_id,
             .resumed_from_release_id = self.resumed_from_release_id,
+            .superseded_by_release_id = self.superseded_by_release_id,
         };
     }
 
@@ -223,6 +227,7 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .trigger = context.trigger,
         .source_release_id = context.source_release_id,
         .resumed_from_release_id = context.resumed_from_release_id,
+        .superseded_by_release_id = dep.superseded_by_release_id,
     };
 }
 
@@ -237,6 +242,7 @@ fn deploymentContext(dep: store.DeploymentRecord) ApplyContext {
                 .trigger = structured_trigger,
                 .source_release_id = dep.source_release_id,
                 .resumed_from_release_id = dep.resumed_from_release_id,
+                .superseded_by_release_id = dep.superseded_by_release_id,
             };
         }
 
@@ -246,14 +252,16 @@ fn deploymentContext(dep: store.DeploymentRecord) ApplyContext {
         return .{
             .trigger = structured_trigger,
             .resumed_from_release_id = dep.resumed_from_release_id,
+            .superseded_by_release_id = dep.superseded_by_release_id,
         };
     }
     const inferred = inferContextFromStoredMessage(dep.message);
-    if (dep.resumed_from_release_id != null) {
+    if (dep.resumed_from_release_id != null or dep.superseded_by_release_id != null) {
         return .{
             .trigger = inferred.trigger,
             .source_release_id = inferred.source_release_id,
             .resumed_from_release_id = dep.resumed_from_release_id,
+            .superseded_by_release_id = dep.superseded_by_release_id,
         };
     }
     return inferred;

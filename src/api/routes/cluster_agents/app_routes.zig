@@ -196,6 +196,7 @@ fn markSupersededClusterRollout(db: *sqlite.Db, alloc: std.mem.Allocator, active
         active.rollout_targets_json,
         active.rollout_checkpoint_json,
     );
+    try store.updateDeploymentSupersededByReleaseIdInDb(db, active.id, new_release_id);
 }
 
 fn resumeStoredClusterRollout(
@@ -327,6 +328,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
         try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
+        try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
@@ -340,6 +343,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
         try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
             report.completed_targets,
             report.failed_targets,
@@ -377,6 +382,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
         try writer.writeByte(',');
@@ -441,6 +448,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
+    try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_release_id", if (previous_successful) |prev| prev.release_id else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_trigger", if (previous_successful) |prev| prev.trigger.toString() else null);
@@ -468,6 +477,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_resumed_from_release_id", if (previous_successful) |prev| prev.resumed_from_release_id else null);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_superseded_by_release_id", if (previous_successful) |prev| prev.superseded_by_release_id else null);
+    try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_message", if (previous_successful) |prev| prev.message else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "previous_successful_failure_details", if (previous_successful) |prev| prev.failure_details_json else null);
@@ -489,6 +500,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
     try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.completed_targets,
         report.failed_targets,
@@ -524,6 +537,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
+    try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
@@ -538,6 +553,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
     try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.completed_targets,
         report.failed_targets,
@@ -576,6 +593,8 @@ fn formatAppStatusResponse(
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", prev.resumed_from_release_id);
         try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", prev.superseded_by_release_id);
+        try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", prev.message);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", prev.failure_details_json);
@@ -590,6 +609,8 @@ fn formatAppStatusResponse(
         try json_helpers.writeJsonStringField(writer, "control_state", prev.rollout_control_state.toString());
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", prev.resumed_from_release_id);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", prev.superseded_by_release_id);
         try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
             prev.completed_targets,
             prev.failed_targets,
@@ -1020,6 +1041,7 @@ test "handleRolloutControl resumes a paused stored rollout when no executor is a
     const old_dep = try store.getDeploymentInDb(harness.node.stateMachineDb(), alloc, "dep-paused");
     defer old_dep.deinit(alloc);
     try std.testing.expectEqualStrings("superseded", old_dep.status);
+    try std.testing.expectEqualStrings(json_helpers.extractJsonString(response.body, "release_id").?, old_dep.superseded_by_release_id.?);
     try std.testing.expect(old_dep.message != null);
     try std.testing.expect(std.mem.indexOf(u8, old_dep.message.?, "rollout resumed in release") != null);
 

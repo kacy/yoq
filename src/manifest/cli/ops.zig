@@ -164,6 +164,7 @@ const RollbackSummary = struct {
     remaining_targets: usize,
     source_release_id: ?[]const u8,
     resumed_from_release_id: ?[]const u8 = null,
+    superseded_by_release_id: ?[]const u8 = null,
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
@@ -406,6 +407,7 @@ const HistoryEntryView = struct {
     remaining_targets: usize,
     source_release_id: ?[]const u8,
     resumed_from_release_id: ?[]const u8 = null,
+    superseded_by_release_id: ?[]const u8 = null,
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
@@ -436,6 +438,7 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
         .resumed_from_release_id = report.resumed_from_release_id,
+        .superseded_by_release_id = report.superseded_by_release_id,
         .message = report.message,
         .failure_details_json = report.failure_details_json,
         .rollout_targets_json = report.rollout_targets_json,
@@ -465,6 +468,7 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "remaining_targets") orelse 0)),
         .source_release_id = json_helpers.extractJsonString(obj, "source_release_id"),
         .resumed_from_release_id = json_helpers.extractJsonString(obj, "resumed_from_release_id"),
+        .superseded_by_release_id = json_helpers.extractJsonString(obj, "superseded_by_release_id"),
         .message = json_helpers.extractJsonString(obj, "message"),
         .failure_details_json = json_helpers.extractJsonArray(obj, "failure_details"),
         .rollout_targets_json = json_helpers.extractJsonArray(obj, "rollout_targets"),
@@ -539,6 +543,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
+    if (entry.superseded_by_release_id) |release_id| w.stringField("superseded_by_release_id", release_id) else w.nullField("superseded_by_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
@@ -547,6 +552,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.stringField("state", entry.rollout_state);
     w.stringField("control_state", entry.rollout_control_state);
     if (entry.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
+    if (entry.superseded_by_release_id) |release_id| w.stringField("superseded_by_release_id", release_id) else w.nullField("superseded_by_release_id");
     w.uintField("completed_targets", entry.completed_targets);
     w.uintField("failed_targets", entry.failed_targets);
     w.uintField("remaining_targets", entry.remaining_targets);
@@ -569,6 +575,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
     if (entry.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
+    if (entry.superseded_by_release_id) |release_id| w.stringField("superseded_by_release_id", release_id) else w.nullField("superseded_by_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
@@ -656,6 +663,7 @@ fn markSupersededLocalRollout(active: store.DeploymentRecord, new_release_id: []
         active.rollout_targets_json,
         active.rollout_checkpoint_json,
     ) catch {};
+    store.updateDeploymentSupersededByReleaseId(active.id, new_release_id) catch {};
 }
 
 fn resumeLocalAppRollout(alloc: std.mem.Allocator, active: store.DeploymentRecord) !void {
@@ -862,6 +870,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
         .remaining_targets = 0,
         .source_release_id = "dep-0",
         .resumed_from_release_id = "dep-paused",
+        .superseded_by_release_id = "dep-next",
         .message = "healthy",
         .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
         .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"control_state\":\"active\"}",
@@ -888,6 +897,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqual(entry.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(entry.source_release_id.?, parsed.source_release_id.?);
     try std.testing.expectEqualStrings(entry.resumed_from_release_id.?, parsed.resumed_from_release_id.?);
+    try std.testing.expectEqualStrings(entry.superseded_by_release_id.?, parsed.superseded_by_release_id.?);
     try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
     try std.testing.expect(parsed.rollout_targets_json != null);
     try std.testing.expect(std.mem.indexOf(u8, parsed.rollout_targets_json.?, "\"workload_name\":\"web\"") != null);

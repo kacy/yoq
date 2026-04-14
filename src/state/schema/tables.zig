@@ -165,6 +165,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    trigger TEXT NOT NULL DEFAULT 'apply',
         \\    source_release_id TEXT,
         \\    resumed_from_release_id TEXT,
+        \\    superseded_by_release_id TEXT,
         \\    manifest_hash TEXT NOT NULL,
         \\    config_snapshot TEXT NOT NULL DEFAULT '',
         \\    completed_targets INTEGER NOT NULL DEFAULT 0,
