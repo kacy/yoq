@@ -160,6 +160,7 @@ const AppStatusSnapshot = struct {
     failed_targets: usize,
     remaining_targets: usize,
     source_release_id: ?[]const u8 = null,
+    resumed_from_release_id: ?[]const u8 = null,
     previous_successful_release_id: ?[]const u8 = null,
     previous_successful_trigger: ?[]const u8 = null,
     previous_successful_status: ?[]const u8 = null,
@@ -171,6 +172,7 @@ const AppStatusSnapshot = struct {
     previous_successful_failed_targets: usize = 0,
     previous_successful_remaining_targets: usize = 0,
     previous_successful_source_release_id: ?[]const u8 = null,
+    previous_successful_resumed_from_release_id: ?[]const u8 = null,
     previous_successful_message: ?[]const u8 = null,
     previous_successful_failure_details_json: ?[]const u8 = null,
     previous_successful_rollout_targets_json: ?[]const u8 = null,
@@ -523,6 +525,7 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .failed_targets = @intCast(@max(0, extractJsonInt(json, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, extractJsonInt(json, "remaining_targets") orelse 0)),
         .source_release_id = extractJsonString(json, "source_release_id"),
+        .resumed_from_release_id = extractJsonString(json, "resumed_from_release_id"),
         .previous_successful_release_id = extractJsonString(json, "previous_successful_release_id"),
         .previous_successful_trigger = extractJsonString(json, "previous_successful_trigger"),
         .previous_successful_status = extractJsonString(json, "previous_successful_status"),
@@ -534,6 +537,7 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .previous_successful_failed_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_failed_targets") orelse 0)),
         .previous_successful_remaining_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_remaining_targets") orelse 0)),
         .previous_successful_source_release_id = extractJsonString(json, "previous_successful_source_release_id"),
+        .previous_successful_resumed_from_release_id = extractJsonString(json, "previous_successful_resumed_from_release_id"),
         .previous_successful_message = extractJsonString(json, "previous_successful_message"),
         .previous_successful_failure_details_json = extractJsonArray(json, "previous_successful_failure_details"),
         .previous_successful_rollout_targets_json = extractJsonArray(json, "previous_successful_rollout_targets"),
@@ -566,6 +570,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (snapshot.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
     if (snapshot.previous_successful_release_id) |release_id| w.stringField("previous_successful_release_id", release_id) else w.nullField("previous_successful_release_id");
     if (snapshot.previous_successful_trigger) |trigger| w.stringField("previous_successful_trigger", trigger) else w.nullField("previous_successful_trigger");
     if (snapshot.previous_successful_status) |status_text| w.stringField("previous_successful_status", status_text) else w.nullField("previous_successful_status");
@@ -577,6 +582,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("previous_successful_failed_targets", snapshot.previous_successful_failed_targets);
     w.uintField("previous_successful_remaining_targets", snapshot.previous_successful_remaining_targets);
     if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("previous_successful_source_release_id", source_release_id) else w.nullField("previous_successful_source_release_id");
+    if (snapshot.previous_successful_resumed_from_release_id) |release_id| w.stringField("previous_successful_resumed_from_release_id", release_id) else w.nullField("previous_successful_resumed_from_release_id");
     if (snapshot.previous_successful_message) |message| w.stringField("previous_successful_message", message) else w.nullField("previous_successful_message");
     if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("previous_successful_failure_details", failure_details) else w.nullField("previous_successful_failure_details");
     if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("previous_successful_rollout_targets", targets) else w.nullField("previous_successful_rollout_targets");
@@ -588,6 +594,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.beginObjectField("rollout");
     w.stringField("state", snapshot.rollout_state);
     w.stringField("control_state", snapshot.rollout_control_state);
+    if (snapshot.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
     w.uintField("completed_targets", snapshot.completed_targets);
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
@@ -607,6 +614,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (snapshot.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
     if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (snapshot.rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
@@ -635,6 +643,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
         w.uintField("failed_targets", snapshot.previous_successful_failed_targets);
         w.uintField("remaining_targets", snapshot.previous_successful_remaining_targets);
         if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+        if (snapshot.previous_successful_resumed_from_release_id) |resumed_from_release_id| w.stringField("resumed_from_release_id", resumed_from_release_id) else w.nullField("resumed_from_release_id");
         if (snapshot.previous_successful_message) |message| w.stringField("message", message) else w.nullField("message");
         if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
         if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
@@ -642,6 +651,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
         w.beginObjectField("rollout");
         w.stringField("state", snapshot.previous_successful_rollout_state orelse "unknown");
         w.stringField("control_state", snapshot.previous_successful_rollout_control_state orelse "active");
+        if (snapshot.previous_successful_resumed_from_release_id) |resumed_from_release_id| w.stringField("resumed_from_release_id", resumed_from_release_id) else w.nullField("resumed_from_release_id");
         w.uintField("completed_targets", snapshot.previous_successful_completed_targets);
         w.uintField("failed_targets", snapshot.previous_successful_failed_targets);
         w.uintField("remaining_targets", snapshot.previous_successful_remaining_targets);
@@ -692,6 +702,7 @@ fn appStatusFromReports(
         .failed_targets = report.failed_targets,
         .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
+        .resumed_from_release_id = report.resumed_from_release_id,
         .previous_successful_release_id = if (previous_successful) |prev| prev.release_id else null,
         .previous_successful_trigger = if (previous_successful) |prev| prev.trigger.toString() else null,
         .previous_successful_status = if (previous_successful) |prev| prev.status.toString() else null,
@@ -703,6 +714,7 @@ fn appStatusFromReports(
         .previous_successful_failed_targets = if (previous_successful) |prev| prev.failed_targets else 0,
         .previous_successful_remaining_targets = if (previous_successful) |prev| prev.remainingTargets() else 0,
         .previous_successful_source_release_id = if (previous_successful) |prev| prev.source_release_id else null,
+        .previous_successful_resumed_from_release_id = if (previous_successful) |prev| prev.resumed_from_release_id else null,
         .previous_successful_message = if (previous_successful) |prev| prev.message else null,
         .previous_successful_failure_details_json = if (previous_successful) |prev| prev.failure_details_json else null,
         .previous_successful_rollout_targets_json = if (previous_successful) |prev| prev.rollout_targets_json else null,
@@ -939,6 +951,7 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
         .failed_targets = 1,
         .remaining_targets = 0,
         .source_release_id = "dep-1",
+        .resumed_from_release_id = "dep-paused",
         .previous_successful_release_id = "dep-0",
         .previous_successful_manifest_hash = "sha256:111",
         .previous_successful_created_at = 100,
@@ -971,6 +984,7 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqual(snapshot.failed_targets, parsed.failed_targets);
     try std.testing.expectEqual(snapshot.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(snapshot.source_release_id.?, parsed.source_release_id.?);
+    try std.testing.expectEqualStrings(snapshot.resumed_from_release_id.?, parsed.resumed_from_release_id.?);
     try std.testing.expectEqualStrings(snapshot.previous_successful_release_id.?, parsed.previous_successful_release_id.?);
     try std.testing.expectEqualStrings(snapshot.previous_successful_manifest_hash.?, parsed.previous_successful_manifest_hash.?);
     try std.testing.expectEqual(snapshot.previous_successful_created_at.?, parsed.previous_successful_created_at.?);

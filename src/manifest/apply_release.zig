@@ -18,6 +18,7 @@ pub const ApplyTrigger = enum {
 pub const ApplyContext = struct {
     trigger: ApplyTrigger = .apply,
     source_release_id: ?[]const u8 = null,
+    resumed_from_release_id: ?[]const u8 = null,
 };
 
 pub const RolloutControlState = enum {
@@ -77,6 +78,7 @@ pub const ApplyResult = struct {
             .created_at = 0,
             .trigger = context.trigger,
             .source_release_id = context.source_release_id,
+            .resumed_from_release_id = context.resumed_from_release_id,
         };
     }
 
@@ -106,6 +108,7 @@ pub const ApplyReport = struct {
     created_at: i64 = 0,
     trigger: ApplyTrigger = .apply,
     source_release_id: ?[]const u8 = null,
+    resumed_from_release_id: ?[]const u8 = null,
 
     pub fn deinit(self: ApplyReport, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
@@ -118,6 +121,7 @@ pub const ApplyReport = struct {
         return .{
             .trigger = self.trigger,
             .source_release_id = self.source_release_id,
+            .resumed_from_release_id = self.resumed_from_release_id,
         };
     }
 
@@ -142,6 +146,7 @@ pub const ApplyReport = struct {
             .completed => "stable",
             .partially_failed => if (remaining > 0) "blocked" else "degraded",
             .failed => if (self.completed_targets > 0) "degraded" else "failed",
+            .superseded => "superseded",
             .rolled_back => "rolled_back",
         };
     }
@@ -217,6 +222,7 @@ pub fn reportFromDeployment(dep: store.DeploymentRecord) ApplyReport {
         .created_at = dep.created_at,
         .trigger = context.trigger,
         .source_release_id = context.source_release_id,
+        .resumed_from_release_id = context.resumed_from_release_id,
     };
 }
 
@@ -230,15 +236,27 @@ fn deploymentContext(dep: store.DeploymentRecord) ApplyContext {
             return .{
                 .trigger = structured_trigger,
                 .source_release_id = dep.source_release_id,
+                .resumed_from_release_id = dep.resumed_from_release_id,
             };
         }
 
         const inferred = inferContextFromStoredMessage(dep.message);
         if (inferred.trigger == .rollback) return inferred;
 
-        return .{ .trigger = structured_trigger };
+        return .{
+            .trigger = structured_trigger,
+            .resumed_from_release_id = dep.resumed_from_release_id,
+        };
     }
-    return inferContextFromStoredMessage(dep.message);
+    const inferred = inferContextFromStoredMessage(dep.message);
+    if (dep.resumed_from_release_id != null) {
+        return .{
+            .trigger = inferred.trigger,
+            .source_release_id = inferred.source_release_id,
+            .resumed_from_release_id = dep.resumed_from_release_id,
+        };
+    }
+    return inferred;
 }
 
 fn inferContextFromStoredMessage(message: ?[]const u8) ApplyContext {
@@ -279,6 +297,7 @@ pub fn materializeMessage(
             .completed => try alloc.dupe(u8, "apply completed"),
             .partially_failed => try alloc.dupe(u8, "apply partially failed"),
             .failed => try alloc.dupe(u8, "apply failed"),
+            .superseded => try alloc.dupe(u8, "apply superseded"),
             .rolled_back => try alloc.dupe(u8, "apply rolled back"),
         },
         .rollback => if (context.source_release_id) |source_id|

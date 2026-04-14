@@ -280,11 +280,13 @@ test "deployment status round-trip" {
     try std.testing.expectEqualStrings("partially_failed", DeploymentStatus.partially_failed.toString());
     try std.testing.expectEqualStrings("completed", DeploymentStatus.completed.toString());
     try std.testing.expectEqualStrings("failed", DeploymentStatus.failed.toString());
+    try std.testing.expectEqualStrings("superseded", DeploymentStatus.superseded.toString());
     try std.testing.expectEqualStrings("rolled_back", DeploymentStatus.rolled_back.toString());
 
     try std.testing.expectEqual(DeploymentStatus.pending, DeploymentStatus.fromString("pending").?);
     try std.testing.expectEqual(DeploymentStatus.partially_failed, DeploymentStatus.fromString("partially_failed").?);
     try std.testing.expectEqual(DeploymentStatus.completed, DeploymentStatus.fromString("completed").?);
+    try std.testing.expectEqual(DeploymentStatus.superseded, DeploymentStatus.fromString("superseded").?);
     try std.testing.expect(DeploymentStatus.fromString("unknown") == null);
 }
 

@@ -49,6 +49,7 @@ const ClusterReleaseTracker = struct {
             name,
             self.context.trigger.toString(),
             self.context.source_release_id,
+            self.context.resumed_from_release_id,
             manifest_hash,
             self.config_snapshot,
             0,
@@ -1195,6 +1196,15 @@ pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig
     return handleApply(alloc, request, ctx, .app, .{});
 }
 
+pub fn handleAppApplyWithContext(
+    alloc: std.mem.Allocator,
+    request: @import("../../http.zig").Request,
+    ctx: RouteContext,
+    apply_context: apply_release.ApplyContext,
+) Response {
+    return handleApply(alloc, request, ctx, .app, apply_context);
+}
+
 pub fn handleDeploy(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
     return handleApply(alloc, request, ctx, .legacy, .{});
 }
@@ -1205,10 +1215,19 @@ pub fn handleAppRollbackApply(
     ctx: RouteContext,
     source_release_id: []const u8,
 ) Response {
-    return handleApply(alloc, request, ctx, .app, .{
+    return handleAppRollbackApplyWithContext(alloc, request, ctx, .{
         .trigger = .rollback,
         .source_release_id = source_release_id,
     });
+}
+
+pub fn handleAppRollbackApplyWithContext(
+    alloc: std.mem.Allocator,
+    request: @import("../../http.zig").Request,
+    ctx: RouteContext,
+    apply_context: apply_release.ApplyContext,
+) Response {
+    return handleApply(alloc, request, ctx, .app, apply_context);
 }
 
 fn formatLegacyApplyResponse(alloc: std.mem.Allocator, placed: usize, failed: usize) ![]u8 {
@@ -1249,6 +1268,8 @@ fn formatAppApplyResponse(
     });
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
 
     const resolved_message = try report.resolvedMessage(alloc);
     defer if (resolved_message) |message| alloc.free(message);
@@ -1265,6 +1286,8 @@ fn formatAppApplyResponse(
     try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
     try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.completed_targets,
         report.failed_targets,

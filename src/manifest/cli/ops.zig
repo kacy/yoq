@@ -163,6 +163,7 @@ const RollbackSummary = struct {
     failed_targets: usize,
     remaining_targets: usize,
     source_release_id: ?[]const u8,
+    resumed_from_release_id: ?[]const u8 = null,
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
@@ -221,6 +222,7 @@ fn rollbackLocalApp(
         .failed_targets = apply_report.failed_targets,
         .remaining_targets = apply_report.remainingTargets(),
         .source_release_id = apply_report.source_release_id,
+        .resumed_from_release_id = apply_report.resumed_from_release_id,
         .message = apply_report.message,
     });
 
@@ -403,6 +405,7 @@ const HistoryEntryView = struct {
     failed_targets: usize,
     remaining_targets: usize,
     source_release_id: ?[]const u8,
+    resumed_from_release_id: ?[]const u8 = null,
     message: ?[]const u8,
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
@@ -432,6 +435,7 @@ fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
         .failed_targets = report.failed_targets,
         .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
+        .resumed_from_release_id = report.resumed_from_release_id,
         .message = report.message,
         .failure_details_json = report.failure_details_json,
         .rollout_targets_json = report.rollout_targets_json,
@@ -460,6 +464,7 @@ fn parseHistoryObject(obj: []const u8) HistoryEntryView {
         .failed_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "remaining_targets") orelse 0)),
         .source_release_id = json_helpers.extractJsonString(obj, "source_release_id"),
+        .resumed_from_release_id = json_helpers.extractJsonString(obj, "resumed_from_release_id"),
         .message = json_helpers.extractJsonString(obj, "message"),
         .failure_details_json = json_helpers.extractJsonArray(obj, "failure_details"),
         .rollout_targets_json = json_helpers.extractJsonArray(obj, "rollout_targets"),
@@ -533,6 +538,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("failed_targets", entry.failed_targets);
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (entry.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
@@ -540,6 +546,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.beginObjectField("rollout");
     w.stringField("state", entry.rollout_state);
     w.stringField("control_state", entry.rollout_control_state);
+    if (entry.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
     w.uintField("completed_targets", entry.completed_targets);
     w.uintField("failed_targets", entry.failed_targets);
     w.uintField("remaining_targets", entry.remaining_targets);
@@ -561,6 +568,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
     w.uintField("failed_targets", entry.failed_targets);
     w.uintField("remaining_targets", entry.remaining_targets);
     if (entry.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (entry.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
     if (entry.message) |message| w.stringField("message", message) else w.nullField("message");
     if (entry.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
     if (entry.rollout_targets_json) |rollout_targets| w.rawField("rollout_targets", rollout_targets) else w.nullField("rollout_targets");
@@ -630,6 +638,7 @@ fn rolloutContextFromDeployment(dep: store.DeploymentRecord) apply_release.Apply
     return .{
         .trigger = if (dep.trigger != null and std.mem.eql(u8, dep.trigger.?, "rollback")) .rollback else .apply,
         .source_release_id = dep.source_release_id,
+        .resumed_from_release_id = dep.resumed_from_release_id,
     };
 }
 
@@ -639,7 +648,7 @@ fn markSupersededLocalRollout(active: store.DeploymentRecord, new_release_id: []
 
     store.updateDeploymentProgress(
         active.id,
-        "failed",
+        "superseded",
         message,
         active.completed_targets,
         active.failed_targets,
@@ -663,7 +672,8 @@ fn resumeLocalAppRollout(alloc: std.mem.Allocator, active: store.DeploymentRecor
     defer prepared.deinit();
     prepared.beginRuntime();
 
-    const context = rolloutContextFromDeployment(active);
+    var context = rolloutContextFromDeployment(active);
+    context.resumed_from_release_id = active.id;
     const apply_report = prepared.startRelease(context) catch |err| {
         writeErr("rollout resume failed: {}\n", .{err});
         return OpsError.DeploymentFailed;
@@ -737,6 +747,7 @@ fn parseRollbackSummary(json: []const u8) RollbackSummary {
         .failed_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "remaining_targets") orelse 0)),
         .source_release_id = json_helpers.extractJsonString(json, "source_release_id"),
+        .resumed_from_release_id = json_helpers.extractJsonString(json, "resumed_from_release_id"),
         .message = json_helpers.extractJsonString(json, "message"),
     };
 }
@@ -746,6 +757,7 @@ fn printRollbackSummary(summary: RollbackSummary) void {
     write("release: {s}\n", .{summary.release_id});
     write("trigger: {s}\n", .{summary.trigger});
     write("source_release_id: {s}\n", .{summary.source_release_id orelse "-"});
+    write("resumed_from_release_id: {s}\n", .{summary.resumed_from_release_id orelse "-"});
     write("status: {s}\n", .{summary.status});
     write("rollout_state: {s}\n", .{summary.rollout_state});
     write("rollout_control_state: {s}\n", .{formatRolloutControlState(summary.rollout_control_state)});
@@ -849,6 +861,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
         .failed_targets = 0,
         .remaining_targets = 0,
         .source_release_id = "dep-0",
+        .resumed_from_release_id = "dep-paused",
         .message = "healthy",
         .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
         .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"control_state\":\"active\"}",
@@ -874,6 +887,7 @@ test "writeHistoryJsonObject round-trips through remote parser" {
     try std.testing.expectEqual(entry.failed_targets, parsed.failed_targets);
     try std.testing.expectEqual(entry.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(entry.source_release_id.?, parsed.source_release_id.?);
+    try std.testing.expectEqualStrings(entry.resumed_from_release_id.?, parsed.resumed_from_release_id.?);
     try std.testing.expectEqualStrings(entry.message.?, parsed.message.?);
     try std.testing.expect(parsed.rollout_targets_json != null);
     try std.testing.expect(std.mem.indexOf(u8, parsed.rollout_targets_json.?, "\"workload_name\":\"web\"") != null);
@@ -980,13 +994,14 @@ test "formatRolloutControlState shortens active and cancel states" {
 
 test "parseRollbackSummary extracts rollout control state" {
     const summary = parseRollbackSummary(
-        \\{"app_name":"demo-app","release_id":"dep-7","trigger":"rollback","status":"in_progress","rollout_state":"blocked","rollout_control_state":"paused","completed_targets":1,"failed_targets":0,"remaining_targets":1,"source_release_id":"dep-3","message":"rollback in progress"}
+        \\{"app_name":"demo-app","release_id":"dep-7","trigger":"rollback","status":"in_progress","rollout_state":"blocked","rollout_control_state":"paused","completed_targets":1,"failed_targets":0,"remaining_targets":1,"source_release_id":"dep-3","resumed_from_release_id":"dep-paused","message":"rollback in progress"}
     );
 
     try std.testing.expectEqualStrings("demo-app", summary.app_name);
     try std.testing.expectEqualStrings("dep-7", summary.release_id);
     try std.testing.expectEqualStrings("blocked", summary.rollout_state);
     try std.testing.expectEqualStrings("paused", summary.rollout_control_state);
+    try std.testing.expectEqualStrings("dep-paused", summary.resumed_from_release_id.?);
 }
 
 test "historyEntryFromDeployment preserves partially failed local release state" {

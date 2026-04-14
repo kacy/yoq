@@ -177,6 +177,7 @@ fn rolloutContextFromDeployment(dep: store.DeploymentRecord) apply_release.Apply
     return .{
         .trigger = if (dep.trigger != null and std.mem.eql(u8, dep.trigger.?, "rollback")) .rollback else .apply,
         .source_release_id = dep.source_release_id,
+        .resumed_from_release_id = dep.resumed_from_release_id,
     };
 }
 
@@ -187,7 +188,7 @@ fn markSupersededClusterRollout(db: *sqlite.Db, alloc: std.mem.Allocator, active
     try store.updateDeploymentProgressInDb(
         db,
         active.id,
-        "failed",
+        "superseded",
         message,
         active.completed_targets,
         active.failed_targets,
@@ -212,9 +213,14 @@ fn resumeStoredClusterRollout(
         .content_length = active.config_snapshot.len,
     };
 
-    const response = switch (rolloutContextFromDeployment(active).trigger) {
-        .apply => deploy_routes.handleAppApply(alloc, request, ctx),
-        .rollback => deploy_routes.handleAppRollbackApply(alloc, request, ctx, active.source_release_id orelse active.id),
+    var context = rolloutContextFromDeployment(active);
+    context.resumed_from_release_id = active.id;
+    const response = switch (context.trigger) {
+        .apply => deploy_routes.handleAppApplyWithContext(alloc, request, ctx, context),
+        .rollback => blk: {
+            context.source_release_id = active.source_release_id orelse active.id;
+            break :blk deploy_routes.handleAppRollbackApplyWithContext(alloc, request, ctx, context);
+        },
     };
     if (response.status != .ok) return response;
 
@@ -319,6 +325,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
         try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
+        try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
@@ -330,6 +338,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
         try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
             report.completed_targets,
             report.failed_targets,
@@ -365,6 +375,8 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         });
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
         try writer.writeByte(',');
@@ -427,6 +439,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
+    try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_release_id", if (previous_successful) |prev| prev.release_id else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_trigger", if (previous_successful) |prev| prev.trigger.toString() else null);
@@ -452,6 +466,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_source_release_id", if (previous_successful) |prev| prev.source_release_id else null);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_resumed_from_release_id", if (previous_successful) |prev| prev.resumed_from_release_id else null);
+    try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "previous_successful_message", if (previous_successful) |prev| prev.message else null);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "previous_successful_failure_details", if (previous_successful) |prev| prev.failure_details_json else null);
@@ -471,6 +487,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
     try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.completed_targets,
         report.failed_targets,
@@ -504,6 +522,8 @@ fn formatAppStatusResponse(
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
     try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
+    try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
@@ -516,6 +536,8 @@ fn formatAppStatusResponse(
     try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
+    try writer.writeByte(',');
+    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
     try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         report.completed_targets,
         report.failed_targets,
@@ -552,6 +574,8 @@ fn formatAppStatusResponse(
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "source_release_id", prev.source_release_id);
         try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", prev.resumed_from_release_id);
+        try writer.writeByte(',');
         try json_helpers.writeNullableJsonStringField(writer, "message", prev.message);
         try writer.writeByte(',');
         try json_helpers.writeNullableJsonRawField(writer, "failure_details", prev.failure_details_json);
@@ -564,6 +588,8 @@ fn formatAppStatusResponse(
         try json_helpers.writeJsonStringField(writer, "state", prev.rolloutState());
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "control_state", prev.rollout_control_state.toString());
+        try writer.writeByte(',');
+        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", prev.resumed_from_release_id);
         try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
             prev.completed_targets,
             prev.failed_targets,
@@ -988,11 +1014,12 @@ test "handleRolloutControl resumes a paused stored rollout when no executor is a
     defer freeResponse(alloc, response);
     try expectResponseOk(response);
     try expectJsonContains(response.body, "\"status\":\"completed\"");
+    try expectJsonContains(response.body, "\"resumed_from_release_id\":\"dep-paused\"");
     try std.testing.expect(std.mem.indexOf(u8, response.body, "\"release_id\":\"dep-paused\"") == null);
 
     const old_dep = try store.getDeploymentInDb(harness.node.stateMachineDb(), alloc, "dep-paused");
     defer old_dep.deinit(alloc);
-    try std.testing.expectEqualStrings("failed", old_dep.status);
+    try std.testing.expectEqualStrings("superseded", old_dep.status);
     try std.testing.expect(old_dep.message != null);
     try std.testing.expect(std.mem.indexOf(u8, old_dep.message.?, "rollout resumed in release") != null);
 
@@ -1000,6 +1027,7 @@ test "handleRolloutControl resumes a paused stored rollout when no executor is a
     defer latest.deinit(alloc);
     try std.testing.expect(!std.mem.eql(u8, latest.id, "dep-paused"));
     try std.testing.expectEqualStrings("completed", latest.status);
+    try std.testing.expectEqualStrings("dep-paused", latest.resumed_from_release_id.?);
 }
 
 test "formatAppStatusResponse includes structured rollback metadata" {

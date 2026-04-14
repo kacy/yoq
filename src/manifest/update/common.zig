@@ -17,6 +17,7 @@ pub const DeploymentStatus = enum {
     partially_failed,
     completed,
     failed,
+    superseded,
     rolled_back,
 
     pub fn toString(self: DeploymentStatus) []const u8 {
@@ -26,6 +27,7 @@ pub const DeploymentStatus = enum {
             .partially_failed => "partially_failed",
             .completed => "completed",
             .failed => "failed",
+            .superseded => "superseded",
             .rolled_back => "rolled_back",
         };
     }
@@ -36,6 +38,7 @@ pub const DeploymentStatus = enum {
         if (std.mem.eql(u8, s, "partially_failed")) return .partially_failed;
         if (std.mem.eql(u8, s, "completed")) return .completed;
         if (std.mem.eql(u8, s, "failed")) return .failed;
+        if (std.mem.eql(u8, s, "superseded")) return .superseded;
         if (std.mem.eql(u8, s, "rolled_back")) return .rolled_back;
         return null;
     }
