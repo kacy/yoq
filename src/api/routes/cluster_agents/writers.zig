@@ -91,6 +91,10 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
     try json_helpers.writeJsonEscaped(writer, assignment.command);
     try writer.writeAll("\",\"status\":\"");
     try writer.writeAll(assignment.status);
+    if (assignment.status_reason) |status_reason| {
+        try writer.writeAll("\",\"status_reason\":\"");
+        try json_helpers.writeJsonEscaped(writer, status_reason);
+    }
     try writer.writeAll("\",\"cpu_limit\":");
     try std.fmt.format(writer, "{d}", .{assignment.cpu_limit});
     try writer.writeAll(",\"memory_limit_mb\":");
@@ -109,6 +113,10 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
         try writer.writeAll(",\"workload_name\":\"");
         try json_helpers.writeJsonEscaped(writer, workload_name);
         try writer.writeByte('"');
+    }
+    if (assignment.health_check_json) |health_check_json| {
+        try writer.writeAll(",\"health_check\":");
+        try writer.writeAll(health_check_json);
     }
     if (assignment.gang_rank) |rank| {
         try writer.writeAll(",\"gang_rank\":");

@@ -5,12 +5,19 @@ pub const FailureAction = enum {
     pause,
 };
 
+pub const RolloutStrategy = enum {
+    rolling,
+    blue_green,
+    canary,
+};
+
 pub const DeploymentStatus = enum {
     pending,
     in_progress,
     partially_failed,
     completed,
     failed,
+    superseded,
     rolled_back,
 
     pub fn toString(self: DeploymentStatus) []const u8 {
@@ -20,6 +27,7 @@ pub const DeploymentStatus = enum {
             .partially_failed => "partially_failed",
             .completed => "completed",
             .failed => "failed",
+            .superseded => "superseded",
             .rolled_back => "rolled_back",
         };
     }
@@ -30,12 +38,14 @@ pub const DeploymentStatus = enum {
         if (std.mem.eql(u8, s, "partially_failed")) return .partially_failed;
         if (std.mem.eql(u8, s, "completed")) return .completed;
         if (std.mem.eql(u8, s, "failed")) return .failed;
+        if (std.mem.eql(u8, s, "superseded")) return .superseded;
         if (std.mem.eql(u8, s, "rolled_back")) return .rolled_back;
         return null;
     }
 };
 
 pub const UpdateStrategy = struct {
+    strategy: RolloutStrategy = .rolling,
     parallelism: u32 = 1,
     delay_between_batches: u32 = 0,
     failure_action: FailureAction = .rollback,

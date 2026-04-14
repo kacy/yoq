@@ -140,12 +140,17 @@ pub fn drainSql(buf: []u8, id: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "UPDATE agents SET status = 'draining' WHERE id = '{s}';", .{id_esc});
 }
 
-pub fn updateAssignmentStatusSql(buf: []u8, assignment_id: []const u8, new_status: []const u8) ![]const u8 {
+pub fn updateAssignmentStatusSql(buf: []u8, assignment_id: []const u8, new_status: []const u8, reason: ?[]const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, assignment_id);
     var status_esc_buf: [64]u8 = undefined;
     const status_esc = try sql_escape.escapeSqlString(&status_esc_buf, new_status);
-    return std.fmt.bufPrint(buf, "UPDATE assignments SET status = '{s}' WHERE id = '{s}';", .{ status_esc, id_esc });
+    var reason_esc_buf: [128]u8 = undefined;
+    if (reason) |status_reason| {
+        const reason_esc = try sql_escape.escapeSqlString(&reason_esc_buf, status_reason);
+        return std.fmt.bufPrint(buf, "UPDATE assignments SET status = '{s}', status_reason = '{s}' WHERE id = '{s}';", .{ status_esc, reason_esc, id_esc });
+    }
+    return std.fmt.bufPrint(buf, "UPDATE assignments SET status = '{s}', status_reason = NULL WHERE id = '{s}';", .{ status_esc, id_esc });
 }
 
 pub fn markOfflineSql(buf: []u8, id: []const u8) ![]const u8 {
@@ -219,6 +224,65 @@ pub fn deleteAssignmentsForWorkloadSql(
         "DELETE FROM assignments WHERE app_name = '{s}' AND workload_kind = '{s}' AND workload_name = '{s}';",
         .{ app_esc, kind_esc, name_esc },
     );
+}
+
+pub fn deleteOtherAssignmentsForWorkloadSql(
+    buf: []u8,
+    app_name: []const u8,
+    workload_kind: []const u8,
+    workload_name: []const u8,
+    keep_ids: []const []const u8,
+) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    var app_esc_buf: [256]u8 = undefined;
+    const app_esc = try sql_escape.escapeSqlString(&app_esc_buf, app_name);
+    var kind_esc_buf: [64]u8 = undefined;
+    const kind_esc = try sql_escape.escapeSqlString(&kind_esc_buf, workload_kind);
+    var name_esc_buf: [256]u8 = undefined;
+    const name_esc = try sql_escape.escapeSqlString(&name_esc_buf, workload_name);
+
+    try writer.print(
+        "DELETE FROM assignments WHERE app_name = '{s}' AND workload_kind = '{s}' AND workload_name = '{s}'",
+        .{ app_esc, kind_esc, name_esc },
+    );
+    if (keep_ids.len > 0) {
+        try writer.writeAll(" AND id NOT IN (");
+        for (keep_ids, 0..) |id, i| {
+            if (i > 0) try writer.writeAll(", ");
+            var id_esc_buf: [64]u8 = undefined;
+            const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+            try writer.print("'{s}'", .{id_esc});
+        }
+        try writer.writeByte(')');
+    }
+    try writer.writeByte(';');
+    return stream.getWritten();
+}
+
+pub fn deleteAssignmentsByIdsSql(
+    buf: []u8,
+    assignment_ids: []const []const u8,
+) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    try writer.writeAll("DELETE FROM assignments");
+    if (assignment_ids.len > 0) {
+        try writer.writeAll(" WHERE id IN (");
+        for (assignment_ids, 0..) |id, i| {
+            if (i > 0) try writer.writeAll(", ");
+            var id_esc_buf: [64]u8 = undefined;
+            const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
+            try writer.print("'{s}'", .{id_esc});
+        }
+        try writer.writeByte(')');
+    } else {
+        try writer.writeAll(" WHERE 1 = 0");
+    }
+    try writer.writeByte(';');
+    return stream.getWritten();
 }
 
 pub fn wireguardPeerSql(

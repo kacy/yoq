@@ -12,12 +12,18 @@ pub const DeploymentRecord = struct {
     service_name: []const u8,
     trigger: ?[]const u8 = null,
     source_release_id: ?[]const u8 = null,
+    resumed_from_release_id: ?[]const u8 = null,
+    superseded_by_release_id: ?[]const u8 = null,
     manifest_hash: []const u8,
     config_snapshot: []const u8,
     completed_targets: usize = 0,
     failed_targets: usize = 0,
     status: []const u8,
     message: ?[]const u8,
+    failure_details_json: ?[]const u8 = null,
+    rollout_targets_json: ?[]const u8 = null,
+    rollout_checkpoint_json: ?[]const u8 = null,
+    rollout_control_state: ?[]const u8 = null,
     created_at: i64,
 
     pub fn deinit(self: DeploymentRecord, alloc: Allocator) void {
@@ -26,15 +32,21 @@ pub const DeploymentRecord = struct {
         alloc.free(self.service_name);
         if (self.trigger) |trigger| alloc.free(trigger);
         if (self.source_release_id) |source_release_id| alloc.free(source_release_id);
+        if (self.resumed_from_release_id) |resumed_from_release_id| alloc.free(resumed_from_release_id);
+        if (self.superseded_by_release_id) |superseded_by_release_id| alloc.free(superseded_by_release_id);
         alloc.free(self.manifest_hash);
         alloc.free(self.config_snapshot);
         alloc.free(self.status);
         if (self.message) |message| alloc.free(message);
+        if (self.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
+        if (self.rollout_targets_json) |rollout_targets_json| alloc.free(rollout_targets_json);
+        if (self.rollout_checkpoint_json) |rollout_checkpoint_json| alloc.free(rollout_checkpoint_json);
+        if (self.rollout_control_state) |rollout_control_state| alloc.free(rollout_control_state);
     }
 };
 
 const deployment_columns =
-    "id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, created_at";
+    "id, app_name, service_name, trigger, source_release_id, resumed_from_release_id, superseded_by_release_id, manifest_hash, config_snapshot, completed_targets, failed_targets, status, message, failure_details_json, rollout_targets_json, rollout_checkpoint_json, rollout_control_state, created_at";
 
 const DeploymentRow = struct {
     id: sqlite.Text,
@@ -42,12 +54,18 @@ const DeploymentRow = struct {
     service_name: sqlite.Text,
     trigger: ?sqlite.Text,
     source_release_id: ?sqlite.Text,
+    resumed_from_release_id: ?sqlite.Text,
+    superseded_by_release_id: ?sqlite.Text,
     manifest_hash: sqlite.Text,
     config_snapshot: sqlite.Text,
     completed_targets: i64,
     failed_targets: i64,
     status: sqlite.Text,
     message: ?sqlite.Text,
+    failure_details_json: ?sqlite.Text,
+    rollout_targets_json: ?sqlite.Text,
+    rollout_checkpoint_json: ?sqlite.Text,
+    rollout_control_state: ?sqlite.Text,
     created_at: i64,
 };
 
@@ -58,12 +76,18 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
         .service_name = row.service_name.data,
         .trigger = if (row.trigger) |trigger| trigger.data else null,
         .source_release_id = if (row.source_release_id) |source_release_id| source_release_id.data else null,
+        .resumed_from_release_id = if (row.resumed_from_release_id) |resumed_from_release_id| resumed_from_release_id.data else null,
+        .superseded_by_release_id = if (row.superseded_by_release_id) |superseded_by_release_id| superseded_by_release_id.data else null,
         .manifest_hash = row.manifest_hash.data,
         .config_snapshot = row.config_snapshot.data,
         .completed_targets = @intCast(@max(@as(i64, 0), row.completed_targets)),
         .failed_targets = @intCast(@max(@as(i64, 0), row.failed_targets)),
         .status = row.status.data,
         .message = if (row.message) |message| message.data else null,
+        .failure_details_json = if (row.failure_details_json) |failure_details_json| failure_details_json.data else null,
+        .rollout_targets_json = if (row.rollout_targets_json) |rollout_targets_json| rollout_targets_json.data else null,
+        .rollout_checkpoint_json = if (row.rollout_checkpoint_json) |rollout_checkpoint_json| rollout_checkpoint_json.data else null,
+        .rollout_control_state = if (row.rollout_control_state) |rollout_control_state| rollout_control_state.data else null,
         .created_at = row.created_at,
     };
 }
@@ -75,7 +99,7 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -83,12 +107,18 @@ pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!v
             record.service_name,
             record.trigger,
             record.source_release_id,
+            record.resumed_from_release_id,
+            record.superseded_by_release_id,
             record.manifest_hash,
             record.config_snapshot,
             @as(i64, @intCast(record.completed_targets)),
             @as(i64, @intCast(record.failed_targets)),
             record.status,
             record.message,
+            record.failure_details_json,
+            record.rollout_targets_json,
+            record.rollout_checkpoint_json,
+            record.rollout_control_state,
             record.created_at,
         },
     ) catch return StoreError.WriteFailed;
@@ -209,9 +239,28 @@ pub fn listLatestDeploymentsByAppInDb(
     return deployments;
 }
 
+pub fn listRecoverableActiveDeploymentsByApp(alloc: Allocator) StoreError!std.ArrayList(DeploymentRecord) {
+    const db = try common.getDb();
+    return listRecoverableActiveDeploymentsByAppInDb(db, alloc);
+}
+
+pub fn listRecoverableActiveDeploymentsByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+) StoreError!std.ArrayList(DeploymentRecord) {
+    return listQueryInDb(
+        db,
+        alloc,
+        "SELECT " ++ deployment_columns ++
+            " FROM deployments WHERE app_name IS NOT NULL AND status IN ('pending', 'in_progress')" ++
+            " AND COALESCE(rollout_control_state, 'active') = 'active' ORDER BY created_at ASC, rowid ASC;",
+        .{},
+    );
+}
+
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try common.getDb();
-    return updateDeploymentStatusInDb(db, id, status, message);
+    return updateDeploymentStatusInDb(db, id, status, message, null, null, null);
 }
 
 pub fn updateDeploymentStatusInDb(
@@ -219,8 +268,11 @@ pub fn updateDeploymentStatusInDb(
     id: []const u8,
     status: []const u8,
     message: ?[]const u8,
+    failure_details_json: ?[]const u8,
+    rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) StoreError!void {
-    return updateDeploymentProgressInDb(db, id, status, message, 0, 0);
+    return updateDeploymentProgressInDb(db, id, status, message, 0, 0, failure_details_json, rollout_targets_json, rollout_checkpoint_json);
 }
 
 pub fn updateDeploymentProgress(
@@ -229,9 +281,12 @@ pub fn updateDeploymentProgress(
     message: ?[]const u8,
     completed_targets: usize,
     failed_targets: usize,
+    failure_details_json: ?[]const u8,
+    rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) StoreError!void {
     const db = try common.getDb();
-    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets);
+    return updateDeploymentProgressInDb(db, id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json, rollout_checkpoint_json);
 }
 
 pub fn updateDeploymentProgressInDb(
@@ -241,12 +296,67 @@ pub fn updateDeploymentProgressInDb(
     message: ?[]const u8,
     completed_targets: usize,
     failed_targets: usize,
+    failure_details_json: ?[]const u8,
+    rollout_targets_json: ?[]const u8,
+    rollout_checkpoint_json: ?[]const u8,
 ) StoreError!void {
     db.exec(
-        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ? WHERE id = ?;",
+        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ?, failure_details_json = ?, rollout_targets_json = ?, rollout_checkpoint_json = ? WHERE id = ?;",
         .{},
-        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), id },
+        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), failure_details_json, rollout_targets_json, rollout_checkpoint_json, id },
     ) catch return StoreError.WriteFailed;
+}
+
+pub fn updateDeploymentRolloutControlState(id: []const u8, control_state: []const u8) StoreError!void {
+    const db = try common.getDb();
+    return updateDeploymentRolloutControlStateInDb(db, id, control_state);
+}
+
+pub fn updateDeploymentRolloutControlStateInDb(
+    db: *sqlite.Db,
+    id: []const u8,
+    control_state: []const u8,
+) StoreError!void {
+    db.exec(
+        "UPDATE deployments SET rollout_control_state = ? WHERE id = ?;",
+        .{},
+        .{ control_state, id },
+    ) catch return StoreError.WriteFailed;
+}
+
+pub fn updateDeploymentSupersededByReleaseId(id: []const u8, superseded_by_release_id: []const u8) StoreError!void {
+    const db = try common.getDb();
+    return updateDeploymentSupersededByReleaseIdInDb(db, id, superseded_by_release_id);
+}
+
+pub fn updateDeploymentSupersededByReleaseIdInDb(
+    db: *sqlite.Db,
+    id: []const u8,
+    superseded_by_release_id: []const u8,
+) StoreError!void {
+    db.exec(
+        "UPDATE deployments SET superseded_by_release_id = ? WHERE id = ?;",
+        .{},
+        .{ superseded_by_release_id, id },
+    ) catch return StoreError.WriteFailed;
+}
+
+pub fn getActiveDeploymentByApp(alloc: Allocator, app_name: []const u8) StoreError!DeploymentRecord {
+    const db = try common.getDb();
+    return getActiveDeploymentByAppInDb(db, alloc, app_name);
+}
+
+pub fn getActiveDeploymentByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+    app_name: []const u8,
+) StoreError!DeploymentRecord {
+    return queryOneInDb(
+        db,
+        alloc,
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE app_name = ? AND status IN ('pending', 'in_progress') ORDER BY created_at DESC, rowid DESC LIMIT 1;",
+        .{app_name},
+    );
 }
 
 pub fn getLatestDeployment(alloc: Allocator, service_name: []const u8) StoreError!DeploymentRecord {
@@ -349,9 +459,9 @@ test "deployment record round-trip via sqlite" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", @as(i64, 1000) },
+        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", null, null, "active", @as(i64, 1000) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -370,6 +480,7 @@ test "deployment record round-trip via sqlite" {
     try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
     try std.testing.expectEqualStrings("completed", record.status);
     try std.testing.expectEqualStrings("initial deploy", record.message.?);
+    try std.testing.expect(record.failure_details_json == null);
     try std.testing.expectEqual(@as(i64, 1000), record.created_at);
 }
 
@@ -401,9 +512,9 @@ test "deployment stores rollback transition metadata" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", @as(i64, 2100) },
+        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", null, null, "active", @as(i64, 2100) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -415,6 +526,55 @@ test "deployment stores rollback transition metadata" {
     try std.testing.expectEqualStrings("dep-1", record.source_release_id.?);
     try std.testing.expectEqual(@as(usize, 1), record.completed_targets);
     try std.testing.expectEqual(@as(usize, 0), record.failed_targets);
+}
+
+test "getActiveDeploymentByAppInDb returns latest pending or in progress release" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .created_at = 100,
+        .rollout_control_state = "active",
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{}",
+        .status = "pending",
+        .message = null,
+        .created_at = 200,
+        .rollout_control_state = "paused",
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:333",
+        .config_snapshot = "{}",
+        .status = "in_progress",
+        .message = null,
+        .created_at = 300,
+        .rollout_control_state = "active",
+    });
+
+    const active = try getActiveDeploymentByAppInDb(&db, std.testing.allocator, "demo-app");
+    defer active.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("dep-3", active.id);
+    try std.testing.expectEqualStrings("active", active.rollout_control_state.?);
 }
 
 test "getPreviousSuccessfulDeploymentByAppInDb excludes current release" {
@@ -593,6 +753,71 @@ test "listLatestDeploymentsByAppInDb returns empty list when no app releases exi
     defer latest.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 0), latest.items.len);
+}
+
+test "listRecoverableActiveDeploymentsByAppInDb returns only active recoverable releases" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-paused",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:1",
+        .config_snapshot = "{}",
+        .status = "in_progress",
+        .message = null,
+        .rollout_control_state = "paused",
+        .created_at = 100,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-active",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:2",
+        .config_snapshot = "{}",
+        .status = "in_progress",
+        .message = null,
+        .rollout_control_state = "active",
+        .created_at = 110,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-pending",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:3",
+        .config_snapshot = "{}",
+        .status = "pending",
+        .message = null,
+        .rollout_control_state = "active",
+        .created_at = 120,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-done",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:4",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .rollout_control_state = "active",
+        .created_at = 130,
+    });
+
+    var recoverable = try listRecoverableActiveDeploymentsByAppInDb(&db, std.testing.allocator);
+    defer {
+        for (recoverable.items) |dep| dep.deinit(std.testing.allocator);
+        recoverable.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), recoverable.items.len);
+    try std.testing.expectEqualStrings("dep-active", recoverable.items[0].id);
+    try std.testing.expectEqualStrings("dep-pending", recoverable.items[1].id);
 }
 
 test "deployment list ordered by timestamp desc" {

@@ -163,7 +163,7 @@ pub fn getAssignments(alloc: Allocator, db: *sqlite.Db, agent_id: []const u8) ![
     return queryAssignmentRows(
         alloc,
         db,
-        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = ?;",
+        "SELECT id, agent_id, image, command, status, status_reason, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, health_check_json, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = ?;",
         .{agent_id},
     );
 }
@@ -172,8 +172,23 @@ pub fn getOrphanedAssignments(alloc: Allocator, db: *sqlite.Db) ![]Assignment {
     return queryAssignmentRows(
         alloc,
         db,
-        "SELECT id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = '' AND status = 'pending';",
+        "SELECT id, agent_id, image, command, status, status_reason, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, health_check_json, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE agent_id = '' AND status = 'pending';",
         .{},
+    );
+}
+
+pub fn listAssignmentsForWorkload(
+    alloc: Allocator,
+    db: *sqlite.Db,
+    app_name: []const u8,
+    workload_kind: []const u8,
+    workload_name: []const u8,
+) ![]Assignment {
+    return queryAssignmentRows(
+        alloc,
+        db,
+        "SELECT id, agent_id, image, command, status, status_reason, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, health_check_json, gang_rank, gang_world_size, gang_master_addr, gang_master_port FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ? ORDER BY created_at, id;",
+        .{ app_name, workload_kind, workload_name },
     );
 }
 
@@ -241,11 +256,13 @@ const AssignmentRow = struct {
     image: sqlite.Text,
     command: sqlite.Text,
     status: sqlite.Text,
+    status_reason: ?sqlite.Text,
     cpu_limit: i64,
     memory_limit_mb: i64,
     app_name: ?sqlite.Text,
     workload_kind: ?sqlite.Text,
     workload_name: ?sqlite.Text,
+    health_check_json: ?sqlite.Text,
     gang_rank: ?i64,
     gang_world_size: ?i64,
     gang_master_addr: ?sqlite.Text,
@@ -270,11 +287,13 @@ fn queryAssignmentRows(alloc: Allocator, db: *sqlite.Db, comptime query: []const
             .image = row.image.data,
             .command = row.command.data,
             .status = row.status.data,
+            .status_reason = if (row.status_reason) |status_reason| status_reason.data else null,
             .cpu_limit = row.cpu_limit,
             .memory_limit_mb = row.memory_limit_mb,
             .app_name = if (row.app_name) |app_name| app_name.data else null,
             .workload_kind = if (row.workload_kind) |workload_kind| workload_kind.data else null,
             .workload_name = if (row.workload_name) |workload_name| workload_name.data else null,
+            .health_check_json = if (row.health_check_json) |health_check_json| health_check_json.data else null,
             .gang_rank = row.gang_rank,
             .gang_world_size = row.gang_world_size,
             .gang_master_addr = if (row.gang_master_addr) |addr| addr.data else null,

@@ -363,6 +363,7 @@ pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Requ
     if (request.body.len == 0) return common.badRequest("missing request body");
 
     const status = extractJsonString(request.body, "status") orelse return common.badRequest("missing status field");
+    const reason = extractJsonString(request.body, "reason");
 
     const valid_statuses = [_][]const u8{ "running", "stopped", "failed" };
     var valid = false;
@@ -375,7 +376,7 @@ pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Requ
     if (!valid) return common.badRequest("invalid status value");
 
     var sql_buf: [256]u8 = undefined;
-    const sql = agent_registry.updateAssignmentStatusSql(&sql_buf, assignment_id, status) catch return common.internalError();
+    const sql = agent_registry.updateAssignmentStatusSql(&sql_buf, assignment_id, status, reason) catch return common.internalError();
 
     _ = node.propose(sql) catch {
         return common.notLeader(alloc, node);

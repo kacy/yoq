@@ -6,6 +6,7 @@ pub const VolumeConstraint = volumes_mod.VolumeConstraint;
 pub const PlacementRequest = struct {
     image: []const u8,
     command: []const u8,
+    health_check_json: ?[]const u8 = null,
     cpu_limit: i64,
     memory_limit_mb: i64,
     app_name: ?[]const u8 = null,

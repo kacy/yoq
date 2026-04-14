@@ -304,6 +304,29 @@ test "full service — all fields populated" {
     try std.testing.expectEqual(spec.VolumeMount.Kind.named, web.volumes[1].kind);
 }
 
+test "service rollout policy parses from nested table" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.rollout]
+        \\strategy = "rolling"
+        \\parallelism = 2
+        \\delay_between_batches = "4s"
+        \\failure_action = "pause"
+        \\health_check_timeout = "15s"
+    );
+    defer manifest.deinit();
+
+    try std.testing.expectEqual(spec.RolloutStrategy.rolling, manifest.services[0].rollout.strategy);
+    try std.testing.expectEqual(@as(u32, 2), manifest.services[0].rollout.parallelism);
+    try std.testing.expectEqual(@as(u32, 4), manifest.services[0].rollout.delay_between_batches);
+    try std.testing.expectEqual(spec.RolloutFailureAction.pause, manifest.services[0].rollout.failure_action);
+    try std.testing.expectEqual(@as(u32, 15), manifest.services[0].rollout.health_check_timeout);
+}
+
 test "volume parsing — driver defaults to local" {
     const alloc = std.testing.allocator;
 

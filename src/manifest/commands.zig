@@ -34,6 +34,10 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     return ops.history(args, alloc);
 }
 
+pub fn rollout(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+    return ops.rollout(args, alloc);
+}
+
 pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     return ops.runWorker(args, alloc);
 }

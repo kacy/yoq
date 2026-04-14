@@ -144,6 +144,71 @@ pub fn parseRestartPolicy(service_name: []const u8, raw: ?[]const u8) common.Loa
     return common.LoadError.InvalidRestartPolicy;
 }
 
+pub fn parseRolloutPolicy(
+    service_name: []const u8,
+    table: ?*const toml.Table,
+) common.LoadError!spec.RolloutPolicy {
+    const rollout_table = table orelse return .{};
+
+    const strategy_raw = rollout_table.getString("strategy") orelse "rolling";
+    const strategy: spec.RolloutStrategy = if (std.mem.eql(u8, strategy_raw, "rolling"))
+        .rolling
+    else if (std.mem.eql(u8, strategy_raw, "blue_green"))
+        .blue_green
+    else if (std.mem.eql(u8, strategy_raw, "canary"))
+        .canary
+    else {
+        log.err("manifest: service '{s}' has unsupported rollout strategy '{s}' (expected rolling, blue_green, or canary)", .{ service_name, strategy_raw });
+        return common.LoadError.InvalidRolloutConfig;
+    };
+
+    const parallelism_raw = rollout_table.getInt("parallelism") orelse 1;
+    if (parallelism_raw < 1 or parallelism_raw > std.math.maxInt(u32)) {
+        log.err("manifest: service '{s}' rollout parallelism must be between 1 and {d}", .{
+            service_name,
+            std.math.maxInt(u32),
+        });
+        return common.LoadError.InvalidRolloutConfig;
+    }
+
+    const delay_between_batches = if (rollout_table.getString("delay_between_batches")) |delay_str|
+        parseDuration(delay_str) orelse {
+            log.err("manifest: service '{s}' has invalid rollout delay_between_batches '{s}'", .{ service_name, delay_str });
+            return common.LoadError.InvalidRolloutConfig;
+        }
+    else
+        0;
+
+    const health_check_timeout = if (rollout_table.getString("health_check_timeout")) |timeout_str|
+        parseDuration(timeout_str) orelse {
+            log.err("manifest: service '{s}' has invalid rollout health_check_timeout '{s}'", .{ service_name, timeout_str });
+            return common.LoadError.InvalidRolloutConfig;
+        }
+    else
+        0;
+
+    const failure_action_raw = rollout_table.getString("failure_action") orelse "rollback";
+    const failure_action: spec.RolloutFailureAction = if (std.mem.eql(u8, failure_action_raw, "rollback"))
+        .rollback
+    else if (std.mem.eql(u8, failure_action_raw, "pause"))
+        .pause
+    else {
+        log.err("manifest: service '{s}' has invalid rollout failure_action '{s}' (expected rollback or pause)", .{
+            service_name,
+            failure_action_raw,
+        });
+        return common.LoadError.InvalidRolloutConfig;
+    };
+
+    return .{
+        .strategy = strategy,
+        .parallelism = @intCast(parallelism_raw),
+        .delay_between_batches = @intCast(delay_between_batches),
+        .failure_action = failure_action,
+        .health_check_timeout = @intCast(health_check_timeout),
+    };
+}
+
 pub fn parseTlsConfig(
     alloc: std.mem.Allocator,
     service_name: []const u8,

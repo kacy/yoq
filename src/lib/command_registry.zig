@@ -63,6 +63,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "run-worker", .group = .build_manifest, .usage = "run-worker [-f manifest.toml] [--server host:port] <name>", .description = "run a one-shot worker task", .handler = manifest_cmds.runWorker },
     .{ .name = "rollback", .group = .build_manifest, .usage = "rollback <service> | --app [name] [--server h:p] [--release id] [--print]", .description = "rollback a service or app release", .handler = manifest_cmds.rollback },
     .{ .name = "history", .group = .build_manifest, .usage = "history <service> | --app [name] [--server h:p] [--json]", .description = "show service or app release history", .handler = manifest_cmds.history },
+    .{ .name = "rollout", .group = .build_manifest, .usage = "rollout <pause|resume|cancel> --app [name] [--server h:p]", .description = "control an active app rollout", .handler = manifest_cmds.rollout },
     .{ .name = "train", .group = .build_manifest, .usage = "train <start|status|stop|pause|resume|scale|logs> [--server host:port] <name>", .description = "manage training jobs", .handler = manifest_cmds.train },
 
     .{ .name = "serve", .group = .cluster, .usage = "serve [--port PORT] [--http-proxy-bind ADDR] [--http-proxy-port PORT]", .description = "start the API server (default: 7700)", .handler = cluster_cmds.serve },

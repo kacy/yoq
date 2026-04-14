@@ -31,6 +31,8 @@ pub const orphanAssignmentsSql = sql_mutations.orphanAssignmentsSql;
 pub const reassignSql = sql_mutations.reassignSql;
 pub const deleteAgentAssignmentsSql = sql_mutations.deleteAgentAssignmentsSql;
 pub const deleteAssignmentsForWorkloadSql = sql_mutations.deleteAssignmentsForWorkloadSql;
+pub const deleteOtherAssignmentsForWorkloadSql = sql_mutations.deleteOtherAssignmentsForWorkloadSql;
+pub const deleteAssignmentsByIdsSql = sql_mutations.deleteAssignmentsByIdsSql;
 pub const wireguardPeerSql = sql_mutations.wireguardPeerSql;
 pub const removeWireguardPeerSql = sql_mutations.removeWireguardPeerSql;
 
@@ -47,6 +49,7 @@ pub const listAgents = queries.listAgents;
 pub const getAgent = queries.getAgent;
 pub const getAssignments = queries.getAssignments;
 pub const getOrphanedAssignments = queries.getOrphanedAssignments;
+pub const listAssignmentsForWorkload = queries.listAssignmentsForWorkload;
 pub const countAssignmentsForWorkload = queries.countAssignmentsForWorkload;
 pub const WorkloadHost = queries.WorkloadHost;
 pub const findWorkloadHostByRank = queries.findWorkloadHostByRank;
@@ -63,6 +66,31 @@ test "registerSql generates valid SQL" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "INSERT INTO agents") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "10.0.0.5:7701") != null);
+}
+
+test "deleteOtherAssignmentsForWorkloadSql keeps new assignment ids" {
+    var buf: [512]u8 = undefined;
+    const sql = try deleteOtherAssignmentsForWorkloadSql(
+        &buf,
+        "demo-app",
+        "service",
+        "web",
+        &.{ "new123", "new456" },
+    );
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "DELETE FROM assignments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "app_name = 'demo-app'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "workload_kind = 'service'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "workload_name = 'web'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "id NOT IN ('new123', 'new456')") != null);
+}
+
+test "deleteAssignmentsByIdsSql targets only selected assignments" {
+    var buf: [256]u8 = undefined;
+    const sql = try deleteAssignmentsByIdsSql(&buf, &.{ "new123", "new456" });
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "DELETE FROM assignments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "id IN ('new123', 'new456')") != null);
 }
 
 test "registerSqlFull includes wireguard columns" {
@@ -201,19 +229,21 @@ test "drainSql generates valid SQL" {
 
 test "updateAssignmentStatusSql generates valid SQL" {
     var buf: [256]u8 = undefined;
-    const sql = try updateAssignmentStatusSql(&buf, "assign123456", "running");
+    const sql = try updateAssignmentStatusSql(&buf, "assign123456", "running", null);
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "UPDATE assignments SET status") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "running") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "assign123456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "status_reason = NULL") != null);
 }
 
 test "updateAssignmentStatusSql escapes values" {
     var buf: [512]u8 = undefined;
-    const sql = try updateAssignmentStatusSql(&buf, "id'; DROP TABLE assignments; --", "running");
+    const sql = try updateAssignmentStatusSql(&buf, "id'; DROP TABLE assignments; --", "running", "readiness_timeout");
 
     // single quote should be doubled
     try std.testing.expect(std.mem.indexOf(u8, sql, "id''; DROP TABLE assignments; --") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "readiness_timeout") != null);
 }
 
 test "validateToken correct" {
@@ -334,6 +364,7 @@ test "orphanAssignmentsSql only affects non-terminal assignments" {
         \\    image TEXT NOT NULL,
         \\    command TEXT NOT NULL DEFAULT '',
         \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    status_reason TEXT,
         \\    cpu_limit INTEGER NOT NULL DEFAULT 0,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 0,
         \\    gang_rank INTEGER,
@@ -399,6 +430,7 @@ test "getOrphanedAssignments returns only orphaned pending" {
         \\    image TEXT NOT NULL,
         \\    command TEXT NOT NULL DEFAULT '',
         \\    status TEXT NOT NULL DEFAULT 'pending',
+        \\    status_reason TEXT,
         \\    cpu_limit INTEGER NOT NULL DEFAULT 0,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 0,
         \\    gang_rank INTEGER,

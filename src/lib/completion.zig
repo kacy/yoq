@@ -65,6 +65,11 @@ const command_meta = [_]CommandMeta{
     .{ .name = "run-worker", .flags = &.{ "-f", "--server" } },
     .{ .name = "rollback", .flags = &.{ "--app", "--server", "--release", "--print" } },
     .{ .name = "history", .flags = &.{ "--app", "--server", "--json" } },
+    .{ .name = "rollout", .flags = &.{ "--app", "--server" }, .subcommands = &.{
+        .{ .name = "pause", .flags = &.{ "--app", "--server" } },
+        .{ .name = "resume", .flags = &.{ "--app", "--server" } },
+        .{ .name = "cancel", .flags = &.{ "--app", "--server" } },
+    } },
     .{ .name = "train", .flags = &.{ "-f", "--server", "--rank" }, .subcommands = &.{
         .{ .name = "start", .flags = &.{ "-f", "--server" } },
         .{ .name = "status", .flags = &.{ "-f", "--server" } },

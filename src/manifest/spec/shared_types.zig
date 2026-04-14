@@ -69,6 +69,25 @@ pub const RestartPolicy = enum {
     on_failure,
 };
 
+pub const RolloutFailureAction = enum {
+    rollback,
+    pause,
+};
+
+pub const RolloutStrategy = enum {
+    rolling,
+    blue_green,
+    canary,
+};
+
+pub const RolloutPolicy = struct {
+    strategy: RolloutStrategy = .rolling,
+    parallelism: u32 = 1,
+    delay_between_batches: u32 = 0,
+    failure_action: RolloutFailureAction = .rollback,
+    health_check_timeout: u32 = 0,
+};
+
 pub const CheckType = union(enum) {
     http: struct {
         path: []const u8,

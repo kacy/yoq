@@ -133,9 +133,16 @@ fn migrateDeployments(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN app_name TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN trigger TEXT NOT NULL DEFAULT 'apply';") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN source_release_id TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN resumed_from_release_id TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN superseded_by_release_id TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN completed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
     addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failed_targets INTEGER NOT NULL DEFAULT 0;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN failure_details_json TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN rollout_targets_json TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN rollout_checkpoint_json TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE deployments ADD COLUMN rollout_control_state TEXT DEFAULT 'active';") catch {};
     db.exec("UPDATE deployments SET trigger = 'apply' WHERE trigger IS NULL OR trigger = '';", .{}, .{}) catch {};
+    db.exec("UPDATE deployments SET rollout_control_state = 'active' WHERE rollout_control_state IS NULL OR rollout_control_state = '';", .{}, .{}) catch {};
 }
 
 fn migrateCronSchedules(db: *sqlite.Db) void {
@@ -153,9 +160,11 @@ fn migrateCronSchedules(db: *sqlite.Db) void {
 }
 
 fn migrateAssignments(db: *sqlite.Db) void {
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN status_reason TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN app_name TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_kind TEXT;") catch {};
     addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_name TEXT;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN health_check_json TEXT;") catch {};
 }
 
 fn addColumnIfMissing(db: *sqlite.Db, sql: []const u8) SchemaError!void {

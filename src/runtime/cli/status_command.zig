@@ -145,6 +145,8 @@ const AppStatusSnapshot = struct {
     trigger: []const u8,
     release_id: []const u8,
     status: []const u8,
+    rollout_state: []const u8 = "unknown",
+    rollout_control_state: []const u8 = "active",
     manifest_hash: []const u8,
     created_at: i64,
     service_count: usize = 0,
@@ -158,17 +160,29 @@ const AppStatusSnapshot = struct {
     failed_targets: usize,
     remaining_targets: usize,
     source_release_id: ?[]const u8 = null,
+    resumed_from_release_id: ?[]const u8 = null,
+    superseded_by_release_id: ?[]const u8 = null,
     previous_successful_release_id: ?[]const u8 = null,
     previous_successful_trigger: ?[]const u8 = null,
     previous_successful_status: ?[]const u8 = null,
+    previous_successful_rollout_state: ?[]const u8 = null,
+    previous_successful_rollout_control_state: ?[]const u8 = null,
     previous_successful_manifest_hash: ?[]const u8 = null,
     previous_successful_created_at: ?i64 = null,
     previous_successful_completed_targets: usize = 0,
     previous_successful_failed_targets: usize = 0,
     previous_successful_remaining_targets: usize = 0,
     previous_successful_source_release_id: ?[]const u8 = null,
+    previous_successful_resumed_from_release_id: ?[]const u8 = null,
+    previous_successful_superseded_by_release_id: ?[]const u8 = null,
     previous_successful_message: ?[]const u8 = null,
+    previous_successful_failure_details_json: ?[]const u8 = null,
+    previous_successful_rollout_targets_json: ?[]const u8 = null,
+    previous_successful_rollout_checkpoint_json: ?[]const u8 = null,
     message: ?[]const u8 = null,
+    failure_details_json: ?[]const u8 = null,
+    rollout_targets_json: ?[]const u8 = null,
+    rollout_checkpoint_json: ?[]const u8 = null,
 };
 
 fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!void {
@@ -403,13 +417,14 @@ fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
 }
 
 fn printAppStatusHeader() void {
-    write("{s:<14} {s:<14} {s:<14} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
-        "APP", "RELEASE", "STATUS", "TRIGGER", "WORKLOADS", "TARGETS", "TRAINING", "PREV OK", "MESSAGE",
+    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<8} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
+        "APP", "RELEASE", "STATUS", "ROLLOUT", "CTRL", "TRIGGER", "WORKLOADS", "TARGETS", "TRAINING", "PREV OK", "MESSAGE",
     });
 }
 
 fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
-    const msg = snapshot.message orelse "";
+    var message_buf: [160]u8 = undefined;
+    const msg = formatStatusMessage(&message_buf, snapshot.message, snapshot.failure_details_json);
 
     var progress_buf: [64]u8 = undefined;
     const progress_str = formatAppProgress(&progress_buf, snapshot);
@@ -422,16 +437,19 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
     }) catch "?";
     var training_buf: [48]u8 = undefined;
     const training_str = formatTrainingRuntime(&training_buf, snapshot);
+    const control_str = formatRolloutControlState(snapshot.rollout_control_state);
 
     const previous_successful = if (snapshot.previous_successful_release_id) |release_id|
         cli.truncate(release_id, 12)
     else
         "-";
 
-    write("{s:<14} {s:<14} {s:<14} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
+    write("{s:<14} {s:<14} {s:<14} {s:<11} {s:<8} {s:<10} {s:<11} {s:<22} {s:<18} {s:<14} {s}\n", .{
         snapshot.app_name,
         cli.truncate(snapshot.release_id, 12),
         snapshot.status,
+        snapshot.rollout_state,
+        control_str,
         snapshot.trigger,
         kinds_str,
         progress_str,
@@ -439,6 +457,19 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
         previous_successful,
         cli.truncate(msg, 48),
     });
+}
+
+fn formatStatusMessage(buf: []u8, message: ?[]const u8, failure_details_json: ?[]const u8) []const u8 {
+    if (message == null or message.?.len == 0) {
+        return json_helpers.summarizeFailureDetails(buf, failure_details_json) orelse "";
+    }
+
+    const prefix = std.fmt.bufPrint(buf, "{s}", .{message.?}) catch return message.?;
+    if (failure_details_json == null) return prefix;
+
+    const sep = std.fmt.bufPrint(buf[prefix.len..], " | ", .{}) catch return prefix;
+    const summary = json_helpers.summarizeFailureDetails(buf[prefix.len + sep.len ..], failure_details_json) orelse return prefix;
+    return buf[0 .. prefix.len + sep.len + summary.len];
 }
 
 fn formatAppProgress(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
@@ -469,12 +500,20 @@ fn formatTrainingRuntime(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
     }) catch "?";
 }
 
+fn formatRolloutControlState(control_state: []const u8) []const u8 {
+    if (std.mem.eql(u8, control_state, "active")) return "-";
+    if (std.mem.eql(u8, control_state, "cancel_requested")) return "cancel";
+    return control_state;
+}
+
 fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
     return .{
         .app_name = extractJsonString(json, "app_name") orelse "?",
         .trigger = extractJsonString(json, "trigger") orelse "apply",
         .release_id = extractJsonString(json, "release_id") orelse "?",
         .status = extractJsonString(json, "status") orelse "unknown",
+        .rollout_state = extractJsonString(json, "rollout_state") orelse "unknown",
+        .rollout_control_state = extractJsonString(json, "rollout_control_state") orelse "active",
         .manifest_hash = extractJsonString(json, "manifest_hash") orelse "?",
         .created_at = extractJsonInt(json, "created_at") orelse 0,
         .service_count = @intCast(@max(0, extractJsonInt(json, "service_count") orelse 0)),
@@ -488,17 +527,29 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .failed_targets = @intCast(@max(0, extractJsonInt(json, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, extractJsonInt(json, "remaining_targets") orelse 0)),
         .source_release_id = extractJsonString(json, "source_release_id"),
+        .resumed_from_release_id = extractJsonString(json, "resumed_from_release_id"),
+        .superseded_by_release_id = extractJsonString(json, "superseded_by_release_id"),
         .previous_successful_release_id = extractJsonString(json, "previous_successful_release_id"),
         .previous_successful_trigger = extractJsonString(json, "previous_successful_trigger"),
         .previous_successful_status = extractJsonString(json, "previous_successful_status"),
+        .previous_successful_rollout_state = extractJsonString(json, "previous_successful_rollout_state"),
+        .previous_successful_rollout_control_state = extractJsonString(json, "previous_successful_rollout_control_state"),
         .previous_successful_manifest_hash = extractJsonString(json, "previous_successful_manifest_hash"),
         .previous_successful_created_at = extractJsonInt(json, "previous_successful_created_at"),
         .previous_successful_completed_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_completed_targets") orelse 0)),
         .previous_successful_failed_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_failed_targets") orelse 0)),
         .previous_successful_remaining_targets = @intCast(@max(0, extractJsonInt(json, "previous_successful_remaining_targets") orelse 0)),
         .previous_successful_source_release_id = extractJsonString(json, "previous_successful_source_release_id"),
+        .previous_successful_resumed_from_release_id = extractJsonString(json, "previous_successful_resumed_from_release_id"),
+        .previous_successful_superseded_by_release_id = extractJsonString(json, "previous_successful_superseded_by_release_id"),
         .previous_successful_message = extractJsonString(json, "previous_successful_message"),
+        .previous_successful_failure_details_json = extractJsonArray(json, "previous_successful_failure_details"),
+        .previous_successful_rollout_targets_json = extractJsonArray(json, "previous_successful_rollout_targets"),
+        .previous_successful_rollout_checkpoint_json = json_helpers.extractJsonObject(json, "previous_successful_rollout_checkpoint"),
         .message = extractJsonString(json, "message"),
+        .failure_details_json = extractJsonArray(json, "failure_details"),
+        .rollout_targets_json = extractJsonArray(json, "rollout_targets"),
+        .rollout_checkpoint_json = json_helpers.extractJsonObject(json, "rollout_checkpoint"),
     };
 }
 
@@ -508,6 +559,8 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.stringField("trigger", snapshot.trigger);
     w.stringField("release_id", snapshot.release_id);
     w.stringField("status", snapshot.status);
+    w.stringField("rollout_state", snapshot.rollout_state);
+    w.stringField("rollout_control_state", snapshot.rollout_control_state);
     w.stringField("manifest_hash", snapshot.manifest_hash);
     w.intField("created_at", snapshot.created_at);
     w.uintField("service_count", snapshot.service_count);
@@ -521,41 +574,101 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (snapshot.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
+    if (snapshot.superseded_by_release_id) |release_id| w.stringField("superseded_by_release_id", release_id) else w.nullField("superseded_by_release_id");
     if (snapshot.previous_successful_release_id) |release_id| w.stringField("previous_successful_release_id", release_id) else w.nullField("previous_successful_release_id");
     if (snapshot.previous_successful_trigger) |trigger| w.stringField("previous_successful_trigger", trigger) else w.nullField("previous_successful_trigger");
     if (snapshot.previous_successful_status) |status_text| w.stringField("previous_successful_status", status_text) else w.nullField("previous_successful_status");
+    if (snapshot.previous_successful_rollout_state) |state| w.stringField("previous_successful_rollout_state", state) else w.nullField("previous_successful_rollout_state");
+    if (snapshot.previous_successful_rollout_control_state) |state| w.stringField("previous_successful_rollout_control_state", state) else w.nullField("previous_successful_rollout_control_state");
     if (snapshot.previous_successful_manifest_hash) |manifest_hash| w.stringField("previous_successful_manifest_hash", manifest_hash) else w.nullField("previous_successful_manifest_hash");
     if (snapshot.previous_successful_created_at) |created_at| w.intField("previous_successful_created_at", created_at) else w.nullField("previous_successful_created_at");
     w.uintField("previous_successful_completed_targets", snapshot.previous_successful_completed_targets);
     w.uintField("previous_successful_failed_targets", snapshot.previous_successful_failed_targets);
     w.uintField("previous_successful_remaining_targets", snapshot.previous_successful_remaining_targets);
     if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("previous_successful_source_release_id", source_release_id) else w.nullField("previous_successful_source_release_id");
+    if (snapshot.previous_successful_resumed_from_release_id) |release_id| w.stringField("previous_successful_resumed_from_release_id", release_id) else w.nullField("previous_successful_resumed_from_release_id");
+    if (snapshot.previous_successful_superseded_by_release_id) |release_id| w.stringField("previous_successful_superseded_by_release_id", release_id) else w.nullField("previous_successful_superseded_by_release_id");
     if (snapshot.previous_successful_message) |message| w.stringField("previous_successful_message", message) else w.nullField("previous_successful_message");
+    if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("previous_successful_failure_details", failure_details) else w.nullField("previous_successful_failure_details");
+    if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("previous_successful_rollout_targets", targets) else w.nullField("previous_successful_rollout_targets");
+    if (snapshot.previous_successful_rollout_checkpoint_json) |checkpoint| w.rawField("previous_successful_rollout_checkpoint", checkpoint) else w.nullField("previous_successful_rollout_checkpoint");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+    if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (snapshot.rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
+    if (snapshot.rollout_checkpoint_json) |checkpoint| w.rawField("rollout_checkpoint", checkpoint) else w.nullField("rollout_checkpoint");
+    w.beginObjectField("rollout");
+    w.stringField("state", snapshot.rollout_state);
+    w.stringField("control_state", snapshot.rollout_control_state);
+    if (snapshot.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
+    if (snapshot.superseded_by_release_id) |release_id| w.stringField("superseded_by_release_id", release_id) else w.nullField("superseded_by_release_id");
+    w.uintField("completed_targets", snapshot.completed_targets);
+    w.uintField("failed_targets", snapshot.failed_targets);
+    w.uintField("remaining_targets", snapshot.remaining_targets);
+    if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (snapshot.rollout_targets_json) |targets| w.rawField("targets", targets) else w.nullField("targets");
+    if (snapshot.rollout_checkpoint_json) |checkpoint| w.rawField("checkpoint", checkpoint) else w.nullField("checkpoint");
+    w.endObject();
     w.beginObjectField("current_release");
     w.stringField("id", snapshot.release_id);
     w.stringField("trigger", snapshot.trigger);
     w.stringField("status", snapshot.status);
+    w.stringField("rollout_state", snapshot.rollout_state);
+    w.stringField("rollout_control_state", snapshot.rollout_control_state);
     w.stringField("manifest_hash", snapshot.manifest_hash);
     w.intField("created_at", snapshot.created_at);
     w.uintField("completed_targets", snapshot.completed_targets);
     w.uintField("failed_targets", snapshot.failed_targets);
     w.uintField("remaining_targets", snapshot.remaining_targets);
     if (snapshot.source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+    if (snapshot.resumed_from_release_id) |release_id| w.stringField("resumed_from_release_id", release_id) else w.nullField("resumed_from_release_id");
+    if (snapshot.superseded_by_release_id) |release_id| w.stringField("superseded_by_release_id", release_id) else w.nullField("superseded_by_release_id");
     if (snapshot.message) |message| w.stringField("message", message) else w.nullField("message");
+    if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (snapshot.rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
+    if (snapshot.rollout_checkpoint_json) |checkpoint| w.rawField("rollout_checkpoint", checkpoint) else w.nullField("rollout_checkpoint");
+    w.beginObjectField("rollout");
+    w.stringField("state", snapshot.rollout_state);
+    w.stringField("control_state", snapshot.rollout_control_state);
+    w.uintField("completed_targets", snapshot.completed_targets);
+    w.uintField("failed_targets", snapshot.failed_targets);
+    w.uintField("remaining_targets", snapshot.remaining_targets);
+    if (snapshot.failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+    if (snapshot.rollout_targets_json) |targets| w.rawField("targets", targets) else w.nullField("targets");
+    if (snapshot.rollout_checkpoint_json) |checkpoint| w.rawField("checkpoint", checkpoint) else w.nullField("checkpoint");
+    w.endObject();
     w.endObject();
     if (snapshot.previous_successful_release_id) |release_id| {
         w.beginObjectField("previous_successful_release");
         w.stringField("id", release_id);
         w.stringField("trigger", snapshot.previous_successful_trigger orelse "apply");
         w.stringField("status", snapshot.previous_successful_status orelse "completed");
+        w.stringField("rollout_state", snapshot.previous_successful_rollout_state orelse "unknown");
+        w.stringField("rollout_control_state", snapshot.previous_successful_rollout_control_state orelse "active");
         if (snapshot.previous_successful_manifest_hash) |manifest_hash| w.stringField("manifest_hash", manifest_hash) else w.nullField("manifest_hash");
         if (snapshot.previous_successful_created_at) |created_at| w.intField("created_at", created_at) else w.nullField("created_at");
         w.uintField("completed_targets", snapshot.previous_successful_completed_targets);
         w.uintField("failed_targets", snapshot.previous_successful_failed_targets);
         w.uintField("remaining_targets", snapshot.previous_successful_remaining_targets);
         if (snapshot.previous_successful_source_release_id) |source_release_id| w.stringField("source_release_id", source_release_id) else w.nullField("source_release_id");
+        if (snapshot.previous_successful_resumed_from_release_id) |resumed_from_release_id| w.stringField("resumed_from_release_id", resumed_from_release_id) else w.nullField("resumed_from_release_id");
+        if (snapshot.previous_successful_superseded_by_release_id) |superseded_by_release_id| w.stringField("superseded_by_release_id", superseded_by_release_id) else w.nullField("superseded_by_release_id");
         if (snapshot.previous_successful_message) |message| w.stringField("message", message) else w.nullField("message");
+        if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+        if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("rollout_targets", targets) else w.nullField("rollout_targets");
+        if (snapshot.previous_successful_rollout_checkpoint_json) |checkpoint| w.rawField("rollout_checkpoint", checkpoint) else w.nullField("rollout_checkpoint");
+        w.beginObjectField("rollout");
+        w.stringField("state", snapshot.previous_successful_rollout_state orelse "unknown");
+        w.stringField("control_state", snapshot.previous_successful_rollout_control_state orelse "active");
+        if (snapshot.previous_successful_resumed_from_release_id) |resumed_from_release_id| w.stringField("resumed_from_release_id", resumed_from_release_id) else w.nullField("resumed_from_release_id");
+        if (snapshot.previous_successful_superseded_by_release_id) |superseded_by_release_id| w.stringField("superseded_by_release_id", superseded_by_release_id) else w.nullField("superseded_by_release_id");
+        w.uintField("completed_targets", snapshot.previous_successful_completed_targets);
+        w.uintField("failed_targets", snapshot.previous_successful_failed_targets);
+        w.uintField("remaining_targets", snapshot.previous_successful_remaining_targets);
+        if (snapshot.previous_successful_failure_details_json) |failure_details| w.rawField("failure_details", failure_details) else w.nullField("failure_details");
+        if (snapshot.previous_successful_rollout_targets_json) |targets| w.rawField("targets", targets) else w.nullField("targets");
+        if (snapshot.previous_successful_rollout_checkpoint_json) |checkpoint| w.rawField("checkpoint", checkpoint) else w.nullField("checkpoint");
+        w.endObject();
         w.endObject();
     } else {
         w.nullField("previous_successful_release");
@@ -584,6 +697,8 @@ fn appStatusFromReports(
         .trigger = report.trigger.toString(),
         .release_id = report.release_id orelse "?",
         .status = report.status.toString(),
+        .rollout_state = report.rolloutState(),
+        .rollout_control_state = report.rollout_control_state.toString(),
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
         .service_count = summary.service_count,
@@ -597,17 +712,29 @@ fn appStatusFromReports(
         .failed_targets = report.failed_targets,
         .remaining_targets = report.remainingTargets(),
         .source_release_id = report.source_release_id,
+        .resumed_from_release_id = report.resumed_from_release_id,
+        .superseded_by_release_id = report.superseded_by_release_id,
         .previous_successful_release_id = if (previous_successful) |prev| prev.release_id else null,
         .previous_successful_trigger = if (previous_successful) |prev| prev.trigger.toString() else null,
         .previous_successful_status = if (previous_successful) |prev| prev.status.toString() else null,
+        .previous_successful_rollout_state = if (previous_successful) |prev| prev.rolloutState() else null,
+        .previous_successful_rollout_control_state = if (previous_successful) |prev| prev.rollout_control_state.toString() else null,
         .previous_successful_manifest_hash = if (previous_successful) |prev| prev.manifest_hash else null,
         .previous_successful_created_at = if (previous_successful) |prev| prev.created_at else null,
         .previous_successful_completed_targets = if (previous_successful) |prev| prev.completed_targets else 0,
         .previous_successful_failed_targets = if (previous_successful) |prev| prev.failed_targets else 0,
         .previous_successful_remaining_targets = if (previous_successful) |prev| prev.remainingTargets() else 0,
         .previous_successful_source_release_id = if (previous_successful) |prev| prev.source_release_id else null,
+        .previous_successful_resumed_from_release_id = if (previous_successful) |prev| prev.resumed_from_release_id else null,
+        .previous_successful_superseded_by_release_id = if (previous_successful) |prev| prev.superseded_by_release_id else null,
         .previous_successful_message = if (previous_successful) |prev| prev.message else null,
+        .previous_successful_failure_details_json = if (previous_successful) |prev| prev.failure_details_json else null,
+        .previous_successful_rollout_targets_json = if (previous_successful) |prev| prev.rollout_targets_json else null,
+        .previous_successful_rollout_checkpoint_json = if (previous_successful) |prev| prev.rollout_checkpoint_json else null,
         .message = report.message,
+        .failure_details_json = report.failure_details_json,
+        .rollout_targets_json = report.rollout_targets_json,
+        .rollout_checkpoint_json = report.rollout_checkpoint_json,
     };
 }
 
@@ -631,19 +758,26 @@ fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
 
 fn appMatchesFilters(snapshot: AppStatusSnapshot, filters: AppListFilters) bool {
     if (filters.status) |status_filter| {
-        if (!std.mem.eql(u8, snapshot.status, status_filter)) return false;
+        if (!std.mem.eql(u8, snapshot.status, status_filter) and !std.mem.eql(u8, snapshot.rollout_state, status_filter)) return false;
     }
-    if (filters.failed_only and !isFailedLikeRollout(snapshot.status)) return false;
-    if (filters.in_progress_only and !isInProgressRollout(snapshot.status)) return false;
+    if (filters.failed_only and !isFailedLikeRollout(snapshot.status, snapshot.rollout_state)) return false;
+    if (filters.in_progress_only and !isInProgressRollout(snapshot.status, snapshot.rollout_state)) return false;
     return true;
 }
 
-fn isFailedLikeRollout(status_text: []const u8) bool {
-    return std.mem.eql(u8, status_text, "failed") or std.mem.eql(u8, status_text, "partially_failed");
+fn isFailedLikeRollout(status_text: []const u8, rollout_state: []const u8) bool {
+    return std.mem.eql(u8, status_text, "failed") or
+        std.mem.eql(u8, status_text, "partially_failed") or
+        std.mem.eql(u8, rollout_state, "blocked") or
+        std.mem.eql(u8, rollout_state, "degraded");
 }
 
-fn isInProgressRollout(status_text: []const u8) bool {
-    return std.mem.eql(u8, status_text, "pending") or std.mem.eql(u8, status_text, "in_progress");
+fn isInProgressRollout(status_text: []const u8, rollout_state: []const u8) bool {
+    return std.mem.eql(u8, status_text, "pending") or
+        std.mem.eql(u8, status_text, "in_progress") or
+        std.mem.eql(u8, rollout_state, "pending") or
+        std.mem.eql(u8, rollout_state, "starting") or
+        std.mem.eql(u8, rollout_state, "rolling");
 }
 
 fn printStatusTable(snapshots: []const monitor.ServiceSnapshot, verbose: bool) void {
@@ -754,6 +888,7 @@ test "parseAppStatusResponse extracts app fields" {
     try std.testing.expectEqualStrings("apply", snapshot.trigger);
     try std.testing.expectEqualStrings("abc123def456", snapshot.release_id);
     try std.testing.expectEqualStrings("completed", snapshot.status);
+    try std.testing.expectEqualStrings("unknown", snapshot.rollout_state);
     try std.testing.expectEqualStrings("sha256:123", snapshot.manifest_hash);
     try std.testing.expectEqual(@as(i64, 42), snapshot.created_at);
     try std.testing.expectEqual(@as(usize, 2), snapshot.service_count);
@@ -790,13 +925,14 @@ test "appStatusFromReport matches remote app status shape" {
 
     const local = appStatusFromReports(report, null, .{ .service_count = 2 }, .{});
     const remote = parseAppStatusResponse(
-        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-2","status":"completed","manifest_hash":"sha256:222","created_at":200,"service_count":2,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":"all placements healthy"}
+        \\{"app_name":"demo-app","trigger":"apply","release_id":"dep-2","status":"completed","rollout_state":"stable","manifest_hash":"sha256:222","created_at":200,"service_count":2,"completed_targets":2,"failed_targets":0,"remaining_targets":0,"source_release_id":null,"message":"all placements healthy"}
     );
 
     try std.testing.expectEqualStrings(local.app_name, remote.app_name);
     try std.testing.expectEqualStrings(local.trigger, remote.trigger);
     try std.testing.expectEqualStrings(local.release_id, remote.release_id);
     try std.testing.expectEqualStrings(local.status, remote.status);
+    try std.testing.expectEqualStrings(local.rollout_state, remote.rollout_state);
     try std.testing.expectEqualStrings(local.manifest_hash, remote.manifest_hash);
     try std.testing.expectEqual(local.created_at, remote.created_at);
     try std.testing.expectEqual(local.service_count, remote.service_count);
@@ -827,10 +963,16 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
         .failed_targets = 1,
         .remaining_targets = 0,
         .source_release_id = "dep-1",
+        .resumed_from_release_id = "dep-paused",
+        .superseded_by_release_id = "dep-next",
         .previous_successful_release_id = "dep-0",
         .previous_successful_manifest_hash = "sha256:111",
         .previous_successful_created_at = 100,
         .message = "all placements healthy",
+        .previous_successful_rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"state\":\"ready\",\"reason\":null}]",
+        .previous_successful_rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":0,\"control_state\":\"active\"}",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"failed\",\"reason\":\"readiness_timeout\"}]",
+        .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":1,\"batch_end\":2,\"total_targets\":2,\"completed_targets\":1,\"failed_targets\":1,\"remaining_targets\":0,\"control_state\":\"active\"}",
     };
 
     var w = json_out.JsonWriter{};
@@ -841,6 +983,7 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqualStrings(snapshot.trigger, parsed.trigger);
     try std.testing.expectEqualStrings(snapshot.release_id, parsed.release_id);
     try std.testing.expectEqualStrings(snapshot.status, parsed.status);
+    try std.testing.expectEqualStrings(snapshot.rollout_state, parsed.rollout_state);
     try std.testing.expectEqualStrings(snapshot.manifest_hash, parsed.manifest_hash);
     try std.testing.expectEqual(snapshot.created_at, parsed.created_at);
     try std.testing.expectEqual(snapshot.service_count, parsed.service_count);
@@ -854,10 +997,20 @@ test "writeAppStatusJsonObject round-trips through remote parser" {
     try std.testing.expectEqual(snapshot.failed_targets, parsed.failed_targets);
     try std.testing.expectEqual(snapshot.remaining_targets, parsed.remaining_targets);
     try std.testing.expectEqualStrings(snapshot.source_release_id.?, parsed.source_release_id.?);
+    try std.testing.expectEqualStrings(snapshot.resumed_from_release_id.?, parsed.resumed_from_release_id.?);
+    try std.testing.expectEqualStrings(snapshot.superseded_by_release_id.?, parsed.superseded_by_release_id.?);
     try std.testing.expectEqualStrings(snapshot.previous_successful_release_id.?, parsed.previous_successful_release_id.?);
     try std.testing.expectEqualStrings(snapshot.previous_successful_manifest_hash.?, parsed.previous_successful_manifest_hash.?);
     try std.testing.expectEqual(snapshot.previous_successful_created_at.?, parsed.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(snapshot.message.?, parsed.message.?);
+    try std.testing.expect(parsed.previous_successful_rollout_targets_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.previous_successful_rollout_targets_json.?, "\"workload_name\":\"db\"") != null);
+    try std.testing.expect(parsed.previous_successful_rollout_checkpoint_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.previous_successful_rollout_checkpoint_json.?, "\"phase\":\"cutover\"") != null);
+    try std.testing.expect(parsed.rollout_targets_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.rollout_targets_json.?, "\"workload_name\":\"web\"") != null);
+    try std.testing.expect(parsed.rollout_checkpoint_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.rollout_checkpoint_json.?, "\"batch_end\":2") != null);
 }
 
 test "writeAppStatusJsonObject includes nested release and workload views" {
@@ -883,6 +1036,8 @@ test "writeAppStatusJsonObject includes nested release and workload views" {
         .previous_successful_manifest_hash = "sha256:111",
         .previous_successful_created_at = 100,
         .message = "all placements healthy",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
+        .rollout_checkpoint_json = "{\"engine\":\"local\",\"phase\":\"replace\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":1,\"failed_targets\":1,\"remaining_targets\":0,\"control_state\":\"active\"}",
     };
 
     var w = json_out.JsonWriter{};
@@ -890,9 +1045,61 @@ test "writeAppStatusJsonObject includes nested release and workload views" {
     const json = w.getWritten();
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"current_release\":{\"id\":\"dep-2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_state\":\"unknown\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_checkpoint\":{\"engine\":\"local\",\"phase\":\"replace\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"unknown\",\"control_state\":\"active\",\"completed_targets\":1,\"failed_targets\":1,\"remaining_targets\":0,\"failure_details\":null,\"targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}],\"checkpoint\":{\"engine\":\"local\",\"phase\":\"replace\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release\":{\"id\":\"dep-0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"workers\":1,\"crons\":2,\"training_jobs\":3}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"training_runtime\":{\"active\":1,\"paused\":1,\"failed\":1}") != null);
+}
+
+test "writeAppStatusJsonObject preserves failure details" {
+    const snapshot = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-4",
+        .status = "partially_failed",
+        .manifest_hash = "sha256:444",
+        .created_at = 400,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .remaining_targets = 0,
+        .message = "one or more rollout targets failed readiness checks",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"readiness_timeout\"}]",
+    };
+
+    var w = json_out.JsonWriter{};
+    writeAppStatusJsonObject(&w, snapshot);
+    const parsed = parseAppStatusResponse(w.getWritten());
+
+    try std.testing.expect(parsed.failure_details_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.failure_details_json.?, "\"reason\":\"readiness_timeout\"") != null);
+}
+
+test "writeAppStatusJsonObject preserves rollout control state" {
+    const snapshot = AppStatusSnapshot{
+        .app_name = "demo-app",
+        .trigger = "apply",
+        .release_id = "dep-5",
+        .status = "in_progress",
+        .rollout_state = "blocked",
+        .rollout_control_state = "paused",
+        .manifest_hash = "sha256:555",
+        .created_at = 500,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .remaining_targets = 1,
+    };
+
+    var w = json_out.JsonWriter{};
+    writeAppStatusJsonObject(&w, snapshot);
+    const json = w.getWritten();
+    const parsed = parseAppStatusResponse(json);
+
+    try std.testing.expectEqualStrings("paused", parsed.rollout_control_state);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_control_state\":\"paused\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"control_state\":\"paused\"") != null);
 }
 
 test "appMatchesFilters applies failed and in-progress filters" {
@@ -901,6 +1108,7 @@ test "appMatchesFilters applies failed and in-progress filters" {
         .trigger = "apply",
         .release_id = "dep-1",
         .status = "partially_failed",
+        .rollout_state = "degraded",
         .manifest_hash = "sha256:111",
         .created_at = 100,
         .completed_targets = 1,
@@ -917,6 +1125,7 @@ test "appMatchesFilters applies failed and in-progress filters" {
         .trigger = "apply",
         .release_id = "dep-2",
         .status = "in_progress",
+        .rollout_state = "rolling",
         .manifest_hash = "sha256:222",
         .created_at = 200,
         .completed_targets = 1,
@@ -931,7 +1140,9 @@ test "appMatchesFilters applies failed and in-progress filters" {
 
     try std.testing.expect(appMatchesFilters(failed_snapshot, .{ .failed_only = true }));
     try std.testing.expect(!appMatchesFilters(failed_snapshot, .{ .in_progress_only = true }));
+    try std.testing.expect(appMatchesFilters(failed_snapshot, .{ .status = "degraded" }));
     try std.testing.expect(appMatchesFilters(pending_snapshot, .{ .in_progress_only = true }));
+    try std.testing.expect(appMatchesFilters(pending_snapshot, .{ .status = "rolling" }));
     try std.testing.expect(!appMatchesFilters(pending_snapshot, .{ .status = "completed" }));
 }
 
@@ -1043,6 +1254,23 @@ test "formatAppProgress summarizes in-flight and partial outcomes" {
         .message = "apply completed",
     };
     try std.testing.expectEqualStrings("2 ok", formatAppProgress(&buf, completed));
+}
+
+test "formatRolloutControlState shortens active and cancel states" {
+    try std.testing.expectEqualStrings("-", formatRolloutControlState("active"));
+    try std.testing.expectEqualStrings("paused", formatRolloutControlState("paused"));
+    try std.testing.expectEqualStrings("cancel", formatRolloutControlState("cancel_requested"));
+}
+
+test "formatStatusMessage appends failure detail summary" {
+    var buf: [256]u8 = undefined;
+    const text = formatStatusMessage(
+        &buf,
+        "one or more rollout targets failed readiness checks",
+        "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"readiness_timeout\"}]",
+    );
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "web: readiness_timeout") != null);
 }
 
 test "formatTrainingRuntime summarizes active paused and failed jobs" {

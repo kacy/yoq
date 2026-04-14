@@ -11,6 +11,7 @@ pub const LoadError = error{
     InvalidVolumeMount,
     InvalidHealthCheck,
     InvalidRestartPolicy,
+    InvalidRolloutConfig,
     InvalidTlsConfig,
     InvalidHttpProxyConfig,
     InvalidVolumeConfig,

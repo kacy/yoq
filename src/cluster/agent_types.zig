@@ -114,11 +114,13 @@ pub const Assignment = struct {
     image: []const u8,
     command: []const u8,
     status: []const u8,
+    status_reason: ?[]const u8 = null,
     cpu_limit: i64,
     memory_limit_mb: i64,
     app_name: ?[]const u8 = null,
     workload_kind: ?[]const u8 = null,
     workload_name: ?[]const u8 = null,
+    health_check_json: ?[]const u8 = null,
     gang_rank: ?i64 = null,
     gang_world_size: ?i64 = null,
     gang_master_addr: ?[]const u8 = null,
@@ -130,9 +132,11 @@ pub const Assignment = struct {
         alloc.free(self.image);
         alloc.free(self.command);
         alloc.free(self.status);
+        if (self.status_reason) |status_reason| alloc.free(status_reason);
         if (self.app_name) |app_name| alloc.free(app_name);
         if (self.workload_kind) |workload_kind| alloc.free(workload_kind);
         if (self.workload_name) |workload_name| alloc.free(workload_name);
+        if (self.health_check_json) |health_check_json| alloc.free(health_check_json);
         if (self.gang_master_addr) |addr| alloc.free(addr);
     }
 };
