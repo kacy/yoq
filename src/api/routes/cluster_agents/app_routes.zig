@@ -157,6 +157,13 @@ pub fn handleRolloutControl(
     };
     defer active.deinit(alloc);
 
+    if (std.mem.eql(u8, control_state, "active") and
+        std.mem.eql(u8, active.rollout_control_state orelse "active", "paused") and
+        active.rollout_checkpoint_json != null)
+    {
+        return resumeStoredClusterRollout(alloc, active, ctx);
+    }
+
     store.updateDeploymentRolloutControlStateInDb(node.stateMachineDb(), active.id, control_state) catch return common.internalError();
     const body = std.fmt.allocPrint(
         alloc,
@@ -164,6 +171,58 @@ pub fn handleRolloutControl(
         .{ app_name, active.id, control_state },
     ) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+fn rolloutContextFromDeployment(dep: store.DeploymentRecord) apply_release.ApplyContext {
+    return .{
+        .trigger = if (dep.trigger != null and std.mem.eql(u8, dep.trigger.?, "rollback")) .rollback else .apply,
+        .source_release_id = dep.source_release_id,
+    };
+}
+
+fn markSupersededClusterRollout(db: *sqlite.Db, alloc: std.mem.Allocator, active: store.DeploymentRecord, new_release_id: []const u8) !void {
+    const message = try std.fmt.allocPrint(alloc, "rollout resumed in release {s}", .{new_release_id});
+    defer alloc.free(message);
+
+    try store.updateDeploymentProgressInDb(
+        db,
+        active.id,
+        "failed",
+        message,
+        active.completed_targets,
+        active.failed_targets,
+        active.failure_details_json,
+        active.rollout_targets_json,
+        active.rollout_checkpoint_json,
+    );
+}
+
+fn resumeStoredClusterRollout(
+    alloc: std.mem.Allocator,
+    active: store.DeploymentRecord,
+    ctx: RouteContext,
+) Response {
+    const request = http.Request{
+        .method = .POST,
+        .path = "/apps/apply",
+        .path_only = "/apps/apply",
+        .query = "",
+        .headers_raw = "",
+        .body = active.config_snapshot,
+        .content_length = active.config_snapshot.len,
+    };
+
+    const response = switch (rolloutContextFromDeployment(active).trigger) {
+        .apply => deploy_routes.handleAppApply(alloc, request, ctx),
+        .rollback => deploy_routes.handleAppRollbackApply(alloc, request, ctx, active.source_release_id orelse active.id),
+    };
+    if (response.status != .ok) return response;
+
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    if (json_helpers.extractJsonString(response.body, "release_id")) |new_release_id| {
+        markSupersededClusterRollout(node.stateMachineDb(), alloc, active, new_release_id) catch return common.internalError();
+    }
+    return response;
 }
 
 fn formatAppsResponse(
@@ -901,6 +960,46 @@ test "handleRolloutControl updates the active release state" {
         defer active.deinit(alloc);
         try std.testing.expectEqualStrings("cancel_requested", active.rollout_control_state.?);
     }
+}
+
+test "handleRolloutControl resumes a paused stored rollout when no executor is active" {
+    const alloc = std.testing.allocator;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try store.saveDeploymentInDb(harness.node.stateMachineDb(), .{
+        .id = "dep-paused",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:paused",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"alpine\",\"command\":[\"echo\",\"hello\"]}]}",
+        .completed_targets = 0,
+        .failed_targets = 0,
+        .status = "in_progress",
+        .message = "apply in progress",
+        .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":0,\"failed_targets\":0,\"remaining_targets\":1,\"control_state\":\"paused\"}",
+        .rollout_control_state = "paused",
+        .created_at = 100,
+    });
+
+    const response = try harness.rolloutControl("demo-app", "resume");
+    defer freeResponse(alloc, response);
+    try expectResponseOk(response);
+    try expectJsonContains(response.body, "\"status\":\"completed\"");
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"release_id\":\"dep-paused\"") == null);
+
+    const old_dep = try store.getDeploymentInDb(harness.node.stateMachineDb(), alloc, "dep-paused");
+    defer old_dep.deinit(alloc);
+    try std.testing.expectEqualStrings("failed", old_dep.status);
+    try std.testing.expect(old_dep.message != null);
+    try std.testing.expect(std.mem.indexOf(u8, old_dep.message.?, "rollout resumed in release") != null);
+
+    const latest = try store.getLatestDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer latest.deinit(alloc);
+    try std.testing.expect(!std.mem.eql(u8, latest.id, "dep-paused"));
+    try std.testing.expectEqualStrings("completed", latest.status);
 }
 
 test "formatAppStatusResponse includes structured rollback metadata" {

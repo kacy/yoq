@@ -148,7 +148,7 @@ pub fn rollout(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     if (server_addr) |addr| {
         try rolloutRemoteApp(alloc, addr, app_name, action);
     } else {
-        try rolloutLocalApp(alloc, app_name, control_state);
+        try rolloutLocalApp(alloc, app_name, action, control_state);
     }
 }
 
@@ -626,12 +626,78 @@ fn rollbackRemoteApp(
     printRollbackSummary(parseRollbackSummary(resp.body));
 }
 
-fn rolloutLocalApp(alloc: std.mem.Allocator, app_name: []const u8, control_state: []const u8) !void {
+fn rolloutContextFromDeployment(dep: store.DeploymentRecord) apply_release.ApplyContext {
+    return .{
+        .trigger = if (dep.trigger != null and std.mem.eql(u8, dep.trigger.?, "rollback")) .rollback else .apply,
+        .source_release_id = dep.source_release_id,
+    };
+}
+
+fn markSupersededLocalRollout(active: store.DeploymentRecord, new_release_id: []const u8) void {
+    const message = std.fmt.allocPrint(std.heap.page_allocator, "rollout resumed in release {s}", .{new_release_id}) catch return;
+    defer std.heap.page_allocator.free(message);
+
+    store.updateDeploymentProgress(
+        active.id,
+        "failed",
+        message,
+        active.completed_targets,
+        active.failed_targets,
+        active.failure_details_json,
+        active.rollout_targets_json,
+        active.rollout_checkpoint_json,
+    ) catch {};
+}
+
+fn resumeLocalAppRollout(alloc: std.mem.Allocator, active: store.DeploymentRecord) !void {
+    var loaded = rollback_snapshot.loadLocalRollbackSnapshot(alloc, active.config_snapshot) catch {
+        writeErr("failed to load rollout snapshot for app {s}\n", .{active.app_name.?});
+        return OpsError.StoreError;
+    };
+    defer loaded.deinit();
+
+    var prepared = local_apply_backend.PreparedLocalApply.init(alloc, &loaded.manifest, &loaded.release, false) catch |err| {
+        writeErr("failed to initialize rollout resume runtime: {}\n", .{err});
+        return OpsError.DeploymentFailed;
+    };
+    defer prepared.deinit();
+    prepared.beginRuntime();
+
+    const context = rolloutContextFromDeployment(active);
+    const apply_report = prepared.startRelease(context) catch |err| {
+        writeErr("rollout resume failed: {}\n", .{err});
+        return OpsError.DeploymentFailed;
+    };
+    defer apply_report.deinit(alloc);
+
+    if (apply_report.release_id) |new_release_id| {
+        markSupersededLocalRollout(active, new_release_id);
+        write("rollout resumed for app {s}: {s} -> {s}\n", .{ active.app_name.?, active.id, new_release_id });
+    }
+    write("status: {s} ({s})\n", .{ apply_report.status.toString(), apply_report.rolloutState() });
+
+    if (loaded.release.resolvedServiceCount() == 0) return;
+
+    writeErr("resumed services running. press ctrl-c to stop.\n", .{});
+    prepared.orch.waitForShutdown();
+    writeErr("\nshutting down...\n", .{});
+    prepared.orch.stopAll();
+    writeErr("stopped\n", .{});
+}
+
+fn rolloutLocalApp(alloc: std.mem.Allocator, app_name: []const u8, action: []const u8, control_state: []const u8) !void {
     const active = store.getActiveDeploymentByApp(alloc, app_name) catch {
         writeErr("no active rollout found for app {s}\n", .{app_name});
         return OpsError.StoreError;
     };
     defer active.deinit(alloc);
+
+    if (std.mem.eql(u8, action, "resume") and
+        std.mem.eql(u8, active.rollout_control_state orelse "active", "paused") and
+        active.rollout_checkpoint_json != null)
+    {
+        return resumeLocalAppRollout(alloc, active);
+    }
 
     store.updateDeploymentRolloutControlState(active.id, control_state) catch return OpsError.StoreError;
     write("rollout control updated for app {s}: {s} ({s})\n", .{ app_name, control_state, active.id });
