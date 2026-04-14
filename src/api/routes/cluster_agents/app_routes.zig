@@ -157,20 +157,12 @@ pub fn handleRolloutControl(
     };
     defer active.deinit(alloc);
 
-    if (std.mem.eql(u8, control_state, "active") and
-        std.mem.eql(u8, active.rollout_control_state orelse "active", "paused") and
-        active.rollout_checkpoint_json != null)
-    {
+    if (shouldResumeStoredRollout(active, control_state)) {
         return resumeStoredClusterRollout(alloc, active, ctx);
     }
 
     store.updateDeploymentRolloutControlStateInDb(node.stateMachineDb(), active.id, control_state) catch return common.internalError();
-    const body = std.fmt.allocPrint(
-        alloc,
-        "{{\"app_name\":\"{s}\",\"release_id\":\"{s}\",\"rollout_control_state\":\"{s}\"}}",
-        .{ app_name, active.id, control_state },
-    ) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return rolloutControlResponse(alloc, app_name, active.id, control_state);
 }
 
 fn rolloutContextFromDeployment(dep: store.DeploymentRecord) apply_release.ApplyContext {
@@ -206,6 +198,26 @@ fn resumeStoredClusterRollout(
         },
     };
     return response;
+}
+
+fn shouldResumeStoredRollout(active: store.DeploymentRecord, control_state: []const u8) bool {
+    return std.mem.eql(u8, control_state, "active") and
+        std.mem.eql(u8, active.rollout_control_state orelse "active", "paused") and
+        active.rollout_checkpoint_json != null;
+}
+
+fn rolloutControlResponse(
+    alloc: std.mem.Allocator,
+    app_name: []const u8,
+    release_id: []const u8,
+    control_state: []const u8,
+) Response {
+    const body = std.fmt.allocPrint(
+        alloc,
+        "{{\"app_name\":\"{s}\",\"release_id\":\"{s}\",\"rollout_control_state\":\"{s}\"}}",
+        .{ app_name, release_id, control_state },
+    ) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 pub fn recoverActiveClusterRolloutsOnce(alloc: std.mem.Allocator, ctx: RouteContext) !usize {

@@ -201,6 +201,16 @@ const ReplacementRolloutTargetBuilder = struct {
     }
 };
 
+const ReplacementResumeState = struct {
+    completed_targets: usize = 0,
+    failed_targets: usize = 0,
+    rollout_targets_json: ?[]u8 = null,
+
+    fn deinit(self: ReplacementResumeState, alloc: std.mem.Allocator) void {
+        if (self.rollout_targets_json) |json| alloc.free(json);
+    }
+};
+
 pub const PreparedLocalApply = struct {
     alloc: std.mem.Allocator,
     manifest: *spec.Manifest,
@@ -681,16 +691,8 @@ fn runReplacementPlan(
     if (mutated) runner.finish();
 
     return .{
-        .status = if (failed == 0)
-            .completed
-        else if (placed > 0)
-            .partially_failed
-        else
-            .failed,
-        .message = if (replacement_indexes.len > 0)
-            "all requested services replaced"
-        else
-            "all requested services started",
+        .status = replacementTerminalStatus(placed, failed),
+        .message = replacementSuccessMessage(replacement_indexes),
         .placed = placed,
         .failed = failed,
         .completed_targets = placed,
@@ -715,6 +717,34 @@ fn allRemainingServicesTerminal(
         if (!isTerminalRolloutState(rollout_targets.stateForService(services[idx].name))) return false;
     }
     return true;
+}
+
+fn replacementTerminalStatus(placed: usize, failed: usize) update_common.DeploymentStatus {
+    if (failed == 0) return .completed;
+    if (placed > 0) return .partially_failed;
+    return .failed;
+}
+
+fn replacementSuccessMessage(replacement_indexes: []const usize) []const u8 {
+    return if (replacement_indexes.len > 0)
+        "all requested services replaced"
+    else
+        "all requested services started";
+}
+
+fn loadReplacementResumeState(
+    alloc: std.mem.Allocator,
+    progress: ?apply_release.ProgressRecorder,
+) ReplacementResumeState {
+    const recorder = progress orelse return .{};
+    const dep = store.getDeployment(alloc, recorder.release_id) catch return .{};
+    defer dep.deinit(alloc);
+
+    return .{
+        .completed_targets = dep.completed_targets,
+        .failed_targets = dep.failed_targets,
+        .rollout_targets_json = if (dep.rollout_targets_json) |json| alloc.dupe(u8, json) catch null else null,
+    };
 }
 
 fn reportProgressDetailsIfSupported(
@@ -947,21 +977,8 @@ const LocalApplyBackend = struct {
         );
         defer replacement_indexes.deinit(self.orch.alloc);
 
-        var initial_completed_targets: usize = 0;
-        var initial_failed_targets: usize = 0;
-        var resume_rollout_targets_json: ?[]const u8 = null;
-        defer if (resume_rollout_targets_json) |json| self.orch.alloc.free(json);
-        if (self.progress) |progress| {
-            const dep = store.getDeployment(self.orch.alloc, progress.release_id) catch null;
-            if (dep) |record| {
-                defer record.deinit(self.orch.alloc);
-                initial_completed_targets = record.completed_targets;
-                initial_failed_targets = record.failed_targets;
-                if (record.rollout_targets_json) |json| {
-                    resume_rollout_targets_json = try self.orch.alloc.dupe(u8, json);
-                }
-            }
-        }
+        const resume_state = loadReplacementResumeState(self.orch.alloc, self.progress);
+        defer resume_state.deinit(self.orch.alloc);
 
         var runner = struct {
             orch: *orchestrator.Orchestrator,
@@ -1069,9 +1086,9 @@ const LocalApplyBackend = struct {
             new_indexes.items,
             replacement_indexes.items,
             effectiveReplacementStrategy(self.release),
-            initial_completed_targets,
-            initial_failed_targets,
-            resume_rollout_targets_json,
+            resume_state.completed_targets,
+            resume_state.failed_targets,
+            resume_state.rollout_targets_json,
         );
     }
 

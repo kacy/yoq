@@ -20,6 +20,16 @@ const RouteContext = common.RouteContext;
 var active_rollout_mu: std.Thread.Mutex = .{};
 var active_rollouts: std.StringHashMapUnmanaged(void) = .empty;
 
+const ResumeSeed = struct {
+    completed_targets: usize = 0,
+    failed_targets: usize = 0,
+    rollout_targets_json: ?[]u8 = null,
+
+    fn deinit(self: ResumeSeed, alloc: std.mem.Allocator) void {
+        if (self.rollout_targets_json) |json| alloc.free(json);
+    }
+};
+
 const ResponseMode = enum {
     legacy,
     app,
@@ -169,18 +179,14 @@ pub const ClusterApplyBackend = struct {
 
     pub fn apply(self: *const ClusterApplyBackend) ClusterApplyError!apply_release.ApplyOutcome {
         const strategy = effectiveClusterRollout(self.requests);
+        const resume_seed = loadResumeSeed(self.alloc, self.node.stateMachineDb(), self.progress);
+        defer resume_seed.deinit(self.alloc);
         var failure_details = FailureDetailBuilder.init(self.alloc);
         defer failure_details.deinit();
         var rollout_targets = RolloutTargetBuilder.init(self.alloc);
         defer rollout_targets.deinit();
         rollout_targets.appendRequests(self.requests) catch return ClusterApplyError.InternalError;
-        if (self.progress) |progress| {
-            const dep = store.getDeploymentInDb(self.node.stateMachineDb(), self.alloc, progress.release_id) catch null;
-            if (dep) |record| {
-                defer record.deinit(self.alloc);
-                rollout_targets.restoreFromJson(record.rollout_targets_json);
-            }
-        }
+        rollout_targets.restoreFromJson(resume_seed.rollout_targets_json);
         var rollback_state_storage: RollbackState = undefined;
         var rollback_state: ?*RollbackState = null;
         if (strategy.failure_action == .rollback) {
@@ -189,20 +195,10 @@ pub const ClusterApplyBackend = struct {
         }
         defer if (rollback_state) |state| state.deinit();
 
-        var placed: usize = 0;
-        var failed: usize = 0;
-        var completed_targets: usize = 0;
-        var failed_targets: usize = 0;
-        if (self.progress) |progress| {
-            const dep = store.getDeploymentInDb(self.node.stateMachineDb(), self.alloc, progress.release_id) catch null;
-            if (dep) |record| {
-                defer record.deinit(self.alloc);
-                completed_targets = record.completed_targets;
-                failed_targets = record.failed_targets;
-                placed = record.completed_targets;
-                failed = record.failed_targets;
-            }
-        }
+        var placed: usize = resume_seed.completed_targets;
+        var failed: usize = resume_seed.failed_targets;
+        var completed_targets: usize = resume_seed.completed_targets;
+        var failed_targets: usize = resume_seed.failed_targets;
 
         var batch_start: usize = 0;
         var first_batch = true;
@@ -597,6 +593,22 @@ pub const ClusterApplyBackend = struct {
         _ = failed;
     }
 };
+
+fn loadResumeSeed(
+    alloc: std.mem.Allocator,
+    db: *sqlite.Db,
+    progress: ?apply_release.ProgressRecorder,
+) ResumeSeed {
+    const recorder = progress orelse return .{};
+    const dep = store.getDeploymentInDb(db, alloc, recorder.release_id) catch return .{};
+    defer dep.deinit(alloc);
+
+    return .{
+        .completed_targets = dep.completed_targets,
+        .failed_targets = dep.failed_targets,
+        .rollout_targets_json = if (dep.rollout_targets_json) |json| alloc.dupe(u8, json) catch null else null,
+    };
+}
 
 const FailureDetail = struct {
     workload_kind: []const u8,
