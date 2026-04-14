@@ -17,6 +17,9 @@ const common = @import("../common.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
+var active_rollout_mu: std.Thread.Mutex = .{};
+var active_rollouts: std.StringHashMapUnmanaged(void) = .empty;
+
 const ResponseMode = enum {
     legacy,
     app,
@@ -36,7 +39,10 @@ const ClusterReleaseTracker = struct {
 
     pub fn begin(self: *const ClusterReleaseTracker) !?[]const u8 {
         if (self.context.continue_release_id) |existing_id| {
-            return self.alloc.dupe(u8, existing_id) catch return ClusterApplyError.InternalError;
+            const resumed_id = self.alloc.dupe(u8, existing_id) catch return ClusterApplyError.InternalError;
+            errdefer self.alloc.free(resumed_id);
+            markClusterRolloutActive(existing_id) catch return ClusterApplyError.InternalError;
+            return resumed_id;
         }
         const name = self.app_name orelse return null;
         const manifest_hash = deployment_store.computeManifestHash(self.alloc, self.config_snapshot) catch return ClusterApplyError.InternalError;
@@ -63,6 +69,8 @@ const ClusterReleaseTracker = struct {
             null,
             null,
         ) catch return ClusterApplyError.InternalError;
+
+        markClusterRolloutActive(id) catch return ClusterApplyError.InternalError;
 
         return id;
     }
@@ -106,12 +114,47 @@ const ClusterReleaseTracker = struct {
             rollout_targets_json,
             rollout_checkpoint_json,
         ) catch return ClusterApplyError.InternalError;
+        if (isTerminalStatus(status)) {
+            markClusterRolloutInactive(id);
+        }
     }
 
     pub fn freeReleaseId(self: *const ClusterReleaseTracker, id: []const u8) void {
         self.alloc.free(id);
     }
 };
+
+fn isTerminalStatus(status: @import("../../../manifest/update/common.zig").DeploymentStatus) bool {
+    return switch (status) {
+        .pending, .in_progress => false,
+        .completed, .partially_failed, .failed, .superseded, .rolled_back => true,
+    };
+}
+
+fn markClusterRolloutActive(id: []const u8) !void {
+    active_rollout_mu.lock();
+    defer active_rollout_mu.unlock();
+
+    const entry = try active_rollouts.getOrPut(std.heap.page_allocator, id);
+    if (!entry.found_existing) {
+        entry.key_ptr.* = try std.heap.page_allocator.dupe(u8, id);
+    }
+}
+
+fn markClusterRolloutInactive(id: []const u8) void {
+    active_rollout_mu.lock();
+    defer active_rollout_mu.unlock();
+
+    if (active_rollouts.fetchRemove(id)) |entry| {
+        std.heap.page_allocator.free(entry.key);
+    }
+}
+
+pub fn isClusterRolloutActive(id: []const u8) bool {
+    active_rollout_mu.lock();
+    defer active_rollout_mu.unlock();
+    return active_rollouts.contains(id);
+}
 
 pub const ClusterApplyBackend = struct {
     alloc: std.mem.Allocator,
@@ -131,6 +174,13 @@ pub const ClusterApplyBackend = struct {
         var rollout_targets = RolloutTargetBuilder.init(self.alloc);
         defer rollout_targets.deinit();
         rollout_targets.appendRequests(self.requests) catch return ClusterApplyError.InternalError;
+        if (self.progress) |progress| {
+            const dep = store.getDeploymentInDb(self.node.stateMachineDb(), self.alloc, progress.release_id) catch null;
+            if (dep) |record| {
+                defer record.deinit(self.alloc);
+                rollout_targets.restoreFromJson(record.rollout_targets_json);
+            }
+        }
         var rollback_state_storage: RollbackState = undefined;
         var rollback_state: ?*RollbackState = null;
         if (strategy.failure_action == .rollback) {
@@ -143,6 +193,16 @@ pub const ClusterApplyBackend = struct {
         var failed: usize = 0;
         var completed_targets: usize = 0;
         var failed_targets: usize = 0;
+        if (self.progress) |progress| {
+            const dep = store.getDeploymentInDb(self.node.stateMachineDb(), self.alloc, progress.release_id) catch null;
+            if (dep) |record| {
+                defer record.deinit(self.alloc);
+                completed_targets = record.completed_targets;
+                failed_targets = record.failed_targets;
+                placed = record.completed_targets;
+                failed = record.failed_targets;
+            }
+        }
 
         var batch_start: usize = 0;
         var first_batch = true;
@@ -285,6 +345,7 @@ pub const ClusterApplyBackend = struct {
         failed_targets: *usize,
         scheduled_targets: *std.ArrayListUnmanaged(ScheduledTarget),
     ) ClusterApplyError!void {
+        if (isTerminalRolloutTargetState(rollout_targets.stateForRequest(req.request))) return;
         const gang_placements = scheduler.scheduleGang(self.alloc, req.request, self.agents) catch {
             failed.* += 1;
             failed_targets.* += 1;
@@ -350,6 +411,7 @@ pub const ClusterApplyBackend = struct {
         failed_targets: *usize,
         scheduled_targets: *std.ArrayListUnmanaged(ScheduledTarget),
     ) ClusterApplyError!void {
+        if (isTerminalRolloutTargetState(rollout_targets.stateForRequest(req.request))) return;
         const placements = scheduler.schedule(self.alloc, &[_]scheduler.PlacementRequest{req.request}, self.agents) catch {
             return ClusterApplyError.InternalError;
         };
@@ -682,6 +744,38 @@ const RolloutTargetBuilder = struct {
         }
     }
 
+    fn stateFor(
+        self: *const RolloutTargetBuilder,
+        workload_kind: []const u8,
+        workload_name: []const u8,
+    ) []const u8 {
+        for (self.items.items) |item| {
+            if (std.mem.eql(u8, item.workload_kind, workload_kind) and std.mem.eql(u8, item.workload_name, workload_name)) {
+                return item.state;
+            }
+        }
+        return "pending";
+    }
+
+    fn stateForRequest(self: *const RolloutTargetBuilder, request: scheduler.PlacementRequest) []const u8 {
+        return self.stateFor(
+            request.workload_kind orelse "service",
+            request.workload_name orelse request.image,
+        );
+    }
+
+    fn restoreFromJson(self: *RolloutTargetBuilder, rollout_targets_json: ?[]const u8) void {
+        const json = rollout_targets_json orelse return;
+        var iter = json_helpers.extractJsonObjects(json);
+        while (iter.next()) |obj| {
+            const workload_kind = json_helpers.extractJsonString(obj, "workload_kind") orelse continue;
+            const workload_name = json_helpers.extractJsonString(obj, "workload_name") orelse continue;
+            const state = json_helpers.extractJsonString(obj, "state") orelse continue;
+            const reason = json_helpers.extractJsonString(obj, "reason");
+            self.set(workload_kind, workload_name, state, reason);
+        }
+    }
+
     fn toOwnedJson(self: *RolloutTargetBuilder) !?[]u8 {
         if (self.items.items.len == 0) return null;
 
@@ -706,6 +800,12 @@ const RolloutTargetBuilder = struct {
         return try json_buf.toOwnedSlice(self.alloc);
     }
 };
+
+fn isTerminalRolloutTargetState(state: []const u8) bool {
+    return std.mem.eql(u8, state, "ready") or
+        std.mem.eql(u8, state, "failed") or
+        std.mem.eql(u8, state, "rolled_back");
+}
 
 const ScheduledTarget = struct {
     request: scheduler.PlacementRequest,
@@ -1984,6 +2084,33 @@ test "finalizeBatchTargets honors paused rollout resume before cutover" {
     try std.testing.expectEqual(@as(usize, 1), assignments.len);
     try std.testing.expectEqualStrings("new-web", assignments[0].id);
     try std.testing.expectEqualStrings("running", assignments[0].status);
+}
+
+test "rollout target builder restores terminal request state from stored json" {
+    const alloc = std.testing.allocator;
+    var rollout_targets = RolloutTargetBuilder.init(alloc);
+    defer rollout_targets.deinit();
+
+    const request: scheduler.PlacementRequest = .{
+        .image = "alpine",
+        .command = "echo web",
+        .cpu_limit = 1000,
+        .memory_limit_mb = 256,
+        .app_name = "demo-app",
+        .workload_kind = "service",
+        .workload_name = "web",
+    };
+
+    try rollout_targets.appendRequests(&.{.{
+        .request = request,
+        .rollout = .{},
+    }});
+    rollout_targets.restoreFromJson(
+        "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}]",
+    );
+
+    try std.testing.expectEqualStrings("ready", rollout_targets.stateForRequest(request));
+    try std.testing.expect(isTerminalRolloutTargetState(rollout_targets.stateForRequest(request)));
 }
 
 test "finalizeBatchTargets discards scheduled targets when paused rollout is canceled" {

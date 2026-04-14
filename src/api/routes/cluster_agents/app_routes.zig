@@ -208,6 +208,28 @@ fn resumeStoredClusterRollout(
     return response;
 }
 
+pub fn recoverActiveClusterRolloutsOnce(alloc: std.mem.Allocator, ctx: RouteContext) !usize {
+    const node = ctx.cluster orelse return 0;
+    var deployments = try store.listRecoverableActiveDeploymentsByAppInDb(node.stateMachineDb(), alloc);
+    defer {
+        for (deployments.items) |dep| dep.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    var recovered: usize = 0;
+    for (deployments.items) |dep| {
+        if (deploy_routes.isClusterRolloutActive(dep.id)) continue;
+
+        const response = resumeStoredClusterRollout(alloc, dep, ctx);
+        defer if (response.allocated) alloc.free(response.body);
+
+        if (response.status == .ok) {
+            recovered += 1;
+        }
+    }
+    return recovered;
+}
+
 fn formatAppsResponse(
     alloc: std.mem.Allocator,
     db: *sqlite.Db,
@@ -1023,6 +1045,39 @@ test "handleRolloutControl resumes a paused stored rollout when no executor is a
     try std.testing.expect(std.mem.eql(u8, latest.id, "dep-paused"));
     try std.testing.expectEqualStrings("completed", latest.status);
     try std.testing.expect(latest.resumed_from_release_id == null);
+}
+
+test "recoverActiveClusterRolloutsOnce resumes active stored rollout in place" {
+    const alloc = std.testing.allocator;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try store.saveDeploymentInDb(harness.node.stateMachineDb(), .{
+        .id = "dep-active",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:active",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"alpine\",\"command\":[\"echo\",\"hello\"]}]}",
+        .completed_targets = 0,
+        .failed_targets = 0,
+        .status = "in_progress",
+        .message = "apply in progress",
+        .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":0,\"failed_targets\":0,\"remaining_targets\":1,\"control_state\":\"active\"}",
+        .rollout_control_state = "active",
+        .created_at = 100,
+    });
+
+    const recovered = try recoverActiveClusterRolloutsOnce(alloc, .{ .cluster = harness.node, .join_token = null });
+    try std.testing.expectEqual(@as(usize, 1), recovered);
+
+    const latest = try store.getLatestDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer latest.deinit(alloc);
+    try std.testing.expectEqualStrings("dep-active", latest.id);
+    try std.testing.expectEqualStrings("completed", latest.status);
+    try std.testing.expect(latest.resumed_from_release_id == null);
+    try std.testing.expect(latest.superseded_by_release_id == null);
 }
 
 test "formatAppStatusResponse includes structured rollback metadata" {

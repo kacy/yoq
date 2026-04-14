@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const api_server = @import("../../api/server.zig");
 const routes = @import("../../api/routes.zig");
+const app_routes = @import("../../api/routes/cluster_agents/app_routes.zig");
 const cluster_node = @import("../node.zig");
 const cluster_config = @import("../config.zig");
 const orchestrator = @import("../../manifest/orchestrator.zig");
@@ -303,8 +304,32 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     };
     defer server.deinit();
 
+    const rollout_recovery_thread = std.Thread.spawn(.{}, recoverClusterRolloutsLoop, .{&node}) catch |err| blk: {
+        log.warn("cluster rollout recovery loop disabled: {}", .{err});
+        break :blk null;
+    };
+
     orchestrator.installSignalHandlers();
     server.run();
 
     node.stop();
+    if (rollout_recovery_thread) |thread| thread.join();
+}
+
+fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
+    while (node.running.load(.acquire)) {
+        if (!node.isLeader()) {
+            std.Thread.sleep(200 * std.time.ns_per_ms);
+            continue;
+        }
+
+        _ = app_routes.recoverActiveClusterRolloutsOnce(std.heap.page_allocator, .{
+            .cluster = node,
+            .join_token = routes.join_token,
+        }) catch |err| {
+            log.warn("cluster rollout recovery pass failed: {}", .{err});
+        };
+
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+    }
 }

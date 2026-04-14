@@ -239,6 +239,25 @@ pub fn listLatestDeploymentsByAppInDb(
     return deployments;
 }
 
+pub fn listRecoverableActiveDeploymentsByApp(alloc: Allocator) StoreError!std.ArrayList(DeploymentRecord) {
+    const db = try common.getDb();
+    return listRecoverableActiveDeploymentsByAppInDb(db, alloc);
+}
+
+pub fn listRecoverableActiveDeploymentsByAppInDb(
+    db: *sqlite.Db,
+    alloc: Allocator,
+) StoreError!std.ArrayList(DeploymentRecord) {
+    return listQueryInDb(
+        db,
+        alloc,
+        "SELECT " ++ deployment_columns ++
+            " FROM deployments WHERE app_name IS NOT NULL AND status IN ('pending', 'in_progress')" ++
+            " AND COALESCE(rollout_control_state, 'active') = 'active' ORDER BY created_at ASC, rowid ASC;",
+        .{},
+    );
+}
+
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
     const db = try common.getDb();
     return updateDeploymentStatusInDb(db, id, status, message, null, null, null);
@@ -734,6 +753,71 @@ test "listLatestDeploymentsByAppInDb returns empty list when no app releases exi
     defer latest.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 0), latest.items.len);
+}
+
+test "listRecoverableActiveDeploymentsByAppInDb returns only active recoverable releases" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-paused",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:1",
+        .config_snapshot = "{}",
+        .status = "in_progress",
+        .message = null,
+        .rollout_control_state = "paused",
+        .created_at = 100,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-active",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:2",
+        .config_snapshot = "{}",
+        .status = "in_progress",
+        .message = null,
+        .rollout_control_state = "active",
+        .created_at = 110,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-pending",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:3",
+        .config_snapshot = "{}",
+        .status = "pending",
+        .message = null,
+        .rollout_control_state = "active",
+        .created_at = 120,
+    });
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-done",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:4",
+        .config_snapshot = "{}",
+        .status = "completed",
+        .message = null,
+        .rollout_control_state = "active",
+        .created_at = 130,
+    });
+
+    var recoverable = try listRecoverableActiveDeploymentsByAppInDb(&db, std.testing.allocator);
+    defer {
+        for (recoverable.items) |dep| dep.deinit(std.testing.allocator);
+        recoverable.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), recoverable.items.len);
+    try std.testing.expectEqualStrings("dep-active", recoverable.items[0].id);
+    try std.testing.expectEqualStrings("dep-pending", recoverable.items[1].id);
 }
 
 test "deployment list ordered by timestamp desc" {
