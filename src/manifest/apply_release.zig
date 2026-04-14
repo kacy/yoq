@@ -18,6 +18,7 @@ pub const ApplyTrigger = enum {
 pub const ApplyContext = struct {
     trigger: ApplyTrigger = .apply,
     source_release_id: ?[]const u8 = null,
+    continue_release_id: ?[]const u8 = null,
     resumed_from_release_id: ?[]const u8 = null,
     superseded_by_release_id: ?[]const u8 = null,
 };

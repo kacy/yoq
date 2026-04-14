@@ -794,6 +794,9 @@ const LocalReleaseTracker = struct {
     context: apply_release.ApplyContext = .{},
 
     pub fn begin(self: *const LocalReleaseTracker) !?[]const u8 {
+        if (self.context.continue_release_id) |existing_id| {
+            return self.plan.alloc.dupe(u8, existing_id);
+        }
         return release_history.recordAppReleaseStart(self.plan, self.context) catch null;
     }
 

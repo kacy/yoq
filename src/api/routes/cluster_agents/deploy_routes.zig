@@ -35,6 +35,9 @@ const ClusterReleaseTracker = struct {
     context: apply_release.ApplyContext = .{},
 
     pub fn begin(self: *const ClusterReleaseTracker) !?[]const u8 {
+        if (self.context.continue_release_id) |existing_id| {
+            return self.alloc.dupe(u8, existing_id) catch return ClusterApplyError.InternalError;
+        }
         const name = self.app_name orelse return null;
         const manifest_hash = deployment_store.computeManifestHash(self.alloc, self.config_snapshot) catch return ClusterApplyError.InternalError;
         defer self.alloc.free(manifest_hash);

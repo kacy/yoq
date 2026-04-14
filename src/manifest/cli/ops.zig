@@ -649,23 +649,6 @@ fn rolloutContextFromDeployment(dep: store.DeploymentRecord) apply_release.Apply
     };
 }
 
-fn markSupersededLocalRollout(active: store.DeploymentRecord, new_release_id: []const u8) void {
-    const message = std.fmt.allocPrint(std.heap.page_allocator, "rollout resumed in release {s}", .{new_release_id}) catch return;
-    defer std.heap.page_allocator.free(message);
-
-    store.updateDeploymentProgress(
-        active.id,
-        "superseded",
-        message,
-        active.completed_targets,
-        active.failed_targets,
-        active.failure_details_json,
-        active.rollout_targets_json,
-        active.rollout_checkpoint_json,
-    ) catch {};
-    store.updateDeploymentSupersededByReleaseId(active.id, new_release_id) catch {};
-}
-
 fn resumeLocalAppRollout(alloc: std.mem.Allocator, active: store.DeploymentRecord) !void {
     var loaded = rollback_snapshot.loadLocalRollbackSnapshot(alloc, active.config_snapshot) catch {
         writeErr("failed to load rollout snapshot for app {s}\n", .{active.app_name.?});
@@ -681,17 +664,14 @@ fn resumeLocalAppRollout(alloc: std.mem.Allocator, active: store.DeploymentRecor
     prepared.beginRuntime();
 
     var context = rolloutContextFromDeployment(active);
-    context.resumed_from_release_id = active.id;
+    context.continue_release_id = active.id;
     const apply_report = prepared.startRelease(context) catch |err| {
         writeErr("rollout resume failed: {}\n", .{err});
         return OpsError.DeploymentFailed;
     };
     defer apply_report.deinit(alloc);
 
-    if (apply_report.release_id) |new_release_id| {
-        markSupersededLocalRollout(active, new_release_id);
-        write("rollout resumed for app {s}: {s} -> {s}\n", .{ active.app_name.?, active.id, new_release_id });
-    }
+    write("rollout resumed for app {s}: {s}\n", .{ active.app_name.?, apply_report.release_id orelse active.id });
     write("status: {s} ({s})\n", .{ apply_report.status.toString(), apply_report.rolloutState() });
 
     if (loaded.release.resolvedServiceCount() == 0) return;

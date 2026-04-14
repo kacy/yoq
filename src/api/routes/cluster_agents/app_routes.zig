@@ -181,24 +181,6 @@ fn rolloutContextFromDeployment(dep: store.DeploymentRecord) apply_release.Apply
     };
 }
 
-fn markSupersededClusterRollout(db: *sqlite.Db, alloc: std.mem.Allocator, active: store.DeploymentRecord, new_release_id: []const u8) !void {
-    const message = try std.fmt.allocPrint(alloc, "rollout resumed in release {s}", .{new_release_id});
-    defer alloc.free(message);
-
-    try store.updateDeploymentProgressInDb(
-        db,
-        active.id,
-        "superseded",
-        message,
-        active.completed_targets,
-        active.failed_targets,
-        active.failure_details_json,
-        active.rollout_targets_json,
-        active.rollout_checkpoint_json,
-    );
-    try store.updateDeploymentSupersededByReleaseIdInDb(db, active.id, new_release_id);
-}
-
 fn resumeStoredClusterRollout(
     alloc: std.mem.Allocator,
     active: store.DeploymentRecord,
@@ -215,7 +197,7 @@ fn resumeStoredClusterRollout(
     };
 
     var context = rolloutContextFromDeployment(active);
-    context.resumed_from_release_id = active.id;
+    context.continue_release_id = active.id;
     const response = switch (context.trigger) {
         .apply => deploy_routes.handleAppApplyWithContext(alloc, request, ctx, context),
         .rollback => blk: {
@@ -223,12 +205,6 @@ fn resumeStoredClusterRollout(
             break :blk deploy_routes.handleAppRollbackApplyWithContext(alloc, request, ctx, context);
         },
     };
-    if (response.status != .ok) return response;
-
-    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
-    if (json_helpers.extractJsonString(response.body, "release_id")) |new_release_id| {
-        markSupersededClusterRollout(node.stateMachineDb(), alloc, active, new_release_id) catch return common.internalError();
-    }
     return response;
 }
 
@@ -1035,21 +1011,18 @@ test "handleRolloutControl resumes a paused stored rollout when no executor is a
     defer freeResponse(alloc, response);
     try expectResponseOk(response);
     try expectJsonContains(response.body, "\"status\":\"completed\"");
-    try expectJsonContains(response.body, "\"resumed_from_release_id\":\"dep-paused\"");
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"release_id\":\"dep-paused\"") == null);
+    try expectJsonContains(response.body, "\"release_id\":\"dep-paused\"");
 
     const old_dep = try store.getDeploymentInDb(harness.node.stateMachineDb(), alloc, "dep-paused");
     defer old_dep.deinit(alloc);
-    try std.testing.expectEqualStrings("superseded", old_dep.status);
-    try std.testing.expectEqualStrings(json_helpers.extractJsonString(response.body, "release_id").?, old_dep.superseded_by_release_id.?);
-    try std.testing.expect(old_dep.message != null);
-    try std.testing.expect(std.mem.indexOf(u8, old_dep.message.?, "rollout resumed in release") != null);
+    try std.testing.expectEqualStrings("completed", old_dep.status);
+    try std.testing.expect(old_dep.superseded_by_release_id == null);
 
     const latest = try store.getLatestDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
     defer latest.deinit(alloc);
-    try std.testing.expect(!std.mem.eql(u8, latest.id, "dep-paused"));
+    try std.testing.expect(std.mem.eql(u8, latest.id, "dep-paused"));
     try std.testing.expectEqualStrings("completed", latest.status);
-    try std.testing.expectEqualStrings("dep-paused", latest.resumed_from_release_id.?);
+    try std.testing.expect(latest.resumed_from_release_id == null);
 }
 
 test "formatAppStatusResponse includes structured rollback metadata" {
