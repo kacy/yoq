@@ -158,6 +158,7 @@ const RollbackSummary = struct {
     trigger: []const u8,
     status: []const u8,
     rollout_state: []const u8 = "unknown",
+    rollout_control_state: []const u8 = "active",
     completed_targets: usize,
     failed_targets: usize,
     remaining_targets: usize,
@@ -214,6 +215,7 @@ fn rollbackLocalApp(
         .trigger = apply_report.trigger.toString(),
         .status = apply_report.status.toString(),
         .rollout_state = apply_report.rolloutState(),
+        .rollout_control_state = apply_report.rollout_control_state.toString(),
         .completed_targets = apply_report.completed_targets,
         .failed_targets = apply_report.failed_targets,
         .remaining_targets = apply_report.remainingTargets(),
@@ -656,6 +658,7 @@ fn parseRollbackSummary(json: []const u8) RollbackSummary {
         .trigger = json_helpers.extractJsonString(json, "trigger") orelse "rollback",
         .status = json_helpers.extractJsonString(json, "status") orelse "unknown",
         .rollout_state = json_helpers.extractJsonString(json, "rollout_state") orelse "unknown",
+        .rollout_control_state = json_helpers.extractJsonString(json, "rollout_control_state") orelse "active",
         .completed_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "completed_targets") orelse 0)),
         .failed_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "failed_targets") orelse 0)),
         .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(json, "remaining_targets") orelse 0)),
@@ -671,6 +674,7 @@ fn printRollbackSummary(summary: RollbackSummary) void {
     write("source_release_id: {s}\n", .{summary.source_release_id orelse "-"});
     write("status: {s}\n", .{summary.status});
     write("rollout_state: {s}\n", .{summary.rollout_state});
+    write("rollout_control_state: {s}\n", .{formatRolloutControlState(summary.rollout_control_state)});
 
     var progress_buf: [64]u8 = undefined;
     const progress = formatProgressCounts(&progress_buf, summary.completed_targets, summary.failed_targets, summary.remaining_targets);
@@ -893,6 +897,17 @@ test "formatRolloutControlState shortens active and cancel states" {
     try std.testing.expectEqualStrings("-", formatRolloutControlState("active"));
     try std.testing.expectEqualStrings("paused", formatRolloutControlState("paused"));
     try std.testing.expectEqualStrings("cancel", formatRolloutControlState("cancel_requested"));
+}
+
+test "parseRollbackSummary extracts rollout control state" {
+    const summary = parseRollbackSummary(
+        \\{"app_name":"demo-app","release_id":"dep-7","trigger":"rollback","status":"in_progress","rollout_state":"blocked","rollout_control_state":"paused","completed_targets":1,"failed_targets":0,"remaining_targets":1,"source_release_id":"dep-3","message":"rollback in progress"}
+    );
+
+    try std.testing.expectEqualStrings("demo-app", summary.app_name);
+    try std.testing.expectEqualStrings("dep-7", summary.release_id);
+    try std.testing.expectEqualStrings("blocked", summary.rollout_state);
+    try std.testing.expectEqualStrings("paused", summary.rollout_control_state);
 }
 
 test "historyEntryFromDeployment preserves partially failed local release state" {
