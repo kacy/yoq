@@ -1831,6 +1831,59 @@ test "app apply route preserves partially failed release metadata across reads" 
     try expectJsonContains(history_response.body, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"");
 }
 
+test "partial failure stays coherent across apps status and history with exact reasons" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"]},{"name":"db","image":"alpine","command":["echo","db"],"cpu_limit":999999,"memory_limit_mb":999999}],"workers":[{"name":"migrate","image":"postgres:16","command":["sh","-c","psql -f /m.sql"]}],"crons":[{"name":"nightly","image":"alpine:3","command":["sh","-c","echo nightly"],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["python","train.py"],"gpus":4,"gpu_type":"H100"}]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const apply_response = harness.appApply(apply_body);
+    defer freeResponse(alloc, apply_response);
+
+    try expectResponseOk(apply_response);
+    try expectJsonContains(apply_response.body, "\"status\":\"partially_failed\"");
+    try expectJsonContains(apply_response.body, "\"rollout_state\":\"degraded\"");
+    try expectJsonContains(apply_response.body, "\"failed_targets\":1");
+    try expectJsonContains(apply_response.body, "\"reason\":\"placement_failed\"");
+
+    const release_id = json_helpers.extractJsonString(apply_response.body, "release_id").?;
+
+    const apps_response = harness.listApps();
+    defer freeResponse(alloc, apps_response);
+    try expectResponseOk(apps_response);
+    try expectJsonContains(apps_response.body, "\"release_id\":\"");
+    try expectJsonContains(apps_response.body, release_id);
+    try expectJsonContains(apps_response.body, "\"status\":\"partially_failed\"");
+    try expectJsonContains(apps_response.body, "\"rollout_state\":\"degraded\"");
+    try expectJsonContains(apps_response.body, "\"worker_count\":1");
+    try expectJsonContains(apps_response.body, "\"cron_count\":1");
+    try expectJsonContains(apps_response.body, "\"training_job_count\":1");
+    try expectJsonContains(apps_response.body, "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]");
+
+    const status_response = harness.status("demo-app");
+    defer freeResponse(alloc, status_response);
+    try expectResponseOk(status_response);
+    try expectJsonContains(status_response.body, "\"release_id\":\"");
+    try expectJsonContains(status_response.body, release_id);
+    try expectJsonContains(status_response.body, "\"status\":\"partially_failed\"");
+    try expectJsonContains(status_response.body, "\"rollout_state\":\"degraded\"");
+    try expectJsonContains(status_response.body, "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]");
+    try expectJsonContains(status_response.body, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"");
+
+    const history_response = harness.history("demo-app");
+    defer freeResponse(alloc, history_response);
+    try expectResponseOk(history_response);
+    try expectJsonContains(history_response.body, "\"id\":\"");
+    try expectJsonContains(history_response.body, release_id);
+    try expectJsonContains(history_response.body, "\"status\":\"partially_failed\"");
+    try expectJsonContains(history_response.body, "\"rollout_state\":\"degraded\"");
+    try expectJsonContains(history_response.body, "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]");
+    try expectJsonContains(history_response.body, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"");
+}
+
 test "readiness-gated apply keeps prior assignments when cutover fails" {
     const alloc = std.testing.allocator;
     const apply_body =
