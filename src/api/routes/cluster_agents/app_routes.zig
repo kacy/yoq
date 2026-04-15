@@ -752,6 +752,10 @@ const RouteFlowHarness = struct {
         return handleAppHistory(self.alloc, app_name, self.ctx());
     }
 
+    fn listApps(self: *RouteFlowHarness) Response {
+        return handleListApps(self.alloc, self.ctx());
+    }
+
     fn rolloutControl(self: *RouteFlowHarness, app_name: []const u8, action: []const u8) !Response {
         const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/rollout/{s}", .{ app_name, action });
         defer self.alloc.free(path);
@@ -1090,6 +1094,81 @@ test "recoverActiveClusterRolloutsOnce resumes active stored rollout in place" {
     try std.testing.expectEqualStrings("completed", latest.status);
     try std.testing.expect(latest.resumed_from_release_id == null);
     try std.testing.expect(latest.superseded_by_release_id == null);
+}
+
+test "paused rollout control stays coherent across apps status history and resume" {
+    const alloc = std.testing.allocator;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    try store.saveDeploymentInDb(harness.node.stateMachineDb(), .{
+        .id = "dep-paused",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:paused",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"alpine\",\"command\":[\"echo\",\"hello\"]}],\"workers\":[{\"name\":\"migrate\",\"image\":\"postgres:16\",\"command\":[\"sh\",\"-c\",\"psql -f /m.sql\"]}],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 0,
+        .failed_targets = 0,
+        .status = "in_progress",
+        .message = "apply in progress",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"pending\",\"reason\":null}]",
+        .rollout_checkpoint_json = "{\"engine\":\"cluster\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":1,\"completed_targets\":0,\"failed_targets\":0,\"remaining_targets\":1,\"control_state\":\"paused\"}",
+        .rollout_control_state = "paused",
+        .created_at = 100,
+    });
+
+    const apps_before = harness.listApps();
+    defer freeResponse(alloc, apps_before);
+    try expectResponseOk(apps_before);
+    try expectJsonContains(apps_before.body, "\"release_id\":\"dep-paused\"");
+    try expectJsonContains(apps_before.body, "\"rollout_state\":\"blocked\"");
+    try expectJsonContains(apps_before.body, "\"rollout_control_state\":\"paused\"");
+
+    const status_before = harness.status("demo-app");
+    defer freeResponse(alloc, status_before);
+    try expectResponseOk(status_before);
+    try expectJsonContains(status_before.body, "\"release_id\":\"dep-paused\"");
+    try expectJsonContains(status_before.body, "\"rollout_state\":\"blocked\"");
+    try expectJsonContains(status_before.body, "\"rollout_control_state\":\"paused\"");
+    try expectJsonContains(status_before.body, "\"worker_count\":1");
+
+    const history_before = harness.history("demo-app");
+    defer freeResponse(alloc, history_before);
+    try expectResponseOk(history_before);
+    try expectJsonContains(history_before.body, "\"id\":\"dep-paused\"");
+    try expectJsonContains(history_before.body, "\"rollout_state\":\"blocked\"");
+    try expectJsonContains(history_before.body, "\"rollout_control_state\":\"paused\"");
+
+    const resume_response = try harness.rolloutControl("demo-app", "resume");
+    defer freeResponse(alloc, resume_response);
+    try expectResponseOk(resume_response);
+    try expectJsonContains(resume_response.body, "\"release_id\":\"dep-paused\"");
+    try expectJsonContains(resume_response.body, "\"status\":\"completed\"");
+    try expectJsonContains(resume_response.body, "\"rollout_control_state\":\"active\"");
+
+    const apps_after = harness.listApps();
+    defer freeResponse(alloc, apps_after);
+    try expectResponseOk(apps_after);
+    try expectJsonContains(apps_after.body, "\"release_id\":\"dep-paused\"");
+    try expectJsonContains(apps_after.body, "\"status\":\"completed\"");
+    try expectJsonContains(apps_after.body, "\"rollout_control_state\":\"active\"");
+
+    const status_after = harness.status("demo-app");
+    defer freeResponse(alloc, status_after);
+    try expectResponseOk(status_after);
+    try expectJsonContains(status_after.body, "\"release_id\":\"dep-paused\"");
+    try expectJsonContains(status_after.body, "\"status\":\"completed\"");
+    try expectJsonContains(status_after.body, "\"rollout_state\":\"stable\"");
+    try expectJsonContains(status_after.body, "\"rollout_control_state\":\"active\"");
+
+    const history_after = harness.history("demo-app");
+    defer freeResponse(alloc, history_after);
+    try expectResponseOk(history_after);
+    try expectJsonContains(history_after.body, "\"id\":\"dep-paused\"");
+    try expectJsonContains(history_after.body, "\"status\":\"completed\"");
+    try expectJsonContains(history_after.body, "\"rollout_control_state\":\"active\"");
 }
 
 test "formatAppStatusResponse includes structured rollback metadata" {
@@ -1579,6 +1658,79 @@ test "app rollback restores cluster cron schedules from selected release" {
     try std.testing.expectEqual(@as(usize, 1), schedules.items.len);
     try std.testing.expectEqualStrings("cleanup", schedules.items[0].name);
     try std.testing.expectEqual(@as(i64, 60), schedules.items[0].every);
+}
+
+test "remote app lifecycle keeps apps status and history coherent after mixed workload rollback" {
+    const alloc = std.testing.allocator;
+    const first_apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","command":["echo","first"]}],"workers":[{"name":"migrate","image":"postgres:16","command":["sh","-c","psql -f /m.sql"]}],"crons":[{"name":"nightly","image":"alpine:3","command":["sh","-c","echo nightly"],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["python","train.py"],"gpus":4,"gpu_type":"H100"}]}
+    ;
+    const second_apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:2","command":["echo","second"]}],"workers":[],"crons":[],"training_jobs":[]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const first_apply_response = harness.appApply(first_apply_body);
+    defer freeResponse(alloc, first_apply_response);
+    try expectResponseOk(first_apply_response);
+    const source_release_id = json_helpers.extractJsonString(first_apply_response.body, "release_id").?;
+
+    const second_apply_response = harness.appApply(second_apply_body);
+    defer freeResponse(alloc, second_apply_response);
+    try expectResponseOk(second_apply_response);
+    const previous_successful_release_id = json_helpers.extractJsonString(second_apply_response.body, "release_id").?;
+
+    const rollback_response = try harness.rollback("demo-app", source_release_id);
+    defer freeResponse(alloc, rollback_response);
+    try expectResponseOk(rollback_response);
+    try expectJsonContains(rollback_response.body, "\"trigger\":\"rollback\"");
+    try expectJsonContains(rollback_response.body, "\"source_release_id\":\"");
+    try expectJsonContains(rollback_response.body, source_release_id);
+
+    const apps_response = harness.listApps();
+    defer freeResponse(alloc, apps_response);
+    try expectResponseOk(apps_response);
+    try expectJsonContains(apps_response.body, "\"app_name\":\"demo-app\"");
+    try expectJsonContains(apps_response.body, "\"trigger\":\"rollback\"");
+    try expectJsonContains(apps_response.body, "\"worker_count\":1");
+    try expectJsonContains(apps_response.body, "\"cron_count\":1");
+    try expectJsonContains(apps_response.body, "\"training_job_count\":1");
+    try expectJsonContains(apps_response.body, "\"previous_successful_release_id\":\"");
+    try expectJsonContains(apps_response.body, previous_successful_release_id);
+
+    const status_response = harness.status("demo-app");
+    defer freeResponse(alloc, status_response);
+    try expectResponseOk(status_response);
+    try expectJsonContains(status_response.body, "\"release_id\":\"");
+    try expectJsonContains(status_response.body, "\"trigger\":\"rollback\"");
+    try expectJsonContains(status_response.body, "\"source_release_id\":\"");
+    try expectJsonContains(status_response.body, source_release_id);
+    try expectJsonContains(status_response.body, "\"worker_count\":1");
+    try expectJsonContains(status_response.body, "\"cron_count\":1");
+    try expectJsonContains(status_response.body, "\"training_job_count\":1");
+    try expectJsonContains(status_response.body, "\"previous_successful_release_id\":\"");
+    try expectJsonContains(status_response.body, previous_successful_release_id);
+
+    const history_response = harness.history("demo-app");
+    defer freeResponse(alloc, history_response);
+    try expectResponseOk(history_response);
+    try expectJsonContains(history_response.body, "\"id\":\"");
+    try expectJsonContains(history_response.body, "\"trigger\":\"rollback\"");
+    try expectJsonContains(history_response.body, "\"source_release_id\":\"");
+    try expectJsonContains(history_response.body, source_release_id);
+    try expectJsonContains(history_response.body, "\"id\":\"");
+    try expectJsonContains(history_response.body, previous_successful_release_id);
+    try expectJsonContains(history_response.body, "\"previous_successful\":true");
+
+    const latest = try store.getLatestDeploymentByAppInDb(harness.node.stateMachineDb(), alloc, "demo-app");
+    defer latest.deinit(alloc);
+    try std.testing.expectEqualStrings("rollback", latest.trigger.?);
+    try std.testing.expectEqualStrings(source_release_id, latest.source_release_id.?);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"workers\":[{\"name\":\"migrate\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"crons\":[{\"name\":\"nightly\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, latest.config_snapshot, "\"training_jobs\":[{\"name\":\"finetune\"") != null);
 }
 
 test "app apply route preserves failed release metadata across reads" {

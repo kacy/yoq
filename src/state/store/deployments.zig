@@ -300,10 +300,14 @@ pub fn updateDeploymentProgressInDb(
     rollout_targets_json: ?[]const u8,
     rollout_checkpoint_json: ?[]const u8,
 ) StoreError!void {
+    const normalized_control_state: ?[]const u8 = if (std.mem.eql(u8, status, "pending") or std.mem.eql(u8, status, "in_progress"))
+        null
+    else
+        "active";
     db.exec(
-        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ?, failure_details_json = ?, rollout_targets_json = ?, rollout_checkpoint_json = ? WHERE id = ?;",
+        "UPDATE deployments SET status = ?, message = ?, completed_targets = ?, failed_targets = ?, failure_details_json = ?, rollout_targets_json = ?, rollout_checkpoint_json = ?, rollout_control_state = COALESCE(?, rollout_control_state) WHERE id = ?;",
         .{},
-        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), failure_details_json, rollout_targets_json, rollout_checkpoint_json, id },
+        .{ status, message, @as(i64, @intCast(completed_targets)), @as(i64, @intCast(failed_targets)), failure_details_json, rollout_targets_json, rollout_checkpoint_json, normalized_control_state, id },
     ) catch return StoreError.WriteFailed;
 }
 
@@ -575,6 +579,33 @@ test "getActiveDeploymentByAppInDb returns latest pending or in progress release
 
     try std.testing.expectEqualStrings("dep-3", active.id);
     try std.testing.expectEqualStrings("active", active.rollout_control_state.?);
+}
+
+test "updateDeploymentProgressInDb resets rollout control state for terminal statuses" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+
+    try saveDeploymentInDb(&db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{}",
+        .status = "in_progress",
+        .message = "apply in progress",
+        .created_at = 100,
+        .rollout_control_state = "paused",
+    });
+
+    try updateDeploymentProgressInDb(&db, "dep-1", "completed", "apply completed", 1, 0, null, null, null);
+
+    const dep = try getDeploymentInDb(&db, std.testing.allocator, "dep-1");
+    defer dep.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("completed", dep.status);
+    try std.testing.expectEqualStrings("active", dep.rollout_control_state.?);
 }
 
 test "getPreviousSuccessfulDeploymentByAppInDb excludes current release" {
