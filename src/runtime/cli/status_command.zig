@@ -183,7 +183,89 @@ const AppStatusSnapshot = struct {
     failure_details_json: ?[]const u8 = null,
     rollout_targets_json: ?[]const u8 = null,
     rollout_checkpoint_json: ?[]const u8 = null,
+
+    fn clone(self: AppStatusSnapshot, alloc: std.mem.Allocator) !AppStatusSnapshot {
+        return .{
+            .app_name = try alloc.dupe(u8, self.app_name),
+            .trigger = try alloc.dupe(u8, self.trigger),
+            .release_id = try alloc.dupe(u8, self.release_id),
+            .status = try alloc.dupe(u8, self.status),
+            .rollout_state = try alloc.dupe(u8, self.rollout_state),
+            .rollout_control_state = try alloc.dupe(u8, self.rollout_control_state),
+            .manifest_hash = try alloc.dupe(u8, self.manifest_hash),
+            .created_at = self.created_at,
+            .service_count = self.service_count,
+            .worker_count = self.worker_count,
+            .cron_count = self.cron_count,
+            .training_job_count = self.training_job_count,
+            .active_training_jobs = self.active_training_jobs,
+            .paused_training_jobs = self.paused_training_jobs,
+            .failed_training_jobs = self.failed_training_jobs,
+            .completed_targets = self.completed_targets,
+            .failed_targets = self.failed_targets,
+            .remaining_targets = self.remaining_targets,
+            .source_release_id = if (self.source_release_id) |v| try alloc.dupe(u8, v) else null,
+            .resumed_from_release_id = if (self.resumed_from_release_id) |v| try alloc.dupe(u8, v) else null,
+            .superseded_by_release_id = if (self.superseded_by_release_id) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_release_id = if (self.previous_successful_release_id) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_trigger = if (self.previous_successful_trigger) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_status = if (self.previous_successful_status) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_rollout_state = if (self.previous_successful_rollout_state) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_rollout_control_state = if (self.previous_successful_rollout_control_state) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_manifest_hash = if (self.previous_successful_manifest_hash) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_created_at = self.previous_successful_created_at,
+            .previous_successful_completed_targets = self.previous_successful_completed_targets,
+            .previous_successful_failed_targets = self.previous_successful_failed_targets,
+            .previous_successful_remaining_targets = self.previous_successful_remaining_targets,
+            .previous_successful_source_release_id = if (self.previous_successful_source_release_id) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_resumed_from_release_id = if (self.previous_successful_resumed_from_release_id) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_superseded_by_release_id = if (self.previous_successful_superseded_by_release_id) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_message = if (self.previous_successful_message) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_failure_details_json = if (self.previous_successful_failure_details_json) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_rollout_targets_json = if (self.previous_successful_rollout_targets_json) |v| try alloc.dupe(u8, v) else null,
+            .previous_successful_rollout_checkpoint_json = if (self.previous_successful_rollout_checkpoint_json) |v| try alloc.dupe(u8, v) else null,
+            .message = if (self.message) |v| try alloc.dupe(u8, v) else null,
+            .failure_details_json = if (self.failure_details_json) |v| try alloc.dupe(u8, v) else null,
+            .rollout_targets_json = if (self.rollout_targets_json) |v| try alloc.dupe(u8, v) else null,
+            .rollout_checkpoint_json = if (self.rollout_checkpoint_json) |v| try alloc.dupe(u8, v) else null,
+        };
+    }
+
+    fn deinit(self: AppStatusSnapshot, alloc: std.mem.Allocator) void {
+        alloc.free(self.app_name);
+        alloc.free(self.trigger);
+        alloc.free(self.release_id);
+        alloc.free(self.status);
+        alloc.free(self.rollout_state);
+        alloc.free(self.rollout_control_state);
+        alloc.free(self.manifest_hash);
+        if (self.source_release_id) |v| alloc.free(v);
+        if (self.resumed_from_release_id) |v| alloc.free(v);
+        if (self.superseded_by_release_id) |v| alloc.free(v);
+        if (self.previous_successful_release_id) |v| alloc.free(v);
+        if (self.previous_successful_trigger) |v| alloc.free(v);
+        if (self.previous_successful_status) |v| alloc.free(v);
+        if (self.previous_successful_rollout_state) |v| alloc.free(v);
+        if (self.previous_successful_rollout_control_state) |v| alloc.free(v);
+        if (self.previous_successful_manifest_hash) |v| alloc.free(v);
+        if (self.previous_successful_source_release_id) |v| alloc.free(v);
+        if (self.previous_successful_resumed_from_release_id) |v| alloc.free(v);
+        if (self.previous_successful_superseded_by_release_id) |v| alloc.free(v);
+        if (self.previous_successful_message) |v| alloc.free(v);
+        if (self.previous_successful_failure_details_json) |v| alloc.free(v);
+        if (self.previous_successful_rollout_targets_json) |v| alloc.free(v);
+        if (self.previous_successful_rollout_checkpoint_json) |v| alloc.free(v);
+        if (self.message) |v| alloc.free(v);
+        if (self.failure_details_json) |v| alloc.free(v);
+        if (self.rollout_targets_json) |v| alloc.free(v);
+        if (self.rollout_checkpoint_json) |v| alloc.free(v);
+    }
 };
+
+fn deinitAppStatusSnapshots(alloc: std.mem.Allocator, snapshots: *std.ArrayList(AppStatusSnapshot)) void {
+    for (snapshots.items) |snapshot| snapshot.deinit(alloc);
+    snapshots.deinit(alloc);
+}
 
 fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!void {
     const latest = store.getLatestDeploymentByApp(alloc, app_name) catch |err| switch (err) {
@@ -311,31 +393,8 @@ fn statusRemoteApp(alloc: std.mem.Allocator, addr: [4]u8, port: u16, app_name: [
 }
 
 fn appsLocal(alloc: std.mem.Allocator, filters: AppListFilters) StatusError!void {
-    var latest = store.listLatestDeploymentsByApp(alloc) catch {
-        writeErr("failed to read app list\n", .{});
-        return StatusError.StoreError;
-    };
-    defer {
-        for (latest.items) |dep| dep.deinit(alloc);
-        latest.deinit(alloc);
-    }
-
-    var snapshots: std.ArrayList(AppStatusSnapshot) = .empty;
-    defer snapshots.deinit(alloc);
-
-    for (latest.items) |dep| {
-        const previous_successful = loadPreviousSuccessfulDeployment(alloc, dep.app_name.?, dep.id) catch {
-            writeErr("failed to read app list\n", .{});
-            return StatusError.StoreError;
-        };
-        defer if (previous_successful) |prev| prev.deinit(alloc);
-
-        const snapshot = snapshotFromDeployments(alloc, dep, previous_successful);
-        if (appMatchesFilters(snapshot, filters)) {
-            snapshots.append(alloc, snapshot) catch return StatusError.OutOfMemory;
-        }
-    }
-
+    var snapshots = try collectLocalAppSnapshots(alloc, filters);
+    defer deinitAppStatusSnapshots(alloc, &snapshots);
     printAppStatuses(snapshots.items);
 }
 
@@ -365,18 +424,59 @@ fn appsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, filters: AppList
         return StatusError.ServerError;
     }
 
-    var snapshots: std.ArrayList(AppStatusSnapshot) = .empty;
-    defer snapshots.deinit(alloc);
+    var snapshots = try collectRemoteAppSnapshotsFromJson(alloc, resp.body, filters);
+    defer deinitAppStatusSnapshots(alloc, &snapshots);
+    printAppStatuses(snapshots.items);
+}
 
-    var iter = json_helpers.extractJsonObjects(resp.body);
-    while (iter.next()) |obj| {
-        const snapshot = parseAppStatusResponse(obj);
+fn collectLocalAppSnapshots(alloc: std.mem.Allocator, filters: AppListFilters) StatusError!std.ArrayList(AppStatusSnapshot) {
+    var latest = store.listLatestDeploymentsByApp(alloc) catch {
+        writeErr("failed to read app list\n", .{});
+        return StatusError.StoreError;
+    };
+    defer {
+        for (latest.items) |dep| dep.deinit(alloc);
+        latest.deinit(alloc);
+    }
+
+    var snapshots: std.ArrayList(AppStatusSnapshot) = .empty;
+    errdefer deinitAppStatusSnapshots(alloc, &snapshots);
+
+    for (latest.items) |dep| {
+        const previous_successful = loadPreviousSuccessfulDeployment(alloc, dep.app_name.?, dep.id) catch {
+            writeErr("failed to read app list\n", .{});
+            return StatusError.StoreError;
+        };
+        defer if (previous_successful) |prev| prev.deinit(alloc);
+
+        const snapshot = snapshotFromDeployments(alloc, dep, previous_successful);
         if (appMatchesFilters(snapshot, filters)) {
-            snapshots.append(alloc, snapshot) catch return StatusError.OutOfMemory;
+            const owned = snapshot.clone(alloc) catch return StatusError.OutOfMemory;
+            snapshots.append(alloc, owned) catch return StatusError.OutOfMemory;
         }
     }
 
-    printAppStatuses(snapshots.items);
+    return snapshots;
+}
+
+fn collectRemoteAppSnapshotsFromJson(
+    alloc: std.mem.Allocator,
+    body: []const u8,
+    filters: AppListFilters,
+) StatusError!std.ArrayList(AppStatusSnapshot) {
+    var snapshots: std.ArrayList(AppStatusSnapshot) = .empty;
+    errdefer deinitAppStatusSnapshots(alloc, &snapshots);
+
+    var iter = json_helpers.extractJsonObjects(body);
+    while (iter.next()) |obj| {
+        const snapshot = parseAppStatusResponse(obj);
+        if (appMatchesFilters(snapshot, filters)) {
+            const owned = snapshot.clone(alloc) catch return StatusError.OutOfMemory;
+            snapshots.append(alloc, owned) catch return StatusError.OutOfMemory;
+        }
+    }
+
+    return snapshots;
 }
 
 fn printAppStatus(snapshot: AppStatusSnapshot) void {
@@ -1145,6 +1245,144 @@ test "appMatchesFilters applies failed and in-progress filters" {
     try std.testing.expect(appMatchesFilters(pending_snapshot, .{ .in_progress_only = true }));
     try std.testing.expect(appMatchesFilters(pending_snapshot, .{ .status = "rolling" }));
     try std.testing.expect(!appMatchesFilters(pending_snapshot, .{ .status = "completed" }));
+}
+
+test "collectLocalAppSnapshots applies filters across stored app summaries" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const db = try store.getDb();
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-a1",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a1",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 100,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .rollout_control_state = "active",
+    });
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-b1",
+        .app_name = "app-b",
+        .service_name = "app-b",
+        .trigger = "apply",
+        .manifest_hash = "sha256:b1",
+        .config_snapshot = "{\"app_name\":\"app-b\",\"services\":[{\"name\":\"api\"},{\"name\":\"db\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .status = "partially_failed",
+        .message = "one or more rollout targets failed",
+        .created_at = 200,
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .rollout_control_state = "active",
+    });
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-c1",
+        .app_name = "app-c",
+        .service_name = "app-c",
+        .trigger = "apply",
+        .manifest_hash = "sha256:c1",
+        .config_snapshot = "{\"app_name\":\"app-c\",\"services\":[{\"name\":\"worker\"},{\"name\":\"sidecar\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .status = "in_progress",
+        .message = "rolling update in progress",
+        .created_at = 300,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .rollout_control_state = "active",
+    });
+
+    var failed = try collectLocalAppSnapshots(alloc, .{ .failed_only = true });
+    defer deinitAppStatusSnapshots(alloc, &failed);
+    try std.testing.expectEqual(@as(usize, 1), failed.items.len);
+    try std.testing.expectEqualStrings("app-b", failed.items[0].app_name);
+    try std.testing.expectEqualStrings("degraded", failed.items[0].rollout_state);
+
+    var in_progress = try collectLocalAppSnapshots(alloc, .{ .in_progress_only = true });
+    defer deinitAppStatusSnapshots(alloc, &in_progress);
+    try std.testing.expectEqual(@as(usize, 1), in_progress.items.len);
+    try std.testing.expectEqualStrings("app-c", in_progress.items[0].app_name);
+    try std.testing.expectEqualStrings("rolling", in_progress.items[0].rollout_state);
+
+    var stable = try collectLocalAppSnapshots(alloc, .{ .status = "stable" });
+    defer deinitAppStatusSnapshots(alloc, &stable);
+    try std.testing.expectEqual(@as(usize, 1), stable.items.len);
+    try std.testing.expectEqualStrings("app-a", stable.items[0].app_name);
+
+    var degraded = try collectLocalAppSnapshots(alloc, .{ .status = "degraded" });
+    defer deinitAppStatusSnapshots(alloc, &degraded);
+    try std.testing.expectEqual(@as(usize, 1), degraded.items.len);
+    try std.testing.expectEqualStrings("app-b", degraded.items[0].app_name);
+}
+
+test "collectRemoteAppSnapshotsFromJson applies rollout-state filters across summaries" {
+    const alloc = std.testing.allocator;
+
+    const snapshots = [_]AppStatusSnapshot{
+        .{
+            .app_name = "app-a",
+            .trigger = "apply",
+            .release_id = "dep-a1",
+            .status = "completed",
+            .rollout_state = "stable",
+            .manifest_hash = "sha256:a1",
+            .created_at = 100,
+            .completed_targets = 1,
+            .failed_targets = 0,
+            .remaining_targets = 0,
+        },
+        .{
+            .app_name = "app-b",
+            .trigger = "apply",
+            .release_id = "dep-b1",
+            .status = "partially_failed",
+            .rollout_state = "degraded",
+            .manifest_hash = "sha256:b1",
+            .created_at = 200,
+            .completed_targets = 1,
+            .failed_targets = 1,
+            .remaining_targets = 0,
+        },
+        .{
+            .app_name = "app-c",
+            .trigger = "apply",
+            .release_id = "dep-c1",
+            .status = "in_progress",
+            .rollout_state = "rolling",
+            .manifest_hash = "sha256:c1",
+            .created_at = 300,
+            .completed_targets = 1,
+            .failed_targets = 0,
+            .remaining_targets = 1,
+        },
+    };
+
+    var w = json_out.JsonWriter{};
+    w.beginArray();
+    for (snapshots) |snapshot| {
+        writeAppStatusJsonObject(&w, snapshot);
+        w.endObject();
+    }
+    w.endArray();
+
+    var failed = try collectRemoteAppSnapshotsFromJson(alloc, w.getWritten(), .{ .failed_only = true });
+    defer deinitAppStatusSnapshots(alloc, &failed);
+    try std.testing.expectEqual(@as(usize, 1), failed.items.len);
+    try std.testing.expectEqualStrings("app-b", failed.items[0].app_name);
+
+    var in_progress = try collectRemoteAppSnapshotsFromJson(alloc, w.getWritten(), .{ .in_progress_only = true });
+    defer deinitAppStatusSnapshots(alloc, &in_progress);
+    try std.testing.expectEqual(@as(usize, 1), in_progress.items.len);
+    try std.testing.expectEqualStrings("app-c", in_progress.items[0].app_name);
+
+    var stable = try collectRemoteAppSnapshotsFromJson(alloc, w.getWritten(), .{ .status = "stable" });
+    defer deinitAppStatusSnapshots(alloc, &stable);
+    try std.testing.expectEqual(@as(usize, 1), stable.items.len);
+    try std.testing.expectEqualStrings("app-a", stable.items[0].app_name);
 }
 
 test "appStatusFromReport preserves partially failed local release state" {
