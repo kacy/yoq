@@ -204,7 +204,7 @@ fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!vo
     };
     defer if (previous_successful) |dep| dep.deinit(alloc);
 
-    const snapshot = snapshotFromDeployments(latest, previous_successful);
+    const snapshot = snapshotFromDeployments(alloc, latest, previous_successful);
     printAppStatus(snapshot);
 }
 
@@ -330,7 +330,7 @@ fn appsLocal(alloc: std.mem.Allocator, filters: AppListFilters) StatusError!void
         };
         defer if (previous_successful) |prev| prev.deinit(alloc);
 
-        const snapshot = snapshotFromDeployments(dep, previous_successful);
+        const snapshot = snapshotFromDeployments(alloc, dep, previous_successful);
         if (appMatchesFilters(snapshot, filters)) {
             snapshots.append(alloc, snapshot) catch return StatusError.OutOfMemory;
         }
@@ -739,6 +739,7 @@ fn appStatusFromReports(
 }
 
 fn snapshotFromDeployments(
+    alloc: std.mem.Allocator,
     latest: store.DeploymentRecord,
     previous_successful: ?store.DeploymentRecord,
 ) AppStatusSnapshot {
@@ -746,7 +747,7 @@ fn snapshotFromDeployments(
         apply_release.reportFromDeployment(latest),
         if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
         app_snapshot.summarize(latest.config_snapshot),
-        store.summarizeTrainingJobsByApp(latest.app_name.?) catch .{},
+        store.summarizeTrainingJobsByApp(alloc, latest.app_name.?) catch .{},
     );
 }
 
@@ -1193,6 +1194,57 @@ test "appStatusFromReport preserves partially failed local release state" {
     try std.testing.expectEqualStrings(local.previous_successful_manifest_hash.?, remote.previous_successful_manifest_hash.?);
     try std.testing.expectEqual(local.previous_successful_created_at.?, remote.previous_successful_created_at.?);
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
+}
+
+test "snapshotFromDeployments preserves mixed workload counts and previous successful context" {
+    const alloc = std.testing.allocator;
+    const latest = store.DeploymentRecord{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "rollback",
+        .source_release_id = "dep-1",
+        .manifest_hash = "sha256:333",
+        .config_snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web"},{"name":"db"}],"workers":[{"name":"migrate"}],"crons":[{"name":"nightly"}],"training_jobs":[{"name":"finetune"},{"name":"eval"}]}
+        ,
+        .completed_targets = 2,
+        .failed_targets = 0,
+        .status = "completed",
+        .message = "rollback completed",
+        .created_at = 300,
+    };
+    const previous_successful = store.DeploymentRecord{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web"}],"workers":[{"name":"migrate"}],"crons":[{"name":"nightly"}],"training_jobs":[{"name":"finetune"}]}
+        ,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .message = "apply completed",
+        .created_at = 100,
+    };
+
+    const snapshot = snapshotFromDeployments(alloc, latest, previous_successful);
+
+    try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
+    try std.testing.expectEqualStrings("rollback", snapshot.trigger);
+    try std.testing.expectEqualStrings("dep-3", snapshot.release_id);
+    try std.testing.expectEqualStrings("stable", snapshot.rollout_state);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.service_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.worker_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.cron_count);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.training_job_count);
+    try std.testing.expectEqualStrings("dep-1", snapshot.previous_successful_release_id.?);
+    try std.testing.expectEqualStrings("apply", snapshot.previous_successful_trigger.?);
+    try std.testing.expectEqualStrings("stable", snapshot.previous_successful_rollout_state.?);
+    try std.testing.expectEqualStrings("sha256:111", snapshot.previous_successful_manifest_hash.?);
+    try std.testing.expectEqual(@as(i64, 100), snapshot.previous_successful_created_at.?);
 }
 
 test "formatAppProgress summarizes in-flight and partial outcomes" {
