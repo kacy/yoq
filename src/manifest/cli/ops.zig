@@ -1197,6 +1197,76 @@ test "local app history preserves paused rollout current and previous successful
     try std.testing.expectEqualStrings("stable", previous_successful.rollout_state);
 }
 
+test "local app history preserves exact partial failure details for current release" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    try store.saveDeployment(.{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeployment(.{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}],\"workers\":[{\"name\":\"migrate\"}],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .status = "partially_failed",
+        .rollout_control_state = "active",
+        .message = "one or more rollout targets failed",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null},{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"}]",
+        .created_at = 200,
+    });
+
+    var deployments = try release_history.listAppReleases(alloc, "demo-app");
+    defer {
+        for (deployments.items) |dep| dep.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), deployments.items.len);
+    const previous_successful_id = previousSuccessfulReleaseId(deployments.items);
+    try std.testing.expect(previous_successful_id != null);
+    try std.testing.expectEqualStrings("dep-1", previous_successful_id.?);
+
+    var current = historyEntryFromDeployment(deployments.items[0]);
+    current.is_current = true;
+    current.is_previous_successful = false;
+
+    var previous_successful = historyEntryFromDeployment(deployments.items[1]);
+    previous_successful.is_current = false;
+    previous_successful.is_previous_successful = true;
+
+    try std.testing.expect(current.is_current);
+    try std.testing.expectEqualStrings("partially_failed", current.status);
+    try std.testing.expectEqualStrings("degraded", current.rollout_state);
+    try std.testing.expect(current.failure_details_json != null);
+    try std.testing.expect(current.rollout_targets_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, current.failure_details_json.?, "\"workload_name\":\"db\",\"reason\":\"placement_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, current.rollout_targets_json.?, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), current.service_count);
+    try std.testing.expectEqual(@as(usize, 1), current.worker_count);
+
+    try std.testing.expect(previous_successful.is_previous_successful);
+    try std.testing.expectEqualStrings("completed", previous_successful.status);
+    try std.testing.expectEqualStrings("stable", previous_successful.rollout_state);
+}
+
 test "formatHistoryMessage appends failure detail summary" {
     var buf: [256]u8 = undefined;
     const text = formatHistoryMessage(
