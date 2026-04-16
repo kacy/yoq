@@ -1533,6 +1533,116 @@ test "collectLocalAppSnapshots preserves exact partial failure details and rollo
     try std.testing.expect(std.mem.indexOf(u8, snapshot.rollout_targets_json.?, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"") != null);
 }
 
+test "collectLocalAppSnapshots keeps latest release per app across mixed rollout states" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const db = try store.getDb();
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-a1",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a1",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-a2",
+        .app_name = "app-a",
+        .service_name = "app-a",
+        .trigger = "apply",
+        .manifest_hash = "sha256:a2",
+        .config_snapshot = "{\"app_name\":\"app-a\",\"services\":[{\"name\":\"web\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .status = "partially_failed",
+        .rollout_control_state = "active",
+        .message = "one or more rollout targets failed",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"placement_failed\"}]",
+        .created_at = 200,
+    });
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-b1",
+        .app_name = "app-b",
+        .service_name = "app-b",
+        .trigger = "apply",
+        .manifest_hash = "sha256:b1",
+        .config_snapshot = "{\"app_name\":\"app-b\",\"services\":[{\"name\":\"api\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 110,
+    });
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-b2",
+        .app_name = "app-b",
+        .service_name = "app-b",
+        .trigger = "apply",
+        .manifest_hash = "sha256:b2",
+        .config_snapshot = "{\"app_name\":\"app-b\",\"services\":[{\"name\":\"api\"},{\"name\":\"worker\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "in_progress",
+        .rollout_control_state = "paused",
+        .message = "rollout paused after first batch",
+        .rollout_checkpoint_json = "{\"engine\":\"local\",\"phase\":\"batch\",\"batch_start\":1,\"batch_end\":2,\"total_targets\":2,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":1,\"control_state\":\"paused\"}",
+        .created_at = 210,
+    });
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-c1",
+        .app_name = "app-c",
+        .service_name = "app-c",
+        .trigger = "apply",
+        .manifest_hash = "sha256:c1",
+        .config_snapshot = "{\"app_name\":\"app-c\",\"services\":[{\"name\":\"db\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 120,
+    });
+
+    var snapshots = try collectLocalAppSnapshots(alloc, .{});
+    defer deinitAppStatusSnapshots(alloc, &snapshots);
+
+    try std.testing.expectEqual(@as(usize, 3), snapshots.items.len);
+
+    const Finder = struct {
+        fn byApp(items: []const AppStatusSnapshot, app_name: []const u8) ?AppStatusSnapshot {
+            for (items) |item| {
+                if (std.mem.eql(u8, item.app_name, app_name)) return item;
+            }
+            return null;
+        }
+    };
+
+    const app_a = Finder.byApp(snapshots.items, "app-a").?;
+    try std.testing.expectEqualStrings("dep-a2", app_a.release_id);
+    try std.testing.expectEqualStrings("degraded", app_a.rollout_state);
+    try std.testing.expectEqualStrings("dep-a1", app_a.previous_successful_release_id.?);
+
+    const app_b = Finder.byApp(snapshots.items, "app-b").?;
+    try std.testing.expectEqualStrings("dep-b2", app_b.release_id);
+    try std.testing.expectEqualStrings("blocked", app_b.rollout_state);
+    try std.testing.expectEqualStrings("paused", app_b.rollout_control_state);
+    try std.testing.expectEqualStrings("dep-b1", app_b.previous_successful_release_id.?);
+
+    const app_c = Finder.byApp(snapshots.items, "app-c").?;
+    try std.testing.expectEqualStrings("dep-c1", app_c.release_id);
+    try std.testing.expectEqualStrings("stable", app_c.rollout_state);
+    try std.testing.expect(app_c.previous_successful_release_id == null);
+}
+
 test "appStatusFromReport preserves partially failed local release state" {
     const dep = store.DeploymentRecord{
         .id = "dep-3",
