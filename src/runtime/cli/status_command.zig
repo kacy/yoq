@@ -1643,6 +1643,61 @@ test "collectLocalAppSnapshots keeps latest release per app across mixed rollout
     try std.testing.expect(app_c.previous_successful_release_id == null);
 }
 
+test "snapshotFromDeployments preserves paused current and detailed previous successful context" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const latest = store.DeploymentRecord{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}],\"workers\":[{\"name\":\"migrate\"}],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "in_progress",
+        .rollout_control_state = "paused",
+        .message = "rollout paused after first batch",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null},{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"state\":\"starting\",\"reason\":null}]",
+        .rollout_checkpoint_json = "{\"engine\":\"local\",\"phase\":\"batch\",\"batch_start\":1,\"batch_end\":2,\"total_targets\":2,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":1,\"control_state\":\"paused\"}",
+        .created_at = 200,
+    };
+    const previous_successful = store.DeploymentRecord{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed with prior warning",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null},{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"}]",
+        .rollout_checkpoint_json = "{\"engine\":\"local\",\"phase\":\"cutover\",\"batch_start\":0,\"batch_end\":2,\"total_targets\":2,\"completed_targets\":1,\"failed_targets\":1,\"remaining_targets\":0,\"control_state\":\"active\"}",
+        .created_at = 100,
+    };
+
+    const snapshot = snapshotFromDeployments(alloc, latest, previous_successful);
+    try std.testing.expectEqualStrings("dep-2", snapshot.release_id);
+    try std.testing.expectEqualStrings("blocked", snapshot.rollout_state);
+    try std.testing.expectEqualStrings("paused", snapshot.rollout_control_state);
+    try std.testing.expect(snapshot.rollout_targets_json != null);
+    try std.testing.expect(snapshot.rollout_checkpoint_json != null);
+    try std.testing.expectEqualStrings("dep-1", snapshot.previous_successful_release_id.?);
+    try std.testing.expectEqualStrings("stable", snapshot.previous_successful_rollout_state.?);
+    try std.testing.expectEqualStrings("active", snapshot.previous_successful_rollout_control_state.?);
+    try std.testing.expect(snapshot.previous_successful_failure_details_json != null);
+    try std.testing.expect(snapshot.previous_successful_rollout_targets_json != null);
+    try std.testing.expect(snapshot.previous_successful_rollout_checkpoint_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.previous_successful_failure_details_json.?, "\"reason\":\"placement_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.previous_successful_rollout_targets_json.?, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"") != null);
+}
+
 test "appStatusFromReport preserves partially failed local release state" {
     const dep = store.DeploymentRecord{
         .id = "dep-3",
