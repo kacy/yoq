@@ -122,6 +122,8 @@ current ACME/TLS limits:
 make build
 ```
 
+For the preferred app/control-plane smoke lane, use `make test-operator` or `zig build test-operator`. This target keeps the highest-signal local app lifecycle, rollback, rollout-control, and `/apps/*` route-flow regressions together without pulling in the full unit suite.
+
 For GPU-focused validation without running the full suite, use `zig build test-gpu`. For a real-host smoke checklist, see [docs/gpu-validation.md](docs/gpu-validation.md).
 For a temporary 5-node GCP validation rig that exercises cluster networking and GPU hosts, see [docs/gcp-cluster-validation.md](docs/gcp-cluster-validation.md).
 For the canonical operator evaluation flow across local runtime, HTTP routing, and clustered deployment, see [docs/golden-path.md](docs/golden-path.md).
