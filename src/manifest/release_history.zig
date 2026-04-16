@@ -1,5 +1,6 @@
 const std = @import("std");
 const apply_release = @import("apply_release.zig");
+const spec = @import("spec.zig");
 const store = @import("../state/store.zig");
 const deployment_store = @import("update/deployment_store.zig");
 const release_plan = @import("release_plan.zig");
@@ -229,4 +230,55 @@ test "rollbackApp returns last successful snapshot when latest release failed" {
         "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:1\"}]}",
         config,
     );
+}
+
+test "rollbackApp snapshot round-trips mixed workloads for local rollback" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    try store.saveDeployment(.{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","rollout":{"strategy":"blue_green","parallelism":2,"delay_between_batches":5,"failure_action":"pause","health_check_timeout":30}}],"workers":[{"name":"migrate","image":"postgres:16","command":["/bin/sh","-c","psql -f /m.sql"],"depends_on":["web"]}],"crons":[{"name":"nightly","image":"alpine:3","command":["/bin/sh","-c","echo nightly"],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["torchrun","train.py"],"gpus":4,"gpu_type":"H100","cpu_limit":2000,"memory_limit_mb":131072,"ib_required":true,"spare_ranks":1,"auto_restart":false,"max_restarts":3}]}
+        ,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeployment(.{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:2\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 200,
+    });
+
+    const snapshot = try rollbackApp(alloc, "demo-app");
+    defer alloc.free(snapshot);
+
+    const rollback_snapshot = @import("rollback_snapshot.zig");
+    var loaded = try rollback_snapshot.loadLocalRollbackSnapshot(alloc, snapshot);
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), loaded.manifest.services.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.manifest.workers.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.manifest.crons.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.manifest.training_jobs.len);
+    try std.testing.expectEqual(spec.RolloutStrategy.blue_green, loaded.manifest.services[0].rollout.strategy);
+    try std.testing.expectEqual(spec.RolloutFailureAction.pause, loaded.manifest.services[0].rollout.failure_action);
+    try std.testing.expectEqualStrings("migrate", loaded.manifest.workers[0].name);
+    try std.testing.expectEqualStrings("nightly", loaded.manifest.crons[0].name);
+    try std.testing.expectEqualStrings("finetune", loaded.manifest.training_jobs[0].name);
+    try std.testing.expectEqualStrings("H100", loaded.manifest.training_jobs[0].gpu_type.?);
 }

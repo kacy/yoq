@@ -1028,6 +1028,101 @@ test "historyEntryFromDeployment preserves partially failed local release state"
     try std.testing.expectEqualStrings(local.message.?, remote.message.?);
 }
 
+test "local app history marks current rollback and previous successful release across lifecycle" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    try store.saveDeployment(.{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","rollout":{"strategy":"blue_green","parallelism":2,"delay_between_batches":5,"failure_action":"pause","health_check_timeout":30}}],"workers":[{"name":"migrate","image":"postgres:16","command":["sh","-c","psql -f /m.sql"]}],"crons":[{"name":"nightly","image":"alpine:3","command":["sh","-c","echo nightly"],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["torchrun","train.py"],"gpus":4,"gpu_type":"H100","cpu_limit":2000,"memory_limit_mb":131072,"ib_required":true,"spare_ranks":1,"auto_restart":false,"max_restarts":3}]}
+        ,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeployment(.{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:2\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 200,
+    });
+    try store.saveDeployment(.{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "rollback",
+        .source_release_id = "dep-1",
+        .manifest_hash = "sha256:111",
+        .config_snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","rollout":{"strategy":"blue_green","parallelism":2,"delay_between_batches":5,"failure_action":"pause","health_check_timeout":30}}],"workers":[{"name":"migrate","image":"postgres:16","command":["sh","-c","psql -f /m.sql"]}],"crons":[{"name":"nightly","image":"alpine:3","command":["sh","-c","echo nightly"],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["torchrun","train.py"],"gpus":4,"gpu_type":"H100","cpu_limit":2000,"memory_limit_mb":131072,"ib_required":true,"spare_ranks":1,"auto_restart":false,"max_restarts":3}]}
+        ,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "rollback completed",
+        .created_at = 300,
+    });
+
+    var deployments = try release_history.listAppReleases(alloc, "demo-app");
+    defer {
+        for (deployments.items) |dep| dep.deinit(alloc);
+        deployments.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), deployments.items.len);
+    try std.testing.expectEqualStrings("dep-3", deployments.items[0].id);
+    try std.testing.expectEqualStrings("dep-2", deployments.items[1].id);
+    try std.testing.expectEqualStrings("dep-1", deployments.items[2].id);
+
+    const previous_successful_id = previousSuccessfulReleaseId(deployments.items);
+    try std.testing.expect(previous_successful_id != null);
+    try std.testing.expectEqualStrings("dep-2", previous_successful_id.?);
+
+    var current = historyEntryFromDeployment(deployments.items[0]);
+    current.is_current = true;
+    current.is_previous_successful = previous_successful_id != null and std.mem.eql(u8, current.id, previous_successful_id.?);
+
+    var previous_successful = historyEntryFromDeployment(deployments.items[1]);
+    previous_successful.is_current = false;
+    previous_successful.is_previous_successful = previous_successful_id != null and std.mem.eql(u8, previous_successful.id, previous_successful_id.?);
+
+    try std.testing.expect(current.is_current);
+    try std.testing.expect(!current.is_previous_successful);
+    try std.testing.expectEqualStrings("rollback", current.trigger);
+    try std.testing.expectEqualStrings("dep-1", current.source_release_id.?);
+    try std.testing.expectEqual(@as(usize, 1), current.service_count);
+    try std.testing.expectEqual(@as(usize, 1), current.worker_count);
+    try std.testing.expectEqual(@as(usize, 1), current.cron_count);
+    try std.testing.expectEqual(@as(usize, 1), current.training_job_count);
+
+    try std.testing.expect(!previous_successful.is_current);
+    try std.testing.expect(previous_successful.is_previous_successful);
+    try std.testing.expectEqualStrings("apply", previous_successful.trigger);
+    try std.testing.expect(previous_successful.source_release_id == null);
+    try std.testing.expectEqual(@as(usize, 1), previous_successful.service_count);
+    try std.testing.expectEqual(@as(usize, 0), previous_successful.worker_count);
+    try std.testing.expectEqual(@as(usize, 0), previous_successful.cron_count);
+    try std.testing.expectEqual(@as(usize, 0), previous_successful.training_job_count);
+}
+
 test "formatHistoryMessage appends failure detail summary" {
     var buf: [256]u8 = undefined;
     const text = formatHistoryMessage(
