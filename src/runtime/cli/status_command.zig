@@ -1385,6 +1385,77 @@ test "collectRemoteAppSnapshotsFromJson applies rollout-state filters across sum
     try std.testing.expectEqualStrings("app-a", stable.items[0].app_name);
 }
 
+test "collectLocalAppSnapshots preserves rollback current and previous successful lifecycle context" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const db = try store.getDb();
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-1",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:111",
+        .config_snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","rollout":{"strategy":"blue_green","parallelism":2,"delay_between_batches":5,"failure_action":"pause","health_check_timeout":30}}],"workers":[{"name":"migrate","image":"postgres:16","command":["sh","-c","psql -f /m.sql"]}],"crons":[{"name":"nightly","image":"alpine:3","command":["sh","-c","echo nightly"],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["torchrun","train.py"],"gpus":4,"gpu_type":"H100"}]}
+        ,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 100,
+    });
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-2",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:222",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\",\"image\":\"nginx:2\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "apply completed",
+        .created_at = 200,
+    });
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-3",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "rollback",
+        .source_release_id = "dep-1",
+        .manifest_hash = "sha256:111",
+        .config_snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","rollout":{"strategy":"blue_green","parallelism":2,"delay_between_batches":5,"failure_action":"pause","health_check_timeout":30}}],"workers":[{"name":"migrate","image":"postgres:16","command":["sh","-c","psql -f /m.sql"]}],"crons":[{"name":"nightly","image":"alpine:3","command":["sh","-c","echo nightly"],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["torchrun","train.py"],"gpus":4,"gpu_type":"H100"}]}
+        ,
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "completed",
+        .rollout_control_state = "active",
+        .message = "rollback completed",
+        .created_at = 300,
+    });
+
+    var snapshots = try collectLocalAppSnapshots(alloc, .{});
+    defer deinitAppStatusSnapshots(alloc, &snapshots);
+
+    try std.testing.expectEqual(@as(usize, 1), snapshots.items.len);
+    const snapshot = snapshots.items[0];
+    try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
+    try std.testing.expectEqualStrings("dep-3", snapshot.release_id);
+    try std.testing.expectEqualStrings("rollback", snapshot.trigger);
+    try std.testing.expectEqualStrings("dep-1", snapshot.source_release_id.?);
+    try std.testing.expectEqualStrings("dep-2", snapshot.previous_successful_release_id.?);
+    try std.testing.expectEqualStrings("stable", snapshot.rollout_state);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.service_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.worker_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.cron_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.training_job_count);
+}
+
 test "appStatusFromReport preserves partially failed local release state" {
     const dep = store.DeploymentRecord{
         .id = "dep-3",
