@@ -1456,6 +1456,83 @@ test "collectLocalAppSnapshots preserves rollback current and previous successfu
     try std.testing.expectEqual(@as(usize, 1), snapshot.training_job_count);
 }
 
+test "collectLocalAppSnapshots preserves paused rollout control and checkpoint" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const db = try store.getDb();
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-paused",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:paused",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"}],\"workers\":[],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 0,
+        .status = "in_progress",
+        .rollout_control_state = "paused",
+        .message = "rollout paused after first batch",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"starting\",\"reason\":null}]",
+        .rollout_checkpoint_json = "{\"engine\":\"local\",\"phase\":\"batch\",\"batch_start\":0,\"batch_end\":1,\"total_targets\":2,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":1,\"control_state\":\"paused\"}",
+        .created_at = 100,
+    });
+
+    var snapshots = try collectLocalAppSnapshots(alloc, .{});
+    defer deinitAppStatusSnapshots(alloc, &snapshots);
+
+    try std.testing.expectEqual(@as(usize, 1), snapshots.items.len);
+    const snapshot = snapshots.items[0];
+    try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
+    try std.testing.expectEqualStrings("in_progress", snapshot.status);
+    try std.testing.expectEqualStrings("blocked", snapshot.rollout_state);
+    try std.testing.expectEqualStrings("paused", snapshot.rollout_control_state);
+    try std.testing.expect(snapshot.rollout_checkpoint_json != null);
+    try std.testing.expect(snapshot.rollout_targets_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.rollout_checkpoint_json.?, "\"control_state\":\"paused\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.rollout_targets_json.?, "\"workload_name\":\"web\"") != null);
+}
+
+test "collectLocalAppSnapshots preserves exact partial failure details and rollout targets" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const db = try store.getDb();
+    try store.saveDeploymentInDb(db, .{
+        .id = "dep-fail",
+        .app_name = "demo-app",
+        .service_name = "demo-app",
+        .trigger = "apply",
+        .manifest_hash = "sha256:fail",
+        .config_snapshot = "{\"app_name\":\"demo-app\",\"services\":[{\"name\":\"web\"},{\"name\":\"db\"}],\"workers\":[{\"name\":\"migrate\"}],\"crons\":[],\"training_jobs\":[]}",
+        .completed_targets = 1,
+        .failed_targets = 1,
+        .status = "partially_failed",
+        .rollout_control_state = "active",
+        .message = "one or more rollout targets failed",
+        .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]",
+        .rollout_targets_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null},{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"}]",
+        .created_at = 100,
+    });
+
+    var snapshots = try collectLocalAppSnapshots(alloc, .{});
+    defer deinitAppStatusSnapshots(alloc, &snapshots);
+
+    try std.testing.expectEqual(@as(usize, 1), snapshots.items.len);
+    const snapshot = snapshots.items[0];
+    try std.testing.expectEqualStrings("demo-app", snapshot.app_name);
+    try std.testing.expectEqualStrings("partially_failed", snapshot.status);
+    try std.testing.expectEqualStrings("degraded", snapshot.rollout_state);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.service_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.worker_count);
+    try std.testing.expect(snapshot.failure_details_json != null);
+    try std.testing.expect(snapshot.rollout_targets_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.failure_details_json.?, "\"reason\":\"placement_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.rollout_targets_json.?, "\"workload_name\":\"db\",\"state\":\"failed\",\"reason\":\"placement_failed\"") != null);
+}
+
 test "appStatusFromReport preserves partially failed local release state" {
     const dep = store.DeploymentRecord{
         .id = "dep-3",
