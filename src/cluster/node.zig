@@ -80,6 +80,14 @@ pub const NodeError = error{
     NotLeader,
 };
 
+pub const TestInitError = error{
+    LogInitFailed,
+    StateMachineInitFailed,
+    TransportInitFailed,
+    AuthInitFailed,
+    RaftInitFailed,
+};
+
 pub const Node = struct {
     alloc: std.mem.Allocator,
     config: NodeConfig,
@@ -106,20 +114,37 @@ pub const Node = struct {
     heartbeat_batcher: heartbeat_batcher_mod.HeartbeatBatcher,
 
     pub fn init(alloc: std.mem.Allocator, config: NodeConfig) !Node {
-        // open persistent log
-        var log_path_buf: [512]u8 = undefined;
-        const log_path = bootstrap.raftDbPath(&log_path_buf, config.data_dir) orelse
-            return NodeError.InitFailed;
+        return initInternal(alloc, config, false);
+    }
 
-        var log = Log.init(log_path) catch return NodeError.InitFailed;
+    /// test-only initializer that skips live transport binding.
+    /// route-flow smoke tests use this to exercise cluster handlers
+    /// against a real log/state-machine DB without depending on sockets.
+    pub fn initForTests(alloc: std.mem.Allocator, config: NodeConfig) TestInitError!Node {
+        return initInternalForTests(alloc, config);
+    }
+
+    fn initInternal(alloc: std.mem.Allocator, config: NodeConfig, skip_transport_bind: bool) !Node {
+        // open persistent log
+        var log = if (skip_transport_bind)
+            Log.initMemory() catch return NodeError.InitFailed
+        else blk: {
+            var log_path_buf: [512]u8 = undefined;
+            const log_path = bootstrap.raftDbPath(&log_path_buf, config.data_dir) orelse
+                return NodeError.InitFailed;
+            break :blk Log.init(log_path) catch return NodeError.InitFailed;
+        };
         errdefer log.deinit();
 
         // open state machine database
-        var sm_path_buf: [512]u8 = undefined;
-        const sm_path = bootstrap.stateDbPath(&sm_path_buf, config.data_dir) orelse
-            return NodeError.InitFailed;
-
-        var sm = StateMachine.init(sm_path) catch return NodeError.InitFailed;
+        var sm = if (skip_transport_bind)
+            StateMachine.initMemory() catch return NodeError.InitFailed
+        else blk: {
+            var sm_path_buf: [512]u8 = undefined;
+            const sm_path = bootstrap.stateDbPath(&sm_path_buf, config.data_dir) orelse
+                return NodeError.InitFailed;
+            break :blk StateMachine.init(sm_path) catch return NodeError.InitFailed;
+        };
         errdefer sm.deinit();
 
         // collect peer IDs for raft
@@ -130,9 +155,14 @@ pub const Node = struct {
         }
 
         // initialize transport
-        var transport = Transport.init(alloc, config.port) catch {
-            return NodeError.InitFailed;
-        };
+        var transport = if (skip_transport_bind)
+            Transport.initForTests(alloc) catch {
+                return NodeError.InitFailed;
+            }
+        else
+            Transport.init(alloc, config.port) catch {
+                return NodeError.InitFailed;
+            };
         errdefer transport.deinit();
         transport.setLocalNodeId(config.id);
 
@@ -155,7 +185,7 @@ pub const Node = struct {
         // non-fatal: if UDP binding fails, gossip is null and the node
         // falls back to heartbeat-based health checks (30s timeout).
         const gossip_port: u16 = if (config.gossip_port != 0) config.gossip_port else config.port +| 100;
-        const gossip_inst = bootstrap.initGossip(alloc, config, &transport);
+        const gossip_inst = if (skip_transport_bind) null else bootstrap.initGossip(alloc, config, &transport);
 
         // initialize raft — dupes peer_ids internally
         var raft = Raft.init(alloc, config.id, peer_ids, &log) catch {
@@ -189,6 +219,60 @@ pub const Node = struct {
             .last_snapshot_index = initial_snap_index,
             .gossip = gossip_inst,
             .gossip_port = gossip_port,
+            .heartbeat_batcher = heartbeat_batcher_mod.HeartbeatBatcher.init(alloc),
+        };
+    }
+
+    fn initInternalForTests(alloc: std.mem.Allocator, config: NodeConfig) TestInitError!Node {
+        var log = Log.initMemory() catch return TestInitError.LogInitFailed;
+        errdefer log.deinit();
+
+        var sm = StateMachine.initMemory() catch return TestInitError.StateMachineInitFailed;
+        errdefer sm.deinit();
+
+        const peer_ids = alloc.alloc(NodeId, config.peers.len) catch return TestInitError.RaftInitFailed;
+        defer alloc.free(peer_ids);
+        for (config.peers, 0..) |p, i| {
+            peer_ids[i] = p.id;
+        }
+
+        var transport = Transport.initForTests(alloc) catch return TestInitError.TransportInitFailed;
+        errdefer transport.deinit();
+        transport.setLocalNodeId(config.id);
+
+        for (config.peers) |p| {
+            transport.addPeer(p.id, p.addr, p.port) catch return TestInitError.TransportInitFailed;
+        }
+
+        if (config.shared_key) |key| {
+            transport.shared_key = key;
+        }
+
+        transport.requireAuth() catch return TestInitError.AuthInitFailed;
+
+        var raft = Raft.init(alloc, config.id, peer_ids, &log) catch return TestInitError.RaftInitFailed;
+        errdefer raft.deinit();
+
+        const initial_snap_index: LogIndex = if (log.getSnapshotMeta()) |meta|
+            meta.last_included_index
+        else
+            0;
+
+        return .{
+            .alloc = alloc,
+            .config = config,
+            .raft = raft,
+            .transport = transport,
+            .log = log,
+            .state_machine = sm,
+            .mu = .{},
+            .running = std.atomic.Value(bool).init(false),
+            .tick_count = 0,
+            .tick_thread = null,
+            .recv_thread = null,
+            .last_snapshot_index = initial_snap_index,
+            .gossip = null,
+            .gossip_port = if (config.gossip_port != 0) config.gossip_port else config.port +| 100,
             .heartbeat_batcher = heartbeat_batcher_mod.HeartbeatBatcher.init(alloc),
         };
     }

@@ -98,6 +98,7 @@ pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
 }
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
+    const rollout_control_state = record.rollout_control_state orelse "active";
     db.exec(
         "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
@@ -118,7 +119,7 @@ pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!v
             record.failure_details_json,
             record.rollout_targets_json,
             record.rollout_checkpoint_json,
-            record.rollout_control_state,
+            rollout_control_state,
             record.created_at,
         },
     ) catch return StoreError.WriteFailed;
@@ -463,9 +464,9 @@ test "deployment record round-trip via sqlite" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep001", "demo-app", "web", "apply", null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", null, null, "active", @as(i64, 1000) },
+        .{ "dep001", "demo-app", "web", "apply", null, null, null, "sha256:abc", "{\"image\":\"nginx:latest\"}", @as(i64, 1), @as(i64, 0), "completed", "initial deploy", null, null, null, "active", @as(i64, 1000) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;
@@ -516,9 +517,9 @@ test "deployment stores rollback transition metadata" {
     try schema.init(&db);
 
     db.exec(
-        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO deployments (" ++ deployment_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
-        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", null, null, "active", @as(i64, 2100) },
+        .{ "dep-rb", "demo-app", "demo-app", "rollback", "dep-1", null, null, "sha256:rb", "{}", @as(i64, 1), @as(i64, 0), "completed", "rollback completed", null, null, null, "active", @as(i64, 2100) },
     ) catch unreachable;
 
     const alloc = std.testing.allocator;

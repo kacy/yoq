@@ -670,17 +670,17 @@ const RouteFlowHarness = struct {
         errdefer tmp.cleanup();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+        const tmp_path = try tmp.dir.realpath(".", &path_buf);
 
         const node = try alloc.create(cluster_node.Node);
         errdefer alloc.destroy(node);
 
-        node.* = cluster_node.Node.init(alloc, .{
+        node.* = try cluster_node.Node.initForTests(alloc, .{
             .id = 1,
             .port = 0,
             .peers = &.{},
             .data_dir = tmp_path,
-        }) catch return error.SkipZigTest;
+        });
         errdefer node.deinit();
         node.fixPointers();
 
@@ -713,11 +713,11 @@ const RouteFlowHarness = struct {
     }
 
     fn seedActiveAgent(self: *RouteFlowHarness) !void {
-        self.node.stateMachineDb().exec(
-            "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        try self.node.stateMachineDb().exec(
+            "INSERT INTO agents (id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             .{},
-            .{ "abc123def456", "10.0.0.2:7701", "active", @as(i64, 4), @as(i64, 8192), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "" },
-        ) catch return error.SkipZigTest;
+            .{ "abc123def456", "10.0.0.2", @as(i64, 7701), "active", @as(i64, 8), @as(i64, 16384), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "", @as(i64, 4), @as(i64, 0), "L4", @as(i64, 24576) },
+        );
     }
 
     fn appApply(self: *RouteFlowHarness, body: []const u8) Response {
@@ -1940,7 +1940,7 @@ test "readiness-gated apply keeps prior assignments when cutover fails" {
 test "app apply rejects invalid rollout config" {
     const alloc = std.testing.allocator;
     const apply_body =
-        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"],"rollout":{"strategy":"canary"}}]}
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"],"rollout":{"strategy":"burst"}}]}
     ;
 
     var harness = try RouteFlowHarness.init(alloc);
