@@ -24,6 +24,15 @@ jobs:
       timeout-minutes: 45
       failure-artifact-name: quality-full-test-log
 
+  operator-smoke:
+    name: operator-smoke
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: operator-smoke
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test-operator -Doptimize=ReleaseSafe
+      timeout-minutes: 30
+      failure-artifact-name: quality-operator-smoke-log
+
   release-build-smoke:
     name: release-build-smoke
     uses: ./.github/workflows/_build-test.yml
