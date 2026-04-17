@@ -55,7 +55,9 @@ test "route returns null for unknown path" {
 }
 
 test "route handles /v1/status GET" {
-    if (true) return error.SkipZigTest; // Skip - requires store layer
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
     const req = http.Request{
         .method = .GET,
         .path = "/v1/status",
@@ -66,14 +68,17 @@ test "route handles /v1/status GET" {
         .content_length = 0,
     };
 
-    const response = route(req, testing.allocator);
-    _ = response; // May be null or a Response depending on store state
-    // Should return a response (either empty array or error)
-    // Don't check exact result as it depends on store state
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expectEqualStrings("[]", response.body);
 }
 
 test "route handles /v1/metrics GET" {
-    if (true) return error.SkipZigTest; // Skip - requires store layer
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
     const req = http.Request{
         .method = .GET,
         .path = "/v1/metrics",
@@ -84,14 +89,17 @@ test "route handles /v1/metrics GET" {
         .content_length = 0,
     };
 
-    const response = route(req, testing.allocator);
-    _ = response; // May be null or a Response depending on store state and ebpf
-    // Should return a response (either empty array or metrics)
-    // Don't check exact result as it depends on store state and ebpf availability
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expectEqualStrings("[]", response.body);
 }
 
 test "route handles /v1/metrics?mode=pairs GET" {
-    if (true) return error.SkipZigTest; // Skip - requires ebpf layer
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
     const req = http.Request{
         .method = .GET,
         .path = "/v1/metrics?mode=pairs",
@@ -102,9 +110,11 @@ test "route handles /v1/metrics?mode=pairs GET" {
         .content_length = 0,
     };
 
-    const response = route(req, testing.allocator);
-    _ = response; // May be null or a Response depending on ebpf availability
-    // Should handle the pairs mode query parameter
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expectEqualStrings("[]", response.body);
 }
 
 test "route returns null for POST to status" {
@@ -708,7 +718,49 @@ test "writeSnapshotJson includes PSI metrics when present" {
 }
 
 test "route handles service filter in metrics" {
-    if (true) return error.SkipZigTest; // Skip - requires store layer
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "myapp-running",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "myapp",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = "10.42.0.9",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1000,
+    });
+    try store.save(.{
+        .id = "otherapp-running",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "otherapp",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = "10.42.0.10",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1001,
+    });
+    try store.save(.{
+        .id = "myapp-stopped",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "myapp",
+        .status = "stopped",
+        .pid = null,
+        .exit_code = 0,
+        .ip_address = "10.42.0.11",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1002,
+    });
+
     const req = http.Request{
         .method = .GET,
         .path = "/v1/metrics?service=myapp",
@@ -719,9 +771,15 @@ test "route handles service filter in metrics" {
         .content_length = 0,
     };
 
-    const response = route(req, testing.allocator);
-    _ = response; // May be null or a Response depending on store state
-    // Should handle the service filter query parameter
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"service\":\"myapp\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"container\":\"myapp-") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"ip\":\"10.42.0.9\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"service\":\"otherapp\"") == null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "10.42.0.11") == null);
 }
 
 test "extractQueryParam from full path with multiple params" {

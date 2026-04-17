@@ -107,6 +107,18 @@ jobs:
       timeout-minutes: 30
       failure-artifact-name: operator-smoke-log
 
+  network-smoke:
+    name: network-smoke
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: network-smoke
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test-network -Doptimize=ReleaseSafe
+      timeout-minutes: 30
+      failure-artifact-name: network-smoke-log
+
   bpf-consistency:
     name: bpf-consistency
     needs:

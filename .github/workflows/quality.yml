@@ -33,6 +33,15 @@ jobs:
       timeout-minutes: 30
       failure-artifact-name: quality-operator-smoke-log
 
+  network-smoke:
+    name: network-smoke
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: network-smoke
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test-network -Doptimize=ReleaseSafe
+      timeout-minutes: 30
+      failure-artifact-name: quality-network-smoke-log
+
   release-build-smoke:
     name: release-build-smoke
     uses: ./.github/workflows/_build-test.yml

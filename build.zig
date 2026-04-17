@@ -168,6 +168,34 @@ pub fn build(b: *std.Build) void {
     }
     operator_test_step.dependOn(&run_operator.step);
 
+    // -- network rollout smoke tests (sqlite required, no root) --
+    //
+    // these are the preferred regression lanes for the network/proxy/service
+    // rollout stack: status/metrics, service registry bridging, reconciler
+    // readiness, and rollout flag semantics. keep this target deterministic
+    // and separate from privileged proxy/runtime coverage.
+    const network_test_step = b.step("test-network", "Run network rollout smoke tests");
+    const network_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_network.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addSqlite(network_test_mod, b, target, optimize);
+
+    const network_tests = b.addTest(.{
+        .root_module = network_test_mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
+    });
+    const run_network = std.Build.Step.Run.create(b, "run network rollout smoke tests");
+    run_network.producer = network_tests;
+    run_network.addArtifactArg(network_tests);
+    run_network.has_side_effects = true;
+    run_network.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
+    if (b.args) |args| {
+        run_network.addArgs(args);
+    }
+    network_test_step.dependOn(&run_network.step);
+
     // -- gpu tests (no hardware required) --
     //
     // these focus on the src/gpu subtree plus manifest GPU env glue. they are
