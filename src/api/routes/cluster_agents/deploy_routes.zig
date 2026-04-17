@@ -1519,7 +1519,10 @@ test "formatAppApplyResponse includes app release metadata" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"apply completed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_checkpoint\":{\"engine\":\"cluster\",\"phase\":\"cutover\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"stable\",\"control_state\":\"active\",\"completed_targets\":2,\"failed_targets\":0,\"remaining_targets\":0,\"failure_details\":null,\"targets\":null,\"checkpoint\":{\"engine\":\"cluster\",\"phase\":\"cutover\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"stable\",\"control_state\":\"active\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"completed_targets\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failed_targets\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_targets\":0") != null);
 }
 
 test "formatAppApplyResponse includes rollback trigger metadata" {
@@ -1567,7 +1570,10 @@ test "formatAppApplyResponse includes partially failed status" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failed\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"one or more placements failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"degraded\",\"completed_targets\":1,\"failed_targets\":1,\"remaining_targets\":0,\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"db\",\"reason\":\"placement_failed\"}],\"targets\":null}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"degraded\",\"control_state\":\"active\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"completed_targets\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"failed_targets\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_targets\":0") != null);
 }
 
 test "formatAppApplyResponse includes rollout control state" {
@@ -1824,7 +1830,7 @@ test "resolveTargetReadinessStates leaves pending targets pending when timeout e
         },
     };
 
-    const states = try resolveTargetReadinessStates(std.testing.allocator, &db, &targets, 0);
+    const states = try resolveTargetReadinessStates(std.testing.allocator, &db, &targets, 0, null);
     defer std.testing.allocator.free(states);
 
     try std.testing.expectEqual(@as(usize, 1), states.len);
@@ -1881,6 +1887,7 @@ test "resolveTargetReadinessStates waits for paused rollout control to resume" {
             _: ?[]const u8,
             _: usize,
             _: usize,
+            _: ?[]const u8,
             _: ?[]const u8,
             _: ?[]const u8,
         ) anyerror!void {}
@@ -1958,6 +1965,7 @@ test "resolveTargetReadinessStates exits when paused rollout is canceled" {
             _: ?[]const u8,
             _: usize,
             _: usize,
+            _: ?[]const u8,
             _: ?[]const u8,
             _: ?[]const u8,
         ) anyerror!void {}

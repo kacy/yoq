@@ -1,4 +1,4 @@
-.PHONY: build run test test-integration test-contract test-sim test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
+.PHONY: build run test test-operator test-integration test-contract test-sim test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
 
 build:
 	zig build -Doptimize=ReleaseSafe
@@ -8,6 +8,9 @@ run:
 
 test:
 	zig build test -Doptimize=ReleaseSafe
+
+test-operator:
+	zig build test-operator -Doptimize=ReleaseSafe
 
 test-integration:
 	zig build test-integration -Doptimize=ReleaseSafe

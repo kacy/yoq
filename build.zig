@@ -141,6 +141,33 @@ pub fn build(b: *std.Build) void {
     run_tests.has_side_effects = true;
     test_step.dependOn(&run_tests.step);
 
+    // -- operator smoke tests (sqlite required, no root) --
+    //
+    // these are the preferred regression lanes for the app-first control plane:
+    // local lifecycle, remote lifecycle, rollout control, rollback parity, and
+    // partial-failure operator views. keep this target focused and high-signal.
+    const operator_test_step = b.step("test-operator", "Run app operator smoke tests");
+    const operator_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_operator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addSqlite(operator_test_mod, b, target, optimize);
+
+    const operator_tests = b.addTest(.{
+        .root_module = operator_test_mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
+    });
+    const run_operator = std.Build.Step.Run.create(b, "run operator smoke tests");
+    run_operator.producer = operator_tests;
+    run_operator.addArtifactArg(operator_tests);
+    run_operator.has_side_effects = true;
+    run_operator.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
+    if (b.args) |args| {
+        run_operator.addArgs(args);
+    }
+    operator_test_step.dependOn(&run_operator.step);
+
     // -- gpu tests (no hardware required) --
     //
     // these focus on the src/gpu subtree plus manifest GPU env glue. they are

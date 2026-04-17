@@ -37,6 +37,8 @@ const msg_append_entries_reply = common.msg_append_entries_reply;
 const msg_install_snapshot = common.msg_install_snapshot;
 const msg_install_snapshot_reply = common.msg_install_snapshot_reply;
 
+const invalid_socket: posix.socket_t = -1;
+
 pub const Transport = struct {
     alloc: std.mem.Allocator,
     listen_fd: posix.socket_t,
@@ -76,9 +78,23 @@ pub const Transport = struct {
         };
     }
 
+    /// test-only initializer that avoids binding a TCP listener.
+    /// useful for route-flow and state-machine tests that need a node
+    /// shell but do not start transport threads or accept network I/O.
+    pub fn initForTests(alloc: std.mem.Allocator) !Transport {
+        return .{
+            .alloc = alloc,
+            .listen_fd = invalid_socket,
+            .peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc),
+            .local_id = null,
+            .shared_key = null,
+            .udp_fd = null,
+        };
+    }
+
     pub fn deinit(self: *Transport) void {
         self.deinitUdp();
-        posix.close(self.listen_fd);
+        if (self.listen_fd != invalid_socket) posix.close(self.listen_fd);
         self.peers.deinit();
     }
 
