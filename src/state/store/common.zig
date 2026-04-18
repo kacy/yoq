@@ -12,8 +12,15 @@ pub const StoreError = error{
 
 var global_db: ?sqlite.Db = null;
 var db_mutex: std.Thread.Mutex = .{};
+var test_db_lifetime_mutex: std.Thread.Mutex = .{};
 
 pub fn initTestDb() StoreError!void {
+    // The in-memory test DB is global process state. Hold an exclusive
+    // lifetime lock until deinitTestDb() so concurrent tests can't reset the
+    // database out from under each other.
+    test_db_lifetime_mutex.lock();
+    errdefer test_db_lifetime_mutex.unlock();
+
     db_mutex.lock();
     defer db_mutex.unlock();
 
@@ -42,6 +49,8 @@ pub fn deinitTestDb() void {
         db.deinit();
         global_db = null;
     }
+
+    test_db_lifetime_mutex.unlock();
 }
 
 pub fn getDb() StoreError!*sqlite.Db {

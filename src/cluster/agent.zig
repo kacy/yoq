@@ -326,13 +326,14 @@ fn buildRegisterBody(
     alloc: Allocator,
     token: []const u8,
     address: []const u8,
+    agent_api_port: u16,
     resources: AgentResources,
     pub_key: []const u8,
     wg_listen_port: u16,
     role: cluster_config.NodeRole,
     region: ?[]const u8,
 ) ![]u8 {
-    return request_support.buildRegisterBody(alloc, token, address, resources, pub_key, wg_listen_port, role, region);
+    return request_support.buildRegisterBody(alloc, token, address, agent_api_port, resources, pub_key, wg_listen_port, role, region);
 }
 
 fn buildHeartbeatBody(alloc: Allocator, resources: AgentResources, gpu_health_label: []const u8) ![]u8 {
@@ -538,6 +539,7 @@ test "buildRegisterBody escapes quoted string fields" {
         alloc,
         "tok\"en",
         "10.0.0.1",
+        7701,
         .{
             .cpu_cores = 4,
             .memory_mb = 8192,

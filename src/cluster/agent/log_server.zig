@@ -161,12 +161,31 @@ fn writeAll(fd: posix.fd_t, data: []const u8) void {
     }
 }
 
+fn waitForServerReady(alloc: std.mem.Allocator, port: u16, token: []const u8) !void {
+    const client = @import("../http_client.zig");
+    var attempts: usize = 0;
+    while (attempts < 50) : (attempts += 1) {
+        var resp = client.getWithAuth(alloc, .{ 127, 0, 0, 1 }, port, "/not-found", token) catch {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+            continue;
+        };
+        defer resp.deinit(alloc);
+        if (resp.status_code == 404) return;
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+    }
+    return error.ServerNotReady;
+}
+
 test "log server serves remote training logs with auth" {
     store.initTestDb() catch return error.SkipZigTest;
     defer store.deinitTestDb();
 
+    const container_id = "aa11bb22cc33";
+    logs.deleteLogFile(container_id);
+    defer logs.deleteLogFile(container_id);
+
     try store.save(.{
-        .id = "abc123def456",
+        .id = container_id,
         .rootfs = "/tmp/rootfs",
         .command = "python train.py",
         .hostname = "finetune-rank-0",
@@ -177,7 +196,7 @@ test "log server serves remote training logs with auth" {
         .created_at = 100,
     });
 
-    var file = try logs.createLogFile("abc123def456");
+    var file = try logs.createLogFile(container_id);
     defer file.close();
     try file.writeAll("rank zero logs\n");
 
@@ -187,6 +206,7 @@ test "log server serves remote training logs with auth" {
         server.deinit();
         thread.join();
     }
+    try waitForServerReady(std.testing.allocator, server.port, "join-token");
 
     var resp = try @import("../http_client.zig").getWithAuth(
         std.testing.allocator,

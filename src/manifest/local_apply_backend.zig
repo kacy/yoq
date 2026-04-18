@@ -656,6 +656,16 @@ fn runReplacementPlan(
         }
 
         if (batch_started == 0) {
+            if (failed > 0) {
+                if (mutated) runner.finish();
+                return replacementFailureOutcome(
+                    strategy,
+                    placed,
+                    failed,
+                    try failure_details.toOwnedJson(),
+                    try rollout_targets.toOwnedJson(),
+                );
+            }
             if (allRemainingServicesTerminal(&rollout_targets, services, batch)) {
                 maybeDelayBetweenBatches(strategy.delay_between_batches, batch_end < replacement_indexes.len);
                 replacement_start = batch_end;
@@ -890,7 +900,7 @@ const LocalReleaseTracker = struct {
 
     pub fn begin(self: *const LocalReleaseTracker) !?[]const u8 {
         if (self.context.continue_release_id) |existing_id| {
-            return self.plan.alloc.dupe(u8, existing_id);
+            return @as([]const u8, try self.plan.alloc.dupe(u8, existing_id));
         }
         return release_history.recordAppReleaseStart(self.plan, self.context) catch null;
     }
@@ -1429,7 +1439,10 @@ test "runReplacementPlan emits live target progress after each update" {
     defer runner.started.deinit(alloc);
     defer runner.progress_updates.deinit(alloc);
 
-    _ = try runReplacementPlan(&runner, alloc, &services, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 }, 0, 0, null);
+    const outcome = try runReplacementPlan(&runner, alloc, &services, &.{0}, &.{1}, .{ .parallelism = 1, .health_check_timeout = 0 }, 0, 0, null);
+    defer if (outcome.failure_details_json) |json| alloc.free(json);
+    defer if (outcome.rollout_targets_json) |json| alloc.free(json);
+    defer if (outcome.rollout_checkpoint_json) |json| alloc.free(json);
 
     try std.testing.expectEqual(@as(usize, 2), runner.progress_updates.items.len);
     try std.testing.expectEqual(@as(usize, 1), runner.progress_updates.items[0].completed_targets);
@@ -1492,7 +1505,7 @@ test "runReplacementPlan tracks mixed per-target readiness outcomes" {
     };
 
     var runner = Runner{};
-    const outcome = try runReplacementPlan(&runner, alloc, &services, &.{0, 1}, &.{}, .{
+    const outcome = try runReplacementPlan(&runner, alloc, &services, &.{ 0, 1 }, &.{}, .{
         .parallelism = 2,
         .health_check_timeout = 5,
         .failure_action = .pause,
@@ -1564,6 +1577,7 @@ test "runReplacementPlan reports canceled rollout before mutation" {
 
     const Runner = struct {
         started: usize = 0,
+        control_checks: usize = 0,
 
         fn start(self: *@This(), _: usize, _: *std.StringHashMapUnmanaged(void)) !void {
             self.started += 1;
@@ -1574,7 +1588,7 @@ test "runReplacementPlan reports canceled rollout before mutation" {
 
         fn awaitControl(self: *@This()) bool {
             self.control_checks += 1;
-            return self.control_checks >= 2;
+            return self.control_checks >= 1;
         }
     };
 

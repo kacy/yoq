@@ -424,6 +424,7 @@ pub const ClusterApplyBackend = struct {
 
         const placement = placements[0].?;
         const owned_id = generateOwnedAssignmentId(self.alloc) catch return ClusterApplyError.InternalError;
+        errdefer self.alloc.free(owned_id);
 
         var sql_buf: [1024]u8 = undefined;
         const sql = scheduler.assignmentSql(
@@ -435,7 +436,6 @@ pub const ClusterApplyBackend = struct {
         ) catch return ClusterApplyError.InternalError;
 
         _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
-        errdefer self.alloc.free(owned_id);
 
         const assignment_ids = self.alloc.alloc([]const u8, 1) catch return ClusterApplyError.InternalError;
         assignment_ids[0] = owned_id;
@@ -1733,7 +1733,7 @@ test "queryTargetReadiness returns failed when any assignment is terminal" {
         .{},
         .{
             "a1", "agent1", "nginx:1", "running", @as(i64, 1),
-            "a2", "agent1", "nginx:1", "failed", @as(i64, 1),
+            "a2", "agent1", "nginx:1", "failed",  @as(i64, 1),
         },
     ) catch unreachable;
 
@@ -2281,7 +2281,7 @@ test "rollback state restores prior assignments after cutover" {
 
     try rollback_state.recordActivatedTarget(.{
         .request = request,
-        .assignment_ids = &.{ "new-web" },
+        .assignment_ids = &.{"new-web"},
         .placement_count = 1,
     });
     try rollback_state.rollbackActivatedTargets(harness.node);
