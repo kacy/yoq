@@ -67,6 +67,16 @@ pub fn setStateChangeHook(hook: ?StateChangeHook) void {
     state_change_hook = hook;
 }
 
+pub fn setRunningForTest(port: u16) void {
+    mutex.lock();
+    defer mutex.unlock();
+    listen_bind_addr = default_bind_addr;
+    listen_port = port;
+    running = true;
+    stop_requested = false;
+    clearLastErrorLocked();
+}
+
 pub fn startIfEnabled(alloc: std.mem.Allocator) void {
     proxy_runtime.bootstrapIfEnabled();
     if (!service_registry_runtime.hasProxyConfiguredServices()) {

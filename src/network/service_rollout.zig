@@ -153,6 +153,20 @@ test "mode becomes shadow when reconciler flag is enabled" {
     try std.testing.expectEqual(Mode.shadow, mode());
 }
 
+test "mode stays legacy when only dns_returns_vip is enabled" {
+    setForTest(.{ .dns_returns_vip = true });
+    defer resetForTest();
+
+    try std.testing.expectEqual(Mode.legacy, mode());
+}
+
+test "mode stays legacy when only l7_proxy_http is enabled" {
+    setForTest(.{ .l7_proxy_http = true });
+    defer resetForTest();
+
+    try std.testing.expectEqual(Mode.legacy, mode());
+}
+
 test "setForTest overrides all rollout flags" {
     setForTest(.{
         .service_registry_v2 = true,

@@ -55,7 +55,9 @@ test "route returns null for unknown path" {
 }
 
 test "route handles /v1/status GET" {
-    if (true) return error.SkipZigTest; // Skip - requires store layer
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
     const req = http.Request{
         .method = .GET,
         .path = "/v1/status",
@@ -66,14 +68,17 @@ test "route handles /v1/status GET" {
         .content_length = 0,
     };
 
-    const response = route(req, testing.allocator);
-    _ = response; // May be null or a Response depending on store state
-    // Should return a response (either empty array or error)
-    // Don't check exact result as it depends on store state
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expectEqualStrings("[]", response.body);
 }
 
 test "route handles /v1/metrics GET" {
-    if (true) return error.SkipZigTest; // Skip - requires store layer
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
     const req = http.Request{
         .method = .GET,
         .path = "/v1/metrics",
@@ -84,14 +89,17 @@ test "route handles /v1/metrics GET" {
         .content_length = 0,
     };
 
-    const response = route(req, testing.allocator);
-    _ = response; // May be null or a Response depending on store state and ebpf
-    // Should return a response (either empty array or metrics)
-    // Don't check exact result as it depends on store state and ebpf availability
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expectEqualStrings("[]", response.body);
 }
 
 test "route handles /v1/metrics?mode=pairs GET" {
-    if (true) return error.SkipZigTest; // Skip - requires ebpf layer
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
     const req = http.Request{
         .method = .GET,
         .path = "/v1/metrics?mode=pairs",
@@ -102,9 +110,11 @@ test "route handles /v1/metrics?mode=pairs GET" {
         .content_length = 0,
     };
 
-    const response = route(req, testing.allocator);
-    _ = response; // May be null or a Response depending on ebpf availability
-    // Should handle the pairs mode query parameter
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expectEqualStrings("[]", response.body);
 }
 
 test "route returns null for POST to status" {
@@ -527,6 +537,225 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[\"components_not_ready\",\"steering_not_ready\"]") != null);
 }
 
+test "route rollout status reports vip cutover ready after clean backfill audit and steering prerequisites" {
+    const health_registry = @import("../../manifest/health/registry_support.zig");
+    const service_registry_backfill = @import("../../network/service_registry_backfill.zig");
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const dns_registry = @import("../../network/dns/registry_support.zig");
+    const service_reconciler = @import("../../network/service_reconciler.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_control_plane.resetForTest();
+    defer proxy_control_plane.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    service_registry_backfill.resetForTest();
+    defer service_registry_backfill.resetForTest();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    dns_registry.resetClusterLookupFaultsForTest();
+    defer dns_registry.resetClusterLookupFaultsForTest();
+    dns_registry.resetDnsInterceptorFaultsForTest();
+    defer dns_registry.resetDnsInterceptorFaultsForTest();
+    dns_registry.resetLoadBalancerFaultsForTest();
+    defer dns_registry.resetLoadBalancerFaultsForTest();
+    service_reconciler.resetForTest();
+    defer service_reconciler.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.registerServiceName("api", "abc123", "10.42.0.9");
+    try store.save(.{
+        .id = "abc123",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "api",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = "10.42.0.9",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1000,
+    });
+
+    service_registry_backfill.runIfEnabled();
+    var service = try store.syncServiceConfig(
+        testing.allocator,
+        "api",
+        "consistent_hash",
+        &.{
+            .{
+                .route_name = "default",
+                .host = "api.internal",
+                .path_prefix = "/",
+                .target_port = 8080,
+            },
+        },
+    );
+    defer service.deinit(testing.allocator);
+    service_registry_runtime.syncServiceFromStore("api");
+    service_reconciler.bootstrapIfEnabled();
+    service_reconciler.runAuditPassIfEnabled();
+    service_reconciler.setComponentStateOverrideForTest(.{
+        .dns_resolver_running = true,
+        .dns_interceptor_loaded = true,
+        .load_balancer_loaded = true,
+    });
+
+    steering_runtime.setPortMapperAvailableForTest(true);
+    steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    listener_runtime.setRunningForTest(listener_runtime.default_listen_port);
+
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/status?mode=service_rollout",
+        .path_only = "/v1/status",
+        .query = "mode=service_rollout",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"cutover_readiness\":{\"backfill_complete\":true,\"audit_fresh\":true,\"shadow_clean\":true,\"components_ready\":true,\"fault_modes_clear\":true,\"downgrade_safe\":true,\"steering_ready\":true,\"steering_blocked_services\":0,\"steering_no_port_services\":0,\"ready_for_reconciler_cutover\":true,\"ready_for_vip_cutover\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"blockers\":[]") != null);
+}
+
+test "route rollout status converges from steering blocked to vip cutover ready" {
+    const health_registry = @import("../../manifest/health/registry_support.zig");
+    const service_registry_backfill = @import("../../network/service_registry_backfill.zig");
+    const service_rollout = @import("../../network/service_rollout.zig");
+    const dns_registry = @import("../../network/dns/registry_support.zig");
+    const service_reconciler = @import("../../network/service_reconciler.zig");
+    const service_registry_runtime = @import("../../network/service_registry_runtime.zig");
+    const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
+    const proxy_runtime = @import("../../network/proxy/runtime.zig");
+    const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+    const steering_runtime = @import("../../network/proxy/steering_runtime.zig");
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    health_registry.resetForTest();
+    defer health_registry.resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_control_plane.resetForTest();
+    defer proxy_control_plane.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    listener_runtime.resetForTest();
+    defer listener_runtime.resetForTest();
+    steering_runtime.resetForTest();
+    defer steering_runtime.resetForTest();
+    service_registry_backfill.resetForTest();
+    defer service_registry_backfill.resetForTest();
+    dns_registry.resetRegistryForTest();
+    defer dns_registry.resetRegistryForTest();
+    dns_registry.resetClusterLookupFaultsForTest();
+    defer dns_registry.resetClusterLookupFaultsForTest();
+    dns_registry.resetDnsInterceptorFaultsForTest();
+    defer dns_registry.resetDnsInterceptorFaultsForTest();
+    dns_registry.resetLoadBalancerFaultsForTest();
+    defer dns_registry.resetLoadBalancerFaultsForTest();
+    service_reconciler.resetForTest();
+    defer service_reconciler.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .service_registry_reconciler = true,
+        .dns_returns_vip = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.registerServiceName("api", "abc123", "10.42.0.9");
+    try store.save(.{
+        .id = "abc123",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "api",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = "10.42.0.9",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1000,
+    });
+
+    service_registry_backfill.runIfEnabled();
+    var service = try store.syncServiceConfig(
+        testing.allocator,
+        "api",
+        "consistent_hash",
+        &.{
+            .{
+                .route_name = "default",
+                .host = "api.internal",
+                .path_prefix = "/",
+                .target_port = 8080,
+            },
+        },
+    );
+    defer service.deinit(testing.allocator);
+    service_registry_runtime.syncServiceFromStore("api");
+    service_reconciler.bootstrapIfEnabled();
+    service_reconciler.runAuditPassIfEnabled();
+
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/status?mode=service_rollout",
+        .path_only = "/v1/status",
+        .query = "mode=service_rollout",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const blocked_response = route(req, testing.allocator).?;
+    defer if (blocked_response.allocated) testing.allocator.free(blocked_response.body);
+    try testing.expect(std.mem.indexOf(u8, blocked_response.body, "\"steering_ready\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, blocked_response.body, "\"ready_for_vip_cutover\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, blocked_response.body, "\"blockers\":[\"components_not_ready\",\"steering_not_ready\"]") != null);
+
+    service_reconciler.setComponentStateOverrideForTest(.{
+        .dns_resolver_running = true,
+        .dns_interceptor_loaded = true,
+        .load_balancer_loaded = true,
+    });
+    steering_runtime.setPortMapperAvailableForTest(true);
+    steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
+    listener_runtime.setRunningForTest(listener_runtime.default_listen_port);
+
+    const converged_response = route(req, testing.allocator).?;
+    defer if (converged_response.allocated) testing.allocator.free(converged_response.body);
+    try testing.expect(std.mem.indexOf(u8, converged_response.body, "\"steering_ready\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, converged_response.body, "\"ready_for_vip_cutover\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, converged_response.body, "\"blockers\":[]") != null);
+}
+
 test "route rollout status sample routes expose steering drift details" {
     const health_registry = @import("../../manifest/health/registry_support.zig");
     const service_rollout = @import("../../network/service_rollout.zig");
@@ -586,7 +815,7 @@ test "route rollout status sample routes expose steering drift details" {
     proxy_runtime.bootstrapIfEnabled();
     steering_runtime.setPortMapperAvailableForTest(true);
     steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
-    try listener_runtime.startOrSkipForTest(testing.allocator, 0);
+    listener_runtime.setRunningForTest(listener_runtime.default_listen_port);
     try steering_runtime.setActualMappingsForTest(&.{});
     proxy_runtime.recordRouteRequestStart("api:default", "api", "api");
     proxy_runtime.recordRouteResponseCode("api:default", "api", "api", 200);
@@ -619,7 +848,8 @@ test "route rollout status sample routes expose steering drift details" {
     try testing.expect(std.mem.indexOf(u8, response.body, "\"backend_traffic\":[{\"backend_service\":\"api\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_traffic\":{\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"upstream_failures_total\":1}") != null);
     try testing.expect(std.mem.indexOf(u8, response.body, "\"mirror_backend_traffic\":[{\"backend_service\":\"api-shadow\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"upstream_failures_total\":1}]") != null);
-    try testing.expect(std.mem.indexOf(u8, response.body, "\"sample_route_traffic\":[{\"route\":\"api:default\",\"service\":\"api\",\"backend_service\":\"api\",\"traffic_role\":\"primary\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}]") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"sample_route_traffic\":[{\"route\":\"api:default\",\"service\":\"api\",\"backend_service\":\"api\",\"traffic_role\":\"primary\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":1,\"upstream_failures_total\":1}") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "{\"route\":\"api:default\",\"service\":\"api\",\"backend_service\":\"api-shadow\",\"traffic_role\":\"mirror\",\"requests_total\":1,\"responses_2xx_total\":1,\"responses_4xx_total\":0,\"responses_5xx_total\":0,\"retries_total\":0,\"upstream_failures_total\":1}") != null);
 }
 
 test "resolveIpToService returns unknown for empty records" {
@@ -708,7 +938,49 @@ test "writeSnapshotJson includes PSI metrics when present" {
 }
 
 test "route handles service filter in metrics" {
-    if (true) return error.SkipZigTest; // Skip - requires store layer
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    try store.save(.{
+        .id = "myapp-running",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "myapp",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = "10.42.0.9",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1000,
+    });
+    try store.save(.{
+        .id = "otherapp-running",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "otherapp",
+        .status = "running",
+        .pid = null,
+        .exit_code = null,
+        .ip_address = "10.42.0.10",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1001,
+    });
+    try store.save(.{
+        .id = "myapp-stopped",
+        .rootfs = "/tmp/rootfs",
+        .command = "sleep infinity",
+        .hostname = "myapp",
+        .status = "stopped",
+        .pid = null,
+        .exit_code = 0,
+        .ip_address = "10.42.0.11",
+        .veth_host = null,
+        .app_name = null,
+        .created_at = 1002,
+    });
+
     const req = http.Request{
         .method = .GET,
         .path = "/v1/metrics?service=myapp",
@@ -719,9 +991,15 @@ test "route handles service filter in metrics" {
         .content_length = 0,
     };
 
-    const response = route(req, testing.allocator);
-    _ = response; // May be null or a Response depending on store state
-    // Should handle the service filter query parameter
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"service\":\"myapp\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"container\":\"myapp-") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"ip\":\"10.42.0.9\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "\"service\":\"otherapp\"") == null);
+    try testing.expect(std.mem.indexOf(u8, response.body, "10.42.0.11") == null);
 }
 
 test "extractQueryParam from full path with multiple params" {
