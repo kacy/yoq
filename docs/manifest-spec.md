@@ -453,7 +453,7 @@ env = ["DATABASE_URL=postgres://db:5432/myapp"]
 
 run with `yoq run-worker migrate`.
 
-workers are part of the canonical app snapshot and release history, but `yoq up` does not run them automatically. use `yoq run-worker <name>` locally or `yoq run-worker --server host:port <name>` against a cluster to execute a worker from the current app release.
+workers are part of the app snapshot and release history, but `yoq up` does not run them automatically. use `yoq run-worker <name>` locally or `yoq run-worker --server host:port <name>` against a cluster to execute a worker from the current app release.
 
 ---
 
@@ -586,7 +586,7 @@ auto_restart = true
 max_restarts = 5
 ```
 
-training definitions are part of the canonical app snapshot and release history, but `yoq up` does not auto-start training runs. use `yoq train start|status|stop|pause|resume|scale|logs <name>` locally or `yoq train ... --server host:port <name>` against a cluster to operate on training jobs from the current app release.
+training definitions are part of the app snapshot and release history, but `yoq up` does not auto-start training runs. use `yoq train start|status|stop|pause|resume|scale|logs <name>` locally or `yoq train ... --server host:port <name>` against a cluster to operate on training jobs from the current app release.
 
 ---
 

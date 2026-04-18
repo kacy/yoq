@@ -8,7 +8,7 @@ driver stack:
 - `/proc/driver/nvidia/*`
 - `/sys/class/drm/*` and optionally `/sys/class/infiniband/*`
 
-That maps well to GPU VMs on GCP, AWS, and Azure. It is not a strong fit for
+That maps well to GPU VMs on GCP, AWS, and Azure. It is not a good fit for
 opaque GPU products that hide the host driver stack.
 
 ## local confidence
@@ -60,7 +60,7 @@ yoq train logs finetune --server 10.0.0.1:7700
 ## recommended first cloud target
 
 Start with a single Linux GPU VM, not Kubernetes and not multi-node NCCL.
-That gives the best signal for the least setup work.
+That gives the best signal with the least setup work.
 
 Good first targets:
 

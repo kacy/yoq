@@ -161,9 +161,9 @@ For standalone `yoq cert provision` and `yoq cert renew`, `--email` is optional.
 
 deployment history is tracked in SQLite. updates proceed as app releases, not as ad hoc service mutations.
 
-for manifest-driven app deploys, yoq now normalizes the manifest into one canonical application snapshot before execution. local `yoq up` and remote `yoq up --server` both operate on that same app-level snapshot, and app releases are recorded in SQLite with the full config snapshot and manifest hash.
+for manifest-driven app deploys, yoq now normalizes the manifest into one app snapshot before execution. local `yoq up` and remote `yoq up --server` both operate on that same app-level snapshot, and app releases are recorded in SQLite with the full config snapshot and manifest hash.
 
-this gives the operator one app-first day-2 model:
+this gives you a single app-first day-2 model:
 
 - `yoq status --app [name]` — current app release status
 - `yoq history --app [name]` — app release history
@@ -179,7 +179,7 @@ this gives the operator one app-first day-2 model:
 
 When `--app` is present and you omit the app name, yoq defaults to the current working directory name for `status --app`, `history --app`, and `rollback --app`. When `rollback --app` omits `--release`, yoq selects the previous successful release before the current one.
 
-Remote `yoq train logs --server ...` now proxies the request to the agent that hosts the selected rank. If that agent is unreachable or does not expose the log endpoint, the API returns an explicit hosting-agent error instead of a misleading empty or missing result.
+Remote `yoq train logs --server ...` now proxies the request to the agent that hosts the selected rank. If that agent is unreachable or does not expose the log endpoint, the API returns a clear hosting-agent error instead of an empty or missing result.
 
 ### app release model
 
@@ -223,7 +223,7 @@ local and clustered applies use the same high-level model:
 
 ### reading status and history JSON
 
-the canonical JSON shape is nested even though older top-level fields are still present for compatibility.
+the main JSON shape is nested even though older top-level fields are still present for compatibility.
 
 status payloads expose:
 

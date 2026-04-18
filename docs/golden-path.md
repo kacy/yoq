@@ -1,6 +1,6 @@
 # golden path
 
-this is the shortest end-to-end way to evaluate yoq as a real platform instead of a pile of disconnected features.
+this is the shortest end-to-end path for evaluating yoq.
 
 the path has three stages:
 
@@ -80,7 +80,7 @@ current limits:
 
 ## 3. clustered deployment
 
-follow one authoritative cluster bootstrap path. use `init-server` for servers and `join` for agents.
+follow one cluster bootstrap path. use `init-server` for servers and `join` for agents.
 
 generate a shared token:
 
@@ -207,4 +207,4 @@ if you want to validate automatic certificates on the cluster example:
 
 ## what this path is for
 
-this path is the baseline operator story. if these steps are clean, the platform is in good shape for a real small-team deployment. if they are not, fix the workflow, docs, or failure handling before adding more feature breadth.
+this path is the baseline operator flow. if these steps are clean, the platform is in good shape for a small-team deployment. if they are not, fix the workflow, docs, or failure handling before adding more feature breadth.

@@ -150,7 +150,7 @@ current implementation note:
 
 ## reading operator output
 
-the canonical nested JSON shape is:
+the nested JSON shape used by the current docs and tooling is:
 
 - `current_release`
 - `previous_successful_release`
@@ -158,7 +158,7 @@ the canonical nested JSON shape is:
 - `training_runtime`
 - `rollout`
 
-the nested `rollout` object is the preferred contract for automation. older top-level rollout fields remain for compatibility.
+the nested `rollout` object is the main contract for automation. older top-level rollout fields remain for compatibility.
 
 text output also exposes rollout and control state directly:
 

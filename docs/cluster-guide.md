@@ -1,6 +1,6 @@
 # cluster setup guide
 
-yoq clusters turn multiple machines into a single platform for running containers. this guide walks through spinning up a cluster from scratch, scaling it, and operating it day-to-day.
+yoq clusters let you run workloads across multiple machines under one control plane. this guide walks through bringing a cluster up from scratch, scaling it, and operating it day to day.
 
 ## prerequisites
 
@@ -136,7 +136,7 @@ port = 3000
 yoq up --server
 ```
 
-the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. under the hood the CLI now sends a canonical app snapshot to `POST /apps/apply`; that snapshot carries services, workers, crons, and training jobs together. the older `/deploy` route remains only for compatibility. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard overlay and eBPF.
+the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. under the hood the CLI sends a single app snapshot to `POST /apps/apply`; that snapshot carries services, workers, crons, and training jobs together. the older `/deploy` route remains only for compatibility. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard overlay and eBPF.
 
 after deploy, use the app-first day-2 commands:
 
@@ -339,7 +339,7 @@ yoq status --app myapp --server 10.0.0.1:7700 --json
 yoq history --app myapp --server 10.0.0.1:7700 --json
 ```
 
-the JSON responses now carry canonical nested sections:
+the JSON responses now carry these nested sections:
 
 - `current_release`
 - `previous_successful_release`

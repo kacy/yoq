@@ -2,13 +2,13 @@
 
 yoq is a single Linux binary for building, running, networking, and deploying containers without stitching together Docker, Compose, Kubernetes, Istio, Helm, and a pile of glue.
 
-Most teams do not need a platform made of separate control planes, YAML layers, sidecars, and operators just to run a few services reliably. They need containers, service discovery, rollouts, secrets, TLS, metrics, and a sane deployment model that one engineer can actually understand end to end.
+Most teams do not need multiple control planes, YAML stacks, sidecars, and operators just to run a few services reliably. They need containers, service discovery, rollouts, secrets, TLS, metrics, and a deployment model that one engineer can actually understand from top to bottom.
 
-That is the point of yoq. It collapses the usual stack into one operational model, one CLI, one state store, and one binary you can ship to a Linux host. Instead of outsourcing core behavior to half a dozen daemons, it builds directly on Linux primitives like namespaces, cgroups v2, io_uring, eBPF, and WireGuard.
+yoq keeps that in one place: one CLI, one state store, and one binary you can ship to a Linux host. Under the hood it uses Linux primitives directly, including namespaces, cgroups v2, io_uring, eBPF, and WireGuard.
 
 Linux kernel 6.1+ is required.
 
-The preferred operator flow is app-first:
+The recommended operator flow is app-first:
 
 - `yoq up`
 - `yoq apps`
@@ -19,14 +19,14 @@ The preferred operator flow is app-first:
 
 ## who this is for
 
-yoq is a strong fit for:
+yoq makes sense for:
 
 - small-to-medium teams that want production features without building a platform team first
 - multi-service applications that outgrew Compose but do not need the ecosystem breadth of Kubernetes
 - operators who prefer direct, inspectable systems over layered abstractions
-- Linux environments where shipping one binary is operationally attractive
+- Linux environments where shipping one binary is easier to live with
 
-yoq takes a different approach from the standard stack. instead of composing separate tools for images, runtime, orchestration, ingress, mesh, secrets, and observability, it keeps everything integrated with a small surface area. the tradeoff is a narrower ecosystem — you get one coherent system instead of a platform you can extend in every direction.
+yoq takes a different approach from the standard stack. instead of composing separate tools for images, runtime, orchestration, ingress, mesh, secrets, and observability, it keeps the core pieces together behind a smaller surface area. The tradeoff is straightforward: a narrower ecosystem in exchange for a system that is easier to reason about.
 
 Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't try to replace that. if you already depend on the full Kubernetes ecosystem surface, deep CRD-driven workflows, or broad vendor tooling built specifically around Kubernetes APIs, yoq is probably not the right fit.
 
@@ -122,13 +122,13 @@ current ACME/TLS limits:
 make build
 ```
 
-For the preferred app/control-plane smoke lane, use `make test-operator` or `zig build test-operator`. This target keeps the highest-signal local app lifecycle, rollback, rollout-control, and `/apps/*` route-flow regressions together without pulling in the full unit suite.
+For the app/control-plane smoke lane, use `make test-operator` or `zig build test-operator`. It keeps the highest-signal local app lifecycle, rollback, rollout-control, and `/apps/*` route-flow regressions together without pulling in the full unit suite.
 
-For the preferred network/service-rollout smoke lane, use `make test-network` or `zig build test-network`. This target keeps deterministic status/metrics, service-registry bridge, rollout-flag, and reconciler coverage together without depending on privileged proxy/runtime tests.
+For the network/service-rollout smoke lane, use `make test-network` or `zig build test-network`. It keeps deterministic status/metrics, service-registry bridge, rollout-flag, and reconciler coverage together without depending on privileged proxy/runtime tests.
 
 For GPU-focused validation without running the full suite, use `zig build test-gpu`. For a real-host smoke checklist, see [docs/gpu-validation.md](docs/gpu-validation.md).
 For a temporary 5-node GCP validation rig that exercises cluster networking and GPU hosts, see [docs/gcp-cluster-validation.md](docs/gcp-cluster-validation.md).
-For the canonical operator evaluation flow across local runtime, HTTP routing, and clustered deployment, see [docs/golden-path.md](docs/golden-path.md).
+For an end-to-end operator evaluation flow across local runtime, HTTP routing, and clustered deployment, see [docs/golden-path.md](docs/golden-path.md).
 For cluster bootstrap, day-2 operations, and failure drills, see [docs/cluster-guide.md](docs/cluster-guide.md).
 For rollout strategies, rollout state, control state, checkpoints, and recovery, see [docs/rollouts.md](docs/rollouts.md).
 
@@ -306,7 +306,7 @@ yoq cert rm <domain>                 remove a certificate
 If `--email` is omitted for the standalone ACME flow, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
 
 For app rollbacks, omitting `--release` picks the previous successful release before the current one. Use `--print` to inspect the selected stored app snapshot without applying it.
-For app rollouts, status and history expose a canonical nested `rollout` view with rollout state, control state, target counts, failure details, and checkpoint data. The older top-level fields remain for compatibility.
+For app rollouts, status and history expose a nested `rollout` view with rollout state, control state, target counts, failure details, and checkpoint data. The older top-level fields are still there for compatibility.
 
 ### server and cluster
 
@@ -343,7 +343,7 @@ yoq train scale [--server host:port] <name> --gpus <n>   scale training ranks
 yoq train logs [--server host:port] <name> [--rank N]    show logs for a training rank
 ```
 
-For clustered training logs, the control plane now proxies log reads to the agent that hosts the selected rank. If that agent is unreachable or does not expose the log endpoint, the API returns an explicit hosting-agent error instead of a misleading empty result.
+For clustered training logs, the control plane proxies log reads to the agent that hosts the selected rank. If that agent is unreachable or does not expose the log endpoint, the API returns an explicit hosting-agent error instead of an empty result.
 
 ### diagnostics
 
@@ -366,18 +366,18 @@ Notes:
 - `--json` is available on `ps`, `images`, `prune`, `version`, `gpu topo`, and `doctor`.
 - crons defined in the manifest start automatically with `yoq up`.
 - deployment, metrics, and certificate commands also support `--server host:port`.
-- clustered manifest deploys now go through the app-first `/apps/apply` API and carry services, workers, crons, and training definitions in one app snapshot. the older `/deploy` route remains as a compatibility shim for legacy callers.
+- clustered manifest deploys now go through the app-first `/apps/apply` API and carry services, workers, crons, and training definitions in one app snapshot. the older `/deploy` route is still there for legacy callers.
 - remote app applies now register active cron schedules in cluster state, and `yoq apps` / `yoq status --app` include live training runtime summaries for the current app.
 
 ## current status
 
-~102K lines of Zig, ~1914 tests, v0.1.7. coverage across runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, metrics, and alerting.
+~102K lines of Zig, ~1914 tests, v0.1.7. Coverage spans runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, metrics, and alerting.
 
 see [docs/architecture.md](docs/architecture.md) for subsystem details and [docs/users-guide.md](docs/users-guide.md) for a guide to the internals.
 
 ## architecture snapshot
 
-yoq is organized as a set of integrated subsystems:
+yoq is organized as a set of subsystems that fit together pretty tightly:
 
 - `runtime/` — container lifecycle, namespaces, cgroups, filesystem, security, logs, exec
 - `image/` — OCI registry, blob storage, layer extraction, metadata

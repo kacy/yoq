@@ -1,6 +1,6 @@
 # GCP cluster validation
 
-This is a temporary 5-node validation rig for proving that `yoq` works on
+this is a temporary 5-node validation rig for proving that `yoq` works on
 Google Compute Engine for:
 
 - cluster formation
@@ -13,7 +13,7 @@ The rig lives under [`infra/gcp/`](../infra/gcp).
 
 ## topology
 
-Default layout:
+default layout:
 
 - 3 on-demand CPU server nodes
 - 2 on-demand CPU agent nodes by default
@@ -127,7 +127,7 @@ It performs eight classes of checks:
 
 Artifacts are written under `infra/gcp/artifacts/<rig>/<timestamp>/`.
 
-## important product note
+## current limitation
 
 The current cluster training path transports a single executable string, not a
 full argv array. Because of that, the default training smoke uses

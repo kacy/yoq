@@ -1,6 +1,6 @@
 # architecture
 
-yoq is a single binary that replaces Docker + Kubernetes + Istio + Helm for most teams. it provides container isolation, image management, networking, service orchestration, clustering, and TLS — all without external dependencies.
+yoq folds container runtime, orchestration, networking, clustering, and TLS into one Linux binary. the goal is to keep the whole stack inspectable without stitching together several separate systems.
 
 written in Zig, targeting Linux kernel 6.1+.
 
@@ -128,7 +128,7 @@ application management — the compose/orchestrator/control-plane layer.
 
 **format:** TOML manifests define `[service.*]`, `[worker.*]`, `[cron.*]`, `[volume.*]`, and `[training.*]` sections. the loader validates dependencies, expands environment variables (`${VAR:-default}`), and normalizes the result into one canonical `ApplicationSpec`.
 
-**canonical app model:** local `yoq up` and remote `yoq up --server` both derive the same `ApplicationSpec`, then one `ReleasePlan`, then execute through the same apply/report model. this is the core architectural shift behind the app-first control plane.
+**canonical app model:** local `yoq up` and remote `yoq up --server` both derive the same `ApplicationSpec`, then one `ReleasePlan`, then execute through the same apply/report model. this is the basis of the app-first control plane.
 
 **orchestrator:** starts and stops services respecting dependency order. reconciles running state against desired state. handles restart policies (none, always, on_failure).
 
