@@ -28,7 +28,7 @@ pub fn handleClusterVersion() Response {
     const cluster_node = @import("../../../cluster/node.zig");
     const version = cluster_node.Node.protocolVersion();
     _ = version;
-    return .{ .status = .ok, .body = "{\"protocol_version\":1,\"software_version\":\"0.1.8\"}", .allocated = false };
+    return .{ .status = .ok, .body = "{\"protocol_version\":1,\"software_version\":\"0.2.0\"}", .allocated = false };
 }
 
 pub fn handleClusterStatus(alloc: std.mem.Allocator, ctx: RouteContext) Response {
@@ -84,5 +84,5 @@ pub fn handleClusterPropose(alloc: std.mem.Allocator, request: http.Request, ctx
 test "cluster version reports current software version" {
     const resp = handleClusterVersion();
     try std.testing.expectEqual(http.StatusCode.ok, resp.status);
-    try std.testing.expectEqualStrings("{\"protocol_version\":1,\"software_version\":\"0.1.8\"}", resp.body);
+    try std.testing.expectEqualStrings("{\"protocol_version\":1,\"software_version\":\"0.2.0\"}", resp.body);
 }
