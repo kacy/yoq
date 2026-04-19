@@ -6,6 +6,7 @@ const agent_registry = @import("../../../cluster/registry.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
+const apply_request = @import("apply_request.zig");
 const deploy_routes = @import("deploy_routes.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
@@ -131,6 +132,9 @@ fn handleWorkerRun(alloc: std.mem.Allocator, app_name: []const u8, worker_name: 
         .command = worker.?.command,
         .cpu_limit = 1000,
         .memory_limit_mb = 256,
+        .app_name = app_name,
+        .workload_kind = "worker",
+        .workload_name = worker_name,
         .gpu_limit = worker.?.gpu_limit,
         .gpu_model = worker.?.gpu_model,
         .gpu_vram_min_mb = worker.?.gpu_vram_min_mb,
@@ -139,6 +143,7 @@ fn handleWorkerRun(alloc: std.mem.Allocator, app_name: []const u8, worker_name: 
         error.NotLeader => common.notLeader(alloc, node),
         else => common.internalError(),
     };
+    defer freeApplyOutcomePayloads(alloc, outcome);
 
     const body = std.fmt.allocPrint(
         alloc,
@@ -387,6 +392,7 @@ fn scheduleTrainingJob(
         error.NotLeader => common.notLeader(alloc, node),
         else => common.internalError(),
     };
+    defer freeApplyOutcomePayloads(alloc, outcome);
 
     const final_state = if (outcome.failed == 0 and outcome.placed > 0) "running" else "failed";
     store.updateTrainingJobStateInDb(node.stateMachineDb(), job_id, final_state, std.time.timestamp()) catch return common.internalError();
@@ -413,8 +419,14 @@ fn runPlacementRequests(
     node: *cluster_node.Node,
     requests: []const scheduler.PlacementRequest,
 ) deploy_routes.ClusterApplyError!apply_release.ApplyOutcome {
-    const owned_requests = alloc.dupe(scheduler.PlacementRequest, requests) catch return deploy_routes.ClusterApplyError.InternalError;
+    const owned_requests = alloc.alloc(apply_request.ServiceRequest, requests.len) catch return deploy_routes.ClusterApplyError.InternalError;
     defer alloc.free(owned_requests);
+    for (requests, 0..) |req, i| {
+        owned_requests[i] = .{
+            .request = req,
+            .rollout = .{},
+        };
+    }
     const agents = agent_registry.listAgents(alloc, node.stateMachineDb()) catch return deploy_routes.ClusterApplyError.InternalError;
     defer {
         for (agents) |a| a.deinit(alloc);
@@ -429,6 +441,12 @@ fn runPlacementRequests(
         .agents = agents,
     };
     return backend.apply();
+}
+
+fn freeApplyOutcomePayloads(alloc: std.mem.Allocator, outcome: apply_release.ApplyOutcome) void {
+    if (outcome.failure_details_json) |json| alloc.free(json);
+    if (outcome.rollout_targets_json) |json| alloc.free(json);
+    if (outcome.rollout_checkpoint_json) |json| alloc.free(json);
 }
 
 fn generateClusterTrainingJobId(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8) ![]u8 {
@@ -478,22 +496,28 @@ fn formatTrainingRecordJson(
 const RouteFlowHarness = struct {
     alloc: std.mem.Allocator,
     tmp: std.testing.TmpDir,
-    node: cluster_node.Node,
+    node: *cluster_node.Node,
 
     fn init(alloc: std.mem.Allocator) !RouteFlowHarness {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
+        try store.initTestDb();
+        errdefer store.deinitTestDb();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+        const tmp_path = try tmp.dir.realpath(".", &path_buf);
 
-        var node = cluster_node.Node.init(alloc, .{
+        const node = try alloc.create(cluster_node.Node);
+        errdefer alloc.destroy(node);
+
+        node.* = try cluster_node.Node.initForTests(alloc, .{
             .id = 1,
             .port = 0,
             .peers = &.{},
             .data_dir = tmp_path,
-        }) catch return error.SkipZigTest;
+        });
         errdefer node.deinit();
+        node.fixPointers();
 
         node.raft.role = .leader;
         node.leader_id = node.config.id;
@@ -509,15 +533,19 @@ const RouteFlowHarness = struct {
 
     fn deinit(self: *RouteFlowHarness) void {
         self.node.deinit();
+        self.alloc.destroy(self.node);
+        store.deinitTestDb();
         self.tmp.cleanup();
     }
 
     fn ctx(self: *RouteFlowHarness) RouteContext {
-        return .{ .cluster = &self.node, .join_token = null };
+        return .{ .cluster = self.node, .join_token = null };
     }
 
     fn applyCommitted(self: *RouteFlowHarness) void {
         self.node.state_machine.applyUpTo(&self.node.log, self.alloc, self.node.log.lastIndex());
+        self.node.raft.role = .leader;
+        self.node.leader_id = self.node.config.id;
     }
 
     fn seedActiveAgent(self: *RouteFlowHarness) !void {
@@ -557,6 +585,21 @@ fn makeRequest(method: http.Method, path: []const u8, body: []const u8, query: [
 
 fn freeResponse(alloc: std.mem.Allocator, response: Response) void {
     if (response.allocated) alloc.free(response.body);
+}
+
+fn waitForLogServerReady(alloc: std.mem.Allocator, port: u16, token: []const u8) !void {
+    const client = @import("../../../cluster/http_client.zig");
+    var attempts: usize = 0;
+    while (attempts < 50) : (attempts += 1) {
+        var resp = client.getWithAuth(alloc, .{ 127, 0, 0, 1 }, port, "/not-found", token) catch {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+            continue;
+        };
+        defer resp.deinit(alloc);
+        if (resp.status_code == 404) return;
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+    }
+    return error.ServerNotReady;
 }
 
 fn countTrainingAssignments(db: *sqlite.Db, app_name: []const u8, job_name: []const u8) usize {
@@ -833,11 +876,15 @@ test "training logs route prefers local logs when available" {
 
 test "training logs route proxies logs from hosting agent" {
     const alloc = std.testing.allocator;
-    store.initTestDb() catch return error.SkipZigTest;
-    defer store.deinitTestDb();
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const container_id = "dd44ee55ff66";
+    @import("../../../runtime/logs.zig").deleteLogFile(container_id);
+    defer @import("../../../runtime/logs.zig").deleteLogFile(container_id);
 
     try store.save(.{
-        .id = "abc123def456",
+        .id = container_id,
         .rootfs = "/tmp/rootfs",
         .command = "python train.py",
         .hostname = "finetune-rank-0",
@@ -847,7 +894,7 @@ test "training logs route proxies logs from hosting agent" {
         .app_name = "demo-app",
         .created_at = 100,
     });
-    var file = try @import("../../../runtime/logs.zig").createLogFile("abc123def456");
+    var file = try @import("../../../runtime/logs.zig").createLogFile(container_id);
     try file.writeAll("proxied rank logs\n");
     file.close();
 
@@ -857,9 +904,8 @@ test "training logs route proxies logs from hosting agent" {
         agent_log_server.deinit();
         log_thread.join();
     }
+    try waitForLogServerReady(alloc, agent_log_server.port, "join-token");
 
-    var harness = try RouteFlowHarness.init(alloc);
-    defer harness.deinit();
     try updateHarnessAgentEndpoint(&harness, "127.0.0.1", agent_log_server.port);
 
     try harness.seedLatestRelease(
@@ -870,7 +916,7 @@ test "training logs route proxies logs from hosting agent" {
     const start_resp = route(
         makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
         alloc,
-        .{ .cluster = &harness.node, .join_token = "join-token" },
+        .{ .cluster = harness.node, .join_token = "join-token" },
     ).?;
     defer freeResponse(alloc, start_resp);
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
@@ -879,7 +925,7 @@ test "training logs route proxies logs from hosting agent" {
     const logs_resp = route(
         makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=0"),
         alloc,
-        .{ .cluster = &harness.node, .join_token = "join-token" },
+        .{ .cluster = harness.node, .join_token = "join-token" },
     ).?;
     defer freeResponse(alloc, logs_resp);
 
