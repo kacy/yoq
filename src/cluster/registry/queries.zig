@@ -239,7 +239,7 @@ pub fn findWorkloadHostByRank(
         \\  AND COALESCE(assignments.gang_rank, 0) = ?
         \\ORDER BY assignments.created_at DESC, assignments.id DESC
         \\LIMIT 1;
-        ,
+    ,
         .{},
         .{ app_name, workload_kind, workload_name, @as(i64, rank) },
     ) catch return error.QueryFailed) orelse return null;

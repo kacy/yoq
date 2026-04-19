@@ -204,7 +204,7 @@ pub const Node = struct {
         else
             0;
 
-        return .{
+        var node = Node{
             .alloc = alloc,
             .config = config,
             .raft = raft,
@@ -221,6 +221,8 @@ pub const Node = struct {
             .gossip_port = gossip_port,
             .heartbeat_batcher = heartbeat_batcher_mod.HeartbeatBatcher.init(alloc),
         };
+        node.fixPointers();
+        return node;
     }
 
     fn initInternalForTests(alloc: std.mem.Allocator, config: NodeConfig) TestInitError!Node {
@@ -258,7 +260,7 @@ pub const Node = struct {
         else
             0;
 
-        return .{
+        var node = Node{
             .alloc = alloc,
             .config = config,
             .raft = raft,
@@ -275,6 +277,8 @@ pub const Node = struct {
             .gossip_port = if (config.gossip_port != 0) config.gossip_port else config.port +| 100,
             .heartbeat_batcher = heartbeat_batcher_mod.HeartbeatBatcher.init(alloc),
         };
+        node.fixPointers();
+        return node;
     }
 
     pub fn deinit(self: *Node) void {
@@ -318,6 +322,7 @@ pub const Node = struct {
 
     /// submit a command through raft (leader only).
     pub fn propose(self: *Node, data: []const u8) !LogIndex {
+        self.fixPointers();
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -491,6 +496,7 @@ pub const Node = struct {
     /// callers (tickLoop, recvLoop) hold self.mu when calling this function.
     /// the unlock/re-lock in phase 2 is transparent to them.
     fn processActions(self: *Node) void {
+        self.fixPointers();
         action_loop.processActions(self);
     }
 

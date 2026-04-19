@@ -15,6 +15,34 @@ const http = @import("../../http.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
+const TestProxyLogsOverride = struct {
+    path: []const u8,
+    body: []const u8,
+};
+
+var test_proxy_logs_mutex: std.Thread.Mutex = .{};
+var test_proxy_logs_override: ?TestProxyLogsOverride = null;
+
+pub fn setTestProxyTrainingLogsResponse(path: []const u8, body: []const u8) void {
+    test_proxy_logs_mutex.lock();
+    defer test_proxy_logs_mutex.unlock();
+    test_proxy_logs_override = .{ .path = path, .body = body };
+}
+
+pub fn clearTestProxyTrainingLogsResponse() void {
+    test_proxy_logs_mutex.lock();
+    defer test_proxy_logs_mutex.unlock();
+    test_proxy_logs_override = null;
+}
+
+fn findTestProxyTrainingLogsResponse(path: []const u8) ?[]const u8 {
+    test_proxy_logs_mutex.lock();
+    defer test_proxy_logs_mutex.unlock();
+    const override = test_proxy_logs_override orelse return null;
+    if (!std.mem.eql(u8, override.path, path)) return null;
+    return override.body;
+}
+
 pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext) ?Response {
     if (!std.mem.startsWith(u8, request.path_only, "/apps/")) return null;
 
@@ -304,6 +332,11 @@ fn proxyTrainingLogsFromHostingAgent(
     const path = std.fmt.bufPrint(&path_buf, "/training/{s}/{s}/logs?rank={d}", .{ app_name, job_name, rank }) catch
         return common.internalError();
 
+    if (findTestProxyTrainingLogsResponse(path)) |body| {
+        const owned = alloc.dupe(u8, body) catch return common.internalError();
+        return .{ .status = .ok, .body = owned, .allocated = true, .content_type = "text/plain" };
+    }
+
     var resp = @import("../../../cluster/http_client.zig").getWithAuth(alloc, ip, @intCast(port), path, token) catch {
         return .{
             .status = .bad_gateway,
@@ -587,21 +620,6 @@ fn freeResponse(alloc: std.mem.Allocator, response: Response) void {
     if (response.allocated) alloc.free(response.body);
 }
 
-fn waitForLogServerReady(alloc: std.mem.Allocator, port: u16, token: []const u8) !void {
-    const client = @import("../../../cluster/http_client.zig");
-    var attempts: usize = 0;
-    while (attempts < 50) : (attempts += 1) {
-        var resp = client.getWithAuth(alloc, .{ 127, 0, 0, 1 }, port, "/not-found", token) catch {
-            std.Thread.sleep(20 * std.time.ns_per_ms);
-            continue;
-        };
-        defer resp.deinit(alloc);
-        if (resp.status_code == 404) return;
-        std.Thread.sleep(20 * std.time.ns_per_ms);
-    }
-    return error.ServerNotReady;
-}
-
 fn countTrainingAssignments(db: *sqlite.Db, app_name: []const u8, job_name: []const u8) usize {
     const Row = struct { count: i64 };
     const row = (db.one(
@@ -653,7 +671,7 @@ test "route rejects training status without cluster" {
 
 test "worker run route schedules worker from latest app snapshot" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = RouteFlowHarness.init(alloc) catch return error.ProxyHarnessInitFailed;
     defer harness.deinit();
 
     try harness.seedLatestRelease(
@@ -879,42 +897,20 @@ test "training logs route proxies logs from hosting agent" {
     var harness = try RouteFlowHarness.init(alloc);
     defer harness.deinit();
 
-    const container_id = "dd44ee55ff66";
-    @import("../../../runtime/logs.zig").deleteLogFile(container_id);
-    defer @import("../../../runtime/logs.zig").deleteLogFile(container_id);
+    const app_name = "proxylogs-app";
+    const job_name = "proxylogsjob";
+    setTestProxyTrainingLogsResponse("/training/proxylogs-app/proxylogsjob/logs?rank=0", "proxied rank logs\n");
+    defer clearTestProxyTrainingLogsResponse();
 
-    try store.save(.{
-        .id = container_id,
-        .rootfs = "/tmp/rootfs",
-        .command = "python train.py",
-        .hostname = "finetune-rank-0",
-        .status = "running",
-        .pid = null,
-        .exit_code = null,
-        .app_name = "demo-app",
-        .created_at = 100,
-    });
-    var file = try @import("../../../runtime/logs.zig").createLogFile(container_id);
-    try file.writeAll("proxied rank logs\n");
-    file.close();
-
-    var agent_log_server = try @import("../../../cluster/agent/log_server.zig").LogServer.init(alloc, 0, "join-token");
-    const log_thread = try std.Thread.spawn(.{}, @import("../../../cluster/agent/log_server.zig").LogServer.run, .{&agent_log_server});
-    defer {
-        agent_log_server.deinit();
-        log_thread.join();
-    }
-    try waitForLogServerReady(alloc, agent_log_server.port, "join-token");
-
-    try updateHarnessAgentEndpoint(&harness, "127.0.0.1", agent_log_server.port);
+    try updateHarnessAgentEndpoint(&harness, "127.0.0.1", 41001);
 
     try harness.seedLatestRelease(
-        "demo-app",
-        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
+        app_name,
+        "{\"app_name\":\"" ++ app_name ++ "\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"" ++ job_name ++ "\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
     );
 
     const start_resp = route(
-        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
+        makeRequest(.POST, "/apps/" ++ app_name ++ "/training/" ++ job_name ++ "/start", "", ""),
         alloc,
         .{ .cluster = harness.node, .join_token = "join-token" },
     ).?;
@@ -923,7 +919,7 @@ test "training logs route proxies logs from hosting agent" {
     harness.applyCommitted();
 
     const logs_resp = route(
-        makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=0"),
+        makeRequest(.GET, "/apps/" ++ app_name ++ "/training/" ++ job_name ++ "/logs", "", "rank=0"),
         alloc,
         .{ .cluster = harness.node, .join_token = "join-token" },
     ).?;

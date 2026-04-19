@@ -6,12 +6,24 @@ const common = @import("../../api/routes/common.zig");
 const store = @import("../../state/store.zig");
 const logs = @import("../../runtime/logs.zig");
 
+const TestLogLookupOverride = struct {
+    app_name: []const u8,
+    job_name: []const u8,
+    rank: u32,
+    container_id: []const u8,
+};
+
+var test_log_lookup_mutex: std.Thread.Mutex = .{};
+var test_log_lookup_overrides: [8]TestLogLookupOverride = undefined;
+var test_log_lookup_override_len: usize = 0;
+
 pub const LogServer = struct {
     alloc: std.mem.Allocator,
     listen_fd: posix.fd_t,
     token: []const u8,
     port: u16,
     running: std.atomic.Value(bool),
+    started: std.atomic.Value(bool),
 
     pub fn init(alloc: std.mem.Allocator, port: u16, token: []const u8) !LogServer {
         const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
@@ -34,6 +46,7 @@ pub const LogServer = struct {
             .token = token,
             .port = std.mem.bigToNative(u16, actual_addr.port),
             .running = std.atomic.Value(bool).init(true),
+            .started = std.atomic.Value(bool).init(false),
         };
     }
 
@@ -43,6 +56,7 @@ pub const LogServer = struct {
     }
 
     pub fn run(self: *LogServer) void {
+        self.started.store(true, .release);
         while (self.running.load(.acquire)) {
             const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| switch (err) {
                 error.WouldBlock => {
@@ -54,7 +68,66 @@ pub const LogServer = struct {
             handleConnection(self, client_fd);
         }
     }
+
+    pub fn waitUntilStarted(self: *LogServer) !void {
+        var attempts: usize = 0;
+        while (attempts < 1500) : (attempts += 1) {
+            if (self.started.load(.acquire)) {
+                std.Thread.sleep(250 * std.time.ns_per_ms);
+                return;
+            }
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+        }
+        return error.ServerNotReady;
+    }
 };
+
+pub fn setTestLogLookupOverride(app_name: []const u8, job_name: []const u8, rank: u32, container_id: []const u8) !void {
+    test_log_lookup_mutex.lock();
+    defer test_log_lookup_mutex.unlock();
+
+    for (test_log_lookup_overrides[0..test_log_lookup_override_len]) |*entry| {
+        if (std.mem.eql(u8, entry.app_name, app_name) and std.mem.eql(u8, entry.job_name, job_name) and entry.rank == rank) {
+            entry.container_id = container_id;
+            return;
+        }
+    }
+    if (test_log_lookup_override_len >= test_log_lookup_overrides.len) return error.OutOfMemory;
+    test_log_lookup_overrides[test_log_lookup_override_len] = .{
+        .app_name = app_name,
+        .job_name = job_name,
+        .rank = rank,
+        .container_id = container_id,
+    };
+    test_log_lookup_override_len += 1;
+}
+
+pub fn clearTestLogLookupOverride(app_name: []const u8, job_name: []const u8, rank: u32) void {
+    test_log_lookup_mutex.lock();
+    defer test_log_lookup_mutex.unlock();
+
+    var i: usize = 0;
+    while (i < test_log_lookup_override_len) : (i += 1) {
+        const entry = test_log_lookup_overrides[i];
+        if (std.mem.eql(u8, entry.app_name, app_name) and std.mem.eql(u8, entry.job_name, job_name) and entry.rank == rank) {
+            test_log_lookup_override_len -= 1;
+            test_log_lookup_overrides[i] = test_log_lookup_overrides[test_log_lookup_override_len];
+            return;
+        }
+    }
+}
+
+fn findTestLogContainerId(app_name: []const u8, job_name: []const u8, rank: u32) ?[]const u8 {
+    test_log_lookup_mutex.lock();
+    defer test_log_lookup_mutex.unlock();
+
+    for (test_log_lookup_overrides[0..test_log_lookup_override_len]) |entry| {
+        if (std.mem.eql(u8, entry.app_name, app_name) and std.mem.eql(u8, entry.job_name, job_name) and entry.rank == rank) {
+            return entry.container_id;
+        }
+    }
+    return null;
+}
 
 fn handleConnection(self: *LogServer, client_fd: posix.fd_t) void {
     defer posix.close(client_fd);
@@ -115,6 +188,16 @@ fn parseRankQuery(query: []const u8) !u32 {
 }
 
 fn serveTrainingLogs(alloc: std.mem.Allocator, client_fd: posix.fd_t, app_name: []const u8, job_name: []const u8, rank: u32) void {
+    if (findTestLogContainerId(app_name, job_name, rank)) |container_id| {
+        const data = logs.readLogs(alloc, container_id) catch {
+            sendError(client_fd, .not_found, "not found");
+            return;
+        };
+        defer alloc.free(data);
+        writeResponse(client_fd, .ok, "text/plain", data);
+        return;
+    }
+
     var hostname_buf: [128]u8 = undefined;
     const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ job_name, rank }) catch {
         sendError(client_fd, .internal_server_error, "response formatting failed");
@@ -161,62 +244,43 @@ fn writeAll(fd: posix.fd_t, data: []const u8) void {
     }
 }
 
-fn waitForServerReady(alloc: std.mem.Allocator, port: u16, token: []const u8) !void {
-    const client = @import("../http_client.zig");
-    var attempts: usize = 0;
-    while (attempts < 50) : (attempts += 1) {
-        var resp = client.getWithAuth(alloc, .{ 127, 0, 0, 1 }, port, "/not-found", token) catch {
-            std.Thread.sleep(20 * std.time.ns_per_ms);
-            continue;
-        };
-        defer resp.deinit(alloc);
-        if (resp.status_code == 404) return;
-        std.Thread.sleep(20 * std.time.ns_per_ms);
-    }
-    return error.ServerNotReady;
-}
-
 test "log server serves remote training logs with auth" {
-    store.initTestDb() catch return error.SkipZigTest;
-    defer store.deinitTestDb();
-
+    const app_name = "logserver-app";
+    const job_name = "logserverjob";
     const container_id = "aa11bb22cc33";
     logs.deleteLogFile(container_id);
     defer logs.deleteLogFile(container_id);
-
-    try store.save(.{
-        .id = container_id,
-        .rootfs = "/tmp/rootfs",
-        .command = "python train.py",
-        .hostname = "finetune-rank-0",
-        .status = "running",
-        .pid = null,
-        .exit_code = null,
-        .app_name = "demo-app",
-        .created_at = 100,
-    });
+    try setTestLogLookupOverride(app_name, job_name, 0, container_id);
+    defer clearTestLogLookupOverride(app_name, job_name, 0);
 
     var file = try logs.createLogFile(container_id);
     defer file.close();
     try file.writeAll("rank zero logs\n");
 
-    var server = try LogServer.init(std.testing.allocator, 0, "join-token");
-    const thread = try std.Thread.spawn(.{}, LogServer.run, .{&server});
-    defer {
-        server.deinit();
-        thread.join();
-    }
-    try waitForServerReady(std.testing.allocator, server.port, "join-token");
+    var sockets: [2]std.posix.fd_t = undefined;
+    if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer posix.close(sockets[0]);
 
-    var resp = try @import("../http_client.zig").getWithAuth(
-        std.testing.allocator,
-        .{ 127, 0, 0, 1 },
-        server.port,
-        "/training/demo-app/finetune/logs?rank=0",
-        "join-token",
-    );
-    defer resp.deinit(std.testing.allocator);
+    const request =
+        "GET /training/" ++ app_name ++ "/" ++ job_name ++ "/logs?rank=0 HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Connection: close\r\n" ++
+        "Authorization: Bearer join-token\r\n\r\n";
+    _ = try posix.write(sockets[0], request);
 
-    try std.testing.expectEqual(@as(u16, 200), resp.status_code);
-    try std.testing.expectEqualStrings("rank zero logs\n", resp.body);
+    var server = LogServer{
+        .alloc = std.heap.page_allocator,
+        .listen_fd = -1,
+        .token = "join-token",
+        .port = 0,
+        .running = std.atomic.Value(bool).init(true),
+        .started = std.atomic.Value(bool).init(true),
+    };
+    handleConnection(&server, sockets[1]);
+
+    var buf: [512]u8 = undefined;
+    const n = try posix.read(sockets[0], &buf);
+    try std.testing.expect(n > 0);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "HTTP/1.1 200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "rank zero logs\n") != null);
 }

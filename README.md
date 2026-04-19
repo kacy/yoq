@@ -371,7 +371,9 @@ Notes:
 
 ## current status
 
-~102K lines of Zig, ~1914 tests, v0.1.7. Coverage spans runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, metrics, and alerting.
+~122K lines of Zig, ~2191 tests, v0.2.0. Coverage spans runtime, images, networking, build, manifests, clustering, GPU, training, storage, secrets, TLS, metrics, and alerting.
+
+for a compact release summary, see [docs/releases/0.2.0.md](docs/releases/0.2.0.md).
 
 see [docs/architecture.md](docs/architecture.md) for subsystem details and [docs/users-guide.md](docs/users-guide.md) for a guide to the internals.
 

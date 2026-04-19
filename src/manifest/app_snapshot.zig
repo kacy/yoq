@@ -247,8 +247,7 @@ test "findTrainingJobSpec extracts training scheduler fields" {
 
 test "listCronSchedules extracts cron registration specs" {
     const alloc = std.testing.allocator;
-    var schedules = try listCronSchedules(
-        alloc,
+    var schedules = try listCronSchedules(alloc,
         \\{"app_name":"demo","services":[],"workers":[],"crons":[{"name":"cleanup","image":"alpine","command":["/bin/sh"],"every":60},{"name":"backup","image":"postgres","command":["/bin/sh"],"every":3600}],"training_jobs":[]}
     );
     defer {

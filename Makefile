@@ -61,7 +61,9 @@ define do_release
 	sed -i 's/"version":"$(CURRENT_VERSION)"/"version":"$(1)"/g' src/api/routes.zig
 	sed -i 's/"version", "$(CURRENT_VERSION)"/"version", "$(1)"/' src/lib/command_registry.zig
 	sed -i 's/yoq $(CURRENT_VERSION)/yoq $(1)/' src/lib/command_registry.zig
-	git add build.zig.zon src/api/routes.zig src/lib/command_registry.zig
+	sed -i 's/"version":"$(CURRENT_VERSION)"/"version":"$(1)"/g' src/test_contract_http.zig
+	sed -E -i 's/"software_version":"[0-9]+\.[0-9]+\.[0-9]+"/"software_version":"$(1)"/' src/api/routes/cluster_agents/cluster_routes.zig
+	git add build.zig.zon src/api/routes.zig src/lib/command_registry.zig src/test_contract_http.zig src/api/routes/cluster_agents/cluster_routes.zig
 	git commit -m "chore: release v$(1)"
 	git tag "v$(1)"
 	git push origin main "v$(1)"
