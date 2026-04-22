@@ -439,14 +439,14 @@ pub const Registry = struct {
     pub fn markEndpointAdminState(self: *Registry, service_name: []const u8, endpoint_id: []const u8, admin_state: []const u8) Error!Action {
         const endpoint = try self.getEndpointMut(service_name, endpoint_id);
         try replaceOwned(self.alloc, &endpoint.admin_state, admin_state);
-        endpoint.last_transition_at = std.time.timestamp();
+        endpoint.last_transition_at = @import("compat").timestamp();
         return buildAction(service_name, .endpoint_admin_changed);
     }
 
     pub fn noteProbeResult(self: *Registry, service_name: []const u8, endpoint_id: []const u8, healthy: bool) Error!Action {
         const endpoint = try self.getEndpointMut(service_name, endpoint_id);
         endpoint.observed_health = if (healthy) .healthy else .unhealthy;
-        endpoint.last_transition_at = std.time.timestamp();
+        endpoint.last_transition_at = @import("compat").timestamp();
         return buildAction(service_name, .probe_result);
     }
 
@@ -455,7 +455,7 @@ pub const Registry = struct {
         if (endpoint.generation != generation) return .stale_generation;
         endpoint.readiness_required = true;
         endpoint.observed_health = .unknown;
-        endpoint.last_transition_at = std.time.timestamp();
+        endpoint.last_transition_at = @import("compat").timestamp();
         return .applied;
     }
 
@@ -469,14 +469,14 @@ pub const Registry = struct {
         const endpoint = try self.getEndpointMut(service_name, endpoint_id);
         if (endpoint.generation != generation) return .stale_generation;
         endpoint.observed_health = if (healthy) .healthy else .unhealthy;
-        endpoint.last_transition_at = std.time.timestamp();
+        endpoint.last_transition_at = @import("compat").timestamp();
         return .applied;
     }
 
     pub fn requestReconcile(self: *Registry, service_name: []const u8) Error!Action {
         const service = try self.getServiceMut(service_name);
         service.last_reconcile_status = .pending;
-        service.last_reconcile_requested_at = std.time.timestamp();
+        service.last_reconcile_requested_at = @import("compat").timestamp();
         if (service.last_reconcile_error) |message| {
             self.alloc.free(message);
             service.last_reconcile_error = null;
@@ -493,7 +493,7 @@ pub const Registry = struct {
 
     pub fn noteNodeLost(self: *Registry, node_id: i64) usize {
         var changed: usize = 0;
-        const now = std.time.timestamp();
+        const now = @import("compat").timestamp();
         for (self.services.items) |*service| {
             for (service.endpoints.items) |*endpoint| {
                 if (endpoint.node_id != node_id) continue;
@@ -508,7 +508,7 @@ pub const Registry = struct {
 
     pub fn noteNodeRecovered(self: *Registry, node_id: i64) usize {
         var changed: usize = 0;
-        const now = std.time.timestamp();
+        const now = @import("compat").timestamp();
         for (self.services.items) |*service| {
             for (service.endpoints.items) |*endpoint| {
                 if (endpoint.node_id != node_id) continue;

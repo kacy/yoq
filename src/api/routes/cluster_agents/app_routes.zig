@@ -249,7 +249,7 @@ fn formatAppsResponse(
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     try writer.writeByte('[');
     for (latest_deployments, 0..) |latest, i| {
@@ -298,7 +298,7 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
 
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     try writer.writeByte('[');
     for (deployments, 0..) |dep, i| {
@@ -424,7 +424,7 @@ fn formatAppStatusResponse(
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     try writer.writeByte('{');
     try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
@@ -670,7 +670,7 @@ const RouteFlowHarness = struct {
         errdefer tmp.cleanup();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = try tmp.dir.realpath(".", &path_buf);
+        const tmp_path = try @import("compat").Dir.from(tmp.dir).realpath(".", &path_buf);
 
         const node = try alloc.create(cluster_node.Node);
         errdefer alloc.destroy(node);

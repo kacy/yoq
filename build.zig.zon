@@ -25,7 +25,7 @@
     .fingerprint = 0x6106bc0f301398af, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -33,8 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .sqlite = .{
-            .url = "git+https://github.com/vrischmann/zig-sqlite?ref=zig-0.15.1#c1a5f2720bad283f870df77b41430bd461bb9182",
-            .hash = "sqlite-3.48.0-F2R_a9eODgDPCO5CDptJHZINZSIn48IFVIWUhuxxwGTb",
+            .path = "vendor/zig-sqlite",
         },
         // upstream sqlite amalgamation - needed for cache-sqlite step
         .sqlite_amalgamation = .{
@@ -46,6 +45,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor/zig-sqlite",
         "LICENSE",
         "README.md",
     },

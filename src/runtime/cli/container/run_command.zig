@@ -29,7 +29,7 @@ fn isFilesystemTarget(target: []const u8) bool {
         std.mem.eql(u8, target, "..");
 }
 
-fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) ContainerError!RunFlags {
+fn parseRunFlags(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) ContainerError!RunFlags {
     var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
     var env: std.ArrayList([]const u8) = .empty;
     var volume_specs: std.ArrayList(cli.VolumeMountSpec) = .empty;
@@ -232,7 +232,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
         return alloc.alloc(container.BindMount, 0) catch return ContainerError.OutOfMemory;
     }
 
-    const cwd = std.fs.cwd().realpathAlloc(alloc, ".") catch {
+    const cwd = @import("compat").cwd().realpathAlloc(alloc, ".") catch {
         writeErr("failed to resolve current working directory\n", .{});
         return ContainerError.OutOfMemory;
     };
@@ -267,7 +267,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
             std.fs.path.resolve(alloc, &.{ cwd, spec.source }) catch return error.OutOfMemory;
         defer alloc.free(source_input);
 
-        const source = std.fs.cwd().realpathAlloc(alloc, source_input) catch {
+        const source = @import("compat").cwd().realpathAlloc(alloc, source_input) catch {
             writeErr("volume source must exist and be canonicalizable: {s}\n", .{spec.source});
             return ContainerError.InvalidArgument;
         };
@@ -351,20 +351,20 @@ fn saveCreatedRecord(id: []const u8, cfg: *const run_state.SavedRunConfig) Conta
         .status = "created",
         .pid = null,
         .exit_code = null,
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     }) catch |err| {
         writeErr("failed to save container state: {}\n", .{err});
         return ContainerError.ConfigSaveFailed;
     };
 }
 
-pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     if (builtin.os.tag != .linux) {
         writeErr("yoq run is only supported on linux (kernel 6.1+)\n", .{});
         return ContainerError.NotSupported;
     }
 
-    if (posix.getuid() != 0) {
+    if (@import("compat").posix.getuid() != 0) {
         writeErr("warning: yoq run requires root privileges for cgroups and networking\n", .{});
     }
 

@@ -60,7 +60,7 @@ pub fn extractFromStage(step: []const u8) ?[]const u8 {
 
     if (!std.mem.eql(u8, lower, "copy") and !std.mem.eql(u8, lower, "add")) return null;
 
-    const rest = std.mem.trimLeft(u8, trimmed[first_space + 1 ..], " \t");
+    const rest = std.mem.trimStart(u8, trimmed[first_space + 1 ..], " \t");
     if (!std.mem.startsWith(u8, rest, "--from=")) return null;
 
     const after_eq = rest["--from=".len..];

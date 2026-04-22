@@ -142,7 +142,7 @@ fn createDeviceNodesAt(target_root: []const u8) void {
 }
 
 fn mkdirIfNeeded(path: []const u8) !void {
-    std.fs.cwd().makeDir(path) catch |e| switch (e) {
+    @import("compat").cwd().makeDir(path) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };

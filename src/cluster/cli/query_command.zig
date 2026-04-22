@@ -15,7 +15,7 @@ const QueryError = error{
     ServerError,
 };
 
-pub fn cluster(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn cluster(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var subcommand: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -58,7 +58,7 @@ fn clusterStatus(alloc: std.mem.Allocator) void {
     write("{s}\n", .{resp.body});
 }
 
-pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn nodes(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var server: cli.ServerAddr = .{};
 
     while (args.next()) |arg| {
@@ -124,7 +124,7 @@ pub fn nodes(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 }
 
-pub fn drain(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn drain(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var node_id: ?[]const u8 = null;
     var server: cli.ServerAddr = .{};
 

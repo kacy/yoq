@@ -21,7 +21,7 @@ pub fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_ho
     lifecycle_commands.cleanupNetwork(container_id, ip_address, veth_host);
 }
 
-pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return run_command.run(args, alloc);
 }
 
@@ -29,26 +29,26 @@ pub fn ps(alloc: std.mem.Allocator) !void {
     return query_commands.ps(alloc);
 }
 
-pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn stop(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return lifecycle_commands.stop(args, alloc);
 }
 
-pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return query_commands.exec_cmd(args, alloc);
 }
 
-pub fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn rm(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return lifecycle_commands.rm(args, alloc);
 }
 
-pub fn log(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn log(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return query_commands.log(args, alloc);
 }
 
-pub fn restart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn restart(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return lifecycle_commands.restart(args, alloc);
 }
 
-pub fn runSupervisor(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return supervisor_runtime.runSupervisor(args, alloc);
 }

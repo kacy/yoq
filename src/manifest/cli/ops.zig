@@ -26,7 +26,7 @@ const OpsError = error{
     UnknownService,
 };
 
-pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn rollback(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var target_name: ?[]const u8 = null;
     var app_mode = false;
     var server_addr: ?[]const u8 = null;
@@ -102,7 +102,7 @@ pub fn rollback(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
     write("\nto apply this rollback, redeploy with this config using 'yoq up'\n", .{});
 }
 
-pub fn rollout(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn rollout(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const action = args.next() orelse {
         writeErr("usage: yoq rollout <pause|resume|cancel> --app [name] [--server host:port]\n", .{});
         return OpsError.InvalidArgument;
@@ -238,7 +238,7 @@ fn rollbackLocalApp(
     writeErr("stopped\n", .{});
 }
 
-pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn history(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var target_name: ?[]const u8 = null;
     var app_mode = false;
     var server_addr: ?[]const u8 = null;
@@ -332,7 +332,7 @@ pub fn history(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return OpsError.StoreError;
+    const cwd = @import("compat").cwd().realpath(".", &cwd_buf) catch return OpsError.StoreError;
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return OpsError.StoreError;
 }
 
@@ -1278,7 +1278,7 @@ test "formatHistoryMessage appends failure detail summary" {
     try std.testing.expect(std.mem.indexOf(u8, text, "db: placement_failed") != null);
 }
 
-pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn runWorker(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var worker_name: ?[]const u8 = null;
     var server_addr: ?[]const u8 = null;
@@ -1348,7 +1348,7 @@ pub fn runWorker(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
     }
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     writeErr("running worker {s}...\n", .{name});

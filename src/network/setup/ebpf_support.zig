@@ -10,7 +10,7 @@ pub fn loadDnsInterceptorOnBridge() void {
     if (ebpf.getDnsInterceptor() != null) return;
 
     const sock = nl.openSocket() catch return;
-    defer posix.close(sock);
+    defer @import("compat").posix.close(sock);
 
     const if_index = nl.getIfIndex(sock, bridge.default_bridge) catch return;
     if (if_index == 0) return;

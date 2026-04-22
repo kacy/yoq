@@ -13,5 +13,5 @@ pub const logs_subdir = "logs";
 pub const max_log_size: u64 = 50 * 1024 * 1024;
 
 pub fn writeToStdout(data: []const u8) LogError!void {
-    std.fs.File.stdout().writeAll(data) catch return LogError.WriteFailed;
+    @import("compat").File.stdout().writeAll(data) catch return LogError.WriteFailed;
 }

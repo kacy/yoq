@@ -61,7 +61,7 @@ pub fn storeCache(cache_key: []const u8, layer_digest: []const u8, diff_id: []co
         .layer_digest = layer_digest,
         .diff_id = diff_id,
         .layer_size = @intCast(size),
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     }) catch |err| {
         log.warn("failed to store build cache: {}", .{err});
     };

@@ -173,7 +173,7 @@ pub const RouteTrafficRole = enum {
     }
 };
 
-var mutex: std.Thread.Mutex = .{};
+var mutex: @import("compat").Mutex = .{};
 var materialized_routes: std.ArrayList(router.Route) = .empty;
 var running: bool = false;
 var configured_services: u32 = 0;
@@ -454,20 +454,20 @@ pub fn recordEndpointFailure(endpoint_id: []const u8, cb_policy: proxy_policy.Ci
             }
             if (proxy_policy.shouldTripCircuit(cb_policy, circuit.consecutive_failures)) {
                 circuit.state = .open;
-                circuit.opened_at_ms = std.time.milliTimestamp();
+                circuit.opened_at_ms = @import("compat").milliTimestamp();
                 circuit.half_open_in_flight = false;
                 circuit_trips_total += 1;
             }
         },
         .half_open => {
             circuit.state = .open;
-            circuit.opened_at_ms = std.time.milliTimestamp();
+            circuit.opened_at_ms = @import("compat").milliTimestamp();
             circuit.half_open_in_flight = false;
             circuit.consecutive_failures = cb_policy.failure_threshold;
             circuit_trips_total += 1;
         },
         .open => {
-            circuit.opened_at_ms = std.time.milliTimestamp();
+            circuit.opened_at_ms = @import("compat").milliTimestamp();
             circuit.half_open_in_flight = false;
         },
     }
@@ -480,7 +480,7 @@ pub fn recordRouteFailure(route_name: []const u8, kind: RouteFailureKind) void {
     const state = ensureRouteStatusLocked(route_name) orelse return;
     state.degraded_reason = degradedReasonForFailure(kind);
     state.last_failure_kind = kind;
-    state.last_failure_at = std.time.timestamp();
+    state.last_failure_at = @import("compat").timestamp();
 }
 
 pub fn recordRouteRecovered(route_name: []const u8) void {
@@ -648,7 +648,7 @@ pub fn resolveUpstreamWithPolicy(alloc: std.mem.Allocator, service_name: []const
     mutex.lock();
     defer mutex.unlock();
 
-    const now_ms = std.time.milliTimestamp();
+    const now_ms = @import("compat").milliTimestamp();
     const target_port = service.http_proxy_target_port;
     for (endpoints.items) |endpoint| {
         const port: u16 = target_port orelse if (endpoint.port < 0) 0 else @intCast(endpoint.port);
@@ -911,7 +911,7 @@ fn syncLocked() !void {
     routes = next_routes;
     pruneRouteStatusesLocked();
     running = next_configured_services > 0;
-    last_sync_at = if (next_configured_services > 0) std.time.timestamp() else null;
+    last_sync_at = if (next_configured_services > 0) @import("compat").timestamp() else null;
 }
 
 fn deinitRoutesLocked() void {

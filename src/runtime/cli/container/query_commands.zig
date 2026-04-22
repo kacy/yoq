@@ -78,7 +78,7 @@ pub fn ps(alloc: std.mem.Allocator) !void {
     }
 }
 
-pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const id = args.next() orelse {
         writeErr("usage: yoq exec <container-id|name> <command> [args...]\n", .{});
         return ContainerError.InvalidArgument;
@@ -122,7 +122,7 @@ pub fn exec_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void 
     std.process.exit(exit_code);
 }
 
-pub fn log(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn log(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const ref = cli.requireArg(args, "usage: yoq logs <container-id|name> [--tail N] [-f]\n");
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);

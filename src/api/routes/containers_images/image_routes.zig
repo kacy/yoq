@@ -14,7 +14,7 @@ pub fn handleListImages(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
 

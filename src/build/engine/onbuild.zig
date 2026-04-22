@@ -59,7 +59,7 @@ pub fn parseTrigger(trigger: []const u8) ?types.TriggerInstruction {
 
     const keyword = if (split_pos) |pos| trimmed[0..pos] else trimmed;
     const args = if (split_pos) |pos|
-        std.mem.trimLeft(u8, trimmed[pos + 1 ..], " \t")
+        std.mem.trimStart(u8, trimmed[pos + 1 ..], " \t")
     else
         "";
 

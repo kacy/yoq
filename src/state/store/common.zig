@@ -11,8 +11,8 @@ pub const StoreError = error{
 };
 
 var global_db: ?sqlite.Db = null;
-var db_mutex: std.Thread.Mutex = .{};
-var test_db_lifetime_mutex: std.Thread.Mutex = .{};
+var db_mutex: @import("compat").Mutex = .{};
+var test_db_lifetime_mutex: @import("compat").Mutex = .{};
 
 pub fn initTestDb() StoreError!void {
     // The in-memory test DB is global process state. Hold an exclusive

@@ -91,7 +91,7 @@ const ReplacementFailureDetailBuilder = struct {
 
         var json_buf: std.ArrayList(u8) = .empty;
         errdefer json_buf.deinit(self.alloc);
-        const writer = json_buf.writer(self.alloc);
+        const writer = @import("compat").arrayListWriter(&json_buf, self.alloc);
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |detail, i| {
@@ -181,7 +181,7 @@ const ReplacementRolloutTargetBuilder = struct {
 
         var json_buf: std.ArrayList(u8) = .empty;
         errdefer json_buf.deinit(self.alloc);
-        const writer = json_buf.writer(self.alloc);
+        const writer = @import("compat").arrayListWriter(&json_buf, self.alloc);
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |target, i| {
@@ -305,7 +305,7 @@ pub const PreparedLocalApply = struct {
                 if (vol.kind != .bind) continue;
 
                 var resolve_buf: [4096]u8 = undefined;
-                const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch |e| {
+                const abs_source = @import("compat").cwd().realpath(vol.source, &resolve_buf) catch |e| {
                     writeErr("warning: failed to resolve path {s}: {}\n", .{ vol.source, e });
                     any_watch_failed = true;
                     continue;
@@ -830,7 +830,7 @@ fn waitHealthyIfSupported(
 
 fn maybeDelayBetweenBatches(delay_seconds: u32, should_delay: bool) void {
     if (!should_delay or delay_seconds == 0) return;
-    std.Thread.sleep(@as(u64, delay_seconds) * std.time.ns_per_s);
+    @import("compat").sleep(@as(u64, delay_seconds) * std.time.ns_per_s);
 }
 
 fn replacementFailureOutcome(
@@ -1048,9 +1048,9 @@ const LocalApplyBackend = struct {
             ) ![]ReplacementHealthResult {
                 const results = try alloc.alloc(ReplacementHealthResult, indexes.len);
                 @memset(results, .timeout);
-                const deadline = @as(u64, @intCast(@max(0, std.time.timestamp()))) + timeout;
+                const deadline = @as(u64, @intCast(@max(0, @import("compat").timestamp()))) + timeout;
                 var remaining = indexes.len;
-                while (@as(u64, @intCast(@max(0, std.time.timestamp()))) < deadline) {
+                while (@as(u64, @intCast(@max(0, @import("compat").timestamp()))) < deadline) {
                     if (runner_self.awaitControl()) {
                         for (results) |*result| {
                             if (result.* == .timeout) {
@@ -1083,7 +1083,7 @@ const LocalApplyBackend = struct {
                         }
                     }
                     if (remaining == 0) return results;
-                    std.Thread.sleep(100 * std.time.ns_per_ms);
+                    @import("compat").sleep(100 * std.time.ns_per_ms);
                 }
                 return results;
             }

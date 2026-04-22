@@ -155,7 +155,7 @@ test "writeContainerJson produces valid JSON" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = @import("compat").fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeContainerJson(writer, record);
@@ -183,7 +183,7 @@ test "writeContainerJson handles null pid" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = @import("compat").fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeContainerJson(writer, record);
@@ -205,7 +205,7 @@ test "writeImageJson produces valid JSON" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = @import("compat").fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeImageJson(writer, img);
@@ -234,7 +234,7 @@ test "writeContainerJson escapes special characters" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = @import("compat").fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeContainerJson(writer, record);
@@ -416,7 +416,7 @@ test "writeImageJson handles empty strings" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = @import("compat").fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeImageJson(writer, img);

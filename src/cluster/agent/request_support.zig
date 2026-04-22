@@ -20,7 +20,7 @@ pub fn buildRegisterBody(
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     try writer.writeAll("{\"token\":\"");
     try json_helpers.writeJsonEscaped(writer, token);
@@ -66,7 +66,7 @@ pub fn buildRegisterBody(
 pub fn buildHeartbeatBody(alloc: Allocator, resources: AgentResources, gpu_health_label: []const u8) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     try writer.writeAll("{\"cpu_cores\":");
     try writer.print("{d}", .{resources.cpu_cores});

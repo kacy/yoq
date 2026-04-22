@@ -121,7 +121,7 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
             .gpu_model = gpu_model_str,
             .gpu_vram_mb = if (gpu_vram_val) |v| @intCast(@max(0, v)) else 0,
         },
-        std.time.timestamp(),
+        @import("compat").timestamp(),
         .{
             .node_id = assigned_node_id,
             .agent_api_port = if (agent_api_port) |port| @intCast(port) else null,
@@ -148,14 +148,14 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     writer.writeAll("{\"id\":\"") catch return common.internalError();
     writer.writeAll(&id_buf) catch return common.internalError();
     writer.writeByte('"') catch return common.internalError();
 
     if (assigned_node_id) |nid| {
-        std.fmt.format(writer, ",\"node_id\":{d}", .{nid}) catch return common.internalError();
+        @import("compat").format(writer, ",\"node_id\":{d}", .{nid}) catch return common.internalError();
     }
     if (overlay_ip_str) |oip| {
         writer.writeAll(",\"overlay_ip\":\"") catch return common.internalError();
@@ -241,7 +241,7 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
             .gpu_used = @intCast(@max(0, gpu_used)),
             .gpu_health = if (gpu_health_str) |s| agent_types.AgentResources.GpuHealthBuf.fromSlice(s) else .{},
         },
-        std.time.timestamp(),
+        @import("compat").timestamp(),
     );
 
     const db = node.stateMachineDb();
@@ -259,7 +259,7 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
         defer a.deinit(alloc);
         var json_buf: std.ArrayList(u8) = .empty;
         defer json_buf.deinit(alloc);
-        const writer = json_buf.writer(alloc);
+        const writer = @import("compat").arrayListWriter(&json_buf, alloc);
         writer.writeAll("{\"status\":\"") catch return common.internalError();
         writer.writeAll(a.status) catch return common.internalError();
         writer.print("\",\"peers_count\":{d}", .{peers_count}) catch return common.internalError();
@@ -289,7 +289,7 @@ pub fn handleListAgents(alloc: std.mem.Allocator, ctx: RouteContext) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
     for (agents, 0..) |a, i| {
@@ -320,7 +320,7 @@ pub fn handleWireguardPeers(alloc: std.mem.Allocator, request: http.Request, ctx
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
     for (peers, 0..) |peer, i| {
@@ -345,7 +345,7 @@ pub fn handleAgentAssignments(alloc: std.mem.Allocator, agent_id: []const u8, ct
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
     for (assignments, 0..) |a, i| {

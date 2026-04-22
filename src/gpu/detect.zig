@@ -47,7 +47,7 @@ pub fn resolveNvLinkPeers(gpus: []GpuInfo, count: u8, nvml: *NvmlHandle) void {
     return nvml_runtime.resolveNvLinkPeers(gpus, count, nvml);
 }
 
-fn testRealpath(dir: std.fs.Dir, sub_path: []const u8, buf: []u8) ![]const u8 {
+fn testRealpath(dir: @import("compat").Dir, sub_path: []const u8, buf: []u8) ![]const u8 {
     return dir.realpath(sub_path, buf);
 }
 
@@ -120,11 +120,11 @@ test "detectProcfs discovers fake GPU directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("proc/driver/nvidia/gpus/0000:65:00.0");
-    try tmp.dir.makePath("proc/driver/nvidia/gpus/0000:b3:00.0");
+    try @import("compat").Dir.from(tmp.dir).makePath("proc/driver/nvidia/gpus/0000:65:00.0");
+    try @import("compat").Dir.from(tmp.dir).makePath("proc/driver/nvidia/gpus/0000:b3:00.0");
 
     var proc_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const proc_root = try testRealpath(tmp.dir, "proc/driver/nvidia/gpus", &proc_buf);
+    const proc_root = try testRealpath(@import("compat").Dir.from(tmp.dir), "proc/driver/nvidia/gpus", &proc_buf);
 
     fallback_runtime.setTestProbeRoots(.{ .procfs_gpus = proc_root });
     defer fallback_runtime.resetTestProbeRoots();
@@ -144,15 +144,15 @@ test "detectSysfs filters NVIDIA cards from fake drm tree" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("sys/class/drm/card0/device");
-    try tmp.dir.writeFile(.{ .sub_path = "sys/class/drm/card0/device/vendor", .data = "0x10de\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "sys/class/drm/card0/device/uevent", .data = "PCI_SLOT_NAME=0000:17:00.0\n" });
+    try @import("compat").Dir.from(tmp.dir).makePath("sys/class/drm/card0/device");
+    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/drm/card0/device/vendor", .data = "0x10de\n" });
+    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/drm/card0/device/uevent", .data = "PCI_SLOT_NAME=0000:17:00.0\n" });
 
-    try tmp.dir.makePath("sys/class/drm/card1/device");
-    try tmp.dir.writeFile(.{ .sub_path = "sys/class/drm/card1/device/vendor", .data = "0x8086\n" });
+    try @import("compat").Dir.from(tmp.dir).makePath("sys/class/drm/card1/device");
+    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/drm/card1/device/vendor", .data = "0x8086\n" });
 
     var drm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const drm_root = try testRealpath(tmp.dir, "sys/class/drm", &drm_buf);
+    const drm_root = try testRealpath(@import("compat").Dir.from(tmp.dir), "sys/class/drm", &drm_buf);
 
     fallback_runtime.setTestProbeRoots(.{ .drm_root = drm_root });
     defer fallback_runtime.resetTestProbeRoots();

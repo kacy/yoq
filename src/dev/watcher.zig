@@ -60,7 +60,7 @@ pub const Watcher = struct {
         for (self.watches[0..self.watch_count]) |entry| {
             self.alloc.free(entry.path);
         }
-        posix.close(self.fd);
+        @import("compat").posix.close(self.fd);
         self.fd = -1; // Mark as invalid to prevent use-after-close
         self.watch_count = 0;
     }
@@ -108,7 +108,7 @@ pub const Watcher = struct {
         try self.addDir(root_path, service_idx);
 
         // open and iterate subdirectories
-        var dir = std.fs.cwd().openDir(root_path, .{ .iterate = true }) catch |e| {
+        var dir = @import("compat").cwd().openDir(root_path, .{ .iterate = true }) catch |e| {
             log.warn("cannot open directory for recursive watch '{s}': {}", .{ root_path, e });
             return error.OpenFailed;
         };
@@ -120,7 +120,7 @@ pub const Watcher = struct {
     /// internal recursive directory walker. adds inotify watches for each
     /// subdirectory found. skips hidden directories (starting with '.').
     /// logs errors but continues walking on partial failures.
-    fn walkDir(self: *Watcher, dir: std.fs.Dir, parent_path: []const u8, service_idx: usize) void {
+    fn walkDir(self: *Watcher, dir: @import("compat").Dir, parent_path: []const u8, service_idx: usize) void {
         var iter = dir.iterate();
         while (true) {
             const entry = iter.next() catch |e| {
@@ -176,7 +176,7 @@ pub const Watcher = struct {
 
         // debounce: wait for the editor to finish writing, then drain
         // any events that piled up during the wait
-        std.Thread.sleep(debounce_ns);
+        @import("compat").sleep(debounce_ns);
 
         // during drain, collect additional services that had events
         service_count = self.drainPendingMulti(services, service_count);
@@ -257,12 +257,12 @@ pub const Watcher = struct {
         var count = initial_count;
 
         // set nonblocking temporarily to drain without waiting
-        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
+        const flags = @import("compat").posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
             log.warn("watcher: failed to get fd flags: {}", .{e});
             return count;
         };
         const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
+        _ = @import("compat").posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
             log.warn("watcher: failed to set non-blocking mode: {}", .{e});
             return count;
         };
@@ -296,7 +296,7 @@ pub const Watcher = struct {
 
         // restore original flags - but only if fd is still valid
         if (self.fd >= 0) {
-            _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
+            _ = @import("compat").posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
                 log.warn("watcher: failed to restore fd flags: {}", .{e});
             };
         }
@@ -426,7 +426,7 @@ test "watch temp directory and detect file change" {
 
     // get the real path for inotify (needs an absolute path)
     var path_buf: [4096]u8 = undefined;
-    const tmp_path = try tmp.dir.realpath(".", &path_buf);
+    const tmp_path = try @import("compat").Dir.from(tmp.dir).realpath(".", &path_buf);
 
     try w.addDir(tmp_path, 42);
     try std.testing.expectEqual(@as(usize, 1), w.watch_count);
@@ -436,7 +436,7 @@ test "watch temp directory and detect file change" {
         watcher: *Watcher,
         services: [64]usize = undefined,
         count: usize = 0,
-        sem: std.Thread.Semaphore = .{},
+        sem: @import("compat").Semaphore = .{},
     };
     var ctx = Context{ .watcher = &w };
 
@@ -453,10 +453,10 @@ test "watch temp directory and detect file change" {
     // wait for the watcher thread to signal it's ready
     ctx.sem.wait();
     // give extra time for the thread to enter the blocking read
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    @import("compat").sleep(50 * std.time.ns_per_ms);
 
     // write a file to trigger the event
-    var file = try tmp.dir.createFile("test.txt", .{});
+    var file = try @import("compat").Dir.from(tmp.dir).createFile("test.txt", .{});
     try file.writeAll("hello");
     file.close();
 

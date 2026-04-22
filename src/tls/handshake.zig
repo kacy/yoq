@@ -66,11 +66,11 @@ test "key schedule: handshake secret varies with shared secret" {
 test "key schedule: traffic keys are different for client and server" {
     const early = deriveEarlySecret();
     var shared: [32]u8 = undefined;
-    std.crypto.random.bytes(&shared);
+    @import("compat").randomBytes(&shared);
     const hs = deriveHandshakeSecret(early, shared);
 
     var transcript: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&transcript);
+    @import("compat").randomBytes(&transcript);
 
     const keys = deriveHandshakeTrafficSecrets(hs, transcript);
 
@@ -84,11 +84,11 @@ test "key schedule: traffic keys are different for client and server" {
 test "key schedule: full derivation produces valid keys" {
     const early = deriveEarlySecret();
     var shared: [32]u8 = undefined;
-    std.crypto.random.bytes(&shared);
+    @import("compat").randomBytes(&shared);
     const hs = deriveHandshakeSecret(early, shared);
 
     var transcript: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&transcript);
+    @import("compat").randomBytes(&transcript);
 
     const hs_keys = deriveHandshakeTrafficSecrets(hs, transcript);
     const server_traffic = deriveTrafficKeys(hs_keys.server_handshake_traffic_secret);
@@ -103,12 +103,12 @@ test "key schedule: full derivation produces valid keys" {
 test "key schedule: application keys derivation" {
     const early = deriveEarlySecret();
     var shared: [32]u8 = undefined;
-    std.crypto.random.bytes(&shared);
+    @import("compat").randomBytes(&shared);
     const hs = deriveHandshakeSecret(early, shared);
     const master = deriveMasterSecret(hs);
 
     var transcript: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&transcript);
+    @import("compat").randomBytes(&transcript);
 
     const app_keys = deriveApplicationSecrets(master, transcript);
 
@@ -118,9 +118,9 @@ test "key schedule: application keys derivation" {
 
 test "finished computation is deterministic" {
     var key: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    @import("compat").randomBytes(&key);
     var transcript: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&transcript);
+    @import("compat").randomBytes(&transcript);
 
     const f1 = computeFinished(key, transcript);
     const f2 = computeFinished(key, transcript);
@@ -129,11 +129,11 @@ test "finished computation is deterministic" {
 
 test "finished changes with different transcript" {
     var key: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    @import("compat").randomBytes(&key);
     var t1: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&t1);
+    @import("compat").randomBytes(&t1);
     var t2: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&t2);
+    @import("compat").randomBytes(&t2);
 
     const f1 = computeFinished(key, t1);
     const f2 = computeFinished(key, t2);
@@ -143,11 +143,11 @@ test "finished changes with different transcript" {
 test "buildServerHello produces valid structure" {
     var buf: [512]u8 = undefined;
     var client_random: [32]u8 = undefined;
-    std.crypto.random.bytes(&client_random);
+    @import("compat").randomBytes(&client_random);
     var server_random: [32]u8 = undefined;
-    std.crypto.random.bytes(&server_random);
+    @import("compat").randomBytes(&server_random);
     var server_key: [32]u8 = undefined;
-    std.crypto.random.bytes(&server_key);
+    @import("compat").randomBytes(&server_key);
 
     const session_id = &[_]u8{};
     const len = try buildServerHello(&buf, client_random, server_random, session_id, server_key);
@@ -179,7 +179,7 @@ test "buildEncryptedExtensions with ALPN" {
 test "buildFinished size" {
     var buf: [256]u8 = undefined;
     var verify_data: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&verify_data);
+    @import("compat").randomBytes(&verify_data);
     const len = try buildFinished(&buf, verify_data);
     try std.testing.expectEqual(@as(usize, 4 + hash_len), len);
     try std.testing.expectEqual(@as(u8, 0x14), buf[0]);
@@ -265,9 +265,9 @@ test "parseClientHelloFields with X25519 and TLS 1.3" {
 test "buildCertificateVerify produces valid structure" {
     var buf: [512]u8 = undefined;
     var transcript: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&transcript);
+    @import("compat").randomBytes(&transcript);
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(@import("compat").io());
     const len = try buildCertificateVerify(&buf, transcript, kp.secret_key);
 
     try std.testing.expectEqual(@as(u8, 0x0F), buf[0]);
@@ -280,11 +280,11 @@ test "buildCertificateVerify different transcripts produce different output" {
     var buf1: [512]u8 = undefined;
     var buf2: [512]u8 = undefined;
     var t1: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&t1);
+    @import("compat").randomBytes(&t1);
     var t2: [hash_len]u8 = undefined;
-    std.crypto.random.bytes(&t2);
+    @import("compat").randomBytes(&t2);
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(@import("compat").io());
     const len1 = try buildCertificateVerify(&buf1, t1, kp.secret_key);
     const len2 = try buildCertificateVerify(&buf2, t2, kp.secret_key);
 
@@ -296,7 +296,7 @@ test "buildCertificateVerify buffer too small" {
     var transcript: [hash_len]u8 = undefined;
     @memset(&transcript, 0);
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(@import("compat").io());
     try std.testing.expectError(
         HandshakeError.BufferTooSmall,
         buildCertificateVerify(&buf, transcript, kp.secret_key),
@@ -304,8 +304,8 @@ test "buildCertificateVerify buffer too small" {
 }
 
 test "X25519 key exchange produces shared secret" {
-    const client_kp = X25519.KeyPair.generate();
-    const server_kp = X25519.KeyPair.generate();
+    const client_kp = X25519.KeyPair.generate(@import("compat").io());
+    const server_kp = X25519.KeyPair.generate(@import("compat").io());
 
     const client_shared = X25519.scalarmult(client_kp.secret_key, server_kp.public_key) catch unreachable;
     const server_shared = X25519.scalarmult(server_kp.secret_key, client_kp.public_key) catch unreachable;

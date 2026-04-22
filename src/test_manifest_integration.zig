@@ -378,7 +378,7 @@ test "load from nonexistent file returns FileNotFound" {
 }
 
 test "checked-in example manifests load and validate cleanly" {
-    var examples_dir = try std.fs.cwd().openDir("examples", .{ .iterate = true });
+    var examples_dir = try @import("compat").cwd().openDir("examples", .{ .iterate = true });
     defer examples_dir.close();
 
     var walker = try examples_dir.walk(alloc);

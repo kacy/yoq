@@ -19,7 +19,7 @@ pub fn getIfIndex(fd: posix.fd_t, name: []const u8) common.NetlinkError!u32 {
     socket_ops.sendOnly(fd, mb.message()) catch return 0;
 
     var recv_buf: [common.buf_size]u8 align(4) = undefined;
-    const recv_len = posix.recv(fd, &recv_buf, 0) catch return 0;
+    const recv_len = @import("compat").posix.recv(fd, &recv_buf, 0) catch return 0;
     if (recv_len < @sizeOf(linux.nlmsghdr)) return 0;
 
     const resp_hdr: *const linux.nlmsghdr = @ptrCast(@alignCast(&recv_buf));

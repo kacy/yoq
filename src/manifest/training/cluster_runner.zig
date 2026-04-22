@@ -14,7 +14,7 @@ pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
 
     var json_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer json_buf.deinit(self.alloc);
-    const writer = json_buf.writer(self.alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, self.alloc);
 
     writer.writeAll("{\"services\":[{\"image\":\"") catch return error.OutOfMemory;
     json_helpers.writeJsonEscaped(writer, self.job.image) catch return error.OutOfMemory;

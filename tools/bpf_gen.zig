@@ -82,7 +82,7 @@ pub fn main() !void {
     const input_path = args[1];
     const output_path = args[2];
 
-    const data = std.fs.cwd().readFileAlloc(alloc, input_path, 10 * 1024 * 1024) catch |e| {
+    const data = @import("compat").cwd().readFileAlloc(alloc, input_path, 10 * 1024 * 1024) catch |e| {
         std.debug.print("error: cannot read {s}: {}\n", .{ input_path, e });
         std.process.exit(1);
     };
@@ -102,7 +102,7 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    const output_file = std.fs.cwd().createFile(output_path, .{}) catch |e| {
+    const output_file = @import("compat").cwd().createFile(output_path, .{}) catch |e| {
         std.debug.print("error: cannot create {s}: {}\n", .{ output_path, e });
         std.process.exit(1);
     };

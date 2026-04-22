@@ -116,13 +116,13 @@ pub fn createBucket(name: []const u8) S3Error!void {
     const dir_path = try storagePath(&buf, storage_subdir ++ "/{s}", .{name});
 
     // use makeDir (not makePath) so it fails if the directory already exists
-    std.fs.cwd().makeDir(dir_path) catch |e| switch (e) {
+    @import("compat").cwd().makeDir(dir_path) catch |e| switch (e) {
         error.PathAlreadyExists => return S3Error.BucketAlreadyExists,
         else => {
             // ensure parent directories exist, then retry
             if (std.mem.lastIndexOfScalar(u8, dir_path, '/')) |last_sep| {
-                std.fs.cwd().makePath(dir_path[0..last_sep]) catch return S3Error.IoError;
-                std.fs.cwd().makeDir(dir_path) catch |e2| switch (e2) {
+                @import("compat").cwd().makePath(dir_path[0..last_sep]) catch return S3Error.IoError;
+                @import("compat").cwd().makeDir(dir_path) catch |e2| switch (e2) {
                     error.PathAlreadyExists => return S3Error.BucketAlreadyExists,
                     else => return S3Error.IoError,
                 };
@@ -142,7 +142,7 @@ pub fn deleteBucket(name: []const u8) S3Error!void {
     const dir_path = try storagePath(&buf, storage_subdir ++ "/{s}", .{name});
 
     // try to remove as empty dir first
-    std.fs.cwd().deleteDir(dir_path) catch |e| switch (e) {
+    @import("compat").cwd().deleteDir(dir_path) catch |e| switch (e) {
         error.FileNotFound => return S3Error.BucketNotFound,
         error.DirNotEmpty => return S3Error.BucketNotEmpty,
         else => {
@@ -158,9 +158,9 @@ pub fn listBuckets(alloc: std.mem.Allocator) S3Error!struct { names: [][]const u
     const dir_path = try storagePath(&buf, storage_subdir, .{});
 
     // ensure storage dir exists
-    std.fs.cwd().makePath(dir_path) catch return S3Error.IoError;
+    @import("compat").cwd().makePath(dir_path) catch return S3Error.IoError;
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return S3Error.IoError;
+    var dir = @import("compat").cwd().openDir(dir_path, .{ .iterate = true }) catch return S3Error.IoError;
     defer dir.close();
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -198,7 +198,7 @@ pub fn listBuckets(alloc: std.mem.Allocator) S3Error!struct { names: [][]const u
 pub fn bucketExists(name: []const u8) bool {
     var buf: [paths.max_path]u8 = undefined;
     const dir_path = storagePath(&buf, storage_subdir ++ "/{s}", .{name}) catch return false;
-    std.fs.cwd().access(dir_path, .{}) catch return false;
+    @import("compat").cwd().access(dir_path, .{}) catch return false;
     return true;
 }
 
@@ -217,10 +217,10 @@ pub fn putObject(name: []const u8, key: []const u8, data: []const u8) S3Error![3
 
     // ensure parent directories exist (for keys like "dir/subdir/file.txt")
     if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_sep| {
-        std.fs.cwd().makePath(file_path[0..last_sep]) catch return S3Error.IoError;
+        @import("compat").cwd().makePath(file_path[0..last_sep]) catch return S3Error.IoError;
     }
 
-    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+    const file = @import("compat").cwd().createFile(file_path, .{}) catch {
         return S3Error.IoError;
     };
     defer file.close();
@@ -237,7 +237,7 @@ pub fn getObject(alloc: std.mem.Allocator, name: []const u8, key: []const u8) S3
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
 
-    return std.fs.cwd().readFileAlloc(alloc, file_path, 256 * 1024 * 1024) catch |e| switch (e) {
+    return @import("compat").cwd().readFileAlloc(alloc, file_path, 256 * 1024 * 1024) catch |e| switch (e) {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
@@ -251,7 +251,7 @@ pub fn deleteObject(name: []const u8, key: []const u8) S3Error!void {
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
 
-    std.fs.cwd().deleteFile(file_path) catch |e| switch (e) {
+    @import("compat").cwd().deleteFile(file_path) catch |e| switch (e) {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
@@ -267,13 +267,13 @@ pub fn headObject(name: []const u8, key: []const u8) S3Error!ObjectMeta {
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
 
-    const stat = std.fs.cwd().statFile(file_path) catch |e| switch (e) {
+    const stat = @import("compat").cwd().statFile(file_path) catch |e| switch (e) {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
 
     // stream file through MD5 in fixed-size chunks to avoid loading entire file
-    const file = std.fs.cwd().openFile(file_path, .{}) catch return S3Error.IoError;
+    const file = @import("compat").cwd().openFile(file_path, .{}) catch return S3Error.IoError;
     defer file.close();
 
     var hasher = std.crypto.hash.Md5.init(.{});
@@ -307,7 +307,7 @@ pub fn listObjects(
     var buf: [paths.max_path]u8 = undefined;
     const dir_path = try storagePath(&buf, storage_subdir ++ "/{s}", .{name});
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| switch (e) {
+    var dir = @import("compat").cwd().openDir(dir_path, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return S3Error.BucketNotFound,
         else => return S3Error.IoError,
     };
@@ -331,7 +331,7 @@ pub fn listObjects(
         // apply prefix filter
         if (prefix.len > 0 and !std.mem.startsWith(u8, key, prefix)) continue;
 
-        const stat = entry.dir.statFile(entry.basename) catch continue;
+        const stat = @import("compat").Dir.from(entry.dir).statFile(entry.basename) catch continue;
         const key_copy = alloc.dupe(u8, key) catch return S3Error.IoError;
         entries.append(alloc, .{
             .key = key_copy,
@@ -360,15 +360,15 @@ pub fn initiateMultipartUpload(name: []const u8, key: []const u8) S3Error![24]u8
     // generate upload ID
     var upload_id: [24]u8 = undefined;
     var random_bytes: [12]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
+    @import("compat").randomBytes(&random_bytes);
     upload_id = std.fmt.bytesToHex(random_bytes, .lower);
 
     // create staging directory
     var buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&buf, multipart_subdir ++ "/{s}", .{upload_id});
-    std.fs.cwd().makePath(staging_path) catch return S3Error.IoError;
+    @import("compat").cwd().makePath(staging_path) catch return S3Error.IoError;
     writeMultipartMeta(staging_path, name, key) catch {
-        std.fs.cwd().deleteTree(staging_path) catch {};
+        @import("compat").cwd().deleteTree(staging_path) catch {};
         return S3Error.IoError;
     };
 
@@ -390,10 +390,10 @@ pub fn uploadPart(upload_id: []const u8, bucket_name: []const u8, key: []const u
     // verify staging directory exists
     var parent_buf: [paths.max_path]u8 = undefined;
     const parent = try storagePath(&parent_buf, multipart_subdir ++ "/{s}", .{upload_id});
-    std.fs.cwd().access(parent, .{}) catch return S3Error.UploadNotFound;
+    @import("compat").cwd().access(parent, .{}) catch return S3Error.UploadNotFound;
     try verifyMultipartTarget(parent, bucket_name, key);
 
-    const file = std.fs.cwd().createFile(staging_path, .{}) catch return S3Error.IoError;
+    const file = @import("compat").cwd().createFile(staging_path, .{}) catch return S3Error.IoError;
     defer file.close();
     file.writeAll(data) catch return S3Error.IoError;
 
@@ -417,7 +417,7 @@ pub fn completeMultipartUpload(
     const staging_path = try storagePath(&staging_buf, multipart_subdir ++ "/{s}", .{upload_id});
     try verifyMultipartTarget(staging_path, bucket_name, key);
 
-    var dir = std.fs.cwd().openDir(staging_path, .{ .iterate = true }) catch return S3Error.UploadNotFound;
+    var dir = @import("compat").cwd().openDir(staging_path, .{ .iterate = true }) catch return S3Error.UploadNotFound;
     defer dir.close();
 
     // collect part filenames and sort them
@@ -449,7 +449,7 @@ pub fn completeMultipartUpload(
     const etag = try writeMultipartObject(dir, bucket_name, key, part_names.items);
 
     // clean up staging directory
-    std.fs.cwd().deleteTree(staging_path) catch {};
+    @import("compat").cwd().deleteTree(staging_path) catch {};
 
     return etag;
 }
@@ -460,7 +460,7 @@ pub fn abortMultipartUpload(upload_id: []const u8) S3Error!void {
     var buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&buf, multipart_subdir ++ "/{s}", .{upload_id});
 
-    std.fs.cwd().deleteTree(staging_path) catch {
+    @import("compat").cwd().deleteTree(staging_path) catch {
         return S3Error.IoError;
     };
 }
@@ -476,15 +476,15 @@ pub fn computeEtag(data: []const u8) [32]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-fn writeMultipartObject(dir: std.fs.Dir, bucket_name: []const u8, key: []const u8, part_names: []const []const u8) S3Error![32]u8 {
+fn writeMultipartObject(dir: @import("compat").Dir, bucket_name: []const u8, key: []const u8, part_names: []const []const u8) S3Error![32]u8 {
     var out_path_buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&out_path_buf, storage_subdir ++ "/{s}/{s}", .{ bucket_name, key });
 
     if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_sep| {
-        std.fs.cwd().makePath(file_path[0..last_sep]) catch return S3Error.IoError;
+        @import("compat").cwd().makePath(file_path[0..last_sep]) catch return S3Error.IoError;
     }
 
-    const out_file = std.fs.cwd().createFile(file_path, .{ .truncate = true }) catch return S3Error.IoError;
+    const out_file = @import("compat").cwd().createFile(file_path, .{ .truncate = true }) catch return S3Error.IoError;
     defer out_file.close();
 
     var hasher = std.crypto.hash.Md5.init(.{});
@@ -511,7 +511,7 @@ fn writeMultipartMeta(staging_path: []const u8, bucket: []const u8, key: []const
     var meta_path_buf: [paths.max_path]u8 = undefined;
     const meta_path = std.fmt.bufPrint(&meta_path_buf, "{s}/{s}", .{ staging_path, multipart_meta_name }) catch
         return error.PathTooLong;
-    const meta_file = try std.fs.cwd().createFile(meta_path, .{ .truncate = true });
+    const meta_file = try @import("compat").cwd().createFile(meta_path, .{ .truncate = true });
     defer meta_file.close();
     try meta_file.writeAll(bucket);
     try meta_file.writeAll("\n");
@@ -522,7 +522,7 @@ fn loadMultipartMeta(staging_path: []const u8, buf: []u8) S3Error!MultipartMeta 
     var meta_path_buf: [paths.max_path]u8 = undefined;
     const meta_path = std.fmt.bufPrint(&meta_path_buf, "{s}/{s}", .{ staging_path, multipart_meta_name }) catch
         return S3Error.PathTooLong;
-    const content = std.fs.cwd().readFile(meta_path, buf) catch |err| switch (err) {
+    const content = @import("compat").cwd().readFile(meta_path, buf) catch |err| switch (err) {
         error.FileNotFound => return S3Error.UploadNotFound,
         else => return S3Error.IoError,
     };
@@ -555,7 +555,7 @@ fn cleanupEmptyObjectDirs(bucket: []const u8, key: []const u8) S3Error!void {
     while (true) {
         var dir_buf: [paths.max_path]u8 = undefined;
         const dir_path = try storagePath(&dir_buf, storage_subdir ++ "/{s}/{s}", .{ bucket, parent });
-        std.fs.cwd().deleteDir(dir_path) catch |err| switch (err) {
+        @import("compat").cwd().deleteDir(dir_path) catch |err| switch (err) {
             error.DirNotEmpty, error.FileNotFound => return,
             else => return S3Error.IoError,
         };
@@ -639,11 +639,11 @@ test "verifyMultipartTarget rejects reused upload id for different object" {
     const staging = try std.fmt.bufPrint(
         &path_buf,
         "/tmp/yoq-s3-multipart-{d}",
-        .{std.time.nanoTimestamp()},
+        .{@import("compat").nanoTimestamp()},
     );
-    defer std.fs.cwd().deleteTree(staging) catch {};
+    defer @import("compat").cwd().deleteTree(staging) catch {};
 
-    try std.fs.cwd().makePath(staging);
+    try @import("compat").cwd().makePath(staging);
     try writeMultipartMeta(staging, "bucket-a", "key-a");
 
     try verifyMultipartTarget(staging, "bucket-a", "key-a");
@@ -657,15 +657,15 @@ test "completeMultipartUpload streams parts into final object" {
 
     var bucket_path_buf: [paths.max_path]u8 = undefined;
     const bucket_path = try storagePath(&bucket_path_buf, storage_subdir ++ "/{s}", .{bucket});
-    std.fs.cwd().deleteTree(bucket_path) catch {};
-    defer std.fs.cwd().deleteTree(bucket_path) catch {};
+    @import("compat").cwd().deleteTree(bucket_path) catch {};
+    defer @import("compat").cwd().deleteTree(bucket_path) catch {};
 
     try createBucket(bucket);
     const upload_id = try initiateMultipartUpload(bucket, key);
 
     var staging_path_buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&staging_path_buf, multipart_subdir ++ "/{s}", .{upload_id});
-    defer std.fs.cwd().deleteTree(staging_path) catch {};
+    defer @import("compat").cwd().deleteTree(staging_path) catch {};
 
     _ = try uploadPart(&upload_id, bucket, key, 1, "hello ");
     _ = try uploadPart(&upload_id, bucket, key, 2, "streamed ");

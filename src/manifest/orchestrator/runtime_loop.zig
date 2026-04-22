@@ -144,7 +144,7 @@ const PreparedService = struct {
             .status = .created,
             .pid = null,
             .exit_code = null,
-            .created_at = std.time.timestamp(),
+            .created_at = @import("compat").timestamp(),
         };
     }
 };
@@ -179,14 +179,14 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             .pid = null,
             .exit_code = null,
             .app_name = orch.app_name,
-            .created_at = std.time.timestamp(),
+            .created_at = @import("compat").timestamp(),
         }) catch {
             orch.states[idx].status = .failed;
             return;
         };
 
         var c = prepared.createContainer(orch, idx, id, svc.name);
-        const start_time = std.time.nanoTimestamp();
+        const start_time = @import("compat").nanoTimestamp();
 
         c.start() catch {
             cleanupContainerArtifacts(id);
@@ -203,7 +203,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         );
 
         const exit_code = c.wait() catch 255;
-        const run_duration_ns = std.time.nanoTimestamp() - start_time;
+        const run_duration_ns = @import("compat").nanoTimestamp() - start_time;
         cleanupContainerArtifacts(id);
 
         if (shutdown_requested.load(.acquire)) break;
@@ -276,7 +276,7 @@ fn handleDevModeRestart(
             writeErr("restarting {s}...\n", .{service_name});
             return true;
         }
-        std.Thread.sleep(restart_poll_ms * std.time.ns_per_ms);
+        @import("compat").sleep(restart_poll_ms * std.time.ns_per_ms);
     }
     return false;
 }
@@ -310,7 +310,7 @@ fn handleRestartPolicyExit(
         if (shutdown_requested.load(.acquire)) return false;
         const remaining = backoff_ms.* - slept_ms;
         const sleep_chunk: u64 = @min(remaining, restart_poll_ms);
-        std.Thread.sleep(sleep_chunk * std.time.ns_per_ms);
+        @import("compat").sleep(sleep_chunk * std.time.ns_per_ms);
         slept_ms += sleep_chunk;
     }
 

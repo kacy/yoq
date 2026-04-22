@@ -22,7 +22,7 @@ pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) types.LayerError!std.
     var dir_buf: [max_path]u8 = undefined;
     const dir_path = layerDir(&dir_buf) catch return types.LayerError.PathTooLong;
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = @import("compat").cwd().openDir(dir_path, .{ .iterate = true }) catch {
         return std.ArrayList([]const u8).empty;
     };
     defer dir.close();
@@ -50,7 +50,7 @@ pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) types.LayerError!std.
 pub fn deleteExtractedLayer(hex: []const u8) void {
     var path_buf: [max_path]u8 = undefined;
     const path = paths.dataPathFmt(&path_buf, "{s}/{s}", .{ layer_subdir, hex }) catch return;
-    std.fs.cwd().deleteTree(path) catch |err| {
+    @import("compat").cwd().deleteTree(path) catch |err| {
         if (err != error.FileNotFound) {
             log.warn("failed to delete extracted layer {s}: {}", .{ hex, err });
         }

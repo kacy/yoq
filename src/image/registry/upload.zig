@@ -177,12 +177,12 @@ pub fn resolveUploadTarget(registry_host: []const u8, location: []const u8) ?Upl
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return null;
     if (protocol != .tls) return null;
 
-    var host_buf: [std.Uri.host_name_max]u8 = undefined;
+    var host_buf: [255]u8 = undefined;
     const upload_host = uri.getHost(&host_buf) catch return null;
 
     return .{
         .url = location,
-        .send_auth = std.mem.eql(u8, upload_host, registry_host),
+        .send_auth = std.mem.eql(u8, upload_host.bytes, registry_host),
     };
 }
 

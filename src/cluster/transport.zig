@@ -37,11 +37,11 @@ const msg_append_entries_reply = common.msg_append_entries_reply;
 const msg_install_snapshot = common.msg_install_snapshot;
 const msg_install_snapshot_reply = common.msg_install_snapshot_reply;
 
-const invalid_socket: posix.socket_t = -1;
+const invalid_socket: @import("compat").posix.socket_t = -1;
 
 pub const Transport = struct {
     alloc: std.mem.Allocator,
-    listen_fd: posix.socket_t,
+    listen_fd: @import("compat").posix.socket_t,
     peers: std.AutoHashMap(NodeId, PeerAddr),
     local_id: ?NodeId,
 
@@ -54,19 +54,19 @@ pub const Transport = struct {
     /// optional UDP socket for gossip protocol messages.
     /// initialized separately from the TCP listener since gossip is
     /// only active when the cluster exceeds a size threshold.
-    udp_fd: ?posix.socket_t,
+    udp_fd: ?@import("compat").posix.socket_t,
 
     pub fn init(alloc: std.mem.Allocator, port: u16) !Transport {
-        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
-        errdefer posix.close(fd);
+        const fd = try @import("compat").posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
+        errdefer @import("compat").posix.close(fd);
 
         // allow address reuse
         const one: i32 = 1;
         try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
 
-        const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-        try posix.bind(fd, &addr.any, addr.getOsSockLen());
-        try posix.listen(fd, 16);
+        const addr = @import("compat").net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+        try @import("compat").posix.bind(fd, &addr.any, addr.getOsSockLen());
+        try @import("compat").posix.listen(fd, 16);
 
         return .{
             .alloc = alloc,
@@ -94,13 +94,13 @@ pub const Transport = struct {
 
     pub fn deinit(self: *Transport) void {
         self.deinitUdp();
-        if (self.listen_fd != invalid_socket) posix.close(self.listen_fd);
+        if (self.listen_fd != invalid_socket) @import("compat").posix.close(self.listen_fd);
         self.peers.deinit();
     }
 
     pub fn addPeer(self: *Transport, id: NodeId, addr: [4]u8, port: u16) !void {
         try self.peers.put(id, .{
-            .addr = std.net.Address.initIp4(addr, port),
+            .addr = @import("compat").net.Address.initIp4(addr, port),
         });
     }
 
@@ -175,7 +175,7 @@ pub const Transport = struct {
         return udp_support.receiveGossip(self, buf);
     }
 
-    fn resolvePeerId(self: *const Transport, addr: std.net.Address) ?NodeId {
+    fn resolvePeerId(self: *const Transport, addr: @import("compat").net.Address) ?NodeId {
         return udp_support.resolvePeerId(self, addr);
     }
 };
@@ -623,7 +623,7 @@ test "verifyAuthenticatedBody rejects mismatched sender id" {
 
     try std.testing.expectError(
         TransportError.AuthenticationFailed,
-        verifyAuthenticatedBody(&body, key, std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9000), &peers),
+        verifyAuthenticatedBody(&body, key, @import("compat").net.Address.initIp4(.{ 10, 0, 0, 2 }, 9000), &peers),
     );
 }
 
@@ -647,11 +647,11 @@ test "verifyAuthenticatedBody rejects sender from wrong ip" {
 
     var peers = std.AutoHashMap(NodeId, PeerAddr).init(alloc);
     defer peers.deinit();
-    try peers.put(2, .{ .addr = std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700) });
+    try peers.put(2, .{ .addr = @import("compat").net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700) });
 
     try std.testing.expectError(
         TransportError.AuthenticationFailed,
-        verifyAuthenticatedBody(&body, key, std.net.Address.initIp4(.{ 10, 0, 0, 99 }, 40000), &peers),
+        verifyAuthenticatedBody(&body, key, @import("compat").net.Address.initIp4(.{ 10, 0, 0, 99 }, 40000), &peers),
     );
 }
 
@@ -673,10 +673,10 @@ test "resolvePeerId matches configured peer" {
 
     try std.testing.expectEqual(
         @as(?NodeId, 2),
-        transport.resolvePeerId(std.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700)),
+        transport.resolvePeerId(@import("compat").net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700)),
     );
     try std.testing.expect(
-        transport.resolvePeerId(std.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700)) == null,
+        transport.resolvePeerId(@import("compat").net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700)) == null,
     );
 }
 
@@ -685,7 +685,7 @@ fn waitForGossipResult(receiver: *Transport, buf: []u8) !?GossipReceiveResult {
     while (attempts < 50) : (attempts += 1) {
         const result = try receiver.receiveGossip(buf);
         if (result != null) return result;
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        @import("compat").sleep(10 * std.time.ns_per_ms);
     }
     return null;
 }
@@ -695,7 +695,7 @@ fn waitForGossipError(receiver: *Transport, buf: []u8) !void {
     while (attempts < 50) : (attempts += 1) {
         const result = receiver.receiveGossip(buf);
         if (result) |_| {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            @import("compat").sleep(10 * std.time.ns_per_ms);
             continue;
         } else |err| switch (err) {
             TransportError.AuthenticationFailed => return,
@@ -707,7 +707,7 @@ fn waitForGossipError(receiver: *Transport, buf: []u8) !void {
 
 fn requireUdpGossipTestHost() !void {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
+    if (@import("compat").getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 }
 
 // -- UDP gossip transport tests --
@@ -750,7 +750,7 @@ test "udp gossip: send and receive with HMAC" {
     // get the receiver's assigned port
     var recv_addr: posix.sockaddr.storage = undefined;
     var recv_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-    try posix.getsockname(receiver.udp_fd.?, @ptrCast(&recv_addr), &recv_len);
+    try @import("compat").posix.getsockname(receiver.udp_fd.?, @ptrCast(&recv_addr), &recv_len);
     const recv_in: *const posix.sockaddr.in = @ptrCast(@alignCast(&recv_addr));
     const recv_port = std.mem.bigToNative(u16, recv_in.port);
 
@@ -763,7 +763,7 @@ test "udp gossip: send and receive with HMAC" {
     const result = try waitForGossipResult(&receiver, &buf);
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(u64, 1), result.?.sender_id);
-    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, @as([4]u8, @bitCast(result.?.from_addr.in.sa.addr)));
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, @as([4]u8, @bitCast(result.?.from_addr.in.addr)));
     try std.testing.expectEqualSlices(u8, payload, result.?.payload);
 }
 
@@ -802,7 +802,7 @@ test "udp gossip: wrong key rejected" {
 
     var recv_addr: posix.sockaddr.storage = undefined;
     var recv_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-    try posix.getsockname(receiver.udp_fd.?, @ptrCast(&recv_addr), &recv_len);
+    try @import("compat").posix.getsockname(receiver.udp_fd.?, @ptrCast(&recv_addr), &recv_len);
     const recv_in: *const posix.sockaddr.in = @ptrCast(@alignCast(&recv_addr));
     const recv_port = std.mem.bigToNative(u16, recv_in.port);
 

@@ -11,12 +11,12 @@ const store_support = @import("store_support.zig");
 const write = cli.write;
 const writeErr = cli.writeErr;
 
-pub fn provision(args: *std.process.ArgIterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
+pub fn provision(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
     const parsed = parseArgs(args) catch |err| return err;
     try runAcmeCommand(alloc, parsed, false);
 }
 
-pub fn renew(args: *std.process.ArgIterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
+pub fn renew(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
     const parsed = parseArgs(args) catch |err| return err;
     try runAcmeCommand(alloc, parsed, true);
 }
@@ -27,7 +27,7 @@ const ParsedArgs = struct {
     directory_url: []const u8,
 };
 
-fn parseArgs(args: *std.process.ArgIterator) common.TlsCommandsError!ParsedArgs {
+fn parseArgs(args: *std.process.Args.Iterator) common.TlsCommandsError!ParsedArgs {
     var domain: ?[]const u8 = null;
     var email: ?[]const u8 = null;
     var use_staging = false;
@@ -128,7 +128,7 @@ fn resolveAccountEmail(
     domain: []const u8,
     explicit_email: ?[]const u8,
 ) ![]u8 {
-    const env_email = std.process.getEnvVarOwned(alloc, "YOQ_ACME_EMAIL") catch |err| switch (err) {
+    const env_email = @import("compat").getEnvVarOwned(alloc, "YOQ_ACME_EMAIL") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         error.OutOfMemory => return error.OutOfMemory,
         else => null,

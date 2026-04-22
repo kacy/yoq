@@ -14,12 +14,12 @@ pub fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void 
     try json_helpers.writeJsonEscaped(writer, record.hostname);
     try writer.writeAll("\",\"pid\":");
     if (record.pid) |pid| {
-        try std.fmt.format(writer, "{d}", .{pid});
+        try @import("compat").format(writer, "{d}", .{pid});
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"created_at\":");
-    try std.fmt.format(writer, "{d}", .{record.created_at});
+    try @import("compat").format(writer, "{d}", .{record.created_at});
 
     if (health.getServiceHealth(record.hostname)) |service_health| {
         const health_str = switch (service_health.status) {
@@ -43,8 +43,8 @@ pub fn writeImageJson(writer: anytype, img: store.ImageRecord) !void {
     try writer.writeAll("\",\"tag\":\"");
     try json_helpers.writeJsonEscaped(writer, img.tag);
     try writer.writeAll("\",\"size\":");
-    try std.fmt.format(writer, "{d}", .{img.total_size});
+    try @import("compat").format(writer, "{d}", .{img.total_size});
     try writer.writeAll(",\"created_at\":");
-    try std.fmt.format(writer, "{d}", .{img.created_at});
+    try @import("compat").format(writer, "{d}", .{img.created_at});
     try writer.writeByte('}');
 }

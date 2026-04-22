@@ -17,11 +17,11 @@ pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) ImageCo
     return resolution.pullAndResolveImage(alloc, target);
 }
 
-pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn pull(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return transfer_command.pull(args, alloc);
 }
 
-pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn push(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return transfer_command.push(args, alloc);
 }
 
@@ -29,11 +29,11 @@ pub fn images(alloc: std.mem.Allocator) !void {
     return query_command.images(alloc);
 }
 
-pub fn rmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn rmi(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return query_command.rmi(args, alloc);
 }
 
-pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn inspect(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     return query_command.inspect(args, alloc);
 }
 

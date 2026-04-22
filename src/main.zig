@@ -7,18 +7,10 @@ const writeErr = cli.writeErr;
 // maximum reasonable command name length to prevent buffer overflow issues
 const MAX_COMMAND_NAME_LEN = 256;
 
-pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer {
-        // check for memory leaks in debug builds
-        const status = gpa.deinit();
-        if (status == .leak) {
-            std.log.warn("memory leak detected during shutdown", .{});
-        }
-    }
-    const alloc = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const alloc = init.gpa;
 
-    var args = std.process.argsWithAllocator(alloc) catch |err| {
+    var args = std.process.Args.Iterator.initAllocator(init.minimal.args, alloc) catch |err| {
         writeErr("failed to initialize argument parser: {s}\n", .{@errorName(err)});
         return err;
     };

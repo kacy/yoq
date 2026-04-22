@@ -861,7 +861,7 @@ test "resolveIpToService returns unknown for empty records" {
 
 test "writeSnapshotJson produces valid JSON" {
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
     const writer = stream.writer();
 
     const snap = monitor.ServiceSnapshot{
@@ -889,7 +889,7 @@ test "writeSnapshotJson produces valid JSON" {
 
 test "writeSnapshotJson handles null health" {
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
     const writer = stream.writer();
 
     const snap = monitor.ServiceSnapshot{
@@ -913,7 +913,7 @@ test "writeSnapshotJson handles null health" {
 
 test "writeSnapshotJson includes PSI metrics when present" {
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
     const writer = stream.writer();
 
     const psi = cgroups.PsiMetrics{ .some_avg10 = 1.5, .full_avg10 = 0.5 };

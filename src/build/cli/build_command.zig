@@ -52,7 +52,7 @@ const LoadedInstructions = union(enum) {
     }
 };
 
-pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn build_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var options = try parseBuildOptions(args, alloc);
     defer options.deinit(alloc);
 
@@ -71,7 +71,7 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
     });
 
     var abs_ctx_buf: [4096]u8 = undefined;
-    const abs_ctx = std.fs.cwd().realpath(ctx_dir, &abs_ctx_buf) catch {
+    const abs_ctx = @import("compat").cwd().realpath(ctx_dir, &abs_ctx_buf) catch {
         writeErr("cannot resolve context directory: {s}\n", .{ctx_dir});
         return BuildCommandsError.InvalidArgument;
     };
@@ -90,7 +90,7 @@ pub fn build_cmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
 }
 
 fn parseBuildOptions(
-    args: *std.process.ArgIterator,
+    args: *std.process.Args.Iterator,
     alloc: std.mem.Allocator,
 ) BuildCommandsError!BuildOptions {
     var options = BuildOptions{};
@@ -186,7 +186,7 @@ fn loadDockerfile(
     alloc: std.mem.Allocator,
     path: []const u8,
 ) BuildCommandsError!dockerfile.ParseResult {
-    const content = std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024) catch {
+    const content = @import("compat").cwd().readFileAlloc(alloc, path, 1024 * 1024) catch {
         writeErr("cannot read {s}\n", .{path});
         return BuildCommandsError.ParseFailed;
     };

@@ -11,7 +11,7 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const requireArg = cli.requireArg;
 
-pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn pull(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const image_str = requireArg(args, "usage: yoq pull <image>\n");
     const ref = spec.parseImageRef(image_str);
 
@@ -42,7 +42,7 @@ pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     });
 }
 
-pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn push(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const source_str = requireArg(args, "usage: yoq push <source> [target]\n");
     const target_str = args.next() orelse source_str;
 

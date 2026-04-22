@@ -42,7 +42,7 @@ pub const FaultMode = enum {
     }
 };
 
-var fault_mutex: std.Thread.Mutex = .{};
+var fault_mutex: @import("compat").Mutex = .{};
 var fault_modes: [@typeInfo(BridgeOperation).@"enum".fields.len]FaultMode = [_]FaultMode{.none} ** @typeInfo(BridgeOperation).@"enum".fields.len;
 var fault_counts: [@typeInfo(BridgeOperation).@"enum".fields.len]u64 = [_]u64{0} ** @typeInfo(BridgeOperation).@"enum".fields.len;
 
@@ -154,7 +154,7 @@ fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_
 
     var ip_buf: [16]u8 = undefined;
     const ip_address = @import("ip.zig").formatIp(container_ip, &ip_buf);
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
     const persisted_node_id = resolveNodeId(service_name, endpoint_id, node_id);
     const existing = store.getServiceEndpoint(alloc, service_name, endpoint_id) catch |err| switch (err) {
         store.StoreError.NotFound => null,

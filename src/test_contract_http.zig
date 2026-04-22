@@ -10,7 +10,7 @@ fn runHandleConnectionRaw(alloc: std.mem.Allocator, raw_request: []const u8) ![]
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try tmp.dir.createFile("raw-http.txt", .{ .read = true });
+    const file = try @import("compat").Dir.from(tmp.dir).createFile("raw-http.txt", .{ .read = true });
     defer file.close();
 
     try file.writeAll(raw_request);

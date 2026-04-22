@@ -50,7 +50,7 @@ pub fn processFrom(
         .manifest_digest = result.manifest_digest,
         .config_digest = pulled_config_str,
         .total_size = @intCast(result.total_size),
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     }) catch |err| {
         log.warn("failed to save base image record: {}", .{err});
     };
@@ -118,8 +118,8 @@ pub fn processRun(
     ) catch return types.BuildError.RunStepFailed;
 
     spawn_result.signalReady();
-    posix.close(spawn_result.stdout_fd);
-    posix.close(spawn_result.stderr_fd);
+    @import("compat").posix.close(spawn_result.stdout_fd);
+    @import("compat").posix.close(spawn_result.stderr_fd);
 
     const wait_result = process.wait(spawn_result.pid, false) catch return types.BuildError.RunStepFailed;
     const exit_code: u8 = switch (wait_result.status) {

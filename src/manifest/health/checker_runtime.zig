@@ -71,25 +71,25 @@ pub fn stopChecker() void {
 
 fn schedulerLoop() void {
     while (registry.checker_running.load(.acquire)) {
-        const now = std.time.timestamp();
+        const now = @import("compat").timestamp();
         scheduleDueChecks(now);
-        std.Thread.sleep(types.scheduler_interval_ms * std.time.ns_per_ms);
+        @import("compat").sleep(types.scheduler_interval_ms * std.time.ns_per_ms);
     }
 }
 
 fn workerLoop(_: usize) void {
     while (registry.checker_running.load(.acquire)) {
         const item = registry.dequeueCheck() orelse {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            @import("compat").sleep(50 * std.time.ns_per_ms);
             continue;
         };
 
-        const started_ns = std.time.nanoTimestamp();
+        const started_ns = @import("compat").nanoTimestamp();
         const success = checks.runCheck(item.container_ip, item.config);
-        const completed_at = std.time.timestamp();
+        const completed_at = @import("compat").timestamp();
         const completion = applyCompletedCheck(item, success, completed_at);
         registry.noteCompletedCheck(completion == .stale, completed_at);
-        const elapsed_ns = std.time.nanoTimestamp() - started_ns;
+        const elapsed_ns = @import("compat").nanoTimestamp() - started_ns;
         const latency_seconds = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / @as(f64, std.time.ns_per_s);
         service_observability.noteHealthCheckCompleted(item.serviceName(), completion == .stale, latency_seconds);
     }

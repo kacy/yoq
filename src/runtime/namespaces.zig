@@ -105,7 +105,7 @@ pub const SpawnResult = struct {
     /// signal the child process that it can proceed.
     /// call this after all parent-side setup (uid maps, networking) is done.
     pub fn signalReady(self: *SpawnResult) void {
-        posix.close(self.ready_fd);
+        @import("compat").posix.close(self.ready_fd);
         self.ready_fd = -1;
     }
 };
@@ -127,41 +127,41 @@ pub fn spawn(
     // create a pipe for parent-child synchronization.
     // parent closes the write end after setting up uid/gid maps,
     // child blocks on read until then.
-    const pipe_fds = posix.pipe() catch return NamespaceError.PipeFailed;
+    const pipe_fds = @import("compat").posix.pipe() catch return NamespaceError.PipeFailed;
     const pipe_read = pipe_fds[0];
     const pipe_write = pipe_fds[1];
 
     // create stdout and stderr pipes for log capture.
     // parent gets the read ends, child gets the write ends (dup2'd to fd 1/2).
-    const stdout_pipe = posix.pipe() catch {
+    const stdout_pipe = @import("compat").posix.pipe() catch {
         // cleanup first pipe on failure
-        posix.close(pipe_read);
-        posix.close(pipe_write);
+        @import("compat").posix.close(pipe_read);
+        @import("compat").posix.close(pipe_write);
         return NamespaceError.PipeFailed;
     };
-    const stderr_pipe = posix.pipe() catch {
+    const stderr_pipe = @import("compat").posix.pipe() catch {
         // cleanup first two pipes on failure
-        posix.close(pipe_read);
-        posix.close(pipe_write);
-        posix.close(stdout_pipe[0]);
-        posix.close(stdout_pipe[1]);
+        @import("compat").posix.close(pipe_read);
+        @import("compat").posix.close(pipe_write);
+        @import("compat").posix.close(stdout_pipe[0]);
+        @import("compat").posix.close(stdout_pipe[1]);
         return NamespaceError.PipeFailed;
     };
 
     errdefer {
-        posix.close(pipe_read);
-        posix.close(pipe_write);
-        posix.close(stdout_pipe[0]);
-        posix.close(stdout_pipe[1]);
-        posix.close(stderr_pipe[0]);
-        posix.close(stderr_pipe[1]);
+        @import("compat").posix.close(pipe_read);
+        @import("compat").posix.close(pipe_write);
+        @import("compat").posix.close(stdout_pipe[0]);
+        @import("compat").posix.close(stdout_pipe[1]);
+        @import("compat").posix.close(stderr_pipe[0]);
+        @import("compat").posix.close(stderr_pipe[1]);
     }
 
     // allocate child stack. clone3 needs an explicit stack for the child.
     const stack_mem = posix.mmap(
         null,
         child_stack_size,
-        posix.PROT.READ | posix.PROT.WRITE,
+        .{ .READ = true, .WRITE = true },
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,
@@ -183,23 +183,23 @@ pub fn spawn(
             // wait for parent to finish uid/gid mapping
             var buf: [1]u8 = undefined;
             _ = posix.read(ctx.pipe_read_fd, &buf) catch {};
-            posix.close(ctx.pipe_read_fd);
+            @import("compat").posix.close(ctx.pipe_read_fd);
 
             // redirect stdout and stderr to the log pipes
             // if this fails, the container output would leak to parent - abort
-            posix.dup2(ctx.stdout_write_fd, posix.STDOUT_FILENO) catch {
+            @import("compat").posix.dup2(ctx.stdout_write_fd, posix.STDOUT_FILENO) catch {
                 log.err("namespace: failed to redirect stdout - aborting container start", .{});
-                posix.close(ctx.stdout_write_fd);
-                posix.close(ctx.stderr_write_fd);
+                @import("compat").posix.close(ctx.stdout_write_fd);
+                @import("compat").posix.close(ctx.stderr_write_fd);
                 return 1;
             };
-            posix.dup2(ctx.stderr_write_fd, posix.STDERR_FILENO) catch {
+            @import("compat").posix.dup2(ctx.stderr_write_fd, posix.STDERR_FILENO) catch {
                 log.err("namespace: failed to redirect stderr - aborting container start", .{});
-                posix.close(ctx.stderr_write_fd);
+                @import("compat").posix.close(ctx.stderr_write_fd);
                 return 1;
             };
-            posix.close(ctx.stdout_write_fd);
-            posix.close(ctx.stderr_write_fd);
+            @import("compat").posix.close(ctx.stdout_write_fd);
+            @import("compat").posix.close(ctx.stderr_write_fd);
 
             // run the real child function
             return ctx.real_fn(ctx.real_arg);
@@ -216,7 +216,7 @@ pub fn spawn(
 
     var args = CloneArgs{
         .flags = ns_flags.toCloneFlags(),
-        .exit_signal = linux.SIG.CHLD,
+        .exit_signal = @intFromEnum(linux.SIG.CHLD),
         .stack = @intFromPtr(stack_mem.ptr),
         .stack_size = child_stack_size,
     };
@@ -232,17 +232,17 @@ pub fn spawn(
     if (pid == 0) {
         // child process — run through trampoline.
         // close parent-side fds before executing.
-        posix.close(pipe_write);
-        posix.close(stdout_pipe[0]);
-        posix.close(stderr_pipe[0]);
+        @import("compat").posix.close(pipe_write);
+        @import("compat").posix.close(stdout_pipe[0]);
+        @import("compat").posix.close(stderr_pipe[0]);
         const exit_code = ChildContext.trampoline(@ptrCast(&ctx));
         linux.exit_group(exit_code);
     }
 
     // parent process — close child-side fds
-    posix.close(pipe_read);
-    posix.close(stdout_pipe[1]);
-    posix.close(stderr_pipe[1]);
+    @import("compat").posix.close(pipe_read);
+    @import("compat").posix.close(stdout_pipe[1]);
+    @import("compat").posix.close(stderr_pipe[1]);
 
     const child_pid: posix.pid_t = @intCast(pid);
 
@@ -254,11 +254,11 @@ pub fn spawn(
         };
         writeUserMapping(child_pid, mapping) catch {
             // child has no uid/gid mappings — must not proceed
-            _ = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, child_pid))), linux.SIG.KILL);
+            _ = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, child_pid))), @intFromEnum(linux.SIG.KILL));
             _ = linux.syscall4(.wait4, @as(usize, @bitCast(@as(isize, child_pid))), 0, 0, 0);
-            posix.close(pipe_write);
-            posix.close(stdout_pipe[0]);
-            posix.close(stderr_pipe[0]);
+            @import("compat").posix.close(pipe_write);
+            @import("compat").posix.close(stdout_pipe[0]);
+            @import("compat").posix.close(stderr_pipe[0]);
             return NamespaceError.WriteFailed;
         };
     }
@@ -316,7 +316,7 @@ fn writeProc(path: []const u8, value: []const u8) !void {
     @memcpy(path_z[0..path.len], path);
     path_z[path.len] = 0;
 
-    const file = std.fs.cwd().openFile(path_z[0..path.len :0], .{ .mode = .write_only }) catch |e| {
+    const file = @import("compat").cwd().openFile(path_z[0..path.len :0], .{ .mode = .write_only }) catch |e| {
         log.err("namespace: failed to open {s}: {s}", .{ path, @errorName(e) });
         return error.WriteFailed;
     };

@@ -57,10 +57,10 @@ pub fn waitForHealth(
     callbacks: common.UpdateCallbacks,
     timeout: u32,
 ) bool {
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
     const deadline = @as(u64, @intCast(@max(0, now))) + timeout;
 
-    while (@as(u64, @intCast(@max(0, std.time.timestamp()))) < deadline) {
+    while (@as(u64, @intCast(@max(0, @import("compat").timestamp()))) < deadline) {
         var all_healthy = true;
 
         for (container_ids.items) |id| {
@@ -71,7 +71,7 @@ pub fn waitForHealth(
         }
 
         if (all_healthy) return true;
-        std.Thread.sleep(1 * std.time.ns_per_s);
+        @import("compat").sleep(1 * std.time.ns_per_s);
     }
 
     return false;

@@ -74,7 +74,7 @@ pub const AcmeClient = struct {
         return .{
             .allocator = allocator,
             .directory_url = directory_url,
-            .http_client = .{ .allocator = allocator },
+            .http_client = .{ .io = @import("compat").io(), .allocator = allocator },
         };
     }
 

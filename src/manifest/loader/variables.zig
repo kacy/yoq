@@ -32,7 +32,7 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) common.LoadE
                 }
 
                 const value = if (var_name.len > 0)
-                    std.process.getEnvVarOwned(alloc, var_name) catch |err| switch (err) {
+                    @import("compat").getEnvVarOwned(alloc, var_name) catch |err| switch (err) {
                         error.EnvironmentVariableNotFound => null,
                         error.OutOfMemory => return common.LoadError.OutOfMemory,
                         else => null,

@@ -156,12 +156,12 @@ test "readKeyFile rejects weak permissions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try tmp.dir.createFile("secrets.key", .{ .mode = 0o644 });
+    const file = try @import("compat").Dir.from(tmp.dir).createFile("secrets.key", .{ .mode = 0o644 });
     defer file.close();
     try file.writeAll(&([_]u8{0x11} ** key_length));
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try tmp.dir.realpath("secrets.key", &path_buf);
+    const path = try @import("compat").Dir.from(tmp.dir).realpath("secrets.key", &path_buf);
     try std.testing.expectError(error.KeyLoadFailed, readKeyFile(path));
 }
 

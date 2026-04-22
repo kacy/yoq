@@ -215,7 +215,7 @@ pub const MockStore = struct {
             .ip_address = null,
             .veth_host = null,
             .app_name = null,
-            .created_at = std.time.timestamp(),
+            .created_at = @import("compat").timestamp(),
         };
 
         try self.containers.append(record);
@@ -234,7 +234,7 @@ pub const MockStore = struct {
             .manifest_digest = try self.alloc.dupe(u8, "sha256:abcdef"),
             .config_digest = try self.alloc.dupe(u8, "sha256:123456"),
             .total_size = 1024,
-            .created_at = std.time.timestamp(),
+            .created_at = @import("compat").timestamp(),
         };
 
         try self.images.append(record);

@@ -153,7 +153,7 @@ pub fn resolveServiceVolumes(
         switch (vol.kind) {
             .bind => {
                 var resolve_buf: [4096]u8 = undefined;
-                const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch {
+                const abs_source = @import("compat").cwd().realpath(vol.source, &resolve_buf) catch {
                     log.warn("failed to resolve bind mount source: {s}", .{vol.source});
                     continue;
                 };
@@ -184,7 +184,7 @@ pub fn resolveServiceVolumes(
                     log.err("orchestrator: no database for volume creation", .{});
                     return error.VolumeFailed;
                 };
-                const timestamp = std.time.timestamp();
+                const timestamp = @import("compat").timestamp();
                 volumes_mod.create(db, app_name, vol_def, timestamp, null) catch |err| {
                     log.err("failed to create volume '{s}': {}", .{ vol.source, err });
                     return error.VolumeFailed;
@@ -276,7 +276,7 @@ pub fn runOneShot(
         .pid = null,
         .exit_code = null,
         .app_name = null,
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     }) catch return false;
 
     var c = container.Container{
@@ -294,7 +294,7 @@ pub fn runOneShot(
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     };
 
     c.start() catch {

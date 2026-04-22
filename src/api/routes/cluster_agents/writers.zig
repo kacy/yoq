@@ -12,24 +12,24 @@ pub fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void 
     try writer.writeByte('"');
     if (agent.agent_api_port) |port| {
         try writer.writeAll(",\"agent_api_port\":");
-        try std.fmt.format(writer, "{d}", .{port});
+        try @import("compat").format(writer, "{d}", .{port});
     }
     try writer.writeAll(",\"cpu_cores\":");
-    try std.fmt.format(writer, "{d}", .{agent.cpu_cores});
+    try @import("compat").format(writer, "{d}", .{agent.cpu_cores});
     try writer.writeAll(",\"memory_mb\":");
-    try std.fmt.format(writer, "{d}", .{agent.memory_mb});
+    try @import("compat").format(writer, "{d}", .{agent.memory_mb});
     try writer.writeAll(",\"cpu_used\":");
-    try std.fmt.format(writer, "{d}", .{agent.cpu_used});
+    try @import("compat").format(writer, "{d}", .{agent.cpu_used});
     try writer.writeAll(",\"memory_used_mb\":");
-    try std.fmt.format(writer, "{d}", .{agent.memory_used_mb});
+    try @import("compat").format(writer, "{d}", .{agent.memory_used_mb});
     try writer.writeAll(",\"containers\":");
-    try std.fmt.format(writer, "{d}", .{agent.containers});
+    try @import("compat").format(writer, "{d}", .{agent.containers});
     try writer.writeAll(",\"last_heartbeat\":");
-    try std.fmt.format(writer, "{d}", .{agent.last_heartbeat});
+    try @import("compat").format(writer, "{d}", .{agent.last_heartbeat});
 
     if (agent.node_id) |nid| {
         try writer.writeAll(",\"node_id\":");
-        try std.fmt.format(writer, "{d}", .{nid});
+        try @import("compat").format(writer, "{d}", .{nid});
     }
     if (agent.wg_public_key) |key| {
         try writer.writeAll(",\"wg_public_key\":\"");
@@ -58,11 +58,11 @@ pub fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void 
     }
     if (agent.gpu_count != 0) {
         try writer.writeAll(",\"gpu_count\":");
-        try std.fmt.format(writer, "{d}", .{agent.gpu_count});
+        try @import("compat").format(writer, "{d}", .{agent.gpu_count});
     }
     if (agent.gpu_used != 0) {
         try writer.writeAll(",\"gpu_used\":");
-        try std.fmt.format(writer, "{d}", .{agent.gpu_used});
+        try @import("compat").format(writer, "{d}", .{agent.gpu_used});
     }
     if (agent.gpu_model) |model| {
         try writer.writeAll(",\"gpu_model\":\"");
@@ -71,7 +71,7 @@ pub fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void 
     }
     if (agent.gpu_vram_mb) |vram| {
         try writer.writeAll(",\"gpu_vram_mb\":");
-        try std.fmt.format(writer, "{d}", .{vram});
+        try @import("compat").format(writer, "{d}", .{vram});
     }
     if (agent.rdma_capable) {
         try writer.writeAll(",\"rdma_capable\":true");
@@ -96,9 +96,9 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
         try json_helpers.writeJsonEscaped(writer, status_reason);
     }
     try writer.writeAll("\",\"cpu_limit\":");
-    try std.fmt.format(writer, "{d}", .{assignment.cpu_limit});
+    try @import("compat").format(writer, "{d}", .{assignment.cpu_limit});
     try writer.writeAll(",\"memory_limit_mb\":");
-    try std.fmt.format(writer, "{d}", .{assignment.memory_limit_mb});
+    try @import("compat").format(writer, "{d}", .{assignment.memory_limit_mb});
     if (assignment.app_name) |app_name| {
         try writer.writeAll(",\"app_name\":\"");
         try json_helpers.writeJsonEscaped(writer, app_name);
@@ -120,11 +120,11 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
     }
     if (assignment.gang_rank) |rank| {
         try writer.writeAll(",\"gang_rank\":");
-        try std.fmt.format(writer, "{d}", .{rank});
+        try @import("compat").format(writer, "{d}", .{rank});
     }
     if (assignment.gang_world_size) |ws| {
         try writer.writeAll(",\"gang_world_size\":");
-        try std.fmt.format(writer, "{d}", .{ws});
+        try @import("compat").format(writer, "{d}", .{ws});
     }
     if (assignment.gang_master_addr) |addr| {
         try writer.writeAll(",\"gang_master_addr\":\"");
@@ -133,14 +133,14 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
     }
     if (assignment.gang_master_port) |port| {
         try writer.writeAll(",\"gang_master_port\":");
-        try std.fmt.format(writer, "{d}", .{port});
+        try @import("compat").format(writer, "{d}", .{port});
     }
     try writer.writeByte('}');
 }
 
 pub fn writeWireguardPeerJson(writer: anytype, peer: agent_registry.WireguardPeer) !void {
     try writer.writeAll("{\"node_id\":");
-    try std.fmt.format(writer, "{d}", .{peer.node_id});
+    try @import("compat").format(writer, "{d}", .{peer.node_id});
     try writer.writeAll(",\"agent_id\":\"");
     try json_helpers.writeJsonEscaped(writer, peer.agent_id);
     try writer.writeAll("\",\"public_key\":\"");

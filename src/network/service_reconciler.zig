@@ -153,7 +153,7 @@ pub const ComponentSnapshot = struct {
     last_change_at: ?i64,
 };
 
-var mutex: std.Thread.Mutex = .{};
+var mutex: @import("compat").Mutex = .{};
 var recent_events: [max_recent_events]Event = undefined;
 var recent_start: usize = 0;
 var recent_len: usize = 0;
@@ -524,7 +524,7 @@ fn buildEvent(kind: EventKind, source: EventSource, service_name: []const u8, co
     var event = Event{
         .kind = kind,
         .source = source,
-        .recorded_at = std.time.timestamp(),
+        .recorded_at = @import("compat").timestamp(),
         .ip = endpoint_ip,
     };
 
@@ -549,7 +549,7 @@ fn bootstrapAuthoritativeLocked() void {
 
 fn auditLoop() void {
     while (audit_running.load(.acquire)) {
-        std.Thread.sleep(audit_interval_secs * std.time.ns_per_s);
+        @import("compat").sleep(audit_interval_secs * std.time.ns_per_s);
         if (!audit_running.load(.acquire)) break;
         runAuditPassIfEnabled();
     }
@@ -559,7 +559,7 @@ fn runAuditPassLocked() void {
     refreshComponentStateLocked();
     quarantineStaleEndpointsLocked();
     audit_passes_total += 1;
-    last_audit_at = std.time.timestamp();
+    last_audit_at = @import("compat").timestamp();
     clearLastAuditErrorLocked();
     deinitDegradedServicesLocked();
 
@@ -604,7 +604,7 @@ fn auditOnceLocked() !void {
 
 fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.ArrayList(service_registry_runtime.ServiceSnapshot)) !void {
     const alloc = std.heap.page_allocator;
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
     const authoritative = auditEnabled(rollout.current());
 
     const runtime_service = findRuntimeService(runtime_services.items, service_name);
@@ -768,7 +768,7 @@ fn quarantineStaleEndpointsLocked() void {
     if (quarantined == 0) return;
 
     stale_endpoint_quarantines_total += quarantined;
-    last_stale_quarantine_at = std.time.timestamp();
+    last_stale_quarantine_at = @import("compat").timestamp();
 
     for (changed_services.items) |service_name| {
         service_registry_runtime.syncServiceFromStore(service_name);
@@ -934,7 +934,7 @@ fn refreshComponentStateLocked() void {
 
     component_state = next_state;
     component_state_changes_total += 1;
-    component_last_change_at = std.time.timestamp();
+    component_last_change_at = @import("compat").timestamp();
 
     log.info(
         "service reconciler: component state changed resolver={} dns_interceptor={} load_balancer={}",

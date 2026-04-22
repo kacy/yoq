@@ -28,7 +28,7 @@ pub const CachedAssignment = struct {
 };
 
 var global_db: ?sqlite.Db = null;
-var db_mutex: std.Thread.Mutex = .{};
+var db_mutex: @import("compat").Mutex = .{};
 
 const create_table_sql =
     \\CREATE TABLE IF NOT EXISTS cached_assignments (

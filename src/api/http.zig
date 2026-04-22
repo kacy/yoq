@@ -194,7 +194,7 @@ pub fn formatResponseWithType(buf: []u8, status: StatusCode, content_type: []con
 /// formats: {"error":"<message>"}
 pub fn formatError(buf: []u8, status: StatusCode, message: []const u8) []const u8 {
     var body_buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&body_buf);
+    var stream = @import("compat").fixedBufferStream(&body_buf);
     const writer = stream.writer();
     writer.writeAll("{\"error\":\"") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}");
     for (message) |c| {
@@ -207,7 +207,7 @@ pub fn formatError(buf: []u8, status: StatusCode, message: []const u8) []const u
         }
     }
     writer.writeAll("\"}") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}");
-    return formatResponse(buf, status, body_buf[0..stream.pos]);
+    return formatResponse(buf, status, stream.getWritten());
 }
 
 /// find a header value by name (case-insensitive) in raw headers.

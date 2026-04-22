@@ -12,7 +12,7 @@ pub fn attachTC(
     priority: u32,
 ) common.EbpfError!void {
     const fd = nl.openSocket() catch return common.EbpfError.AttachFailed;
-    defer posix.close(fd);
+    defer @import("compat").posix.close(fd);
 
     createClsactQdisc(fd, if_index) catch |e| {
         log.warn("ebpf: failed to create clsact qdisc on ifindex {d}: {}", .{ if_index, e });
@@ -27,7 +27,7 @@ pub fn attachTC(
 
 pub fn detachTC(if_index: u32) common.EbpfError!void {
     const fd = nl.openSocket() catch return common.EbpfError.DetachFailed;
-    defer posix.close(fd);
+    defer @import("compat").posix.close(fd);
 
     deleteClsactQdisc(fd, if_index) catch |e| {
         log.warn("ebpf: failed to delete clsact qdisc on ifindex {d}: {}", .{ if_index, e });
@@ -37,7 +37,7 @@ pub fn detachTC(if_index: u32) common.EbpfError!void {
 
 pub fn attachXdp(if_index: u32, prog_fd: posix.fd_t) common.EbpfError!void {
     const fd = nl.openSocket() catch return common.EbpfError.AttachFailed;
-    defer posix.close(fd);
+    defer @import("compat").posix.close(fd);
 
     var buf: [nl.buf_size]u8 align(4) = undefined;
     var mb = nl.MessageBuilder.init(&buf);
@@ -65,7 +65,7 @@ pub fn attachXdp(if_index: u32, prog_fd: posix.fd_t) common.EbpfError!void {
 
 pub fn detachXdp(if_index: u32) common.EbpfError!void {
     const fd = nl.openSocket() catch return common.EbpfError.DetachFailed;
-    defer posix.close(fd);
+    defer @import("compat").posix.close(fd);
 
     var buf: [nl.buf_size]u8 align(4) = undefined;
     var mb = nl.MessageBuilder.init(&buf);

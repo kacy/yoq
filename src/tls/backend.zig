@@ -15,7 +15,7 @@ pub const Backend = struct {
 };
 
 pub const BackendRegistry = struct {
-    mutex: std.Thread.Mutex,
+    mutex: @import("compat").Mutex,
     backends: std.StringHashMapUnmanaged(Backend),
     allocator: std.mem.Allocator,
 

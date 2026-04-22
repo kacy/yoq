@@ -31,7 +31,7 @@ pub const default_filename = "manifest.toml";
 /// reads the file, parses it, and returns a typed Manifest.
 /// caller must call result.deinit() when done.
 pub fn load(alloc: std.mem.Allocator, path: []const u8) LoadError!spec.Manifest {
-    const content = std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024) catch |err| {
+    const content = @import("compat").cwd().readFileAlloc(alloc, path, 1024 * 1024) catch |err| {
         switch (err) {
             error.FileNotFound => {
                 log.err("manifest: file not found: {s}", .{path});
@@ -700,8 +700,8 @@ test "load from file — writes and reads back" {
 
     // write a temp file
     const path = "/tmp/yoq_test_manifest.toml";
-    const file = std.fs.cwd().createFile(path, .{}) catch return;
-    defer std.fs.cwd().deleteFile(path) catch {};
+    const file = @import("compat").cwd().createFile(path, .{}) catch return;
+    defer @import("compat").cwd().deleteFile(path) catch {};
     file.writeAll(content) catch return;
     file.close();
 

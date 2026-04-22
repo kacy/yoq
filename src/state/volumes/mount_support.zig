@@ -20,7 +20,7 @@ pub fn prepareVolumePath(vol_path: []const u8, driver: spec.VolumeDriver) common
             const was_mounted = isMounted(vol_path);
             mountNfs(vol_path, nfs.server, nfs.path, nfs.options) catch |err| {
                 log.err("volumes: NFS mount failed for {s}: {}", .{ vol_path, err });
-                if (prepared.path_created) std.fs.cwd().deleteTree(vol_path) catch {};
+                if (prepared.path_created) @import("compat").cwd().deleteTree(vol_path) catch {};
                 return err;
             };
             prepared.nfs_mounted = !was_mounted;
@@ -39,11 +39,11 @@ pub fn prepareVolumePath(vol_path: []const u8, driver: spec.VolumeDriver) common
 pub fn rollbackPreparedVolume(path: []const u8, driver: spec.VolumeDriver, prepared: common.PreparedVolume) void {
     switch (driver) {
         .local => {
-            if (prepared.path_created) std.fs.cwd().deleteTree(path) catch {};
+            if (prepared.path_created) @import("compat").cwd().deleteTree(path) catch {};
         },
         .nfs => {
             if (prepared.nfs_mounted) unmountNfs(path) catch {};
-            if (prepared.path_created) std.fs.cwd().deleteTree(path) catch {};
+            if (prepared.path_created) @import("compat").cwd().deleteTree(path) catch {};
         },
         .host, .parallel => {},
     }
@@ -58,7 +58,7 @@ pub fn cleanupManagedVolume(driver: []const u8, path: []const u8) common.VolumeE
     }
 
     if (std.mem.eql(u8, driver, "local") or std.mem.eql(u8, driver, "nfs")) {
-        std.fs.cwd().deleteTree(path) catch |err| {
+        @import("compat").cwd().deleteTree(path) catch |err| {
             log.err("volumes: failed to remove directory {s}: {}", .{ path, err });
             return common.VolumeError.IoError;
         };
@@ -66,12 +66,12 @@ pub fn cleanupManagedVolume(driver: []const u8, path: []const u8) common.VolumeE
 }
 
 pub fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    @import("compat").cwd().access(path, .{}) catch return false;
     return true;
 }
 
 pub fn isMounted(path: []const u8) bool {
-    const file = std.fs.cwd().openFile("/proc/mounts", .{}) catch return false;
+    const file = @import("compat").cwd().openFile("/proc/mounts", .{}) catch return false;
     defer file.close();
 
     var buf: [8192]u8 = undefined;
@@ -114,7 +114,7 @@ fn checkMountLine(line: []const u8, path: []const u8) bool {
 
 fn ensurePath(path: []const u8, label: []const u8) common.VolumeError!bool {
     const existed = pathExists(path);
-    std.fs.cwd().makePath(path) catch |err| {
+    @import("compat").cwd().makePath(path) catch |err| {
         log.err("volumes: failed to create {s} {s}: {}", .{ label, path, err });
         return common.VolumeError.IoError;
     };

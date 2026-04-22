@@ -44,7 +44,7 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
         .manifest_digest = owned_digest,
         .config_digest = config_digest_str,
         .total_size = @intCast(state.total_size),
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     }) catch |err| {
         log.warn("failed to save built image record: {}", .{err});
     };
@@ -58,9 +58,9 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
 }
 
 pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState) ![]const u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
-    const writer = buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&buf, alloc);
 
     try writer.writeAll("{");
     try writer.writeAll("\"architecture\":\"amd64\",\"os\":\"linux\"");
@@ -196,9 +196,9 @@ pub fn buildManifestJson(
     config_digest: blob_store.Digest,
     config_size: usize,
 ) ![]const u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
-    const writer = buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&buf, alloc);
 
     try writer.writeAll("{\"schemaVersion\":2");
     try writer.writeAll(",\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\"");
@@ -208,7 +208,7 @@ pub fn buildManifestJson(
     try writer.writeAll(",\"digest\":\"");
     try writer.writeAll(config_digest.string(&digest_buf));
     try writer.writeAll("\"");
-    try std.fmt.format(writer, ",\"size\":{d}", .{config_size});
+    try @import("compat").format(writer, ",\"size\":{d}", .{config_size});
     try writer.writeAll("}");
 
     try writer.writeAll(",\"layers\":[");
@@ -218,7 +218,7 @@ pub fn buildManifestJson(
         try writer.writeAll(",\"digest\":\"");
         try writer.writeAll(digest);
         try writer.writeAll("\"");
-        try std.fmt.format(writer, ",\"size\":{d}", .{state.layer_sizes.items[i]});
+        try @import("compat").format(writer, ",\"size\":{d}", .{state.layer_sizes.items[i]});
         try writer.writeAll("}");
     }
     try writer.writeAll("]}");

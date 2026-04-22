@@ -10,7 +10,7 @@ pub const max_total_fds = 128;
 var total_bpf_fds: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 const CircuitBreaker = struct {
-    mutex: std.Thread.Mutex,
+    mutex: @import("compat").Mutex,
     failures: u32,
     last_failure_time: i64,
     threshold: u32,
@@ -32,7 +32,7 @@ const CircuitBreaker = struct {
 
         if (self.failures < self.threshold) return true;
 
-        const now = std.time.milliTimestamp();
+        const now = @import("compat").milliTimestamp();
         if (now - self.last_failure_time > self.reset_timeout_ms) {
             self.failures = 0;
             self.last_failure_time = 0;
@@ -56,7 +56,7 @@ const CircuitBreaker = struct {
         defer self.mutex.unlock();
 
         self.failures += 1;
-        self.last_failure_time = std.time.milliTimestamp();
+        self.last_failure_time = @import("compat").milliTimestamp();
     }
 };
 

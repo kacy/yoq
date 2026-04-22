@@ -39,7 +39,7 @@ pub fn handleStatus(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    var writer = json_buf.writer(alloc);
+    var writer = @import("compat").arrayListWriter(&json_buf, alloc);
     writer.writeByte('[') catch return common.internalError();
 
     for (snapshots.items, 0..) |snap, idx| {
@@ -87,7 +87,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    var writer = json_buf.writer(alloc);
+    var writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     writer.writeAll("{\"mode\":\"canonical") catch return common.internalError();
     writer.writeAll("\",\"flags\":{") catch return common.internalError();

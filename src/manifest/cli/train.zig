@@ -18,7 +18,7 @@ const TrainError = error{
     UnknownService,
 };
 
-pub fn train(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn train(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const action = args.next() orelse {
         writeErr("usage: yoq train <start|status|stop|pause|resume|scale|logs> <name>\n", .{});
         return TrainError.InvalidArgument;
@@ -37,7 +37,7 @@ pub fn train(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     return TrainError.InvalidArgument;
 }
 
-fn trainStart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn trainStart(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var job_name: ?[]const u8 = null;
     var server_addr: ?[]const u8 = null;
@@ -82,7 +82,7 @@ fn trainStart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -109,7 +109,7 @@ fn trainStart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 }
 
-fn trainStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn trainStatus(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var job_name: ?[]const u8 = null;
     var server_addr: ?[]const u8 = null;
@@ -152,7 +152,7 @@ fn trainStatus(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch {
@@ -219,7 +219,7 @@ const TrainArgs = struct {
     server_addr: ?[]const u8,
 };
 
-fn parseTrainArgs(args: *std.process.ArgIterator) TrainArgs {
+fn parseTrainArgs(args: *std.process.Args.Iterator) TrainArgs {
     var result = TrainArgs{
         .manifest_path = manifest_loader.default_filename,
         .job_name = null,
@@ -241,7 +241,7 @@ fn parseTrainArgs(args: *std.process.ArgIterator) TrainArgs {
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return TrainError.StoreError;
+    const cwd = @import("compat").cwd().realpath(".", &cwd_buf) catch return TrainError.StoreError;
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return TrainError.DeploymentFailed;
 }
 
@@ -298,7 +298,7 @@ fn remoteTrainingGetStatus(alloc: std.mem.Allocator, server_addr: []const u8, jo
     write("{s}\n", .{resp.body});
 }
 
-fn loadTrainJobContext(args: *std.process.ArgIterator, alloc: std.mem.Allocator, comptime usage: []const u8) !TrainJobContext {
+fn loadTrainJobContext(args: *std.process.Args.Iterator, alloc: std.mem.Allocator, comptime usage: []const u8) !TrainJobContext {
     const parsed = parseTrainArgs(args);
     return loadTrainJobContextFromParsed(parsed, alloc, usage);
 }
@@ -324,7 +324,7 @@ fn loadTrainJobContextFromParsed(parsed: TrainArgs, alloc: std.mem.Allocator, co
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     const ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -336,7 +336,7 @@ fn loadTrainJobContextFromParsed(parsed: TrainArgs, alloc: std.mem.Allocator, co
     return .{ .name = name, .job = job, .ctrl = ctrl, .manifest = manifest, .server_addr = parsed.server_addr };
 }
 
-fn trainStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn trainStop(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const parsed = parseTrainArgs(args);
     const name = parsed.job_name orelse {
         writeErr("usage: yoq train stop [-f manifest.toml] [--server host:port] <name>\n", .{});
@@ -367,7 +367,7 @@ fn trainStop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     writeErr("training job {s} stopped\n", .{ctx.name});
 }
 
-fn trainPause(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn trainPause(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const parsed = parseTrainArgs(args);
     const name = parsed.job_name orelse {
         writeErr("usage: yoq train pause [-f manifest.toml] [--server host:port] <name>\n", .{});
@@ -403,7 +403,7 @@ fn trainPause(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     writeErr("training job {s} paused\n", .{ctx.name});
 }
 
-fn trainResume(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn trainResume(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const parsed = parseTrainArgs(args);
     const name = parsed.job_name orelse {
         writeErr("usage: yoq train resume [-f manifest.toml] [--server host:port] <name>\n", .{});
@@ -459,7 +459,7 @@ fn trainResume(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 }
 
-fn trainScale(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn trainScale(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var job_name: ?[]const u8 = null;
     var new_gpus: ?u32 = null;
     var server_addr: ?[]const u8 = null;
@@ -521,7 +521,7 @@ fn trainScale(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -551,7 +551,7 @@ fn trainScale(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 
     if (ctrl.job_id) |jid| {
-        store.updateTrainingJobGpus(jid, gpus, std.time.timestamp()) catch {
+        store.updateTrainingJobGpus(jid, gpus, @import("compat").timestamp()) catch {
             writeErr("failed to update GPU count in store\n", .{});
             return TrainError.StoreError;
         };
@@ -578,7 +578,7 @@ fn trainScale(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 }
 
-fn trainLogs(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn trainLogs(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var job_name: ?[]const u8 = null;
     var rank: u32 = 0;
     var server_addr: ?[]const u8 = null;
@@ -635,7 +635,7 @@ fn trainLogs(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch "app";
+    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     const record = store.findAppContainer(alloc, app_name, hostname) catch |err| {

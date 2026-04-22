@@ -16,7 +16,7 @@ const hpack = @import("hpack.zig");
 pub fn proxyConnection(
     alloc: std.mem.Allocator,
     routes: []const router.Route,
-    client_fd: posix.socket_t,
+    client_fd: @import("compat").posix.socket_t,
     initial_request: []const u8,
     client_ip: ?[4]u8,
 ) !void {
@@ -35,7 +35,7 @@ pub fn proxyConnection(
 const ConnectionRouter = struct {
     allocator: std.mem.Allocator,
     routes: []const router.Route,
-    client_fd: posix.socket_t,
+    client_fd: @import("compat").posix.socket_t,
     client_ip: ?[4]u8,
     downstream_buf: std.ArrayList(u8) = .empty,
     streams: std.ArrayList(StreamSession) = .empty,
@@ -660,7 +660,7 @@ const ConnectionRouter = struct {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
-        errdefer posix.close(upstream_fd);
+        errdefer @import("compat").posix.close(upstream_fd);
 
         const preface_and_settings = buildInitialUpstreamPreamble(self.allocator) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
@@ -778,7 +778,7 @@ const StreamSession = struct {
     route: router.Route,
     backend_service: []u8,
     upstream: upstream_mod.Upstream,
-    upstream_fd: posix.socket_t,
+    upstream_fd: @import("compat").posix.socket_t,
     upstream_buf: std.ArrayList(u8) = .empty,
     mirror: ?MirrorSession = null,
     response_started: bool = false,
@@ -787,7 +787,7 @@ const StreamSession = struct {
     request_deadline_at_ms: i64,
 
     fn deinit(self: *StreamSession, alloc: std.mem.Allocator) void {
-        posix.close(self.upstream_fd);
+        @import("compat").posix.close(self.upstream_fd);
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
@@ -798,13 +798,13 @@ const StreamSession = struct {
 const MirrorSession = struct {
     backend_service: []u8,
     upstream: upstream_mod.Upstream,
-    upstream_fd: posix.socket_t,
+    upstream_fd: @import("compat").posix.socket_t,
     upstream_buf: std.ArrayList(u8) = .empty,
     response_started: bool = false,
     request_deadline_at_ms: i64,
 
     fn deinit(self: *MirrorSession, alloc: std.mem.Allocator) void {
-        posix.close(self.upstream_fd);
+        @import("compat").posix.close(self.upstream_fd);
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
@@ -955,20 +955,20 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     return hasher.final();
 }
 
-fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8) !posix.socket_t {
+fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8) !@import("compat").posix.socket_t {
     const upstream_fd = try socket_helpers.connectToUpstream(route.connect_timeout_ms, route.request_timeout_ms, upstream);
-    errdefer posix.close(upstream_fd);
+    errdefer @import("compat").posix.close(upstream_fd);
     const preface_and_settings = try buildInitialUpstreamPreamble(alloc);
     defer alloc.free(preface_and_settings);
     try sendUpstreamPreamble(upstream_fd, preface_and_settings, request_bytes);
     return upstream_fd;
 }
 
-fn sendUpstreamPreamble(upstream_fd: posix.socket_t, preface_and_settings: []const u8, request_bytes: []const u8) !void {
+fn sendUpstreamPreamble(upstream_fd: @import("compat").posix.socket_t, preface_and_settings: []const u8, request_bytes: []const u8) !void {
     try socket_helpers.writeAll(upstream_fd, preface_and_settings);
     try socket_helpers.writeAll(upstream_fd, request_bytes);
 }
 
 fn nowMs() i64 {
-    return std.time.milliTimestamp();
+    return @import("compat").milliTimestamp();
 }

@@ -84,7 +84,7 @@ pub fn saveImageFromPull(
         .manifest_digest = manifest_digest,
         .config_digest = config_digest,
         .total_size = @intCast(total_size),
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     });
 }
 

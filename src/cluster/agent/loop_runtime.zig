@@ -32,7 +32,7 @@ pub fn agentLoop(self: anytype) void {
 
         var remaining: u32 = agentHeartbeatTicks(self);
         while (remaining > 0 and self.running.load(.acquire)) : (remaining -= 1) {
-            std.Thread.sleep(100 * std.time.ns_per_ms);
+            @import("compat").sleep(100 * std.time.ns_per_ms);
             if (remaining % 5 == 0) gossip_support.tickGossipLoop(self);
             gossip_support.receiveGossipLoop(self);
         }

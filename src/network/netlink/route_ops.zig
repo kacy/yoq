@@ -73,7 +73,7 @@ pub fn hasAddress(fd: posix.fd_t, if_index: u32, ip: *const [4]u8, prefix_len: u
 
     var recv_buf: [common.buf_size]u8 align(4) = undefined;
     while (true) {
-        const recv_len = posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
+        const recv_len = @import("compat").posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
         if (recv_len < @sizeOf(std.os.linux.nlmsghdr)) return common.NetlinkError.InvalidResponse;
 
         var offset: usize = 0;
@@ -145,7 +145,7 @@ pub fn getFirstIpv4Address(fd: posix.fd_t, if_index: u32) common.NetlinkError!?[
 
     var recv_buf: [common.buf_size]u8 align(4) = undefined;
     while (true) {
-        const recv_len = posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
+        const recv_len = @import("compat").posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
         const parse_result = try parseFirstIpv4AddressMessage(recv_buf[0..recv_len], if_index);
         switch (parse_result) {
             .pending => continue,

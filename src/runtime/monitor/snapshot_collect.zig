@@ -85,7 +85,7 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
         }
     }
 
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
     const cpu_pct = if (has_cpu) blk: {
         const elapsed_secs = now - earliest_start;
         if (elapsed_secs <= 0) break :blk @as(f64, 0.0);

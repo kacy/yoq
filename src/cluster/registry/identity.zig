@@ -45,7 +45,7 @@ pub fn getGossipSeeds(alloc: Allocator, db: *sqlite.Db, count: u32) ![][]const u
     ) catch return &[_][]const u8{};
     defer stmt.deinit();
 
-    var results: std.ArrayListUnmanaged([]const u8) = .{};
+    var results: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
         for (results.items) |seed| alloc.free(seed);
         results.deinit(alloc);
@@ -82,7 +82,7 @@ pub fn validateToken(token: []const u8, expected: []const u8) bool {
 
 pub fn generateAgentId(buf: *[12]u8) void {
     var random_bytes: [6]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
+    @import("compat").randomBytes(&random_bytes);
     const hex = "0123456789abcdef";
     for (random_bytes, 0..) |byte, i| {
         buf[i * 2] = hex[byte >> 4];

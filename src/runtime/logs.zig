@@ -11,7 +11,7 @@ const follow = @import("logs/follow.zig");
 
 pub const LogError = common.LogError;
 
-pub fn createLogFile(container_id: []const u8) LogError!std.fs.File {
+pub fn createLogFile(container_id: []const u8) LogError!@import("compat").File {
     return storage.createLogFile(container_id);
 }
 
@@ -27,12 +27,12 @@ pub fn deleteLogFile(container_id: []const u8) void {
     storage.deleteLogFile(container_id);
 }
 
-pub fn writeLogLine(log_file: std.fs.File, stream: []const u8, line: []const u8) void {
+pub fn writeLogLine(log_file: @import("compat").File, stream: []const u8, line: []const u8) void {
     capture.writeLogLine(log_file, stream, line);
 }
 
 pub fn captureStream(
-    log_file: std.fs.File,
+    log_file: @import("compat").File,
     pipe_fd: std.posix.fd_t,
     stream_label: []const u8,
     dev_service: ?[]const u8,

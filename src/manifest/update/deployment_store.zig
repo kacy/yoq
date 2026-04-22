@@ -6,7 +6,7 @@ const common = @import("common.zig");
 pub fn generateDeploymentId(alloc: std.mem.Allocator) ![]const u8 {
     const chars = "0123456789abcdef";
     var bytes: [6]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    @import("compat").randomBytes(&bytes);
 
     const hex = try alloc.alloc(u8, 12);
     for (bytes, 0..) |b, i| {
@@ -58,7 +58,7 @@ pub fn recordDeployment(
         .rollout_targets_json = rollout_targets_json,
         .rollout_checkpoint_json = rollout_checkpoint_json,
         .rollout_control_state = "active",
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     }) catch return error.StoreFailed;
 }
 
@@ -97,7 +97,7 @@ pub fn recordDeploymentInDb(
         .rollout_targets_json = rollout_targets_json,
         .rollout_checkpoint_json = rollout_checkpoint_json,
         .rollout_control_state = "active",
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     }) catch return error.StoreFailed;
 }
 

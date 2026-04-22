@@ -146,17 +146,17 @@ var service_views: [max_services]ServiceView = [_]ServiceView{.{
     .backends = undefined,
     .active = false,
 }} ** max_services;
-var registry_mutex: std.Thread.Mutex = .{};
+var registry_mutex: @import("compat").Mutex = .{};
 
 var cluster_db: ?*sqlite.Db = null;
-var cluster_db_mutex: std.Thread.Mutex = .{};
+var cluster_db_mutex: @import("compat").Mutex = .{};
 var cluster_lookup_fault_mode: ClusterLookupFaultMode = .none;
 var cluster_lookup_fault_ip: [4]u8 = .{ 10, 255, 255, 254 };
 var cluster_lookup_fault_injections: u64 = 0;
-var dns_interceptor_fault_mutex: std.Thread.Mutex = .{};
+var dns_interceptor_fault_mutex: @import("compat").Mutex = .{};
 var dns_interceptor_fault_mode: DnsInterceptorFaultMode = .none;
 var dns_interceptor_fault_injections: u64 = 0;
-var load_balancer_fault_mutex: std.Thread.Mutex = .{};
+var load_balancer_fault_mutex: @import("compat").Mutex = .{};
 var load_balancer_fault_mode: LoadBalancerFaultMode = .none;
 var load_balancer_fault_injections: u64 = 0;
 
@@ -610,7 +610,7 @@ pub fn parseResolvConf(content: []const u8) ?[4]u8 {
         const line = content[pos..line_end];
         pos = if (line_end < content.len) line_end + 1 else content.len;
 
-        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        const trimmed = std.mem.trimStart(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
 
         const prefix = "nameserver";
@@ -618,8 +618,8 @@ pub fn parseResolvConf(content: []const u8) ?[4]u8 {
         if (!std.mem.eql(u8, trimmed[0..prefix.len], prefix)) continue;
         if (trimmed[prefix.len] != ' ' and trimmed[prefix.len] != '\t') continue;
 
-        const addr_str = std.mem.trimLeft(u8, trimmed[prefix.len..], " \t");
-        const addr_clean = std.mem.trimRight(u8, addr_str, " \t\r");
+        const addr_str = std.mem.trimStart(u8, trimmed[prefix.len..], " \t");
+        const addr_clean = std.mem.trimEnd(u8, addr_str, " \t\r");
         if (addr_clean.len == 0) continue;
         if (ip_mod.parseIp(addr_clean)) |addr| return addr;
     }

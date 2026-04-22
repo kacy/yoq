@@ -7,7 +7,7 @@ const store_support = @import("store_support.zig");
 const write = cli.write;
 const writeErr = cli.writeErr;
 
-pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
+pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
     var domain: ?[]const u8 = null;
     var cert_path: ?[]const u8 = null;
     var key_path: ?[]const u8 = null;
@@ -41,13 +41,13 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) common.TlsC
         return common.TlsCommandsError.InvalidArgument;
     };
 
-    const cert_pem = std.fs.cwd().readFileAlloc(alloc, cp, 1024 * 1024) catch {
+    const cert_pem = @import("compat").cwd().readFileAlloc(alloc, cp, 1024 * 1024) catch {
         writeErr("failed to read certificate file: {s}\n", .{cp});
         return common.TlsCommandsError.ReadFailed;
     };
     defer alloc.free(cert_pem);
 
-    const key_pem = std.fs.cwd().readFileAlloc(alloc, kp, 1024 * 1024) catch {
+    const key_pem = @import("compat").cwd().readFileAlloc(alloc, kp, 1024 * 1024) catch {
         writeErr("failed to read key file: {s}\n", .{kp});
         return common.TlsCommandsError.ReadFailed;
     };

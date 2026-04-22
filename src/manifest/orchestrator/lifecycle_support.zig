@@ -239,7 +239,7 @@ pub fn waitForShutdown(self: anytype, shutdown_requested: *const std.atomic.Valu
         }
         if (all_done) break;
 
-        std.Thread.sleep(200 * std.time.ns_per_ms);
+        @import("compat").sleep(200 * std.time.ns_per_ms);
     }
 }
 
@@ -252,16 +252,16 @@ pub fn serviceIndex(self: anytype, name: []const u8) ?usize {
 
 pub fn waitForRunning(self: anytype, idx: usize) bool {
     const timeout_ns: u64 = 30 * std.time.ns_per_s;
-    const start = @as(u64, @intCast(std.time.nanoTimestamp()));
+    const start = @as(u64, @intCast(@import("compat").nanoTimestamp()));
 
     while (true) {
         const status = self.states[idx].status;
         if (status == .running) return true;
         if (status == .failed or status == .stopped) return false;
 
-        const now = @as(u64, @intCast(std.time.nanoTimestamp()));
+        const now = @as(u64, @intCast(@import("compat").nanoTimestamp()));
         if (now - start > timeout_ns) return false;
 
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        @import("compat").sleep(100 * std.time.ns_per_ms);
     }
 }

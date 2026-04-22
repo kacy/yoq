@@ -38,7 +38,7 @@ pub const ProxyError = error{
 /// ACME HTTP-01 challenge token store.
 /// tokens are registered by the ACME client and served on port 80.
 pub const ChallengeStore = struct {
-    mutex: std.Thread.Mutex,
+    mutex: @import("compat").Mutex,
     tokens: std.StringHashMapUnmanaged([]const u8), // token -> key_authorization
     allocator: std.mem.Allocator,
 
@@ -137,10 +137,10 @@ pub const TlsProxy = struct {
         http_port: u16,
     ) ProxyError!TlsProxy {
         const tls_fd = socket_support.createListenSocket(tls_port) catch return ProxyError.SocketFailed;
-        errdefer posix.close(tls_fd);
+        errdefer @import("compat").posix.close(tls_fd);
 
         const http_fd = socket_support.createListenSocket(http_port) catch return ProxyError.SocketFailed;
-        errdefer posix.close(http_fd);
+        errdefer @import("compat").posix.close(http_fd);
 
         return .{
             .allocator = allocator,
@@ -168,8 +168,8 @@ pub const TlsProxy = struct {
     pub fn deinit(self: *TlsProxy) void {
         self.stop();
         self.challenges.deinit();
-        posix.close(self.tls_fd);
-        posix.close(self.http_fd);
+        @import("compat").posix.close(self.tls_fd);
+        @import("compat").posix.close(self.http_fd);
     }
 
     /// start accepting connections on both ports.
@@ -228,7 +228,7 @@ pub const TlsProxy = struct {
             const poll_result = posix.poll(&poll_fds, 1000) catch continue;
             if (poll_result == 0) continue;
 
-            const client_fd = posix.accept(self.tls_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
+            const client_fd = @import("compat").posix.accept(self.tls_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
                 if (err == error.WouldBlock) continue;
                 log.warn("tls accept error: {}", .{err});
                 continue;
@@ -236,14 +236,14 @@ pub const TlsProxy = struct {
 
             const current = active_connections.load(.acquire);
             if (current >= max_connections) {
-                posix.close(client_fd);
+                @import("compat").posix.close(client_fd);
                 continue;
             }
             _ = active_connections.fetchAdd(1, .acq_rel);
 
             const thread = std.Thread.spawn(.{}, tlsConnectionHandler, .{ self, client_fd }) catch {
                 _ = active_connections.fetchSub(1, .acq_rel);
-                posix.close(client_fd);
+                @import("compat").posix.close(client_fd);
                 continue;
             };
             thread.detach();
@@ -258,14 +258,14 @@ pub const TlsProxy = struct {
             const poll_result = posix.poll(&poll_fds, 1000) catch continue;
             if (poll_result == 0) continue;
 
-            const client_fd = posix.accept(self.http_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
+            const client_fd = @import("compat").posix.accept(self.http_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
                 if (err == error.WouldBlock) continue;
                 log.warn("http accept error: {}", .{err});
                 continue;
             };
 
             const thread = std.Thread.spawn(.{}, httpConnectionHandler, .{ self, client_fd }) catch {
-                posix.close(client_fd);
+                @import("compat").posix.close(client_fd);
                 continue;
             };
             thread.detach();
@@ -286,7 +286,7 @@ pub const TlsProxy = struct {
             var elapsed: u64 = 0;
             while (elapsed < config.check_interval_s and self.running.load(.acquire)) {
                 const step: u64 = @min(5, config.check_interval_s - elapsed);
-                std.Thread.sleep(step * std.time.ns_per_s);
+                @import("compat").sleep(step * std.time.ns_per_s);
                 elapsed += step;
             }
             if (!self.running.load(.acquire)) break;
@@ -381,7 +381,7 @@ pub const TlsProxy = struct {
         defer {
             _ = active_connections.fetchSub(1, .acq_rel);
             if (!handshake_complete) http_support.sendCloseNotify(client_fd);
-            posix.close(client_fd);
+            @import("compat").posix.close(client_fd);
         }
 
         // read ClientHello (up to 16KB — typical ClientHello is ~300 bytes)
@@ -432,7 +432,7 @@ pub const TlsProxy = struct {
     }
 
     fn httpConnectionHandler(self: *TlsProxy, client_fd: posix.fd_t) void {
-        defer posix.close(client_fd);
+        defer @import("compat").posix.close(client_fd);
 
         var buf: [4096]u8 = undefined;
         const bytes_read = socket_support.readWithTimeout(client_fd, &buf, 5000) catch return;
@@ -462,7 +462,7 @@ pub const TlsProxy = struct {
 
         var response_buf: [1024]u8 = undefined;
         const response = http_support.formatRedirectResponse(&response_buf, location) catch return;
-        _ = posix.write(client_fd, response) catch |e| {
+        _ = @import("compat").posix.write(client_fd, response) catch |e| {
             log.warn("tls proxy redirect write failed: {}", .{e});
         };
     }
@@ -479,7 +479,7 @@ pub const TlsProxy = struct {
 
         var response_buf: [1024]u8 = undefined;
         const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ key_auth.len, key_auth }) catch return;
-        _ = posix.write(client_fd, response) catch |e| {
+        _ = @import("compat").posix.write(client_fd, response) catch |e| {
             log.warn("tls proxy acme challenge write failed: {}", .{e});
         };
     }

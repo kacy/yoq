@@ -61,7 +61,7 @@ pub const StorageMetricsCollector = struct {
 
     pub fn deinit(self: *StorageMetricsCollector) void {
         if (is_linux and self.map_fd >= 0) {
-            posix.close(self.map_fd);
+            @import("compat").posix.close(self.map_fd);
         }
     }
 };

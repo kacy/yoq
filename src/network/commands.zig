@@ -18,7 +18,7 @@ const PolicyCommandsError = error{
 
 // -- network policy commands --
 
-pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn policy(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var subcmd: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -60,7 +60,7 @@ pub fn policy(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 }
 
-fn policyAddRule(args: *std.process.ArgIterator, alloc: std.mem.Allocator, action: []const u8) PolicyCommandsError!void {
+fn policyAddRule(args: *std.process.Args.Iterator, alloc: std.mem.Allocator, action: []const u8) PolicyCommandsError!void {
     const source = args.next() orelse {
         writeErr("usage: yoq policy {s} <source> <target>\n", .{action});
         return PolicyCommandsError.InvalidArgument;
@@ -80,7 +80,7 @@ fn policyAddRule(args: *std.process.ArgIterator, alloc: std.mem.Allocator, actio
     write("{s} -> {s}: {s}\n", .{ source, target, action });
 }
 
-fn policyRm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) PolicyCommandsError!void {
+fn policyRm(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) PolicyCommandsError!void {
     const source = args.next() orelse {
         writeErr("usage: yoq policy rm <source> <target>\n", .{});
         return PolicyCommandsError.InvalidArgument;

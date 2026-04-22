@@ -131,7 +131,7 @@ fn findMeta(name: []const u8) ?*const CommandMeta {
 
 // -- handler --
 
-pub fn handler(args: *std.process.ArgIterator, _: std.mem.Allocator) !void {
+pub fn handler(args: *std.process.Args.Iterator, _: std.mem.Allocator) !void {
     const shell = args.next() orelse {
         cli.writeErr("usage: yoq completion <bash|zsh|fish>\n", .{});
         return CompletionError.InvalidArgument;

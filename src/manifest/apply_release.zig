@@ -405,7 +405,7 @@ pub const ProgressRecorder = struct {
             switch (state) {
                 .active => return false,
                 .cancel_requested => return true,
-                .paused => std.Thread.sleep(100 * std.time.ns_per_ms),
+                .paused => @import("compat").sleep(100 * std.time.ns_per_ms),
             }
         }
     }

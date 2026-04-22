@@ -186,7 +186,7 @@ pub fn performRollingUpdate(
         // step 4: delay between batches (if configured and not the last batch)
         if (strategy.delay_between_batches > 0 and batch_end < total) {
             log.info("update: waiting {d}s before next batch", .{strategy.delay_between_batches});
-            std.Thread.sleep(@as(u64, strategy.delay_between_batches) * std.time.ns_per_s);
+            @import("compat").sleep(@as(u64, strategy.delay_between_batches) * std.time.ns_per_s);
         }
 
         batch_start = batch_end;

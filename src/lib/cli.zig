@@ -32,7 +32,7 @@ pub var stderr_write_failures: usize = 0;
 /// write formatted output to stdout. tracks failures but doesn't panic.
 pub fn write(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
+    var w = @import("compat").File.stdout().writer(&buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stdout_write_failures += 1;
@@ -47,7 +47,7 @@ pub fn write(comptime fmt: []const u8, args: anytype) void {
 /// write formatted output to stderr. tracks failures but doesn't panic.
 pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
+    var w = @import("compat").File.stderr().writer(&buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stderr_write_failures += 1;
@@ -63,7 +63,7 @@ pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
 
 /// require the next CLI argument, or print usage and exit.
 /// used by commands that take a single required positional argument.
-pub fn requireArg(args: *std.process.ArgIterator, comptime usage: []const u8) []const u8 {
+pub fn requireArg(args: *std.process.Args.Iterator, comptime usage: []const u8) []const u8 {
     return args.next() orelse {
         writeErr(usage, .{});
         std.process.exit(1);
@@ -251,7 +251,7 @@ pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
 
-    const file = std.fs.cwd().openFile(token_path, .{}) catch return null;
+    const file = @import("compat").cwd().openFile(token_path, .{}) catch return null;
     defer file.close();
 
     if (!hasOwnerOnlyPermissions(file)) return null;
@@ -274,7 +274,7 @@ pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
 /// returns the hex string in the provided buffer, or null on failure.
 pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
     var raw: [32]u8 = undefined;
-    std.crypto.random.bytes(&raw);
+    @import("compat").randomBytes(&raw);
     defer std.crypto.secureZero(u8, &raw);
 
     const hex = std.fmt.bytesToHex(raw, .lower);
@@ -288,7 +288,7 @@ pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
 
     if (tokenFileExistsWithWeakPermissions(token_path)) return null;
 
-    const file = std.fs.cwd().createFile(token_path, .{
+    const file = @import("compat").cwd().createFile(token_path, .{
         .mode = 0o600,
         .truncate = true,
         .exclusive = false,
@@ -310,13 +310,13 @@ pub fn isValidApiToken(token: []const u8) bool {
     return true;
 }
 
-fn hasOwnerOnlyPermissions(file: std.fs.File) bool {
+fn hasOwnerOnlyPermissions(file: @import("compat").File) bool {
     const stat = file.stat() catch return false;
     return (stat.mode & 0o077) == 0;
 }
 
 fn tokenFileExistsWithWeakPermissions(path: []const u8) bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    const file = @import("compat").cwd().openFile(path, .{}) catch return false;
     defer file.close();
     return !hasOwnerOnlyPermissions(file);
 }
@@ -340,13 +340,13 @@ const TokenTestBackup = struct {
 
     fn restore(self: TokenTestBackup) void {
         if (!self.moved) return;
-        std.fs.cwd().rename(self.backupPath(), self.tokenPath()) catch |e| {
+        @import("compat").cwd().rename(self.backupPath(), self.tokenPath()) catch |e| {
             log.warn("test cleanup: failed to restore token file: {}", .{e});
         };
     }
 };
 
-var token_test_mutex: std.Thread.Mutex = .{};
+var token_test_mutex: @import("compat").Mutex = .{};
 
 fn backupExistingToken() ?TokenTestBackup {
     var backup: TokenTestBackup = .{
@@ -363,13 +363,13 @@ fn backupExistingToken() ?TokenTestBackup {
     backup.backup_path_len = backup_path.len;
 
     paths.ensureDataDirStrict("") catch return null;
-    std.fs.cwd().deleteFile(backup.backupPath()) catch |err| switch (err) {
+    @import("compat").cwd().deleteFile(backup.backupPath()) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return null,
     };
 
     const moved = blk: {
-        std.fs.cwd().rename(token_path, backup_path) catch |err| switch (err) {
+        @import("compat").cwd().rename(token_path, backup_path) catch |err| switch (err) {
             error.FileNotFound => break :blk false,
             else => return null,
         };
@@ -462,7 +462,7 @@ test "generateAndSaveToken produces valid 64-char hex string" {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
-    std.fs.cwd().deleteFile(token_path) catch {};
+    @import("compat").cwd().deleteFile(token_path) catch {};
 }
 
 test "readApiToken round-trip with generateAndSaveToken" {
@@ -483,7 +483,7 @@ test "readApiToken round-trip with generateAndSaveToken" {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
-    std.fs.cwd().deleteFile(token_path) catch {};
+    @import("compat").cwd().deleteFile(token_path) catch {};
 }
 
 test "readApiToken returns null for missing file" {
@@ -508,19 +508,19 @@ test "readApiToken rejects weak file permissions" {
     const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
 
     // move existing file out of the way
-    const moved = if (std.fs.cwd().rename(token_path, backup_path)) |_| true else |_| false;
-    defer if (moved) std.fs.cwd().rename(backup_path, token_path) catch |e| {
+    const moved = if (@import("compat").cwd().rename(token_path, backup_path)) |_| true else |_| false;
+    defer if (moved) @import("compat").cwd().rename(backup_path, token_path) catch |e| {
         log.warn("test cleanup: failed to restore token file: {}", .{e});
     };
 
-    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o644 }) catch |e| {
+    const file = @import("compat").cwd().createFile(token_path, .{ .mode = 0o644 }) catch |e| {
         // If we can't create the test file, skip this test
         log.warn("test: skipping weak permissions test - cannot create file: {}", .{e});
         return;
     };
     defer {
         file.close();
-        std.fs.cwd().deleteFile(token_path) catch |e| {
+        @import("compat").cwd().deleteFile(token_path) catch |e| {
             log.warn("test cleanup: failed to delete test token file: {}", .{e});
         };
     }

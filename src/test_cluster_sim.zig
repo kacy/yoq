@@ -482,7 +482,7 @@ fn ensureRandomSimInvariants(nodes: []const *SimNode, prev_commit: *[8]u64) !voi
 }
 
 fn appendTrace(trace: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
-    try trace.writer(std.testing.allocator).print(fmt, args);
+    try @import("compat").arrayListWriter(&trace, std.testing.allocator).print(fmt, args);
 }
 
 fn runRandomSeed(seed: u64, trace: *std.ArrayList(u8)) !void {

@@ -22,18 +22,20 @@ pub const Entry = struct {
 };
 
 pub const HeartbeatBatcher = struct {
-    mu: std.Thread.Mutex,
-    buffer: std.AutoArrayHashMap([12]u8, Entry),
+    alloc: Allocator,
+    mu: @import("compat").Mutex,
+    buffer: std.AutoArrayHashMapUnmanaged([12]u8, Entry),
 
     pub fn init(alloc: Allocator) HeartbeatBatcher {
         return .{
+            .alloc = alloc,
             .mu = .{},
-            .buffer = std.AutoArrayHashMap([12]u8, Entry).init(alloc),
+            .buffer = .empty,
         };
     }
 
     pub fn deinit(self: *HeartbeatBatcher) void {
-        self.buffer.deinit();
+        self.buffer.deinit(self.alloc);
     }
 
     /// record a heartbeat from an agent. deduplicates by agent ID,
@@ -47,7 +49,7 @@ pub const HeartbeatBatcher = struct {
         self.mu.lock();
         defer self.mu.unlock();
 
-        self.buffer.put(key, .{
+        self.buffer.put(self.alloc, key, .{
             .id = key,
             .resources = resources,
             .timestamp = now,

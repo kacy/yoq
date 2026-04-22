@@ -28,7 +28,7 @@ pub fn resetTestProbeRoots() void {
 }
 
 pub fn detectProcfs() ?DetectResult {
-    var dir = std.fs.openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
+    var dir = @import("compat").openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
     defer dir.close();
 
     var result = emptyDetectResult(.procfs, null);
@@ -56,7 +56,7 @@ pub fn detectProcfs() ?DetectResult {
 
 pub fn detectSysfs() ?DetectResult {
     var result = emptyDetectResult(.sysfs, null);
-    var drm_dir = std.fs.openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
+    var drm_dir = @import("compat").openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
     defer drm_dir.close();
 
     var iter = drm_dir.iterate();
@@ -111,7 +111,7 @@ pub fn emptyDetectResult(source: DetectSource, nvml: ?NvmlHandle) DetectResult {
 
 pub fn readSysfsFile(path: []const u8) ?SysfsContent {
     var result = SysfsContent{ .buf = undefined, .len = 0 };
-    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    const file = @import("compat").cwd().openFile(path, .{}) catch return null;
     defer file.close();
     result.len = file.read(&result.buf) catch return null;
     return result;

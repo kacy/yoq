@@ -80,15 +80,15 @@ pub const MetricsCollector = struct {
             log.debug("ebpf: failed to detach metrics collector: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
+            @import("compat").posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
         }
         if (self.metrics_fd >= 0) {
-            posix.close(self.metrics_fd);
+            @import("compat").posix.close(self.metrics_fd);
             resource_support.releaseBpfFd();
         }
         if (self.pair_metrics_fd >= 0) {
-            posix.close(self.pair_metrics_fd);
+            @import("compat").posix.close(self.pair_metrics_fd);
             resource_support.releaseBpfFd();
         }
     }
@@ -103,7 +103,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!MetricsCollector {
         map0_def.max_entries,
     );
     errdefer {
-        posix.close(map_fd);
+        @import("compat").posix.close(map_fd);
         resource_support.releaseBpfFd();
     }
 
@@ -115,14 +115,14 @@ pub fn load(bridge_if_index: u32) common.EbpfError!MetricsCollector {
         map1_def.max_entries,
     );
     errdefer {
-        posix.close(pair_fd);
+        @import("compat").posix.close(pair_fd);
         resource_support.releaseBpfFd();
     }
 
     var map_fds = [_]posix.fd_t{ map_fd, pair_fd };
     const prog_fd = try program_support.loadProgram(metrics_prog, &map_fds);
     errdefer {
-        posix.close(prog_fd);
+        @import("compat").posix.close(prog_fd);
         resource_support.releaseBpfFd();
     }
 

@@ -40,7 +40,7 @@ pub fn setupClusterNetworking(config: common.ClusterNetworkConfig) !void {
 
     if (config.role == .server) {
         const fwd_path = "/proc/sys/net/ipv4/conf/wg-yoq/forwarding";
-        if (std.fs.cwd().openFile(fwd_path, .{ .mode = .write_only })) |file| {
+        if (@import("compat").cwd().openFile(fwd_path, .{ .mode = .write_only })) |file| {
             defer file.close();
             file.writeAll("1") catch return error.ConfigFailed;
             log.info("IP forwarding enabled on wg-yoq (server role)", .{});

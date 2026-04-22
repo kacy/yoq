@@ -64,15 +64,15 @@ pub const PolicyEnforcer = struct {
             log.debug("ebpf: failed to detach policy enforcer: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
+            @import("compat").posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
         }
         if (self.policy_fd >= 0) {
-            posix.close(self.policy_fd);
+            @import("compat").posix.close(self.policy_fd);
             resource_support.releaseBpfFd();
         }
         if (self.isolation_fd >= 0) {
-            posix.close(self.isolation_fd);
+            @import("compat").posix.close(self.isolation_fd);
             resource_support.releaseBpfFd();
         }
     }
@@ -86,7 +86,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!PolicyEnforcer {
         policy_prog.maps[0].max_entries,
     );
     errdefer {
-        posix.close(policy_fd);
+        @import("compat").posix.close(policy_fd);
         resource_support.releaseBpfFd();
     }
 
@@ -97,14 +97,14 @@ pub fn load(bridge_if_index: u32) common.EbpfError!PolicyEnforcer {
         policy_prog.maps[1].max_entries,
     );
     errdefer {
-        posix.close(isolation_fd);
+        @import("compat").posix.close(isolation_fd);
         resource_support.releaseBpfFd();
     }
 
     var map_fds = [_]posix.fd_t{ policy_fd, isolation_fd };
     const prog_fd = try program_support.loadProgram(policy_prog, &map_fds);
     errdefer {
-        posix.close(prog_fd);
+        @import("compat").posix.close(prog_fd);
         resource_support.releaseBpfFd();
     }
 

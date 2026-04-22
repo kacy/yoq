@@ -16,7 +16,7 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try storage.logPath(&path_buf, container_id);
 
-    const file = std.fs.cwd().openFile(file_path, .{}) catch return LogError.NotFound;
+    const file = @import("compat").cwd().openFile(file_path, .{}) catch return LogError.NotFound;
     defer file.close();
 
     const tail = try prepareFollowStart(file, container_id, tail_lines);
@@ -34,7 +34,7 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t
 
     defer {
         _ = linux.inotify_rm_watch(fd, @intCast(wd));
-        posix.close(fd);
+        @import("compat").posix.close(fd);
     }
 
     var event_buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
@@ -48,7 +48,7 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t
     _ = drainNewBytes(file, &read_buf);
 }
 
-fn prepareFollowStart(file: std.fs.File, container_id: []const u8, tail_lines: usize) LogError!?[]const u8 {
+fn prepareFollowStart(file: @import("compat").File, container_id: []const u8, tail_lines: usize) LogError!?[]const u8 {
     if (tail_lines > 0) {
         const tail = try storage.readTail(std.heap.page_allocator, container_id, tail_lines);
         errdefer std.heap.page_allocator.free(tail);
@@ -61,18 +61,18 @@ fn prepareFollowStart(file: std.fs.File, container_id: []const u8, tail_lines: u
     return null;
 }
 
-fn seekToEnd(file: std.fs.File) LogError!void {
+fn seekToEnd(file: @import("compat").File) LogError!void {
     const end_pos = file.getEndPos() catch return LogError.ReadFailed;
     file.seekTo(end_pos) catch return LogError.ReadFailed;
 }
 
-fn drainNewBytes(file: std.fs.File, buf: []u8) bool {
+fn drainNewBytes(file: @import("compat").File, buf: []u8) bool {
     var saw_bytes = false;
     while (true) {
         const bytes_read = file.read(buf) catch return saw_bytes;
         if (bytes_read == 0) break;
         saw_bytes = true;
-        std.fs.File.stdout().writeAll(buf[0..bytes_read]) catch return saw_bytes;
+        @import("compat").File.stdout().writeAll(buf[0..bytes_read]) catch return saw_bytes;
     }
     return saw_bytes;
 }
@@ -90,7 +90,7 @@ fn procCgroupMatchesContainer(pid: posix.pid_t, container_id: []const u8) bool {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cgroup", .{pid}) catch return false;
 
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    const file = @import("compat").cwd().openFile(path, .{}) catch return false;
     defer file.close();
 
     var buf: [4096]u8 = undefined;
@@ -128,7 +128,7 @@ test "procCgroupContentMatchesContainer matches exact yoq cgroup path" {
 test "seekToEnd moves watched file to end" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const file = tmp_dir.dir.createFile("follow.log", .{ .read = true }) catch unreachable;
+    const file = @import("compat").Dir.from(tmp_dir.dir).createFile("follow.log", .{ .read = true }) catch unreachable;
     defer file.close();
 
     file.writeAll("one\ntwo\nthree\n") catch unreachable;

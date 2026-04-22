@@ -69,9 +69,9 @@ pub fn createContainerDirs(containers_subdir: []const u8, container_id: []const 
     }) catch return error.CreateFailed;
     dirs.merged_len = merged_slice.len;
 
-    std.fs.cwd().makePath(dirs.upperPath()) catch return error.CreateFailed;
-    std.fs.cwd().makePath(dirs.workPath()) catch return error.CreateFailed;
-    std.fs.cwd().makePath(dirs.mergedPath()) catch return error.CreateFailed;
+    @import("compat").cwd().makePath(dirs.upperPath()) catch return error.CreateFailed;
+    @import("compat").cwd().makePath(dirs.workPath()) catch return error.CreateFailed;
+    @import("compat").cwd().makePath(dirs.mergedPath()) catch return error.CreateFailed;
 
     return dirs;
 }
@@ -84,7 +84,7 @@ pub fn cleanupContainerDirs(containers_subdir: []const u8, container_id: []const
         containers_subdir, container_id,
     }) catch return;
 
-    std.fs.cwd().deleteTree(dir_path) catch {};
+    @import("compat").cwd().deleteTree(dir_path) catch {};
 }
 
 pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGenerationFailed}!void {
@@ -94,7 +94,7 @@ pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGene
     var collision_count: u32 = 0;
     while (collision_count < max_collision_attempts) : (collision_count += 1) {
         var bytes: [6]u8 = undefined;
-        std.crypto.random.bytes(&bytes);
+        @import("compat").randomBytes(&bytes);
 
         for (bytes, 0..) |b, i| {
             buf[i * 2] = chars[b >> 4];
@@ -106,10 +106,10 @@ pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGene
             containers_subdir, buf,
         }) catch continue;
 
-        std.fs.cwd().access(dir_path, .{}) catch return;
+        @import("compat").cwd().access(dir_path, .{}) catch return;
     }
 
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
     var counter: u16 = 0;
     while (counter < 1000) : (counter += 1) {
         const unique_val: u64 = @as(u64, @intCast(now)) << 16 | counter;
@@ -131,7 +131,7 @@ pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGene
             containers_subdir, buf,
         }) catch continue;
 
-        std.fs.cwd().access(dir_path, .{}) catch return;
+        @import("compat").cwd().access(dir_path, .{}) catch return;
     }
 
     return error.IdGenerationFailed;

@@ -142,8 +142,8 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     }
 
     if (host_mode) {
-        posix.chdir(ctx.working_dir) catch {
-            posix.chdir("/") catch {};
+        @import("compat").posix.chdir(ctx.working_dir) catch {
+            @import("compat").posix.chdir("/") catch {};
         };
         return execCommandWrapper(@ptrCast(@constCast(ctx)));
     }
@@ -151,8 +151,8 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     setHostname(ctx.hostname);
     _ = linux.syscall1(.umask, 0o022);
 
-    posix.chdir(ctx.working_dir) catch {
-        posix.chdir("/") catch {};
+    @import("compat").posix.chdir(ctx.working_dir) catch {
+        @import("compat").posix.chdir("/") catch {};
     };
 
     security.apply() catch return @intFromEnum(ExitCode.security_failed);

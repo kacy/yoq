@@ -44,18 +44,18 @@ pub fn handleClusterStatus(alloc: std.mem.Allocator, ctx: RouteContext) Response
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     writer.writeAll("{\"cluster\":true") catch return common.internalError();
-    std.fmt.format(writer, ",\"id\":{d}", .{node.config.id}) catch return common.internalError();
+    @import("compat").format(writer, ",\"id\":{d}", .{node.config.id}) catch return common.internalError();
     writer.writeAll(",\"role\":\"") catch return common.internalError();
     writer.writeAll(role_str) catch return common.internalError();
     writer.writeByte('"') catch return common.internalError();
-    std.fmt.format(writer, ",\"term\":{d}", .{node.currentTerm()}) catch return common.internalError();
-    std.fmt.format(writer, ",\"peers\":{d}", .{node.config.peers.len}) catch return common.internalError();
+    @import("compat").format(writer, ",\"term\":{d}", .{node.currentTerm()}) catch return common.internalError();
+    @import("compat").format(writer, ",\"peers\":{d}", .{node.config.peers.len}) catch return common.internalError();
 
     if (node.leaderId()) |lid| {
-        std.fmt.format(writer, ",\"leader_id\":{d}", .{lid}) catch return common.internalError();
+        @import("compat").format(writer, ",\"leader_id\":{d}", .{lid}) catch return common.internalError();
         var addr_buf: [64]u8 = undefined;
         if (node.leaderAddrBuf(&addr_buf)) |addr| {
             writer.writeAll(",\"leader\":\"") catch return common.internalError();

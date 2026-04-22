@@ -123,11 +123,11 @@ pub const PortMapper = struct {
             log.debug("ebpf: failed to detach port mapper: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
+            @import("compat").posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
         }
         if (self.map_fd >= 0) {
-            posix.close(self.map_fd);
+            @import("compat").posix.close(self.map_fd);
             resource_support.releaseBpfFd();
         }
     }
@@ -143,16 +143,16 @@ pub fn load(if_index: u32) common.EbpfError!PortMapper {
 
     var map_fds = [_]posix.fd_t{map_fd};
     const prog_fd = program_support.loadProgramWithType(port_map_prog, &map_fds, .xdp) catch |e| {
-        posix.close(map_fd);
+        @import("compat").posix.close(map_fd);
         resource_support.releaseBpfFd();
         return e;
     };
 
     attach_support.attachXdp(if_index, prog_fd) catch |e| {
         log.warn("ebpf: failed to attach XDP on ifindex {d}: {}", .{ if_index, e });
-        posix.close(prog_fd);
+        @import("compat").posix.close(prog_fd);
         resource_support.releaseBpfFd();
-        posix.close(map_fd);
+        @import("compat").posix.close(map_fd);
         resource_support.releaseBpfFd();
         return common.EbpfError.AttachFailed;
     };

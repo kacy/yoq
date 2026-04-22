@@ -123,7 +123,7 @@ pub const ContainerConfig = struct {
 pub const Container = struct {
     const RuntimeHandles = struct {
         cgroup: ?cgroups.Cgroup = null,
-        log_file: ?std.fs.File = null,
+        log_file: ?@import("compat").File = null,
         stdout_thread: ?std.Thread = null,
         stderr_thread: ?std.Thread = null,
         mirror_output: bool = false,
@@ -140,7 +140,7 @@ pub const Container = struct {
     /// protects status, pid, and exit_code from concurrent access
     /// these fields are accessed from the main thread (poll/stop/wait)
     /// and potentially signal handlers
-    state_mutex: std.Thread.Mutex = .{},
+    state_mutex: @import("compat").Mutex = .{},
 
     /// check if the container's process is still alive.
     /// updates status if it has exited.
@@ -496,15 +496,15 @@ test "canonical bind source rejects symlink path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("real");
-    try tmp.dir.symLink("real", "link", .{});
+    try @import("compat").Dir.from(tmp.dir).makeDir("real");
+    try @import("compat").Dir.from(tmp.dir).symLink("real", "link", .{});
 
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real_path = try tmp.dir.realpath("real", &real_buf);
+    const real_path = try @import("compat").Dir.from(tmp.dir).realpath("real", &real_buf);
     try std.testing.expect(isCanonicalBindSource(real_path));
 
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base_path = try tmp.dir.realpath(".", &base_buf);
+    const base_path = try @import("compat").Dir.from(tmp.dir).realpath(".", &base_buf);
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_buf, "{s}/link", .{base_path});
     try std.testing.expect(!isCanonicalBindSource(link_path));

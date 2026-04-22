@@ -116,8 +116,8 @@ pub fn setupGpu(config: anytype, dirs: ?*const id_paths.OverlayDirs) void {
 pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespaces.SpawnResult) void {
     runtime.log_file = logs.createLogFile(config.id) catch |err| blk: {
         log.warn("failed to create log file for {s}: {}", .{ config.id, err });
-        posix.close(spawn_result.stdout_fd);
-        posix.close(spawn_result.stderr_fd);
+        @import("compat").posix.close(spawn_result.stdout_fd);
+        @import("compat").posix.close(spawn_result.stderr_fd);
         break :blk null;
     };
 
@@ -131,7 +131,7 @@ pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespa
             runtime.mirror_output,
         }) catch |err| blk: {
             log.warn("failed to spawn stdout capture thread: {}", .{err});
-            posix.close(spawn_result.stdout_fd);
+            @import("compat").posix.close(spawn_result.stdout_fd);
             break :blk null;
         };
 
@@ -144,7 +144,7 @@ pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespa
             runtime.mirror_output,
         }) catch |err| blk: {
             log.warn("failed to spawn stderr capture thread: {}", .{err});
-            posix.close(spawn_result.stderr_fd);
+            @import("compat").posix.close(spawn_result.stderr_fd);
             break :blk null;
         };
     }
@@ -165,11 +165,11 @@ pub fn cleanupFailedSpawn(
     process.kill(spawn_result.pid) catch {};
     self.runtime.cgroup.?.destroy() catch {};
     if (spawn_result.ready_fd >= 0) {
-        std.posix.close(spawn_result.ready_fd);
+        @import("compat").posix.close(spawn_result.ready_fd);
         spawn_result.ready_fd = -1;
     }
-    std.posix.close(spawn_result.stdout_fd);
-    std.posix.close(spawn_result.stderr_fd);
+    @import("compat").posix.close(spawn_result.stdout_fd);
+    @import("compat").posix.close(spawn_result.stderr_fd);
     self.pid = null;
     self.status = .created;
     active_pid.store(0, .release);

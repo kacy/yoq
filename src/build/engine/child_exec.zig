@@ -37,8 +37,8 @@ pub fn buildChildMain(arg: ?*anyopaque) callconv(.c) u8 {
 
     filesystem.mountEssential() catch return 1;
 
-    posix.chdir(ctx.workdir) catch {
-        posix.chdir("/") catch {};
+    @import("compat").posix.chdir(ctx.workdir) catch {
+        @import("compat").posix.chdir("/") catch {};
     };
 
     return execShellCommand(ctx.command, ctx.env, ctx.shell);

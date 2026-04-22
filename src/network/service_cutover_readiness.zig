@@ -33,7 +33,7 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     defer audit.deinit(alloc);
     const steering = try steering_runtime.snapshotVipCutoverReadiness(alloc);
     const components = service_reconciler.snapshotComponentState();
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
 
     const backfill_complete = !backfill.enabled or (backfill.runs_total > 0 and backfill.last_error == null);
     const audit_fresh = blk: {

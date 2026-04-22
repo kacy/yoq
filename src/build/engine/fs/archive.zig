@@ -32,10 +32,10 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     paths.ensureDataDir("tmp") catch return error.FileNotFound;
 
     {
-        const gz_file = try std.fs.cwd().openFile(gz_path, .{});
+        const gz_file = try @import("compat").cwd().openFile(gz_path, .{});
         defer gz_file.close();
 
-        const tmp_file = try std.fs.cwd().createFile(tmp_path, .{});
+        const tmp_file = try @import("compat").cwd().createFile(tmp_path, .{});
         defer tmp_file.close();
 
         var read_buf: [4096]u8 = undefined;
@@ -54,19 +54,19 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
         try tmp_writer.interface.flush();
         tmp_file.sync() catch {};
     }
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer @import("compat").cwd().deleteFile(tmp_path) catch {};
 
     try extractUncompressedTar(tmp_path, dest_path);
 }
 
 fn extractUncompressedTar(tar_path: []const u8, dest_path: []const u8) !void {
-    const tar_file = try std.fs.cwd().openFile(tar_path, .{});
+    const tar_file = try @import("compat").cwd().openFile(tar_path, .{});
     defer tar_file.close();
 
     var tar_read_buf: [4096]u8 = undefined;
     var tar_reader = tar_file.reader(&tar_read_buf);
 
-    var dest_dir = try std.fs.cwd().openDir(dest_path, .{});
+    var dest_dir = try @import("compat").cwd().openDir(dest_path, .{});
     defer dest_dir.close();
 
     var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -87,7 +87,7 @@ fn extractUncompressedTar(tar_path: []const u8, dest_path: []const u8) !void {
                 if (entry.name.len > 0) try dest_dir.makePath(entry.name);
             },
             .file => {
-                const mode: std.fs.File.Mode = @intCast(entry.mode & 0o777);
+                const mode: @import("compat").File.Mode = @intCast(entry.mode & 0o777);
                 const fs_file = try createDirAndFile(dest_dir, entry.name, mode);
                 defer fs_file.close();
                 try copyTarEntryToFile(&it, entry, fs_file);
@@ -140,7 +140,7 @@ fn isSafeSymlinkTarget(entry_path: []const u8, link_target: []const u8) bool {
     return true;
 }
 
-fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: std.fs.File) !void {
+fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: @import("compat").File) !void {
     if (entry.size > max_file_size) return error.FileTooBig;
 
     var remaining = entry.size;
@@ -155,7 +155,7 @@ fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_fi
     it.unread_file_bytes = 0;
 }
 
-fn createDirAndFile(dir: std.fs.Dir, name: []const u8, mode: std.fs.File.Mode) !std.fs.File {
+fn createDirAndFile(dir: @import("compat").Dir, name: []const u8, mode: @import("compat").File.Mode) !@import("compat").File {
     return dir.createFile(name, .{ .mode = mode }) catch |err| {
         if (err == error.FileNotFound) {
             if (std.fs.path.dirname(name)) |dir_name| {
@@ -167,7 +167,7 @@ fn createDirAndFile(dir: std.fs.Dir, name: []const u8, mode: std.fs.File.Mode) !
     };
 }
 
-fn createDirAndSymlink(dir: std.fs.Dir, link_name: []const u8, file_name: []const u8) !void {
+fn createDirAndSymlink(dir: @import("compat").Dir, link_name: []const u8, file_name: []const u8) !void {
     dir.symLink(link_name, file_name, .{}) catch |err| {
         if (err == error.FileNotFound) {
             if (std.fs.path.dirname(file_name)) |dir_name| {

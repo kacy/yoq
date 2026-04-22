@@ -10,7 +10,7 @@ const writeErr = cli.writeErr;
 
 pub const TlsCommandsError = common.TlsCommandsError;
 
-pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn cert(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var subcmd: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -60,10 +60,10 @@ pub fn cert(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     return TlsCommandsError.InvalidArgument;
 }
 
-fn cmdCertProvision(args: *std.process.ArgIterator, alloc: std.mem.Allocator) TlsCommandsError!void {
+fn cmdCertProvision(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) TlsCommandsError!void {
     return acme_command.provision(args, alloc);
 }
 
-fn cmdCertRenew(args: *std.process.ArgIterator, alloc: std.mem.Allocator) TlsCommandsError!void {
+fn cmdCertRenew(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) TlsCommandsError!void {
     return acme_command.renew(args, alloc);
 }

@@ -42,7 +42,7 @@ const Snapshot = struct {
     }
 };
 
-pub fn gpu(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn gpu(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const parsed = try parseGpuCommand(args);
 
     switch (parsed.subcommand) {
@@ -269,7 +269,7 @@ fn topoJson(snapshot: *Snapshot) void {
     w.flush();
 }
 
-fn parseGpuCommand(args: *std.process.ArgIterator) !ParsedGpuCommand {
+fn parseGpuCommand(args: *std.process.Args.Iterator) !ParsedGpuCommand {
     var subcmd: ?[]const u8 = null;
     var bench_opts = BenchOpts{};
 
@@ -320,7 +320,7 @@ fn parseGpuCommand(args: *std.process.ArgIterator) !ParsedGpuCommand {
 }
 
 fn parseRequiredValue(
-    args: *std.process.ArgIterator,
+    args: *std.process.Args.Iterator,
     flag: []const u8,
     comptime T: type,
     comptime invalid_fmt: []const u8,
@@ -398,13 +398,13 @@ fn formatGpuSm(info: *const detect.GpuInfo, buf: []u8) []const u8 {
 }
 
 fn formatGpuPeers(info: *const detect.GpuInfo, buf: []u8) []const u8 {
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
 
     for (0..info.nvlink_peer_count) |i| {
         if (i > 0) {
             stream.writer().writeByte(',') catch break;
         }
-        std.fmt.format(stream.writer(), "{d}", .{info.nvlink_peers[i]}) catch break;
+        @import("compat").format(stream.writer(), "{d}", .{info.nvlink_peers[i]}) catch break;
     }
 
     const written = stream.getWritten();

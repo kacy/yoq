@@ -21,7 +21,7 @@ pub fn hashFiles(
         };
     };
 
-    var dir = std.fs.cwd().openDir(context_dir, .{}) catch return types.ContextError.NotFound;
+    var dir = @import("compat").cwd().openDir(context_dir, .{}) catch return types.ContextError.NotFound;
     defer dir.close();
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -43,7 +43,7 @@ pub fn hashFiles(
 
 fn hashDirectory(
     alloc: std.mem.Allocator,
-    base_dir: std.fs.Dir,
+    base_dir: @import("compat").Dir,
     sub_path: []const u8,
     hasher: *std.crypto.hash.sha2.Sha256,
 ) types.ContextError!blob_store.Digest {
@@ -86,7 +86,7 @@ fn hashDirectory(
 }
 
 fn hashOpenFile(
-    dir: std.fs.Dir,
+    dir: @import("compat").Dir,
     path: []const u8,
     hasher: *std.crypto.hash.sha2.Sha256,
 ) types.ContextError!void {

@@ -45,7 +45,7 @@ pub fn cleanupNetwork(container_id: []const u8, ip_address: ?[]const u8, veth_ho
     }
 }
 
-pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn stop(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const id = requireArg(args, "usage: yoq stop <container-id|name>\n");
 
     const record = state_support.resolveContainerRef(alloc, id) catch |e| return e;
@@ -69,7 +69,7 @@ pub fn stop(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     write("{s}\n", .{record.id});
 }
 
-pub fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn rm(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const id = requireArg(args, "usage: yoq rm <container-id|name>\n");
 
     const record = state_support.resolveContainerRef(alloc, id) catch |e| return e;
@@ -86,7 +86,7 @@ pub fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     write("{s}\n", .{id});
 }
 
-pub fn restart(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn restart(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const ref = requireArg(args, "usage: yoq restart <container-id|name>\n");
     const record = state_support.resolveContainerRef(alloc, ref) catch |e| return e;
     defer record.deinit(alloc);

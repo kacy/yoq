@@ -16,7 +16,7 @@ pub const RuntimeError = service_registry.Error || error{
     StoreWriteFailed,
 };
 
-var mutex: std.Thread.Mutex = .{};
+var mutex: @import("compat").Mutex = .{};
 var initialized: bool = false;
 var registry: service_registry.Registry = undefined;
 

@@ -116,7 +116,7 @@ pub fn decodeUpdates(data: []const u8, count: u8, BoundedUpdates: type, MemberSt
                 .ip = data[pos + 8 ..][0..4].*,
                 .port = @as(u16, data[pos + 12]) | (@as(u16, data[pos + 13]) << 8),
             },
-            .state = std.meta.intToEnum(MemberState, data[pos + 14]) catch return .{},
+            .state = @import("compat").intToEnum(MemberState, data[pos + 14]) catch return .{},
             .incarnation = readU64(data[pos + 15 ..]),
         };
         pos += 23;

@@ -17,7 +17,7 @@ pub fn parseGossipSeeds(self: anytype, body: []const u8) void {
     const arr = body[arr_start..arr_end];
     if (arr.len == 0) return;
 
-    var seeds: std.ArrayListUnmanaged([]const u8) = .{};
+    var seeds: std.ArrayListUnmanaged([]const u8) = .empty;
     var pos: usize = 0;
     while (pos < arr.len) {
         const quote_start = std.mem.indexOfPos(u8, arr, pos, "\"") orelse break;

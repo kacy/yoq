@@ -25,7 +25,7 @@ const StatusError = error{
     OutOfMemory,
 };
 
-pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn status(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var verbose = false;
     var server: ?cli.ServerAddr = null;
     var app_mode = false;
@@ -75,7 +75,7 @@ pub fn status(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     try statusLocal(alloc, verbose);
 }
 
-pub fn apps(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn apps(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var server: ?cli.ServerAddr = null;
     var filters = AppListFilters{};
 
@@ -853,7 +853,7 @@ fn snapshotFromDeployments(
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch return StatusError.StoreError;
+    const cwd = @import("compat").cwd().realpath(".", &cwd_buf) catch return StatusError.StoreError;
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return StatusError.OutOfMemory;
 }
 

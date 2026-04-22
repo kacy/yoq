@@ -120,7 +120,7 @@ pub fn checkKernel() Check {
 }
 
 pub fn checkCgroupV2() Check {
-    const file = std.fs.openFileAbsolute("/sys/fs/cgroup/cgroup.controllers", .{}) catch {
+    const file = @import("compat").openFileAbsolute("/sys/fs/cgroup/cgroup.controllers", .{}) catch {
         return makeCheck("cgroup-v2", .fail, "/sys/fs/cgroup/cgroup.controllers not found");
     };
     file.close();
@@ -128,7 +128,7 @@ pub fn checkCgroupV2() Check {
 }
 
 pub fn checkEbpf() Check {
-    std.fs.accessAbsolute("/sys/fs/bpf", .{}) catch {
+    @import("compat").accessAbsolute("/sys/fs/bpf", .{}) catch {
         return makeCheck("ebpf", .fail, "/sys/fs/bpf not mounted");
     };
     return makeCheck("ebpf", .pass, "bpf filesystem available");
@@ -143,7 +143,7 @@ pub fn checkGpu() Check {
 }
 
 pub fn checkWireguard() Check {
-    std.fs.accessAbsolute("/sys/module/wireguard", .{}) catch {
+    @import("compat").accessAbsolute("/sys/module/wireguard", .{}) catch {
         return makeCheck("wireguard", .warn, "wireguard module not loaded (cluster networking unavailable)");
     };
     return makeCheck("wireguard", .pass, "wireguard module loaded");

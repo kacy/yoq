@@ -6,7 +6,7 @@ pub const rate_table_size: usize = 64;
 
 pub const RateLimiter = struct {
     entries: [rate_table_size]RateEntry,
-    mutex: std.Thread.Mutex,
+    mutex: @import("compat").Mutex,
 
     const RateEntry = struct {
         ip: u32,
@@ -30,7 +30,7 @@ pub const RateLimiter = struct {
     }
 
     pub fn checkRate(self: *RateLimiter, ip: u32) bool {
-        return self.checkRateAt(ip, std.time.timestamp());
+        return self.checkRateAt(ip, @import("compat").timestamp());
     }
 
     pub fn checkRateAt(self: *RateLimiter, ip: u32, now: i64) bool {

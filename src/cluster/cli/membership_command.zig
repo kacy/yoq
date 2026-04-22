@@ -17,7 +17,7 @@ const MembershipError = error{
     ServerStartFailed,
 };
 
-pub fn join(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn join(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var server_host: ?[]const u8 = null;
     var token: ?[]const u8 = null;
     var api_port: u16 = 7700;

@@ -199,7 +199,7 @@ pub const ApplicationSpec = struct {
     pub fn toLegacyDeployJson(self: *const ApplicationSpec, alloc: std.mem.Allocator) ![]u8 {
         var json_buf: std.ArrayList(u8) = .empty;
         errdefer json_buf.deinit(alloc);
-        const writer = json_buf.writer(alloc);
+        const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
         try writer.writeAll("{\"volume_app\":\"");
         try json_helpers.writeJsonEscaped(writer, self.app_name);
@@ -253,7 +253,7 @@ pub const ApplicationSpec = struct {
     pub fn toApplyJson(self: *const ApplicationSpec, alloc: std.mem.Allocator) ![]u8 {
         var json_buf: std.ArrayList(u8) = .empty;
         errdefer json_buf.deinit(alloc);
-        const writer = json_buf.writer(alloc);
+        const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
         try writer.writeAll("{\"app_name\":\"");
         try json_helpers.writeJsonEscaped(writer, self.app_name);

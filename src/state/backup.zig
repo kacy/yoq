@@ -150,7 +150,7 @@ test "validateBackupSchema rejects incomplete database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try @import("compat").Dir.from(tmp.dir).realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(path);
 
     var path_buf: [paths.max_path]u8 = undefined;

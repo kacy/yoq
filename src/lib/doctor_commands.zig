@@ -10,7 +10,7 @@ const doctor = @import("doctor.zig");
 
 const write = cli.write;
 
-pub fn doctorCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn doctorCmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     _ = alloc;
 
     while (args.next()) |arg| {

@@ -8,7 +8,7 @@ pub fn encrypt(allocator: std.mem.Allocator, plaintext: []const u8, key: [common
     errdefer allocator.free(ciphertext);
 
     var nonce: [common.nonce_length]u8 = undefined;
-    std.crypto.random.bytes(&nonce);
+    @import("compat").randomBytes(&nonce);
 
     var tag: [common.tag_length]u8 = undefined;
     XChaCha20Poly1305.encrypt(ciphertext, &tag, plaintext, "", nonce, key);

@@ -1,7 +1,7 @@
 const std = @import("std");
 
-// sqlite version hash from build.zig.zon - bump this when updating sqlite
-const SQLITE_HASH = "sqlite-3.48.0-F2R_a9eODgDPCO5CDptJHZINZSIn48IFVIWUhuxxwGTb";
+// sqlite wrapper cache key - bump this when updating the vendored wrapper.
+const SQLITE_HASH = "sqlite-3.48.0-F2R_a8KPDgC9FKAvA3_lf1enn92aBWSbm5TV_W9J8bXx";
 
 /// check if we have a cached sqlite build matching current version
 fn hasCachedSqlite(b: *std.Build) bool {
@@ -46,17 +46,17 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.Resolve
         "-DSQLITE_ENABLE_FTS5",
         "-DSQLITE_ENABLE_JSON1",
     };
-    sqlite_lib.addCSourceFile(.{
+    sqlite_lib.root_module.addCSourceFile(.{
         .file = sqlite_upstream.path("sqlite3.c"),
         .flags = c_flags,
     });
     // zig-sqlite's workaround.c provides sqliteTransientAsDestructor
-    sqlite_lib.addCSourceFile(.{
+    sqlite_lib.root_module.addCSourceFile(.{
         .file = sqlite_dep.path("c/workaround.c"),
         .flags = c_flags,
     });
-    sqlite_lib.addIncludePath(sqlite_upstream.path("."));
-    sqlite_lib.addIncludePath(sqlite_dep.path("c"));
+    sqlite_lib.root_module.addIncludePath(sqlite_upstream.path("."));
+    sqlite_lib.root_module.addIncludePath(sqlite_dep.path("c"));
 
     // create the sqlite module using zig-sqlite's Zig wrapper but our static lib
     const sqlite_mod = b.addModule("sqlite-import", .{
@@ -70,6 +70,13 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.Resolve
     sqlite_mod.linkLibrary(sqlite_lib);
 
     module.addImport("sqlite", sqlite_mod);
+
+    const compat_mod = b.createModule(.{
+        .root_source_file = b.path("src/lib/compat.zig"),
+        .target = mod_target,
+        .optimize = mod_optimize,
+    });
+    module.addImport("compat", compat_mod);
 }
 
 pub fn build(b: *std.Build) void {
@@ -439,7 +446,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    sqlite_lib.addCSourceFile(.{
+    sqlite_lib.root_module.addCSourceFile(.{
         .file = sqlite_c_path,
         .flags = &.{
             "-std=c99",

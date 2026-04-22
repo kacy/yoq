@@ -233,7 +233,7 @@ pub fn deleteOtherAssignmentsForWorkloadSql(
     workload_name: []const u8,
     keep_ids: []const []const u8,
 ) ![]const u8 {
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     var app_esc_buf: [256]u8 = undefined;
@@ -265,7 +265,7 @@ pub fn deleteAssignmentsByIdsSql(
     buf: []u8,
     assignment_ids: []const []const u8,
 ) ![]const u8 {
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     try writer.writeAll("DELETE FROM assignments");

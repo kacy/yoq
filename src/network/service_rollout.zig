@@ -13,7 +13,7 @@ pub const Mode = enum {
     shadow,
 };
 
-var flags_mutex: std.Thread.Mutex = .{};
+var flags_mutex: @import("compat").Mutex = .{};
 var flags_initialized: bool = false;
 var flags: Flags = .{};
 var logged_rollout_state: bool = false;
@@ -104,14 +104,14 @@ fn modeLabel(current_mode: Mode) []const u8 {
 }
 
 fn readDeprecatedAlwaysOnBoolEnv(name: []const u8, replacement: []const u8) bool {
-    const raw = std.posix.getenv(name) orelse return true;
+    const raw = @import("compat").getenv(name) orelse return true;
     _ = parseBool(name, raw);
     log.warn("service discovery compatibility flag {s} is deprecated and ignored; {s}", .{ name, replacement });
     return true;
 }
 
 fn readAlwaysOnBoolEnv(name: []const u8) bool {
-    const raw = std.posix.getenv(name) orelse return true;
+    const raw = @import("compat").getenv(name) orelse return true;
     _ = parseBool(name, raw);
     log.warn("service discovery compatibility flag {s} is deprecated and ignored; HTTP proxy routing is always on", .{name});
     return true;

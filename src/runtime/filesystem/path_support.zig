@@ -14,12 +14,12 @@ pub fn isPathSafe(path: []const u8) bool {
 }
 
 pub fn isSymlink(path: []const u8) bool {
-    const stat = posix.fstatat(posix.AT.FDCWD, path, posix.AT.SYMLINK_NOFOLLOW) catch return false;
+    const stat = @import("compat").posix.fstatat(posix.AT.FDCWD, path, posix.AT.SYMLINK_NOFOLLOW) catch return false;
     return stat.mode & posix.S.IFMT == posix.S.IFLNK;
 }
 
 pub fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
-    const fd = posix.open(path, .{ .NOFOLLOW = true, .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |e| {
+    const fd = @import("compat").posix.open(path, .{ .NOFOLLOW = true, .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |e| {
         if (e == error.NotDir or e == error.SymLinkLoop) {
             log.warn("filesystem: path is a symlink or contains symlinks: {s}", .{path});
             return FilesystemError.BindSourceIsSymlink;
@@ -28,13 +28,13 @@ pub fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
         return FilesystemError.BindSourceValidationFailed;
     };
 
-    const stat = posix.fstat(fd) catch {
-        posix.close(fd);
+    const stat = @import("compat").posix.fstat(fd) catch {
+        @import("compat").posix.close(fd);
         return FilesystemError.BindSourceValidationFailed;
     };
 
     if (stat.mode & posix.S.IFMT == posix.S.IFLNK) {
-        posix.close(fd);
+        @import("compat").posix.close(fd);
         log.warn("filesystem: path is a symlink: {s}", .{path});
         return FilesystemError.BindSourceIsSymlink;
     }
@@ -46,7 +46,7 @@ pub fn isCanonicalAbsolutePath(path: []const u8) bool {
     if (path.len == 0 or path[0] != '/') return false;
 
     var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = std.fs.cwd().realpath(path, &resolved_buf) catch return false;
+    const resolved = @import("compat").cwd().realpath(path, &resolved_buf) catch return false;
     return std.mem.eql(u8, resolved, path);
 }
 

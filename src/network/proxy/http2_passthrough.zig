@@ -56,8 +56,8 @@ pub fn streamEndSeen(buf: []const u8, target_stream_id: u32) bool {
 }
 
 pub fn relaySocketConnection(
-    client_fd: posix.socket_t,
-    upstream_fd: posix.socket_t,
+    client_fd: @import("compat").posix.socket_t,
+    upstream_fd: @import("compat").posix.socket_t,
     timeout_ms: u32,
 ) Error!void {
     var client_open = true;

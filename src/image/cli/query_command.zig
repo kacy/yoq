@@ -43,7 +43,7 @@ pub fn images(alloc: std.mem.Allocator) !void {
     }
 }
 
-pub fn rmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn rmi(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const image_str = requireArg(args, "usage: yoq rmi <image>\n");
     const ref = spec.parseImageRef(image_str);
     const image = store.findImage(alloc, ref.repository, ref.reference) catch |err| {
@@ -60,7 +60,7 @@ pub fn rmi(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     write("untagged: {s}:{s}\n", .{ image.repository, image.tag });
 }
 
-pub fn inspect(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn inspect(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const image_str = requireArg(args, "usage: yoq inspect <image>\n");
 
     while (args.next()) |arg| {

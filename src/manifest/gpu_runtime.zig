@@ -23,7 +23,7 @@ pub const MeshSupport = struct {
 
     pub fn deinit(self: *MeshSupport) void {
         if (self.topo_file_path) |path| {
-            std.fs.deleteFileAbsolute(path) catch {};
+            @import("compat").deleteFileAbsolute(path) catch {};
             self.alloc.free(path);
             self.topo_file_path = null;
         }
@@ -105,10 +105,10 @@ fn createTopologyFile(alloc: Allocator, ib_result: gpu_mesh.IbDetectResult) ?[]c
         const path = std.fmt.bufPrint(
             &path_buf,
             "/tmp/yoq-nccl-topology-{x}.xml",
-            .{std.crypto.random.int(u64)},
+            .{@import("compat").randomInt(u64)},
         ) catch return null;
 
-        var file = std.fs.createFileAbsolute(path, .{ .exclusive = true }) catch |err| switch (err) {
+        var file = @import("compat").createFileAbsolute(path, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => {
                 log.warn("failed to create NCCL topology file: {}", .{err});
@@ -119,12 +119,12 @@ fn createTopologyFile(alloc: Allocator, ib_result: gpu_mesh.IbDetectResult) ?[]c
 
         file.writeAll(topo_xml) catch |err| {
             log.warn("failed to write NCCL topology file: {}", .{err});
-            std.fs.deleteFileAbsolute(path) catch {};
+            @import("compat").deleteFileAbsolute(path) catch {};
             return null;
         };
 
         return alloc.dupe(u8, path) catch {
-            std.fs.deleteFileAbsolute(path) catch {};
+            @import("compat").deleteFileAbsolute(path) catch {};
             return null;
         };
     }

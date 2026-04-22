@@ -51,7 +51,7 @@ pub fn createRunningContainer(
         .ip_address = try alloc.dupe(u8, "10.0.0.1"),
         .veth_host = try alloc.dupe(u8, "veth0"),
         .app_name = try alloc.dupe(u8, "test-app"),
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     };
 }
 
@@ -75,7 +75,7 @@ pub fn createStoppedContainer(
         .ip_address = null,
         .veth_host = null,
         .app_name = try alloc.dupe(u8, "test-app"),
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     };
 }
 
@@ -99,7 +99,7 @@ pub fn createMinimalContainer(
         .ip_address = null,
         .veth_host = null,
         .app_name = null,
-        .created_at = std.time.timestamp(),
+        .created_at = @import("compat").timestamp(),
     };
 }
 

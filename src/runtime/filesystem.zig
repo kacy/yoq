@@ -178,17 +178,17 @@ test "isSymlink detects symlinks" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("realdir");
-    try tmp.dir.symLink("realdir", "linkdir", .{});
+    try @import("compat").Dir.from(tmp.dir).makeDir("realdir");
+    try @import("compat").Dir.from(tmp.dir).symLink("realdir", "linkdir", .{});
 
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real_path = try tmp.dir.realpath("realdir", &real_buf);
+    const real_path = try @import("compat").Dir.from(tmp.dir).realpath("realdir", &real_buf);
     try std.testing.expect(!isSymlink(real_path));
 
     // for the symlink, we need the path without resolving it.
     // realpath resolves symlinks, so we build the path manually.
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base_path = try tmp.dir.realpath(".", &base_buf);
+    const base_path = try @import("compat").Dir.from(tmp.dir).realpath(".", &base_buf);
     var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/linkdir", .{base_path}) catch unreachable;
     try std.testing.expect(isSymlink(link_path));
@@ -204,14 +204,14 @@ test "isCanonicalAbsolutePath rejects non-canonical and relative paths" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("real");
-    try tmp.dir.symLink("real", "link", .{});
+    try @import("compat").Dir.from(tmp.dir).makeDir("real");
+    try @import("compat").Dir.from(tmp.dir).symLink("real", "link", .{});
 
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = try tmp.dir.realpath(".", &base_buf);
+    const base = try @import("compat").Dir.from(tmp.dir).realpath(".", &base_buf);
 
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real = try tmp.dir.realpath("real", &real_buf);
+    const real = try @import("compat").Dir.from(tmp.dir).realpath("real", &real_buf);
     try std.testing.expect(isCanonicalAbsolutePath(real));
 
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -226,13 +226,13 @@ test "validatePathNoSymlink accepts regular files" {
     defer tmp.cleanup();
 
     // create a regular file
-    try tmp.dir.writeFile(.{ .sub_path = "testfile", .data = "test content" });
+    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "testfile", .data = "test content" });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try tmp.dir.realpath("testfile", &path_buf);
+    const path = try @import("compat").Dir.from(tmp.dir).realpath("testfile", &path_buf);
 
     const fd = try validatePathNoSymlink(path);
-    posix.close(fd);
+    @import("compat").posix.close(fd);
 }
 
 test "validatePathNoSymlink accepts directories" {
@@ -240,13 +240,13 @@ test "validatePathNoSymlink accepts directories" {
     defer tmp.cleanup();
 
     // create a directory
-    try tmp.dir.makeDir("testdir");
+    try @import("compat").Dir.from(tmp.dir).makeDir("testdir");
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try tmp.dir.realpath("testdir", &path_buf);
+    const path = try @import("compat").Dir.from(tmp.dir).realpath("testdir", &path_buf);
 
     const fd = try validatePathNoSymlink(path);
-    posix.close(fd);
+    @import("compat").posix.close(fd);
 }
 
 test "validatePathNoSymlink rejects symlinks" {
@@ -254,11 +254,11 @@ test "validatePathNoSymlink rejects symlinks" {
     defer tmp.cleanup();
 
     // create a file and symlink to it
-    try tmp.dir.writeFile(.{ .sub_path = "realfile", .data = "content" });
-    try tmp.dir.symLink("realfile", "linkfile", .{});
+    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "realfile", .data = "content" });
+    try @import("compat").Dir.from(tmp.dir).symLink("realfile", "linkfile", .{});
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = try tmp.dir.realpath(".", &path_buf);
+    const base = try @import("compat").Dir.from(tmp.dir).realpath(".", &path_buf);
 
     var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/linkfile", .{base});

@@ -3,7 +3,7 @@ const types = @import("types.zig");
 
 pub fn generateKeyPair() types.WireguardError!types.KeyPair {
     const X25519 = std.crypto.dh.X25519;
-    var raw_kp = X25519.KeyPair.generate();
+    var raw_kp = X25519.KeyPair.generate(@import("compat").io());
     defer std.crypto.secureZero(u8, &raw_kp.secret_key);
 
     var kp: types.KeyPair = undefined;

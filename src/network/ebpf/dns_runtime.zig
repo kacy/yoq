@@ -39,12 +39,12 @@ pub const DnsInterceptor = struct {
             log.debug("ebpf: failed to detach DNS interceptor: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
+            @import("compat").posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
             self.prog_fd = -1;
         }
         if (self.map_fd >= 0) {
-            posix.close(self.map_fd);
+            @import("compat").posix.close(self.map_fd);
             resource_support.releaseBpfFd();
             self.map_fd = -1;
         }
@@ -91,14 +91,14 @@ pub fn load(bridge_if_index: u32) common.EbpfError!DnsInterceptor {
         map_def.max_entries,
     );
     errdefer {
-        posix.close(map_fd);
+        @import("compat").posix.close(map_fd);
         resource_support.releaseBpfFd();
     }
 
     var map_fds = [_]posix.fd_t{map_fd};
     const prog_fd = try program_support.loadProgram(dns_intercept, &map_fds);
     errdefer {
-        posix.close(prog_fd);
+        @import("compat").posix.close(prog_fd);
         resource_support.releaseBpfFd();
     }
 

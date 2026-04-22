@@ -18,16 +18,16 @@ const RateLimitEntry = struct {
 var upstream_dns: [4]u8 = .{ 8, 8, 8, 8 };
 var upstream_initialized: bool = false;
 var resolver_thread: ?std.Thread = null;
-var resolver_socket: ?posix.socket_t = null;
+var resolver_socket: ?@import("compat").posix.socket_t = null;
 var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var external_resolver_available: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var resolver_mutex: std.Thread.Mutex = .{};
+var resolver_mutex: @import("compat").Mutex = .{};
 var rate_limits: [256]RateLimitEntry = [_]RateLimitEntry{.{
     .ip = 0,
     .tokens = rate_limit_max_tokens,
     .last_refill = 0,
 }} ** 256;
-var rate_limit_mutex: std.Thread.Mutex = .{};
+var rate_limit_mutex: @import("compat").Mutex = .{};
 
 pub fn startResolver() void {
     resolver_mutex.lock();
@@ -37,7 +37,7 @@ pub fn startResolver() void {
 
     initUpstreamDns();
 
-    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0) catch |e| {
+    const sock = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0) catch |e| {
         log.warn("dns: failed to create socket: {}", .{e});
         return;
     };
@@ -47,14 +47,14 @@ pub fn startResolver() void {
         .addr = std.mem.nativeToBig(u32, (@as(u32, 10) << 24) | (@as(u32, 42) << 16) | (@as(u32, 0) << 8) | 1),
     };
 
-    posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |e| {
+    @import("compat").posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |e| {
         if (e == error.AddressInUse) {
             external_resolver_available.store(true, .release);
             log.info("dns resolver already available on 10.42.0.1:53", .{});
         } else {
             log.warn("dns: failed to bind to 10.42.0.1:53: {}", .{e});
         }
-        posix.close(sock);
+        @import("compat").posix.close(sock);
         return;
     };
 
@@ -65,7 +65,7 @@ pub fn startResolver() void {
     resolver_thread = std.Thread.spawn(.{}, resolverLoop, .{sock}) catch |e| {
         log.warn("dns: failed to spawn resolver thread: {}", .{e});
         resolver_running.store(false, .release);
-        posix.close(sock);
+        @import("compat").posix.close(sock);
         resolver_socket = null;
         return;
     };
@@ -109,7 +109,7 @@ pub fn stopResolver() void {
     // close socket after thread has exited
     resolver_mutex.lock();
     if (resolver_socket) |sock| {
-        posix.close(sock);
+        @import("compat").posix.close(sock);
         resolver_socket = null;
     }
     external_resolver_available.store(false, .release);
@@ -120,7 +120,7 @@ fn initUpstreamDns() void {
     if (upstream_initialized) return;
     upstream_initialized = true;
 
-    const content = std.fs.cwd().readFileAlloc(std.heap.page_allocator, "/etc/resolv.conf", 4096) catch {
+    const content = @import("compat").cwd().readFileAlloc(std.heap.page_allocator, "/etc/resolv.conf", 4096) catch {
         log.info("dns: /etc/resolv.conf not readable, using 8.8.8.8", .{});
         return;
     };
@@ -138,7 +138,7 @@ fn checkRateLimit(client_ip: u32) bool {
     rate_limit_mutex.lock();
     defer rate_limit_mutex.unlock();
 
-    const now = std.time.milliTimestamp();
+    const now = @import("compat").milliTimestamp();
     const idx = @as(usize, @intCast(client_ip % 256));
     var entry = &rate_limits[idx];
 
@@ -163,14 +163,14 @@ fn checkRateLimit(client_ip: u32) bool {
     return true;
 }
 
-fn resolverLoop(sock: posix.socket_t) void {
+fn resolverLoop(sock: @import("compat").posix.socket_t) void {
     var recv_buf: [512]u8 = undefined;
 
     while (resolver_running.load(.acquire)) {
         var client_addr: posix.sockaddr.in = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
 
-        const recv_len = posix.recvfrom(sock, &recv_buf, 0, @ptrCast(&client_addr), &addr_len) catch {
+        const recv_len = @import("compat").posix.recvfrom(sock, &recv_buf, 0, @ptrCast(&client_addr), &addr_len) catch {
             if (!resolver_running.load(.acquire)) break;
             continue;
         };
@@ -193,7 +193,7 @@ fn resolverLoop(sock: posix.socket_t) void {
 }
 
 fn handleQuery(
-    sock: posix.socket_t,
+    sock: @import("compat").posix.socket_t,
     query: []const u8,
     client_addr: *const posix.sockaddr.in,
     addr_len: posix.socklen_t,
@@ -221,7 +221,7 @@ fn handleQuery(
     if (registry_support.lookupServiceForDns(name)) |service_ip| {
         var response_buf: [512]u8 = undefined;
         if (packet_support.buildResponse(query, query.len, service_ip, &response_buf)) |resp_len| {
-            _ = posix.sendto(sock, response_buf[0..resp_len], 0, @ptrCast(client_addr), addr_len) catch |e| {
+            _ = @import("compat").posix.sendto(sock, response_buf[0..resp_len], 0, @ptrCast(client_addr), addr_len) catch |e| {
                 log.warn("dns: failed to send response: {}", .{e});
             };
             return;
@@ -232,13 +232,13 @@ fn handleQuery(
 }
 
 fn forwardQuery(
-    sock: posix.socket_t,
+    sock: @import("compat").posix.socket_t,
     query: []const u8,
     client_addr: *const posix.sockaddr.in,
     addr_len: posix.socklen_t,
 ) void {
-    const upstream_sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch return;
-    defer posix.close(upstream_sock);
+    const upstream_sock = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch return;
+    defer @import("compat").posix.close(upstream_sock);
 
     const timeout = posix.timeval{ .sec = 2, .usec = 0 };
     posix.setsockopt(upstream_sock, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |e| {
@@ -252,13 +252,13 @@ fn forwardQuery(
         .addr = std.mem.nativeToBig(u32, expected_addr),
     };
 
-    _ = posix.sendto(upstream_sock, query, 0, @ptrCast(&upstream_addr), @sizeOf(posix.sockaddr.in)) catch return;
+    _ = @import("compat").posix.sendto(upstream_sock, query, 0, @ptrCast(&upstream_addr), @sizeOf(posix.sockaddr.in)) catch return;
 
     var response_buf: [512]u8 = undefined;
     var resp_addr: posix.sockaddr.in = undefined;
     var resp_addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
 
-    const resp_n = posix.recvfrom(upstream_sock, &response_buf, 0, @ptrCast(&resp_addr), &resp_addr_len) catch return;
+    const resp_n = @import("compat").posix.recvfrom(upstream_sock, &response_buf, 0, @ptrCast(&resp_addr), &resp_addr_len) catch return;
 
     if (resp_addr.addr != upstream_addr.addr or resp_addr.port != upstream_addr.port) {
         log.warn("dns: dropping response from unexpected source (expected {d}.{d}.{d}.{d}:{d})", .{
@@ -286,7 +286,7 @@ fn forwardQuery(
         return;
     }
 
-    _ = posix.sendto(sock, response_buf[0..resp_n], 0, @ptrCast(client_addr), addr_len) catch |e| {
+    _ = @import("compat").posix.sendto(sock, response_buf[0..resp_n], 0, @ptrCast(client_addr), addr_len) catch |e| {
         log.warn("dns: failed to relay upstream response: {}", .{e});
     };
 }

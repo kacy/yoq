@@ -11,20 +11,20 @@ const TransportError = common.TransportError;
 pub fn initUdp(self: anytype, port: u16) !void {
     if (self.udp_fd != null) return;
 
-    const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-    errdefer posix.close(fd);
+    const fd = try @import("compat").posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    errdefer @import("compat").posix.close(fd);
 
     const one: i32 = 1;
     try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
 
-    const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-    try posix.bind(fd, &addr.any, addr.getOsSockLen());
+    const addr = @import("compat").net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+    try @import("compat").posix.bind(fd, &addr.any, addr.getOsSockLen());
     self.udp_fd = fd;
 }
 
 pub fn deinitUdp(self: anytype) void {
     if (self.udp_fd) |fd| {
-        posix.close(fd);
+        @import("compat").posix.close(fd);
         self.udp_fd = null;
     }
 }
@@ -50,8 +50,8 @@ pub fn sendGossip(self: anytype, ip: [4]u8, port: u16, payload: []const u8) Tran
     hmac.final(&tag);
     @memcpy(frame_buf[8..40], &tag);
 
-    const dest = std.net.Address.initIp4(ip, port);
-    _ = posix.sendto(fd, frame_buf[0..frame_len], 0, &dest.any, dest.getOsSockLen()) catch {
+    const dest = @import("compat").net.Address.initIp4(ip, port);
+    _ = @import("compat").posix.sendto(fd, frame_buf[0..frame_len], 0, &dest.any, dest.getOsSockLen()) catch {
         return TransportError.SendFailed;
     };
 }
@@ -62,7 +62,7 @@ pub fn receiveGossip(self: anytype, buf: []u8) TransportError!?GossipReceiveResu
 
     var from_addr: posix.sockaddr = undefined;
     var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-    const recv_len = posix.recvfrom(fd, buf, 0, &from_addr, &addr_len) catch |err| {
+    const recv_len = @import("compat").posix.recvfrom(fd, buf, 0, &from_addr, &addr_len) catch |err| {
         return switch (err) {
             error.WouldBlock => null,
             else => TransportError.ReceiveFailed,
@@ -86,17 +86,17 @@ pub fn receiveGossip(self: anytype, buf: []u8) TransportError!?GossipReceiveResu
 
     return .{
         .sender_id = common.readU64(sender_bytes),
-        .from_addr = std.net.Address{ .any = from_addr },
+        .from_addr = @import("compat").net.Address{ .any = from_addr },
         .payload = payload,
     };
 }
 
-pub fn resolvePeerId(self: anytype, addr: std.net.Address) ?NodeId {
+pub fn resolvePeerId(self: anytype, addr: @import("compat").net.Address) ?NodeId {
     var iter = self.peers.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.addr.any.family != addr.any.family) continue;
-        if (std.mem.eql(u8, std.mem.asBytes(&entry.value_ptr.addr.in.sa.addr), std.mem.asBytes(&addr.in.sa.addr)) and
-            entry.value_ptr.addr.in.sa.port == addr.in.sa.port)
+        if (std.mem.eql(u8, std.mem.asBytes(&entry.value_ptr.addr.in.addr), std.mem.asBytes(&addr.in.addr)) and
+            entry.value_ptr.addr.in.port == addr.in.port)
         {
             return entry.key_ptr.*;
         }

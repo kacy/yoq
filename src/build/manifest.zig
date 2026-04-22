@@ -50,7 +50,7 @@ pub const LoadResult = types.LoadResult;
 /// load a build manifest from a file path.
 /// caller must call result.deinit() when done.
 pub fn load(alloc: std.mem.Allocator, path: []const u8) LoadError!LoadResult {
-    const content = std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024) catch |err| {
+    const content = @import("compat").cwd().readFileAlloc(alloc, path, 1024 * 1024) catch |err| {
         return switch (err) {
             error.FileNotFound => LoadError.FileNotFound,
             else => LoadError.ReadFailed,

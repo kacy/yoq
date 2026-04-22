@@ -12,7 +12,11 @@ pub fn getSystemResources() AgentResources {
     const cpu_cores: u32 = @intCast(std.Thread.getCpuCount() catch 1);
 
     var memory_mb: u64 = 0;
-    const meminfo = std.fs.cwd().readFileAlloc(std.heap.page_allocator, "/proc/meminfo", 8192) catch "";
+    const meminfo = blk: {
+        const file = @import("compat").openFileAbsolute("/proc/meminfo", .{}) catch break :blk "";
+        defer file.close();
+        break :blk file.readToEndAlloc(std.heap.page_allocator, 8192) catch "";
+    };
     defer if (meminfo.len > 0) std.heap.page_allocator.free(meminfo);
 
     if (meminfo.len > 0) {
@@ -39,20 +43,20 @@ pub fn getSystemResources() AgentResources {
 }
 
 pub fn detectLocalIp(target: [4]u8, buf: *[16]u8) []const u8 {
-    const addr = std.net.Address.initIp4(target, 80);
+    const addr = @import("compat").net.Address.initIp4(target, 80);
 
-    const sock = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch {
+    const sock = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch {
         return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
     };
-    defer posix.close(sock);
+    defer @import("compat").posix.close(sock);
 
-    posix.connect(sock, &addr.any, addr.getOsSockLen()) catch {
+    @import("compat").posix.connect(sock, &addr.any, addr.getOsSockLen()) catch {
         return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
     };
 
     var local_addr: posix.sockaddr.storage = undefined;
     var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-    posix.getsockname(sock, @ptrCast(&local_addr), &addr_len) catch {
+    @import("compat").posix.getsockname(sock, @ptrCast(&local_addr), &addr_len) catch {
         return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
     };
 

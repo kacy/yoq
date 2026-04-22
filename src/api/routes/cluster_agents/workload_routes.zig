@@ -20,7 +20,7 @@ const TestProxyLogsOverride = struct {
     body: []const u8,
 };
 
-var test_proxy_logs_mutex: std.Thread.Mutex = .{};
+var test_proxy_logs_mutex: @import("compat").Mutex = .{};
 var test_proxy_logs_override: ?TestProxyLogsOverride = null;
 
 pub fn setTestProxyTrainingLogsResponse(path: []const u8, body: []const u8) void {
@@ -208,7 +208,7 @@ fn handleTrainingScale(
     if (rec == null) return common.notFound();
     defer rec.?.deinit(alloc);
 
-    store.updateTrainingJobGpusInDb(node.stateMachineDb(), rec.?.id, @intCast(gpus), std.time.timestamp()) catch return common.internalError();
+    store.updateTrainingJobGpusInDb(node.stateMachineDb(), rec.?.id, @intCast(gpus), @import("compat").timestamp()) catch return common.internalError();
     return scheduleTrainingJob(alloc, app_name, job_name, rec.?.id, @intCast(gpus), ctx);
 }
 
@@ -228,7 +228,7 @@ fn handleTrainingStateChange(
         error.NotLeader => common.notLeader(alloc, node),
         else => common.internalError(),
     };
-    store.updateTrainingJobStateInDb(node.stateMachineDb(), rec.?.id, new_state, std.time.timestamp()) catch return common.internalError();
+    store.updateTrainingJobStateInDb(node.stateMachineDb(), rec.?.id, new_state, @import("compat").timestamp()) catch return common.internalError();
     const updated = store.getTrainingJobInDb(node.stateMachineDb(), alloc, rec.?.id) catch return common.internalError();
     defer updated.deinit(alloc);
     return formatTrainingRecordResponse(
@@ -384,7 +384,7 @@ fn scheduleTrainingJob(
         generateClusterTrainingJobId(alloc, app_name, job_name) catch return common.internalError();
     defer alloc.free(job_id);
 
-    const now = std.time.timestamp();
+    const now = @import("compat").timestamp();
     const existing = store.findTrainingJobInDb(node.stateMachineDb(), alloc, app_name, job_name) catch return common.internalError();
     defer if (existing) |rec| rec.deinit(alloc);
     const restarts = if (existing) |rec| rec.restart_count else 0;
@@ -428,7 +428,7 @@ fn scheduleTrainingJob(
     defer freeApplyOutcomePayloads(alloc, outcome);
 
     const final_state = if (outcome.failed == 0 and outcome.placed > 0) "running" else "failed";
-    store.updateTrainingJobStateInDb(node.stateMachineDb(), job_id, final_state, std.time.timestamp()) catch return common.internalError();
+    store.updateTrainingJobStateInDb(node.stateMachineDb(), job_id, final_state, @import("compat").timestamp()) catch return common.internalError();
 
     const rec = store.getTrainingJobInDb(node.stateMachineDb(), alloc, job_id) catch return common.internalError();
     defer rec.deinit(alloc);
@@ -483,7 +483,7 @@ fn freeApplyOutcomePayloads(alloc: std.mem.Allocator, outcome: apply_release.App
 }
 
 fn generateClusterTrainingJobId(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "cluster-{s}-{s}-{d}", .{ app_name, job_name, std.time.timestamp() });
+    return std.fmt.allocPrint(alloc, "cluster-{s}-{s}-{d}", .{ app_name, job_name, @import("compat").timestamp() });
 }
 
 fn formatTrainingRecordResponse(
@@ -504,7 +504,7 @@ fn formatTrainingRecordJson(
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
 
     try writer.writeByte('{');
     try json_helpers.writeJsonStringField(writer, "app_name", record.app_name);
@@ -538,7 +538,7 @@ const RouteFlowHarness = struct {
         errdefer store.deinitTestDb();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = try tmp.dir.realpath(".", &path_buf);
+        const tmp_path = try @import("compat").Dir.from(tmp.dir).realpath(".", &path_buf);
 
         const node = try alloc.create(cluster_node.Node);
         errdefer alloc.destroy(node);

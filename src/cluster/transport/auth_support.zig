@@ -41,7 +41,7 @@ pub fn applyHmac(
 pub fn verifyAuthenticatedBody(
     body: []const u8,
     key: [32]u8,
-    from_addr: std.net.Address,
+    from_addr: @import("compat").net.Address,
     peers: *const std.AutoHashMap(NodeId, PeerAddr),
 ) TransportError!VerifiedBody {
     if (body.len < 41) return TransportError.AuthenticationFailed;

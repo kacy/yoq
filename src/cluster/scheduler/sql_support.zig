@@ -82,7 +82,7 @@ pub fn assignmentSqlGang(
 
 pub fn generateAssignmentId(buf: *[12]u8) void {
     var random_bytes: [6]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
+    @import("compat").randomBytes(&random_bytes);
     const hex = "0123456789abcdef";
     for (random_bytes, 0..) |byte, i| {
         buf[i * 2] = hex[byte >> 4];

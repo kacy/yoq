@@ -1,5 +1,8 @@
 zig-out/
 .zig-cache/
+.zig-global-cache/
+.zig-local-cache/
+zig-pkg/
 *.o
 *.so
 *.dylib

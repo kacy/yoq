@@ -14,7 +14,7 @@ pub const max_path = paths.max_path;
 pub const blob_subdir = "blobs/sha256";
 
 pub const BlobHandle = struct {
-    file: std.fs.File,
+    file: @import("compat").File,
     size: u64,
 
     pub fn close(self: *BlobHandle) void {

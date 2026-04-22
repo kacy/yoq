@@ -12,7 +12,7 @@ pub var stderr_write_failures: usize = 0;
 
 pub fn write(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
+    var w = @import("compat").File.stdout().writer(&buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stdout_write_failures += 1;
@@ -26,7 +26,7 @@ pub fn write(comptime fmt: []const u8, args: anytype) void {
 
 pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
+    var w = @import("compat").File.stderr().writer(&buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stderr_write_failures += 1;

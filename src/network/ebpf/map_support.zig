@@ -21,7 +21,7 @@ pub const MapUpdateFaultMode = enum {
     }
 };
 
-var fault_mutex: std.Thread.Mutex = .{};
+var fault_mutex: @import("compat").Mutex = .{};
 var map_update_fault_mode: MapUpdateFaultMode = .none;
 var map_update_fault_injections: u64 = 0;
 

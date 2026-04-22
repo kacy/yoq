@@ -89,7 +89,7 @@ pub const ObservedMapping = struct {
     port: u16,
 };
 
-var mutex: std.Thread.Mutex = .{};
+var mutex: @import("compat").Mutex = .{};
 var applied_mappings: std.ArrayList(ObservedMapping) = .empty;
 var running: bool = false;
 var configured_services: u32 = 0;
@@ -283,7 +283,7 @@ fn syncLocked() !void {
 
     desired_mappings = @intCast(desired.items.len);
     running = true;
-    last_sync_at = std.time.timestamp();
+    last_sync_at = @import("compat").timestamp();
 }
 
 fn buildDesiredMappingsLocked(alloc: std.mem.Allocator) !std.ArrayList(DesiredMapping) {

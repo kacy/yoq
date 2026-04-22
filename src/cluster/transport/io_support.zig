@@ -14,17 +14,17 @@ const VerifiedBody = common.VerifiedBody;
 pub fn sendBytes(self: anytype, peer_id: NodeId, peer: PeerAddr, data: []const u8) !void {
     _ = self;
     _ = peer_id;
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return TransportError.ConnectFailed;
-    defer posix.close(fd);
+    const fd = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return TransportError.ConnectFailed;
+    defer @import("compat").posix.close(fd);
 
     const timeout = posix.timeval{ .sec = 1, .usec = 0 };
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
 
-    posix.connect(fd, &peer.addr.any, peer.addr.getOsSockLen()) catch return TransportError.ConnectFailed;
+    @import("compat").posix.connect(fd, &peer.addr.any, peer.addr.getOsSockLen()) catch return TransportError.ConnectFailed;
 
     var total: usize = 0;
     while (total < data.len) {
-        const bytes_written = posix.write(fd, data[total..]) catch return TransportError.SendFailed;
+        const bytes_written = @import("compat").posix.write(fd, data[total..]) catch return TransportError.SendFailed;
         if (bytes_written == 0) return TransportError.SendFailed;
         total += bytes_written;
     }
@@ -34,15 +34,15 @@ pub fn receive(self: anytype, alloc: std.mem.Allocator) TransportError!?Received
     var client_addr: posix.sockaddr = undefined;
     var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
 
-    const client_fd = posix.accept(self.listen_fd, &client_addr, &addr_len, 0) catch |err| {
+    const client_fd = @import("compat").posix.accept(self.listen_fd, &client_addr, &addr_len, 0) catch |err| {
         return switch (err) {
             error.WouldBlock => null,
             else => TransportError.ReceiveFailed,
         };
     };
-    defer posix.close(client_fd);
+    defer @import("compat").posix.close(client_fd);
 
-    const from_addr = std.net.Address{ .any = client_addr };
+    const from_addr = @import("compat").net.Address{ .any = client_addr };
     const timeout = posix.timeval{ .sec = 5, .usec = 0 };
     posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
