@@ -245,7 +245,10 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     }
 
     const ref = image_spec.parseImageRef(image);
-    var pull_result = image_registry.pull(self.alloc, ref) catch {
+    var threaded_io = std.Io.Threaded.init(self.alloc, .{});
+    defer threaded_io.deinit();
+
+    var pull_result = image_registry.pull(threaded_io.io(), self.alloc, ref) catch {
         log.warn("failed to pull image {s} for assignment {s}", .{ image, assignment_id });
         setContainerState(self, assignment_id, .failed);
         reportStatus(self, assignment_id, "failed", "image_pull_failed");

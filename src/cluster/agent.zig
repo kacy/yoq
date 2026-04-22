@@ -124,7 +124,10 @@ pub const Agent = struct {
         const resources = resource_support.getSystemResources();
 
         // generate a wireguard keypair for mesh networking
-        const kp = wireguard.generateKeyPair() catch {
+        var threaded_io = std.Io.Threaded.init(self.alloc, .{});
+        defer threaded_io.deinit();
+
+        const kp = wireguard.generateKeyPair(threaded_io.io()) catch {
             writeErr("failed to generate wireguard keypair\n", .{});
             return AgentError.RegisterFailed;
         };

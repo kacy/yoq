@@ -1,5 +1,6 @@
 const std = @import("std");
 const platform = @import("platform");
+const AppContext = @import("../lib/app_context.zig").AppContext;
 const cli = @import("../lib/cli.zig");
 const json_out = @import("../lib/json_output.zig");
 const secrets = @import("secrets.zig");
@@ -21,7 +22,8 @@ const SecretCommandsError = error{
     OutOfMemory,
 };
 
-pub fn secret(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn secret(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    const alloc = ctx.alloc;
     var subcmd: ?[]const u8 = null;
 
     // peek at first arg — could be subcommand or --json
@@ -224,8 +226,8 @@ const BackupCommandsError = error{
     RestoreFailed,
 };
 
-pub fn backupCmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
-    _ = alloc;
+pub fn backupCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    _ = ctx;
     var output_path: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -263,8 +265,8 @@ pub fn backupCmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !vo
     write("backup saved to {s}\n", .{path});
 }
 
-pub fn restoreCmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
-    _ = alloc;
+pub fn restoreCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    _ = ctx;
     var input_path: ?[]const u8 = null;
 
     while (args.next()) |arg| {

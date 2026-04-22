@@ -19,7 +19,6 @@
 //   RFC 7468 (PEM encoding)
 
 const std = @import("std");
-const platform = @import("platform");
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
 pub const PemError = error{
@@ -263,7 +262,7 @@ test "parseEcPrivateKey round-trip with derKeyToPem" {
     const alloc = std.testing.allocator;
 
     // generate a key and convert to PEM
-    const kp = EcdsaP256.KeyPair.generate(platform.io());
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     const key_bytes = kp.secret_key.toBytes();
     const pem = try csr.derKeyToPem(alloc, &key_bytes);
     defer alloc.free(pem);

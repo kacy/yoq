@@ -74,7 +74,7 @@ pub fn createAccount(self: anytype, email: []const u8) types.AcmeError!void {
     };
 
     if (self.account_key == null) {
-        self.account_key = EcdsaP256.KeyPair.generate(platform.io());
+        self.account_key = EcdsaP256.KeyPair.generate(self.io);
     }
 
     const nonce = try fetchNonce(self);
@@ -287,7 +287,7 @@ pub fn waitForOrderReady(self: anytype, order: *types.Order) types.AcmeError!voi
 }
 
 pub fn finalize(self: anytype, order: *types.Order, domain: []const u8) types.AcmeError!types.FinalizeResult {
-    const csr_result = csr_mod.generateCsr(self.allocator, domain) catch return types.AcmeError.CsrGenerationFailed;
+    const csr_result = csr_mod.generateCsr(self.io, self.allocator, domain) catch return types.AcmeError.CsrGenerationFailed;
     defer self.allocator.free(csr_result.csr_der);
 
     const csr_b64 = jws.base64urlEncode(self.allocator, csr_result.csr_der) catch

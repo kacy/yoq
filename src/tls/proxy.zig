@@ -117,6 +117,7 @@ pub const RenewalConfig = struct {
 
 pub const TlsProxy = struct {
     allocator: std.mem.Allocator,
+    threaded_io: std.Io.Threaded,
     backends: *backend_mod.BackendRegistry,
     certs: *cert_store.CertStore,
     challenges: ChallengeStore,
@@ -145,6 +146,7 @@ pub const TlsProxy = struct {
 
         return .{
             .allocator = allocator,
+            .threaded_io = std.Io.Threaded.init(allocator, .{}),
             .backends = backends,
             .certs = certs,
             .challenges = ChallengeStore.init(allocator),
@@ -168,6 +170,7 @@ pub const TlsProxy = struct {
 
     pub fn deinit(self: *TlsProxy) void {
         self.stop();
+        self.threaded_io.deinit();
         self.challenges.deinit();
         platform.posix.close(self.tls_fd);
         platform.posix.close(self.http_fd);
@@ -332,7 +335,7 @@ pub const TlsProxy = struct {
     fn renewCertificate(self: *TlsProxy, domain: []const u8, config: RenewalConfig) RenewError!void {
         log.info("renewing certificate for {s}", .{domain});
 
-        var client = acme_mod.AcmeClient.init(self.allocator, config.directory_url);
+        var client = acme_mod.AcmeClient.init(self.threaded_io.io(), self.allocator, config.directory_url);
         defer client.deinit();
 
         var exported = client.issueAndExport(.{
@@ -421,6 +424,7 @@ pub const TlsProxy = struct {
 
         // perform TLS handshake and proxy traffic
         session_runtime.handleTlsSession(
+            self.threaded_io.io(),
             client_fd,
             client_hello,
             cert_result.cert_pem,

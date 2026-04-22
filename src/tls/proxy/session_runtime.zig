@@ -15,6 +15,7 @@ const Sha384 = std.crypto.hash.sha2.Sha384;
 const hash_len = Sha384.digest_length;
 
 pub fn handleTlsSession(
+    io: std.Io,
     client_fd: posix.fd_t,
     client_hello: []const u8,
     cert_pem: []u8,
@@ -39,7 +40,7 @@ pub fn handleTlsSession(
     else
         null;
 
-    const server_kp = X25519.KeyPair.generate(platform.io());
+    const server_kp = X25519.KeyPair.generate(io);
     const shared_secret = X25519.scalarmult(server_kp.secret_key, client_x25519_key) catch
         return error.KeyExchangeFailed;
 

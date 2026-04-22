@@ -12,8 +12,6 @@
 //   RFC 5280 §4.2.1.6 (Subject Alternative Name)
 
 const std = @import("std");
-const platform = @import("platform");
-
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
 pub const CsrError = error{
@@ -29,12 +27,13 @@ pub const CsrError = error{
 ///
 /// caller owns the returned CSR bytes.
 pub fn generateCsr(
+    io: std.Io,
     allocator: std.mem.Allocator,
     domain: []const u8,
 ) CsrError!struct { csr_der: []u8, key_pair: EcdsaP256.KeyPair } {
     if (domain.len > 253) return CsrError.DomainTooLong;
 
-    const kp = EcdsaP256.KeyPair.generate(platform.io());
+    const kp = EcdsaP256.KeyPair.generate(io);
     const csr_der = try buildCsr(allocator, domain, kp);
 
     return .{
@@ -335,7 +334,7 @@ pub fn derKeyToPem(allocator: std.mem.Allocator, raw_key: []const u8) CsrError![
 test "generateCsr produces valid DER" {
     const alloc = std.testing.allocator;
 
-    const result = try generateCsr(alloc, "example.com");
+    const result = try generateCsr(std.testing.io, alloc, "example.com");
     defer alloc.free(result.csr_der);
 
     // CSR must start with SEQUENCE tag (0x30)
@@ -349,7 +348,7 @@ test "generateCsr contains domain" {
     const alloc = std.testing.allocator;
 
     const domain = "test.example.org";
-    const result = try generateCsr(alloc, domain);
+    const result = try generateCsr(std.testing.io, alloc, domain);
     defer alloc.free(result.csr_der);
 
     // the domain should appear in the DER (in CN and SAN)
@@ -359,9 +358,9 @@ test "generateCsr contains domain" {
 test "generateCsr different domains produce different CSRs" {
     const alloc = std.testing.allocator;
 
-    const r1 = try generateCsr(alloc, "foo.com");
+    const r1 = try generateCsr(std.testing.io, alloc, "foo.com");
     defer alloc.free(r1.csr_der);
-    const r2 = try generateCsr(alloc, "bar.com");
+    const r2 = try generateCsr(std.testing.io, alloc, "bar.com");
     defer alloc.free(r2.csr_der);
 
     try std.testing.expect(!std.mem.eql(u8, r1.csr_der, r2.csr_der));
@@ -370,13 +369,13 @@ test "generateCsr different domains produce different CSRs" {
 test "generateCsr rejects domain too long" {
     const alloc = std.testing.allocator;
     const long_domain = "a" ** 254;
-    try std.testing.expectError(CsrError.DomainTooLong, generateCsr(alloc, long_domain));
+    try std.testing.expectError(CsrError.DomainTooLong, generateCsr(std.testing.io, alloc, long_domain));
 }
 
 test "CSR contains ecdsa-with-SHA256 OID" {
     const alloc = std.testing.allocator;
 
-    const result = try generateCsr(alloc, "example.com");
+    const result = try generateCsr(std.testing.io, alloc, "example.com");
     defer alloc.free(result.csr_der);
 
     const ecdsa_sha256_oid = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02 };
@@ -386,7 +385,7 @@ test "CSR contains ecdsa-with-SHA256 OID" {
 test "CSR contains ecPublicKey OID" {
     const alloc = std.testing.allocator;
 
-    const result = try generateCsr(alloc, "example.com");
+    const result = try generateCsr(std.testing.io, alloc, "example.com");
     defer alloc.free(result.csr_der);
 
     const ec_pub_oid = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
@@ -396,7 +395,7 @@ test "CSR contains ecPublicKey OID" {
 test "CSR contains subjectAltName OID" {
     const alloc = std.testing.allocator;
 
-    const result = try generateCsr(alloc, "example.com");
+    const result = try generateCsr(std.testing.io, alloc, "example.com");
     defer alloc.free(result.csr_der);
 
     const san_oid = [_]u8{ 0x55, 0x1D, 0x11 }; // 2.5.29.17
@@ -429,7 +428,7 @@ test "derKeyToPem produces valid PEM" {
     const alloc = std.testing.allocator;
 
     // generate a keypair to get a valid 32-byte secret key
-    const kp = EcdsaP256.KeyPair.generate(platform.io());
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     const key_bytes = kp.secret_key.toBytes();
 
     const pem = try derKeyToPem(alloc, &key_bytes);

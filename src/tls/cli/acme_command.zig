@@ -12,14 +12,14 @@ const store_support = @import("store_support.zig");
 const write = cli.write;
 const writeErr = cli.writeErr;
 
-pub fn provision(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
+pub fn provision(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
     const parsed = parseArgs(args) catch |err| return err;
-    try runAcmeCommand(alloc, parsed, false);
+    try runAcmeCommand(io, alloc, parsed, false);
 }
 
-pub fn renew(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
+pub fn renew(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
     const parsed = parseArgs(args) catch |err| return err;
-    try runAcmeCommand(alloc, parsed, true);
+    try runAcmeCommand(io, alloc, parsed, true);
 }
 
 const ParsedArgs = struct {
@@ -64,6 +64,7 @@ fn parseArgs(args: *std.process.Args.Iterator) common.TlsCommandsError!ParsedArg
 }
 
 fn runAcmeCommand(
+    io: std.Io,
     alloc: std.mem.Allocator,
     parsed: ParsedArgs,
     require_existing: bool,
@@ -102,7 +103,7 @@ fn runAcmeCommand(
     defer server.deinit();
     server.start();
 
-    var client = acme.AcmeClient.init(alloc, parsed.directory_url);
+    var client = acme.AcmeClient.init(io, alloc, parsed.directory_url);
     defer client.deinit();
 
     var exported = client.issueAndExport(.{

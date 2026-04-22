@@ -84,11 +84,11 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
     return last_exit;
 }
 
-pub fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
+pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
     const exe_path = platform.selfExePathAlloc(alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
 
-    const child = std.process.spawn(platform.io(), .{
+    const child = std.process.spawn(io, .{
         .argv = &.{ exe_path, "__run-supervisor", id },
         .stdin = .ignore,
         .stdout = .ignore,

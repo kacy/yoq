@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("lib/cli.zig");
+const AppContext = @import("lib/app_context.zig").AppContext;
 const command_registry = @import("lib/command_registry.zig");
 
 const writeErr = cli.writeErr;
@@ -9,6 +10,14 @@ const MAX_COMMAND_NAME_LEN = 256;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
+
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+
+    const app_ctx = AppContext{
+        .alloc = alloc,
+        .io = threaded_io.io(),
+    };
 
     var args = std.process.Args.Iterator.initAllocator(init.minimal.args, alloc) catch |err| {
         writeErr("failed to initialize argument parser: {s}\n", .{@errorName(err)});
@@ -31,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (command_registry.findCommand(command)) |spec| {
-        spec.handler(&args, alloc) catch |err| {
+        spec.handler(&args, app_ctx) catch |err| {
             // print user-friendly error message
             const error_msg = switch (err) {
                 error.OutOfMemory => "out of memory",

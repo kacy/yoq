@@ -58,7 +58,10 @@ pub fn ensureImageAvailable(alloc: std.mem.Allocator, image: []const u8) bool {
         return true;
     } else |_| {}
 
-    var result = registry.pull(alloc, ref) catch return false;
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+
+    var result = registry.pull(threaded_io.io(), alloc, ref) catch return false;
     defer result.deinit();
 
     const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch return false;
@@ -88,7 +91,10 @@ pub fn resolveServiceImage(alloc: std.mem.Allocator, image: []const u8) ?Service
 
     var result = ServiceImageConfig{ .rootfs = "/", .img_record = img };
 
-    result.pull_result = registry.pull(alloc, ref) catch return null;
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+
+    result.pull_result = registry.pull(threaded_io.io(), alloc, ref) catch return null;
     result.config_parsed = image_spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch return null;
 
     if (result.config_parsed.?.value.config) |cc| {

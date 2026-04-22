@@ -37,7 +37,10 @@ pub fn processFrom(
         return loadLocalBaseImage(alloc, state, img.manifest_digest);
     }
 
-    var result = registry.pull(alloc, ref) catch return types.BuildError.PullFailed;
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+
+    var result = registry.pull(threaded_io.io(), alloc, ref) catch return types.BuildError.PullFailed;
     defer result.deinit();
 
     const pulled_config_digest = blob_store.computeDigest(result.config_bytes);

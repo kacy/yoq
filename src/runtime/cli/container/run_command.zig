@@ -3,6 +3,7 @@ const platform = @import("platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const cli = @import("../../../lib/cli.zig");
+const AppContext = @import("../../../lib/app_context.zig").AppContext;
 const container = @import("../../container.zig");
 const run_state = @import("../../run_state.zig");
 const net_setup = @import("../../../network/setup.zig");
@@ -359,7 +360,9 @@ fn saveCreatedRecord(id: []const u8, cfg: *const run_state.SavedRunConfig) Conta
     };
 }
 
-pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn run(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    const alloc = ctx.alloc;
+
     if (builtin.os.tag != .linux) {
         writeErr("yoq run is only supported on linux (kernel 6.1+)\n", .{});
         return ContainerError.NotSupported;
@@ -375,7 +378,7 @@ pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const is_image = !isFilesystemTarget(flags.target);
 
     var img = if (is_image)
-        try image_cmds.pullAndResolveImage(alloc, flags.target)
+        try image_cmds.pullAndResolveImage(ctx.io, alloc, flags.target)
     else
         image_cmds.ImageResolution{ .rootfs = flags.target };
     defer img.deinit();
@@ -408,7 +411,7 @@ pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     };
 
     if (flags.detach) {
-        supervisor_runtime.spawnSupervisor(alloc, id) catch |e| return e;
+        supervisor_runtime.spawnSupervisor(ctx.io, alloc, id) catch |e| return e;
         state_support.waitForContainerStart(alloc, id) catch |e| return e;
         write("{s}\n", .{id});
         return;

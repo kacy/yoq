@@ -25,6 +25,7 @@ pub fn fetchBlob(
 }
 
 pub fn downloadLayerWorker(
+    io: std.Io,
     alloc: std.mem.Allocator,
     host: []const u8,
     repository: []const u8,
@@ -35,7 +36,7 @@ pub fn downloadLayerWorker(
 ) void {
     if (err_flag.load(.acquire)) return;
 
-    var thread_client: std.http.Client = .{ .io = platform.io(), .allocator = alloc };
+    var thread_client: std.http.Client = .{ .io = io, .allocator = alloc };
     defer thread_client.deinit();
 
     downloadLayerBlob(alloc, &thread_client, host, repository, digest, token) catch |err| {

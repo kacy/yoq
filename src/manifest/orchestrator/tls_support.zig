@@ -14,7 +14,10 @@ pub fn provisionAcmeCert(
     domain: []const u8,
     email: []const u8,
 ) void {
-    var client = acme_mod.AcmeClient.init(alloc, acme_mod.letsencrypt_production);
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+
+    var client = acme_mod.AcmeClient.init(threaded_io.io(), alloc, acme_mod.letsencrypt_production);
     defer client.deinit();
 
     var exported = client.issueAndExport(.{

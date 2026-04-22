@@ -268,7 +268,7 @@ test "buildCertificateVerify produces valid structure" {
     var transcript: [hash_len]u8 = undefined;
     platform.randomBytes(&transcript);
 
-    const kp = EcdsaP256.KeyPair.generate(platform.io());
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     const len = try buildCertificateVerify(&buf, transcript, kp.secret_key);
 
     try std.testing.expectEqual(@as(u8, 0x0F), buf[0]);
@@ -285,7 +285,7 @@ test "buildCertificateVerify different transcripts produce different output" {
     var t2: [hash_len]u8 = undefined;
     platform.randomBytes(&t2);
 
-    const kp = EcdsaP256.KeyPair.generate(platform.io());
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     const len1 = try buildCertificateVerify(&buf1, t1, kp.secret_key);
     const len2 = try buildCertificateVerify(&buf2, t2, kp.secret_key);
 
@@ -297,7 +297,7 @@ test "buildCertificateVerify buffer too small" {
     var transcript: [hash_len]u8 = undefined;
     @memset(&transcript, 0);
 
-    const kp = EcdsaP256.KeyPair.generate(platform.io());
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     try std.testing.expectError(
         HandshakeError.BufferTooSmall,
         buildCertificateVerify(&buf, transcript, kp.secret_key),
@@ -305,8 +305,8 @@ test "buildCertificateVerify buffer too small" {
 }
 
 test "X25519 key exchange produces shared secret" {
-    const client_kp = X25519.KeyPair.generate(platform.io());
-    const server_kp = X25519.KeyPair.generate(platform.io());
+    const client_kp = X25519.KeyPair.generate(std.testing.io);
+    const server_kp = X25519.KeyPair.generate(std.testing.io);
 
     const client_shared = X25519.scalarmult(client_kp.secret_key, server_kp.public_key) catch unreachable;
     const server_shared = X25519.scalarmult(server_kp.secret_key, client_kp.public_key) catch unreachable;

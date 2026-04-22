@@ -1,4 +1,5 @@
 const std = @import("std");
+const AppContext = @import("../lib/app_context.zig").AppContext;
 const cli = @import("../lib/cli.zig");
 const json_out = @import("../lib/json_output.zig");
 const store = @import("../state/store.zig");
@@ -18,7 +19,8 @@ const PolicyCommandsError = error{
 
 // -- network policy commands --
 
-pub fn policy(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn policy(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    const alloc = ctx.alloc;
     var subcmd: ?[]const u8 = null;
 
     while (args.next()) |arg| {

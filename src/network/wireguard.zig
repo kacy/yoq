@@ -65,14 +65,14 @@ pub fn removeRoute(dest: [4]u8, prefix_len: u8) WireguardError!void {
     return device_runtime.removeRoute(dest, prefix_len);
 }
 
-pub fn generateKeyPair() WireguardError!KeyPair {
-    return key_support.generateKeyPair();
+pub fn generateKeyPair(io: std.Io) WireguardError!KeyPair {
+    return key_support.generateKeyPair(io);
 }
 
 // -- tests --
 
 test "generateKeyPair returns valid base64 keys" {
-    const kp = try generateKeyPair();
+    const kp = try generateKeyPair(std.testing.io);
 
     // X25519 base64 is always exactly 44 chars
     try std.testing.expectEqual(@as(usize, 44), kp.private_key.len);
@@ -92,8 +92,8 @@ test "generateKeyPair returns valid base64 keys" {
 }
 
 test "generateKeyPair returns different keys each call" {
-    const kp1 = try generateKeyPair();
-    const kp2 = try generateKeyPair();
+    const kp1 = try generateKeyPair(std.testing.io);
+    const kp2 = try generateKeyPair(std.testing.io);
 
     // private keys should differ (astronomically unlikely to match)
     try std.testing.expect(!std.mem.eql(u8, &kp1.private_key, &kp2.private_key));
@@ -102,7 +102,7 @@ test "generateKeyPair returns different keys each call" {
 }
 
 test "base64 round-trip: decode then re-encode matches" {
-    const kp = try generateKeyPair();
+    const kp = try generateKeyPair(std.testing.io);
 
     const decoder = std.base64.standard.Decoder;
     const encoder = std.base64.standard.Encoder;
@@ -119,7 +119,7 @@ test "base64 round-trip: decode then re-encode matches" {
 
 test "decodeKey valid base64" {
     // generate a real key and decode it back
-    const kp = try generateKeyPair();
+    const kp = try generateKeyPair(std.testing.io);
     const raw = decodeKey(&kp.private_key);
     try std.testing.expect(raw != null);
     try std.testing.expectEqual(@as(usize, 32), raw.?.len);

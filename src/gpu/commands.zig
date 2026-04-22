@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const platform = @import("platform");
+const AppContext = @import("../lib/app_context.zig").AppContext;
 const cli_output = @import("../lib/cli_output.zig");
 const json_out = @import("../lib/json_output.zig");
 const detect = @import("detect.zig");
@@ -43,12 +44,12 @@ const Snapshot = struct {
     }
 };
 
-pub fn gpu(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn gpu(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const parsed = try parseGpuCommand(args);
 
     switch (parsed.subcommand) {
         .topo => topo(),
-        .bench => bench(alloc, parsed.bench_opts),
+        .bench => bench(ctx.alloc, parsed.bench_opts),
     }
 }
 
