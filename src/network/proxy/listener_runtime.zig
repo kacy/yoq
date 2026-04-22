@@ -92,7 +92,6 @@ pub fn startForTest(alloc: std.mem.Allocator, port: u16) void {
 }
 
 pub fn startOrSkipForTest(alloc: std.mem.Allocator, port: u16) !void {
-    if (@import("compat").getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
     configure(default_bind_addr, port);
     start(alloc);
     if (portIfRunning() != null) return;
@@ -337,6 +336,14 @@ fn deinitRoutes(alloc: std.mem.Allocator, routes: *std.ArrayList(router.Route)) 
         alloc.free(route.vip_address);
         if (route.match.host) |host| alloc.free(host);
         alloc.free(route.match.path_prefix);
+        if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (route.method_matches) |method_match| method_match.deinit(alloc);
+        if (route.method_matches.len > 0) alloc.free(route.method_matches);
+        for (route.header_matches) |header_match| header_match.deinit(alloc);
+        if (route.header_matches.len > 0) alloc.free(route.header_matches);
+        for (route.backend_services) |backend| backend.deinit(alloc);
+        if (route.backend_services.len > 0) alloc.free(route.backend_services);
+        if (route.mirror_service) |mirror_service| alloc.free(mirror_service);
     }
     routes.deinit(alloc);
 }

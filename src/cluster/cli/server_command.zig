@@ -81,7 +81,7 @@ pub fn serve(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
-    listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+    listener_runtime.setStateChangeHook(proxy_control_plane.refreshListenerStateIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
     defer listener_runtime.stop();
@@ -207,7 +207,7 @@ pub fn initServer(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !v
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
-    listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+    listener_runtime.setStateChangeHook(proxy_control_plane.refreshListenerStateIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
     defer listener_runtime.stop();

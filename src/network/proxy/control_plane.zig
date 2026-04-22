@@ -42,9 +42,14 @@ var event_sync_passes_total: u64 = 0;
 var periodic_sync_passes_total: u64 = 0;
 var last_sync_trigger: ?SyncTrigger = null;
 var last_sync_pass_at: ?i64 = null;
+var sync_pass_active = std.atomic.Value(bool).init(false);
 
 pub fn refreshIfEnabled() void {
-    runSyncPass(.event);
+    runSyncPass(.event, true);
+}
+
+pub fn refreshListenerStateIfEnabled() void {
+    runSyncPass(.event, false);
 }
 
 pub fn startSyncLoopIfEnabled() void {
@@ -92,6 +97,7 @@ pub fn resetForTest() void {
     periodic_sync_passes_total = 0;
     last_sync_trigger = null;
     last_sync_pass_at = null;
+    sync_pass_active.store(false, .release);
 }
 
 pub fn setSyncIntervalMsForTest(interval_ms: ?u64) void {
@@ -108,8 +114,15 @@ fn vipSteeringEnabled() bool {
     return controlPlaneEnabled();
 }
 
-fn runSyncPass(trigger: SyncTrigger) void {
-    listener_runtime_mod.startIfEnabled(std.heap.page_allocator);
+fn runSyncPass(trigger: SyncTrigger, ensure_listener: bool) void {
+    if (sync_pass_active.swap(true, .acq_rel)) return;
+    defer sync_pass_active.store(false, .release);
+
+    if (ensure_listener) {
+        listener_runtime_mod.startIfEnabled(std.heap.page_allocator);
+    } else {
+        proxy_runtime.bootstrapIfEnabled();
+    }
     steering_runtime.syncIfEnabled();
     mutex.lock();
     defer mutex.unlock();
@@ -123,7 +136,7 @@ fn runSyncPass(trigger: SyncTrigger) void {
 }
 
 fn syncLoop() void {
-    runSyncPass(.periodic);
+    runSyncPass(.periodic, true);
 
     while (sync_running.load(.acquire)) {
         const interval_ms = blk: {
@@ -133,7 +146,7 @@ fn syncLoop() void {
         };
         @import("compat").sleep(interval_ms * std.time.ns_per_ms);
         if (!sync_running.load(.acquire)) break;
-        runSyncPass(.periodic);
+        runSyncPass(.periodic, true);
     }
 }
 
@@ -342,7 +355,7 @@ test "listener state changes trigger event-driven steering repair" {
     steering_runtime.setPortMapperAvailableForTest(true);
     steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
     try steering_runtime.setActualMappingsForTest(&.{});
-    listener_runtime.setStateChangeHook(refreshIfEnabled);
+    listener_runtime.setStateChangeHook(refreshListenerStateIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
 
     try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
@@ -381,19 +394,23 @@ const TestUpstreamServer = struct {
     response: []const u8,
 
     fn init(response: []const u8) !TestUpstreamServer {
-        const listen_fd = try @import("compat").posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        const listen_fd = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch
+            return error.SkipZigTest;
         errdefer @import("compat").posix.close(listen_fd);
 
         const reuseaddr: i32 = 1;
         posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
         const addr = @import("compat").net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-        try @import("compat").posix.bind(listen_fd, &addr.any, addr.getOsSockLen());
-        try @import("compat").posix.listen(listen_fd, 1);
+        @import("compat").posix.bind(listen_fd, &addr.any, addr.getOsSockLen()) catch
+            return error.SkipZigTest;
+        @import("compat").posix.listen(listen_fd, 1) catch
+            return error.SkipZigTest;
 
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        try @import("compat").posix.getsockname(listen_fd, @ptrCast(&bound_addr), &bound_len);
+        @import("compat").posix.getsockname(listen_fd, @ptrCast(&bound_addr), &bound_len) catch
+            return error.SkipZigTest;
 
         return .{
             .listen_fd = listen_fd,
@@ -434,7 +451,6 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
     const store = @import("../../state/store.zig");
     const listener_runtime = @import("listener_runtime.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
-    if (@import("compat").getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 
     var upstream = try TestUpstreamServer.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     defer upstream.deinit();
@@ -488,7 +504,7 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
     try steering_runtime.setActualMappingsForTest(&.{});
     steering_runtime.setMappingHooksForTest(recordMappedTarget, null);
     defer steering_runtime.setMappingHooksForTest(null, null);
-    listener_runtime.setStateChangeHook(refreshIfEnabled);
+    listener_runtime.setStateChangeHook(refreshListenerStateIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
     recorded_target_port = 0;
 
@@ -516,7 +532,6 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     const store = @import("../../state/store.zig");
     const listener_runtime = @import("listener_runtime.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
-    if (@import("compat").getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 
     var upstream = try TestUpstreamServer.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     defer upstream.deinit();

@@ -707,7 +707,9 @@ fn waitForGossipError(receiver: *Transport, buf: []u8) !void {
 
 fn requireUdpGossipTestHost() !void {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    if (@import("compat").getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
+    const fd = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0) catch
+        return error.SkipZigTest;
+    @import("compat").posix.close(fd);
 }
 
 // -- UDP gossip transport tests --

@@ -260,7 +260,7 @@ pub const PreparedLocalApply = struct {
         service_reconciler.ensureDataPlaneReadyIfEnabled();
         service_reconciler.bootstrapIfEnabled();
         service_reconciler.startAuditLoopIfEnabled();
-        listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+        listener_runtime.setStateChangeHook(proxy_control_plane.refreshListenerStateIfEnabled);
         listener_runtime.startIfEnabled(self.alloc);
         proxy_control_plane.startSyncLoopIfEnabled();
         orchestrator.installSignalHandlers();
