@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const checkpoint_mgr = @import("../checkpoint.zig");
 const store = @import("../../state/store.zig");
@@ -15,7 +16,7 @@ pub fn generateClusterJobId(self: anytype) !void {
 
 fn generateJobIdWithPrefix(self: anytype, prefix: []const u8) !void {
     var id_buf: [256]u8 = undefined;
-    const ts = @import("compat").timestamp();
+    const ts = platform.timestamp();
     const id_str = std.fmt.bufPrint(&id_buf, "{s}{s}-{s}-{d}", .{ prefix, self.app_name, self.job.name, ts }) catch return error.OutOfMemory;
     if (self.job_id) |existing| self.alloc.free(existing);
     self.job_id = try self.alloc.dupe(u8, id_str);
@@ -28,13 +29,13 @@ pub fn isClusterManaged(self: anytype) bool {
 
 pub fn persistState(self: anytype) void {
     const jid = self.job_id orelse return;
-    const now = @import("compat").timestamp();
+    const now = platform.timestamp();
     store.updateTrainingJobState(jid, self.state.label(), now) catch {};
 }
 
 pub fn createPersistentRecord(self: anytype) void {
     const jid = self.job_id orelse return;
-    const now = @import("compat").timestamp();
+    const now = platform.timestamp();
     const ckpt = self.job.checkpoint;
 
     store.saveTrainingJob(.{

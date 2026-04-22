@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const blob_store = @import("../store.zig");
 const paths = @import("../../lib/paths.zig");
@@ -16,7 +17,7 @@ pub fn createLayerFromDir(
     alloc: std.mem.Allocator,
     dir_path: []const u8,
 ) types.LayerError!?types.LayerCreateResult {
-    var dir = @import("compat").cwd().openDir(dir_path, .{ .iterate = true }) catch
+    var dir = platform.cwd().openDir(dir_path, .{ .iterate = true }) catch
         return types.LayerError.CreateFailed;
     defer dir.close();
 
@@ -31,7 +32,7 @@ pub fn createLayerFromDir(
 
     const uncompressed_digest = writeTarFromDir(alloc, dir_path, tar_path) catch
         return types.LayerError.CreateFailed;
-    defer @import("compat").cwd().deleteFile(tar_path) catch {};
+    defer platform.cwd().deleteFile(tar_path) catch {};
 
     var gz_path_buf: [max_path]u8 = undefined;
     const gz_path = paths.uniqueDataTempPath(&gz_path_buf, "tmp", "build-layer", ".tar.gz") catch
@@ -39,7 +40,7 @@ pub fn createLayerFromDir(
 
     const compress_result = gzipCompress(alloc, tar_path, gz_path) catch
         return types.LayerError.CreateFailed;
-    defer @import("compat").cwd().deleteFile(gz_path) catch {};
+    defer platform.cwd().deleteFile(gz_path) catch {};
 
     blob_store.putBlobFromFile(gz_path, compress_result.digest) catch
         return types.LayerError.CreateFailed;
@@ -52,10 +53,10 @@ pub fn createLayerFromDir(
 }
 
 fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !GzipResult {
-    const src_file = try @import("compat").cwd().openFile(src_path, .{});
+    const src_file = try platform.cwd().openFile(src_path, .{});
     defer src_file.close();
 
-    const dst_file = try @import("compat").cwd().createFile(dst_path, .{});
+    const dst_file = try platform.cwd().createFile(dst_path, .{});
     defer dst_file.close();
 
     const compressor = try alloc.create(std.compress.flate.Compress);
@@ -85,7 +86,7 @@ fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []cons
     const stat = try dst_file.stat();
     const size = stat.size;
 
-    const verify_file = try @import("compat").cwd().openFile(dst_path, .{});
+    const verify_file = try platform.cwd().openFile(dst_path, .{});
     defer verify_file.close();
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -107,10 +108,10 @@ fn writeTarFromDir(
     dir_path: []const u8,
     tar_path: []const u8,
 ) !blob_store.Digest {
-    var dir = try @import("compat").cwd().openDir(dir_path, .{ .iterate = true });
+    var dir = try platform.cwd().openDir(dir_path, .{ .iterate = true });
     defer dir.close();
 
-    const tar_file = try @import("compat").cwd().createFile(tar_path, .{});
+    const tar_file = try platform.cwd().createFile(tar_path, .{});
     defer tar_file.close();
 
     var write_buf: [8192]u8 = undefined;
@@ -127,7 +128,7 @@ fn writeTarFromDir(
     try file_writer.interface.flush();
     tar_file.sync() catch {};
 
-    const hash_file = try @import("compat").cwd().openFile(tar_path, .{});
+    const hash_file = try platform.cwd().openFile(tar_path, .{});
     defer hash_file.close();
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -142,9 +143,9 @@ fn writeTarFromDir(
 }
 
 pub fn writeTarEntry(
-    dir: @import("compat").Dir,
+    dir: platform.Dir,
     tar_writer: *std.tar.Writer,
-    entry: @import("compat").Dir.Walker.Entry,
+    entry: platform.Dir.Walker.Entry,
 ) !void {
     switch (entry.kind) {
         .directory => try writeTarDirectoryEntry(tar_writer, entry.path),
@@ -164,7 +165,7 @@ fn writeTarDirectoryEntry(tar_writer: *std.tar.Writer, path: []const u8) !void {
     };
 }
 
-fn writeTarFileEntry(dir: @import("compat").Dir, tar_writer: *std.tar.Writer, path: []const u8) !void {
+fn writeTarFileEntry(dir: platform.Dir, tar_writer: *std.tar.Writer, path: []const u8) !void {
     var file = dir.openFile(path, .{}) catch |err| {
         log.warn("tar: failed to open '{s}': {}", .{ path, err });
         return err;
@@ -184,7 +185,7 @@ fn writeTarFileEntry(dir: @import("compat").Dir, tar_writer: *std.tar.Writer, pa
     };
 }
 
-fn writeTarSymlinkEntry(dir: @import("compat").Dir, tar_writer: *std.tar.Writer, path: []const u8) !void {
+fn writeTarSymlinkEntry(dir: platform.Dir, tar_writer: *std.tar.Writer, path: []const u8) !void {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_target = dir.readLink(path, &link_buf) catch |err| {
         log.warn("tar: failed to read symlink '{s}': {}", .{ path, err });

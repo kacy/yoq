@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const json_helpers = @import("../lib/json_helpers.zig");
 const store = @import("../state/store.zig");
 const update_common = @import("update/common.zig");
@@ -405,7 +406,7 @@ pub const ProgressRecorder = struct {
             switch (state) {
                 .active => return false,
                 .cancel_requested => return true,
-                .paused => @import("compat").sleep(100 * std.time.ns_per_ms),
+                .paused => platform.sleep(100 * std.time.ns_per_ms),
             }
         }
     }

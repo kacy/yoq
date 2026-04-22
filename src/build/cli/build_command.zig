@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const dockerfile = @import("../dockerfile.zig");
@@ -71,7 +72,7 @@ pub fn build_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !vo
     });
 
     var abs_ctx_buf: [4096]u8 = undefined;
-    const abs_ctx = @import("compat").cwd().realpath(ctx_dir, &abs_ctx_buf) catch {
+    const abs_ctx = platform.cwd().realpath(ctx_dir, &abs_ctx_buf) catch {
         writeErr("cannot resolve context directory: {s}\n", .{ctx_dir});
         return BuildCommandsError.InvalidArgument;
     };
@@ -186,7 +187,7 @@ fn loadDockerfile(
     alloc: std.mem.Allocator,
     path: []const u8,
 ) BuildCommandsError!dockerfile.ParseResult {
-    const content = @import("compat").cwd().readFileAlloc(alloc, path, 1024 * 1024) catch {
+    const content = platform.cwd().readFileAlloc(alloc, path, 1024 * 1024) catch {
         writeErr("cannot read {s}\n", .{path});
         return BuildCommandsError.ParseFailed;
     };

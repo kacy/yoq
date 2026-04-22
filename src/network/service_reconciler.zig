@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cluster_registry = @import("../cluster/registry.zig");
 const dns = @import("dns.zig");
 const dns_registry_support = @import("dns/registry_support.zig");
@@ -153,7 +154,7 @@ pub const ComponentSnapshot = struct {
     last_change_at: ?i64,
 };
 
-var mutex: @import("compat").Mutex = .{};
+var mutex: platform.Mutex = .{};
 var recent_events: [max_recent_events]Event = undefined;
 var recent_start: usize = 0;
 var recent_len: usize = 0;
@@ -524,7 +525,7 @@ fn buildEvent(kind: EventKind, source: EventSource, service_name: []const u8, co
     var event = Event{
         .kind = kind,
         .source = source,
-        .recorded_at = @import("compat").timestamp(),
+        .recorded_at = platform.timestamp(),
         .ip = endpoint_ip,
     };
 
@@ -549,7 +550,7 @@ fn bootstrapAuthoritativeLocked() void {
 
 fn auditLoop() void {
     while (audit_running.load(.acquire)) {
-        @import("compat").sleep(audit_interval_secs * std.time.ns_per_s);
+        platform.sleep(audit_interval_secs * std.time.ns_per_s);
         if (!audit_running.load(.acquire)) break;
         runAuditPassIfEnabled();
     }
@@ -559,7 +560,7 @@ fn runAuditPassLocked() void {
     refreshComponentStateLocked();
     quarantineStaleEndpointsLocked();
     audit_passes_total += 1;
-    last_audit_at = @import("compat").timestamp();
+    last_audit_at = platform.timestamp();
     clearLastAuditErrorLocked();
     deinitDegradedServicesLocked();
 
@@ -604,7 +605,7 @@ fn auditOnceLocked() !void {
 
 fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.ArrayList(service_registry_runtime.ServiceSnapshot)) !void {
     const alloc = std.heap.page_allocator;
-    const now = @import("compat").timestamp();
+    const now = platform.timestamp();
     const authoritative = auditEnabled(rollout.current());
 
     const runtime_service = findRuntimeService(runtime_services.items, service_name);
@@ -768,7 +769,7 @@ fn quarantineStaleEndpointsLocked() void {
     if (quarantined == 0) return;
 
     stale_endpoint_quarantines_total += quarantined;
-    last_stale_quarantine_at = @import("compat").timestamp();
+    last_stale_quarantine_at = platform.timestamp();
 
     for (changed_services.items) |service_name| {
         service_registry_runtime.syncServiceFromStore(service_name);
@@ -934,7 +935,7 @@ fn refreshComponentStateLocked() void {
 
     component_state = next_state;
     component_state_changes_total += 1;
-    component_last_change_at = @import("compat").timestamp();
+    component_last_change_at = platform.timestamp();
 
     log.info(
         "service reconciler: component state changed resolver={} dns_interceptor={} load_balancer={}",

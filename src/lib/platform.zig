@@ -1,5 +1,7 @@
 const std = @import("std");
 
+/// Project platform boundary for Zig 0.16 I/O, filesystem, sync, and Linux
+/// syscall adapters. Callers should import this once per file as `platform`.
 pub const net = struct {
     pub const Address = extern union {
         any: std.posix.sockaddr,
@@ -300,18 +302,18 @@ pub const File = struct {
         return @intCast(try posix.lseek(self.handle, 0, std.os.linux.SEEK.CUR));
     }
 
-    pub fn deprecatedWriter(self: File) DeprecatedWriter {
+    pub fn textWriter(self: File) TextWriter {
         return .{ .file = self };
     }
 
-    pub fn deprecatedReader(self: File) DeprecatedReader {
+    pub fn textReader(self: File) TextReader {
         return .{ .file = self };
     }
 
-    pub const DeprecatedWriter = struct {
+    pub const TextWriter = struct {
         file: File,
 
-        pub fn print(self: DeprecatedWriter, comptime fmt: []const u8, args: anytype) !void {
+        pub fn print(self: TextWriter, comptime fmt: []const u8, args: anytype) !void {
             var buffer: [4096]u8 = undefined;
             var out = self.file.writer(&buffer);
             try out.interface.print(fmt, args);
@@ -319,10 +321,10 @@ pub const File = struct {
         }
     };
 
-    pub const DeprecatedReader = struct {
+    pub const TextReader = struct {
         file: File,
 
-        pub fn readUntilDelimiterOrEof(self: DeprecatedReader, buffer: []u8, delimiter: u8) !?[]u8 {
+        pub fn readUntilDelimiterOrEof(self: TextReader, buffer: []u8, delimiter: u8) !?[]u8 {
             var len: usize = 0;
             while (len < buffer.len) {
                 var byte: [1]u8 = undefined;

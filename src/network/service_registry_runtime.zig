@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../lib/log.zig");
 const service_observability = @import("service_observability.zig");
 const service_registry_backfill = @import("service_registry_backfill.zig");
@@ -16,7 +17,7 @@ pub const RuntimeError = service_registry.Error || error{
     StoreWriteFailed,
 };
 
-var mutex: @import("compat").Mutex = .{};
+var mutex: platform.Mutex = .{};
 var initialized: bool = false;
 var registry: service_registry.Registry = undefined;
 

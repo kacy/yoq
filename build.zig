@@ -71,12 +71,12 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.Resolve
 
     module.addImport("sqlite", sqlite_mod);
 
-    const compat_mod = b.createModule(.{
-        .root_source_file = b.path("src/lib/compat.zig"),
+    const platform_mod = b.createModule(.{
+        .root_source_file = b.path("src/lib/platform.zig"),
         .target = mod_target,
         .optimize = mod_optimize,
     });
-    module.addImport("compat", compat_mod);
+    module.addImport("platform", platform_mod);
 }
 
 pub fn build(b: *std.Build) void {

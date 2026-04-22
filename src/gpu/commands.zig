@@ -4,6 +4,7 @@
 // through the `yoq gpu <topo|bench>` commands.
 
 const std = @import("std");
+const platform = @import("platform");
 const cli_output = @import("../lib/cli_output.zig");
 const json_out = @import("../lib/json_output.zig");
 const detect = @import("detect.zig");
@@ -398,13 +399,13 @@ fn formatGpuSm(info: *const detect.GpuInfo, buf: []u8) []const u8 {
 }
 
 fn formatGpuPeers(info: *const detect.GpuInfo, buf: []u8) []const u8 {
-    var stream = @import("compat").fixedBufferStream(buf);
+    var stream = platform.fixedBufferStream(buf);
 
     for (0..info.nvlink_peer_count) |i| {
         if (i > 0) {
             stream.writer().writeByte(',') catch break;
         }
-        @import("compat").format(stream.writer(), "{d}", .{info.nvlink_peers[i]}) catch break;
+        platform.format(stream.writer(), "{d}", .{info.nvlink_peers[i]}) catch break;
     }
 
     const written = stream.getWritten();

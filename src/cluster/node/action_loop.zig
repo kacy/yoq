@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const transport_mod = @import("../transport.zig");
 const types = @import("../raft_types.zig");
 const agent_registry = @import("../registry.zig");
@@ -87,14 +88,14 @@ pub fn tickLoop(self: anytype) void {
         if (gossip_tick_due) {
             membership_sync.tickGossip(self);
         }
-        @import("compat").sleep(100 * std.time.ns_per_ms);
+        platform.sleep(100 * std.time.ns_per_ms);
     }
 }
 
 pub fn recvLoop(self: anytype) void {
     while (self.running.load(.acquire)) {
         const msg = self.transport.receive(self.alloc) catch {
-            @import("compat").sleep(10 * std.time.ns_per_ms);
+            platform.sleep(10 * std.time.ns_per_ms);
             continue;
         };
 
@@ -106,7 +107,7 @@ pub fn recvLoop(self: anytype) void {
             processActions(self);
         } else {
             membership_sync.receiveGossipMessages(self);
-            @import("compat").sleep(10 * std.time.ns_per_ms);
+            platform.sleep(10 * std.time.ns_per_ms);
         }
     }
 }
@@ -216,7 +217,7 @@ pub fn handleMessage(self: anytype, received: transport_mod.ReceivedMessage) voi
     }
 }
 
-pub fn resolveNodeId(self: anytype, addr: @import("compat").net.Address) ?NodeId {
+pub fn resolveNodeId(self: anytype, addr: platform.net.Address) ?NodeId {
     const from_ip: [4]u8 = @bitCast(addr.in.addr);
     const from_port = std.mem.bigToNative(u16, addr.in.port);
 

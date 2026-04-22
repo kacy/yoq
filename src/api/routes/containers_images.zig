@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http = @import("../http.zig");
 const store = @import("../../state/store.zig");
 const common = @import("common.zig");
@@ -155,7 +156,7 @@ test "writeContainerJson produces valid JSON" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = @import("compat").fixedBufferStream(&buf);
+    var fbs = platform.fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeContainerJson(writer, record);
@@ -183,7 +184,7 @@ test "writeContainerJson handles null pid" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = @import("compat").fixedBufferStream(&buf);
+    var fbs = platform.fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeContainerJson(writer, record);
@@ -205,7 +206,7 @@ test "writeImageJson produces valid JSON" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = @import("compat").fixedBufferStream(&buf);
+    var fbs = platform.fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeImageJson(writer, img);
@@ -234,7 +235,7 @@ test "writeContainerJson escapes special characters" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = @import("compat").fixedBufferStream(&buf);
+    var fbs = platform.fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeContainerJson(writer, record);
@@ -416,7 +417,7 @@ test "writeImageJson handles empty strings" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = @import("compat").fixedBufferStream(&buf);
+    var fbs = platform.fixedBufferStream(&buf);
     const writer = fbs.writer();
 
     try writeImageJson(writer, img);

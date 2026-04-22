@@ -6,6 +6,7 @@
 // reading those metrics.
 
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const is_linux = builtin.os.tag == .linux;
@@ -61,7 +62,7 @@ pub const StorageMetricsCollector = struct {
 
     pub fn deinit(self: *StorageMetricsCollector) void {
         if (is_linux and self.map_fd >= 0) {
-            @import("compat").posix.close(self.map_fd);
+            platform.posix.close(self.map_fd);
         }
     }
 };

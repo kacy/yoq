@@ -5,6 +5,7 @@
 // global-db pattern as state/store.zig.
 
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const paths = @import("../lib/paths.zig");
 
@@ -28,7 +29,7 @@ pub const CachedAssignment = struct {
 };
 
 var global_db: ?sqlite.Db = null;
-var db_mutex: @import("compat").Mutex = .{};
+var db_mutex: platform.Mutex = .{};
 
 const create_table_sql =
     \\CREATE TABLE IF NOT EXISTS cached_assignments (

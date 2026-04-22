@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
 const writers = @import("writers.zig");
@@ -14,7 +15,7 @@ pub fn handleListImages(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
 

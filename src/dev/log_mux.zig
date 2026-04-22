@@ -7,6 +7,7 @@
 // format: "\x1b[36m[web]     \x1b[0m | log line here"
 
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../lib/log.zig");
 
 /// ansi colors for service name prefixes
@@ -27,7 +28,7 @@ pub var write_failures: std.atomic.Value(usize) = .init(0);
 
 /// mutex for thread-safe output. initialized explicitly to avoid
 /// relying on compile-time zero initialization.
-var write_mutex: @import("compat").Mutex = @import("compat").Mutex{};
+var write_mutex: platform.Mutex = platform.Mutex{};
 
 /// maximum formatted line length (excluding null terminator)
 const max_line_len = 8192;
@@ -63,7 +64,7 @@ pub fn writeLine(service_name: []const u8, color_idx: usize, line: []const u8) v
     // write to stderr (stdout is reserved for machine-readable output)
     // use a separate buffer for the writer to avoid reuse confusion
     var write_buf: [max_line_len]u8 = undefined;
-    var w = @import("compat").File.stderr().writer(&write_buf);
+    var w = platform.File.stderr().writer(&write_buf);
     const out = &w.interface;
 
     out.writeAll(formatted) catch |e| {

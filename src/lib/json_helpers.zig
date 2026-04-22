@@ -4,6 +4,7 @@
 // manually-built JSON output.
 
 const std = @import("std");
+const platform = @import("platform");
 
 /// write a string with JSON escaping (backslash, quotes, control chars).
 /// handles all control characters below 0x20 with \u00XX encoding.
@@ -18,7 +19,7 @@ pub fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
             else => {
                 if (c < 0x20) {
                     // other control characters — use \u00XX
-                    try @import("compat").format(writer, "\\u{x:0>4}", .{c});
+                    try platform.format(writer, "\\u{x:0>4}", .{c});
                 } else {
                     try writer.writeByte(c);
                 }
@@ -328,7 +329,7 @@ pub fn summarizeFailureDetails(buf: []u8, failure_details_json: ?[]const u8) ?[]
 
 test "basic escaping" {
     var buf: [256]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     try writeJsonEscaped(writer, "hello \"world\"");
@@ -337,7 +338,7 @@ test "basic escaping" {
 
 test "backslash and special chars" {
     var buf: [256]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     try writeJsonEscaped(writer, "path\\to\nnew\tline");
@@ -346,7 +347,7 @@ test "backslash and special chars" {
 
 test "control characters use unicode escape" {
     var buf: [256]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     // 0x01 (SOH) should become \u0001
@@ -356,7 +357,7 @@ test "control characters use unicode escape" {
 
 test "plain ascii passthrough" {
     var buf: [256]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     try writeJsonEscaped(writer, "abc123");
@@ -365,7 +366,7 @@ test "plain ascii passthrough" {
 
 test "writeJsonStringField emits quoted field" {
     var buf: [256]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     try writeJsonStringField(writer, "app_name", "demo-app");
@@ -374,7 +375,7 @@ test "writeJsonStringField emits quoted field" {
 
 test "writeNullableJsonStringField emits null field" {
     var buf: [256]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     try writeNullableJsonStringField(writer, "source_release_id", null);
@@ -471,7 +472,7 @@ test "extractJsonObjects empty string" {
 
 test "writeJsonEscaped null byte" {
     var buf: [256]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     try writeJsonEscaped(writer, &[_]u8{0x00});
@@ -554,7 +555,7 @@ test "extractJsonString multiple consecutive escapes" {
 
 test "writeJsonEscaped all control characters" {
     var buf: [1024]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     // write all control chars 0x00-0x1F

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const sqlite = @import("sqlite");
 const log = @import("../../lib/log.zig");
@@ -146,17 +147,17 @@ var service_views: [max_services]ServiceView = [_]ServiceView{.{
     .backends = undefined,
     .active = false,
 }} ** max_services;
-var registry_mutex: @import("compat").Mutex = .{};
+var registry_mutex: platform.Mutex = .{};
 
 var cluster_db: ?*sqlite.Db = null;
-var cluster_db_mutex: @import("compat").Mutex = .{};
+var cluster_db_mutex: platform.Mutex = .{};
 var cluster_lookup_fault_mode: ClusterLookupFaultMode = .none;
 var cluster_lookup_fault_ip: [4]u8 = .{ 10, 255, 255, 254 };
 var cluster_lookup_fault_injections: u64 = 0;
-var dns_interceptor_fault_mutex: @import("compat").Mutex = .{};
+var dns_interceptor_fault_mutex: platform.Mutex = .{};
 var dns_interceptor_fault_mode: DnsInterceptorFaultMode = .none;
 var dns_interceptor_fault_injections: u64 = 0;
-var load_balancer_fault_mutex: @import("compat").Mutex = .{};
+var load_balancer_fault_mutex: platform.Mutex = .{};
 var load_balancer_fault_mode: LoadBalancerFaultMode = .none;
 var load_balancer_fault_injections: u64 = 0;
 

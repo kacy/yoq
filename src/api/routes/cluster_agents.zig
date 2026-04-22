@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http = @import("../http.zig");
 const agent_registry = @import("../../cluster/registry.zig");
 const common = @import("common.zig");
@@ -280,7 +281,7 @@ test "route matches assignment status update path" {
 
 test "writeAgentJson produces valid JSON" {
     var buf: [1024]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     const agent = agent_registry.AgentRecord{
@@ -313,7 +314,7 @@ test "writeAgentJson produces valid JSON" {
 
 test "writeAgentJson omits optional fields when null" {
     var buf: [1024]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     const agent = agent_registry.AgentRecord{
@@ -342,7 +343,7 @@ test "writeAgentJson omits optional fields when null" {
 
 test "writeAssignmentJson produces valid JSON" {
     var buf: [1024]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     const assignment = agent_registry.Assignment{
@@ -368,7 +369,7 @@ test "writeAssignmentJson produces valid JSON" {
 
 test "writeWireguardPeerJson produces valid JSON" {
     var buf: [1024]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     const peer = agent_registry.WireguardPeer{
@@ -392,7 +393,7 @@ test "writeWireguardPeerJson produces valid JSON" {
 
 test "writeWireguardPeerJson escapes special characters" {
     var buf: [2048]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     const peer = agent_registry.WireguardPeer{

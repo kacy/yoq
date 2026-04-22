@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const container = @import("../container.zig");
 const process = @import("../process.zig");
@@ -33,7 +34,7 @@ pub const Cgroup = struct {
     var v2_cached: enum { unknown, yes, no } = .unknown;
     pub fn isV2Available() bool {
         if (v2_cached != .unknown) return v2_cached == .yes;
-        @import("compat").cwd().access(cgroup_root ++ "/cgroup.controllers", .{}) catch {
+        platform.cwd().access(cgroup_root ++ "/cgroup.controllers", .{}) catch {
             v2_cached = .no;
             return false;
         };
@@ -47,7 +48,7 @@ pub const Cgroup = struct {
 
         const cg = open(container_id) catch return CgroupError.CreateFailed;
 
-        @import("compat").cwd().makeDir(cgroup_root ++ "/" ++ yoq_prefix) catch |e| switch (e) {
+        platform.cwd().makeDir(cgroup_root ++ "/" ++ yoq_prefix) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return CgroupError.CreateFailed,
         };
@@ -56,7 +57,7 @@ pub const Cgroup = struct {
             subtree_controllers_enabled = enableSubtreeControllers(cgroup_root ++ "/" ++ yoq_prefix);
         }
 
-        @import("compat").cwd().makeDir(cg.path()) catch |e| switch (e) {
+        platform.cwd().makeDir(cg.path()) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return CgroupError.CreateFailed,
         };
@@ -181,7 +182,7 @@ pub const Cgroup = struct {
     pub fn readAllMetrics(self: *const Cgroup) common.CgroupMetrics {
         var metrics: common.CgroupMetrics = .{};
 
-        var dir = @import("compat").cwd().openDir(self.path(), .{}) catch return metrics;
+        var dir = platform.cwd().openDir(self.path(), .{}) catch return metrics;
         defer dir.close();
 
         {
@@ -247,7 +248,7 @@ pub const Cgroup = struct {
         const max_attempts: u32 = 500;
         while (attempts < max_attempts) : (attempts += 1) {
             if (self.isEmpty()) break;
-            @import("compat").sleep(10 * std.time.ns_per_ms);
+            platform.sleep(10 * std.time.ns_per_ms);
         }
 
         if (!self.isEmpty()) {
@@ -257,7 +258,7 @@ pub const Cgroup = struct {
             return CgroupError.DeleteFailed;
         }
 
-        @import("compat").cwd().deleteDir(self.path()) catch return CgroupError.DeleteFailed;
+        platform.cwd().deleteDir(self.path()) catch return CgroupError.DeleteFailed;
     }
 
     fn isEmpty(self: *const Cgroup) bool {
@@ -305,7 +306,7 @@ pub const Cgroup = struct {
         var path_buf: [512]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ self.path(), filename }) catch return error.WriteFailed;
 
-        const file = @import("compat").cwd().openFile(file_path, .{ .mode = .write_only }) catch return error.WriteFailed;
+        const file = platform.cwd().openFile(file_path, .{ .mode = .write_only }) catch return error.WriteFailed;
         defer file.close();
 
         file.writeAll(value) catch return error.WriteFailed;
@@ -315,7 +316,7 @@ pub const Cgroup = struct {
         var path_buf: [512]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ self.path(), filename }) catch return error.ReadFailed;
 
-        const file = @import("compat").cwd().openFile(file_path, .{}) catch return error.ReadFailed;
+        const file = platform.cwd().openFile(file_path, .{}) catch return error.ReadFailed;
         defer file.close();
 
         const bytes_read = file.readAll(buf) catch return error.ReadFailed;
@@ -338,12 +339,12 @@ pub const Cgroup = struct {
 fn enableSubtreeControllers(dir_path: []const u8) bool {
     var ctrl_buf: [512]u8 = undefined;
     const ctrl_path = std.fmt.bufPrint(&ctrl_buf, "{s}/cgroup.subtree_control", .{dir_path}) catch return false;
-    const file = @import("compat").cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch return false;
+    const file = platform.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch return false;
     defer file.close();
 
     var controllers_path_buf: [512]u8 = undefined;
     const controllers_path = std.fmt.bufPrint(&controllers_path_buf, "{s}/cgroup.controllers", .{dir_path}) catch return false;
-    const controllers_file = @import("compat").cwd().openFile(controllers_path, .{}) catch return false;
+    const controllers_file = platform.cwd().openFile(controllers_path, .{}) catch return false;
     defer controllers_file.close();
 
     var available_buf: [256]u8 = undefined;

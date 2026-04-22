@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sql_escape = @import("../../lib/sql.zig");
 const gpu_scheduler = @import("../../gpu/scheduler.zig");
 const common = @import("common.zig");
@@ -82,7 +83,7 @@ pub fn assignmentSqlGang(
 
 pub fn generateAssignmentId(buf: *[12]u8) void {
     var random_bytes: [6]u8 = undefined;
-    @import("compat").randomBytes(&random_bytes);
+    platform.randomBytes(&random_bytes);
     const hex = "0123456789abcdef";
     for (random_bytes, 0..) |byte, i| {
         buf[i * 2] = hex[byte >> 4];

@@ -4,6 +4,7 @@
 // imports the actual test content from tests/fuzz/.
 
 const std = @import("std");
+const platform = @import("platform");
 const loader = @import("manifest/loader.zig");
 
 const alloc = std.testing.allocator;
@@ -24,7 +25,7 @@ fn expectLoadSuccess(input: []const u8) !void {
 
 test "edge: extremely long service name" {
     var buf: [2048]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
     try writer.writeAll("[service.");
     try writer.writeByteNTimes('a', 1000);
@@ -112,7 +113,7 @@ test "edge: unicode in env vars" {
 
 test "edge: manifest with 100 services" {
     var buf: [32768]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&buf);
+    var stream = platform.fixedBufferStream(&buf);
     const writer = stream.writer();
 
     for (0..100) |i| {

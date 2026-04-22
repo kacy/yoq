@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const http = @import("../http.zig");
 const routes = @import("../routes.zig");
@@ -44,7 +45,7 @@ fn getPeerIp(fd: posix.fd_t) u32 {
 }
 
 pub fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
-    defer @import("compat").posix.close(client_fd);
+    defer platform.posix.close(client_fd);
 
     const client_ip = getPeerIp(client_fd);
     if (client_ip != 0 and !rate_limit.rate_limiter.checkRate(client_ip)) {
@@ -193,7 +194,7 @@ pub fn findHeaderEnd(buf: []const u8) ?usize {
 fn setReadTimeout(fd: posix.fd_t, seconds: i64) void {
     var sock_addr: posix.sockaddr.storage = undefined;
     var sock_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-    @import("compat").posix.getsockname(fd, @ptrCast(&sock_addr), &sock_len) catch return;
+    platform.posix.getsockname(fd, @ptrCast(&sock_addr), &sock_len) catch return;
 
     const timeout = posix.timeval{ .sec = seconds, .usec = 0 };
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |e| {
@@ -222,7 +223,7 @@ fn writeResponse(fd: posix.fd_t, status: http.StatusCode, content_type: []const 
 fn writeAll(fd: posix.fd_t, data: []const u8) void {
     var written: usize = 0;
     while (written < data.len) {
-        const bytes_written = @import("compat").posix.write(fd, data[written..]) catch return;
+        const bytes_written = platform.posix.write(fd, data[written..]) catch return;
         if (bytes_written == 0) return;
         written += bytes_written;
     }
@@ -232,7 +233,7 @@ test "readRequestAlloc handles body larger than legacy buffer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try @import("compat").Dir.from(tmp.dir).createFile("large-request.txt", .{ .read = true });
+    const file = try platform.Dir.from(tmp.dir).createFile("large-request.txt", .{ .read = true });
     defer file.close();
 
     const body_len = 96 * 1024;
@@ -263,7 +264,7 @@ test "writeResponse streams body larger than response scratch buffer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try @import("compat").Dir.from(tmp.dir).createFile("large-response.txt", .{ .read = true });
+    const file = try platform.Dir.from(tmp.dir).createFile("large-response.txt", .{ .read = true });
     defer file.close();
 
     const body_len = 12 * 1024;
@@ -286,7 +287,7 @@ test "writeResponse omits body for HEAD semantics while preserving content lengt
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try @import("compat").Dir.from(tmp.dir).createFile("head-response.txt", .{ .read = true });
+    const file = try platform.Dir.from(tmp.dir).createFile("head-response.txt", .{ .read = true });
     defer file.close();
 
     writeResponse(file.handle, .ok, "application/json", "metadata", true);

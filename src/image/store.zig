@@ -10,6 +10,7 @@
 // (which images are pulled, tags, etc.) lives in state/store.zig.
 
 const std = @import("std");
+const platform = @import("platform");
 const blob_runtime = @import("store/blob_runtime.zig");
 const digest_support = @import("store/digest_support.zig");
 const types = @import("store/types.zig");
@@ -110,7 +111,7 @@ test "digest parse — invalid" {
 }
 
 test "put and get blob" {
-    const home = @import("compat").getenv("HOME") orelse return;
+    const home = platform.getenv("HOME") orelse return;
     _ = home;
 
     const data = "test blob content for yoq store";
@@ -128,7 +129,7 @@ test "put and get blob" {
 }
 
 test "put blob is idempotent" {
-    const home = @import("compat").getenv("HOME") orelse return;
+    const home = platform.getenv("HOME") orelse return;
     _ = home;
 
     const data = "idempotent test blob";
@@ -146,7 +147,7 @@ test "has blob returns false for missing" {
 }
 
 test "verify blob — valid blob passes" {
-    const home = @import("compat").getenv("HOME") orelse return;
+    const home = platform.getenv("HOME") orelse return;
     _ = home;
 
     const data = "verify blob test content";
@@ -157,7 +158,7 @@ test "verify blob — valid blob passes" {
 }
 
 test "verify blob — corrupted blob fails" {
-    const home = @import("compat").getenv("HOME") orelse return;
+    const home = platform.getenv("HOME") orelse return;
     _ = home;
 
     const data = "original content for corruption test";
@@ -166,7 +167,7 @@ test "verify blob — corrupted blob fails" {
 
     var path_buf: [max_path]u8 = undefined;
     const path = try blobPath(digest, &path_buf);
-    const file = try @import("compat").cwd().createFile(path, .{});
+    const file = try platform.cwd().createFile(path, .{});
     defer file.close();
     try file.writeAll("corrupted data");
 
@@ -179,7 +180,7 @@ test "verify blob — missing blob returns false" {
 }
 
 test "putBlobDirect repairs corrupted existing blob" {
-    const home = @import("compat").getenv("HOME") orelse return;
+    const home = platform.getenv("HOME") orelse return;
     _ = home;
 
     const data = "repair corrupted blob content";
@@ -188,7 +189,7 @@ test "putBlobDirect repairs corrupted existing blob" {
 
     var path_buf: [max_path]u8 = undefined;
     const path = try blobPath(digest, &path_buf);
-    const file = try @import("compat").cwd().createFile(path, .{ .truncate = true });
+    const file = try platform.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll("corrupted data");
     try std.testing.expect(!verifyBlob(digest));
@@ -208,7 +209,7 @@ test "remove blob — silently handles missing blob" {
 }
 
 test "listBlobsOnDisk returns stored blobs" {
-    const home = @import("compat").getenv("HOME") orelse return;
+    const home = platform.getenv("HOME") orelse return;
     _ = home;
     const alloc = std.testing.allocator;
 
@@ -235,7 +236,7 @@ test "listBlobsOnDisk returns stored blobs" {
 }
 
 test "getBlobSize returns correct size" {
-    const home = @import("compat").getenv("HOME") orelse return;
+    const home = platform.getenv("HOME") orelse return;
     _ = home;
 
     const data = "blob size test content";
@@ -258,7 +259,7 @@ test "blobAllocSize accepts blobs larger than 256 MiB" {
 }
 
 test "openBlob returns size and readable handle" {
-    const home = @import("compat").getenv("HOME") orelse return;
+    const home = platform.getenv("HOME") orelse return;
     _ = home;
 
     const data = "blob handle test content";

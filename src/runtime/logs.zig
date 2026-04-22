@@ -4,6 +4,7 @@
 // flows live in runtime/logs/.
 
 const std = @import("std");
+const platform = @import("platform");
 const common = @import("logs/common.zig");
 const storage = @import("logs/storage.zig");
 const capture = @import("logs/capture.zig");
@@ -11,7 +12,7 @@ const follow = @import("logs/follow.zig");
 
 pub const LogError = common.LogError;
 
-pub fn createLogFile(container_id: []const u8) LogError!@import("compat").File {
+pub fn createLogFile(container_id: []const u8) LogError!platform.File {
     return storage.createLogFile(container_id);
 }
 
@@ -27,12 +28,12 @@ pub fn deleteLogFile(container_id: []const u8) void {
     storage.deleteLogFile(container_id);
 }
 
-pub fn writeLogLine(log_file: @import("compat").File, stream: []const u8, line: []const u8) void {
+pub fn writeLogLine(log_file: platform.File, stream: []const u8, line: []const u8) void {
     capture.writeLogLine(log_file, stream, line);
 }
 
 pub fn captureStream(
-    log_file: @import("compat").File,
+    log_file: platform.File,
     pipe_fd: std.posix.fd_t,
     stream_label: []const u8,
     dev_service: ?[]const u8,

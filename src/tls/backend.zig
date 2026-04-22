@@ -8,6 +8,7 @@
 // and the orchestrator lifecycle run on different threads.
 
 const std = @import("std");
+const platform = @import("platform");
 
 pub const Backend = struct {
     ip: []const u8,
@@ -15,7 +16,7 @@ pub const Backend = struct {
 };
 
 pub const BackendRegistry = struct {
-    mutex: @import("compat").Mutex,
+    mutex: platform.Mutex,
     backends: std.StringHashMapUnmanaged(Backend),
     allocator: std.mem.Allocator,
 

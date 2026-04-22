@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const app_spec = @import("../app_spec.zig");
 const local_apply_backend = @import("../local_apply_backend.zig");
@@ -55,7 +56,7 @@ pub fn up(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     defer manifest.deinit();
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").cwd().realpath(".", &cwd_buf) catch |err| {
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch |err| {
         writeErr("failed to resolve working directory: {}\n", .{err});
         return DeployError.StoreError;
     };
@@ -170,7 +171,7 @@ pub fn down(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     defer manifest.deinit();
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").cwd().realpath(".", &cwd_buf) catch |err| {
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch |err| {
         writeErr("failed to resolve working directory: {}\n", .{err});
         return DeployError.StoreError;
     };
@@ -211,7 +212,7 @@ pub fn down(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
                 while (waited < 100) : (waited += 1) {
                     const result = process.wait(pid, true) catch break;
                     switch (result.status) {
-                        .running => @import("compat").sleep(100 * std.time.ns_per_ms),
+                        .running => platform.sleep(100 * std.time.ns_per_ms),
                         else => break,
                     }
                 }

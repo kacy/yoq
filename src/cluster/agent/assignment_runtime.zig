@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http_client = @import("../http_client.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const log = @import("../../lib/log.zig");
@@ -43,7 +44,7 @@ pub fn reconcile(self: anytype) void {
     };
     defer resp.deinit(self.alloc);
 
-    const now = @import("compat").timestamp();
+    const now = platform.timestamp();
     var iter = json_helpers.extractJsonObjects(resp.body);
     while (iter.next()) |obj| {
         const assignment_id = extractJsonString(obj, "id") orelse continue;
@@ -286,7 +287,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         .pid = null,
         .exit_code = null,
         .app_name = meta.app_name,
-        .created_at = @import("compat").timestamp(),
+        .created_at = platform.timestamp(),
     }) catch {
         log.warn("failed to save container record for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
@@ -337,7 +338,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = @import("compat").timestamp(),
+        .created_at = platform.timestamp(),
     };
 
     log.info("starting container {s} for assignment {s}", .{ container_id, assignment_id });
@@ -407,16 +408,16 @@ fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, m
     manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return .invalid;
     manifest_health.startChecker();
 
-    const deadline_ns = @import("compat").nanoTimestamp() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
+    const deadline_ns = platform.nanoTimestamp() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
     defer {
         const final_status = manifest_health.getStatus(service_name) orelse .starting;
         if (final_status != .healthy) manifest_health.unregisterService(service_name);
     }
-    while (@import("compat").nanoTimestamp() < deadline_ns) {
+    while (platform.nanoTimestamp() < deadline_ns) {
         switch (manifest_health.getStatus(service_name) orelse .starting) {
             .healthy => return .healthy,
             .unhealthy => return .unhealthy,
-            .starting => @import("compat").sleep(100 * std.time.ns_per_ms),
+            .starting => platform.sleep(100 * std.time.ns_per_ms),
         }
     }
     return .timeout;

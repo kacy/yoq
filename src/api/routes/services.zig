@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http = @import("../http.zig");
 const common = @import("common.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
@@ -80,7 +81,7 @@ fn handleListServices(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
     for (services.items, 0..) |service, idx| {
@@ -102,7 +103,7 @@ fn handleGetService(alloc: std.mem.Allocator, service_name: []const u8) Response
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
     writeServiceJson(writer, alloc, service) catch return common.internalError();
 
     const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
@@ -121,7 +122,7 @@ fn handleListServiceEndpoints(alloc: std.mem.Allocator, service_name: []const u8
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
     for (endpoints.items, 0..) |endpoint, idx| {
@@ -151,7 +152,7 @@ fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const 
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
     for (proxy_routes.items, 0..) |proxy_route, idx| {

@@ -9,6 +9,7 @@
 // falls back gracefully to TCP when no InfiniBand is detected.
 
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const detect = @import("detect.zig");
 const log = @import("../lib/log.zig");
@@ -71,7 +72,7 @@ pub fn detectInfiniband() IbDetectResult {
     // check for GPUDirect RDMA (nvidia-peermem)
     result.gdr_available = checkGdr();
 
-    var ib_dir = @import("compat").openDirAbsolute(detect_paths.ib_root, .{ .iterate = true }) catch return result;
+    var ib_dir = platform.openDirAbsolute(detect_paths.ib_root, .{ .iterate = true }) catch return result;
     defer ib_dir.close();
 
     var iter = ib_dir.iterate();
@@ -109,7 +110,7 @@ pub fn detectInfiniband() IbDetectResult {
 /// check if GPUDirect RDMA is available.
 fn checkGdr() bool {
     // nvidia-peermem kernel module
-    const file = @import("compat").cwd().openFile(detect_paths.peermem_path, .{}) catch {
+    const file = platform.cwd().openFile(detect_paths.peermem_path, .{}) catch {
         return false;
     };
     file.close();
@@ -241,8 +242,8 @@ fn appendGpuNode(
 
 fn appendGpuHeader(alloc: Allocator, buf: *std.ArrayListUnmanaged(u8), gpu: GpuInfo) !void {
     try buf.appendSlice(alloc, "      <gpu dev=\"");
-    try @import("compat").format(@import("compat").arrayListWriter(buf, alloc), "{d}", .{gpu.index});
-    try @import("compat").format(@import("compat").arrayListWriter(buf, alloc), "\" sm=\"{d}\" mem=\"{d}\"", .{
+    try platform.format(platform.arrayListWriter(buf, alloc), "{d}", .{gpu.index});
+    try platform.format(platform.arrayListWriter(buf, alloc), "\" sm=\"{d}\" mem=\"{d}\"", .{
         gpuSmValue(gpu),
         gpu.vram_mb,
     });
@@ -268,7 +269,7 @@ fn appendNvLinkEntries(
             try buf.appendSlice(alloc, ">\n");
         }
 
-        try @import("compat").format(@import("compat").arrayListWriter(buf, alloc), "        <nvlink target=\"{s}\" count=\"1\" />\n", .{peer_pci});
+        try platform.format(platform.arrayListWriter(buf, alloc), "        <nvlink target=\"{s}\" count=\"1\" />\n", .{peer_pci});
     }
 
     return wrote_entry;
@@ -289,7 +290,7 @@ fn appendIbTopology(
 
 fn appendIbNode(alloc: Allocator, buf: *std.ArrayListUnmanaged(u8), nic: IbDevice) !void {
     try appendPciOpen(alloc, buf, nic.getPciBusId(), "0x020700");
-    try @import("compat").format(@import("compat").arrayListWriter(buf, alloc), "      <nic name=\"{s}\" speed=\"{d}\" gdr=\"{s}\" />\n", .{
+    try platform.format(platform.arrayListWriter(buf, alloc), "      <nic name=\"{s}\" speed=\"{d}\" gdr=\"{s}\" />\n", .{
         nic.getName(),
         nic.rate_gbps,
         if (nic.gdr_supported) "1" else "0",
@@ -303,7 +304,7 @@ fn appendPciOpen(
     pci_bus_id: []const u8,
     class: []const u8,
 ) !void {
-    try @import("compat").format(@import("compat").arrayListWriter(buf, alloc), "    <pci busid=\"{s}\" class=\"{s}\" link_speed=\"16 GT/s\" link_width=\"16\">\n", .{
+    try platform.format(platform.arrayListWriter(buf, alloc), "    <pci busid=\"{s}\" class=\"{s}\" link_speed=\"16 GT/s\" link_width=\"16\">\n", .{
         pci_bus_id,
         class,
     });
@@ -327,7 +328,7 @@ pub const gpu_prio_bpf_path = "bpf/gpu_prio.o";
 /// and detachment via:
 ///   tc filter del dev wg-yoq egress
 pub fn isGpuPrioAvailable() bool {
-    @import("compat").cwd().access(gpu_prio_bpf_path, .{}) catch return false;
+    platform.cwd().access(gpu_prio_bpf_path, .{}) catch return false;
     return true;
 }
 
@@ -363,18 +364,18 @@ test "detectInfiniband discovers fake IB tree" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try @import("compat").Dir.from(tmp.dir).makePath("sys/class/infiniband/mlx5_0/ports/1");
-    try @import("compat").Dir.from(tmp.dir).makePath("sys/class/infiniband/mlx5_0/device");
-    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/state", .data = "4: ACTIVE\n" });
-    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/rate", .data = "200 Gb/sec\n" });
-    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/device/uevent", .data = "PCI_SLOT_NAME=0000:81:00.0\n" });
-    try @import("compat").Dir.from(tmp.dir).makePath("proc/driver");
-    try @import("compat").Dir.from(tmp.dir).writeFile(.{ .sub_path = "proc/driver/nvidia-peermem", .data = "loaded\n" });
+    try platform.Dir.from(tmp.dir).makePath("sys/class/infiniband/mlx5_0/ports/1");
+    try platform.Dir.from(tmp.dir).makePath("sys/class/infiniband/mlx5_0/device");
+    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/state", .data = "4: ACTIVE\n" });
+    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/rate", .data = "200 Gb/sec\n" });
+    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/device/uevent", .data = "PCI_SLOT_NAME=0000:81:00.0\n" });
+    try platform.Dir.from(tmp.dir).makePath("proc/driver");
+    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "proc/driver/nvidia-peermem", .data = "loaded\n" });
 
     var ib_buf: [std.fs.max_path_bytes]u8 = undefined;
     var peermem_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ib_root = try @import("compat").Dir.from(tmp.dir).realpath("sys/class/infiniband", &ib_buf);
-    const peermem_path = try @import("compat").Dir.from(tmp.dir).realpath("proc/driver/nvidia-peermem", &peermem_buf);
+    const ib_root = try platform.Dir.from(tmp.dir).realpath("sys/class/infiniband", &ib_buf);
+    const peermem_path = try platform.Dir.from(tmp.dir).realpath("proc/driver/nvidia-peermem", &peermem_buf);
 
     setTestDetectPaths(.{
         .ib_root = ib_root,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const deployment_store = @import("deployment_store.zig");
 const common = @import("common.zig");
@@ -57,10 +58,10 @@ pub fn waitForHealth(
     callbacks: common.UpdateCallbacks,
     timeout: u32,
 ) bool {
-    const now = @import("compat").timestamp();
+    const now = platform.timestamp();
     const deadline = @as(u64, @intCast(@max(0, now))) + timeout;
 
-    while (@as(u64, @intCast(@max(0, @import("compat").timestamp()))) < deadline) {
+    while (@as(u64, @intCast(@max(0, platform.timestamp()))) < deadline) {
         var all_healthy = true;
 
         for (container_ids.items) |id| {
@@ -71,7 +72,7 @@ pub fn waitForHealth(
         }
 
         if (all_healthy) return true;
-        @import("compat").sleep(1 * std.time.ns_per_s);
+        platform.sleep(1 * std.time.ns_per_s);
     }
 
     return false;

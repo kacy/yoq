@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const secrets = @import("../../state/secrets.zig");
 const common = @import("common.zig");
@@ -41,7 +42,7 @@ pub const CertStore = struct {
         const not_after = x509_parse.parseExpiryFromPem(cert_pem) catch
             return common.CertError.InvalidCert;
 
-        const now: i64 = @import("compat").timestamp();
+        const now: i64 = platform.timestamp();
         if (not_after <= now) return common.CertError.InvalidCert;
 
         const encrypted = secrets.encrypt(self.allocator, key_pem, self.key) catch
@@ -166,7 +167,7 @@ pub const CertStore = struct {
             .{domain},
         ) catch return common.CertError.ReadFailed) orelse return common.CertError.NotFound;
 
-        const threshold = @import("compat").timestamp() + (days * 86400);
+        const threshold = platform.timestamp() + (days * 86400);
         return row.not_after <= threshold;
     }
 
@@ -175,7 +176,7 @@ pub const CertStore = struct {
             domain: sqlite.Text,
         };
 
-        const threshold = @import("compat").timestamp() + (days * 86400);
+        const threshold = platform.timestamp() + (days * 86400);
         var results: std.ArrayList([]const u8) = .empty;
 
         var stmt = self.db.prepare(

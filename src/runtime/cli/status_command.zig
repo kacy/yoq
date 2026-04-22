@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const json_out = @import("../../lib/json_output.zig");
 const apply_release = @import("../../manifest/apply_release.zig");
@@ -853,7 +854,7 @@ fn snapshotFromDeployments(
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").cwd().realpath(".", &cwd_buf) catch return StatusError.StoreError;
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch return StatusError.StoreError;
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return StatusError.OutOfMemory;
 }
 

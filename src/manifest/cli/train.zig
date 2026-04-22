@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const manifest_loader = @import("../loader.zig");
 const manifest_spec = @import("../spec.zig");
@@ -82,7 +83,7 @@ fn trainStart(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void 
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
+    const cwd = platform.getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -152,7 +153,7 @@ fn trainStatus(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
+    const cwd = platform.getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch {
@@ -241,7 +242,7 @@ fn parseTrainArgs(args: *std.process.Args.Iterator) TrainArgs {
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").cwd().realpath(".", &cwd_buf) catch return TrainError.StoreError;
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch return TrainError.StoreError;
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return TrainError.DeploymentFailed;
 }
 
@@ -324,7 +325,7 @@ fn loadTrainJobContextFromParsed(parsed: TrainArgs, alloc: std.mem.Allocator, co
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
+    const cwd = platform.getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     const ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -521,7 +522,7 @@ fn trainScale(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void 
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
+    const cwd = platform.getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -551,7 +552,7 @@ fn trainScale(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void 
     }
 
     if (ctrl.job_id) |jid| {
-        store.updateTrainingJobGpus(jid, gpus, @import("compat").timestamp()) catch {
+        store.updateTrainingJobGpus(jid, gpus, platform.timestamp()) catch {
             writeErr("failed to update GPU count in store\n", .{});
             return TrainError.StoreError;
         };
@@ -635,7 +636,7 @@ fn trainLogs(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
+    const cwd = platform.getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     const record = store.findAppContainer(alloc, app_name, hostname) catch |err| {

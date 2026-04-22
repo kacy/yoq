@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http = @import("../../http.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const secrets = @import("../../../state/secrets.zig");
@@ -20,7 +21,7 @@ pub fn handleListSecrets(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
     for (names.items, 0..) |name, i| {

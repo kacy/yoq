@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const container = @import("../../container.zig");
 const process = @import("../../process.zig");
 const run_state = @import("../../run_state.zig");
@@ -36,7 +37,7 @@ fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirr
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = @import("compat").timestamp(),
+        .created_at = platform.timestamp(),
         .runtime = .{ .mirror_output = mirror_output },
     };
 }
@@ -75,7 +76,7 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
         if (attach) {
             writeErr("container {s} exited ({d}), restarting in {d}ms...\n", .{ id, last_exit, backoff_ms });
         }
-        @import("compat").sleep(@as(u64, backoff_ms) * std.time.ns_per_ms);
+        platform.sleep(@as(u64, backoff_ms) * std.time.ns_per_ms);
         backoff_ms = @min(std.math.mul(u32, backoff_ms, 2) catch 30_000, 30_000);
         first_start = false;
     }
@@ -84,10 +85,10 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
 }
 
 pub fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
-    const exe_path = @import("compat").selfExePathAlloc(alloc) catch return ContainerError.OutOfMemory;
+    const exe_path = platform.selfExePathAlloc(alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
 
-    const child = std.process.spawn(@import("compat").io(), .{
+    const child = std.process.spawn(platform.io(), .{
         .argv = &.{ exe_path, "__run-supervisor", id },
         .stdin = .ignore,
         .stdout = .ignore,
@@ -97,7 +98,7 @@ pub fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) ContainerError!
         return ContainerError.ProcessNotFound;
     };
 
-    @import("compat").sleep(100 * std.time.ns_per_ms);
+    platform.sleep(100 * std.time.ns_per_ms);
 
     if (process.sendSignal(child.id orelse return ContainerError.ProcessNotFound, 0)) |_| {
         return;
@@ -116,7 +117,7 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
-            @import("compat").sleep(50 * std.time.ns_per_ms);
+            platform.sleep(50 * std.time.ns_per_ms);
         } else |_| {
             return;
         }
@@ -127,7 +128,7 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     attempts = 0;
     while (attempts < 40) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
-            @import("compat").sleep(50 * std.time.ns_per_ms);
+            platform.sleep(50 * std.time.ns_per_ms);
         } else |_| {
             return;
         }

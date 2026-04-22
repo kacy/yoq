@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const schema = @import("../schema.zig");
 const paths = @import("../../lib/paths.zig");
@@ -11,8 +12,8 @@ pub const StoreError = error{
 };
 
 var global_db: ?sqlite.Db = null;
-var db_mutex: @import("compat").Mutex = .{};
-var test_db_lifetime_mutex: @import("compat").Mutex = .{};
+var db_mutex: platform.Mutex = .{};
+var test_db_lifetime_mutex: platform.Mutex = .{};
 
 pub fn initTestDb() StoreError!void {
     // The in-memory test DB is global process state. Hold an exclusive

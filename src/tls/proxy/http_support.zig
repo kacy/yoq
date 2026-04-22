@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
 
@@ -84,7 +85,7 @@ pub fn sendCloseNotify(fd: posix.fd_t) void {
         0x01,
         0x00,
     };
-    _ = @import("compat").posix.write(fd, &close_notify) catch |e| {
+    _ = platform.posix.write(fd, &close_notify) catch |e| {
         log.warn("tls close_notify write failed: {}", .{e});
     };
 }
@@ -92,7 +93,7 @@ pub fn sendCloseNotify(fd: posix.fd_t) void {
 pub fn sendHttpResponse(fd: posix.fd_t, status: []const u8, body: []const u8) void {
     var buf: [512]u8 = undefined;
     const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, body.len, body }) catch return;
-    _ = @import("compat").posix.write(fd, response) catch |e| {
+    _ = platform.posix.write(fd, response) catch |e| {
         log.warn("tls http response write failed: {}", .{e});
     };
 }

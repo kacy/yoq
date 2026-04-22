@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const attach_support = @import("attach_support.zig");
@@ -123,11 +124,11 @@ pub const PortMapper = struct {
             log.debug("ebpf: failed to detach port mapper: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            @import("compat").posix.close(self.prog_fd);
+            platform.posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
         }
         if (self.map_fd >= 0) {
-            @import("compat").posix.close(self.map_fd);
+            platform.posix.close(self.map_fd);
             resource_support.releaseBpfFd();
         }
     }
@@ -143,16 +144,16 @@ pub fn load(if_index: u32) common.EbpfError!PortMapper {
 
     var map_fds = [_]posix.fd_t{map_fd};
     const prog_fd = program_support.loadProgramWithType(port_map_prog, &map_fds, .xdp) catch |e| {
-        @import("compat").posix.close(map_fd);
+        platform.posix.close(map_fd);
         resource_support.releaseBpfFd();
         return e;
     };
 
     attach_support.attachXdp(if_index, prog_fd) catch |e| {
         log.warn("ebpf: failed to attach XDP on ifindex {d}: {}", .{ if_index, e });
-        @import("compat").posix.close(prog_fd);
+        platform.posix.close(prog_fd);
         resource_support.releaseBpfFd();
-        @import("compat").posix.close(map_fd);
+        platform.posix.close(map_fd);
         resource_support.releaseBpfFd();
         return common.EbpfError.AttachFailed;
     };

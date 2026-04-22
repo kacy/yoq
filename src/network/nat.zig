@@ -16,6 +16,7 @@
 // containers work without NAT (just no internet or port mapping).
 
 const std = @import("std");
+const platform = @import("platform");
 const cmd = @import("../lib/cmd.zig");
 const log = @import("../lib/log.zig");
 const network_bridge = @import("bridge.zig");
@@ -32,7 +33,7 @@ pub const NatError = error{
 /// enable IPv4 forwarding by writing to /proc/sys/net/ipv4/ip_forward.
 /// required for traffic to flow between container namespace and host.
 pub fn enableForwarding() NatError!void {
-    const file = @import("compat").cwd().openFile(
+    const file = platform.cwd().openFile(
         "/proc/sys/net/ipv4/ip_forward",
         .{ .mode = .write_only },
     ) catch return NatError.ForwardingFailed;
@@ -332,7 +333,7 @@ fn enableRouteLocalnet(interface: []const u8) NatError!void {
     var path_buf: [128]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/sys/net/ipv4/conf/{s}/route_localnet", .{interface}) catch
         return NatError.RouteLocalnetFailed;
-    const file = @import("compat").cwd().openFile(path, .{ .mode = .write_only }) catch return NatError.RouteLocalnetFailed;
+    const file = platform.cwd().openFile(path, .{ .mode = .write_only }) catch return NatError.RouteLocalnetFailed;
     defer file.close();
     file.writeAll("1\n") catch return NatError.RouteLocalnetFailed;
 }

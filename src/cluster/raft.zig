@@ -18,6 +18,7 @@
 //   // process actions (send messages, apply committed entries)
 
 const std = @import("std");
+const platform = @import("platform");
 const action_queue = @import("action_queue.zig");
 const common = @import("raft/common.zig");
 const election_runtime = @import("raft/election_runtime.zig");
@@ -122,7 +123,7 @@ pub const Raft = struct {
         }
 
         // seed rng with node id + timestamp for uniqueness
-        const seed = @as(u64, @truncate(@as(u128, @bitCast(@import("compat").nanoTimestamp())))) ^ id;
+        const seed = @as(u64, @truncate(@as(u128, @bitCast(platform.nanoTimestamp())))) ^ id;
 
         // load snapshot metadata from persistent storage
         const snap_meta = log.getSnapshotMeta();

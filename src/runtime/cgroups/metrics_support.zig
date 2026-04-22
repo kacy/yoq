@@ -1,11 +1,12 @@
 const std = @import("std");
+const platform = @import("platform");
 const common = @import("common.zig");
 
 pub const PsiMetrics = common.PsiMetrics;
 pub const IoStats = common.IoStats;
 pub const CgroupMetrics = common.CgroupMetrics;
 
-pub fn readFromDir(dir: @import("compat").Dir, filename: []const u8, buf: []u8) ?[]const u8 {
+pub fn readFromDir(dir: platform.Dir, filename: []const u8, buf: []u8) ?[]const u8 {
     const file = dir.openFile(filename, .{}) catch return null;
     defer file.close();
     const bytes_read = file.readAll(buf) catch return null;

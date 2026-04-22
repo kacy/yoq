@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const http = @import("../../http.zig");
 const store = @import("../../../state/store.zig");
@@ -90,7 +91,7 @@ pub fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    var writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    var writer = platform.arrayListWriter(&json_buf, alloc);
     writer.writeByte('[') catch return common.internalError();
 
     var first = true;
@@ -145,7 +146,7 @@ pub fn handleMetricsPairs(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    var writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    var writer = platform.arrayListWriter(&json_buf, alloc);
     writer.writeByte('[') catch return common.internalError();
 
     var first = true;
@@ -177,7 +178,7 @@ pub fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    var writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    var writer = platform.arrayListWriter(&json_buf, alloc);
     writer.writeByte('[') catch return common.internalError();
 
     for (entries[0..count], 0..) |entry, idx| {
@@ -203,7 +204,7 @@ pub fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
 pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
-    var writer = @import("compat").arrayListWriter(&buf, alloc);
+    var writer = platform.arrayListWriter(&buf, alloc);
 
     writeServiceRolloutPrometheus(writer) catch return common.internalError();
 
@@ -935,7 +936,7 @@ pub fn handleGpuMetrics(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    var writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    var writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('{') catch return common.internalError();
     gpu_health.writeMetricsJson(writer, metrics, gpu_result.count) catch return common.internalError();

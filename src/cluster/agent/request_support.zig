@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const ip_mod = @import("../../network/ip.zig");
 const agent_types = @import("../agent_types.zig");
@@ -20,7 +21,7 @@ pub fn buildRegisterBody(
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     try writer.writeAll("{\"token\":\"");
     try json_helpers.writeJsonEscaped(writer, token);
@@ -66,7 +67,7 @@ pub fn buildRegisterBody(
 pub fn buildHeartbeatBody(alloc: Allocator, resources: AgentResources, gpu_health_label: []const u8) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     try writer.writeAll("{\"cpu_cores\":");
     try writer.print("{d}", .{resources.cpu_cores});

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const agent_registry = @import("../../../cluster/registry.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 
@@ -12,24 +13,24 @@ pub fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void 
     try writer.writeByte('"');
     if (agent.agent_api_port) |port| {
         try writer.writeAll(",\"agent_api_port\":");
-        try @import("compat").format(writer, "{d}", .{port});
+        try platform.format(writer, "{d}", .{port});
     }
     try writer.writeAll(",\"cpu_cores\":");
-    try @import("compat").format(writer, "{d}", .{agent.cpu_cores});
+    try platform.format(writer, "{d}", .{agent.cpu_cores});
     try writer.writeAll(",\"memory_mb\":");
-    try @import("compat").format(writer, "{d}", .{agent.memory_mb});
+    try platform.format(writer, "{d}", .{agent.memory_mb});
     try writer.writeAll(",\"cpu_used\":");
-    try @import("compat").format(writer, "{d}", .{agent.cpu_used});
+    try platform.format(writer, "{d}", .{agent.cpu_used});
     try writer.writeAll(",\"memory_used_mb\":");
-    try @import("compat").format(writer, "{d}", .{agent.memory_used_mb});
+    try platform.format(writer, "{d}", .{agent.memory_used_mb});
     try writer.writeAll(",\"containers\":");
-    try @import("compat").format(writer, "{d}", .{agent.containers});
+    try platform.format(writer, "{d}", .{agent.containers});
     try writer.writeAll(",\"last_heartbeat\":");
-    try @import("compat").format(writer, "{d}", .{agent.last_heartbeat});
+    try platform.format(writer, "{d}", .{agent.last_heartbeat});
 
     if (agent.node_id) |nid| {
         try writer.writeAll(",\"node_id\":");
-        try @import("compat").format(writer, "{d}", .{nid});
+        try platform.format(writer, "{d}", .{nid});
     }
     if (agent.wg_public_key) |key| {
         try writer.writeAll(",\"wg_public_key\":\"");
@@ -58,11 +59,11 @@ pub fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void 
     }
     if (agent.gpu_count != 0) {
         try writer.writeAll(",\"gpu_count\":");
-        try @import("compat").format(writer, "{d}", .{agent.gpu_count});
+        try platform.format(writer, "{d}", .{agent.gpu_count});
     }
     if (agent.gpu_used != 0) {
         try writer.writeAll(",\"gpu_used\":");
-        try @import("compat").format(writer, "{d}", .{agent.gpu_used});
+        try platform.format(writer, "{d}", .{agent.gpu_used});
     }
     if (agent.gpu_model) |model| {
         try writer.writeAll(",\"gpu_model\":\"");
@@ -71,7 +72,7 @@ pub fn writeAgentJson(writer: anytype, agent: agent_registry.AgentRecord) !void 
     }
     if (agent.gpu_vram_mb) |vram| {
         try writer.writeAll(",\"gpu_vram_mb\":");
-        try @import("compat").format(writer, "{d}", .{vram});
+        try platform.format(writer, "{d}", .{vram});
     }
     if (agent.rdma_capable) {
         try writer.writeAll(",\"rdma_capable\":true");
@@ -96,9 +97,9 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
         try json_helpers.writeJsonEscaped(writer, status_reason);
     }
     try writer.writeAll("\",\"cpu_limit\":");
-    try @import("compat").format(writer, "{d}", .{assignment.cpu_limit});
+    try platform.format(writer, "{d}", .{assignment.cpu_limit});
     try writer.writeAll(",\"memory_limit_mb\":");
-    try @import("compat").format(writer, "{d}", .{assignment.memory_limit_mb});
+    try platform.format(writer, "{d}", .{assignment.memory_limit_mb});
     if (assignment.app_name) |app_name| {
         try writer.writeAll(",\"app_name\":\"");
         try json_helpers.writeJsonEscaped(writer, app_name);
@@ -120,11 +121,11 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
     }
     if (assignment.gang_rank) |rank| {
         try writer.writeAll(",\"gang_rank\":");
-        try @import("compat").format(writer, "{d}", .{rank});
+        try platform.format(writer, "{d}", .{rank});
     }
     if (assignment.gang_world_size) |ws| {
         try writer.writeAll(",\"gang_world_size\":");
-        try @import("compat").format(writer, "{d}", .{ws});
+        try platform.format(writer, "{d}", .{ws});
     }
     if (assignment.gang_master_addr) |addr| {
         try writer.writeAll(",\"gang_master_addr\":\"");
@@ -133,14 +134,14 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
     }
     if (assignment.gang_master_port) |port| {
         try writer.writeAll(",\"gang_master_port\":");
-        try @import("compat").format(writer, "{d}", .{port});
+        try platform.format(writer, "{d}", .{port});
     }
     try writer.writeByte('}');
 }
 
 pub fn writeWireguardPeerJson(writer: anytype, peer: agent_registry.WireguardPeer) !void {
     try writer.writeAll("{\"node_id\":");
-    try @import("compat").format(writer, "{d}", .{peer.node_id});
+    try platform.format(writer, "{d}", .{peer.node_id});
     try writer.writeAll(",\"agent_id\":\"");
     try json_helpers.writeJsonEscaped(writer, peer.agent_id);
     try writer.writeAll("\",\"public_key\":\"");

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http_client = @import("../http_client.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const log = @import("../../lib/log.zig");
@@ -32,7 +33,7 @@ pub fn agentLoop(self: anytype) void {
 
         var remaining: u32 = agentHeartbeatTicks(self);
         while (remaining > 0 and self.running.load(.acquire)) : (remaining -= 1) {
-            @import("compat").sleep(100 * std.time.ns_per_ms);
+            platform.sleep(100 * std.time.ns_per_ms);
             if (remaining % 5 == 0) gossip_support.tickGossipLoop(self);
             gossip_support.receiveGossipLoop(self);
         }

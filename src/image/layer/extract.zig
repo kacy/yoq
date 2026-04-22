@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const blob_store = @import("../store.zig");
 const paths = @import("../../lib/paths.zig");
@@ -18,7 +19,7 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
         return types.LayerError.PathTooLong;
     const dest_owned = alloc.dupe(u8, dest_path) catch return types.LayerError.ExtractionFailed;
 
-    if (@import("compat").cwd().access(dest_path, .{})) |_| {
+    if (platform.cwd().access(dest_path, .{})) |_| {
         if (hasCompleteCacheMarker(dest_path)) {
             if (blob_store.verifyBlob(digest)) {
                 return dest_owned;
@@ -38,11 +39,11 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
 
     var parent_buf: [max_path]u8 = undefined;
     const parent_path = layer_path.layerDir(&parent_buf) catch return types.LayerError.PathTooLong;
-    @import("compat").cwd().makePath(parent_path) catch |err| {
+    platform.cwd().makePath(parent_path) catch |err| {
         log.warn("failed to create layer cache dir: {}", .{err});
     };
 
-    @import("compat").cwd().makePath(dest_path) catch return types.LayerError.ExtractionFailed;
+    platform.cwd().makePath(dest_path) catch return types.LayerError.ExtractionFailed;
 
     var blob_path_buf: [max_path]u8 = undefined;
     const blob_path = blob_store.blobPath(digest, &blob_path_buf) catch
@@ -133,10 +134,10 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     paths.ensureDataDir("tmp") catch return error.FileNotFound;
 
     {
-        const gz_file = try @import("compat").cwd().openFile(gz_path, .{});
+        const gz_file = try platform.cwd().openFile(gz_path, .{});
         defer gz_file.close();
 
-        const tmp_file = try @import("compat").cwd().createFile(tmp_path, .{});
+        const tmp_file = try platform.cwd().createFile(tmp_path, .{});
         defer tmp_file.close();
 
         var read_buf: [4096]u8 = undefined;
@@ -155,15 +156,15 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
         tmp_writer.interface.flush() catch return error.FileNotFound;
         tmp_file.sync() catch {};
     }
-    defer @import("compat").cwd().deleteFile(tmp_path) catch {};
+    defer platform.cwd().deleteFile(tmp_path) catch {};
 
-    const tar_file = try @import("compat").cwd().openFile(tmp_path, .{});
+    const tar_file = try platform.cwd().openFile(tmp_path, .{});
     defer tar_file.close();
 
     var tar_read_buf: [4096]u8 = undefined;
     var tar_reader = tar_file.reader(&tar_read_buf);
 
-    var dest_dir = try @import("compat").cwd().openDir(dest_path, .{});
+    var dest_dir = try platform.cwd().openDir(dest_path, .{});
     defer dest_dir.close();
 
     var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -181,7 +182,7 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
                 if (entry.name.len > 0) try dest_dir.makePath(entry.name);
             },
             .file => {
-                const mode: @import("compat").File.Mode = @intCast(entry.mode & 0o777);
+                const mode: platform.File.Mode = @intCast(entry.mode & 0o777);
                 const fs_file = try createDirAndFile(dest_dir, entry.name, mode);
                 defer fs_file.close();
                 try copyTarEntryToFile(&it, entry, fs_file);
@@ -200,7 +201,7 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     }
 }
 
-fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: @import("compat").File) !void {
+fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: platform.File) !void {
     if (entry.size > max_file_size) {
         log.warn("tar entry exceeds max file size ({d} bytes): skipping", .{entry.size});
         return error.FileTooBig;
@@ -218,7 +219,7 @@ fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_fi
     it.unread_file_bytes = 0;
 }
 
-fn createDirAndFile(dir: @import("compat").Dir, name: []const u8, mode: @import("compat").File.Mode) !@import("compat").File {
+fn createDirAndFile(dir: platform.Dir, name: []const u8, mode: platform.File.Mode) !platform.File {
     return dir.createFile(name, .{ .mode = mode }) catch |err| {
         if (err == error.FileNotFound) {
             if (std.fs.path.dirname(name)) |dir_name| {
@@ -230,7 +231,7 @@ fn createDirAndFile(dir: @import("compat").Dir, name: []const u8, mode: @import(
     };
 }
 
-fn createDirAndSymlink(dir: @import("compat").Dir, link_name: []const u8, file_name: []const u8) !void {
+fn createDirAndSymlink(dir: platform.Dir, link_name: []const u8, file_name: []const u8) !void {
     dir.symLink(link_name, file_name, .{}) catch |err| {
         if (err == error.FileNotFound) {
             if (std.fs.path.dirname(file_name)) |dir_name| {
@@ -245,14 +246,14 @@ fn createDirAndSymlink(dir: @import("compat").Dir, link_name: []const u8, file_n
 fn hasCompleteCacheMarker(dest_path: []const u8) bool {
     var marker_buf: [max_path]u8 = undefined;
     const marker_path = cacheMarkerPath(&marker_buf, dest_path) catch return false;
-    @import("compat").cwd().access(marker_path, .{}) catch return false;
+    platform.cwd().access(marker_path, .{}) catch return false;
     return true;
 }
 
 fn createCompleteCacheMarker(dest_path: []const u8) !void {
     var marker_buf: [max_path]u8 = undefined;
     const marker_path = try cacheMarkerPath(&marker_buf, dest_path);
-    const file = try @import("compat").cwd().createFile(marker_path, .{ .truncate = true });
+    const file = try platform.cwd().createFile(marker_path, .{ .truncate = true });
     defer file.close();
     try file.writeAll("ok\n");
 }
@@ -262,7 +263,7 @@ fn cacheMarkerPath(buf: *[max_path]u8, dest_path: []const u8) ![]const u8 {
 }
 
 fn removeExtractedLayer(dest_path: []const u8) void {
-    @import("compat").cwd().deleteTree(dest_path) catch {
-        @import("compat").cwd().deleteFile(dest_path) catch {};
+    platform.cwd().deleteTree(dest_path) catch {
+        platform.cwd().deleteFile(dest_path) catch {};
     };
 }

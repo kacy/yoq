@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const gpu_scheduler = @import("../../../gpu/scheduler.zig");
 const scheduler = @import("../../../cluster/scheduler.zig");
@@ -17,7 +18,7 @@ const common = @import("../common.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
-var active_rollout_mu: @import("compat").Mutex = .{};
+var active_rollout_mu: platform.Mutex = .{};
 var active_rollouts: std.StringHashMapUnmanaged(void) = .empty;
 
 const ResumeSeed = struct {
@@ -231,7 +232,7 @@ pub const ClusterApplyBackend = struct {
 
             if (failed_targets > batch_failed_before) break;
             if (strategy.delay_between_batches > 0 and batch_end < self.requests.len) {
-                @import("compat").sleep(@as(u64, strategy.delay_between_batches) * std.time.ns_per_s);
+                platform.sleep(@as(u64, strategy.delay_between_batches) * std.time.ns_per_s);
             }
             batch_start = batch_end;
             first_batch = false;
@@ -371,7 +372,7 @@ pub const ClusterApplyBackend = struct {
                     owned_id,
                     gp.agent_id,
                     req.request,
-                    @import("compat").timestamp(),
+                    platform.timestamp(),
                     gp,
                 ) catch return ClusterApplyError.InternalError;
 
@@ -432,7 +433,7 @@ pub const ClusterApplyBackend = struct {
             owned_id,
             placement.agent_id,
             req.request,
-            @import("compat").timestamp(),
+            platform.timestamp(),
         ) catch return ClusterApplyError.InternalError;
 
         _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
@@ -656,7 +657,7 @@ const FailureDetailBuilder = struct {
 
         var json_buf: std.ArrayList(u8) = .empty;
         errdefer json_buf.deinit(self.alloc);
-        const writer = @import("compat").arrayListWriter(&json_buf, self.alloc);
+        const writer = platform.arrayListWriter(&json_buf, self.alloc);
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |detail, i| {
@@ -793,7 +794,7 @@ const RolloutTargetBuilder = struct {
 
         var json_buf: std.ArrayList(u8) = .empty;
         errdefer json_buf.deinit(self.alloc);
-        const writer = @import("compat").arrayListWriter(&json_buf, self.alloc);
+        const writer = platform.arrayListWriter(&json_buf, self.alloc);
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |target, i| {
@@ -986,7 +987,7 @@ fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assign
             assignment.id,
             assignment.agent_id,
             request,
-            @import("compat").timestamp(),
+            platform.timestamp(),
             .{
                 .agent_id = assignment.agent_id,
                 .rank = @intCast(assignment.gang_rank.?),
@@ -1003,7 +1004,7 @@ fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assign
             assignment.id,
             assignment.agent_id,
             request,
-            @import("compat").timestamp(),
+            platform.timestamp(),
         ) catch return ClusterApplyError.InternalError;
 
     _ = node.propose(sql) catch return ClusterApplyError.NotLeader;
@@ -1066,7 +1067,7 @@ fn resolveTargetReadinessStates(
     errdefer alloc.free(states);
     @memset(states, .pending);
 
-    const deadline_ns: i128 = @import("compat").nanoTimestamp() + (@as(i128, timeout_secs) * std.time.ns_per_s);
+    const deadline_ns: i128 = platform.nanoTimestamp() + (@as(i128, timeout_secs) * std.time.ns_per_s);
     var remaining = targets.len;
 
     while (remaining > 0) {
@@ -1084,8 +1085,8 @@ fn resolveTargetReadinessStates(
         }
 
         if (remaining == 0) return states;
-        if (@import("compat").nanoTimestamp() >= deadline_ns) break;
-        @import("compat").sleep(100 * std.time.ns_per_ms);
+        if (platform.nanoTimestamp() >= deadline_ns) break;
+        platform.sleep(100 * std.time.ns_per_ms);
     }
 
     return states;
@@ -1303,7 +1304,7 @@ fn reconcileCronSchedules(db: *sqlite.Db, alloc: std.mem.Allocator, app_name: []
         alloc,
         app_name,
         schedules.items,
-        @import("compat").timestamp(),
+        platform.timestamp(),
     );
 }
 
@@ -1356,7 +1357,7 @@ fn formatAppApplyResponse(
 ) ![]u8 {
     var json_buf: std.ArrayList(u8) = .empty;
     errdefer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     try writer.writeByte('{');
     try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
@@ -1430,7 +1431,7 @@ const RolloutNodeHarness = struct {
         errdefer tmp.cleanup();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = @import("compat").Dir.from(tmp.dir).realpath(".", &path_buf) catch return error.SkipZigTest;
+        const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return error.SkipZigTest;
 
         const node = try alloc.create(cluster_node.Node);
         errdefer alloc.destroy(node);
@@ -1900,7 +1901,7 @@ test "resolveTargetReadinessStates waits for paused rollout control to resume" {
 
     const Resumer = struct {
         fn run() void {
-            @import("compat").sleep(150 * std.time.ns_per_ms);
+            platform.sleep(150 * std.time.ns_per_ms);
             store.updateDeploymentRolloutControlState("dep-pause", "active") catch {};
         }
     };
@@ -1978,7 +1979,7 @@ test "resolveTargetReadinessStates exits when paused rollout is canceled" {
 
     const Canceler = struct {
         fn run() void {
-            @import("compat").sleep(150 * std.time.ns_per_ms);
+            platform.sleep(150 * std.time.ns_per_ms);
             store.updateDeploymentRolloutControlState("dep-cancel", "cancel_requested") catch {};
         }
     };
@@ -2060,7 +2061,7 @@ test "finalizeBatchTargets honors paused rollout resume before cutover" {
 
     const Resumer = struct {
         fn run(db: *sqlite.Db) void {
-            @import("compat").sleep(150 * std.time.ns_per_ms);
+            platform.sleep(150 * std.time.ns_per_ms);
             db.exec("UPDATE assignments SET status = 'running' WHERE id = 'new-web';", .{}, .{}) catch {};
             store.updateDeploymentRolloutControlState("dep-resume", "active") catch {};
         }
@@ -2200,7 +2201,7 @@ test "finalizeBatchTargets discards scheduled targets when paused rollout is can
 
     const Canceler = struct {
         fn run() void {
-            @import("compat").sleep(150 * std.time.ns_per_ms);
+            platform.sleep(150 * std.time.ns_per_ms);
             store.updateDeploymentRolloutControlState("dep-cancel-finalize", "cancel_requested") catch {};
         }
     };

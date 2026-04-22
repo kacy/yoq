@@ -21,6 +21,7 @@
 //   RFC 8737 (ACME TLS-ALPN-01, not implemented)
 
 const std = @import("std");
+const platform = @import("platform");
 const http = std.http;
 
 const client_runtime = @import("acme/client_runtime.zig");
@@ -74,7 +75,7 @@ pub const AcmeClient = struct {
         return .{
             .allocator = allocator,
             .directory_url = directory_url,
-            .http_client = .{ .io = @import("compat").io(), .allocator = allocator },
+            .http_client = .{ .io = platform.io(), .allocator = allocator },
         };
     }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const common = @import("common.zig");
 
 pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) common.LoadError![]const u8 {
@@ -32,7 +33,7 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) common.LoadE
                 }
 
                 const value = if (var_name.len > 0)
-                    @import("compat").getEnvVarOwned(alloc, var_name) catch |err| switch (err) {
+                    platform.getEnvVarOwned(alloc, var_name) catch |err| switch (err) {
                         error.EnvironmentVariableNotFound => null,
                         error.OutOfMemory => return common.LoadError.OutOfMemory,
                         else => null,

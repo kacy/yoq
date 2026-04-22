@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const store = @import("../../../state/store.zig");
 const process = @import("../../../runtime/process.zig");
 const logs = @import("../../../runtime/logs.zig");
@@ -21,7 +22,7 @@ pub fn handleListContainers(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
 
@@ -51,7 +52,7 @@ pub fn handleGetContainer(alloc: std.mem.Allocator, id: []const u8) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writers.writeContainerJson(writer, record) catch return common.internalError();
 
@@ -74,7 +75,7 @@ pub fn handleGetLogs(alloc: std.mem.Allocator, id: []const u8) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeAll("{\"logs\":\"") catch return common.internalError();
     @import("../../../lib/json_helpers.zig").writeJsonEscaped(writer, log_data) catch return common.internalError();
@@ -124,7 +125,7 @@ pub fn waitForProcessExit(id: []const u8, pid: i32) bool {
         const cg = cgroups.Cgroup.open(id) catch return true;
         if (!cg.containsProcess(pid)) return true;
         process.sendSignal(pid, 0) catch return true;
-        @import("compat").sleep(stop_poll_interval_ms * std.time.ns_per_ms);
+        platform.sleep(stop_poll_interval_ms * std.time.ns_per_ms);
     }
     return false;
 }

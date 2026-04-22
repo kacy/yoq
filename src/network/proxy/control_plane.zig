@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const service_rollout = @import("../service_rollout.zig");
 const proxy_runtime = @import("runtime.zig");
 const service_registry_runtime_mod = @import("../service_registry_runtime.zig");
@@ -36,7 +37,7 @@ pub const Snapshot = struct {
 var sync_running = std.atomic.Value(bool).init(false);
 var sync_thread: ?std.Thread = null;
 var sync_interval_override_ms: ?u64 = null;
-var mutex: @import("compat").Mutex = .{};
+var mutex: platform.Mutex = .{};
 var sync_passes_total: u64 = 0;
 var event_sync_passes_total: u64 = 0;
 var periodic_sync_passes_total: u64 = 0;
@@ -132,7 +133,7 @@ fn runSyncPass(trigger: SyncTrigger, ensure_listener: bool) void {
         .periodic => periodic_sync_passes_total += 1,
     }
     last_sync_trigger = trigger;
-    last_sync_pass_at = @import("compat").timestamp();
+    last_sync_pass_at = platform.timestamp();
 }
 
 fn syncLoop() void {
@@ -144,7 +145,7 @@ fn syncLoop() void {
             defer mutex.unlock();
             break :blk sync_interval_override_ms orelse (sync_interval_secs * std.time.ms_per_s);
         };
-        @import("compat").sleep(interval_ms * std.time.ns_per_ms);
+        platform.sleep(interval_ms * std.time.ns_per_ms);
         if (!sync_running.load(.acquire)) break;
         runSyncPass(.periodic, true);
     }
@@ -204,7 +205,7 @@ test "periodic steering sync loop repairs drifted mappings" {
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    @import("compat").sleep(40 * std.time.ns_per_ms);
+    platform.sleep(40 * std.time.ns_per_ms);
 
     const state = try steering_runtime.snapshotServiceStatus(std.testing.allocator, "api");
     try std.testing.expect(state.ready);
@@ -289,7 +290,7 @@ test "periodic control plane repairs routes while steering waits on prerequisite
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    @import("compat").sleep(40 * std.time.ns_per_ms);
+    platform.sleep(40 * std.time.ns_per_ms);
 
     const proxy_state = try proxy_runtime.snapshot(std.testing.allocator);
     defer proxy_state.deinit(std.testing.allocator);
@@ -386,7 +387,7 @@ test "listener state changes trigger event-driven steering repair" {
 }
 
 const TestUpstreamServer = struct {
-    listen_fd: @import("compat").posix.socket_t,
+    listen_fd: platform.posix.socket_t,
     port: u16,
     thread: ?std.Thread = null,
     request_buf: [2048]u8 = undefined,
@@ -394,22 +395,22 @@ const TestUpstreamServer = struct {
     response: []const u8,
 
     fn init(response: []const u8) !TestUpstreamServer {
-        const listen_fd = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch
+        const listen_fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch
             return error.SkipZigTest;
-        errdefer @import("compat").posix.close(listen_fd);
+        errdefer platform.posix.close(listen_fd);
 
         const reuseaddr: i32 = 1;
         posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
-        const addr = @import("compat").net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-        @import("compat").posix.bind(listen_fd, &addr.any, addr.getOsSockLen()) catch
+        const addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+        platform.posix.bind(listen_fd, &addr.any, addr.getOsSockLen()) catch
             return error.SkipZigTest;
-        @import("compat").posix.listen(listen_fd, 1) catch
+        platform.posix.listen(listen_fd, 1) catch
             return error.SkipZigTest;
 
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        @import("compat").posix.getsockname(listen_fd, @ptrCast(&bound_addr), &bound_len) catch
+        platform.posix.getsockname(listen_fd, @ptrCast(&bound_addr), &bound_len) catch
             return error.SkipZigTest;
 
         return .{
@@ -421,7 +422,7 @@ const TestUpstreamServer = struct {
 
     fn deinit(self: *TestUpstreamServer) void {
         if (self.thread) |thread| thread.join();
-        @import("compat").posix.close(self.listen_fd);
+        platform.posix.close(self.listen_fd);
     }
 
     fn start(self: *TestUpstreamServer) !void {
@@ -433,8 +434,8 @@ const TestUpstreamServer = struct {
     }
 
     fn acceptOne(self: *TestUpstreamServer) void {
-        const client_fd = @import("compat").posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
-        defer @import("compat").posix.close(client_fd);
+        const client_fd = platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+        defer platform.posix.close(client_fd);
         self.request_len = posix.read(client_fd, &self.request_buf) catch 0;
         _ = socket_helpers.writeAll(client_fd, self.response) catch {};
     }
@@ -513,10 +514,10 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
 
     try std.testing.expect(recorded_target_port != 0);
 
-    const client_fd = try @import("compat").posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer @import("compat").posix.close(client_fd);
-    const listener_addr = @import("compat").net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
-    try @import("compat").posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const listener_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
+    try platform.posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;
@@ -594,13 +595,13 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    @import("compat").sleep(40 * std.time.ns_per_ms);
+    platform.sleep(40 * std.time.ns_per_ms);
     try std.testing.expect(recorded_target_port != 0);
 
-    const client_fd = try @import("compat").posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer @import("compat").posix.close(client_fd);
-    const listener_addr = @import("compat").net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
-    try @import("compat").posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const listener_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
+    try platform.posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;

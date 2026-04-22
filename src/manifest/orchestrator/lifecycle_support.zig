@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const container = @import("../../runtime/container.zig");
@@ -239,7 +240,7 @@ pub fn waitForShutdown(self: anytype, shutdown_requested: *const std.atomic.Valu
         }
         if (all_done) break;
 
-        @import("compat").sleep(200 * std.time.ns_per_ms);
+        platform.sleep(200 * std.time.ns_per_ms);
     }
 }
 
@@ -252,16 +253,16 @@ pub fn serviceIndex(self: anytype, name: []const u8) ?usize {
 
 pub fn waitForRunning(self: anytype, idx: usize) bool {
     const timeout_ns: u64 = 30 * std.time.ns_per_s;
-    const start = @as(u64, @intCast(@import("compat").nanoTimestamp()));
+    const start = @as(u64, @intCast(platform.nanoTimestamp()));
 
     while (true) {
         const status = self.states[idx].status;
         if (status == .running) return true;
         if (status == .failed or status == .stopped) return false;
 
-        const now = @as(u64, @intCast(@import("compat").nanoTimestamp()));
+        const now = @as(u64, @intCast(platform.nanoTimestamp()));
         if (now - start > timeout_ns) return false;
 
-        @import("compat").sleep(100 * std.time.ns_per_ms);
+        platform.sleep(100 * std.time.ns_per_ms);
     }
 }

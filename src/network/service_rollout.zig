@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../lib/log.zig");
 
 pub const Flags = struct {
@@ -13,7 +14,7 @@ pub const Mode = enum {
     shadow,
 };
 
-var flags_mutex: @import("compat").Mutex = .{};
+var flags_mutex: platform.Mutex = .{};
 var flags_initialized: bool = false;
 var flags: Flags = .{};
 var logged_rollout_state: bool = false;
@@ -104,14 +105,14 @@ fn modeLabel(current_mode: Mode) []const u8 {
 }
 
 fn readDeprecatedAlwaysOnBoolEnv(name: []const u8, replacement: []const u8) bool {
-    const raw = @import("compat").getenv(name) orelse return true;
+    const raw = platform.getenv(name) orelse return true;
     _ = parseBool(name, raw);
     log.warn("service discovery compatibility flag {s} is deprecated and ignored; {s}", .{ name, replacement });
     return true;
 }
 
 fn readAlwaysOnBoolEnv(name: []const u8) bool {
-    const raw = @import("compat").getenv(name) orelse return true;
+    const raw = platform.getenv(name) orelse return true;
     _ = parseBool(name, raw);
     log.warn("service discovery compatibility flag {s} is deprecated and ignored; HTTP proxy routing is always on", .{name});
     return true;

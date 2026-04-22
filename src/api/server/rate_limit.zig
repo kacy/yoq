@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 pub const rate_limit_per_sec: u32 = 10;
 pub const rate_limit_burst: u32 = 50;
@@ -6,7 +7,7 @@ pub const rate_table_size: usize = 64;
 
 pub const RateLimiter = struct {
     entries: [rate_table_size]RateEntry,
-    mutex: @import("compat").Mutex,
+    mutex: platform.Mutex,
 
     const RateEntry = struct {
         ip: u32,
@@ -30,7 +31,7 @@ pub const RateLimiter = struct {
     }
 
     pub fn checkRate(self: *RateLimiter, ip: u32) bool {
-        return self.checkRateAt(ip, @import("compat").timestamp());
+        return self.checkRateAt(ip, platform.timestamp());
     }
 
     pub fn checkRateAt(self: *RateLimiter, ip: u32, now: i64) bool {

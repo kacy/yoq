@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../lib/log.zig");
 const rollout = @import("service_rollout.zig");
 const store = @import("../state/store.zig");
@@ -16,7 +17,7 @@ pub const Snapshot = struct {
     }
 };
 
-var mutex: @import("compat").Mutex = .{};
+var mutex: platform.Mutex = .{};
 var runs_total: u64 = 0;
 var services_created_total: u64 = 0;
 var endpoints_created_total: u64 = 0;
@@ -30,7 +31,7 @@ pub fn runIfEnabled() void {
     defer mutex.unlock();
 
     runs_total += 1;
-    last_run_at = @import("compat").timestamp();
+    last_run_at = platform.timestamp();
     clearLastErrorLocked();
 
     runLocked() catch |err| {

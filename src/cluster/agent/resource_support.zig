@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const gpu_detect = @import("../../gpu/detect.zig");
 const gpu_health = @import("../../gpu/health.zig");
@@ -13,7 +14,7 @@ pub fn getSystemResources() AgentResources {
 
     var memory_mb: u64 = 0;
     const meminfo = blk: {
-        const file = @import("compat").openFileAbsolute("/proc/meminfo", .{}) catch break :blk "";
+        const file = platform.openFileAbsolute("/proc/meminfo", .{}) catch break :blk "";
         defer file.close();
         break :blk file.readToEndAlloc(std.heap.page_allocator, 8192) catch "";
     };
@@ -43,20 +44,20 @@ pub fn getSystemResources() AgentResources {
 }
 
 pub fn detectLocalIp(target: [4]u8, buf: *[16]u8) []const u8 {
-    const addr = @import("compat").net.Address.initIp4(target, 80);
+    const addr = platform.net.Address.initIp4(target, 80);
 
-    const sock = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch {
+    const sock = platform.posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch {
         return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
     };
-    defer @import("compat").posix.close(sock);
+    defer platform.posix.close(sock);
 
-    @import("compat").posix.connect(sock, &addr.any, addr.getOsSockLen()) catch {
+    platform.posix.connect(sock, &addr.any, addr.getOsSockLen()) catch {
         return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
     };
 
     var local_addr: posix.sockaddr.storage = undefined;
     var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-    @import("compat").posix.getsockname(sock, @ptrCast(&local_addr), &addr_len) catch {
+    platform.posix.getsockname(sock, @ptrCast(&local_addr), &addr_len) catch {
         return std.fmt.bufPrint(buf, "127.0.0.1", .{}) catch "127.0.0.1";
     };
 

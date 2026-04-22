@@ -5,6 +5,7 @@
 // create, start, stop, remove.
 
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -123,7 +124,7 @@ pub const ContainerConfig = struct {
 pub const Container = struct {
     const RuntimeHandles = struct {
         cgroup: ?cgroups.Cgroup = null,
-        log_file: ?@import("compat").File = null,
+        log_file: ?platform.File = null,
         stdout_thread: ?std.Thread = null,
         stderr_thread: ?std.Thread = null,
         mirror_output: bool = false,
@@ -140,7 +141,7 @@ pub const Container = struct {
     /// protects status, pid, and exit_code from concurrent access
     /// these fields are accessed from the main thread (poll/stop/wait)
     /// and potentially signal handlers
-    state_mutex: @import("compat").Mutex = .{},
+    state_mutex: platform.Mutex = .{},
 
     /// check if the container's process is still alive.
     /// updates status if it has exited.
@@ -496,15 +497,15 @@ test "canonical bind source rejects symlink path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try @import("compat").Dir.from(tmp.dir).makeDir("real");
-    try @import("compat").Dir.from(tmp.dir).symLink("real", "link", .{});
+    try platform.Dir.from(tmp.dir).makeDir("real");
+    try platform.Dir.from(tmp.dir).symLink("real", "link", .{});
 
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real_path = try @import("compat").Dir.from(tmp.dir).realpath("real", &real_buf);
+    const real_path = try platform.Dir.from(tmp.dir).realpath("real", &real_buf);
     try std.testing.expect(isCanonicalBindSource(real_path));
 
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base_path = try @import("compat").Dir.from(tmp.dir).realpath(".", &base_buf);
+    const base_path = try platform.Dir.from(tmp.dir).realpath(".", &base_buf);
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_buf, "{s}/link", .{base_path});
     try std.testing.expect(!isCanonicalBindSource(link_path));

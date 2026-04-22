@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const json_out = @import("../../lib/json_output.zig");
@@ -332,7 +333,7 @@ pub fn history(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
 
 fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").cwd().realpath(".", &cwd_buf) catch return OpsError.StoreError;
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch return OpsError.StoreError;
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return OpsError.StoreError;
 }
 
@@ -1348,7 +1349,7 @@ pub fn runWorker(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !vo
     }
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = @import("compat").getCwd(&cwd_buf) catch "app";
+    const cwd = platform.getCwd(&cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     writeErr("running worker {s}...\n", .{name});

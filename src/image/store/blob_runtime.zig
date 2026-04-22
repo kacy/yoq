@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const paths = @import("../../lib/paths.zig");
 const digest_support = @import("digest_support.zig");
@@ -16,16 +17,16 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: digest_support.
 
     var dir_buf: [types.max_path]u8 = undefined;
     const dir_path = blobDir(&dir_buf) catch return types.BlobError.PathTooLong;
-    @import("compat").cwd().makePath(dir_path) catch {};
+    platform.cwd().makePath(dir_path) catch {};
 
     var tmp_buf: [types.max_path]u8 = undefined;
     const tmp_path = paths.uniqueDataTempPath(&tmp_buf, types.blob_subdir, "blob", ".tmp") catch
         return types.BlobError.PathTooLong;
 
-    const src_file = @import("compat").cwd().openFile(source_path, .{}) catch return types.BlobError.ReadFailed;
+    const src_file = platform.cwd().openFile(source_path, .{}) catch return types.BlobError.ReadFailed;
     defer src_file.close();
 
-    const dest_file = @import("compat").cwd().createFile(tmp_path, .{}) catch return types.BlobError.WriteFailed;
+    const dest_file = platform.cwd().createFile(tmp_path, .{}) catch return types.BlobError.WriteFailed;
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [8192]u8 = undefined;
@@ -48,13 +49,13 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: digest_support.
     dest_file.close();
 
     if (!write_ok) {
-        @import("compat").cwd().deleteFile(tmp_path) catch {};
+        platform.cwd().deleteFile(tmp_path) catch {};
         return types.BlobError.WriteFailed;
     }
 
     const actual = hasher.finalResult();
     if (!std.mem.eql(u8, &actual, &expected_digest.hash)) {
-        @import("compat").cwd().deleteFile(tmp_path) catch {};
+        platform.cwd().deleteFile(tmp_path) catch {};
         return types.BlobError.HashMismatch;
     }
 
@@ -69,18 +70,18 @@ pub fn putBlobDirect(data: []const u8, digest: digest_support.Digest) types.Blob
 fn writeToStore(data: []const u8, digest: digest_support.Digest) types.BlobError!void {
     var dir_buf: [types.max_path]u8 = undefined;
     const dir_path = blobDir(&dir_buf) catch return types.BlobError.PathTooLong;
-    @import("compat").cwd().makePath(dir_path) catch {};
+    platform.cwd().makePath(dir_path) catch {};
 
     var tmp_buf: [types.max_path]u8 = undefined;
     const tmp_path = paths.uniqueDataTempPath(&tmp_buf, types.blob_subdir, "blob", ".tmp") catch
         return types.BlobError.PathTooLong;
 
-    const file = @import("compat").cwd().createFile(tmp_path, .{}) catch return types.BlobError.WriteFailed;
+    const file = platform.cwd().createFile(tmp_path, .{}) catch return types.BlobError.WriteFailed;
 
     file.writeAll(data) catch |e| {
         log.warn("blob store write failed: {}", .{e});
         file.close();
-        @import("compat").cwd().deleteFile(tmp_path) catch {};
+        platform.cwd().deleteFile(tmp_path) catch {};
         return types.BlobError.WriteFailed;
     };
     file.sync() catch {};
@@ -92,17 +93,17 @@ fn writeToStore(data: []const u8, digest: digest_support.Digest) types.BlobError
 fn renameTempToBlob(tmp_path: []const u8, digest: digest_support.Digest) types.BlobError!void {
     var path_buf: [types.max_path]u8 = undefined;
     const final_path = blobPath(digest, &path_buf) catch return types.BlobError.PathTooLong;
-    @import("compat").cwd().rename(tmp_path, final_path) catch |e| {
+    platform.cwd().rename(tmp_path, final_path) catch |e| {
         if (hasVerifiedBlob(digest)) {
-            @import("compat").cwd().deleteFile(tmp_path) catch {};
+            platform.cwd().deleteFile(tmp_path) catch {};
             return;
         }
 
         log.warn("blob rename failed, retrying after cleanup: {}", .{e});
         removeBlob(digest);
-        @import("compat").cwd().rename(tmp_path, final_path) catch |e2| {
+        platform.cwd().rename(tmp_path, final_path) catch |e2| {
             log.warn("blob rename retry failed: {}", .{e2});
-            @import("compat").cwd().deleteFile(tmp_path) catch {};
+            platform.cwd().deleteFile(tmp_path) catch {};
             return types.BlobError.WriteFailed;
         };
     };
@@ -111,7 +112,7 @@ fn renameTempToBlob(tmp_path: []const u8, digest: digest_support.Digest) types.B
 pub fn getBlob(alloc: std.mem.Allocator, digest: digest_support.Digest) types.BlobError![]u8 {
     var path_buf: [types.max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return types.BlobError.PathTooLong;
-    const file = @import("compat").cwd().openFile(path, .{}) catch return types.BlobError.NotFound;
+    const file = platform.cwd().openFile(path, .{}) catch return types.BlobError.NotFound;
     defer file.close();
 
     const stat = file.stat() catch return types.BlobError.NotFound;
@@ -122,7 +123,7 @@ pub fn getBlob(alloc: std.mem.Allocator, digest: digest_support.Digest) types.Bl
 pub fn openBlob(digest: digest_support.Digest) types.BlobError!types.BlobHandle {
     var path_buf: [types.max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return types.BlobError.PathTooLong;
-    const file = @import("compat").cwd().openFile(path, .{}) catch return types.BlobError.NotFound;
+    const file = platform.cwd().openFile(path, .{}) catch return types.BlobError.NotFound;
     errdefer file.close();
 
     const stat = file.stat() catch return types.BlobError.NotFound;
@@ -135,7 +136,7 @@ pub fn openBlob(digest: digest_support.Digest) types.BlobError!types.BlobHandle 
 pub fn hasBlob(digest: digest_support.Digest) bool {
     var path_buf: [types.max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return false;
-    @import("compat").cwd().access(path, .{}) catch return false;
+    platform.cwd().access(path, .{}) catch return false;
     return true;
 }
 
@@ -149,14 +150,14 @@ fn hasVerifiedBlob(digest: digest_support.Digest) bool {
 pub fn deleteBlob(digest: digest_support.Digest) types.BlobError!void {
     var path_buf: [types.max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return types.BlobError.PathTooLong;
-    @import("compat").cwd().deleteFile(path) catch return types.BlobError.NotFound;
+    platform.cwd().deleteFile(path) catch return types.BlobError.NotFound;
 }
 
 pub fn verifyBlob(digest: digest_support.Digest) bool {
     var path_buf: [types.max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return false;
 
-    const file = @import("compat").cwd().openFile(path, .{}) catch return false;
+    const file = platform.cwd().openFile(path, .{}) catch return false;
     defer file.close();
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -174,7 +175,7 @@ pub fn verifyBlob(digest: digest_support.Digest) bool {
 pub fn removeBlob(digest: digest_support.Digest) void {
     var path_buf: [types.max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return;
-    @import("compat").cwd().deleteFile(path) catch |err| {
+    platform.cwd().deleteFile(path) catch |err| {
         if (err != error.FileNotFound) {
             log.warn("failed to remove blob {s}: {}", .{ path, err });
         }
@@ -184,7 +185,7 @@ pub fn removeBlob(digest: digest_support.Digest) void {
 pub fn tempBlobPath(buf: *[types.max_path]u8) types.BlobError![]const u8 {
     var dir_buf: [types.max_path]u8 = undefined;
     const dir_path = blobDir(&dir_buf) catch return types.BlobError.PathTooLong;
-    @import("compat").cwd().makePath(dir_path) catch {};
+    platform.cwd().makePath(dir_path) catch {};
     return paths.uniqueDataTempPath(buf, types.blob_subdir, "blob", ".tmp") catch
         return types.BlobError.PathTooLong;
 }
@@ -207,7 +208,7 @@ pub fn listBlobsOnDisk(alloc: std.mem.Allocator) types.BlobError!std.ArrayList([
     var dir_buf: [types.max_path]u8 = undefined;
     const dir_path = blobDir(&dir_buf) catch return types.BlobError.PathTooLong;
 
-    var dir = @import("compat").cwd().openDir(dir_path, .{ .iterate = true }) catch |e| {
+    var dir = platform.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| {
         if (e != error.FileNotFound) log.warn("failed to open blob directory: {}", .{e});
         return std.ArrayList([]const u8).empty;
     };
@@ -236,7 +237,7 @@ pub fn listBlobsOnDisk(alloc: std.mem.Allocator) types.BlobError!std.ArrayList([
 pub fn getBlobSize(digest: digest_support.Digest) ?u64 {
     var path_buf: [types.max_path]u8 = undefined;
     const path = blobPath(digest, &path_buf) catch return null;
-    const file = @import("compat").cwd().openFile(path, .{}) catch return null;
+    const file = platform.cwd().openFile(path, .{}) catch return null;
     defer file.close();
     const stat = file.stat() catch return null;
     return stat.size;

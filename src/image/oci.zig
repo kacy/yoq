@@ -5,6 +5,7 @@
 // per the OCI runtime spec.
 
 const std = @import("std");
+const platform = @import("platform");
 const image_spec = @import("spec.zig");
 const state_store = @import("../state/store.zig");
 const blob_store = @import("store.zig");
@@ -84,7 +85,7 @@ pub fn saveImageFromPull(
         .manifest_digest = manifest_digest,
         .config_digest = config_digest,
         .total_size = @intCast(total_size),
-        .created_at = @import("compat").timestamp(),
+        .created_at = platform.timestamp(),
     });
 }
 

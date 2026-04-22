@@ -8,6 +8,7 @@
 // only supports methods we actually use (GET, POST, PUT, DELETE).
 
 const std = @import("std");
+const platform = @import("platform");
 
 pub const Method = enum {
     GET,
@@ -194,7 +195,7 @@ pub fn formatResponseWithType(buf: []u8, status: StatusCode, content_type: []con
 /// formats: {"error":"<message>"}
 pub fn formatError(buf: []u8, status: StatusCode, message: []const u8) []const u8 {
     var body_buf: [512]u8 = undefined;
-    var stream = @import("compat").fixedBufferStream(&body_buf);
+    var stream = platform.fixedBufferStream(&body_buf);
     const writer = stream.writer();
     writer.writeAll("{\"error\":\"") catch return formatResponse(buf, status, "{\"error\":\"internal error\"}");
     for (message) |c| {

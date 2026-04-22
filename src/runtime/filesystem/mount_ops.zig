@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const linux = std.os.linux;
 const posix = std.posix;
 const syscall_util = @import("../../lib/syscall.zig");
@@ -89,7 +90,7 @@ pub fn pivotRoot(new_root: []const u8) FilesystemError!void {
     const rc2 = linux.mount(root_z, root_z, @ptrCast("bind"), linux.MS.BIND | linux.MS.REC, 0);
     if (syscall_util.isError(rc2)) return FilesystemError.MountFailed;
 
-    @import("compat").posix.chdir(new_root) catch return FilesystemError.PivotFailed;
+    platform.posix.chdir(new_root) catch return FilesystemError.PivotFailed;
 
     const rc4 = linux.syscall2(.pivot_root, @intFromPtr(dot), @intFromPtr(dot));
     if (syscall_util.isError(rc4)) return FilesystemError.PivotFailed;
@@ -116,7 +117,7 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
         log.err("bind mount: source path validation failed for {s}: {s}", .{ source, @errorName(e) });
         return e;
     };
-    defer @import("compat").posix.close(validation_fd);
+    defer platform.posix.close(validation_fd);
 
     var fd_path_buf: [64]u8 = undefined;
     const fd_path = std.fmt.bufPrint(&fd_path_buf, "/proc/self/fd/{d}\x00", .{validation_fd}) catch
@@ -144,7 +145,7 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
 
     const full_target: [*:0]const u8 = @ptrCast(&target_buf);
 
-    @import("compat").cwd().makePath(target_buf[0..target_pos]) catch return FilesystemError.MkdirFailed;
+    platform.cwd().makePath(target_buf[0..target_pos]) catch return FilesystemError.MkdirFailed;
 
     var flags: u32 = linux.MS.BIND | linux.MS.REC;
     const rc = linux.mount(source_z, full_target, null, flags, 0);

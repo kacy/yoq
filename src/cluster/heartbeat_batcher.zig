@@ -9,6 +9,7 @@
 // never contend on the raft lock for heartbeat writes.
 
 const std = @import("std");
+const platform = @import("platform");
 const agent_types = @import("agent_types.zig");
 const registry = @import("registry.zig");
 
@@ -23,7 +24,7 @@ pub const Entry = struct {
 
 pub const HeartbeatBatcher = struct {
     alloc: Allocator,
-    mu: @import("compat").Mutex,
+    mu: platform.Mutex,
     buffer: std.AutoArrayHashMapUnmanaged([12]u8, Entry),
 
     pub fn init(alloc: Allocator) HeartbeatBatcher {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const paths = @import("../../lib/paths.zig");
 const container = @import("../container.zig");
 const common = @import("common.zig");
@@ -11,7 +12,7 @@ pub fn logPath(buf: *[paths.max_path]u8, container_id: []const u8) LogError![]co
         return LogError.PathTooLong;
 }
 
-pub fn createLogFile(container_id: []const u8) LogError!@import("compat").File {
+pub fn createLogFile(container_id: []const u8) LogError!platform.File {
     if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
 
     paths.ensureDataDir(common.logs_subdir) catch {};
@@ -19,7 +20,7 @@ pub fn createLogFile(container_id: []const u8) LogError!@import("compat").File {
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
-    return @import("compat").cwd().createFile(file_path, .{}) catch
+    return platform.cwd().createFile(file_path, .{}) catch
         return LogError.CreateFailed;
 }
 
@@ -29,7 +30,7 @@ pub fn readLogs(alloc: std.mem.Allocator, container_id: []const u8) LogError![]c
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
-    const file = @import("compat").cwd().openFile(file_path, .{}) catch
+    const file = platform.cwd().openFile(file_path, .{}) catch
         return LogError.NotFound;
     defer file.close();
 
@@ -44,7 +45,7 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
-    const file = @import("compat").cwd().openFile(file_path, .{}) catch
+    const file = platform.cwd().openFile(file_path, .{}) catch
         return LogError.NotFound;
     defer file.close();
 
@@ -120,7 +121,7 @@ pub fn deleteLogFile(container_id: []const u8) void {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = logPath(&path_buf, container_id) catch return;
-    @import("compat").cwd().deleteFile(file_path) catch {};
+    platform.cwd().deleteFile(file_path) catch {};
 }
 
 test "logPath validates container ID" {

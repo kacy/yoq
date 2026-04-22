@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const api_server = @import("../../api/server.zig");
 const routes = @import("../../api/routes.zig");
@@ -319,7 +320,7 @@ pub fn initServer(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !v
 fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
     while (node.running.load(.acquire)) {
         if (!node.isLeader()) {
-            @import("compat").sleep(200 * std.time.ns_per_ms);
+            platform.sleep(200 * std.time.ns_per_ms);
             continue;
         }
 
@@ -330,6 +331,6 @@ fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
             log.warn("cluster rollout recovery pass failed: {}", .{err});
         };
 
-        @import("compat").sleep(500 * std.time.ns_per_ms);
+        platform.sleep(500 * std.time.ns_per_ms);
     }
 }

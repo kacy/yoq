@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const types = @import("../raft_types.zig");
 const common = @import("common.zig");
 
@@ -41,7 +42,7 @@ pub fn applyHmac(
 pub fn verifyAuthenticatedBody(
     body: []const u8,
     key: [32]u8,
-    from_addr: @import("compat").net.Address,
+    from_addr: platform.net.Address,
     peers: *const std.AutoHashMap(NodeId, PeerAddr),
 ) TransportError!VerifiedBody {
     if (body.len < 41) return TransportError.AuthenticationFailed;

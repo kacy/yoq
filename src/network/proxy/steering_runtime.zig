@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const bridge = @import("../bridge.zig");
 const ip = @import("../ip.zig");
@@ -89,7 +90,7 @@ pub const ObservedMapping = struct {
     port: u16,
 };
 
-var mutex: @import("compat").Mutex = .{};
+var mutex: platform.Mutex = .{};
 var applied_mappings: std.ArrayList(ObservedMapping) = .empty;
 var running: bool = false;
 var configured_services: u32 = 0;
@@ -283,7 +284,7 @@ fn syncLocked() !void {
 
     desired_mappings = @intCast(desired.items.len);
     running = true;
-    last_sync_at = @import("compat").timestamp();
+    last_sync_at = platform.timestamp();
 }
 
 fn buildDesiredMappingsLocked(alloc: std.mem.Allocator) !std.ArrayList(DesiredMapping) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http = std.http;
 
 const csr_mod = @import("../csr.zig");
@@ -73,7 +74,7 @@ pub fn createAccount(self: anytype, email: []const u8) types.AcmeError!void {
     };
 
     if (self.account_key == null) {
-        self.account_key = EcdsaP256.KeyPair.generate(@import("compat").io());
+        self.account_key = EcdsaP256.KeyPair.generate(platform.io());
     }
 
     const nonce = try fetchNonce(self);
@@ -243,8 +244,8 @@ pub fn respondToChallenge(self: anytype, challenge_url: []const u8) types.AcmeEr
 }
 
 pub fn waitForAuthorizationValid(self: anytype, auth_url: []const u8) types.AcmeError!void {
-    const start = @import("compat").nanoTimestamp();
-    while (@import("compat").nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = platform.nanoTimestamp();
+    while (platform.nanoTimestamp() - start < pollTimeoutNs()) {
         var response = postAsGet(self, auth_url, types.AcmeError.AuthorizationFetchFailed) catch
             return types.AcmeError.AuthorizationFetchFailed;
         defer response.deinit();
@@ -256,15 +257,15 @@ pub fn waitForAuthorizationValid(self: anytype, auth_url: []const u8) types.Acme
         if (std.mem.eql(u8, status, "valid")) return;
         if (std.mem.eql(u8, status, "invalid")) return types.AcmeError.ChallengeFailed;
 
-        @import("compat").sleep(poll_interval_ns);
+        platform.sleep(poll_interval_ns);
     }
 
     return types.AcmeError.Timeout;
 }
 
 pub fn waitForOrderReady(self: anytype, order: *types.Order) types.AcmeError!void {
-    const start = @import("compat").nanoTimestamp();
-    while (@import("compat").nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = platform.nanoTimestamp();
+    while (platform.nanoTimestamp() - start < pollTimeoutNs()) {
         var snapshot = fetchOrderSnapshot(self, order.order_url, types.AcmeError.OrderCreationFailed) catch
             return types.AcmeError.OrderCreationFailed;
         defer snapshot.deinit();
@@ -279,7 +280,7 @@ pub fn waitForOrderReady(self: anytype, order: *types.Order) types.AcmeError!voi
         }
         if (std.mem.eql(u8, snapshot.status, "invalid")) return types.AcmeError.OrderCreationFailed;
 
-        @import("compat").sleep(poll_interval_ns);
+        platform.sleep(poll_interval_ns);
     }
 
     return types.AcmeError.Timeout;
@@ -384,8 +385,8 @@ pub fn httpPost(self: anytype, url: []const u8, body: []const u8) ![]u8 {
 }
 
 fn waitForOrderValid(order: *types.Order, self: anytype) types.AcmeError!void {
-    const start = @import("compat").nanoTimestamp();
-    while (@import("compat").nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = platform.nanoTimestamp();
+    while (platform.nanoTimestamp() - start < pollTimeoutNs()) {
         var snapshot = fetchOrderSnapshot(self, order.order_url, types.AcmeError.FinalizeFailed) catch
             return types.AcmeError.FinalizeFailed;
         defer snapshot.deinit();
@@ -398,7 +399,7 @@ fn waitForOrderValid(order: *types.Order, self: anytype) types.AcmeError!void {
         if (std.mem.eql(u8, snapshot.status, "valid") and order.cert_url != null) return;
         if (std.mem.eql(u8, snapshot.status, "invalid")) return types.AcmeError.FinalizeFailed;
 
-        @import("compat").sleep(poll_interval_ns);
+        platform.sleep(poll_interval_ns);
     }
 
     return types.AcmeError.Timeout;

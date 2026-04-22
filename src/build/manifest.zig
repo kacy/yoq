@@ -37,6 +37,7 @@
 //   cmd = ["node", "server.js"]
 
 const std = @import("std");
+const platform = @import("platform");
 const dockerfile = @import("dockerfile.zig");
 const loader = @import("manifest/loader.zig");
 const ordering = @import("manifest/ordering.zig");
@@ -50,7 +51,7 @@ pub const LoadResult = types.LoadResult;
 /// load a build manifest from a file path.
 /// caller must call result.deinit() when done.
 pub fn load(alloc: std.mem.Allocator, path: []const u8) LoadError!LoadResult {
-    const content = @import("compat").cwd().readFileAlloc(alloc, path, 1024 * 1024) catch |err| {
+    const content = platform.cwd().readFileAlloc(alloc, path, 1024 * 1024) catch |err| {
         return switch (err) {
             error.FileNotFound => LoadError.FileNotFound,
             else => LoadError.ReadFailed,

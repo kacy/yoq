@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const acme = @import("../acme.zig");
@@ -128,7 +129,7 @@ fn resolveAccountEmail(
     domain: []const u8,
     explicit_email: ?[]const u8,
 ) ![]u8 {
-    const env_email = @import("compat").getEnvVarOwned(alloc, "YOQ_ACME_EMAIL") catch |err| switch (err) {
+    const env_email = platform.getEnvVarOwned(alloc, "YOQ_ACME_EMAIL") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         error.OutOfMemory => return error.OutOfMemory,
         else => null,

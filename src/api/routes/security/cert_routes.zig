@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const cert_store = @import("../../../tls/cert_store.zig");
 const common = @import("../common.zig");
@@ -18,7 +19,7 @@ pub fn handleListCertificates(alloc: std.mem.Allocator) Response {
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&json_buf, alloc);
+    const writer = platform.arrayListWriter(&json_buf, alloc);
 
     writer.writeByte('[') catch return common.internalError();
     for (certs.items, 0..) |cert, i| {
@@ -26,7 +27,7 @@ pub fn handleListCertificates(alloc: std.mem.Allocator) Response {
         writer.writeAll("{\"domain\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, cert.domain) catch return common.internalError();
         writer.writeAll("\",\"not_after\":") catch return common.internalError();
-        @import("compat").format(writer, "{d}", .{cert.not_after}) catch return common.internalError();
+        platform.format(writer, "{d}", .{cert.not_after}) catch return common.internalError();
         writer.writeAll(",\"source\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, cert.source) catch return common.internalError();
         writer.writeAll("\"}") catch return common.internalError();

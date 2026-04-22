@@ -6,6 +6,7 @@
 // silently.
 
 const std = @import("std");
+const platform = @import("platform");
 const loader = @import("loader.zig");
 
 pub const Options = struct {
@@ -31,8 +32,8 @@ pub const InitError = error{
 pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
     // check if file already exists (unless --force)
     if (!opts.force) {
-        if (@import("compat").cwd().statFile(opts.output_path)) |_| {
-            const stderr = @import("compat").File.stderr().deprecatedWriter();
+        if (platform.cwd().statFile(opts.output_path)) |_| {
+            const stderr = platform.File.stderr().textWriter();
             stderr.print("{s} already exists (use -f to specify a different path)\n", .{opts.output_path}) catch {};
             return InitError.FileExists;
         } else |_| {
@@ -40,7 +41,7 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
         }
     }
 
-    const is_tty = @import("compat").isatty(std.posix.STDIN_FILENO);
+    const is_tty = platform.isatty(std.posix.STDIN_FILENO);
 
     const answers = if (is_tty)
         gatherInteractive(alloc) orelse return InitError.CwdFailed
@@ -50,17 +51,17 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
     const content = generateManifest(alloc, answers) catch return InitError.WriteFailed;
     defer alloc.free(content);
 
-    @import("compat").cwd().writeFile(.{
+    platform.cwd().writeFile(.{
         .sub_path = opts.output_path,
         .data = content,
     }) catch return InitError.WriteFailed;
 
     if (is_tty) {
-        const stderr = @import("compat").File.stderr().deprecatedWriter();
+        const stderr = platform.File.stderr().textWriter();
         stderr.print("\ncreated {s}\n\n  yoq up        start services\n  yoq up --dev  start with hot reload\n", .{opts.output_path}) catch {};
     } else {
         // non-interactive: just print the path to stdout
-        const stdout = @import("compat").File.stdout().deprecatedWriter();
+        const stdout = platform.File.stdout().textWriter();
         stdout.print("{s}\n", .{opts.output_path}) catch {};
     }
 }
@@ -68,7 +69,7 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
 /// derive default project name from basename of cwd
 fn defaultProjectName(alloc: std.mem.Allocator) ?[]const u8 {
     var buf: [4096]u8 = undefined;
-    const cwd = @import("compat").cwd().realpath(".", &buf) catch return null;
+    const cwd = platform.cwd().realpath(".", &buf) catch return null;
     const basename = std.fs.path.basename(cwd);
     return alloc.dupe(u8, basename) catch null;
 }
@@ -77,7 +78,7 @@ fn defaultProjectName(alloc: std.mem.Allocator) ?[]const u8 {
 fn gatherInteractive(alloc: std.mem.Allocator) ?Answers {
     const default_project = defaultProjectName(alloc) orelse return null;
     var buf: [256]u8 = undefined;
-    const stdin = @import("compat").File.stdin().deprecatedReader();
+    const stdin = platform.File.stdin().textReader();
 
     const project = prompt(stdin, &buf, "project name", default_project);
     const service = prompt(stdin, &buf, "service name", "app");
@@ -106,7 +107,7 @@ fn gatherDefaults(alloc: std.mem.Allocator) ?Answers {
 
 /// display `? label (default): `, read a line, return default on empty/EOF
 fn prompt(reader: anytype, buf: []u8, label: []const u8, default: []const u8) []const u8 {
-    const stderr = @import("compat").File.stderr().deprecatedWriter();
+    const stderr = platform.File.stderr().textWriter();
     stderr.print("? {s} ({s}): ", .{ label, default }) catch {};
 
     const line = reader.readUntilDelimiterOrEof(buf, '\n') catch return default;
@@ -120,7 +121,7 @@ fn prompt(reader: anytype, buf: []u8, label: []const u8, default: []const u8) []
 
 /// prompt that parses a port number, returns null for "none"
 fn promptPort(reader: anytype, buf: []u8, label: []const u8, default: []const u8) ?u16 {
-    const stderr = @import("compat").File.stderr().deprecatedWriter();
+    const stderr = platform.File.stderr().textWriter();
     stderr.print("? {s} ({s}): ", .{ label, default }) catch {};
 
     const line = reader.readUntilDelimiterOrEof(buf, '\n') catch return null;
@@ -139,7 +140,7 @@ fn promptPort(reader: anytype, buf: []u8, label: []const u8, default: []const u8
 pub fn generateManifest(alloc: std.mem.Allocator, answers: Answers) error{OutOfMemory}![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
-    const writer = @import("compat").arrayListWriter(&buf, alloc);
+    const writer = platform.arrayListWriter(&buf, alloc);
 
     try writer.print(
         \\# yoq manifest — {s}

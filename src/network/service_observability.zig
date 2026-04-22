@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const Allocator = std.mem.Allocator;
 
@@ -51,7 +52,7 @@ const MutableServiceCounters = struct {
     }
 };
 
-var mutex: @import("compat").Mutex = .{};
+var mutex: platform.Mutex = .{};
 var service_counters: std.ArrayList(MutableServiceCounters) = .empty;
 var vip_alloc_failures_total: u64 = 0;
 
@@ -177,10 +178,10 @@ fn noteServiceCounter(service_name: []const u8, kind: CounterKind) void {
         .endpoint_flap => counters.endpoint_flaps_total += 1,
     }
     switch (kind) {
-        .reconcile_requested => counters.reconcile_requested_at = @import("compat").timestamp(),
+        .reconcile_requested => counters.reconcile_requested_at = platform.timestamp(),
         .reconcile_succeeded, .reconcile_failed => {
             if (counters.reconcile_requested_at) |started_at| {
-                const now = @import("compat").timestamp();
+                const now = platform.timestamp();
                 counters.reconcile_duration_seconds = @floatFromInt(@max(now - started_at, 0));
                 counters.reconcile_requested_at = null;
             }

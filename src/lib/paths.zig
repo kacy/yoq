@@ -5,6 +5,7 @@
 // don't each reimplement the HOME lookup and bufPrint boilerplate.
 
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const fmtx = std.fmt;
 const log = @import("log.zig");
@@ -19,7 +20,7 @@ fn dataRoot(buf: *[max_path]u8) PathError![]const u8 {
             return PathError.PathTooLong;
     }
 
-    const home = @import("compat").getenv("HOME") orelse return PathError.HomeDirNotFound;
+    const home = platform.getenv("HOME") orelse return PathError.HomeDirNotFound;
     return std.fmt.bufPrint(buf, "{s}/.local/share/yoq", .{home}) catch
         return PathError.PathTooLong;
 }
@@ -44,7 +45,7 @@ pub fn dataPathFmt(buf: *[max_path]u8, comptime fmt: []const u8, args: anytype) 
 pub fn ensureDataDir(subpath: []const u8) PathError!void {
     var buf: [max_path]u8 = undefined;
     const path = try dataPath(&buf, subpath);
-    @import("compat").cwd().makePath(path) catch |e| {
+    platform.cwd().makePath(path) catch |e| {
         log.warn("paths: failed to create directory {s}: {}. " ++
             "This may cause subsequent operations to fail.", .{ path, e });
         // Don't propagate the error - let callers decide if this is fatal
@@ -56,7 +57,7 @@ pub fn ensureDataDir(subpath: []const u8) PathError!void {
 pub fn ensureDataDirStrict(subpath: []const u8) (PathError || error{CreateFailed})!void {
     var buf: [max_path]u8 = undefined;
     const path = try dataPath(&buf, subpath);
-    @import("compat").cwd().makePath(path) catch return error.CreateFailed;
+    platform.cwd().makePath(path) catch return error.CreateFailed;
 }
 
 /// build a unique temp path under ~/.local/share/yoq/<subdir>/.
@@ -68,7 +69,7 @@ pub fn uniqueDataTempPath(
     suffix: []const u8,
 ) PathError![]const u8 {
     var rand: [6]u8 = undefined;
-    @import("compat").randomBytes(&rand);
+    platform.randomBytes(&rand);
 
     var hex: [12]u8 = undefined;
     _ = fmtx.bufPrint(&hex, "{s}", .{fmtx.bytesToHex(rand, .lower)}) catch

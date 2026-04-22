@@ -15,6 +15,7 @@
 // running containers — same code path as the local orchestrator.
 
 const std = @import("std");
+const platform = @import("platform");
 const http_client = @import("http_client.zig");
 const agent_types = @import("agent_types.zig");
 const cli = @import("../lib/cli.zig");
@@ -74,7 +75,7 @@ pub const Agent = struct {
     /// tracks assignment_id → local container state.
     /// protected by mutex since container threads update it.
     local_containers: std.StringHashMap(ContainerState),
-    container_lock: @import("compat").Mutex,
+    container_lock: platform.Mutex,
 
     // wireguard mesh networking fields (set during registration if the
     // server assigns a node_id)

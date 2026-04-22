@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
 const log = @import("../../lib/log.zig");
@@ -46,7 +47,7 @@ pub fn allocate(db: *sqlite.Db, container_id: []const u8) common.IpError![4]u8 {
     db.exec(
         "INSERT INTO ip_allocations (container_id, ip_address, allocated_at) VALUES (?, ?, ?);",
         .{},
-        .{ container_id, ip_str, @as(i64, @import("compat").timestamp()) },
+        .{ container_id, ip_str, @as(i64, platform.timestamp()) },
     ) catch return common.IpError.AllocationFailed;
 
     db.exec("COMMIT;", .{}, .{}) catch return common.IpError.AllocationFailed;
@@ -86,7 +87,7 @@ pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: comm
             db.exec(
                 "INSERT INTO ip_allocations (container_id, ip_address, allocated_at) VALUES (?, ?, ?);",
                 .{},
-                .{ container_id, ip_str, @as(i64, @import("compat").timestamp()) },
+                .{ container_id, ip_str, @as(i64, platform.timestamp()) },
             ) catch return common.IpError.AllocationFailed;
 
             db.exec("COMMIT;", .{}, .{}) catch return common.IpError.AllocationFailed;

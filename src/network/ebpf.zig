@@ -18,6 +18,7 @@
 // cleaned up when the yoq process exits.
 
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
@@ -158,7 +159,7 @@ fn makeKey(name: []const u8) ?[64]u8 {
 /// metrics_collector, policy_enforcer). currently safe because container
 /// startup is sequential, but this protects against future parallel
 /// startup (e.g. `yoq up` with multiple services).
-var global_mutex: @import("compat").Mutex = .{};
+var global_mutex: platform.Mutex = .{};
 fn trackBpfFdClosed() void {
     resource_support.releaseBpfFd();
 }
@@ -429,7 +430,7 @@ pub fn isSupported() bool {
     if (comptime builtin.os.tag != .linux) return false;
 
     const fd = BPF.map_create(.hash, 4, 4, 1) catch return false;
-    @import("compat").posix.close(fd);
+    platform.posix.close(fd);
     return true;
 }
 
@@ -596,7 +597,7 @@ test "createMap returns fd or error" {
     const result = createMap(.hash, 4, 4, 16);
     if (result) |fd| {
         try std.testing.expect(fd >= 0);
-        @import("compat").posix.close(fd);
+        platform.posix.close(fd);
     } else |_| {
         // expected in unprivileged environments
     }

@@ -12,6 +12,7 @@
 //   RFC 5280 §4.2.1.6 (Subject Alternative Name)
 
 const std = @import("std");
+const platform = @import("platform");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
@@ -33,7 +34,7 @@ pub fn generateCsr(
 ) CsrError!struct { csr_der: []u8, key_pair: EcdsaP256.KeyPair } {
     if (domain.len > 253) return CsrError.DomainTooLong;
 
-    const kp = EcdsaP256.KeyPair.generate(@import("compat").io());
+    const kp = EcdsaP256.KeyPair.generate(platform.io());
     const csr_der = try buildCsr(allocator, domain, kp);
 
     return .{
@@ -428,7 +429,7 @@ test "derKeyToPem produces valid PEM" {
     const alloc = std.testing.allocator;
 
     // generate a keypair to get a valid 32-byte secret key
-    const kp = EcdsaP256.KeyPair.generate(@import("compat").io());
+    const kp = EcdsaP256.KeyPair.generate(platform.io());
     const key_bytes = kp.secret_key.toBytes();
 
     const pem = try derKeyToPem(alloc, &key_bytes);

@@ -8,6 +8,7 @@
 // duplicating socket setup code across agent operations.
 
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
@@ -79,9 +80,9 @@ pub fn postWithAuth(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, 
 }
 
 fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) HttpClientError!Response {
-    const fd = @import("compat").posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch
+    const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch
         return HttpClientError.ConnectFailed;
-    defer @import("compat").posix.close(fd);
+    defer platform.posix.close(fd);
 
     // set timeouts — send timeout must be set before connect() because
     // Linux uses SO_SNDTIMEO as the connect timeout
@@ -90,8 +91,8 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     // connect
-    const sock_addr = @import("compat").net.Address.initIp4(addr, port);
-    @import("compat").posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch
+    const sock_addr = platform.net.Address.initIp4(addr, port);
+    platform.posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch
         return HttpClientError.ConnectFailed;
 
     // send
@@ -134,10 +135,10 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
     };
 }
 
-fn writeAll(fd: @import("compat").posix.socket_t, data: []const u8) !void {
+fn writeAll(fd: platform.posix.socket_t, data: []const u8) !void {
     var total: usize = 0;
     while (total < data.len) {
-        const written = @import("compat").posix.write(fd, data[total..]) catch return error.WriteFailed;
+        const written = platform.posix.write(fd, data[total..]) catch return error.WriteFailed;
         if (written == 0) return error.WriteFailed;
         total += written;
     }

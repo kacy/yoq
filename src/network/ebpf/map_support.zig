@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
@@ -21,7 +22,7 @@ pub const MapUpdateFaultMode = enum {
     }
 };
 
-var fault_mutex: @import("compat").Mutex = .{};
+var fault_mutex: platform.Mutex = .{};
 var map_update_fault_mode: MapUpdateFaultMode = .none;
 var map_update_fault_injections: u64 = 0;
 

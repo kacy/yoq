@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const service_observability = @import("../../network/service_observability.zig");
@@ -7,7 +8,7 @@ const store = @import("../../state/store.zig");
 const types = @import("types.zig");
 
 pub var health_states: std.ArrayList(types.ServiceHealth) = .empty;
-pub var health_mutex: @import("compat").Mutex = .{};
+pub var health_mutex: platform.Mutex = .{};
 
 pub var scheduler_thread: ?std.Thread = null;
 pub var worker_threads: [types.max_worker_threads]?std.Thread = [_]?std.Thread{null} ** types.max_worker_threads;
@@ -15,7 +16,7 @@ pub var worker_thread_count: usize = 0;
 pub var checker_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 pub var work_queue: std.ArrayList(types.CheckItem) = .empty;
-pub var work_mutex: @import("compat").Mutex = .{};
+pub var work_mutex: platform.Mutex = .{};
 pub var scheduled_total: u64 = 0;
 pub var completed_total: u64 = 0;
 pub var stale_results_total: u64 = 0;
@@ -32,7 +33,7 @@ pub fn registerService(
     var endpoint_id_buf: [96]u8 = undefined;
     const endpoint_id = activeEndpointId(&container_id, &endpoint_id_buf);
     const generation = resolveEndpointGeneration(service_name, endpoint_id);
-    const now = @import("compat").timestamp();
+    const now = platform.timestamp();
 
     service_registry_runtime.syncServiceFromStore(service_name);
     proxy_control_plane.refreshIfEnabled();
