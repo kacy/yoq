@@ -35,11 +35,11 @@ const PreparedService = struct {
     gpu_indices_len: usize,
     mesh_support: ?gpu_runtime.MeshSupport,
 
-    fn init(orch: anytype, idx: usize) ?PreparedService {
+    fn init(io: std.Io, orch: anytype, idx: usize) ?PreparedService {
         const svc = orch.manifest.services[idx];
         const alloc = orch.alloc;
 
-        var img = service_runtime.resolveServiceImage(alloc, svc.image) orelse return null;
+        var img = service_runtime.resolveServiceImageWithIo(io, alloc, svc.image) orelse return null;
         errdefer img.deinit(alloc);
 
         var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, svc.command) catch {
@@ -153,7 +153,10 @@ const PreparedService = struct {
 pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.atomic.Value(bool)) void {
     const svc = orch.manifest.services[idx];
 
-    var prepared = PreparedService.init(orch, idx) orelse {
+    var threaded_io = std.Io.Threaded.init(orch.alloc, .{});
+    defer threaded_io.deinit();
+
+    var prepared = PreparedService.init(threaded_io.io(), orch, idx) orelse {
         orch.states[idx].status = .failed;
         return;
     };

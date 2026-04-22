@@ -381,6 +381,9 @@ fn provisionAcmeCerts(
     services: []const spec.Service,
     start_set: ?std.StringHashMapUnmanaged(void),
 ) void {
+    var threaded_io: ?std.Io.Threaded = null;
+    defer if (threaded_io) |*io| io.deinit();
+
     for (services) |svc| {
         if (!shouldStart(start_set, svc.name)) continue;
         const tls = svc.tls orelse continue;
@@ -396,7 +399,12 @@ fn provisionAcmeCerts(
         }
 
         writeErr("  tls: provisioning certificate for {s}...\n", .{tls.domain});
-        tls_support.provisionAcmeCert(
+        if (threaded_io == null) {
+            threaded_io = std.Io.Threaded.init(alloc, .{});
+        }
+        const acme_io = if (threaded_io) |*io| io.io() else unreachable;
+        tls_support.provisionAcmeCertWithIo(
+            acme_io,
             alloc,
             certs,
             challenges,

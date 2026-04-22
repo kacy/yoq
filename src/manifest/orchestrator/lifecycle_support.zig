@@ -58,13 +58,16 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
 
     try self.computeStartSet();
 
+    var pull_io = std.Io.Threaded.init(self.alloc, .{});
+    defer pull_io.deinit();
+
     for (services, 0..) |svc, i| {
         if (!shouldStart(self, svc.name)) continue;
 
         self.states[i].status = .pulling;
         writeErr("pulling {s}...\n", .{svc.image});
 
-        if (!service_runtime.ensureImageAvailable(self.alloc, svc.image)) {
+        if (!service_runtime.ensureImageAvailableWithIo(pull_io.io(), self.alloc, svc.image)) {
             writeErr("failed to pull image: {s}\n", .{svc.image});
             self.states[i].status = .failed;
             return OrchestratorError.PullFailed;
@@ -122,7 +125,12 @@ pub fn startServiceByIndex(
         if (self.manifest.workerByName(dep_name)) |worker| {
             if (!completed_workers.contains(dep_name)) {
                 writeErr("running worker {s}...\n", .{dep_name});
-                if (!service_runtime.runOneShot(
+
+                var worker_io = std.Io.Threaded.init(self.alloc, .{});
+                defer worker_io.deinit();
+
+                if (!service_runtime.runOneShotWithIo(
+                    worker_io.io(),
                     self.alloc,
                     worker.image,
                     worker.command,
