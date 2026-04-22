@@ -1,7 +1,8 @@
 const std = @import("std");
 
-/// Project platform boundary for Zig 0.16 I/O, filesystem, sync, and Linux
-/// syscall adapters. Callers should import this once per file as `platform`.
+/// Linux platform boundary for blocking OS primitives and temporary Zig 0.16
+/// filesystem adapters. New command/runtime entrypoints should pass std.Io
+/// explicitly instead of adding more implicit IO here.
 pub const net = struct {
     pub const Address = extern union {
         any: std.posix.sockaddr,
@@ -27,28 +28,47 @@ pub const net = struct {
     };
 };
 
-pub fn io() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
-
 pub fn timestamp() i64 {
-    return @intCast(@divTrunc(std.Io.Clock.real.now(io()).nanoseconds, std.time.ns_per_s));
+    return @intCast(@divTrunc(realTimeNanos(), std.time.ns_per_s));
 }
 
 pub fn milliTimestamp() i64 {
-    return @intCast(@divTrunc(std.Io.Clock.real.now(io()).nanoseconds, std.time.ns_per_ms));
+    return @intCast(@divTrunc(realTimeNanos(), std.time.ns_per_ms));
 }
 
 pub fn nanoTimestamp() i128 {
-    return std.Io.Clock.real.now(io()).nanoseconds;
+    return realTimeNanos();
 }
 
 pub fn sleep(ns: u64) void {
-    std.Io.sleep(io(), .fromNanoseconds(@intCast(ns)), .awake) catch {};
+    var remaining = std.os.linux.timespec{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    while (true) {
+        var next: std.os.linux.timespec = undefined;
+        const rc = std.os.linux.nanosleep(&remaining, &next);
+        switch (std.os.linux.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => remaining = next,
+            else => return,
+        }
+    }
 }
 
 pub fn randomBytes(buffer: []u8) void {
-    io().random(buffer);
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const rc = std.os.linux.getrandom(buffer.ptr + offset, buffer.len - offset, 0);
+        switch (std.os.linux.errno(rc)) {
+            .SUCCESS => {
+                if (rc == 0) unreachable;
+                offset += rc;
+            },
+            .INTR => {},
+            else => unreachable,
+        }
+    }
 }
 
 pub fn randomInt(comptime T: type) T {
@@ -66,7 +86,8 @@ pub fn intToEnum(comptime T: type, value: anytype) !T {
 }
 
 pub fn isatty(fd: std.posix.fd_t) bool {
-    return std.Io.File.isTty(.{ .handle = fd, .flags = .{ .nonblocking = false } }, io()) catch false;
+    _ = std.posix.tcgetattr(fd) catch return false;
+    return true;
 }
 
 pub fn getenv(name: []const u8) ?[]const u8 {
@@ -85,12 +106,48 @@ pub fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) (std.mem.Alloc
 }
 
 pub fn getCwd(buffer: []u8) ![]u8 {
-    const len = try std.process.currentPath(io(), buffer);
-    return buffer[0..len];
+    const rc = std.os.linux.getcwd(buffer.ptr, buffer.len);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => if (rc > 0) buffer[0 .. rc - 1] else error.CurrentDirUnlinked,
+        .RANGE => error.NameTooLong,
+        .NOENT => error.CurrentDirUnlinked,
+        else => error.Unexpected,
+    };
 }
 
 pub fn selfExePathAlloc(alloc: std.mem.Allocator) ![:0]u8 {
-    return std.process.executablePathAlloc(io(), alloc);
+    var size: usize = 256;
+    while (size <= 64 * 1024) : (size *= 2) {
+        const buffer = try alloc.allocSentinel(u8, size, 0);
+        errdefer alloc.free(buffer);
+
+        const rc = std.os.linux.readlink("/proc/self/exe", buffer.ptr, buffer.len);
+        switch (std.os.linux.errno(rc)) {
+            .SUCCESS => {
+                if (rc < buffer.len) {
+                    buffer[rc] = 0;
+                    return buffer[0..rc :0];
+                }
+            },
+            .NOENT => return error.FileNotFound,
+            .ACCES, .PERM => return error.AccessDenied,
+            else => return error.Unexpected,
+        }
+
+        alloc.free(buffer);
+    }
+    return error.NameTooLong;
+}
+
+fn realTimeNanos() i128 {
+    var ts: std.os.linux.timespec = undefined;
+    const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
+    if (std.os.linux.errno(rc) != .SUCCESS) return 0;
+    return (@as(i128, ts.sec) * std.time.ns_per_s) + ts.nsec;
+}
+
+fn legacyFilesystemIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 pub fn format(writer: anytype, comptime fmt: []const u8, args: anytype) !void {
@@ -231,19 +288,19 @@ pub const File = struct {
     }
 
     pub fn close(self: File) void {
-        self.inner().close(io());
+        self.inner().close(legacyFilesystemIo());
     }
 
     pub fn writer(self: File, buffer: []u8) std.Io.File.Writer {
-        return self.inner().writer(io(), buffer);
+        return self.inner().writer(legacyFilesystemIo(), buffer);
     }
 
     pub fn reader(self: File, buffer: []u8) std.Io.File.Reader {
-        return self.inner().reader(io(), buffer);
+        return self.inner().reader(legacyFilesystemIo(), buffer);
     }
 
     pub fn writeAll(self: File, bytes: []const u8) !void {
-        try self.inner().writeStreamingAll(io(), bytes);
+        try self.inner().writeStreamingAll(legacyFilesystemIo(), bytes);
     }
 
     pub fn read(self: File, buffer: []u8) !usize {
@@ -276,11 +333,11 @@ pub const File = struct {
     }
 
     pub fn sync(self: File) !void {
-        try self.inner().sync(io());
+        try self.inner().sync(legacyFilesystemIo());
     }
 
     pub fn stat(self: File) !Stat {
-        const file_stat = try self.inner().stat(io());
+        const file_stat = try self.inner().stat(legacyFilesystemIo());
         return .{
             .size = file_stat.size,
             .mode = file_stat.permissions.toMode(),
@@ -347,7 +404,7 @@ pub const Dir = struct {
         pub const Entry = std.Io.Dir.Walker.Entry;
 
         pub fn next(self: *Walker) !?Walker.Entry {
-            return self.inner.next(io());
+            return self.inner.next(legacyFilesystemIo());
         }
 
         pub fn deinit(self: *Walker) void {
@@ -373,39 +430,39 @@ pub const Dir = struct {
     }
 
     pub fn close(self: Dir) void {
-        self.inner.close(io());
+        self.inner.close(legacyFilesystemIo());
     }
 
     pub fn access(self: Dir, path: []const u8, options: std.Io.Dir.AccessOptions) !void {
-        try self.inner.access(io(), path, options);
+        try self.inner.access(legacyFilesystemIo(), path, options);
     }
 
     pub fn makeDir(self: Dir, path: []const u8) !void {
-        try self.inner.createDir(io(), path, .default_dir);
+        try self.inner.createDir(legacyFilesystemIo(), path, .default_dir);
     }
 
     pub fn makePath(self: Dir, path: []const u8) !void {
-        try self.inner.createDirPath(io(), path);
+        try self.inner.createDirPath(legacyFilesystemIo(), path);
     }
 
     pub fn deleteDir(self: Dir, path: []const u8) !void {
-        try self.inner.deleteDir(io(), path);
+        try self.inner.deleteDir(legacyFilesystemIo(), path);
     }
 
     pub fn deleteFile(self: Dir, path: []const u8) !void {
-        try self.inner.deleteFile(io(), path);
+        try self.inner.deleteFile(legacyFilesystemIo(), path);
     }
 
     pub fn deleteTree(self: Dir, path: []const u8) !void {
-        try self.inner.deleteTree(io(), path);
+        try self.inner.deleteTree(legacyFilesystemIo(), path);
     }
 
     pub fn openFile(self: Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) !File {
-        return File.from(try self.inner.openFile(io(), path, options));
+        return File.from(try self.inner.openFile(legacyFilesystemIo(), path, options));
     }
 
     pub fn createFile(self: Dir, path: []const u8, options: CreateFileOptions) !File {
-        return File.from(try self.inner.createFile(io(), path, .{
+        return File.from(try self.inner.createFile(legacyFilesystemIo(), path, .{
             .read = options.read,
             .truncate = options.truncate,
             .exclusive = options.exclusive,
@@ -420,11 +477,11 @@ pub const Dir = struct {
     }
 
     pub fn openDir(self: Dir, path: []const u8, options: std.Io.Dir.OpenOptions) !Dir {
-        return Dir.from(try self.inner.openDir(io(), path, options));
+        return Dir.from(try self.inner.openDir(legacyFilesystemIo(), path, options));
     }
 
     pub fn statFile(self: Dir, path: []const u8) !Stat {
-        const file_stat = try self.inner.statFile(io(), path, .{});
+        const file_stat = try self.inner.statFile(legacyFilesystemIo(), path, .{});
         return .{
             .size = file_stat.size,
             .mode = file_stat.permissions.toMode(),
@@ -435,37 +492,37 @@ pub const Dir = struct {
     }
 
     pub fn readFile(self: Dir, path: []const u8, buffer: []u8) ![]u8 {
-        return self.inner.readFile(io(), path, buffer);
+        return self.inner.readFile(legacyFilesystemIo(), path, buffer);
     }
 
     pub fn readFileAlloc(self: Dir, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
-        return self.inner.readFileAlloc(io(), path, alloc, .limited(max_bytes));
+        return self.inner.readFileAlloc(legacyFilesystemIo(), path, alloc, .limited(max_bytes));
     }
 
     pub fn readLink(self: Dir, path: []const u8, buffer: []u8) ![]u8 {
-        const len = try self.inner.readLink(io(), path, buffer);
+        const len = try self.inner.readLink(legacyFilesystemIo(), path, buffer);
         return buffer[0..len];
     }
 
     pub fn copyFile(self: Dir, source_path: []const u8, dest_dir: Dir, dest_path: []const u8, options: std.Io.Dir.CopyFileOptions) !void {
-        try self.inner.copyFile(source_path, dest_dir.inner, dest_path, io(), options);
+        try self.inner.copyFile(source_path, dest_dir.inner, dest_path, legacyFilesystemIo(), options);
     }
 
     pub fn symLink(self: Dir, target_path: []const u8, sym_link_path: []const u8, flags: std.Io.Dir.SymLinkFlags) !void {
-        try self.inner.symLink(io(), target_path, sym_link_path, flags);
+        try self.inner.symLink(legacyFilesystemIo(), target_path, sym_link_path, flags);
     }
 
     pub fn realpath(self: Dir, path: []const u8, buffer: []u8) ![]u8 {
-        const len = try self.inner.realPathFile(io(), path, buffer);
+        const len = try self.inner.realPathFile(legacyFilesystemIo(), path, buffer);
         return buffer[0..len];
     }
 
     pub fn realpathAlloc(self: Dir, alloc: std.mem.Allocator, path: []const u8) ![:0]u8 {
-        return self.inner.realPathFileAlloc(io(), path, alloc);
+        return self.inner.realPathFileAlloc(legacyFilesystemIo(), path, alloc);
     }
 
     pub fn rename(self: Dir, old_path: []const u8, new_path: []const u8) !void {
-        try self.inner.rename(old_path, self.inner, new_path, io());
+        try self.inner.rename(old_path, self.inner, new_path, legacyFilesystemIo());
     }
 
     pub fn iterate(self: Dir) Iterator {
@@ -480,7 +537,7 @@ pub const Dir = struct {
         inner: std.Io.Dir.Iterator,
 
         pub fn next(self: *Iterator) !?std.Io.Dir.Entry {
-            return self.inner.next(io());
+            return self.inner.next(legacyFilesystemIo());
         }
     };
 };
@@ -490,11 +547,11 @@ pub fn cwd() Dir {
 }
 
 pub fn openDirAbsolute(path: []const u8, options: std.Io.Dir.OpenOptions) !Dir {
-    return Dir.from(try std.Io.Dir.openDirAbsolute(io(), path, options));
+    return Dir.from(try std.Io.Dir.openDirAbsolute(legacyFilesystemIo(), path, options));
 }
 
 pub fn openFileAbsolute(path: []const u8, options: std.Io.Dir.OpenFileOptions) !File {
-    return File.from(try std.Io.Dir.openFileAbsolute(io(), path, options));
+    return File.from(try std.Io.Dir.openFileAbsolute(legacyFilesystemIo(), path, options));
 }
 
 pub fn createFileAbsolute(path: []const u8, options: Dir.CreateFileOptions) !File {
@@ -502,11 +559,11 @@ pub fn createFileAbsolute(path: []const u8, options: Dir.CreateFileOptions) !Fil
 }
 
 pub fn accessAbsolute(path: []const u8, options: std.Io.Dir.AccessOptions) !void {
-    return std.Io.Dir.accessAbsolute(io(), path, options);
+    return std.Io.Dir.accessAbsolute(legacyFilesystemIo(), path, options);
 }
 
 pub fn deleteFileAbsolute(path: []const u8) !void {
-    return std.Io.Dir.deleteFileAbsolute(io(), path);
+    return std.Io.Dir.deleteFileAbsolute(legacyFilesystemIo(), path);
 }
 
 pub const posix = struct {
