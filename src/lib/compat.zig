@@ -161,30 +161,37 @@ fn writableSlice(buffer: anytype) []u8 {
 }
 
 pub const Mutex = struct {
-    state: std.atomic.Mutex = .unlocked,
+    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
 
     pub fn lock(self: *Mutex) void {
-        while (!self.state.tryLock()) {
-            std.atomic.spinLoopHint();
-        }
+        if (std.c.pthread_mutex_lock(&self.inner) != .SUCCESS) unreachable;
     }
 
     pub fn unlock(self: *Mutex) void {
-        self.state.unlock();
+        if (std.c.pthread_mutex_unlock(&self.inner) != .SUCCESS) unreachable;
     }
 };
 
 pub const Semaphore = struct {
-    posted: std.atomic.Value(bool) = .init(false),
+    mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    cond: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
+    permits: usize = 0,
 
     pub fn post(self: *Semaphore) void {
-        self.posted.store(true, .release);
+        if (std.c.pthread_mutex_lock(&self.mutex) != .SUCCESS) unreachable;
+        self.permits += 1;
+        if (std.c.pthread_cond_signal(&self.cond) != .SUCCESS) unreachable;
+        if (std.c.pthread_mutex_unlock(&self.mutex) != .SUCCESS) unreachable;
     }
 
     pub fn wait(self: *Semaphore) void {
-        while (!self.posted.load(.acquire)) {
-            std.atomic.spinLoopHint();
+        if (std.c.pthread_mutex_lock(&self.mutex) != .SUCCESS) unreachable;
+        defer if (std.c.pthread_mutex_unlock(&self.mutex) != .SUCCESS) unreachable;
+
+        while (self.permits == 0) {
+            if (std.c.pthread_cond_wait(&self.cond, &self.mutex) != .SUCCESS) unreachable;
         }
+        self.permits -= 1;
     }
 };
 
