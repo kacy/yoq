@@ -192,8 +192,6 @@ test "create layer from empty dir returns null" {
 
 fn requireLayerCreationTestHost() !void {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
-    // Skip slow I/O tests in CI or when YOQ_SKIP_SLOW_TESTS is set
-    if (@import("compat").getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 }
 
 test "create layer from dir — round trip" {

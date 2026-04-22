@@ -52,8 +52,6 @@ pub fn createLayerFromDir(
 }
 
 fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !GzipResult {
-    // TODO: re-evaluate this path after upgrading past Zig 0.15.2.
-    // Zig 0.15.2 std.compress.flate.Compress still contains an incomplete drain path.
     const src_file = try @import("compat").cwd().openFile(src_path, .{});
     defer src_file.close();
 
@@ -82,6 +80,7 @@ fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []cons
     }
 
     compressor.finish() catch return error.CompressFailed;
+    try dst_writer.interface.flush();
 
     const stat = try dst_file.stat();
     const size = stat.size;
