@@ -400,16 +400,16 @@ fn formatGpuSm(info: *const detect.GpuInfo, buf: []u8) []const u8 {
 }
 
 fn formatGpuPeers(info: *const detect.GpuInfo, buf: []u8) []const u8 {
-    var stream = platform.fixedBufferStream(buf);
+    var stream: std.Io.Writer = .fixed(buf);
 
     for (0..info.nvlink_peer_count) |i| {
         if (i > 0) {
-            stream.writer().writeByte(',') catch break;
+            stream.writeByte(',') catch break;
         }
-        platform.format(stream.writer(), "{d}", .{info.nvlink_peers[i]}) catch break;
+        stream.print("{d}", .{info.nvlink_peers[i]}) catch break;
     }
 
-    const written = stream.getWritten();
+    const written = stream.buffered();
     return if (written.len > 0) written else "-";
 }
 

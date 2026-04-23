@@ -140,9 +140,7 @@ fn promptPort(reader: anytype, buf: []u8, label: []const u8, default: []const u8
 pub fn generateManifest(alloc: std.mem.Allocator, answers: Answers) error{OutOfMemory}![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&buf, alloc);
-
-    try writer.print(
+    try buf.print(alloc,
         \\# yoq manifest — {s}
         \\#
         \\# start:  yoq up
@@ -154,10 +152,10 @@ pub fn generateManifest(alloc: std.mem.Allocator, answers: Answers) error{OutOfM
     , .{ answers.project, answers.service, answers.image });
 
     if (answers.port) |port| {
-        try writer.print("ports = [\"{d}:{d}\"]\n", .{ port, port });
+        try buf.print(alloc, "ports = [\"{d}:{d}\"]\n", .{ port, port });
     }
 
-    try writer.writeAll("restart = \"on_failure\"\n");
+    try buf.appendSlice(alloc, "restart = \"on_failure\"\n");
 
     return buf.toOwnedSlice(alloc);
 }

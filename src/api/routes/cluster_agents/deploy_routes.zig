@@ -655,9 +655,10 @@ const FailureDetailBuilder = struct {
     fn toOwnedJson(self: *FailureDetailBuilder) !?[]u8 {
         if (self.items.items.len == 0) return null;
 
-        var json_buf: std.ArrayList(u8) = .empty;
-        errdefer json_buf.deinit(self.alloc);
-        const writer = platform.arrayListWriter(&json_buf, self.alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |detail, i| {
@@ -671,7 +672,7 @@ const FailureDetailBuilder = struct {
             try writer.writeByte('}');
         }
         try writer.writeByte(']');
-        const owned = try json_buf.toOwnedSlice(self.alloc);
+        const owned = try json_buf_writer.toOwnedSlice();
         return owned;
     }
 };
@@ -792,9 +793,10 @@ const RolloutTargetBuilder = struct {
     fn toOwnedJson(self: *RolloutTargetBuilder) !?[]u8 {
         if (self.items.items.len == 0) return null;
 
-        var json_buf: std.ArrayList(u8) = .empty;
-        errdefer json_buf.deinit(self.alloc);
-        const writer = platform.arrayListWriter(&json_buf, self.alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |target, i| {
@@ -810,7 +812,7 @@ const RolloutTargetBuilder = struct {
             try writer.writeByte('}');
         }
         try writer.writeByte(']');
-        return try json_buf.toOwnedSlice(self.alloc);
+        return try json_buf_writer.toOwnedSlice();
     }
 };
 
@@ -1355,9 +1357,10 @@ fn formatAppApplyResponse(
     report: apply_release.ApplyReport,
     summary: app_snapshot.Summary,
 ) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeByte('{');
     try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
@@ -1418,7 +1421,7 @@ fn formatAppApplyResponse(
     try writer.writeByte('}');
     try writer.writeByte('}');
 
-    return json_buf.toOwnedSlice(alloc);
+    return json_buf_writer.toOwnedSlice();
 }
 
 const RolloutNodeHarness = struct {

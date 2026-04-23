@@ -25,12 +25,12 @@ fn expectLoadSuccess(input: []const u8) !void {
 
 test "edge: extremely long service name" {
     var buf: [2048]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
     try writer.writeAll("[service.");
     try writer.writeByteNTimes('a', 1000);
     try writer.writeAll("]\nimage = \"nginx\"\n");
-    const input = stream.getWritten();
+    const input = stream.buffered();
 
     var manifest = loader.loadFromString(alloc, input) catch return;
     manifest.deinit();
@@ -113,13 +113,13 @@ test "edge: unicode in env vars" {
 
 test "edge: manifest with 100 services" {
     var buf: [32768]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     for (0..100) |i| {
         try writer.print("[service.svc{d}]\nimage = \"nginx\"\n\n", .{i});
     }
-    const input = stream.getWritten();
+    const input = stream.buffered();
 
     var manifest = loader.loadFromString(alloc, input) catch return;
     manifest.deinit();

@@ -19,7 +19,7 @@ pub fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
             else => {
                 if (c < 0x20) {
                     // other control characters — use \u00XX
-                    try platform.format(writer, "\\u{x:0>4}", .{c});
+                    try writer.print("\\u{x:0>4}", .{c});
                 } else {
                     try writer.writeByte(c);
                 }
@@ -329,57 +329,57 @@ pub fn summarizeFailureDetails(buf: []u8, failure_details_json: ?[]const u8) ?[]
 
 test "basic escaping" {
     var buf: [256]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     try writeJsonEscaped(writer, "hello \"world\"");
-    try std.testing.expectEqualStrings("hello \\\"world\\\"", stream.getWritten());
+    try std.testing.expectEqualStrings("hello \\\"world\\\"", stream.buffered());
 }
 
 test "backslash and special chars" {
     var buf: [256]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     try writeJsonEscaped(writer, "path\\to\nnew\tline");
-    try std.testing.expectEqualStrings("path\\\\to\\nnew\\tline", stream.getWritten());
+    try std.testing.expectEqualStrings("path\\\\to\\nnew\\tline", stream.buffered());
 }
 
 test "control characters use unicode escape" {
     var buf: [256]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     // 0x01 (SOH) should become \u0001
     try writeJsonEscaped(writer, &[_]u8{0x01});
-    try std.testing.expectEqualStrings("\\u0001", stream.getWritten());
+    try std.testing.expectEqualStrings("\\u0001", stream.buffered());
 }
 
 test "plain ascii passthrough" {
     var buf: [256]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     try writeJsonEscaped(writer, "abc123");
-    try std.testing.expectEqualStrings("abc123", stream.getWritten());
+    try std.testing.expectEqualStrings("abc123", stream.buffered());
 }
 
 test "writeJsonStringField emits quoted field" {
     var buf: [256]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     try writeJsonStringField(writer, "app_name", "demo-app");
-    try std.testing.expectEqualStrings("\"app_name\":\"demo-app\"", stream.getWritten());
+    try std.testing.expectEqualStrings("\"app_name\":\"demo-app\"", stream.buffered());
 }
 
 test "writeNullableJsonStringField emits null field" {
     var buf: [256]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     try writeNullableJsonStringField(writer, "source_release_id", null);
-    try std.testing.expectEqualStrings("\"source_release_id\":null", stream.getWritten());
+    try std.testing.expectEqualStrings("\"source_release_id\":null", stream.buffered());
 }
 
 test "extractJsonString basic" {
@@ -472,11 +472,11 @@ test "extractJsonObjects empty string" {
 
 test "writeJsonEscaped null byte" {
     var buf: [256]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     try writeJsonEscaped(writer, &[_]u8{0x00});
-    try std.testing.expectEqualStrings("\\u0000", stream.getWritten());
+    try std.testing.expectEqualStrings("\\u0000", stream.buffered());
 }
 
 test "extractJsonInt with whitespace after colon" {
@@ -555,8 +555,8 @@ test "extractJsonString multiple consecutive escapes" {
 
 test "writeJsonEscaped all control characters" {
     var buf: [1024]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     // write all control chars 0x00-0x1F
     var input: [32]u8 = undefined;
@@ -565,7 +565,7 @@ test "writeJsonEscaped all control characters" {
     }
     try writeJsonEscaped(writer, &input);
 
-    const output = stream.getWritten();
+    const output = stream.buffered();
 
     // \n (0x0A), \r (0x0D), \t (0x09) use shorthand
     try std.testing.expect(std.mem.indexOf(u8, output, "\\n") != null);

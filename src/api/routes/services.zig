@@ -79,9 +79,10 @@ fn handleListServices(alloc: std.mem.Allocator) Response {
         services.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('[') catch return common.internalError();
     for (services.items, 0..) |service, idx| {
@@ -90,7 +91,7 @@ fn handleListServices(alloc: std.mem.Allocator) Response {
     }
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -101,12 +102,13 @@ fn handleGetService(alloc: std.mem.Allocator, service_name: []const u8) Response
     };
     defer service.deinit(alloc);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
     writeServiceJson(writer, alloc, service) catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -120,9 +122,10 @@ fn handleListServiceEndpoints(alloc: std.mem.Allocator, service_name: []const u8
         endpoints.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('[') catch return common.internalError();
     for (endpoints.items, 0..) |endpoint, idx| {
@@ -131,7 +134,7 @@ fn handleListServiceEndpoints(alloc: std.mem.Allocator, service_name: []const u8
     }
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -150,9 +153,10 @@ fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const 
         route_traffic.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('[') catch return common.internalError();
     for (proxy_routes.items, 0..) |proxy_route, idx| {
@@ -161,7 +165,7 @@ fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const 
     }
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 

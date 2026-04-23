@@ -17,9 +17,10 @@ pub fn handleListCertificates(alloc: std.mem.Allocator) Response {
         certs.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('[') catch return common.internalError();
     for (certs.items, 0..) |cert, i| {
@@ -27,14 +28,14 @@ pub fn handleListCertificates(alloc: std.mem.Allocator) Response {
         writer.writeAll("{\"domain\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, cert.domain) catch return common.internalError();
         writer.writeAll("\",\"not_after\":") catch return common.internalError();
-        platform.format(writer, "{d}", .{cert.not_after}) catch return common.internalError();
+        writer.print("{d}", .{cert.not_after}) catch return common.internalError();
         writer.writeAll(",\"source\":\"") catch return common.internalError();
         json_helpers.writeJsonEscaped(writer, cert.source) catch return common.internalError();
         writer.writeAll("\"}") catch return common.internalError();
     }
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 

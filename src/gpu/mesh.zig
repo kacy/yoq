@@ -242,8 +242,8 @@ fn appendGpuNode(
 
 fn appendGpuHeader(alloc: Allocator, buf: *std.ArrayListUnmanaged(u8), gpu: GpuInfo) !void {
     try buf.appendSlice(alloc, "      <gpu dev=\"");
-    try platform.format(platform.arrayListWriter(buf, alloc), "{d}", .{gpu.index});
-    try platform.format(platform.arrayListWriter(buf, alloc), "\" sm=\"{d}\" mem=\"{d}\"", .{
+    try buf.print(alloc, "{d}", .{gpu.index});
+    try buf.print(alloc, "\" sm=\"{d}\" mem=\"{d}\"", .{
         gpuSmValue(gpu),
         gpu.vram_mb,
     });
@@ -269,7 +269,7 @@ fn appendNvLinkEntries(
             try buf.appendSlice(alloc, ">\n");
         }
 
-        try platform.format(platform.arrayListWriter(buf, alloc), "        <nvlink target=\"{s}\" count=\"1\" />\n", .{peer_pci});
+        try buf.print(alloc, "        <nvlink target=\"{s}\" count=\"1\" />\n", .{peer_pci});
     }
 
     return wrote_entry;
@@ -290,7 +290,7 @@ fn appendIbTopology(
 
 fn appendIbNode(alloc: Allocator, buf: *std.ArrayListUnmanaged(u8), nic: IbDevice) !void {
     try appendPciOpen(alloc, buf, nic.getPciBusId(), "0x020700");
-    try platform.format(platform.arrayListWriter(buf, alloc), "      <nic name=\"{s}\" speed=\"{d}\" gdr=\"{s}\" />\n", .{
+    try buf.print(alloc, "      <nic name=\"{s}\" speed=\"{d}\" gdr=\"{s}\" />\n", .{
         nic.getName(),
         nic.rate_gbps,
         if (nic.gdr_supported) "1" else "0",
@@ -304,7 +304,7 @@ fn appendPciOpen(
     pci_bus_id: []const u8,
     class: []const u8,
 ) !void {
-    try platform.format(platform.arrayListWriter(buf, alloc), "    <pci busid=\"{s}\" class=\"{s}\" link_speed=\"16 GT/s\" link_width=\"16\">\n", .{
+    try buf.print(alloc, "    <pci busid=\"{s}\" class=\"{s}\" link_speed=\"16 GT/s\" link_width=\"16\">\n", .{
         pci_bus_id,
         class,
     });

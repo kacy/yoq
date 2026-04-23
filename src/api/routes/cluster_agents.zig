@@ -281,8 +281,8 @@ test "route matches assignment status update path" {
 
 test "writeAgentJson produces valid JSON" {
     var buf: [1024]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     const agent = agent_registry.AgentRecord{
         .id = "agent123",
@@ -301,7 +301,7 @@ test "writeAgentJson produces valid JSON" {
     };
 
     writeAgentJson(writer, agent) catch unreachable;
-    const json = stream.getWritten();
+    const json = stream.buffered();
 
     try testing.expect(std.mem.indexOf(u8, json, "agent123") != null);
     try testing.expect(std.mem.indexOf(u8, json, "192.168.1.1:8080") != null);
@@ -314,8 +314,8 @@ test "writeAgentJson produces valid JSON" {
 
 test "writeAgentJson omits optional fields when null" {
     var buf: [1024]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     const agent = agent_registry.AgentRecord{
         .id = "agent456",
@@ -334,7 +334,7 @@ test "writeAgentJson omits optional fields when null" {
     };
 
     writeAgentJson(writer, agent) catch unreachable;
-    const json = stream.getWritten();
+    const json = stream.buffered();
 
     try testing.expect(std.mem.indexOf(u8, json, "agent456") != null);
     try testing.expect(std.mem.indexOf(u8, json, "draining") != null);
@@ -343,8 +343,8 @@ test "writeAgentJson omits optional fields when null" {
 
 test "writeAssignmentJson produces valid JSON" {
     var buf: [1024]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     const assignment = agent_registry.Assignment{
         .id = "assign789",
@@ -357,7 +357,7 @@ test "writeAssignmentJson produces valid JSON" {
     };
 
     writeAssignmentJson(writer, assignment) catch unreachable;
-    const json = stream.getWritten();
+    const json = stream.buffered();
 
     try testing.expect(std.mem.indexOf(u8, json, "assign789") != null);
     try testing.expect(std.mem.indexOf(u8, json, "agent123") != null);
@@ -369,8 +369,8 @@ test "writeAssignmentJson produces valid JSON" {
 
 test "writeWireguardPeerJson produces valid JSON" {
     var buf: [1024]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     const peer = agent_registry.WireguardPeer{
         .node_id = 3,
@@ -382,7 +382,7 @@ test "writeWireguardPeerJson produces valid JSON" {
     };
 
     writeWireguardPeerJson(writer, peer) catch unreachable;
-    const json = stream.getWritten();
+    const json = stream.buffered();
 
     try testing.expect(std.mem.indexOf(u8, json, "\"node_id\":3") != null);
     try testing.expect(std.mem.indexOf(u8, json, "agent789") != null);
@@ -393,8 +393,8 @@ test "writeWireguardPeerJson produces valid JSON" {
 
 test "writeWireguardPeerJson escapes special characters" {
     var buf: [2048]u8 = undefined;
-    var stream = platform.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     const peer = agent_registry.WireguardPeer{
         .node_id = 1,
@@ -406,7 +406,7 @@ test "writeWireguardPeerJson escapes special characters" {
     };
 
     writeWireguardPeerJson(writer, peer) catch unreachable;
-    const json = stream.getWritten();
+    const json = stream.buffered();
 
     try testing.expect(std.mem.indexOf(u8, json, "\\\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\\n") != null);

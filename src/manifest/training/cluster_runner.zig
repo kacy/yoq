@@ -13,9 +13,10 @@ pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
     const http_client = @import("../../cluster/http_client.zig");
     const json_helpers = @import("../../lib/json_helpers.zig");
 
-    var json_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer json_buf.deinit(self.alloc);
-    const writer = platform.arrayListWriter(&json_buf, self.alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeAll("{\"services\":[{\"image\":\"") catch return error.OutOfMemory;
     json_helpers.writeJsonEscaped(writer, self.job.image) catch return error.OutOfMemory;
@@ -50,7 +51,10 @@ pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
-    var resp = http_client.postWithAuth(self.alloc, server_ip, server_port, "/deploy", json_buf.items, token) catch {
+    const request_body = try json_buf_writer.toOwnedSlice();
+    defer self.alloc.free(request_body);
+
+    var resp = http_client.postWithAuth(self.alloc, server_ip, server_port, "/deploy", request_body, token) catch {
         self.state = .failed;
         state_support.persistState(self);
         return error.ConnectionFailed;

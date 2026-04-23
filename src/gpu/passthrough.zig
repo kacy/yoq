@@ -161,12 +161,12 @@ pub fn generateGpuEnv(gpu_indices: []const u32, buf: *[4096]u8) ![]const u8 {
 }
 
 fn formatGpuList(buf: []u8, indices: []const u32) ![]const u8 {
-    var fixed = platform.fixedBufferStream(buf);
+    var fixed: std.Io.Writer = .fixed(buf);
     for (indices, 0..) |idx, i| {
-        if (i > 0) try fixed.writer().writeByte(',');
-        try platform.format(fixed.writer(), "{d}", .{idx});
+        if (i > 0) try fixed.writeByte(',');
+        try fixed.print("{d}", .{idx});
     }
-    return fixed.getWritten();
+    return fixed.buffered();
 }
 
 /// apply NUMA affinity to a container cgroup by writing cpuset.mems and cpuset.cpus.

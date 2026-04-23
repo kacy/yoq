@@ -38,9 +38,10 @@ pub fn handleStatus(alloc: std.mem.Allocator) Response {
         snapshots.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    var writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
     writer.writeByte('[') catch return common.internalError();
 
     for (snapshots.items, 0..) |snap, idx| {
@@ -50,7 +51,7 @@ pub fn handleStatus(alloc: std.mem.Allocator) Response {
 
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -86,9 +87,10 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
     var events: [service_reconciler.max_recent_events]service_reconciler.Event = undefined;
     const event_count = service_reconciler.snapshotRecentEvents(&events);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    var writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeAll("{\"mode\":\"canonical") catch return common.internalError();
     writer.writeAll("\",\"flags\":{") catch return common.internalError();
@@ -548,7 +550,7 @@ pub fn handleServiceRolloutStatus(alloc: std.mem.Allocator) Response {
 
     writer.writeAll("]}}") catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 

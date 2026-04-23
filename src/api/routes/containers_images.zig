@@ -156,12 +156,12 @@ test "writeContainerJson produces valid JSON" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = platform.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var fbs: std.Io.Writer = .fixed(&buf);
+    const writer = &fbs;
 
     try writeContainerJson(writer, record);
 
-    const json_str = fbs.getWritten();
+    const json_str = fbs.buffered();
     try testing.expect(std.mem.indexOf(u8, json_str, "\"id\":") != null);
     try testing.expect(std.mem.indexOf(u8, json_str, "\"status\":\"running\"") != null);
     try testing.expect(std.mem.indexOf(u8, json_str, "\"pid\":1234") != null);
@@ -184,12 +184,12 @@ test "writeContainerJson handles null pid" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = platform.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var fbs: std.Io.Writer = .fixed(&buf);
+    const writer = &fbs;
 
     try writeContainerJson(writer, record);
 
-    const json_str = fbs.getWritten();
+    const json_str = fbs.buffered();
     try testing.expect(std.mem.indexOf(u8, json_str, "\"pid\":null") != null);
 }
 
@@ -206,12 +206,12 @@ test "writeImageJson produces valid JSON" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = platform.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var fbs: std.Io.Writer = .fixed(&buf);
+    const writer = &fbs;
 
     try writeImageJson(writer, img);
 
-    const json_str = fbs.getWritten();
+    const json_str = fbs.buffered();
     try testing.expect(std.mem.indexOf(u8, json_str, "\"id\":") != null);
     try testing.expect(std.mem.indexOf(u8, json_str, "\"repository\":\"alpine\"") != null);
     try testing.expect(std.mem.indexOf(u8, json_str, "\"tag\":\"latest\"") != null);
@@ -235,12 +235,12 @@ test "writeContainerJson escapes special characters" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = platform.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var fbs: std.Io.Writer = .fixed(&buf);
+    const writer = &fbs;
 
     try writeContainerJson(writer, record);
 
-    const json_str = fbs.getWritten();
+    const json_str = fbs.buffered();
     // Should contain escaped quotes
     try testing.expect(std.mem.indexOf(u8, json_str, "\\\"hello world\\\"") != null);
 }
@@ -417,12 +417,12 @@ test "writeImageJson handles empty strings" {
     };
 
     var buf: [1024]u8 = undefined;
-    var fbs = platform.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var fbs: std.Io.Writer = .fixed(&buf);
+    const writer = &fbs;
 
     try writeImageJson(writer, img);
 
-    const json_str = fbs.getWritten();
+    const json_str = fbs.buffered();
     try testing.expect(std.mem.indexOf(u8, json_str, "\"repository\":\"\"") != null);
     try testing.expect(std.mem.indexOf(u8, json_str, "\"tag\":\"\"") != null);
 }

@@ -89,9 +89,10 @@ pub fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
 
     const collector = ebpf.getMetricsCollector();
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    var writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
     writer.writeByte('[') catch return common.internalError();
 
     var first = true;
@@ -128,7 +129,7 @@ pub fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
 
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -144,9 +145,10 @@ pub fn handleMetricsPairs(alloc: std.mem.Allocator) Response {
         records.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    var writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
     writer.writeByte('[') catch return common.internalError();
 
     var first = true;
@@ -166,7 +168,7 @@ pub fn handleMetricsPairs(alloc: std.mem.Allocator) Response {
 
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -176,9 +178,10 @@ pub fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
     var entries: [1024]storage_metrics.IoEntry = undefined;
     const count = collector.listAllIoMetrics(&entries);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    var writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
     writer.writeByte('[') catch return common.internalError();
 
     for (entries[0..count], 0..) |entry, idx| {
@@ -197,14 +200,15 @@ pub fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
 
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(alloc);
-    var writer = platform.arrayListWriter(&buf, alloc);
+    var buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer buf_writer.deinit();
+
+    const writer = &buf_writer.writer;
 
     writeServiceRolloutPrometheus(writer) catch return common.internalError();
 
@@ -251,7 +255,7 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
         gpu_health.writePrometheus(writer, gpu_metrics, gpu_result.count) catch return common.internalError();
     }
 
-    const body = buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = buf_writer.toOwnedSlice() catch return common.internalError();
     return .{
         .status = .ok,
         .body = body,
@@ -934,15 +938,16 @@ pub fn handleGpuMetrics(alloc: std.mem.Allocator) Response {
     var nvml = gpu_result.nvml orelse return common.jsonOkOwned(alloc, "{\"gpu_metrics\":[]}");
     const metrics = gpu_health.pollAllMetrics(&nvml, gpu_result.count);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    var writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('{') catch return common.internalError();
     gpu_health.writeMetricsJson(writer, metrics, gpu_result.count) catch return common.internalError();
     writer.writeByte('}') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 

@@ -15,9 +15,6 @@ fn hasCachedSqlite(b: *std.Build) bool {
 }
 
 fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    _ = target;
-    _ = optimize;
-
     const mod_target = module.resolved_target.?;
     const mod_optimize = module.optimize.?;
 
@@ -70,6 +67,12 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.Resolve
     sqlite_mod.linkLibrary(sqlite_lib);
 
     module.addImport("sqlite", sqlite_mod);
+    addCommonImports(module, b, target, optimize);
+}
+
+fn addCommonImports(module: *std.Build.Module, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const mod_target = module.resolved_target orelse target;
+    const mod_optimize = module.optimize orelse optimize;
 
     const platform_mod = b.createModule(.{
         .root_source_file = b.path("src/lib/platform.zig"),

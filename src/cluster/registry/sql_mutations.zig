@@ -234,8 +234,8 @@ pub fn deleteOtherAssignmentsForWorkloadSql(
     workload_name: []const u8,
     keep_ids: []const []const u8,
 ) ![]const u8 {
-    var stream = platform.fixedBufferStream(buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(buf);
+    const writer = &stream;
 
     var app_esc_buf: [256]u8 = undefined;
     const app_esc = try sql_escape.escapeSqlString(&app_esc_buf, app_name);
@@ -259,15 +259,15 @@ pub fn deleteOtherAssignmentsForWorkloadSql(
         try writer.writeByte(')');
     }
     try writer.writeByte(';');
-    return stream.getWritten();
+    return stream.buffered();
 }
 
 pub fn deleteAssignmentsByIdsSql(
     buf: []u8,
     assignment_ids: []const []const u8,
 ) ![]const u8 {
-    var stream = platform.fixedBufferStream(buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(buf);
+    const writer = &stream;
 
     try writer.writeAll("DELETE FROM assignments");
     if (assignment_ids.len > 0) {
@@ -283,7 +283,7 @@ pub fn deleteAssignmentsByIdsSql(
         try writer.writeAll(" WHERE 1 = 0");
     }
     try writer.writeByte(';');
-    return stream.getWritten();
+    return stream.buffered();
 }
 
 pub fn wireguardPeerSql(

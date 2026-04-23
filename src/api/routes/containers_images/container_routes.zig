@@ -20,9 +20,10 @@ pub fn handleListContainers(alloc: std.mem.Allocator) Response {
         ids.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('[') catch return common.internalError();
 
@@ -39,7 +40,7 @@ pub fn handleListContainers(alloc: std.mem.Allocator) Response {
 
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -50,13 +51,14 @@ pub fn handleGetContainer(alloc: std.mem.Allocator, id: []const u8) Response {
     };
     defer record.deinit(alloc);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writers.writeContainerJson(writer, record) catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -73,15 +75,16 @@ pub fn handleGetLogs(alloc: std.mem.Allocator, id: []const u8) Response {
     };
     defer alloc.free(log_data);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeAll("{\"logs\":\"") catch return common.internalError();
     @import("../../../lib/json_helpers.zig").writeJsonEscaped(writer, log_data) catch return common.internalError();
     writer.writeAll("\"}") catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 

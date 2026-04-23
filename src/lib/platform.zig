@@ -1,8 +1,8 @@
 const std = @import("std");
 
-/// Linux platform boundary for blocking OS primitives and temporary Zig 0.16
-/// filesystem adapters. New command/runtime entrypoints should pass std.Io
-/// explicitly instead of adding more implicit IO here.
+/// Linux platform boundary for blocking OS primitives and filesystem adapters.
+/// Generic formatting or buffer-writing helpers belong in library support
+/// modules, not here.
 pub const net = struct {
     pub const Address = extern union {
         any: std.posix.sockaddr,
@@ -141,75 +141,6 @@ fn realTimeNanos() i128 {
     const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
     if (std.os.linux.errno(rc) != .SUCCESS) return 0;
     return (@as(i128, ts.sec) * std.time.ns_per_s) + ts.nsec;
-}
-
-pub fn format(writer: anytype, comptime fmt: []const u8, args: anytype) !void {
-    switch (@typeInfo(@TypeOf(writer))) {
-        .pointer => |ptr| {
-            if (@hasDecl(ptr.child, "print")) return writer.print(fmt, args);
-            if (@hasField(ptr.child, "interface")) return writer.interface.print(fmt, args);
-        },
-        else => {
-            var copy = writer;
-            if (@hasDecl(@TypeOf(copy), "print")) return copy.print(fmt, args);
-            if (@hasField(@TypeOf(copy), "interface")) return copy.interface.print(fmt, args);
-        },
-    }
-    @compileError("unsupported writer type");
-}
-
-pub fn fixedBufferStream(buffer: anytype) FixedBufferStream {
-    return .init(writableSlice(buffer));
-}
-
-pub fn arrayListWriter(list: anytype, alloc: std.mem.Allocator) ArrayListWriter(@TypeOf(list)) {
-    return .{ .list = list, .alloc = alloc };
-}
-
-pub fn ArrayListWriter(comptime ListPtr: type) type {
-    return struct {
-        list: ListPtr,
-        alloc: std.mem.Allocator,
-
-        pub fn writeAll(self: @This(), bytes: []const u8) !void {
-            try self.list.appendSlice(self.alloc, bytes);
-        }
-
-        pub fn writeByte(self: @This(), byte: u8) !void {
-            try self.list.append(self.alloc, byte);
-        }
-
-        pub fn print(self: @This(), comptime fmt: []const u8, args: anytype) !void {
-            try self.list.print(self.alloc, fmt, args);
-        }
-    };
-}
-
-pub const FixedBufferStream = struct {
-    writer_impl: std.Io.Writer,
-
-    fn init(buffer: []u8) FixedBufferStream {
-        return .{ .writer_impl = .fixed(buffer) };
-    }
-
-    pub fn writer(self: *FixedBufferStream) *std.Io.Writer {
-        return &self.writer_impl;
-    }
-
-    pub fn getWritten(self: *FixedBufferStream) []u8 {
-        return self.writer_impl.buffered();
-    }
-};
-
-fn writableSlice(buffer: anytype) []u8 {
-    return switch (@typeInfo(@TypeOf(buffer))) {
-        .pointer => |ptr| switch (ptr.size) {
-            .one => buffer[0..],
-            .slice => buffer,
-            else => @compileError("unsupported fixed buffer type"),
-        },
-        else => @compileError("unsupported fixed buffer type"),
-    };
 }
 
 pub const Mutex = struct {

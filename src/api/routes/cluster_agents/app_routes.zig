@@ -248,9 +248,10 @@ fn formatAppsResponse(
     db: *sqlite.Db,
     latest_deployments: []const store.DeploymentRecord,
 ) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeByte('[');
     for (latest_deployments, 0..) |latest, i| {
@@ -263,7 +264,7 @@ fn formatAppsResponse(
         try writer.writeAll(json);
     }
     try writer.writeByte(']');
-    return json_buf.toOwnedSlice(alloc);
+    return json_buf_writer.toOwnedSlice();
 }
 
 fn loadPreviousSuccessfulDeployment(
@@ -297,9 +298,10 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
     const current_release_id = if (deployments.len > 0) deployments[0].id else null;
     const previous_successful_release_id = findPreviousSuccessfulReleaseId(deployments);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeByte('[');
     for (deployments, 0..) |dep, i| {
@@ -413,7 +415,7 @@ fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store
         try writer.writeByte('}');
     }
     try writer.writeByte(']');
-    return json_buf.toOwnedSlice(alloc);
+    return json_buf_writer.toOwnedSlice();
 }
 
 fn formatAppStatusResponse(
@@ -423,9 +425,10 @@ fn formatAppStatusResponse(
     summary: app_snapshot.Summary,
     training_summary: store.TrainingJobSummary,
 ) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeByte('{');
     try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
@@ -650,7 +653,7 @@ fn formatAppStatusResponse(
         training_summary.failed,
     });
     try writer.writeByte('}');
-    return json_buf.toOwnedSlice(alloc);
+    return json_buf_writer.toOwnedSlice();
 }
 
 fn findPreviousSuccessfulReleaseId(deployments: []const store.DeploymentRecord) ?[]const u8 {

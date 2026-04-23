@@ -377,9 +377,10 @@ pub const ReverseProxy = struct {
         const inbound_tracestate = http.findHeaderValue(parsed.headers_raw, tracestate_header);
         const forwarded_proto = trustedForwardedProto(parsed.headers_raw, client_ip) orelse "http";
 
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(alloc);
-        const writer = platform.arrayListWriter(&buf, alloc);
+        var buf_writer = std.Io.Writer.Allocating.init(alloc);
+        defer buf_writer.deinit();
+
+        const writer = &buf_writer.writer;
 
         try writer.print("{s} {s} HTTP/1.1\r\n", .{
             proxy_helpers.methodString(parsed.method),
@@ -406,7 +407,7 @@ pub const ReverseProxy = struct {
             } else {
                 try writer.print("{s}: ", .{x_forwarded_for_header});
             }
-            try writeIp4(&writer, address);
+            try writeIp4(writer, address);
             try writer.writeAll("\r\n");
         }
         try writer.print("{s}: {s}\r\n", .{ x_forwarded_host_header, inbound_host });
@@ -417,7 +418,7 @@ pub const ReverseProxy = struct {
         try writer.writeAll("Connection: close\r\n\r\n");
         try writer.writeAll(parsed.body);
 
-        return buf.toOwnedSlice(alloc);
+        return buf_writer.toOwnedSlice();
     }
 
     fn forwardPlan(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
@@ -653,7 +654,7 @@ fn trustedForwardedProtoFromRawRequest(raw_request: []const u8, client_ip: ?[4]u
     return null;
 }
 
-fn writeIp4(writer: anytype, address: [4]u8) !void {
+fn writeIp4(writer: *std.Io.Writer, address: [4]u8) !void {
     try writer.print("{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
 }
 

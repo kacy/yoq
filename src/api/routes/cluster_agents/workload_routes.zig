@@ -503,9 +503,10 @@ fn formatTrainingRecordJson(
     state_override: ?[]const u8,
     message: ?[]const u8,
 ) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeByte('{');
     try json_helpers.writeJsonStringField(writer, "app_name", record.app_name);
@@ -524,7 +525,7 @@ fn formatTrainingRecordJson(
         try json_helpers.writeJsonStringField(writer, "message", msg);
     }
     try writer.writeByte('}');
-    return json_buf.toOwnedSlice(alloc);
+    return json_buf_writer.toOwnedSlice();
 }
 
 const RouteFlowHarness = struct {

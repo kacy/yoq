@@ -43,20 +43,21 @@ pub fn handleClusterStatus(alloc: std.mem.Allocator, ctx: RouteContext) Response
         .leader => "leader",
     };
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeAll("{\"cluster\":true") catch return common.internalError();
-    platform.format(writer, ",\"id\":{d}", .{node.config.id}) catch return common.internalError();
+    writer.print(",\"id\":{d}", .{node.config.id}) catch return common.internalError();
     writer.writeAll(",\"role\":\"") catch return common.internalError();
     writer.writeAll(role_str) catch return common.internalError();
     writer.writeByte('"') catch return common.internalError();
-    platform.format(writer, ",\"term\":{d}", .{node.currentTerm()}) catch return common.internalError();
-    platform.format(writer, ",\"peers\":{d}", .{node.config.peers.len}) catch return common.internalError();
+    writer.print(",\"term\":{d}", .{node.currentTerm()}) catch return common.internalError();
+    writer.print(",\"peers\":{d}", .{node.config.peers.len}) catch return common.internalError();
 
     if (node.leaderId()) |lid| {
-        platform.format(writer, ",\"leader_id\":{d}", .{lid}) catch return common.internalError();
+        writer.print(",\"leader_id\":{d}", .{lid}) catch return common.internalError();
         var addr_buf: [64]u8 = undefined;
         if (node.leaderAddrBuf(&addr_buf)) |addr| {
             writer.writeAll(",\"leader\":\"") catch return common.internalError();
@@ -67,7 +68,7 @@ pub fn handleClusterStatus(alloc: std.mem.Allocator, ctx: RouteContext) Response
 
     writer.writeByte('}') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 

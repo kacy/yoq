@@ -19,9 +19,10 @@ pub fn buildRegisterBody(
     role: cluster_config.NodeRole,
     region: ?[]const u8,
 ) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeAll("{\"token\":\"");
     try json_helpers.writeJsonEscaped(writer, token);
@@ -61,13 +62,14 @@ pub fn buildRegisterBody(
     }
 
     try writer.writeByte('}');
-    return try json_buf.toOwnedSlice(alloc);
+    return try json_buf_writer.toOwnedSlice();
 }
 
 pub fn buildHeartbeatBody(alloc: Allocator, resources: AgentResources, gpu_health_label: []const u8) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = platform.arrayListWriter(&json_buf, alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeAll("{\"cpu_cores\":");
     try writer.print("{d}", .{resources.cpu_cores});
@@ -87,7 +89,7 @@ pub fn buildHeartbeatBody(alloc: Allocator, resources: AgentResources, gpu_healt
     try json_helpers.writeJsonEscaped(writer, gpu_health_label);
     try writer.writeAll("\"}");
 
-    return try json_buf.toOwnedSlice(alloc);
+    return try json_buf_writer.toOwnedSlice();
 }
 
 pub fn parseHostPort(s: []const u8) ?struct { addr: [4]u8, port: u16 } {
