@@ -179,7 +179,9 @@ fn writeTarFileEntry(dir: platform.Dir, tar_writer: *std.tar.Writer, path: []con
         return err;
     };
 
-    tar_writer.writeFile(path, &reader, @intCast(@divFloor(stat.mtime, std.time.ns_per_s))) catch |err| {
+    tar_writer.writeFileStream(path, stat.size, &reader.interface, .{
+        .mtime = @intCast(@divFloor(stat.mtime, std.time.ns_per_s)),
+    }) catch |err| {
         log.warn("tar: failed to write file '{s}': {}", .{ path, err });
         return err;
     };

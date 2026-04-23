@@ -118,23 +118,20 @@ pub fn getCwd(buffer: []u8) ![]u8 {
 pub fn selfExePathAlloc(alloc: std.mem.Allocator) ![:0]u8 {
     var size: usize = 256;
     while (size <= 64 * 1024) : (size *= 2) {
-        const buffer = try alloc.allocSentinel(u8, size, 0);
-        errdefer alloc.free(buffer);
+        const buffer = try alloc.alloc(u8, size);
+        defer alloc.free(buffer);
 
         const rc = std.os.linux.readlink("/proc/self/exe", buffer.ptr, buffer.len);
         switch (std.os.linux.errno(rc)) {
             .SUCCESS => {
                 if (rc < buffer.len) {
-                    buffer[rc] = 0;
-                    return buffer[0..rc :0];
+                    return alloc.dupeZ(u8, buffer[0..rc]);
                 }
             },
             .NOENT => return error.FileNotFound,
             .ACCES, .PERM => return error.AccessDenied,
             else => return error.Unexpected,
         }
-
-        alloc.free(buffer);
     }
     return error.NameTooLong;
 }
@@ -144,10 +141,6 @@ fn realTimeNanos() i128 {
     const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
     if (std.os.linux.errno(rc) != .SUCCESS) return 0;
     return (@as(i128, ts.sec) * std.time.ns_per_s) + ts.nsec;
-}
-
-fn legacyFilesystemIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
 }
 
 pub fn format(writer: anytype, comptime fmt: []const u8, args: anytype) !void {
@@ -254,6 +247,113 @@ pub const Semaphore = struct {
     }
 };
 
+fn linuxVoid(rc: usize) !void {
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => {},
+        .ACCES => error.AccessDenied,
+        .AGAIN => error.WouldBlock,
+        .BADF => error.FileNotFound,
+        .EXIST => error.PathAlreadyExists,
+        .INVAL => error.InvalidArgument,
+        .ISDIR => error.IsDir,
+        .LOOP => error.SymLinkLoop,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NAMETOOLONG => error.NameTooLong,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NOENT => error.FileNotFound,
+        .NOMEM => error.SystemResources,
+        .NOTEMPTY => error.DirNotEmpty,
+        .NOSPC => error.NoSpaceLeft,
+        .NOTDIR => error.NotDir,
+        .PERM => error.PermissionDenied,
+        .ROFS => error.ReadOnlyFileSystem,
+        else => error.Unexpected,
+    };
+}
+
+fn linuxUsize(rc: usize) !usize {
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => rc,
+        .ACCES => error.AccessDenied,
+        .AGAIN => error.WouldBlock,
+        .BADF => error.FileNotFound,
+        .EXIST => error.PathAlreadyExists,
+        .INVAL => error.InvalidArgument,
+        .ISDIR => error.IsDir,
+        .LOOP => error.SymLinkLoop,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NAMETOOLONG => error.NameTooLong,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NOENT => error.FileNotFound,
+        .NOMEM => error.SystemResources,
+        .NOTEMPTY => error.DirNotEmpty,
+        .NOSPC => error.NoSpaceLeft,
+        .NOTDIR => error.NotDir,
+        .PERM => error.PermissionDenied,
+        .ROFS => error.ReadOnlyFileSystem,
+        else => error.Unexpected,
+    };
+}
+
+fn fileStat(fd: std.posix.fd_t) !File.Stat {
+    var statx: std.os.linux.Statx = undefined;
+    try linuxVoid(std.os.linux.statx(
+        fd,
+        "",
+        std.os.linux.AT.EMPTY_PATH,
+        .{ .TYPE = true, .MODE = true, .SIZE = true, .MTIME = true },
+        &statx,
+    ));
+    return statFromLinux(&statx);
+}
+
+fn statFromLinux(statx: *const std.os.linux.Statx) File.Stat {
+    return .{
+        .size = statx.size,
+        .mode = statx.mode,
+        .mtime = (@as(i128, statx.mtime.sec) * std.time.ns_per_s) + statx.mtime.nsec,
+        .kind = kindFromMode(statx.mode),
+        .permissions = .fromMode(statx.mode & 0o777),
+    };
+}
+
+fn realpathFd(fd: std.posix.fd_t, buffer: []u8) ![]u8 {
+    var proc_path_buf: [64]u8 = undefined;
+    const proc_path = try std.fmt.bufPrintZ(&proc_path_buf, "/proc/self/fd/{d}", .{fd});
+    const len = try linuxUsize(std.os.linux.readlink(proc_path, buffer.ptr, buffer.len));
+    if (len == buffer.len) return error.NameTooLong;
+    return buffer[0..len];
+}
+
+fn realpathFdAlloc(alloc: std.mem.Allocator, fd: std.posix.fd_t) ![:0]u8 {
+    var size: usize = 256;
+    while (size <= 64 * 1024) : (size *= 2) {
+        const buffer = try alloc.alloc(u8, size);
+        defer alloc.free(buffer);
+        const path = realpathFd(fd, buffer) catch |err| switch (err) {
+            error.NameTooLong => {
+                continue;
+            },
+            else => |e| return e,
+        };
+        return alloc.dupeZ(u8, path);
+    }
+    return error.NameTooLong;
+}
+
+fn kindFromMode(mode: std.posix.mode_t) std.Io.File.Kind {
+    return switch (mode & std.os.linux.S.IFMT) {
+        std.os.linux.S.IFBLK => .block_device,
+        std.os.linux.S.IFCHR => .character_device,
+        std.os.linux.S.IFDIR => .directory,
+        std.os.linux.S.IFIFO => .named_pipe,
+        std.os.linux.S.IFLNK => .sym_link,
+        std.os.linux.S.IFREG => .file,
+        std.os.linux.S.IFSOCK => .unix_domain_socket,
+        else => .unknown,
+    };
+}
+
 pub const File = struct {
     pub const Mode = std.posix.mode_t;
     pub const Stat = struct {
@@ -267,7 +367,7 @@ pub const File = struct {
     handle: std.Io.File.Handle,
     flags: std.Io.File.Flags = .{ .nonblocking = false },
 
-    fn from(file: std.Io.File) File {
+    pub fn from(file: std.Io.File) File {
         return .{ .handle = file.handle, .flags = file.flags };
     }
 
@@ -288,19 +388,24 @@ pub const File = struct {
     }
 
     pub fn close(self: File) void {
-        self.inner().close(legacyFilesystemIo());
+        if (self.handle >= 0 and self.handle > 2) posix.close(self.handle);
     }
 
-    pub fn writer(self: File, buffer: []u8) std.Io.File.Writer {
-        return self.inner().writer(legacyFilesystemIo(), buffer);
+    pub fn writer(self: File, buffer: []u8) Writer {
+        return Writer.init(self, buffer);
     }
 
-    pub fn reader(self: File, buffer: []u8) std.Io.File.Reader {
-        return self.inner().reader(legacyFilesystemIo(), buffer);
+    pub fn reader(self: File, buffer: []u8) Reader {
+        return Reader.init(self, buffer);
     }
 
     pub fn writeAll(self: File, bytes: []const u8) !void {
-        try self.inner().writeStreamingAll(legacyFilesystemIo(), bytes);
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const written = try posix.write(self.handle, bytes[offset..]);
+            if (written == 0) return error.WriteFailed;
+            offset += written;
+        }
     }
 
     pub fn read(self: File, buffer: []u8) !usize {
@@ -333,18 +438,11 @@ pub const File = struct {
     }
 
     pub fn sync(self: File) !void {
-        try self.inner().sync(legacyFilesystemIo());
+        return linuxVoid(std.os.linux.fsync(self.handle));
     }
 
     pub fn stat(self: File) !Stat {
-        const file_stat = try self.inner().stat(legacyFilesystemIo());
-        return .{
-            .size = file_stat.size,
-            .mode = file_stat.permissions.toMode(),
-            .mtime = file_stat.mtime.toNanoseconds(),
-            .kind = file_stat.kind,
-            .permissions = file_stat.permissions,
-        };
+        return fileStat(self.handle);
     }
 
     pub fn getEndPos(self: File) !u64 {
@@ -395,20 +493,179 @@ pub const File = struct {
             return buffer[0..len];
         }
     };
+
+    pub const Writer = struct {
+        file: File,
+        interface: std.Io.Writer,
+
+        fn init(file: File, buffer: []u8) Writer {
+            return .{
+                .file = file,
+                .interface = .{
+                    .vtable = &.{
+                        .drain = drain,
+                        .sendFile = sendFile,
+                    },
+                    .buffer = buffer,
+                },
+            };
+        }
+
+        pub fn flush(self: *Writer) std.Io.Writer.Error!void {
+            return self.interface.flush();
+        }
+
+        fn drain(io_writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *Writer = @alignCast(@fieldParentPtr("interface", io_writer));
+            const buffered = io_writer.buffered();
+            self.file.writeAll(buffered) catch return error.WriteFailed;
+            io_writer.end = 0;
+
+            var consumed: usize = 0;
+            if (data.len == 0) return consumed;
+            for (data, 0..) |chunk, i| {
+                const repeats: usize = if (i == data.len - 1) splat else 1;
+                for (0..repeats) |_| {
+                    self.file.writeAll(chunk) catch return error.WriteFailed;
+                    consumed += chunk.len;
+                }
+            }
+            return consumed;
+        }
+
+        fn sendFile(io_writer: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
+            _ = io_writer;
+            _ = file_reader;
+            _ = limit;
+            return error.Unimplemented;
+        }
+    };
+
+    pub const Reader = struct {
+        file: File,
+        interface: std.Io.Reader,
+
+        fn init(file: File, buffer: []u8) Reader {
+            return .{
+                .file = file,
+                .interface = .{
+                    .vtable = &.{
+                        .stream = stream,
+                        .readVec = readVec,
+                    },
+                    .buffer = buffer,
+                    .seek = 0,
+                    .end = 0,
+                },
+            };
+        }
+
+        fn stream(io_reader: *std.Io.Reader, sink: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+            const self: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
+            var scratch: [8192]u8 = undefined;
+            const target = limit.slice(&scratch);
+            if (target.len == 0) return 0;
+
+            const bytes_read = self.file.read(target) catch return error.ReadFailed;
+            if (bytes_read == 0) return error.EndOfStream;
+            sink.writeAll(target[0..bytes_read]) catch return error.WriteFailed;
+            return bytes_read;
+        }
+
+        fn readVec(io_reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+            const self: *Reader = @alignCast(@fieldParentPtr("interface", io_reader));
+            if (data.len == 0) return 0;
+
+            if (data[0].len == 0) {
+                const bytes_read = self.file.read(io_reader.buffer) catch return error.ReadFailed;
+                if (bytes_read == 0) return error.EndOfStream;
+                io_reader.seek = 0;
+                io_reader.end = bytes_read;
+                return 0;
+            }
+
+            var total: usize = 0;
+            for (data) |buffer| {
+                if (buffer.len == 0) continue;
+                const bytes_read = self.file.read(buffer) catch return error.ReadFailed;
+                if (bytes_read == 0) {
+                    if (total == 0) return error.EndOfStream;
+                    break;
+                }
+                total += bytes_read;
+                if (bytes_read < buffer.len) break;
+            }
+            return total;
+        }
+    };
 };
 
 pub const Dir = struct {
     pub const Walker = struct {
-        inner: std.Io.Dir.Walker,
+        stack: std.ArrayList(StackItem),
+        name_buffer: std.ArrayList(u8),
+        allocator: std.mem.Allocator,
 
-        pub const Entry = std.Io.Dir.Walker.Entry;
+        const StackItem = struct {
+            iter: Iterator,
+            dirname_len: usize,
+            close_on_deinit: bool,
+        };
 
-        pub fn next(self: *Walker) !?Walker.Entry {
-            return self.inner.next(legacyFilesystemIo());
-        }
+        pub const Entry = struct {
+            dir: Dir,
+            basename: [:0]const u8,
+            path: [:0]const u8,
+            kind: std.Io.File.Kind,
+
+            pub fn depth(self: Walker.Entry) usize {
+                return std.mem.countScalar(u8, self.path, std.fs.path.sep) + 1;
+            }
+        };
 
         pub fn deinit(self: *Walker) void {
-            self.inner.deinit();
+            for (self.stack.items) |item| {
+                if (item.close_on_deinit) item.iter.dir.close();
+            }
+            self.name_buffer.deinit(self.allocator);
+            self.stack.deinit(self.allocator);
+        }
+
+        pub fn next(self: *Walker) !?Walker.Entry {
+            while (self.stack.items.len > 0) {
+                const top = &self.stack.items[self.stack.items.len - 1];
+                var dirname_len = top.dirname_len;
+                if (try top.iter.next()) |entry| {
+                    self.name_buffer.shrinkRetainingCapacity(dirname_len);
+                    if (self.name_buffer.items.len != 0) {
+                        try self.name_buffer.append(self.allocator, std.fs.path.sep);
+                        dirname_len += 1;
+                    }
+                    try self.name_buffer.ensureUnusedCapacity(self.allocator, entry.name.len + 1);
+                    self.name_buffer.appendSliceAssumeCapacity(entry.name);
+                    self.name_buffer.appendAssumeCapacity(0);
+                    const walker_entry: Walker.Entry = .{
+                        .dir = top.iter.dir,
+                        .basename = self.name_buffer.items[dirname_len .. self.name_buffer.items.len - 1 :0],
+                        .path = self.name_buffer.items[0 .. self.name_buffer.items.len - 1 :0],
+                        .kind = entry.kind,
+                    };
+                    if (entry.kind == .directory) {
+                        var subdir = try walker_entry.dir.openDir(walker_entry.basename, .{ .iterate = true });
+                        errdefer subdir.close();
+                        try self.stack.append(self.allocator, .{
+                            .iter = subdir.iterate(),
+                            .dirname_len = self.name_buffer.items.len - 1,
+                            .close_on_deinit = true,
+                        });
+                    }
+                    return walker_entry;
+                }
+
+                const item = self.stack.pop().?;
+                if (item.close_on_deinit) item.iter.dir.close();
+            }
+            return null;
         }
     };
     pub const Entry = std.Io.Dir.Entry;
@@ -430,44 +687,94 @@ pub const Dir = struct {
     }
 
     pub fn close(self: Dir) void {
-        self.inner.close(legacyFilesystemIo());
+        if (self.inner.handle != std.posix.AT.FDCWD) posix.close(self.inner.handle);
     }
 
     pub fn access(self: Dir, path: []const u8, options: std.Io.Dir.AccessOptions) !void {
-        try self.inner.access(legacyFilesystemIo(), path, options);
+        _ = options;
+        _ = try self.statFile(path);
     }
 
     pub fn makeDir(self: Dir, path: []const u8) !void {
-        try self.inner.createDir(legacyFilesystemIo(), path, .default_dir);
+        const path_z = try std.posix.toPosixPath(path);
+        try linuxVoid(std.os.linux.mkdirat(self.inner.handle, &path_z, 0o777));
     }
 
     pub fn makePath(self: Dir, path: []const u8) !void {
-        try self.inner.createDirPath(legacyFilesystemIo(), path);
+        if (path.len == 0) return;
+        var i: usize = 0;
+        while (i < path.len) {
+            while (i < path.len and path[i] == std.fs.path.sep) i += 1;
+            const start = i;
+            while (i < path.len and path[i] != std.fs.path.sep) i += 1;
+            if (i == start) continue;
+            const sub_path = path[0..i];
+            self.makeDir(sub_path) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => |e| return e,
+            };
+        }
     }
 
     pub fn deleteDir(self: Dir, path: []const u8) !void {
-        try self.inner.deleteDir(legacyFilesystemIo(), path);
+        const path_z = try std.posix.toPosixPath(path);
+        try linuxVoid(std.os.linux.unlinkat(self.inner.handle, &path_z, std.os.linux.AT.REMOVEDIR));
     }
 
     pub fn deleteFile(self: Dir, path: []const u8) !void {
-        try self.inner.deleteFile(legacyFilesystemIo(), path);
+        const path_z = try std.posix.toPosixPath(path);
+        try linuxVoid(std.os.linux.unlinkat(self.inner.handle, &path_z, 0));
     }
 
     pub fn deleteTree(self: Dir, path: []const u8) !void {
-        try self.inner.deleteTree(legacyFilesystemIo(), path);
+        const stat = self.statFile(path) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => |e| return e,
+        };
+        if (stat.kind != .directory) return self.deleteFile(path);
+
+        var dir = try self.openDir(path, .{ .iterate = true });
+        defer dir.close();
+
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind == .directory) {
+                try dir.deleteTree(entry.name);
+            } else {
+                try dir.deleteFile(entry.name);
+            }
+        }
+        try self.deleteDir(path);
     }
 
     pub fn openFile(self: Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) !File {
-        return File.from(try self.inner.openFile(legacyFilesystemIo(), path, options));
+        var flags: std.posix.O = .{
+            .ACCMODE = switch (options.mode) {
+                .read_only => .RDONLY,
+                .write_only => .WRONLY,
+                .read_write => .RDWR,
+            },
+            .NOFOLLOW = !options.follow_symlinks,
+        };
+        if (@hasField(std.posix.O, "CLOEXEC")) flags.CLOEXEC = true;
+        if (@hasField(std.posix.O, "LARGEFILE")) flags.LARGEFILE = true;
+        if (@hasField(std.posix.O, "NOCTTY")) flags.NOCTTY = !options.allow_ctty;
+        if (@hasField(std.posix.O, "PATH")) flags.PATH = options.path_only;
+        const fd = try std.posix.openat(self.inner.handle, path, flags, 0);
+        return .{ .handle = fd, .flags = .{ .nonblocking = false } };
     }
 
     pub fn createFile(self: Dir, path: []const u8, options: CreateFileOptions) !File {
-        return File.from(try self.inner.createFile(legacyFilesystemIo(), path, .{
-            .read = options.read,
-            .truncate = options.truncate,
-            .exclusive = options.exclusive,
-            .permissions = .fromMode(options.mode),
-        }));
+        var flags: std.posix.O = .{
+            .ACCMODE = if (options.read) .RDWR else .WRONLY,
+            .CREAT = true,
+            .TRUNC = options.truncate,
+            .EXCL = options.exclusive,
+        };
+        if (@hasField(std.posix.O, "CLOEXEC")) flags.CLOEXEC = true;
+        if (@hasField(std.posix.O, "LARGEFILE")) flags.LARGEFILE = true;
+        const fd = try std.posix.openat(self.inner.handle, path, flags, options.mode);
+        return .{ .handle = fd, .flags = .{ .nonblocking = false } };
     }
 
     pub fn writeFile(self: Dir, args: anytype) !void {
@@ -477,67 +784,153 @@ pub const Dir = struct {
     }
 
     pub fn openDir(self: Dir, path: []const u8, options: std.Io.Dir.OpenOptions) !Dir {
-        return Dir.from(try self.inner.openDir(legacyFilesystemIo(), path, options));
+        var flags: std.posix.O = .{
+            .ACCMODE = .RDONLY,
+            .DIRECTORY = true,
+            .NOFOLLOW = !options.follow_symlinks,
+        };
+        if (@hasField(std.posix.O, "CLOEXEC")) flags.CLOEXEC = true;
+        if (@hasField(std.posix.O, "PATH") and !options.iterate) flags.PATH = true;
+        const fd = try std.posix.openat(self.inner.handle, path, flags, 0);
+        return .{ .inner = .{ .handle = fd } };
     }
 
     pub fn statFile(self: Dir, path: []const u8) !Stat {
-        const file_stat = try self.inner.statFile(legacyFilesystemIo(), path, .{});
-        return .{
-            .size = file_stat.size,
-            .mode = file_stat.permissions.toMode(),
-            .mtime = file_stat.mtime.toNanoseconds(),
-            .kind = file_stat.kind,
-            .permissions = file_stat.permissions,
-        };
+        const path_z = try std.posix.toPosixPath(path);
+        var statx: std.os.linux.Statx = undefined;
+        try linuxVoid(std.os.linux.statx(
+            self.inner.handle,
+            &path_z,
+            std.os.linux.AT.SYMLINK_NOFOLLOW,
+            .{ .TYPE = true, .MODE = true, .SIZE = true, .MTIME = true },
+            &statx,
+        ));
+        return statFromLinux(&statx);
     }
 
     pub fn readFile(self: Dir, path: []const u8, buffer: []u8) ![]u8 {
-        return self.inner.readFile(legacyFilesystemIo(), path, buffer);
+        const file = try self.openFile(path, .{});
+        defer file.close();
+        const len = try file.readAll(buffer);
+        return buffer[0..len];
     }
 
     pub fn readFileAlloc(self: Dir, alloc: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
-        return self.inner.readFileAlloc(legacyFilesystemIo(), path, alloc, .limited(max_bytes));
+        const file = try self.openFile(path, .{});
+        defer file.close();
+        return file.readToEndAlloc(alloc, max_bytes);
     }
 
     pub fn readLink(self: Dir, path: []const u8, buffer: []u8) ![]u8 {
-        const len = try self.inner.readLink(legacyFilesystemIo(), path, buffer);
+        const path_z = try std.posix.toPosixPath(path);
+        const len = try linuxUsize(std.os.linux.readlinkat(self.inner.handle, &path_z, buffer.ptr, buffer.len));
         return buffer[0..len];
     }
 
     pub fn copyFile(self: Dir, source_path: []const u8, dest_dir: Dir, dest_path: []const u8, options: std.Io.Dir.CopyFileOptions) !void {
-        try self.inner.copyFile(source_path, dest_dir.inner, dest_path, legacyFilesystemIo(), options);
+        const source = try self.openFile(source_path, .{});
+        defer source.close();
+        const mode = if (options.permissions) |permissions| permissions.toMode() else 0o666;
+        const dest = try dest_dir.createFile(dest_path, .{ .mode = mode });
+        defer dest.close();
+        var buffer: [64 * 1024]u8 = undefined;
+        while (true) {
+            const n = try source.read(&buffer);
+            if (n == 0) break;
+            try dest.writeAll(buffer[0..n]);
+        }
     }
 
     pub fn symLink(self: Dir, target_path: []const u8, sym_link_path: []const u8, flags: std.Io.Dir.SymLinkFlags) !void {
-        try self.inner.symLink(legacyFilesystemIo(), target_path, sym_link_path, flags);
+        _ = flags;
+        const target_z = try std.posix.toPosixPath(target_path);
+        const link_z = try std.posix.toPosixPath(sym_link_path);
+        try linuxVoid(std.os.linux.symlinkat(&target_z, self.inner.handle, &link_z));
     }
 
     pub fn realpath(self: Dir, path: []const u8, buffer: []u8) ![]u8 {
-        const len = try self.inner.realPathFile(legacyFilesystemIo(), path, buffer);
-        return buffer[0..len];
+        const file = try self.openFile(path, .{ .path_only = true });
+        defer file.close();
+        return realpathFd(file.handle, buffer);
     }
 
     pub fn realpathAlloc(self: Dir, alloc: std.mem.Allocator, path: []const u8) ![:0]u8 {
-        return self.inner.realPathFileAlloc(legacyFilesystemIo(), path, alloc);
+        const file = try self.openFile(path, .{ .path_only = true });
+        defer file.close();
+        return realpathFdAlloc(alloc, file.handle);
     }
 
     pub fn rename(self: Dir, old_path: []const u8, new_path: []const u8) !void {
-        try self.inner.rename(old_path, self.inner, new_path, legacyFilesystemIo());
+        const old_z = try std.posix.toPosixPath(old_path);
+        const new_z = try std.posix.toPosixPath(new_path);
+        try linuxVoid(std.os.linux.renameat(self.inner.handle, &old_z, self.inner.handle, &new_z));
     }
 
     pub fn iterate(self: Dir) Iterator {
-        return .{ .inner = self.inner.iterate() };
+        return .{ .dir = self };
     }
 
     pub fn walk(self: Dir, alloc: std.mem.Allocator) !Walker {
-        return .{ .inner = try self.inner.walk(alloc) };
+        var stack: std.ArrayList(Walker.StackItem) = .empty;
+        try stack.append(alloc, .{
+            .iter = self.iterate(),
+            .dirname_len = 0,
+            .close_on_deinit = false,
+        });
+        return .{
+            .stack = stack,
+            .name_buffer = .empty,
+            .allocator = alloc,
+        };
     }
 
     pub const Iterator = struct {
-        inner: std.Io.Dir.Iterator,
+        dir: Dir,
+        state: enum { reset, reading, finished } = .reset,
+        buffer: [2048]u8 align(@alignOf(usize)) = undefined,
+        index: usize = 0,
+        end: usize = 0,
 
         pub fn next(self: *Iterator) !?std.Io.Dir.Entry {
-            return self.inner.next(legacyFilesystemIo());
+            while (true) {
+                if (self.end - self.index == 0) {
+                    if (self.state == .finished) return null;
+                    if (self.state == .reset) {
+                        _ = posix.lseek(self.dir.inner.handle, 0, std.os.linux.SEEK.SET) catch {};
+                        self.state = .reading;
+                    }
+                    const n = try linuxUsize(std.os.linux.getdents64(self.dir.inner.handle, &self.buffer, self.buffer.len));
+                    if (n == 0) {
+                        self.state = .finished;
+                        return null;
+                    }
+                    self.index = 0;
+                    self.end = n;
+                }
+
+                const linux_entry: *align(1) std.os.linux.dirent64 = @ptrCast(&self.buffer[self.index]);
+                self.index += linux_entry.reclen;
+                const name_ptr: [*]u8 = &linux_entry.name;
+                const padded_name = name_ptr[0 .. linux_entry.reclen - @offsetOf(std.os.linux.dirent64, "name")];
+                const name_len = std.mem.findScalar(u8, padded_name, 0).?;
+                const name = name_ptr[0..name_len :0];
+                if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+
+                return .{
+                    .name = name,
+                    .kind = switch (linux_entry.type) {
+                        std.os.linux.DT.BLK => .block_device,
+                        std.os.linux.DT.CHR => .character_device,
+                        std.os.linux.DT.DIR => .directory,
+                        std.os.linux.DT.FIFO => .named_pipe,
+                        std.os.linux.DT.LNK => .sym_link,
+                        std.os.linux.DT.REG => .file,
+                        std.os.linux.DT.SOCK => .unix_domain_socket,
+                        else => .unknown,
+                    },
+                    .inode = linux_entry.ino,
+                };
+            }
         }
     };
 };
@@ -547,11 +940,11 @@ pub fn cwd() Dir {
 }
 
 pub fn openDirAbsolute(path: []const u8, options: std.Io.Dir.OpenOptions) !Dir {
-    return Dir.from(try std.Io.Dir.openDirAbsolute(legacyFilesystemIo(), path, options));
+    return cwd().openDir(path, options);
 }
 
 pub fn openFileAbsolute(path: []const u8, options: std.Io.Dir.OpenFileOptions) !File {
-    return File.from(try std.Io.Dir.openFileAbsolute(legacyFilesystemIo(), path, options));
+    return cwd().openFile(path, options);
 }
 
 pub fn createFileAbsolute(path: []const u8, options: Dir.CreateFileOptions) !File {
@@ -559,11 +952,11 @@ pub fn createFileAbsolute(path: []const u8, options: Dir.CreateFileOptions) !Fil
 }
 
 pub fn accessAbsolute(path: []const u8, options: std.Io.Dir.AccessOptions) !void {
-    return std.Io.Dir.accessAbsolute(legacyFilesystemIo(), path, options);
+    return cwd().access(path, options);
 }
 
 pub fn deleteFileAbsolute(path: []const u8) !void {
-    return std.Io.Dir.deleteFileAbsolute(legacyFilesystemIo(), path);
+    return cwd().deleteFile(path);
 }
 
 pub const posix = struct {
@@ -601,7 +994,7 @@ pub const posix = struct {
     }
 
     pub fn fstat(fd: std.posix.fd_t) !File.Stat {
-        return File.from(.{ .handle = fd, .flags = .{ .nonblocking = false } }).stat();
+        return fileStat(fd);
     }
 
     pub fn fstatat(dirfd: std.posix.fd_t, path: []const u8, flags: anytype) !File.Stat {

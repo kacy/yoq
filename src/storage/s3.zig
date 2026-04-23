@@ -332,7 +332,7 @@ pub fn listObjects(
         // apply prefix filter
         if (prefix.len > 0 and !std.mem.startsWith(u8, key, prefix)) continue;
 
-        const stat = platform.Dir.from(entry.dir).statFile(entry.basename) catch continue;
+        const stat = entry.dir.statFile(entry.basename) catch continue;
         const key_copy = alloc.dupe(u8, key) catch return S3Error.IoError;
         entries.append(alloc, .{
             .key = key_copy,
