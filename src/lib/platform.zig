@@ -40,22 +40,6 @@ pub fn nanoTimestamp() i128 {
     return realTimeNanos();
 }
 
-pub fn sleep(ns: u64) void {
-    var remaining = std.os.linux.timespec{
-        .sec = @intCast(ns / std.time.ns_per_s),
-        .nsec = @intCast(ns % std.time.ns_per_s),
-    };
-    while (true) {
-        var next: std.os.linux.timespec = undefined;
-        const rc = std.os.linux.nanosleep(&remaining, &next);
-        switch (std.os.linux.errno(rc)) {
-            .SUCCESS => return,
-            .INTR => remaining = next,
-            else => return,
-        }
-    }
-}
-
 pub fn randomBytes(buffer: []u8) void {
     var offset: usize = 0;
     while (offset < buffer.len) {
@@ -71,69 +55,9 @@ pub fn randomBytes(buffer: []u8) void {
     }
 }
 
-pub fn randomInt(comptime T: type) T {
-    var bytes: [@sizeOf(T)]u8 = undefined;
-    randomBytes(&bytes);
-    return @bitCast(bytes);
-}
-
-pub fn intToEnum(comptime T: type, value: anytype) !T {
-    const int_value = @as(std.meta.Int(.unsigned, @bitSizeOf(@typeInfo(T).@"enum".tag_type)), @intCast(value));
-    inline for (@typeInfo(T).@"enum".fields) |field| {
-        if (field.value == int_value) return @enumFromInt(field.value);
-    }
-    return error.InvalidEnumTag;
-}
-
 pub fn isatty(fd: std.posix.fd_t) bool {
     _ = std.posix.tcgetattr(fd) catch return false;
     return true;
-}
-
-pub fn getenv(name: []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (std.c.environ[i]) |entry| : (i += 1) {
-        const raw = std.mem.span(entry);
-        const eq = std.mem.indexOfScalar(u8, raw, '=') orelse continue;
-        if (std.mem.eql(u8, raw[0..eq], name)) return raw[eq + 1 ..];
-    }
-    return null;
-}
-
-pub fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) (std.mem.Allocator.Error || error{ EnvironmentVariableNotFound, Unexpected })![]u8 {
-    const value = getenv(name) orelse return error.EnvironmentVariableNotFound;
-    return alloc.dupe(u8, value);
-}
-
-pub fn getCwd(buffer: []u8) ![]u8 {
-    const rc = std.os.linux.getcwd(buffer.ptr, buffer.len);
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => if (rc > 0) buffer[0 .. rc - 1] else error.CurrentDirUnlinked,
-        .RANGE => error.NameTooLong,
-        .NOENT => error.CurrentDirUnlinked,
-        else => error.Unexpected,
-    };
-}
-
-pub fn selfExePathAlloc(alloc: std.mem.Allocator) ![:0]u8 {
-    var size: usize = 256;
-    while (size <= 64 * 1024) : (size *= 2) {
-        const buffer = try alloc.alloc(u8, size);
-        defer alloc.free(buffer);
-
-        const rc = std.os.linux.readlink("/proc/self/exe", buffer.ptr, buffer.len);
-        switch (std.os.linux.errno(rc)) {
-            .SUCCESS => {
-                if (rc < buffer.len) {
-                    return alloc.dupeZ(u8, buffer[0..rc]);
-                }
-            },
-            .NOENT => return error.FileNotFound,
-            .ACCES, .PERM => return error.AccessDenied,
-            else => return error.Unexpected,
-        }
-    }
-    return error.NameTooLong;
 }
 
 fn realTimeNanos() i128 {
@@ -142,41 +66,6 @@ fn realTimeNanos() i128 {
     if (std.os.linux.errno(rc) != .SUCCESS) return 0;
     return (@as(i128, ts.sec) * std.time.ns_per_s) + ts.nsec;
 }
-
-pub const Mutex = struct {
-    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
-
-    pub fn lock(self: *Mutex) void {
-        if (std.c.pthread_mutex_lock(&self.inner) != .SUCCESS) unreachable;
-    }
-
-    pub fn unlock(self: *Mutex) void {
-        if (std.c.pthread_mutex_unlock(&self.inner) != .SUCCESS) unreachable;
-    }
-};
-
-pub const Semaphore = struct {
-    mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
-    cond: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
-    permits: usize = 0,
-
-    pub fn post(self: *Semaphore) void {
-        if (std.c.pthread_mutex_lock(&self.mutex) != .SUCCESS) unreachable;
-        self.permits += 1;
-        if (std.c.pthread_cond_signal(&self.cond) != .SUCCESS) unreachable;
-        if (std.c.pthread_mutex_unlock(&self.mutex) != .SUCCESS) unreachable;
-    }
-
-    pub fn wait(self: *Semaphore) void {
-        if (std.c.pthread_mutex_lock(&self.mutex) != .SUCCESS) unreachable;
-        defer if (std.c.pthread_mutex_unlock(&self.mutex) != .SUCCESS) unreachable;
-
-        while (self.permits == 0) {
-            if (std.c.pthread_cond_wait(&self.cond, &self.mutex) != .SUCCESS) unreachable;
-        }
-        self.permits -= 1;
-    }
-};
 
 fn linuxVoid(rc: usize) !void {
     return switch (std.os.linux.errno(rc)) {
@@ -306,18 +195,6 @@ pub const File = struct {
         return .{ .handle = self.handle, .flags = self.flags };
     }
 
-    pub fn stdin() File {
-        return from(std.Io.File.stdin());
-    }
-
-    pub fn stdout() File {
-        return from(std.Io.File.stdout());
-    }
-
-    pub fn stderr() File {
-        return from(std.Io.File.stderr());
-    }
-
     pub fn close(self: File) void {
         if (self.handle >= 0 and self.handle > 2) posix.close(self.handle);
     }
@@ -387,43 +264,6 @@ pub const File = struct {
     pub fn getPos(self: File) !u64 {
         return @intCast(try posix.lseek(self.handle, 0, std.os.linux.SEEK.CUR));
     }
-
-    pub fn textWriter(self: File) TextWriter {
-        return .{ .file = self };
-    }
-
-    pub fn textReader(self: File) TextReader {
-        return .{ .file = self };
-    }
-
-    pub const TextWriter = struct {
-        file: File,
-
-        pub fn print(self: TextWriter, comptime fmt: []const u8, args: anytype) !void {
-            var buffer: [4096]u8 = undefined;
-            var out = self.file.writer(&buffer);
-            try out.interface.print(fmt, args);
-            try out.flush();
-        }
-    };
-
-    pub const TextReader = struct {
-        file: File,
-
-        pub fn readUntilDelimiterOrEof(self: TextReader, buffer: []u8, delimiter: u8) !?[]u8 {
-            var len: usize = 0;
-            while (len < buffer.len) {
-                var byte: [1]u8 = undefined;
-                const n = try self.file.read(&byte);
-                if (n == 0) break;
-                if (byte[0] == delimiter) break;
-                buffer[len] = byte[0];
-                len += 1;
-            }
-            if (len == 0) return null;
-            return buffer[0..len];
-        }
-    };
 
     pub const Writer = struct {
         file: File,
