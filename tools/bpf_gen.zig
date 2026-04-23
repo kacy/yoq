@@ -66,13 +66,10 @@ const ProgramInfo = struct {
     section_idx: u16,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+pub fn main(init: std.process.Init) !void {
+    const alloc = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(alloc);
+    const cwd = std.Io.Dir.cwd();
 
     if (args.len != 3) {
         std.debug.print("usage: bpf_gen <input.o> <output.zig>\n", .{});
@@ -82,7 +79,7 @@ pub fn main() !void {
     const input_path = args[1];
     const output_path = args[2];
 
-    const data = @import("compat").cwd().readFileAlloc(alloc, input_path, 10 * 1024 * 1024) catch |e| {
+    const data = cwd.readFileAlloc(init.io, input_path, alloc, .limited(10 * 1024 * 1024)) catch |e| {
         std.debug.print("error: cannot read {s}: {}\n", .{ input_path, e });
         std.process.exit(1);
     };
@@ -102,14 +99,14 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    const output_file = @import("compat").cwd().createFile(output_path, .{}) catch |e| {
+    const output_file = cwd.createFile(init.io, output_path, .{}) catch |e| {
         std.debug.print("error: cannot create {s}: {}\n", .{ output_path, e });
         std.process.exit(1);
     };
-    defer output_file.close();
+    defer output_file.close(init.io);
 
     var write_buf: [4096]u8 = undefined;
-    var file_writer = output_file.writer(&write_buf);
+    var file_writer = output_file.writer(init.io, &write_buf);
     try generateZig(&file_writer.interface, input_path, maps.items, programs.items, relocs.items);
     try file_writer.interface.flush();
 

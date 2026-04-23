@@ -2,13 +2,9 @@ const std = @import("std");
 const posix = std.posix;
 
 const ipv4_loopback = [4]u8{ 127, 0, 0, 1 };
-pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
-    const argv = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, argv);
+pub fn main(init: std.process.Init) !void {
+    const alloc = init.gpa;
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (argv.len < 3) {
         usage();
