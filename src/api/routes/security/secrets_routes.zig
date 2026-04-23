@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const http = @import("../../http.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const secrets = @import("../../../state/secrets.zig");
@@ -8,6 +7,9 @@ const store_support = @import("store_support.zig");
 
 const Response = common.Response;
 const extractJsonString = json_helpers.extractJsonString;
+const SecretListContext = struct {
+    names: []const []const u8,
+};
 
 pub fn handleListSecrets(alloc: std.mem.Allocator) Response {
     var sec = store_support.openSecretsStore(alloc) orelse return common.internalError();
@@ -19,22 +21,9 @@ pub fn handleListSecrets(alloc: std.mem.Allocator) Response {
         names.deinit(alloc);
     }
 
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-
-    writer.writeByte('[') catch return common.internalError();
-    for (names.items, 0..) |name, i| {
-        if (i > 0) writer.writeByte(',') catch return common.internalError();
-        writer.writeByte('"') catch return common.internalError();
-        json_helpers.writeJsonEscaped(writer, name) catch return common.internalError();
-        writer.writeByte('"') catch return common.internalError();
-    }
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, SecretListContext{
+        .names = names.items,
+    }, writeSecretListJson);
 }
 
 pub fn handleSetSecret(alloc: std.mem.Allocator, request: http.Request) Response {
@@ -63,4 +52,15 @@ pub fn handleDeleteSecret(alloc: std.mem.Allocator, name: []const u8) Response {
     };
 
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn writeSecretListJson(writer: *std.Io.Writer, ctx: SecretListContext) !void {
+    try writer.writeByte('[');
+    for (ctx.names, 0..) |name, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try json_helpers.writeJsonEscaped(writer, name);
+        try writer.writeByte('"');
+    }
+    try writer.writeByte(']');
 }

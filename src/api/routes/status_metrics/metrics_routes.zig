@@ -27,6 +27,18 @@ const proxy_control_plane = @import("../../../network/proxy/control_plane.zig");
 const steering_runtime = @import("../../../network/proxy/steering_runtime.zig");
 
 const Response = common.Response;
+const MetricsResponseContext = struct {
+    collector: ?*const ebpf.MetricsCollector,
+    records: []const store.ContainerRecord,
+    service_filter: ?[]const u8,
+};
+const MetricsPairsContext = struct {
+    entries: []const ebpf.PairEntry,
+    records: []const store.ContainerRecord,
+};
+const StorageIoContext = struct {
+    entries: []const storage_metrics.IoEntry,
+};
 const ebpf = if (builtin.os.tag == .linux) @import("../../../network/ebpf.zig") else struct {
     pub const PairEntry = struct {
         key: struct {
@@ -86,51 +98,11 @@ pub fn handleMetrics(alloc: std.mem.Allocator, request: http.Request) Response {
         for (records.items) |rec| rec.deinit(alloc);
         records.deinit(alloc);
     }
-
-    const collector = ebpf.getMetricsCollector();
-
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-    writer.writeByte('[') catch return common.internalError();
-
-    var first = true;
-    for (records.items) |rec| {
-        if (!std.mem.eql(u8, rec.status, "running")) continue;
-
-        if (service_filter) |svc| {
-            if (!std.mem.eql(u8, rec.hostname, svc)) continue;
-        }
-
-        const ip_str = rec.ip_address orelse continue;
-
-        var packets: u64 = 0;
-        var bytes: u64 = 0;
-        if (collector) |mc| {
-            if (ip_mod.parseIp(ip_str)) |addr| {
-                const ip_net = ebpf.ipToNetworkOrder(addr);
-                if (mc.readMetrics(ip_net)) |metrics| {
-                    packets = metrics.packets;
-                    bytes = metrics.bytes;
-                }
-            }
-        }
-
-        if (!first) writer.writeByte(',') catch return common.internalError();
-        first = false;
-
-        const short_id = if (rec.id.len >= 6) rec.id[0..6] else rec.id;
-        writer.print(
-            "{{\"service\":\"{s}\",\"container\":\"{s}\",\"ip\":\"{s}\",\"packets\":{d},\"bytes\":{d}}}",
-            .{ rec.hostname, short_id, ip_str, packets, bytes },
-        ) catch return common.internalError();
-    }
-
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, MetricsResponseContext{
+        .collector = ebpf.getMetricsCollector(),
+        .records = records.items,
+        .service_filter = service_filter,
+    }, writeMetricsJson);
 }
 
 pub fn handleMetricsPairs(alloc: std.mem.Allocator) Response {
@@ -144,32 +116,10 @@ pub fn handleMetricsPairs(alloc: std.mem.Allocator) Response {
         for (records.items) |rec| rec.deinit(alloc);
         records.deinit(alloc);
     }
-
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-    writer.writeByte('[') catch return common.internalError();
-
-    var first = true;
-    for (entries[0..count]) |entry| {
-        if (!first) writer.writeByte(',') catch return common.internalError();
-        first = false;
-
-        const src_name = resolveIpToService(entry.key.src_ip, records.items);
-        const dst_name = resolveIpToService(entry.key.dst_ip, records.items);
-        const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
-
-        writer.print(
-            "{{\"from\":\"{s}\",\"to\":\"{s}\",\"port\":{d},\"connections\":{d},\"packets\":{d},\"bytes\":{d},\"errors\":{d}}}",
-            .{ src_name, dst_name, port, entry.value.connections, entry.value.packets, entry.value.bytes, entry.value.errors },
-        ) catch return common.internalError();
-    }
-
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, MetricsPairsContext{
+        .entries = entries[0..count],
+        .records = records.items,
+    }, writeMetricsPairsJson);
 }
 
 pub fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
@@ -178,15 +128,79 @@ pub fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
     var entries: [1024]storage_metrics.IoEntry = undefined;
     const count = collector.listAllIoMetrics(&entries);
 
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
+    return common.jsonOkWrite(alloc, StorageIoContext{
+        .entries = entries[0..count],
+    }, writeStorageIoMetricsJson);
+}
 
-    const writer = &json_buf_writer.writer;
-    writer.writeByte('[') catch return common.internalError();
+pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
+    return common.ownedResponse(
+        alloc,
+        .ok,
+        "text/plain; version=0.0.4; charset=utf-8",
+        {},
+        writeMetricsPrometheus,
+    );
+}
 
-    for (entries[0..count], 0..) |entry, idx| {
-        if (idx > 0) writer.writeByte(',') catch return common.internalError();
-        writer.print(
+fn writeMetricsJson(writer: *std.Io.Writer, ctx: MetricsResponseContext) !void {
+    try writer.writeByte('[');
+
+    var first = true;
+    for (ctx.records) |rec| {
+        if (!std.mem.eql(u8, rec.status, "running")) continue;
+        if (ctx.service_filter) |svc| {
+            if (!std.mem.eql(u8, rec.hostname, svc)) continue;
+        }
+
+        const ip_str = rec.ip_address orelse continue;
+        var packets: u64 = 0;
+        var bytes: u64 = 0;
+        if (ctx.collector) |collector| {
+            if (ip_mod.parseIp(ip_str)) |addr| {
+                const ip_net = ebpf.ipToNetworkOrder(addr);
+                if (collector.readMetrics(ip_net)) |metrics| {
+                    packets = metrics.packets;
+                    bytes = metrics.bytes;
+                }
+            }
+        }
+
+        if (!first) try writer.writeByte(',');
+        first = false;
+
+        const short_id = if (rec.id.len >= 6) rec.id[0..6] else rec.id;
+        try writer.print(
+            "{{\"service\":\"{s}\",\"container\":\"{s}\",\"ip\":\"{s}\",\"packets\":{d},\"bytes\":{d}}}",
+            .{ rec.hostname, short_id, ip_str, packets, bytes },
+        );
+    }
+
+    try writer.writeByte(']');
+}
+
+fn writeMetricsPairsJson(writer: *std.Io.Writer, ctx: MetricsPairsContext) !void {
+    try writer.writeByte('[');
+    for (ctx.entries, 0..) |entry, idx| {
+        if (idx > 0) try writer.writeByte(',');
+
+        const src_name = resolveIpToService(entry.key.src_ip, ctx.records);
+        const dst_name = resolveIpToService(entry.key.dst_ip, ctx.records);
+        const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
+
+        try writer.print(
+            "{{\"from\":\"{s}\",\"to\":\"{s}\",\"port\":{d},\"connections\":{d},\"packets\":{d},\"bytes\":{d},\"errors\":{d}}}",
+            .{ src_name, dst_name, port, entry.value.connections, entry.value.packets, entry.value.bytes, entry.value.errors },
+        );
+    }
+    try writer.writeByte(']');
+}
+
+fn writeStorageIoMetricsJson(writer: *std.Io.Writer, ctx: StorageIoContext) !void {
+    try writer.writeByte('[');
+    for (ctx.entries, 0..) |entry, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.print(
             "{{\"cgroup_id\":{d},\"read_bytes\":{d},\"write_bytes\":{d},\"read_ops\":{d},\"write_ops\":{d}}}",
             .{
                 entry.cgroup_id,
@@ -195,39 +209,30 @@ pub fn handleStorageIoMetrics(alloc: std.mem.Allocator) Response {
                 entry.metrics.read_ops,
                 entry.metrics.write_ops,
             },
-        ) catch return common.internalError();
+        );
     }
-
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    try writer.writeByte(']');
 }
 
-pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
-    var buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer buf_writer.deinit();
-
-    const writer = &buf_writer.writer;
-
-    writeServiceRolloutPrometheus(writer) catch return common.internalError();
+fn writeMetricsPrometheus(writer: *std.Io.Writer, _: void) !void {
+    try writeServiceRolloutPrometheus(writer);
 
     if (ebpf.getMetricsCollector()) |collector| {
         var entries: [1024]ebpf.PairEntry = undefined;
         const count = collector.readPairMetrics(&entries);
 
-        writer.writeAll("# HELP yoq_network_bytes_total Network bytes transferred\n") catch return common.internalError();
-        writer.writeAll("# TYPE yoq_network_bytes_total counter\n") catch return common.internalError();
+        try writer.writeAll("# HELP yoq_network_bytes_total Network bytes transferred\n");
+        try writer.writeAll("# TYPE yoq_network_bytes_total counter\n");
         for (entries[0..count]) |entry| {
             const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
-            writer.print("yoq_network_bytes_total{{port=\"{d}\"}} {d}\n", .{ port, entry.value.bytes }) catch return common.internalError();
+            try writer.print("yoq_network_bytes_total{{port=\"{d}\"}} {d}\n", .{ port, entry.value.bytes });
         }
 
-        writer.writeAll("# HELP yoq_network_packets_total Network packets transferred\n") catch return common.internalError();
-        writer.writeAll("# TYPE yoq_network_packets_total counter\n") catch return common.internalError();
+        try writer.writeAll("# HELP yoq_network_packets_total Network packets transferred\n");
+        try writer.writeAll("# TYPE yoq_network_packets_total counter\n");
         for (entries[0..count]) |entry| {
             const port = std.mem.nativeTo(u16, entry.key.dst_port, .big);
-            writer.print("yoq_network_packets_total{{port=\"{d}\"}} {d}\n", .{ port, entry.value.packets }) catch return common.internalError();
+            try writer.print("yoq_network_packets_total{{port=\"{d}\"}} {d}\n", .{ port, entry.value.packets });
         }
     }
 
@@ -235,16 +240,16 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
         var entries: [1024]storage_metrics.IoEntry = undefined;
         const count = collector.listAllIoMetrics(&entries);
 
-        writer.writeAll("# HELP yoq_storage_read_bytes_total Storage read bytes\n") catch return common.internalError();
-        writer.writeAll("# TYPE yoq_storage_read_bytes_total counter\n") catch return common.internalError();
+        try writer.writeAll("# HELP yoq_storage_read_bytes_total Storage read bytes\n");
+        try writer.writeAll("# TYPE yoq_storage_read_bytes_total counter\n");
         for (entries[0..count]) |entry| {
-            writer.print("yoq_storage_read_bytes_total{{cgroup_id=\"{d}\"}} {d}\n", .{ entry.cgroup_id, entry.metrics.read_bytes }) catch return common.internalError();
+            try writer.print("yoq_storage_read_bytes_total{{cgroup_id=\"{d}\"}} {d}\n", .{ entry.cgroup_id, entry.metrics.read_bytes });
         }
 
-        writer.writeAll("# HELP yoq_storage_write_bytes_total Storage write bytes\n") catch return common.internalError();
-        writer.writeAll("# TYPE yoq_storage_write_bytes_total counter\n") catch return common.internalError();
+        try writer.writeAll("# HELP yoq_storage_write_bytes_total Storage write bytes\n");
+        try writer.writeAll("# TYPE yoq_storage_write_bytes_total counter\n");
         for (entries[0..count]) |entry| {
-            writer.print("yoq_storage_write_bytes_total{{cgroup_id=\"{d}\"}} {d}\n", .{ entry.cgroup_id, entry.metrics.write_bytes }) catch return common.internalError();
+            try writer.print("yoq_storage_write_bytes_total{{cgroup_id=\"{d}\"}} {d}\n", .{ entry.cgroup_id, entry.metrics.write_bytes });
         }
     }
 
@@ -252,16 +257,8 @@ pub fn handleMetricsPrometheus(alloc: std.mem.Allocator) Response {
     defer gpu_result.deinit();
     if (gpu_result.nvml) |*nvml| {
         const gpu_metrics = gpu_health.pollAllMetrics(nvml, gpu_result.count);
-        gpu_health.writePrometheus(writer, gpu_metrics, gpu_result.count) catch return common.internalError();
+        try gpu_health.writePrometheus(writer, gpu_metrics, gpu_result.count);
     }
-
-    const body = buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{
-        .status = .ok,
-        .body = body,
-        .allocated = true,
-        .content_type = "text/plain; version=0.0.4; charset=utf-8",
-    };
 }
 
 fn writeServiceRolloutPrometheus(writer: anytype) !void {

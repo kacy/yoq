@@ -1,10 +1,14 @@
 const std = @import("std");
-const platform = @import("platform");
 const http = @import("../../http.zig");
 const common = @import("../common.zig");
+const cluster_node = @import("../../../cluster/node.zig");
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
+const ClusterStatusContext = struct {
+    node: *cluster_node.Node,
+    role_str: []const u8,
+};
 
 pub fn handleLeaderStepDown(alloc: std.mem.Allocator, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
@@ -26,7 +30,6 @@ pub fn handleLeaderStepDown(alloc: std.mem.Allocator, ctx: RouteContext) Respons
 }
 
 pub fn handleClusterVersion() Response {
-    const cluster_node = @import("../../../cluster/node.zig");
     const version = cluster_node.Node.protocolVersion();
     _ = version;
     return .{ .status = .ok, .body = "{\"protocol_version\":1,\"software_version\":\"0.2.0\"}", .allocated = false };
@@ -43,33 +46,10 @@ pub fn handleClusterStatus(alloc: std.mem.Allocator, ctx: RouteContext) Response
         .leader => "leader",
     };
 
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-
-    writer.writeAll("{\"cluster\":true") catch return common.internalError();
-    writer.print(",\"id\":{d}", .{node.config.id}) catch return common.internalError();
-    writer.writeAll(",\"role\":\"") catch return common.internalError();
-    writer.writeAll(role_str) catch return common.internalError();
-    writer.writeByte('"') catch return common.internalError();
-    writer.print(",\"term\":{d}", .{node.currentTerm()}) catch return common.internalError();
-    writer.print(",\"peers\":{d}", .{node.config.peers.len}) catch return common.internalError();
-
-    if (node.leaderId()) |lid| {
-        writer.print(",\"leader_id\":{d}", .{lid}) catch return common.internalError();
-        var addr_buf: [64]u8 = undefined;
-        if (node.leaderAddrBuf(&addr_buf)) |addr| {
-            writer.writeAll(",\"leader\":\"") catch return common.internalError();
-            writer.writeAll(addr) catch return common.internalError();
-            writer.writeByte('"') catch return common.internalError();
-        }
-    }
-
-    writer.writeByte('}') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, ClusterStatusContext{
+        .node = node,
+        .role_str = role_str,
+    }, writeClusterStatusJson);
 }
 
 pub fn handleClusterPropose(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
@@ -87,4 +67,26 @@ test "cluster version reports current software version" {
     const resp = handleClusterVersion();
     try std.testing.expectEqual(http.StatusCode.ok, resp.status);
     try std.testing.expectEqualStrings("{\"protocol_version\":1,\"software_version\":\"0.2.0\"}", resp.body);
+}
+
+fn writeClusterStatusJson(writer: *std.Io.Writer, ctx: ClusterStatusContext) !void {
+    try writer.writeAll("{\"cluster\":true");
+    try writer.print(",\"id\":{d}", .{ctx.node.config.id});
+    try writer.writeAll(",\"role\":\"");
+    try writer.writeAll(ctx.role_str);
+    try writer.writeByte('"');
+    try writer.print(",\"term\":{d}", .{ctx.node.currentTerm()});
+    try writer.print(",\"peers\":{d}", .{ctx.node.config.peers.len});
+
+    if (ctx.node.leaderId()) |leader_id| {
+        try writer.print(",\"leader_id\":{d}", .{leader_id});
+        var addr_buf: [64]u8 = undefined;
+        if (ctx.node.leaderAddrBuf(&addr_buf)) |leader_addr| {
+            try writer.writeAll(",\"leader\":\"");
+            try writer.writeAll(leader_addr);
+            try writer.writeByte('"');
+        }
+    }
+
+    try writer.writeByte('}');
 }

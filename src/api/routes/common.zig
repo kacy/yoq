@@ -59,6 +59,31 @@ pub fn jsonOkOwned(alloc: std.mem.Allocator, body: []const u8) Response {
     return .{ .status = .ok, .body = owned, .allocated = true };
 }
 
+pub fn ownedResponse(
+    alloc: std.mem.Allocator,
+    status: http.StatusCode,
+    content_type: ?[]const u8,
+    context: anytype,
+    writeFn: anytype,
+) Response {
+    var body_writer = std.Io.Writer.Allocating.init(alloc);
+    defer body_writer.deinit();
+
+    writeFn(&body_writer.writer, context) catch return internalError();
+
+    const body = body_writer.toOwnedSlice() catch return internalError();
+    return .{
+        .status = status,
+        .body = body,
+        .allocated = true,
+        .content_type = content_type,
+    };
+}
+
+pub fn jsonOkWrite(alloc: std.mem.Allocator, context: anytype, writeFn: anytype) Response {
+    return ownedResponse(alloc, .ok, null, context, writeFn);
+}
+
 pub fn extractBearerToken(request: *const http.Request) ?[]const u8 {
     const auth_value = http.findHeaderValue(request.headers_raw, "Authorization") orelse return null;
 
@@ -201,6 +226,41 @@ test "jsonOkOwned returns allocated ok response" {
     try testing.expectEqualStrings(body, resp.body);
     try testing.expect(resp.allocated);
     testing.allocator.free(resp.body);
+}
+
+test "jsonOkWrite returns allocated ok response" {
+    const Ctx = struct {
+        value: []const u8,
+    };
+    const Writer = struct {
+        fn write(writer: *std.Io.Writer, ctx: Ctx) !void {
+            try writer.print("{{\"value\":\"{s}\"}}", .{ctx.value});
+        }
+    };
+
+    const resp = jsonOkWrite(testing.allocator, Ctx{ .value = "ok" }, Writer.write);
+    defer testing.allocator.free(resp.body);
+
+    try testing.expectEqual(http.StatusCode.ok, resp.status);
+    try testing.expectEqualStrings("{\"value\":\"ok\"}", resp.body);
+    try testing.expect(resp.allocated);
+    try testing.expect(resp.content_type == null);
+}
+
+test "ownedResponse preserves content type" {
+    const Writer = struct {
+        fn write(writer: *std.Io.Writer, _: void) !void {
+            try writer.writeAll("metrics");
+        }
+    };
+
+    const resp = ownedResponse(testing.allocator, .ok, "text/plain", {}, Writer.write);
+    defer testing.allocator.free(resp.body);
+
+    try testing.expectEqual(http.StatusCode.ok, resp.status);
+    try testing.expectEqualStrings("metrics", resp.body);
+    try testing.expect(resp.allocated);
+    try testing.expectEqualStrings("text/plain", resp.content_type.?);
 }
 
 test "extractBearerToken extracts valid token" {

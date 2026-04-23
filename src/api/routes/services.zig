@@ -12,6 +12,21 @@ const service_registry_runtime = @import("../../network/service_registry_runtime
 const store = @import("../../state/store.zig");
 
 const Response = common.Response;
+const ServiceListContext = struct {
+    alloc: std.mem.Allocator,
+    services: []const service_registry_runtime.ServiceSnapshot,
+};
+const EndpointListContext = struct {
+    endpoints: []const service_registry_runtime.EndpointSnapshot,
+};
+const ProxyRouteListContext = struct {
+    proxy_routes: []const proxy_runtime.RouteSnapshot,
+    route_traffic: []const proxy_runtime.RouteTrafficSnapshot,
+};
+const SingleServiceContext = struct {
+    alloc: std.mem.Allocator,
+    service: service_registry_runtime.ServiceSnapshot,
+};
 
 pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
     const path = request.path_only;
@@ -78,21 +93,10 @@ fn handleListServices(alloc: std.mem.Allocator) Response {
         for (services.items) |service| service.deinit(alloc);
         services.deinit(alloc);
     }
-
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-
-    writer.writeByte('[') catch return common.internalError();
-    for (services.items, 0..) |service, idx| {
-        if (idx > 0) writer.writeByte(',') catch return common.internalError();
-        writeServiceJson(writer, alloc, service) catch return common.internalError();
-    }
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, ServiceListContext{
+        .alloc = alloc,
+        .services = services.items,
+    }, writeServiceListJson);
 }
 
 fn handleGetService(alloc: std.mem.Allocator, service_name: []const u8) Response {
@@ -101,15 +105,10 @@ fn handleGetService(alloc: std.mem.Allocator, service_name: []const u8) Response
         else => return common.internalError(),
     };
     defer service.deinit(alloc);
-
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-    writeServiceJson(writer, alloc, service) catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, SingleServiceContext{
+        .alloc = alloc,
+        .service = service,
+    }, writeSingleServiceJson);
 }
 
 fn handleListServiceEndpoints(alloc: std.mem.Allocator, service_name: []const u8) Response {
@@ -121,21 +120,9 @@ fn handleListServiceEndpoints(alloc: std.mem.Allocator, service_name: []const u8
         for (endpoints.items) |endpoint| endpoint.deinit(alloc);
         endpoints.deinit(alloc);
     }
-
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-
-    writer.writeByte('[') catch return common.internalError();
-    for (endpoints.items, 0..) |endpoint, idx| {
-        if (idx > 0) writer.writeByte(',') catch return common.internalError();
-        writeEndpointJson(writer, endpoint) catch return common.internalError();
-    }
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, EndpointListContext{
+        .endpoints = endpoints.items,
+    }, writeEndpointListJson);
 }
 
 fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const u8) Response {
@@ -152,21 +139,10 @@ fn handleListServiceProxyRoutes(alloc: std.mem.Allocator, service_name: []const 
         for (route_traffic.items) |entry| entry.deinit(alloc);
         route_traffic.deinit(alloc);
     }
-
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-
-    writer.writeByte('[') catch return common.internalError();
-    for (proxy_routes.items, 0..) |proxy_route, idx| {
-        if (idx > 0) writer.writeByte(',') catch return common.internalError();
-        writeProxyRouteJson(writer, proxy_route, route_traffic.items) catch return common.internalError();
-    }
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, ProxyRouteListContext{
+        .proxy_routes = proxy_routes.items,
+        .route_traffic = route_traffic.items,
+    }, writeProxyRouteListJson);
 }
 
 fn handleRequestReconcile(service_name: []const u8) Response {
@@ -193,6 +169,37 @@ fn handleDeleteEndpoint(service_name: []const u8, endpoint_id: []const u8) Respo
     };
     proxy_control_plane.refreshIfEnabled();
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn writeServiceListJson(writer: *std.Io.Writer, ctx: ServiceListContext) !void {
+    try writer.writeByte('[');
+    for (ctx.services, 0..) |service, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writeServiceJson(writer, ctx.alloc, service);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeSingleServiceJson(writer: *std.Io.Writer, ctx: SingleServiceContext) !void {
+    try writeServiceJson(writer, ctx.alloc, ctx.service);
+}
+
+fn writeEndpointListJson(writer: *std.Io.Writer, ctx: EndpointListContext) !void {
+    try writer.writeByte('[');
+    for (ctx.endpoints, 0..) |endpoint, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writeEndpointJson(writer, endpoint);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeProxyRouteListJson(writer: *std.Io.Writer, ctx: ProxyRouteListContext) !void {
+    try writer.writeByte('[');
+    for (ctx.proxy_routes, 0..) |proxy_route, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writeProxyRouteJson(writer, proxy_route, ctx.route_traffic);
+    }
+    try writer.writeByte(']');
 }
 
 fn writeServiceJson(writer: anytype, alloc: std.mem.Allocator, service: service_registry_runtime.ServiceSnapshot) !void {
