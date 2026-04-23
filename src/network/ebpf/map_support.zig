@@ -22,7 +22,7 @@ pub const MapUpdateFaultMode = enum {
     }
 };
 
-var fault_mutex: platform.Mutex = .{};
+var fault_mutex: std.Io.Mutex = .init;
 var map_update_fault_mode: MapUpdateFaultMode = .none;
 var map_update_fault_injections: u64 = 0;
 
@@ -129,26 +129,26 @@ pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) common.
 }
 
 pub fn mapUpdateFaultMode() MapUpdateFaultMode {
-    fault_mutex.lock();
-    defer fault_mutex.unlock();
+    fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer fault_mutex.unlock(std.Options.debug_io);
     return map_update_fault_mode;
 }
 
 pub fn mapUpdateFaultInjectionCount() u64 {
-    fault_mutex.lock();
-    defer fault_mutex.unlock();
+    fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer fault_mutex.unlock(std.Options.debug_io);
     return map_update_fault_injections;
 }
 
 pub fn setMapUpdateFaultModeForTest(mode: MapUpdateFaultMode) void {
-    fault_mutex.lock();
-    defer fault_mutex.unlock();
+    fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer fault_mutex.unlock(std.Options.debug_io);
     map_update_fault_mode = mode;
 }
 
 pub fn resetFaultInjectionForTest() void {
-    fault_mutex.lock();
-    defer fault_mutex.unlock();
+    fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer fault_mutex.unlock(std.Options.debug_io);
     map_update_fault_mode = .none;
     map_update_fault_injections = 0;
 }
@@ -169,14 +169,14 @@ pub fn mapDelete(map_fd: posix.fd_t, key: []const u8) bool {
 }
 
 fn currentMapUpdateFaultMode() MapUpdateFaultMode {
-    fault_mutex.lock();
-    defer fault_mutex.unlock();
+    fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer fault_mutex.unlock(std.Options.debug_io);
     return map_update_fault_mode;
 }
 
 fn noteMapUpdateFaultInjection(mode: MapUpdateFaultMode) void {
-    fault_mutex.lock();
-    defer fault_mutex.unlock();
+    fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer fault_mutex.unlock(std.Options.debug_io);
     map_update_fault_injections += 1;
     log.warn("ebpf: injected map_update fault mode={s}", .{mode.label()});
 }

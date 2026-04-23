@@ -25,10 +25,10 @@ pub fn tickLoop(self: anytype) void {
         var do_cleanup = false;
 
         {
-            self.mu.lock();
+            self.mu.lockUncancelable(std.Options.debug_io);
             const is_leader = self.raft.role == .leader;
             const tick = self.tick_count +% 1;
-            self.mu.unlock();
+            self.mu.unlock(std.Options.debug_io);
 
             if (is_leader) {
                 do_health = tick % 300 == 0;
@@ -57,8 +57,8 @@ pub fn tickLoop(self: anytype) void {
         var still_leader = false;
         var gossip_tick_due = false;
         {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(std.Options.debug_io);
+            defer self.mu.unlock(std.Options.debug_io);
 
             self.raft.tick();
             processActions(self);
@@ -77,11 +77,11 @@ pub fn tickLoop(self: anytype) void {
                 if (do_cleanup) membership_sync.cleanupDeadAgents(self, records);
             }
             if (heartbeat_batch) |batch| {
-                self.mu.lock();
+                self.mu.lockUncancelable(std.Options.debug_io);
                 _ = self.raft.propose(batch) catch |e| {
                     logger.warn("failed to propose heartbeat batch: {}", .{e});
                 };
-                self.mu.unlock();
+                self.mu.unlock(std.Options.debug_io);
             }
         }
 
@@ -100,8 +100,8 @@ pub fn recvLoop(self: anytype) void {
         };
 
         if (msg) |received| {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(std.Options.debug_io);
+            defer self.mu.unlock(std.Options.debug_io);
 
             handleMessage(self, received);
             processActions(self);
@@ -301,8 +301,8 @@ pub fn processActions(self: anytype) void {
 
     if (!has_sends) return;
 
-    self.mu.unlock();
-    defer self.mu.lock();
+    self.mu.unlock(std.Options.debug_io);
+    defer self.mu.lockUncancelable(std.Options.debug_io);
 
     for (actions) |action| {
         switch (action) {

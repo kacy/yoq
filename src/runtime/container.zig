@@ -141,13 +141,13 @@ pub const Container = struct {
     /// protects status, pid, and exit_code from concurrent access
     /// these fields are accessed from the main thread (poll/stop/wait)
     /// and potentially signal handlers
-    state_mutex: platform.Mutex = .{},
+    state_mutex: std.Io.Mutex = .init,
 
     /// check if the container's process is still alive.
     /// updates status if it has exited.
     pub fn poll(self: *Container) ContainerError!void {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
+        self.state_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.state_mutex.unlock(std.Options.debug_io);
 
         const pid = self.pid orelse return;
         if (self.status != .running) return;
@@ -176,8 +176,8 @@ pub const Container = struct {
 
     /// send SIGTERM to the container's init process.
     pub fn stop(self: *Container) ContainerError!void {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
+        self.state_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.state_mutex.unlock(std.Options.debug_io);
 
         const pid = self.pid orelse return ContainerError.NotRunning;
         if (self.status != .running) return ContainerError.NotRunning;
@@ -187,8 +187,8 @@ pub const Container = struct {
 
     /// send SIGKILL to the container's init process.
     pub fn forceStop(self: *Container) ContainerError!void {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
+        self.state_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.state_mutex.unlock(std.Options.debug_io);
 
         const pid = self.pid orelse return ContainerError.NotRunning;
         if (self.status != .running) return ContainerError.NotRunning;
@@ -273,19 +273,19 @@ pub const Container = struct {
 
     /// wait for the running container to exit, then clean up runtime resources.
     pub fn wait(self: *Container) ContainerError!u8 {
-        self.state_mutex.lock();
+        self.state_mutex.lockUncancelable(std.Options.debug_io);
         const pid = self.pid orelse {
-            self.state_mutex.unlock();
+            self.state_mutex.unlock(std.Options.debug_io);
             return ContainerError.NotRunning;
         };
-        self.state_mutex.unlock();
+        self.state_mutex.unlock(std.Options.debug_io);
 
         const wait_result = process.wait(pid, false) catch {
-            self.state_mutex.lock();
+            self.state_mutex.lockUncancelable(std.Options.debug_io);
             self.status = .stopped;
             self.exit_code = 255;
             self.pid = null;
-            self.state_mutex.unlock();
+            self.state_mutex.unlock(std.Options.debug_io);
             active_pid.store(0, .release);
             store.updateStatus(self.config.id, "stopped", null, 255) catch {};
             return 255;
@@ -298,11 +298,11 @@ pub const Container = struct {
             .stopped => 128, // stopped processes treated as signaled
         };
 
-        self.state_mutex.lock();
+        self.state_mutex.lockUncancelable(std.Options.debug_io);
         self.status = .stopped;
         self.exit_code = exit_code;
         self.pid = null;
-        self.state_mutex.unlock();
+        self.state_mutex.unlock(std.Options.debug_io);
         active_pid.store(0, .release);
         self.finalize(exit_code);
         return exit_code;

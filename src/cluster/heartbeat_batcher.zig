@@ -24,13 +24,13 @@ pub const Entry = struct {
 
 pub const HeartbeatBatcher = struct {
     alloc: Allocator,
-    mu: platform.Mutex,
+    mu: std.Io.Mutex,
     buffer: std.AutoArrayHashMapUnmanaged([12]u8, Entry),
 
     pub fn init(alloc: Allocator) HeartbeatBatcher {
         return .{
             .alloc = alloc,
-            .mu = .{},
+            .mu = .init,
             .buffer = .empty,
         };
     }
@@ -47,8 +47,8 @@ pub const HeartbeatBatcher = struct {
         var key: [12]u8 = undefined;
         @memcpy(&key, id[0..12]);
 
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
 
         self.buffer.put(self.alloc, key, .{
             .id = key,
@@ -63,8 +63,8 @@ pub const HeartbeatBatcher = struct {
         // swap entries out under lock
         var entries: []Entry = &.{};
         {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(std.Options.debug_io);
+            defer self.mu.unlock(std.Options.debug_io);
 
             if (self.buffer.count() == 0) return null;
 

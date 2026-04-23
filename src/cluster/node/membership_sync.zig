@@ -11,8 +11,8 @@ const logger = @import("../../lib/log.zig");
 const agent_gossip_port: u16 = 9800;
 
 fn proposeUnderLock(self: anytype, sql: []const u8) !void {
-    self.mu.lock();
-    defer self.mu.unlock();
+    self.mu.lockUncancelable(std.Options.debug_io);
+    defer self.mu.unlock(std.Options.debug_io);
     _ = try self.raft.propose(sql);
 }
 
@@ -148,8 +148,8 @@ pub fn receiveGossipMessages(self: anytype) void {
 
     if (msg_count == 0) return;
 
-    self.mu.lock();
-    defer self.mu.unlock();
+    self.mu.lockUncancelable(std.Options.debug_io);
+    defer self.mu.unlock(std.Options.debug_io);
 
     for (msgs[0..msg_count]) |msg| {
         switch (msg) {

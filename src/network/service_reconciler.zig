@@ -154,7 +154,7 @@ pub const ComponentSnapshot = struct {
     last_change_at: ?i64,
 };
 
-var mutex: platform.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var recent_events: [max_recent_events]Event = undefined;
 var recent_start: usize = 0;
 var recent_len: usize = 0;
@@ -229,20 +229,20 @@ pub fn noteEndpointUnhealthyFrom(source: EventSource, service_name: []const u8, 
 }
 
 pub fn eventCount(kind: EventKind) u64 {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     return event_counts[@intFromEnum(kind)];
 }
 
 pub fn eventCountBySource(source: EventSource, kind: EventKind) u64 {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     return event_counts_by_source[@intFromEnum(source)][@intFromEnum(kind)];
 }
 
 pub fn snapshotRecentEvents(out: []Event) usize {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const count = @min(out.len, recent_len);
     const start = recent_len - count;
@@ -260,8 +260,8 @@ pub fn resetForTest() void {
         audit_thread = null;
     }
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     recent_start = 0;
     recent_len = 0;
     event_counts = [_]u64{0} ** event_counts.len;
@@ -316,8 +316,8 @@ pub fn bootstrapIfEnabled() void {
     const flags = rollout.current();
     if (!auditEnabled(flags)) return;
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     quarantineStaleEndpointsLocked();
     bootstrapAuthoritativeLocked();
@@ -341,14 +341,14 @@ pub fn runAuditPassIfEnabled() void {
     const flags = rollout.current();
     if (!auditEnabled(flags)) return;
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     runAuditPassLocked();
 }
 
 pub fn snapshotAuditState(alloc: std.mem.Allocator) !AuditSnapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var degraded: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -379,8 +379,8 @@ pub fn snapshotAuditState(alloc: std.mem.Allocator) !AuditSnapshot {
 }
 
 pub fn snapshotNodeSignalState() NodeSignalSnapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return .{
         .lost_total = node_lost_signals_total,
@@ -392,8 +392,8 @@ pub fn snapshotNodeSignalState() NodeSignalSnapshot {
 }
 
 pub fn snapshotComponentState() ComponentSnapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return .{
         .state = detectComponentStateLocked(),
@@ -414,22 +414,22 @@ pub fn noteNodeRecovered(node_id: i64) void {
 pub fn refreshComponentStateIfEnabled() void {
     if (rollout.mode() == .legacy) return;
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     refreshComponentStateLocked();
 }
 
 pub fn setComponentStateOverrideForTest(state: ComponentState) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     component_state_override = state;
 }
 
 fn noteEvent(event: Event) void {
     if (rollout.mode() == .legacy) return;
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     if (!logged_authoritative_flag_notice) {
         logged_authoritative_flag_notice = true;
@@ -472,8 +472,8 @@ fn noteEvent(event: Event) void {
 fn noteNodeSignal(node_id: i64, is_loss: bool) void {
     if (rollout.mode() == .legacy) return;
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const alloc = std.heap.page_allocator;
     var service_names = collectServicesForNodeLocked(alloc, node_id) catch |err| {
@@ -1280,8 +1280,8 @@ test "retry backoff grows and clears" {
     resetForTest();
     defer resetForTest();
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try noteRetryFailureLocked("api", 100);
     try std.testing.expect(!retryDueLocked("api", 100));

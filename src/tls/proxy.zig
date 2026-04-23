@@ -39,13 +39,13 @@ pub const ProxyError = error{
 /// ACME HTTP-01 challenge token store.
 /// tokens are registered by the ACME client and served on port 80.
 pub const ChallengeStore = struct {
-    mutex: platform.Mutex,
+    mutex: std.Io.Mutex,
     tokens: std.StringHashMapUnmanaged([]const u8), // token -> key_authorization
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) ChallengeStore {
         return .{
-            .mutex = .{},
+            .mutex = .init,
             .tokens = .empty,
             .allocator = allocator,
         };
@@ -61,8 +61,8 @@ pub const ChallengeStore = struct {
     }
 
     pub fn set(self: *ChallengeStore, token: []const u8, key_auth: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         if (self.tokens.fetchRemove(token)) |kv| {
             self.allocator.free(kv.key);
@@ -78,23 +78,23 @@ pub const ChallengeStore = struct {
     }
 
     pub fn get(self: *ChallengeStore, token: []const u8) ?[]const u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         return self.tokens.get(token);
     }
 
     pub fn getOwned(self: *ChallengeStore, alloc: std.mem.Allocator, token: []const u8) !?[]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         const value = self.tokens.get(token) orelse return null;
         return try alloc.dupe(u8, value);
     }
 
     pub fn remove(self: *ChallengeStore, token: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         if (self.tokens.fetchRemove(token)) |kv| {
             self.allocator.free(kv.key);

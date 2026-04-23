@@ -20,7 +20,7 @@ pub fn init(alloc: std.mem.Allocator, server_addr: [4]u8, server_port: u16, toke
         .log_server = null,
         .log_server_thread = null,
         .local_containers = std.StringHashMap(agent_mod.ContainerState).init(alloc),
-        .container_lock = .{},
+        .container_lock = .init,
         .node_id = null,
         .wg_keypair = null,
         .overlay_ip = null,
@@ -111,8 +111,8 @@ pub fn wait(self: anytype) void {
 pub fn deinit(self: anytype) void {
     stop(self);
 
-    self.container_lock.lock();
-    defer self.container_lock.unlock();
+    self.container_lock.lockUncancelable(std.Options.debug_io);
+    defer self.container_lock.unlock(std.Options.debug_io);
 
     var it = self.local_containers.iterator();
     while (it.next()) |entry| {

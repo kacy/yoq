@@ -174,7 +174,7 @@ pub const RouteTrafficRole = enum {
     }
 };
 
-var mutex: platform.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var materialized_routes: std.ArrayList(router.Route) = .empty;
 var running: bool = false;
 var configured_services: u32 = 0;
@@ -232,8 +232,8 @@ const RouteTrafficState = struct {
 };
 
 pub fn resetForTest() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     running = false;
     configured_services = 0;
@@ -258,8 +258,8 @@ pub fn resetForTest() void {
 }
 
 pub fn bootstrapIfEnabled() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     syncLocked() catch |err| {
         setLastErrorLocked(err);
@@ -268,8 +268,8 @@ pub fn bootstrapIfEnabled() void {
 }
 
 pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var circuit_open_endpoints: u32 = 0;
     var circuit_half_open_endpoints: u32 = 0;
@@ -306,14 +306,14 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
 }
 
 pub fn configuredServiceCount() u32 {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     return configured_services;
 }
 
 pub fn recordRequestStart() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     requests_total += 1;
 }
 
@@ -326,8 +326,8 @@ pub fn recordMirrorRouteRequestStart(route_name: []const u8, service_name: []con
 }
 
 fn recordRouteRequestStartWithRole(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     state.requests_total += 1;
@@ -338,8 +338,8 @@ pub fn recordResponse(status: http.StatusCode) void {
 }
 
 pub fn recordResponseCode(status_code: u16) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     switch (status_code) {
         200...299 => responses_2xx_total += 1,
@@ -358,8 +358,8 @@ pub fn recordMirrorRouteResponseCode(route_name: []const u8, service_name: []con
 }
 
 fn recordRouteResponseCodeWithRole(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8, status_code: u16) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     switch (status_code) {
@@ -371,8 +371,8 @@ fn recordRouteResponseCodeWithRole(role: RouteTrafficRole, route_name: []const u
 }
 
 pub fn recordRetry() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     retries_total += 1;
 }
 
@@ -385,22 +385,22 @@ pub fn recordMirrorRouteRetry(route_name: []const u8, service_name: []const u8, 
 }
 
 fn recordRouteRetryWithRole(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     state.retries_total += 1;
 }
 
 pub fn recordLoopRejection() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     loop_rejections_total += 1;
 }
 
 pub fn recordUpstreamFailure(kind: UpstreamFailureKind) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     switch (kind) {
         .connect => upstream_connect_failures_total += 1,
@@ -419,24 +419,24 @@ pub fn recordMirrorRouteUpstreamFailure(route_name: []const u8, service_name: []
 }
 
 fn recordRouteUpstreamFailureWithRole(role: RouteTrafficRole, route_name: []const u8, service_name: []const u8, backend_service: []const u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     state.upstream_failures_total += 1;
 }
 
 pub fn recordEndpointSuccess(endpoint_id: []const u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const circuit = endpoint_circuits.getPtr(endpoint_id) orelse return;
     circuit.* = .{};
 }
 
 pub fn recordEndpointFailure(endpoint_id: []const u8, cb_policy: proxy_policy.CircuitBreakerPolicy) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const circuit = blk: {
         if (endpoint_circuits.getPtr(endpoint_id)) |existing| break :blk existing;
@@ -475,8 +475,8 @@ pub fn recordEndpointFailure(endpoint_id: []const u8, cb_policy: proxy_policy.Ci
 }
 
 pub fn recordRouteFailure(route_name: []const u8, kind: RouteFailureKind) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const state = ensureRouteStatusLocked(route_name) orelse return;
     state.degraded_reason = degradedReasonForFailure(kind);
@@ -485,16 +485,16 @@ pub fn recordRouteFailure(route_name: []const u8, kind: RouteFailureKind) void {
 }
 
 pub fn recordRouteRecovered(route_name: []const u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const state = route_statuses.getPtr(route_name) orelse return;
     state.degraded_reason = .none;
 }
 
 pub fn snapshotRoutes(alloc: std.mem.Allocator) !std.ArrayList(RouteSnapshot) {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var routes_snapshot: std.ArrayList(RouteSnapshot) = .empty;
     errdefer {
@@ -512,8 +512,8 @@ pub fn snapshotRoutes(alloc: std.mem.Allocator) !std.ArrayList(RouteSnapshot) {
 }
 
 pub fn snapshotRouteTraffic(alloc: std.mem.Allocator) !std.ArrayList(RouteTrafficSnapshot) {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var traffic_snapshot: std.ArrayList(RouteTrafficSnapshot) = .empty;
     errdefer {
@@ -541,8 +541,8 @@ pub fn snapshotRouteTraffic(alloc: std.mem.Allocator) !std.ArrayList(RouteTraffi
 }
 
 pub fn snapshotRouteConfigs(alloc: std.mem.Allocator) !std.ArrayList(router.Route) {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var routes_snapshot: std.ArrayList(router.Route) = .empty;
     errdefer {
@@ -598,8 +598,8 @@ pub fn snapshotServiceRoutes(alloc: std.mem.Allocator, service_name: []const u8)
         service.deinit(alloc);
     }
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var routes_snapshot: std.ArrayList(RouteSnapshot) = .empty;
     errdefer {
@@ -619,8 +619,8 @@ pub fn snapshotServiceRoutes(alloc: std.mem.Allocator, service_name: []const u8)
 }
 
 pub fn resolveRoute(alloc: std.mem.Allocator, method: []const u8, host: []const u8, path: []const u8) !RouteSnapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const matched = router.matchRoute(materialized_routes.items, method, host, path, &.{}) orelse return error.RouteNotFound;
     return cloneRouteSnapshot(alloc, matched);
@@ -646,8 +646,8 @@ pub fn resolveUpstreamWithPolicy(alloc: std.mem.Allocator, service_name: []const
         candidates.deinit(alloc);
     }
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const now_ms = platform.milliTimestamp();
     const target_port = service.http_proxy_target_port;

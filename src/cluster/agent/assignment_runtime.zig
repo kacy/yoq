@@ -109,9 +109,9 @@ fn reconcileFromCache(self: anytype) void {
 }
 
 fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
-    self.container_lock.lock();
+    self.container_lock.lockUncancelable(std.Options.debug_io);
     const already_tracked = self.local_containers.contains(id);
-    self.container_lock.unlock();
+    self.container_lock.unlock(std.Options.debug_io);
     if (already_tracked) return;
 
     const id_copy = self.alloc.dupe(u8, id) catch return;
@@ -185,9 +185,9 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         };
     } else null;
 
-    self.container_lock.lock();
+    self.container_lock.lockUncancelable(std.Options.debug_io);
     self.local_containers.put(id_copy, .starting) catch {
-        self.container_lock.unlock();
+        self.container_lock.unlock(std.Options.debug_io);
         self.alloc.free(id_copy);
         self.alloc.free(image_copy);
         self.alloc.free(command_copy);
@@ -198,7 +198,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         if (gang_copy) |gang| self.alloc.free(gang.master_addr);
         return;
     };
-    self.container_lock.unlock();
+    self.container_lock.unlock(std.Options.debug_io);
 
     if (gang_copy) |gang| {
         log.info("starting gang assignment {s} (image: {s}, rank {d}/{d})", .{ id_copy, image_copy, gang.rank, gang.world_size });
@@ -213,9 +213,9 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         .health_check_json = health_check_json_copy,
     } }) catch {
         log.warn("failed to spawn thread for assignment {s}", .{id_copy});
-        self.container_lock.lock();
+        self.container_lock.lockUncancelable(std.Options.debug_io);
         _ = self.local_containers.remove(id_copy);
-        self.container_lock.unlock();
+        self.container_lock.unlock(std.Options.debug_io);
         self.alloc.free(id_copy);
         self.alloc.free(image_copy);
         self.alloc.free(command_copy);
@@ -543,8 +543,8 @@ fn reportStatus(self: anytype, assignment_id: []const u8, status: []const u8, re
 }
 
 fn setContainerState(self: anytype, assignment_id: []const u8, state: anytype) void {
-    self.container_lock.lock();
-    defer self.container_lock.unlock();
+    self.container_lock.lockUncancelable(std.Options.debug_io);
+    defer self.container_lock.unlock(std.Options.debug_io);
     if (self.local_containers.getPtr(assignment_id)) |container_state| {
         container_state.* = state;
     }

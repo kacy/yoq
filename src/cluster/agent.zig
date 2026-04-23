@@ -75,7 +75,7 @@ pub const Agent = struct {
     /// tracks assignment_id → local container state.
     /// protected by mutex since container threads update it.
     local_containers: std.StringHashMap(ContainerState),
-    container_lock: platform.Mutex,
+    container_lock: std.Io.Mutex,
 
     // wireguard mesh networking fields (set during registration if the
     // server assigns a node_id)

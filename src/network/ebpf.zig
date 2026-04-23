@@ -159,7 +159,7 @@ fn makeKey(name: []const u8) ?[64]u8 {
 /// metrics_collector, policy_enforcer). currently safe because container
 /// startup is sequential, but this protects against future parallel
 /// startup (e.g. `yoq up` with multiple services).
-var global_mutex: platform.Mutex = .{};
+var global_mutex: std.Io.Mutex = .init;
 fn trackBpfFdClosed() void {
     resource_support.releaseBpfFd();
 }
@@ -173,8 +173,8 @@ var dns_interceptor: ?DnsInterceptor = null;
 /// as a TC ingress filter on the given bridge interface. idempotent —
 /// returns immediately if already loaded.
 pub fn loadDnsInterceptor(bridge_if_index: u32) EbpfError!void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (dns_interceptor != null) return; // already loaded
     dns_interceptor = try dns_runtime.load(bridge_if_index);
@@ -184,8 +184,8 @@ pub fn loadDnsInterceptor(bridge_if_index: u32) EbpfError!void {
 
 /// unload the DNS interceptor. detaches from TC and closes fds.
 pub fn unloadDnsInterceptor() void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (dns_interceptor) |*interceptor| {
         interceptor.deinit();
@@ -196,8 +196,8 @@ pub fn unloadDnsInterceptor() void {
 
 /// get the active DNS interceptor, if loaded.
 pub fn getDnsInterceptor() ?*const DnsInterceptor {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (dns_interceptor) |*interceptor| {
         return interceptor;
@@ -221,8 +221,8 @@ var load_balancer: ?LoadBalancer = null;
 
 /// load and attach the load balancer BPF program.
 pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (load_balancer != null) return;
     load_balancer = try lb_runtime.load(bridge_if_index);
@@ -232,8 +232,8 @@ pub fn loadLoadBalancer(bridge_if_index: u32) EbpfError!void {
 
 /// unload the load balancer.
 pub fn unloadLoadBalancer() void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (load_balancer) |*lb| {
         lb.deinit();
@@ -244,8 +244,8 @@ pub fn unloadLoadBalancer() void {
 
 /// get the active load balancer, if loaded.
 pub fn getLoadBalancer() ?*const LoadBalancer {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (load_balancer) |*lb| {
         return lb;
@@ -279,8 +279,8 @@ var metrics_collector: ?MetricsCollector = null;
 
 /// load and attach the metrics BPF program to the bridge.
 pub fn loadMetricsCollector(bridge_if_index: u32) EbpfError!void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (metrics_collector != null) return;
     metrics_collector = try metrics_runtime.load(bridge_if_index);
@@ -290,8 +290,8 @@ pub fn loadMetricsCollector(bridge_if_index: u32) EbpfError!void {
 
 /// unload the metrics collector.
 pub fn unloadMetricsCollector() void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (metrics_collector) |*mc| {
         mc.deinit();
@@ -302,8 +302,8 @@ pub fn unloadMetricsCollector() void {
 
 /// get the active metrics collector, if loaded.
 pub fn getMetricsCollector() ?*const MetricsCollector {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (metrics_collector) |*mc| {
         return mc;
@@ -326,8 +326,8 @@ var policy_enforcer: ?PolicyEnforcer = null;
 /// load and attach the policy enforcer BPF program to the bridge.
 /// attaches at priority 0 (runs before DNS/LB at 1 and metrics at 2).
 pub fn loadPolicyEnforcer(bridge_if_index: u32) EbpfError!void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (policy_enforcer != null) return;
     policy_enforcer = try policy_runtime.load(bridge_if_index);
@@ -337,8 +337,8 @@ pub fn loadPolicyEnforcer(bridge_if_index: u32) EbpfError!void {
 
 /// unload the policy enforcer.
 pub fn unloadPolicyEnforcer() void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (policy_enforcer) |*pe| {
         pe.deinit();
@@ -349,8 +349,8 @@ pub fn unloadPolicyEnforcer() void {
 
 /// get the active policy enforcer, if loaded.
 pub fn getPolicyEnforcer() ?*const PolicyEnforcer {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (policy_enforcer) |*pe| {
         return pe;
@@ -376,8 +376,8 @@ var port_mapper: ?PortMapper = null;
 
 /// load and attach the XDP port mapping program to an interface.
 pub fn loadPortMapper(if_index: u32) EbpfError!void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (port_mapper != null) return;
     port_mapper = try port_map_runtime.load(if_index);
@@ -386,8 +386,8 @@ pub fn loadPortMapper(if_index: u32) EbpfError!void {
 }
 
 pub fn unloadPortMapper() void {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (port_mapper) |*pm| {
         pm.deinit();
@@ -397,8 +397,8 @@ pub fn unloadPortMapper() void {
 }
 
 pub fn getPortMapper() ?*const PortMapper {
-    global_mutex.lock();
-    defer global_mutex.unlock();
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
 
     if (port_mapper) |*pm| {
         return pm;

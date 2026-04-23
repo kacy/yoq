@@ -96,7 +96,7 @@ pub const Node = struct {
     transport: Transport,
     log: Log,
     state_machine: StateMachine,
-    mu: platform.Mutex,
+    mu: std.Io.Mutex,
     running: std.atomic.Value(bool),
     tick_count: u32,
     leader_id: ?NodeId = null,
@@ -212,7 +212,7 @@ pub const Node = struct {
             .transport = transport,
             .log = log,
             .state_machine = sm,
-            .mu = .{},
+            .mu = .init,
             .running = std.atomic.Value(bool).init(false),
             .tick_count = 0,
             .tick_thread = null,
@@ -268,7 +268,7 @@ pub const Node = struct {
             .transport = transport,
             .log = log,
             .state_machine = sm,
-            .mu = .{},
+            .mu = .init,
             .running = std.atomic.Value(bool).init(false),
             .tick_count = 0,
             .tick_thread = null,
@@ -324,8 +324,8 @@ pub const Node = struct {
     /// submit a command through raft (leader only).
     pub fn propose(self: *Node, data: []const u8) !LogIndex {
         self.fixPointers();
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
 
         return self.raft.propose(data) catch return NodeError.NotLeader;
     }
@@ -345,8 +345,8 @@ pub const Node = struct {
     }
 
     pub fn isLeader(self: *Node) bool {
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
         return self.raft.role == .leader;
     }
 
@@ -354,8 +354,8 @@ pub const Node = struct {
     /// used during rolling upgrades to avoid election timeout delays.
     /// returns true if leadership was transferred, false if not leader.
     pub fn transferLeadership(self: *Node) bool {
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
         return self.raft.transferLeadership();
     }
 
@@ -865,15 +865,15 @@ test "processActions snapshot restart preserves last_applied continuity" {
         });
 
         try node.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 1 } });
-        node.mu.lock();
+        node.mu.lockUncancelable(std.Options.debug_io);
         node.processActions();
-        node.mu.unlock();
+        node.mu.unlock(std.Options.debug_io);
         try std.testing.expectEqual(@as(LogIndex, 1), node.state_machine.last_applied);
 
         try node.raft.actions.append(alloc, .{ .take_snapshot = .{ .up_to_index = 1, .term = 1 } });
-        node.mu.lock();
+        node.mu.lockUncancelable(std.Options.debug_io);
         node.processActions();
-        node.mu.unlock();
+        node.mu.unlock(std.Options.debug_io);
 
         try std.testing.expectEqual(@as(LogIndex, 1), node.last_snapshot_index);
         try std.testing.expect(node.raft.snapshot_meta != null);
@@ -903,9 +903,9 @@ test "processActions snapshot restart preserves last_applied continuity" {
         .data = "UPDATE agents SET status = 'draining' WHERE id = 'snap01';",
     });
     try restarted.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 2 } });
-    restarted.mu.lock();
+    restarted.mu.lockUncancelable(std.Options.debug_io);
     restarted.processActions();
-    restarted.mu.unlock();
+    restarted.mu.unlock(std.Options.debug_io);
 
     try std.testing.expectEqual(@as(LogIndex, 2), restarted.state_machine.last_applied);
     const draining_status = (try getAgentStatusForTest(alloc, &restarted.state_machine.db, "snap01")).?;
@@ -960,9 +960,9 @@ test "install_snapshot restart preserves recovered state and future applies" {
             .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('stale01', '10.0.0.11:7700', 'active', 4, 8192, 0, 0, 0, 1000, 1000);",
         });
         try node.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 1 } });
-        node.mu.lock();
+        node.mu.lockUncancelable(std.Options.debug_io);
         node.processActions();
-        node.mu.unlock();
+        node.mu.unlock(std.Options.debug_io);
 
         node.handleMessage(.{
             .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
@@ -1006,9 +1006,9 @@ test "install_snapshot restart preserves recovered state and future applies" {
         .data = "UPDATE agents SET status = 'draining' WHERE id = 'snapmsg';",
     });
     try restarted.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 6 } });
-    restarted.mu.lock();
+    restarted.mu.lockUncancelable(std.Options.debug_io);
     restarted.processActions();
-    restarted.mu.unlock();
+    restarted.mu.unlock(std.Options.debug_io);
 
     try std.testing.expectEqual(@as(LogIndex, 6), restarted.state_machine.last_applied);
     const updated_status = (try getAgentStatusForTest(alloc, &restarted.state_machine.db, "snapmsg")).?;
