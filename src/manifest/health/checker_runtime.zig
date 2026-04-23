@@ -74,14 +74,14 @@ fn schedulerLoop() void {
     while (registry.checker_running.load(.acquire)) {
         const now = platform.timestamp();
         scheduleDueChecks(now);
-        platform.sleep(types.scheduler_interval_ms * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(types.scheduler_interval_ms)), .awake) catch unreachable;
     }
 }
 
 fn workerLoop(_: usize) void {
     while (registry.checker_running.load(.acquire)) {
         const item = registry.dequeueCheck() orelse {
-            platform.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
             continue;
         };
 
@@ -97,8 +97,8 @@ fn workerLoop(_: usize) void {
 }
 
 fn scheduleDueChecks(now: i64) void {
-    registry.health_mutex.lock();
-    defer registry.health_mutex.unlock();
+    registry.health_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry.health_mutex.unlock(std.Options.debug_io);
 
     for (registry.health_states.items) |*entry| {
         if (entry.in_flight) continue;
@@ -135,8 +135,8 @@ fn buildCheckItem(entry: *const types.ServiceHealth) types.CheckItem {
 
 fn applyCompletedCheck(item: types.CheckItem, success: bool, completed_at: i64) Completion {
     const transition = blk: {
-        registry.health_mutex.lock();
-        defer registry.health_mutex.unlock();
+        registry.health_mutex.lockUncancelable(std.Options.debug_io);
+        defer registry.health_mutex.unlock(std.Options.debug_io);
 
         const entry = findTrackedEntry(item) orelse break :blk null;
         if (entry.generation != item.generation or entry.registration_epoch != item.registration_epoch) break :blk null;

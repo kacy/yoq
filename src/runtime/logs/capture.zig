@@ -113,9 +113,18 @@ pub fn captureStream(
 }
 
 fn writeTerminalLine(stream_label: []const u8, line: []const u8) void {
-    const file = if (std.mem.eql(u8, stream_label, "stderr")) platform.File.stderr() else platform.File.stdout();
-    file.writeAll(line) catch return;
-    file.writeAll("\n") catch {};
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
+    var buf: [4096]u8 = undefined;
+    var writer = if (std.mem.eql(u8, stream_label, "stderr"))
+        std.Io.File.stderr().writer(io, &buf)
+    else
+        std.Io.File.stdout().writer(io, &buf);
+    writer.interface.writeAll(line) catch return;
+    writer.interface.writeAll("\n") catch return;
+    writer.interface.flush() catch {};
 }
 
 test "write and read log line" {

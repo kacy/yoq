@@ -22,17 +22,17 @@ var resolver_thread: ?std.Thread = null;
 var resolver_socket: ?platform.posix.socket_t = null;
 var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var external_resolver_available: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var resolver_mutex: platform.Mutex = .{};
+var resolver_mutex: std.Io.Mutex = .init;
 var rate_limits: [256]RateLimitEntry = [_]RateLimitEntry{.{
     .ip = 0,
     .tokens = rate_limit_max_tokens,
     .last_refill = 0,
 }} ** 256;
-var rate_limit_mutex: platform.Mutex = .{};
+var rate_limit_mutex: std.Io.Mutex = .init;
 
 pub fn startResolver() void {
-    resolver_mutex.lock();
-    defer resolver_mutex.unlock();
+    resolver_mutex.lockUncancelable(std.Options.debug_io);
+    defer resolver_mutex.unlock(std.Options.debug_io);
 
     if (resolver_running.load(.acquire) or external_resolver_available.load(.acquire)) return;
 
@@ -83,11 +83,11 @@ pub fn isOwnedByCurrentProcess() bool {
 }
 
 pub fn stopResolver() void {
-    resolver_mutex.lock();
+    resolver_mutex.lockUncancelable(std.Options.debug_io);
 
     if (!resolver_running.load(.acquire)) {
         external_resolver_available.store(false, .release);
-        resolver_mutex.unlock();
+        resolver_mutex.unlock(std.Options.debug_io);
         return;
     }
 
@@ -101,20 +101,20 @@ pub fn stopResolver() void {
 
     const thread = resolver_thread;
     resolver_thread = null;
-    resolver_mutex.unlock();
+    resolver_mutex.unlock(std.Options.debug_io);
 
     if (thread) |t| {
         t.join();
     }
 
     // close socket after thread has exited
-    resolver_mutex.lock();
+    resolver_mutex.lockUncancelable(std.Options.debug_io);
     if (resolver_socket) |sock| {
         platform.posix.close(sock);
         resolver_socket = null;
     }
     external_resolver_available.store(false, .release);
-    resolver_mutex.unlock();
+    resolver_mutex.unlock(std.Options.debug_io);
 }
 
 fn initUpstreamDns() void {
@@ -136,8 +136,8 @@ fn initUpstreamDns() void {
 }
 
 fn checkRateLimit(client_ip: u32) bool {
-    rate_limit_mutex.lock();
-    defer rate_limit_mutex.unlock();
+    rate_limit_mutex.lockUncancelable(std.Options.debug_io);
+    defer rate_limit_mutex.unlock(std.Options.debug_io);
 
     const now = platform.milliTimestamp();
     const idx = @as(usize, @intCast(client_ip % 256));

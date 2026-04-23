@@ -686,7 +686,7 @@ fn waitForGossipResult(receiver: *Transport, buf: []u8) !?GossipReceiveResult {
     while (attempts < 50) : (attempts += 1) {
         const result = try receiver.receiveGossip(buf);
         if (result != null) return result;
-        platform.sleep(10 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
     }
     return null;
 }
@@ -696,7 +696,7 @@ fn waitForGossipError(receiver: *Transport, buf: []u8) !void {
     while (attempts < 50) : (attempts += 1) {
         const result = receiver.receiveGossip(buf);
         if (result) |_| {
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         } else |err| switch (err) {
             TransportError.AuthenticationFailed => return,

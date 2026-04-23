@@ -420,7 +420,7 @@ fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, m
         switch (manifest_health.getStatus(service_name) orelse .starting) {
             .healthy => return .healthy,
             .unhealthy => return .unhealthy,
-            .starting => platform.sleep(100 * std.time.ns_per_ms),
+            .starting => std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable,
         }
     }
     return .timeout;

@@ -8,7 +8,7 @@ const store = @import("../../state/store.zig");
 const types = @import("types.zig");
 
 pub var health_states: std.ArrayList(types.ServiceHealth) = .empty;
-pub var health_mutex: platform.Mutex = .{};
+pub var health_mutex: std.Io.Mutex = .init;
 
 pub var scheduler_thread: ?std.Thread = null;
 pub var worker_threads: [types.max_worker_threads]?std.Thread = [_]?std.Thread{null} ** types.max_worker_threads;
@@ -16,7 +16,7 @@ pub var worker_thread_count: usize = 0;
 pub var checker_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 pub var work_queue: std.ArrayList(types.CheckItem) = .empty;
-pub var work_mutex: platform.Mutex = .{};
+pub var work_mutex: std.Io.Mutex = .init;
 pub var scheduled_total: u64 = 0;
 pub var completed_total: u64 = 0;
 pub var stale_results_total: u64 = 0;
@@ -42,8 +42,8 @@ pub fn registerService(
         log.warn("health: pending gate rejected for {s}/{s} generation={}", .{ service_name, endpoint_id, generation });
     }
 
-    health_mutex.lock();
-    defer health_mutex.unlock();
+    health_mutex.lockUncancelable(std.Options.debug_io);
+    defer health_mutex.unlock(std.Options.debug_io);
 
     const len = @min(service_name.len, 64);
     const endpoint_len = @min(endpoint_id.len, 96);
@@ -94,34 +94,34 @@ pub fn registerService(
 }
 
 pub fn unregisterService(service_name: []const u8) void {
-    health_mutex.lock();
-    defer health_mutex.unlock();
+    health_mutex.lockUncancelable(std.Options.debug_io);
+    defer health_mutex.unlock(std.Options.debug_io);
 
     const index = findServiceIndex(service_name) orelse return;
     _ = health_states.orderedRemove(index);
 }
 
 pub fn getStatus(service_name: []const u8) ?types.HealthStatus {
-    health_mutex.lock();
-    defer health_mutex.unlock();
+    health_mutex.lockUncancelable(std.Options.debug_io);
+    defer health_mutex.unlock(std.Options.debug_io);
 
     const index = findServiceIndex(service_name) orelse return null;
     return health_states.items[index].status;
 }
 
 pub fn getServiceHealth(service_name: []const u8) ?types.ServiceHealth {
-    health_mutex.lock();
-    defer health_mutex.unlock();
+    health_mutex.lockUncancelable(std.Options.debug_io);
+    defer health_mutex.unlock(std.Options.debug_io);
 
     const index = findServiceIndex(service_name) orelse return null;
     return health_states.items[index];
 }
 
 pub fn snapshotChecker() types.CheckerSnapshot {
-    work_mutex.lock();
-    defer work_mutex.unlock();
-    health_mutex.lock();
-    defer health_mutex.unlock();
+    work_mutex.lockUncancelable(std.Options.debug_io);
+    defer work_mutex.unlock(std.Options.debug_io);
+    health_mutex.lockUncancelable(std.Options.debug_io);
+    defer health_mutex.unlock(std.Options.debug_io);
 
     var in_flight: usize = 0;
     for (health_states.items) |entry| {
@@ -159,10 +159,10 @@ pub fn resetForTest() void {
     }
     worker_thread_count = 0;
 
-    health_mutex.lock();
-    defer health_mutex.unlock();
-    work_mutex.lock();
-    defer work_mutex.unlock();
+    health_mutex.lockUncancelable(std.Options.debug_io);
+    defer health_mutex.unlock(std.Options.debug_io);
+    work_mutex.lockUncancelable(std.Options.debug_io);
+    defer work_mutex.unlock(std.Options.debug_io);
 
     health_states.clearRetainingCapacity();
     work_queue.clearRetainingCapacity();
@@ -176,8 +176,8 @@ pub fn resetForTest() void {
 }
 
 pub fn enqueueCheck(item: types.CheckItem, scheduled_at: i64) types.HealthError!bool {
-    work_mutex.lock();
-    defer work_mutex.unlock();
+    work_mutex.lockUncancelable(std.Options.debug_io);
+    defer work_mutex.unlock(std.Options.debug_io);
 
     if (work_queue.items.len >= types.max_queued_checks) {
         dropped_queue_full_total += 1;
@@ -192,16 +192,16 @@ pub fn enqueueCheck(item: types.CheckItem, scheduled_at: i64) types.HealthError!
 }
 
 pub fn dequeueCheck() ?types.CheckItem {
-    work_mutex.lock();
-    defer work_mutex.unlock();
+    work_mutex.lockUncancelable(std.Options.debug_io);
+    defer work_mutex.unlock(std.Options.debug_io);
 
     if (work_queue.items.len == 0) return null;
     return work_queue.orderedRemove(0);
 }
 
 pub fn noteCompletedCheck(stale: bool, completed_at: i64) void {
-    work_mutex.lock();
-    defer work_mutex.unlock();
+    work_mutex.lockUncancelable(std.Options.debug_io);
+    defer work_mutex.unlock(std.Options.debug_io);
     completed_total += 1;
     if (stale) stale_results_total += 1;
     last_completed_at = completed_at;

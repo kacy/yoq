@@ -119,7 +119,7 @@ pub const ReverseProxy = struct {
 
     pub fn deinit(self: *ReverseProxy) void {
         while (self.active_mirror_requests.load(.acquire) != 0) {
-            platform.sleep(std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch unreachable;
         }
     }
 
@@ -1917,7 +1917,7 @@ const TestUpstreamServer = struct {
     fn start(self: *TestUpstreamServer) !void {
         socket_helpers.setSocketTimeoutMs(self.listen_fd, 5000);
         self.thread = try std.Thread.spawn(.{}, acceptOne, .{self});
-        platform.sleep(50 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
     }
 
     fn wait(self: *TestUpstreamServer) void {
@@ -1944,11 +1944,11 @@ const TestUpstreamServer = struct {
                 .respond => |response| _ = socket_helpers.writeAll(client_fd, response) catch {},
                 .stream_respond => |resp| {
                     _ = socket_helpers.writeAll(client_fd, resp.first) catch {};
-                    platform.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
+                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(resp.delay_ms)), .awake) catch unreachable;
                     _ = socket_helpers.writeAll(client_fd, resp.second) catch {};
                 },
                 .delayed_respond => |resp| {
-                    platform.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
+                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(resp.delay_ms)), .awake) catch unreachable;
                     _ = socket_helpers.writeAll(client_fd, resp.response) catch {};
                 },
             }
@@ -1988,7 +1988,7 @@ fn initTestListenerSocket() !BoundTestListener {
     while (attempt < 50) : (attempt += 1) {
         const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
         errdefer platform.posix.close(fd);
@@ -1998,13 +1998,13 @@ fn initTestListenerSocket() !BoundTestListener {
         platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
             platform.posix.close(fd);
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
         platform.posix.listen(fd, 1) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
             platform.posix.close(fd);
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
@@ -2013,7 +2013,7 @@ fn initTestListenerSocket() !BoundTestListener {
         platform.posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
             platform.posix.close(fd);
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
@@ -3436,7 +3436,7 @@ test "handleConnection relays HTTP/2 client data frames upstream" {
     defer std.testing.allocator.free(data);
 
     try socket_helpers.writeAll(client_fd, request);
-    platform.sleep(25 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(25), .awake) catch unreachable;
     try socket_helpers.writeAll(client_fd, data);
 
     const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);

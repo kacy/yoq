@@ -5,7 +5,6 @@
 // spawn-and-wait boilerplate.
 
 const std = @import("std");
-const platform = @import("platform");
 
 pub const max_args = 20;
 pub const ArgList = [max_args]?[]const u8;
@@ -71,7 +70,7 @@ fn execInChild(argv: [*:null]const ?[*:0]const u8) noreturn {
         linux.exit(127);
     }
 
-    const path_env = platform.getenv("PATH") orelse "/usr/local/bin:/bin:/usr/bin";
+    const path_env = if (std.c.getenv("PATH")) |value| std.mem.span(value) else "/usr/local/bin:/bin:/usr/bin";
     var it = std.mem.tokenizeScalar(u8, path_env, ':');
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     while (it.next()) |dir| {

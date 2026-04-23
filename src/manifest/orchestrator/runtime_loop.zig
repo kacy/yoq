@@ -280,7 +280,7 @@ fn handleDevModeRestart(
             writeErr("restarting {s}...\n", .{service_name});
             return true;
         }
-        platform.sleep(restart_poll_ms * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(restart_poll_ms)), .awake) catch unreachable;
     }
     return false;
 }
@@ -314,7 +314,7 @@ fn handleRestartPolicyExit(
         if (shutdown_requested.load(.acquire)) return false;
         const remaining = backoff_ms.* - slept_ms;
         const sleep_chunk: u64 = @min(remaining, restart_poll_ms);
-        platform.sleep(sleep_chunk * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(sleep_chunk)), .awake) catch unreachable;
         slept_ms += sleep_chunk;
     }
 

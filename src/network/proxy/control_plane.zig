@@ -37,7 +37,7 @@ pub const Snapshot = struct {
 var sync_running = std.atomic.Value(bool).init(false);
 var sync_thread: ?std.Thread = null;
 var sync_interval_override_ms: ?u64 = null;
-var mutex: platform.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var sync_passes_total: u64 = 0;
 var event_sync_passes_total: u64 = 0;
 var periodic_sync_passes_total: u64 = 0;
@@ -72,8 +72,8 @@ pub fn stopSyncLoop() void {
 }
 
 pub fn snapshot() Snapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return .{
         .enabled = controlPlaneEnabled(),
@@ -90,8 +90,8 @@ pub fn snapshot() Snapshot {
 
 pub fn resetForTest() void {
     stopSyncLoop();
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     sync_interval_override_ms = null;
     sync_passes_total = 0;
     event_sync_passes_total = 0;
@@ -102,8 +102,8 @@ pub fn resetForTest() void {
 }
 
 pub fn setSyncIntervalMsForTest(interval_ms: ?u64) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     sync_interval_override_ms = interval_ms;
 }
 
@@ -125,8 +125,8 @@ fn runSyncPass(trigger: SyncTrigger, ensure_listener: bool) void {
         proxy_runtime.bootstrapIfEnabled();
     }
     steering_runtime.syncIfEnabled();
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     sync_passes_total += 1;
     switch (trigger) {
         .event => event_sync_passes_total += 1,
@@ -141,11 +141,11 @@ fn syncLoop() void {
 
     while (sync_running.load(.acquire)) {
         const interval_ms = blk: {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.Options.debug_io);
+            defer mutex.unlock(std.Options.debug_io);
             break :blk sync_interval_override_ms orelse (sync_interval_secs * std.time.ms_per_s);
         };
-        platform.sleep(interval_ms * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(interval_ms)), .awake) catch unreachable;
         if (!sync_running.load(.acquire)) break;
         runSyncPass(.periodic, true);
     }
@@ -205,7 +205,7 @@ test "periodic steering sync loop repairs drifted mappings" {
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    platform.sleep(40 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(40), .awake) catch unreachable;
 
     const state = try steering_runtime.snapshotServiceStatus(std.testing.allocator, "api");
     try std.testing.expect(state.ready);
@@ -290,7 +290,7 @@ test "periodic control plane repairs routes while steering waits on prerequisite
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    platform.sleep(40 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(40), .awake) catch unreachable;
 
     const proxy_state = try proxy_runtime.snapshot(std.testing.allocator);
     defer proxy_state.deinit(std.testing.allocator);
@@ -595,7 +595,7 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    platform.sleep(40 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(40), .awake) catch unreachable;
     try std.testing.expect(recorded_target_port != 0);
 
     const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);

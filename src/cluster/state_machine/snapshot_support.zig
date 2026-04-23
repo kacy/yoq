@@ -144,7 +144,7 @@ fn createUniqueTempFile(buf: []u8, prefix: []const u8, suffix: []const u8) Snaps
 } {
     var attempts: usize = 0;
     while (attempts < 16) : (attempts += 1) {
-        const slice = std.fmt.bufPrint(buf, "{s}.{x}{s}", .{ prefix, platform.randomInt(u64), suffix }) catch {
+        const slice = std.fmt.bufPrint(buf, "{s}.{x}{s}", .{ prefix, randomU64(), suffix }) catch {
             return SnapshotError.IoError;
         };
         if (slice.len >= buf.len) return SnapshotError.IoError;
@@ -157,6 +157,12 @@ fn createUniqueTempFile(buf: []u8, prefix: []const u8, suffix: []const u8) Snaps
         return .{ .path = path, .file = file };
     }
     return SnapshotError.IoError;
+}
+
+fn randomU64() u64 {
+    var bytes: [8]u8 = undefined;
+    platform.randomBytes(&bytes);
+    return std.mem.readInt(u64, &bytes, .little);
 }
 
 test "createUniqueTempFile uses owner-only permissions" {

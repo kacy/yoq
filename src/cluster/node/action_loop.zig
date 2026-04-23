@@ -88,14 +88,14 @@ pub fn tickLoop(self: anytype) void {
         if (gossip_tick_due) {
             membership_sync.tickGossip(self);
         }
-        platform.sleep(100 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
     }
 }
 
 pub fn recvLoop(self: anytype) void {
     while (self.running.load(.acquire)) {
         const msg = self.transport.receive(self.alloc) catch {
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
@@ -107,7 +107,7 @@ pub fn recvLoop(self: anytype) void {
             processActions(self);
         } else {
             membership_sync.receiveGossipMessages(self);
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
         }
     }
 }

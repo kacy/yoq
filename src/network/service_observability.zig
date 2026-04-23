@@ -52,13 +52,13 @@ const MutableServiceCounters = struct {
     }
 };
 
-var mutex: platform.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var service_counters: std.ArrayList(MutableServiceCounters) = .empty;
 var vip_alloc_failures_total: u64 = 0;
 
 pub fn resetForTest() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     for (service_counters.items) |entry| entry.deinit(std.heap.page_allocator);
     service_counters.clearRetainingCapacity();
@@ -82,8 +82,8 @@ pub fn noteHealthCheckScheduled(service_name: []const u8) void {
 }
 
 pub fn noteHealthCheckCompleted(service_name: []const u8, stale: bool, latency_seconds: f64) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var counters = ensureServiceCountersLocked(service_name) catch return;
     counters.health_checks_completed_total += 1;
@@ -96,8 +96,8 @@ pub fn noteEndpointFlap(service_name: []const u8) void {
 }
 
 pub fn noteVipAllocFailure() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     vip_alloc_failures_total += 1;
 }
 
@@ -107,8 +107,8 @@ pub const BpfComponent = enum {
 };
 
 pub fn noteBpfSyncFailure(service_name: []const u8, component: BpfComponent) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var counters = ensureServiceCountersLocked(service_name) catch return;
     switch (component) {
@@ -118,8 +118,8 @@ pub fn noteBpfSyncFailure(service_name: []const u8, component: BpfComponent) voi
 }
 
 pub fn snapshot(alloc: Allocator) !Snapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var services: std.ArrayList(ServiceCounters) = .empty;
     errdefer {
@@ -166,8 +166,8 @@ const CounterKind = enum {
 };
 
 fn noteServiceCounter(service_name: []const u8, kind: CounterKind) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     var counters = ensureServiceCountersLocked(service_name) catch return;
     switch (kind) {

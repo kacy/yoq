@@ -89,7 +89,7 @@ pub const CronScheduler = struct {
 
             const idx = earliest_idx orelse {
                 // no crons — shouldn't happen but sleep and retry
-                platform.sleep(1 * std.time.ns_per_s);
+                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(1), .awake) catch unreachable;
                 continue;
             };
 
@@ -97,7 +97,7 @@ pub const CronScheduler = struct {
             if (earliest_time > now) {
                 var remaining = earliest_time - now;
                 while (remaining > 0 and self.running.load(.acquire)) {
-                    platform.sleep(1 * std.time.ns_per_s);
+                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(1), .awake) catch unreachable;
                     remaining -= 1;
                 }
                 if (!self.running.load(.acquire)) break;

@@ -21,24 +21,24 @@ const TestProxyLogsOverride = struct {
     body: []const u8,
 };
 
-var test_proxy_logs_mutex: platform.Mutex = .{};
+var test_proxy_logs_mutex: std.Io.Mutex = .init;
 var test_proxy_logs_override: ?TestProxyLogsOverride = null;
 
 pub fn setTestProxyTrainingLogsResponse(path: []const u8, body: []const u8) void {
-    test_proxy_logs_mutex.lock();
-    defer test_proxy_logs_mutex.unlock();
+    test_proxy_logs_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_proxy_logs_mutex.unlock(std.Options.debug_io);
     test_proxy_logs_override = .{ .path = path, .body = body };
 }
 
 pub fn clearTestProxyTrainingLogsResponse() void {
-    test_proxy_logs_mutex.lock();
-    defer test_proxy_logs_mutex.unlock();
+    test_proxy_logs_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_proxy_logs_mutex.unlock(std.Options.debug_io);
     test_proxy_logs_override = null;
 }
 
 fn findTestProxyTrainingLogsResponse(path: []const u8) ?[]const u8 {
-    test_proxy_logs_mutex.lock();
-    defer test_proxy_logs_mutex.unlock();
+    test_proxy_logs_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_proxy_logs_mutex.unlock(std.Options.debug_io);
     const override = test_proxy_logs_override orelse return null;
     if (!std.mem.eql(u8, override.path, path)) return null;
     return override.body;

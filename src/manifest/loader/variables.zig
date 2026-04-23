@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const common = @import("common.zig");
 
 pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) common.LoadError![]const u8 {
@@ -33,11 +32,7 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) common.LoadE
                 }
 
                 const value = if (var_name.len > 0)
-                    platform.getEnvVarOwned(alloc, var_name) catch |err| switch (err) {
-                        error.EnvironmentVariableNotFound => null,
-                        error.OutOfMemory => return common.LoadError.OutOfMemory,
-                        else => null,
-                    }
+                    getEnvVarOwned(alloc, var_name) catch return common.LoadError.OutOfMemory
                 else
                     null;
                 defer if (value) |owned| alloc.free(owned);
@@ -57,4 +52,12 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) common.LoadE
     }
 
     return result.toOwnedSlice(alloc) catch return common.LoadError.OutOfMemory;
+}
+
+fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) error{OutOfMemory}!?[]u8 {
+    const name_z = try alloc.dupeZ(u8, name);
+    defer alloc.free(name_z);
+
+    const value = std.c.getenv(name_z.ptr) orelse return null;
+    return try alloc.dupe(u8, std.mem.span(value));
 }

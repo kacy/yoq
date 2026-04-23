@@ -91,8 +91,12 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
 fn logMsg(level: Level, comptime fmt: []const u8, args: anytype) void {
     if (@intFromEnum(level) < @intFromEnum(min_level)) return;
 
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
     var buf: [8192]u8 = undefined;
-    var w = platform.File.stderr().writer(&buf);
+    var w = std.Io.File.stderr().writer(io, &buf);
     const out = &w.interface;
 
     switch (log_format) {

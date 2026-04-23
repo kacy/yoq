@@ -32,8 +32,12 @@ pub var stderr_write_failures: usize = 0;
 
 /// write formatted output to stdout. tracks failures but doesn't panic.
 pub fn write(comptime fmt: []const u8, args: anytype) void {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
     var buf: [4096]u8 = undefined;
-    var w = platform.File.stdout().writer(&buf);
+    var w = std.Io.File.stdout().writer(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stdout_write_failures += 1;
@@ -47,8 +51,12 @@ pub fn write(comptime fmt: []const u8, args: anytype) void {
 
 /// write formatted output to stderr. tracks failures but doesn't panic.
 pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
     var buf: [4096]u8 = undefined;
-    var w = platform.File.stderr().writer(&buf);
+    var w = std.Io.File.stderr().writer(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stderr_write_failures += 1;
@@ -347,7 +355,7 @@ const TokenTestBackup = struct {
     }
 };
 
-var token_test_mutex: platform.Mutex = .{};
+var token_test_mutex: std.Io.Mutex = .init;
 
 fn backupExistingToken() ?TokenTestBackup {
     var backup: TokenTestBackup = .{
@@ -447,8 +455,8 @@ test "invalid container names" {
 }
 
 test "generateAndSaveToken produces valid 64-char hex string" {
-    token_test_mutex.lock();
-    defer token_test_mutex.unlock();
+    token_test_mutex.lockUncancelable(std.testing.io);
+    defer token_test_mutex.unlock(std.testing.io);
 
     const backup = backupExistingToken() orelse return;
     defer backup.restore();
@@ -467,8 +475,8 @@ test "generateAndSaveToken produces valid 64-char hex string" {
 }
 
 test "readApiToken round-trip with generateAndSaveToken" {
-    token_test_mutex.lock();
-    defer token_test_mutex.unlock();
+    token_test_mutex.lockUncancelable(std.testing.io);
+    defer token_test_mutex.unlock(std.testing.io);
 
     const backup = backupExistingToken() orelse return;
     defer backup.restore();
@@ -488,8 +496,8 @@ test "readApiToken round-trip with generateAndSaveToken" {
 }
 
 test "readApiToken returns null for missing file" {
-    token_test_mutex.lock();
-    defer token_test_mutex.unlock();
+    token_test_mutex.lockUncancelable(std.testing.io);
+    defer token_test_mutex.unlock(std.testing.io);
 
     const backup = backupExistingToken() orelse return;
     defer backup.restore();
@@ -499,8 +507,8 @@ test "readApiToken returns null for missing file" {
 }
 
 test "readApiToken rejects weak file permissions" {
-    token_test_mutex.lock();
-    defer token_test_mutex.unlock();
+    token_test_mutex.lockUncancelable(std.testing.io);
+    defer token_test_mutex.unlock(std.testing.io);
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;

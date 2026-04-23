@@ -130,11 +130,7 @@ fn resolveAccountEmail(
     domain: []const u8,
     explicit_email: ?[]const u8,
 ) ![]u8 {
-    const env_email = platform.getEnvVarOwned(alloc, "YOQ_ACME_EMAIL") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        error.OutOfMemory => return error.OutOfMemory,
-        else => null,
-    };
+    const env_email = lookupEnvOwned(alloc, "YOQ_ACME_EMAIL") catch return error.OutOfMemory;
     errdefer if (env_email) |email| alloc.free(email);
     return resolveAccountEmailWithFallback(alloc, domain, explicit_email, env_email);
 }
@@ -206,4 +202,9 @@ fn resolveAccountEmailForTest(
 ) ![]u8 {
     const owned_env_email = if (env_email) |email| try alloc.dupe(u8, email) else null;
     return resolveAccountEmailWithFallback(alloc, domain, explicit_email, owned_env_email);
+}
+
+fn lookupEnvOwned(alloc: std.mem.Allocator, name: [:0]const u8) error{OutOfMemory}!?[]u8 {
+    const value = std.c.getenv(name.ptr) orelse return null;
+    return try alloc.dupe(u8, std.mem.span(value));
 }

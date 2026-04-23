@@ -18,7 +18,7 @@ const common = @import("../common.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
-var active_rollout_mu: platform.Mutex = .{};
+var active_rollout_mu: std.Io.Mutex = .init;
 var active_rollouts: std.StringHashMapUnmanaged(void) = .empty;
 
 const ResumeSeed = struct {
@@ -143,8 +143,8 @@ fn isTerminalStatus(status: @import("../../../manifest/update/common.zig").Deplo
 }
 
 fn markClusterRolloutActive(id: []const u8) !void {
-    active_rollout_mu.lock();
-    defer active_rollout_mu.unlock();
+    active_rollout_mu.lockUncancelable(std.Options.debug_io);
+    defer active_rollout_mu.unlock(std.Options.debug_io);
 
     const entry = try active_rollouts.getOrPut(std.heap.page_allocator, id);
     if (!entry.found_existing) {
@@ -153,8 +153,8 @@ fn markClusterRolloutActive(id: []const u8) !void {
 }
 
 fn markClusterRolloutInactive(id: []const u8) void {
-    active_rollout_mu.lock();
-    defer active_rollout_mu.unlock();
+    active_rollout_mu.lockUncancelable(std.Options.debug_io);
+    defer active_rollout_mu.unlock(std.Options.debug_io);
 
     if (active_rollouts.fetchRemove(id)) |entry| {
         std.heap.page_allocator.free(entry.key);
@@ -162,8 +162,8 @@ fn markClusterRolloutInactive(id: []const u8) void {
 }
 
 pub fn isClusterRolloutActive(id: []const u8) bool {
-    active_rollout_mu.lock();
-    defer active_rollout_mu.unlock();
+    active_rollout_mu.lockUncancelable(std.Options.debug_io);
+    defer active_rollout_mu.unlock(std.Options.debug_io);
     return active_rollouts.contains(id);
 }
 
@@ -232,7 +232,7 @@ pub const ClusterApplyBackend = struct {
 
             if (failed_targets > batch_failed_before) break;
             if (strategy.delay_between_batches > 0 and batch_end < self.requests.len) {
-                platform.sleep(@as(u64, strategy.delay_between_batches) * std.time.ns_per_s);
+                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(strategy.delay_between_batches)), .awake) catch unreachable;
             }
             batch_start = batch_end;
             first_batch = false;
@@ -1088,7 +1088,7 @@ fn resolveTargetReadinessStates(
 
         if (remaining == 0) return states;
         if (platform.nanoTimestamp() >= deadline_ns) break;
-        platform.sleep(100 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
     }
 
     return states;
@@ -1904,7 +1904,7 @@ test "resolveTargetReadinessStates waits for paused rollout control to resume" {
 
     const Resumer = struct {
         fn run() void {
-            platform.sleep(150 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
             store.updateDeploymentRolloutControlState("dep-pause", "active") catch {};
         }
     };
@@ -1982,7 +1982,7 @@ test "resolveTargetReadinessStates exits when paused rollout is canceled" {
 
     const Canceler = struct {
         fn run() void {
-            platform.sleep(150 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
             store.updateDeploymentRolloutControlState("dep-cancel", "cancel_requested") catch {};
         }
     };
@@ -2064,7 +2064,7 @@ test "finalizeBatchTargets honors paused rollout resume before cutover" {
 
     const Resumer = struct {
         fn run(db: *sqlite.Db) void {
-            platform.sleep(150 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
             db.exec("UPDATE assignments SET status = 'running' WHERE id = 'new-web';", .{}, .{}) catch {};
             store.updateDeploymentRolloutControlState("dep-resume", "active") catch {};
         }
@@ -2204,7 +2204,7 @@ test "finalizeBatchTargets discards scheduled targets when paused rollout is can
 
     const Canceler = struct {
         fn run() void {
-            platform.sleep(150 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
             store.updateDeploymentRolloutControlState("dep-cancel-finalize", "cancel_requested") catch {};
         }
     };

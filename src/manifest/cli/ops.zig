@@ -1349,7 +1349,7 @@ pub fn runWorker(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !vo
     }
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.getCwd(&cwd_buf) catch "app";
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     writeErr("running worker {s}...\n", .{name});

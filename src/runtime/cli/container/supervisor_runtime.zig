@@ -76,7 +76,7 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
         if (attach) {
             writeErr("container {s} exited ({d}), restarting in {d}ms...\n", .{ id, last_exit, backoff_ms });
         }
-        platform.sleep(@as(u64, backoff_ms) * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(backoff_ms)), .awake) catch unreachable;
         backoff_ms = @min(std.math.mul(u32, backoff_ms, 2) catch 30_000, 30_000);
         first_start = false;
     }
@@ -85,7 +85,7 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
 }
 
 pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
-    const exe_path = platform.selfExePathAlloc(alloc) catch return ContainerError.OutOfMemory;
+    const exe_path = readSelfExePathAlloc(io, alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
 
     const child = std.process.spawn(io, .{
@@ -98,7 +98,7 @@ pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) Con
         return ContainerError.ProcessNotFound;
     };
 
-    platform.sleep(100 * std.time.ns_per_ms);
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
 
     if (process.sendSignal(child.id orelse return ContainerError.ProcessNotFound, 0)) |_| {
         return;
@@ -117,7 +117,7 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
-            platform.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
         } else |_| {
             return;
         }
@@ -128,7 +128,7 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     attempts = 0;
     while (attempts < 40) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
-            platform.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
         } else |_| {
             return;
         }
@@ -169,4 +169,23 @@ pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator)
 
     const exit_code = superviseSavedRun(id, &cfg, false);
     std.process.exit(exit_code);
+}
+
+fn readSelfExePathAlloc(io: std.Io, alloc: std.mem.Allocator) ![:0]u8 {
+    var size: usize = 256;
+    while (size <= 64 * 1024) : (size *= 2) {
+        const buffer = try alloc.alloc(u8, size);
+        defer alloc.free(buffer);
+
+        const path_len = std.Io.Dir.readLinkAbsolute(io, "/proc/self/exe", buffer) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            error.AccessDenied => return error.AccessDenied,
+            error.NameTooLong => continue,
+            else => return error.Unexpected,
+        };
+        if (path_len < buffer.len) {
+            return alloc.dupeZ(u8, buffer[0..path_len]);
+        }
+    }
+    return error.NameTooLong;
 }

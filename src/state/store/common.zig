@@ -12,18 +12,18 @@ pub const StoreError = error{
 };
 
 var global_db: ?sqlite.Db = null;
-var db_mutex: platform.Mutex = .{};
-var test_db_lifetime_mutex: platform.Mutex = .{};
+var db_mutex: std.Io.Mutex = .init;
+var test_db_lifetime_mutex: std.Io.Mutex = .init;
 
 pub fn initTestDb() StoreError!void {
     // The in-memory test DB is global process state. Hold an exclusive
     // lifetime lock until deinitTestDb() so concurrent tests can't reset the
     // database out from under each other.
-    test_db_lifetime_mutex.lock();
-    errdefer test_db_lifetime_mutex.unlock();
+    test_db_lifetime_mutex.lockUncancelable(std.Options.debug_io);
+    errdefer test_db_lifetime_mutex.unlock(std.Options.debug_io);
 
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     if (global_db) |*db| {
         db.deinit();
@@ -43,22 +43,22 @@ pub fn initTestDb() StoreError!void {
 }
 
 pub fn deinitTestDb() void {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     if (global_db) |*db| {
         db.deinit();
         global_db = null;
     }
 
-    test_db_lifetime_mutex.unlock();
+    test_db_lifetime_mutex.unlock(std.Options.debug_io);
 }
 
 pub fn getDb() StoreError!*sqlite.Db {
     if (global_db != null) return &global_db.?;
 
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     if (global_db != null) return &global_db.?;
 
@@ -79,8 +79,8 @@ pub fn getDb() StoreError!*sqlite.Db {
 }
 
 pub fn closeDb() void {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     if (global_db) |*db| {
         db.deinit();

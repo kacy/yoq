@@ -30,11 +30,12 @@ pub const InitError = error{
 /// entry point — checks file existence, detects TTY, gathers answers,
 /// generates and writes the manifest file.
 pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
+    const io = std.Options.debug_io;
+
     // check if file already exists (unless --force)
     if (!opts.force) {
         if (platform.cwd().statFile(opts.output_path)) |_| {
-            const stderr = platform.File.stderr().textWriter();
-            stderr.print("{s} already exists (use -f to specify a different path)\n", .{opts.output_path}) catch {};
+            writeToStderr(io, "{s} already exists (use -f to specify a different path)\n", .{opts.output_path});
             return InitError.FileExists;
         } else |_| {
             // file doesn't exist — good
@@ -44,7 +45,7 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
     const is_tty = platform.isatty(std.posix.STDIN_FILENO);
 
     const answers = if (is_tty)
-        gatherInteractive(alloc) orelse return InitError.CwdFailed
+        gatherInteractive(io, alloc) orelse return InitError.CwdFailed
     else
         gatherDefaults(alloc) orelse return InitError.CwdFailed;
 
@@ -57,12 +58,10 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
     }) catch return InitError.WriteFailed;
 
     if (is_tty) {
-        const stderr = platform.File.stderr().textWriter();
-        stderr.print("\ncreated {s}\n\n  yoq up        start services\n  yoq up --dev  start with hot reload\n", .{opts.output_path}) catch {};
+        writeToStderr(io, "\ncreated {s}\n\n  yoq up        start services\n  yoq up --dev  start with hot reload\n", .{opts.output_path});
     } else {
         // non-interactive: just print the path to stdout
-        const stdout = platform.File.stdout().textWriter();
-        stdout.print("{s}\n", .{opts.output_path}) catch {};
+        writeToStdout(io, "{s}\n", .{opts.output_path});
     }
 }
 
@@ -75,15 +74,15 @@ fn defaultProjectName(alloc: std.mem.Allocator) ?[]const u8 {
 }
 
 /// run the 4 interactive prompts
-fn gatherInteractive(alloc: std.mem.Allocator) ?Answers {
+fn gatherInteractive(io: std.Io, alloc: std.mem.Allocator) ?Answers {
     const default_project = defaultProjectName(alloc) orelse return null;
-    var buf: [256]u8 = undefined;
-    const stdin = platform.File.stdin().textReader();
+    var stdin_buf: [256]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
 
-    const project = prompt(stdin, &buf, "project name", default_project);
-    const service = prompt(stdin, &buf, "service name", "app");
-    const image = prompt(stdin, &buf, "image", "nginx:latest");
-    const port = promptPort(stdin, &buf, "port", "none");
+    const project = prompt(io, &stdin_reader.interface, "project name", default_project);
+    const service = prompt(io, &stdin_reader.interface, "service name", "app");
+    const image = prompt(io, &stdin_reader.interface, "image", "nginx:latest");
+    const port = promptPort(io, &stdin_reader.interface, "port", "none");
 
     // dupe answers so they outlive the read buffer
     return .{
@@ -106,11 +105,10 @@ fn gatherDefaults(alloc: std.mem.Allocator) ?Answers {
 }
 
 /// display `? label (default): `, read a line, return default on empty/EOF
-fn prompt(reader: anytype, buf: []u8, label: []const u8, default: []const u8) []const u8 {
-    const stderr = platform.File.stderr().textWriter();
-    stderr.print("? {s} ({s}): ", .{ label, default }) catch {};
+fn prompt(io: std.Io, reader: *std.Io.Reader, label: []const u8, default: []const u8) []const u8 {
+    writeToStderr(io, "? {s} ({s}): ", .{ label, default });
 
-    const line = reader.readUntilDelimiterOrEof(buf, '\n') catch return default;
+    const line = reader.takeDelimiter('\n') catch return default;
     if (line) |l| {
         const trimmed = std.mem.trim(u8, l, " \t\r");
         if (trimmed.len == 0) return default;
@@ -120,20 +118,33 @@ fn prompt(reader: anytype, buf: []u8, label: []const u8, default: []const u8) []
 }
 
 /// prompt that parses a port number, returns null for "none"
-fn promptPort(reader: anytype, buf: []u8, label: []const u8, default: []const u8) ?u16 {
-    const stderr = platform.File.stderr().textWriter();
-    stderr.print("? {s} ({s}): ", .{ label, default }) catch {};
+fn promptPort(io: std.Io, reader: *std.Io.Reader, label: []const u8, default: []const u8) ?u16 {
+    writeToStderr(io, "? {s} ({s}): ", .{ label, default });
 
-    const line = reader.readUntilDelimiterOrEof(buf, '\n') catch return null;
+    const line = reader.takeDelimiter('\n') catch return null;
     if (line) |l| {
         const trimmed = std.mem.trim(u8, l, " \t\r");
         if (trimmed.len == 0) return null; // user pressed Enter → "none"
         return std.fmt.parseInt(u16, trimmed, 10) catch {
-            stderr.print("  invalid port, using none\n", .{}) catch {};
+            writeToStderr(io, "  invalid port, using none\n", .{});
             return null;
         };
     }
     return null;
+}
+
+fn writeToStdout(io: std.Io, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &buf);
+    stdout_writer.interface.print(fmt, args) catch return;
+    stdout_writer.interface.flush() catch {};
+}
+
+fn writeToStderr(io: std.Io, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &buf);
+    stderr_writer.interface.print(fmt, args) catch return;
+    stderr_writer.interface.flush() catch {};
 }
 
 /// build the TOML manifest string from gathered answers

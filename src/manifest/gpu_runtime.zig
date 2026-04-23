@@ -106,7 +106,7 @@ fn createTopologyFile(alloc: Allocator, ib_result: gpu_mesh.IbDetectResult) ?[]c
         const path = std.fmt.bufPrint(
             &path_buf,
             "/tmp/yoq-nccl-topology-{x}.xml",
-            .{platform.randomInt(u64)},
+            .{randomU64()},
         ) catch return null;
 
         var file = platform.createFileAbsolute(path, .{ .exclusive = true }) catch |err| switch (err) {
@@ -132,6 +132,12 @@ fn createTopologyFile(alloc: Allocator, ib_result: gpu_mesh.IbDetectResult) ?[]c
 
     log.warn("failed to reserve unique NCCL topology file path", .{});
     return null;
+}
+
+fn randomU64() u64 {
+    var bytes: [8]u8 = undefined;
+    platform.randomBytes(&bytes);
+    return std.mem.readInt(u64, &bytes, .little);
 }
 
 test "appendEnvEntries parses null-separated env data" {

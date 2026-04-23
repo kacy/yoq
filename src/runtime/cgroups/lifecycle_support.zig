@@ -248,7 +248,7 @@ pub const Cgroup = struct {
         const max_attempts: u32 = 500;
         while (attempts < max_attempts) : (attempts += 1) {
             if (self.isEmpty()) break;
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
         }
 
         if (!self.isEmpty()) {

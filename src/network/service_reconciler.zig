@@ -550,7 +550,7 @@ fn bootstrapAuthoritativeLocked() void {
 
 fn auditLoop() void {
     while (audit_running.load(.acquire)) {
-        platform.sleep(audit_interval_secs * std.time.ns_per_s);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(audit_interval_secs)), .awake) catch unreachable;
         if (!audit_running.load(.acquire)) break;
         runAuditPassIfEnabled();
     }

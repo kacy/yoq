@@ -248,7 +248,7 @@ pub fn waitForShutdown(self: anytype, shutdown_requested: *const std.atomic.Valu
         }
         if (all_done) break;
 
-        platform.sleep(200 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(200), .awake) catch unreachable;
     }
 }
 
@@ -271,6 +271,6 @@ pub fn waitForRunning(self: anytype, idx: usize) bool {
         const now = @as(u64, @intCast(platform.nanoTimestamp()));
         if (now - start > timeout_ns) return false;
 
-        platform.sleep(100 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
     }
 }

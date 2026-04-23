@@ -472,7 +472,7 @@ fn initTestListenerSocket() !BoundTestListener {
     while (attempt < 50) : (attempt += 1) {
         const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
         errdefer platform.posix.close(fd);
@@ -482,13 +482,13 @@ fn initTestListenerSocket() !BoundTestListener {
         platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
             platform.posix.close(fd);
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
         platform.posix.listen(fd, 1) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
             platform.posix.close(fd);
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
@@ -497,7 +497,7 @@ fn initTestListenerSocket() !BoundTestListener {
         platform.posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
             platform.posix.close(fd);
-            platform.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 

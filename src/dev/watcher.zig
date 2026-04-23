@@ -177,7 +177,7 @@ pub const Watcher = struct {
 
         // debounce: wait for the editor to finish writing, then drain
         // any events that piled up during the wait
-        platform.sleep(debounce_ns);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(debounce_ns)), .awake) catch unreachable;
 
         // during drain, collect additional services that had events
         service_count = self.drainPendingMulti(services, service_count);
@@ -437,14 +437,14 @@ test "watch temp directory and detect file change" {
         watcher: *Watcher,
         services: [64]usize = undefined,
         count: usize = 0,
-        sem: platform.Semaphore = .{},
+        sem: std.Io.Semaphore = .{},
     };
     var ctx = Context{ .watcher = &w };
 
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(context: *Context) void {
             // signal that we're about to start watching
-            context.sem.post();
+            context.sem.post(std.testing.io);
             // wait for changes, collect up to 64 services
             const services_found = context.watcher.waitForChange(&context.services);
             context.count = services_found.len;
@@ -452,9 +452,9 @@ test "watch temp directory and detect file change" {
     }.run, .{&ctx});
 
     // wait for the watcher thread to signal it's ready
-    ctx.sem.wait();
+    ctx.sem.waitUncancelable(std.testing.io);
     // give extra time for the thread to enter the blocking read
-    platform.sleep(50 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
 
     // write a file to trigger the event
     var file = try platform.Dir.from(tmp.dir).createFile("test.txt", .{});

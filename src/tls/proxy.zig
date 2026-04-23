@@ -290,7 +290,7 @@ pub const TlsProxy = struct {
             var elapsed: u64 = 0;
             while (elapsed < config.check_interval_s and self.running.load(.acquire)) {
                 const step: u64 = @min(5, config.check_interval_s - elapsed);
-                platform.sleep(step * std.time.ns_per_s);
+                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(step)), .awake) catch unreachable;
                 elapsed += step;
             }
             if (!self.running.load(.acquire)) break;

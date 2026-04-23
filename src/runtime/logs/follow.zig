@@ -68,13 +68,20 @@ fn seekToEnd(file: platform.File) LogError!void {
 }
 
 fn drainNewBytes(file: platform.File, buf: []u8) bool {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
+    var out_buf: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &out_buf);
     var saw_bytes = false;
     while (true) {
         const bytes_read = file.read(buf) catch return saw_bytes;
         if (bytes_read == 0) break;
         saw_bytes = true;
-        platform.File.stdout().writeAll(buf[0..bytes_read]) catch return saw_bytes;
+        stdout_writer.interface.writeAll(buf[0..bytes_read]) catch return saw_bytes;
     }
+    stdout_writer.interface.flush() catch return saw_bytes;
     return saw_bytes;
 }
 

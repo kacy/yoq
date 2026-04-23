@@ -2,7 +2,7 @@ const std = @import("std");
 const platform = @import("platform");
 const paths = @import("lib/paths.zig");
 
-pub var contract_lock: platform.Mutex = .{};
+pub var contract_lock: std.Io.Mutex = .init;
 
 pub fn cleanupS3TestState() !void {
     var path_buf: [paths.max_path]u8 = undefined;

@@ -14,7 +14,7 @@ const TestLogLookupOverride = struct {
     container_id: []const u8,
 };
 
-var test_log_lookup_mutex: platform.Mutex = .{};
+var test_log_lookup_mutex: std.Io.Mutex = .init;
 var test_log_lookup_overrides: [8]TestLogLookupOverride = undefined;
 var test_log_lookup_override_len: usize = 0;
 
@@ -61,7 +61,7 @@ pub const LogServer = struct {
         while (self.running.load(.acquire)) {
             const client_fd = platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| switch (err) {
                 error.WouldBlock => {
-                    platform.sleep(50 * std.time.ns_per_ms);
+                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
                     continue;
                 },
                 else => return,
@@ -74,18 +74,18 @@ pub const LogServer = struct {
         var attempts: usize = 0;
         while (attempts < 1500) : (attempts += 1) {
             if (self.started.load(.acquire)) {
-                platform.sleep(250 * std.time.ns_per_ms);
+                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(250), .awake) catch unreachable;
                 return;
             }
-            platform.sleep(20 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(20), .awake) catch unreachable;
         }
         return error.ServerNotReady;
     }
 };
 
 pub fn setTestLogLookupOverride(app_name: []const u8, job_name: []const u8, rank: u32, container_id: []const u8) !void {
-    test_log_lookup_mutex.lock();
-    defer test_log_lookup_mutex.unlock();
+    test_log_lookup_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_log_lookup_mutex.unlock(std.Options.debug_io);
 
     for (test_log_lookup_overrides[0..test_log_lookup_override_len]) |*entry| {
         if (std.mem.eql(u8, entry.app_name, app_name) and std.mem.eql(u8, entry.job_name, job_name) and entry.rank == rank) {
@@ -104,8 +104,8 @@ pub fn setTestLogLookupOverride(app_name: []const u8, job_name: []const u8, rank
 }
 
 pub fn clearTestLogLookupOverride(app_name: []const u8, job_name: []const u8, rank: u32) void {
-    test_log_lookup_mutex.lock();
-    defer test_log_lookup_mutex.unlock();
+    test_log_lookup_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_log_lookup_mutex.unlock(std.Options.debug_io);
 
     var i: usize = 0;
     while (i < test_log_lookup_override_len) : (i += 1) {
@@ -119,8 +119,8 @@ pub fn clearTestLogLookupOverride(app_name: []const u8, job_name: []const u8, ra
 }
 
 fn findTestLogContainerId(app_name: []const u8, job_name: []const u8, rank: u32) ?[]const u8 {
-    test_log_lookup_mutex.lock();
-    defer test_log_lookup_mutex.unlock();
+    test_log_lookup_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_log_lookup_mutex.unlock(std.Options.debug_io);
 
     for (test_log_lookup_overrides[0..test_log_lookup_override_len]) |entry| {
         if (std.mem.eql(u8, entry.app_name, app_name) and std.mem.eql(u8, entry.job_name, job_name) and entry.rank == rank) {

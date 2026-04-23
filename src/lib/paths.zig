@@ -20,7 +20,7 @@ fn dataRoot(buf: *[max_path]u8) PathError![]const u8 {
             return PathError.PathTooLong;
     }
 
-    const home = platform.getenv("HOME") orelse return PathError.HomeDirNotFound;
+    const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else return PathError.HomeDirNotFound;
     return std.fmt.bufPrint(buf, "{s}/.local/share/yoq", .{home}) catch
         return PathError.PathTooLong;
 }

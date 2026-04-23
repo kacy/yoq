@@ -212,7 +212,7 @@ pub fn down(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
                 while (waited < 100) : (waited += 1) {
                     const result = process.wait(pid, true) catch break;
                     switch (result.status) {
-                        .running => platform.sleep(100 * std.time.ns_per_ms),
+                        .running => std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable,
                         else => break,
                     }
                 }

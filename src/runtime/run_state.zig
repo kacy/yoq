@@ -165,7 +165,7 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     errdefer alloc.free(port_maps);
     const limits = readLimits(input) catch |err| return mapReadError(err);
     const restart_raw = readByte(input) catch return RunStateError.ReadFailed;
-    const restart_policy: RestartPolicy = platform.intToEnum(RestartPolicy, restart_raw) catch
+    const restart_policy = std.enums.fromInt(RestartPolicy, restart_raw) orelse
         return RunStateError.InvalidFormat;
 
     return .{
@@ -295,7 +295,7 @@ fn readPortMaps(alloc: std.mem.Allocator, reader: anytype) ![]net_setup.PortMap 
             .container_port = try readInt(reader, u16),
         };
         const protocol_raw = try readByte(reader);
-        pm.protocol = platform.intToEnum(net_setup.Protocol, protocol_raw) catch
+        pm.protocol = std.enums.fromInt(net_setup.Protocol, protocol_raw) orelse
             return error.InvalidFormat;
     }
     return port_maps;

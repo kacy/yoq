@@ -106,7 +106,7 @@ pub fn waitForProcessExit(id: []const u8, pid: i32) bool {
         const cg = cgroups.Cgroup.open(id) catch return true;
         if (!cg.containsProcess(pid)) return true;
         process.sendSignal(pid, 0) catch return true;
-        platform.sleep(stop_poll_interval_ms * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(stop_poll_interval_ms)), .awake) catch unreachable;
     }
     return false;
 }

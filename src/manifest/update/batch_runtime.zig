@@ -72,7 +72,7 @@ pub fn waitForHealth(
         }
 
         if (all_healthy) return true;
-        platform.sleep(1 * std.time.ns_per_s);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(1), .awake) catch unreachable;
     }
 
     return false;

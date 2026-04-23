@@ -83,7 +83,7 @@ fn trainStart(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void 
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.getCwd(&cwd_buf) catch "app";
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -153,7 +153,7 @@ fn trainStatus(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.getCwd(&cwd_buf) catch "app";
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch {
@@ -325,7 +325,7 @@ fn loadTrainJobContextFromParsed(parsed: TrainArgs, alloc: std.mem.Allocator, co
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.getCwd(&cwd_buf) catch "app";
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     const ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -522,7 +522,7 @@ fn trainScale(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void 
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.getCwd(&cwd_buf) catch "app";
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
@@ -636,7 +636,7 @@ fn trainLogs(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     };
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.getCwd(&cwd_buf) catch "app";
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch "app";
     const app_name = std.fs.path.basename(cwd);
 
     const record = store.findAppContainer(alloc, app_name, hostname) catch |err| {

@@ -257,7 +257,7 @@ pub fn waitForAuthorizationValid(self: anytype, auth_url: []const u8) types.Acme
         if (std.mem.eql(u8, status, "valid")) return;
         if (std.mem.eql(u8, status, "invalid")) return types.AcmeError.ChallengeFailed;
 
-        platform.sleep(poll_interval_ns);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
     }
 
     return types.AcmeError.Timeout;
@@ -280,7 +280,7 @@ pub fn waitForOrderReady(self: anytype, order: *types.Order) types.AcmeError!voi
         }
         if (std.mem.eql(u8, snapshot.status, "invalid")) return types.AcmeError.OrderCreationFailed;
 
-        platform.sleep(poll_interval_ns);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
     }
 
     return types.AcmeError.Timeout;
@@ -399,7 +399,7 @@ fn waitForOrderValid(order: *types.Order, self: anytype) types.AcmeError!void {
         if (std.mem.eql(u8, snapshot.status, "valid") and order.cert_url != null) return;
         if (std.mem.eql(u8, snapshot.status, "invalid")) return types.AcmeError.FinalizeFailed;
 
-        platform.sleep(poll_interval_ns);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
     }
 
     return types.AcmeError.Timeout;

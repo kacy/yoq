@@ -28,7 +28,7 @@ pub var write_failures: std.atomic.Value(usize) = .init(0);
 
 /// mutex for thread-safe output. initialized explicitly to avoid
 /// relying on compile-time zero initialization.
-var write_mutex: platform.Mutex = platform.Mutex{};
+var write_mutex: std.Io.Mutex = .init;
 
 /// maximum formatted line length (excluding null terminator)
 const max_line_len = 8192;
@@ -38,6 +38,10 @@ const max_line_len = 8192;
 /// tracks write failures in atomic write_failures counter.
 /// handles long lines by truncating with a suffix indicator.
 pub fn writeLine(service_name: []const u8, color_idx: usize, line: []const u8) void {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
     const color = colors[color_idx % colors.len];
 
     // format the line with prefix
@@ -58,13 +62,13 @@ pub fn writeLine(service_name: []const u8, color_idx: usize, line: []const u8) v
         };
     };
 
-    write_mutex.lock();
-    defer write_mutex.unlock();
+    write_mutex.lockUncancelable(std.Options.debug_io);
+    defer write_mutex.unlock(std.Options.debug_io);
 
     // write to stderr (stdout is reserved for machine-readable output)
     // use a separate buffer for the writer to avoid reuse confusion
     var write_buf: [max_line_len]u8 = undefined;
-    var w = platform.File.stderr().writer(&write_buf);
+    var w = std.Io.File.stderr().writer(io, &write_buf);
     const out = &w.interface;
 
     out.writeAll(formatted) catch |e| {

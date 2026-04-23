@@ -176,8 +176,7 @@ test "assemble rootfs — empty layer list" {
 }
 
 test "create layer from empty dir returns null" {
-    const home = platform.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     // create a temp empty directory
@@ -197,8 +196,7 @@ fn requireLayerCreationTestHost() !void {
 
 test "create layer from dir — round trip" {
     try requireLayerCreationTestHost();
-    const home = platform.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     // create a temp directory with some files
@@ -235,8 +233,7 @@ test "create layer from dir — round trip" {
 
 test "create layer from dir — deterministic digest" {
     try requireLayerCreationTestHost();
-    const home = platform.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     // create two identical directories
@@ -267,8 +264,7 @@ test "create layer from dir — deterministic digest" {
 
 test "different content produces different layer digests" {
     try requireLayerCreationTestHost();
-    const home = platform.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     var tmp1 = std.testing.tmpDir(.{});
@@ -333,4 +329,8 @@ test "symlink target validation — deep escape attempt" {
     try std.testing.expect(isSafeSymlinkTarget("a/b/c/d/link", "../../../../root_file"));
     // one more ".." would escape
     try std.testing.expect(!isSafeSymlinkTarget("a/b/c/d/link", "../../../../../escape"));
+}
+
+fn hasHomeEnv() bool {
+    return std.c.getenv("HOME") != null;
 }

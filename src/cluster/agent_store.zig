@@ -29,7 +29,7 @@ pub const CachedAssignment = struct {
 };
 
 var global_db: ?sqlite.Db = null;
-var db_mutex: platform.Mutex = .{};
+var db_mutex: std.Io.Mutex = .init;
 
 const create_table_sql =
     \\CREATE TABLE IF NOT EXISTS cached_assignments (
@@ -54,8 +54,8 @@ pub fn init(data_dir: []const u8) !void {
 
 /// initialize the agent cache database at a specific file path.
 pub fn initWithPath(file_path: []const u8) !void {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     if (global_db != null) return;
 
@@ -85,8 +85,8 @@ pub fn initWithPath(file_path: []const u8) !void {
 
 /// initialize with an in-memory database for testing.
 pub fn initTestDb() !void {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     var db = sqlite.Db.init(.{
         .mode = .Memory,
@@ -104,8 +104,8 @@ fn getDb() !*sqlite.Db {
 
 /// insert or update a cached assignment.
 pub fn upsertAssignment(assignment: CachedAssignment) !void {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     const db = try getDb();
     db.exec(
@@ -140,8 +140,8 @@ pub fn listPendingAssignments(alloc: Allocator) ![]CachedAssignment {
 }
 
 fn queryAssignments(alloc: Allocator, comptime query: []const u8) ![]CachedAssignment {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     const db = try getDb();
 
@@ -183,8 +183,8 @@ fn queryAssignments(alloc: Allocator, comptime query: []const u8) ![]CachedAssig
 
 /// remove a cached assignment by ID.
 pub fn removeAssignment(id: []const u8) !void {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     const db = try getDb();
     db.exec(
@@ -196,8 +196,8 @@ pub fn removeAssignment(id: []const u8) !void {
 
 /// update the status of a cached assignment.
 pub fn updateStatus(id: []const u8, status: []const u8) !void {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     const db = try getDb();
     db.exec(
@@ -209,8 +209,8 @@ pub fn updateStatus(id: []const u8, status: []const u8) !void {
 
 /// close the database connection.
 pub fn closeDb() void {
-    db_mutex.lock();
-    defer db_mutex.unlock();
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    defer db_mutex.unlock(std.Options.debug_io);
 
     if (global_db) |*db| {
         db.deinit();

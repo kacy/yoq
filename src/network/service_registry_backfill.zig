@@ -17,7 +17,7 @@ pub const Snapshot = struct {
     }
 };
 
-var mutex: platform.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var runs_total: u64 = 0;
 var services_created_total: u64 = 0;
 var endpoints_created_total: u64 = 0;
@@ -27,8 +27,8 @@ var last_error: ?[]const u8 = null;
 pub fn runIfEnabled() void {
     if (rollout.mode() == .legacy) return;
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     runs_total += 1;
     last_run_at = platform.timestamp();
@@ -41,8 +41,8 @@ pub fn runIfEnabled() void {
 }
 
 pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return .{
         .enabled = rollout.mode() != .legacy,
@@ -55,8 +55,8 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
 }
 
 pub fn resetForTest() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     runs_total = 0;
     services_created_total = 0;
     endpoints_created_total = 0;

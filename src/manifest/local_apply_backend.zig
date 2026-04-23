@@ -833,7 +833,7 @@ fn waitHealthyIfSupported(
 
 fn maybeDelayBetweenBatches(delay_seconds: u32, should_delay: bool) void {
     if (!should_delay or delay_seconds == 0) return;
-    platform.sleep(@as(u64, delay_seconds) * std.time.ns_per_s);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(delay_seconds)), .awake) catch unreachable;
 }
 
 fn replacementFailureOutcome(
@@ -1086,7 +1086,7 @@ const LocalApplyBackend = struct {
                         }
                     }
                     if (remaining == 0) return results;
-                    platform.sleep(100 * std.time.ns_per_ms);
+                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
                 }
                 return results;
             }

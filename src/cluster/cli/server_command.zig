@@ -320,7 +320,7 @@ pub fn initServer(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !v
 fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
     while (node.running.load(.acquire)) {
         if (!node.isLeader()) {
-            platform.sleep(200 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(200), .awake) catch unreachable;
             continue;
         }
 
@@ -331,6 +331,6 @@ fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
             log.warn("cluster rollout recovery pass failed: {}", .{err});
         };
 
-        platform.sleep(500 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(500), .awake) catch unreachable;
     }
 }
