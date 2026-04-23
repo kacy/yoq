@@ -49,6 +49,7 @@ pub fn detectProcfs() ?DetectResult {
     }
 
     if (result.count > 0) {
+        sortGpusByPciBusId(result.gpus[0..result.count]);
         log.info("GPU: detected {d} GPU(s) via procfs", .{result.count});
         return result;
     }
@@ -99,6 +100,14 @@ pub fn detectSysfs() ?DetectResult {
         return result;
     }
     return null;
+}
+
+fn sortGpusByPciBusId(gpus: []GpuInfo) void {
+    std.mem.sort(GpuInfo, gpus, {}, struct {
+        fn lessThan(_: void, a: GpuInfo, b: GpuInfo) bool {
+            return std.mem.order(u8, a.getPciBusId(), b.getPciBusId()) == .lt;
+        }
+    }.lessThan);
 }
 
 pub fn emptyDetectResult(source: DetectSource, nvml: ?NvmlHandle) DetectResult {

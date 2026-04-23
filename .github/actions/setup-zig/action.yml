@@ -30,6 +30,12 @@ runs:
           ${{ runner.os }}-${{ inputs.cache-prefix }}-${{ inputs.zig-version }}-
           ${{ runner.os }}-${{ inputs.cache-prefix }}-
 
+    - name: ensure zig cache directories
+      shell: bash
+      run: |
+        mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
+        mkdir -p "${ZIG_LOCAL_CACHE_DIR:-.zig-cache}/tmp"
+
     - name: print zig version
       shell: bash
       run: zig version
