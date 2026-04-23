@@ -153,7 +153,12 @@ jobs:
         shell: bash
         run: |
           git diff -- src/network/bpf > "$RUNNER_TEMP/bpf-diff.patch" || true
+          git status --porcelain -- src/network/bpf >> "$RUNNER_TEMP/bpf-diff.patch"
           git diff --exit-code -- src/network/bpf
+          if git status --porcelain -- src/network/bpf | grep -q .; then
+            git status --porcelain -- src/network/bpf
+            exit 1
+          fi
 
       - name: upload bpf diff
         if: failure()

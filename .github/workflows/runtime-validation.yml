@@ -108,7 +108,9 @@ jobs:
 
       - name: record generated bpf diff
         shell: bash
-        run: git diff -- src/network/bpf > "$RUNNER_TEMP/runtime-bpf-diff.patch" || true
+        run: |
+          git diff -- src/network/bpf > "$RUNNER_TEMP/runtime-bpf-diff.patch" || true
+          git status --porcelain -- src/network/bpf >> "$RUNNER_TEMP/runtime-bpf-diff.patch"
 
       - name: upload bpf runtime diff
         uses: actions/upload-artifact@v4
