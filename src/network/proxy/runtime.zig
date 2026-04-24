@@ -11,6 +11,14 @@ const service_rollout = @import("../service_rollout.zig");
 
 pub const max_routes_in_status = 16;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
+fn nowRealMilliseconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds();
+}
+
 pub const RouteDegradedReason = enum {
     none,
     service_state,
@@ -455,20 +463,20 @@ pub fn recordEndpointFailure(endpoint_id: []const u8, cb_policy: proxy_policy.Ci
             }
             if (proxy_policy.shouldTripCircuit(cb_policy, circuit.consecutive_failures)) {
                 circuit.state = .open;
-                circuit.opened_at_ms = platform.milliTimestamp();
+                circuit.opened_at_ms = nowRealMilliseconds();
                 circuit.half_open_in_flight = false;
                 circuit_trips_total += 1;
             }
         },
         .half_open => {
             circuit.state = .open;
-            circuit.opened_at_ms = platform.milliTimestamp();
+            circuit.opened_at_ms = nowRealMilliseconds();
             circuit.half_open_in_flight = false;
             circuit.consecutive_failures = cb_policy.failure_threshold;
             circuit_trips_total += 1;
         },
         .open => {
-            circuit.opened_at_ms = platform.milliTimestamp();
+            circuit.opened_at_ms = nowRealMilliseconds();
             circuit.half_open_in_flight = false;
         },
     }
@@ -481,7 +489,7 @@ pub fn recordRouteFailure(route_name: []const u8, kind: RouteFailureKind) void {
     const state = ensureRouteStatusLocked(route_name) orelse return;
     state.degraded_reason = degradedReasonForFailure(kind);
     state.last_failure_kind = kind;
-    state.last_failure_at = platform.timestamp();
+    state.last_failure_at = nowRealSeconds();
 }
 
 pub fn recordRouteRecovered(route_name: []const u8) void {
@@ -649,7 +657,7 @@ pub fn resolveUpstreamWithPolicy(alloc: std.mem.Allocator, service_name: []const
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
 
-    const now_ms = platform.milliTimestamp();
+    const now_ms = nowRealMilliseconds();
     const target_port = service.http_proxy_target_port;
     for (endpoints.items) |endpoint| {
         const port: u16 = target_port orelse if (endpoint.port < 0) 0 else @intCast(endpoint.port);
@@ -912,7 +920,7 @@ fn syncLocked() !void {
     routes = next_routes;
     pruneRouteStatusesLocked();
     running = next_configured_services > 0;
-    last_sync_at = if (next_configured_services > 0) platform.timestamp() else null;
+    last_sync_at = if (next_configured_services > 0) nowRealSeconds() else null;
 }
 
 fn deinitRoutesLocked() void {

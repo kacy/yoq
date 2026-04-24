@@ -19,6 +19,10 @@ const cli = @import("../lib/cli.zig");
 
 const writeErr = cli.writeErr;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 pub const CronScheduler = struct {
     alloc: std.mem.Allocator,
     crons: []const spec.Cron,
@@ -32,7 +36,7 @@ pub const CronScheduler = struct {
         const next_runs = try alloc.alloc(i64, crons.len);
 
         // schedule first run of each cron at now + interval
-        const now = platform.timestamp();
+        const now = nowRealSeconds();
         for (crons, 0..) |c, i| {
             next_runs[i] = now + @as(i64, @intCast(c.every));
         }
@@ -75,7 +79,7 @@ pub const CronScheduler = struct {
 
     fn schedulerLoop(self: *CronScheduler) void {
         while (self.running.load(.acquire)) {
-            const now = platform.timestamp();
+            const now = nowRealSeconds();
 
             // find the soonest cron that's due
             var earliest_idx: ?usize = null;
@@ -129,7 +133,7 @@ pub const CronScheduler = struct {
             }
 
             // reschedule
-            self.next_runs[idx] = platform.timestamp() + @as(i64, @intCast(cron.every));
+            self.next_runs[idx] = nowRealSeconds() + @as(i64, @intCast(cron.every));
         }
     }
 };
@@ -164,7 +168,7 @@ test "CronScheduler init sets next_runs" {
     defer sched.deinit();
 
     // next_runs should be set to now + interval
-    const now = platform.timestamp();
+    const now = nowRealSeconds();
     try std.testing.expect(sched.next_runs[0] >= now);
     try std.testing.expect(sched.next_runs[0] <= now + 3600);
     try std.testing.expect(sched.next_runs[1] >= now);
@@ -193,7 +197,7 @@ test "CronScheduler starts and stops" {
     defer sched.deinit();
 
     // set next_run far in the future so the loop just sleeps
-    sched.next_runs[0] = platform.timestamp() + 999999;
+    sched.next_runs[0] = nowRealSeconds() + 999999;
 
     sched.start();
     try std.testing.expect(sched.running.load(.acquire));

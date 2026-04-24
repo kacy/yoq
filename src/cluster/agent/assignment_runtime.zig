@@ -16,6 +16,14 @@ const agent_store = @import("../agent_store.zig");
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
+fn nowAwakeNanoseconds() i128 {
+    return @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds());
+}
+
 pub const GangInfo = struct {
     rank: u32,
     world_size: u32,
@@ -44,7 +52,7 @@ pub fn reconcile(self: anytype) void {
     };
     defer resp.deinit(self.alloc);
 
-    const now = platform.timestamp();
+    const now = nowRealSeconds();
     var iter = json_helpers.extractJsonObjects(resp.body);
     while (iter.next()) |obj| {
         const assignment_id = extractJsonString(obj, "id") orelse continue;
@@ -290,7 +298,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         .pid = null,
         .exit_code = null,
         .app_name = meta.app_name,
-        .created_at = platform.timestamp(),
+        .created_at = nowRealSeconds(),
     }) catch {
         log.warn("failed to save container record for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
@@ -341,7 +349,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = platform.timestamp(),
+        .created_at = nowRealSeconds(),
     };
 
     log.info("starting container {s} for assignment {s}", .{ container_id, assignment_id });
@@ -411,12 +419,12 @@ fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, m
     manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return .invalid;
     manifest_health.startChecker();
 
-    const deadline_ns = platform.nanoTimestamp() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
+    const deadline_ns = nowAwakeNanoseconds() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
     defer {
         const final_status = manifest_health.getStatus(service_name) orelse .starting;
         if (final_status != .healthy) manifest_health.unregisterService(service_name);
     }
-    while (platform.nanoTimestamp() < deadline_ns) {
+    while (nowAwakeNanoseconds() < deadline_ns) {
         switch (manifest_health.getStatus(service_name) orelse .starting) {
             .healthy => return .healthy,
             .unhealthy => return .unhealthy,

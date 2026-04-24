@@ -7,6 +7,10 @@ const json_helpers = @import("../../lib/json_helpers.zig");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]const u8) types.BuildError!types.BuildResult {
     const config_json = buildConfigJson(alloc, state) catch return types.BuildError.ImageStoreFailed;
     defer alloc.free(config_json);
@@ -45,7 +49,7 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
         .manifest_digest = owned_digest,
         .config_digest = config_digest_str,
         .total_size = @intCast(state.total_size),
-        .created_at = platform.timestamp(),
+        .created_at = nowRealSeconds(),
     }) catch |err| {
         log.warn("failed to save built image record: {}", .{err});
     };

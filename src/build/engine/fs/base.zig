@@ -18,6 +18,10 @@ const types = @import("../types.zig");
 
 const signal_exit_base: u8 = 128;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 pub fn processFrom(
     alloc: std.mem.Allocator,
     state: *types.BuildState,
@@ -54,7 +58,7 @@ pub fn processFrom(
         .manifest_digest = result.manifest_digest,
         .config_digest = pulled_config_str,
         .total_size = @intCast(result.total_size),
-        .created_at = platform.timestamp(),
+        .created_at = nowRealSeconds(),
     }) catch |err| {
         log.warn("failed to save base image record: {}", .{err});
     };

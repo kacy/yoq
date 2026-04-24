@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const http = @import("../../http.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const cluster_config = @import("../../../cluster/config.zig");
@@ -12,6 +11,10 @@ const Response = common.Response;
 const RouteContext = common.RouteContext;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
+
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
 
 pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
@@ -122,7 +125,7 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
             .gpu_model = gpu_model_str,
             .gpu_vram_mb = if (gpu_vram_val) |v| @intCast(@max(0, v)) else 0,
         },
-        platform.timestamp(),
+        nowRealSeconds(),
         .{
             .node_id = assigned_node_id,
             .agent_api_port = if (agent_api_port) |port| @intCast(port) else null,
@@ -243,7 +246,7 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
             .gpu_used = @intCast(@max(0, gpu_used)),
             .gpu_health = if (gpu_health_str) |s| agent_types.AgentResources.GpuHealthBuf.fromSlice(s) else .{},
         },
-        platform.timestamp(),
+        nowRealSeconds(),
     );
 
     const db = node.stateMachineDb();

@@ -18,6 +18,14 @@ const common = @import("../common.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
+fn nowAwakeNanoseconds() i128 {
+    return @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds());
+}
+
 var active_rollout_mu: std.Io.Mutex = .init;
 var active_rollouts: std.StringHashMapUnmanaged(void) = .empty;
 
@@ -372,7 +380,7 @@ pub const ClusterApplyBackend = struct {
                     owned_id,
                     gp.agent_id,
                     req.request,
-                    platform.timestamp(),
+                    nowRealSeconds(),
                     gp,
                 ) catch return ClusterApplyError.InternalError;
 
@@ -433,7 +441,7 @@ pub const ClusterApplyBackend = struct {
             owned_id,
             placement.agent_id,
             req.request,
-            platform.timestamp(),
+            nowRealSeconds(),
         ) catch return ClusterApplyError.InternalError;
 
         _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
@@ -989,7 +997,7 @@ fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assign
             assignment.id,
             assignment.agent_id,
             request,
-            platform.timestamp(),
+            nowRealSeconds(),
             .{
                 .agent_id = assignment.agent_id,
                 .rank = @intCast(assignment.gang_rank.?),
@@ -1006,7 +1014,7 @@ fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assign
             assignment.id,
             assignment.agent_id,
             request,
-            platform.timestamp(),
+            nowRealSeconds(),
         ) catch return ClusterApplyError.InternalError;
 
     _ = node.propose(sql) catch return ClusterApplyError.NotLeader;
@@ -1069,7 +1077,7 @@ fn resolveTargetReadinessStates(
     errdefer alloc.free(states);
     @memset(states, .pending);
 
-    const deadline_ns: i128 = platform.nanoTimestamp() + (@as(i128, timeout_secs) * std.time.ns_per_s);
+    const deadline_ns: i128 = nowAwakeNanoseconds() + (@as(i128, timeout_secs) * std.time.ns_per_s);
     var remaining = targets.len;
 
     while (remaining > 0) {
@@ -1087,7 +1095,7 @@ fn resolveTargetReadinessStates(
         }
 
         if (remaining == 0) return states;
-        if (platform.nanoTimestamp() >= deadline_ns) break;
+        if (nowAwakeNanoseconds() >= deadline_ns) break;
         std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
     }
 
@@ -1306,7 +1314,7 @@ fn reconcileCronSchedules(db: *sqlite.Db, alloc: std.mem.Allocator, app_name: []
         alloc,
         app_name,
         schedules.items,
-        platform.timestamp(),
+        nowRealSeconds(),
     );
 }
 

@@ -16,6 +16,10 @@ const http = @import("../../http.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 const TestProxyLogsOverride = struct {
     path: []const u8,
     body: []const u8,
@@ -209,7 +213,7 @@ fn handleTrainingScale(
     if (rec == null) return common.notFound();
     defer rec.?.deinit(alloc);
 
-    store.updateTrainingJobGpusInDb(node.stateMachineDb(), rec.?.id, @intCast(gpus), platform.timestamp()) catch return common.internalError();
+    store.updateTrainingJobGpusInDb(node.stateMachineDb(), rec.?.id, @intCast(gpus), nowRealSeconds()) catch return common.internalError();
     return scheduleTrainingJob(alloc, app_name, job_name, rec.?.id, @intCast(gpus), ctx);
 }
 
@@ -229,7 +233,7 @@ fn handleTrainingStateChange(
         error.NotLeader => common.notLeader(alloc, node),
         else => common.internalError(),
     };
-    store.updateTrainingJobStateInDb(node.stateMachineDb(), rec.?.id, new_state, platform.timestamp()) catch return common.internalError();
+    store.updateTrainingJobStateInDb(node.stateMachineDb(), rec.?.id, new_state, nowRealSeconds()) catch return common.internalError();
     const updated = store.getTrainingJobInDb(node.stateMachineDb(), alloc, rec.?.id) catch return common.internalError();
     defer updated.deinit(alloc);
     return formatTrainingRecordResponse(
@@ -385,7 +389,7 @@ fn scheduleTrainingJob(
         generateClusterTrainingJobId(alloc, app_name, job_name) catch return common.internalError();
     defer alloc.free(job_id);
 
-    const now = platform.timestamp();
+    const now = nowRealSeconds();
     const existing = store.findTrainingJobInDb(node.stateMachineDb(), alloc, app_name, job_name) catch return common.internalError();
     defer if (existing) |rec| rec.deinit(alloc);
     const restarts = if (existing) |rec| rec.restart_count else 0;
@@ -429,7 +433,7 @@ fn scheduleTrainingJob(
     defer freeApplyOutcomePayloads(alloc, outcome);
 
     const final_state = if (outcome.failed == 0 and outcome.placed > 0) "running" else "failed";
-    store.updateTrainingJobStateInDb(node.stateMachineDb(), job_id, final_state, platform.timestamp()) catch return common.internalError();
+    store.updateTrainingJobStateInDb(node.stateMachineDb(), job_id, final_state, nowRealSeconds()) catch return common.internalError();
 
     const rec = store.getTrainingJobInDb(node.stateMachineDb(), alloc, job_id) catch return common.internalError();
     defer rec.deinit(alloc);
@@ -484,7 +488,7 @@ fn freeApplyOutcomePayloads(alloc: std.mem.Allocator, outcome: apply_release.App
 }
 
 fn generateClusterTrainingJobId(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "cluster-{s}-{s}-{d}", .{ app_name, job_name, platform.timestamp() });
+    return std.fmt.allocPrint(alloc, "cluster-{s}-{s}-{d}", .{ app_name, job_name, nowRealSeconds() });
 }
 
 fn formatTrainingRecordResponse(

@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const http = std.http;
 
 const csr_mod = @import("../csr.zig");
@@ -11,6 +10,10 @@ const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
 const poll_interval_ns = 2 * std.time.ns_per_s;
 const poll_timeout_ns = 60 * std.time.ns_per_s;
+
+fn nowAwakeNanoseconds() i128 {
+    return @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds());
+}
 
 const HttpResponse = struct {
     status: http.Status,
@@ -244,8 +247,8 @@ pub fn respondToChallenge(self: anytype, challenge_url: []const u8) types.AcmeEr
 }
 
 pub fn waitForAuthorizationValid(self: anytype, auth_url: []const u8) types.AcmeError!void {
-    const start = platform.nanoTimestamp();
-    while (platform.nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = nowAwakeNanoseconds();
+    while (nowAwakeNanoseconds() - start < pollTimeoutNs()) {
         var response = postAsGet(self, auth_url, types.AcmeError.AuthorizationFetchFailed) catch
             return types.AcmeError.AuthorizationFetchFailed;
         defer response.deinit();
@@ -264,8 +267,8 @@ pub fn waitForAuthorizationValid(self: anytype, auth_url: []const u8) types.Acme
 }
 
 pub fn waitForOrderReady(self: anytype, order: *types.Order) types.AcmeError!void {
-    const start = platform.nanoTimestamp();
-    while (platform.nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = nowAwakeNanoseconds();
+    while (nowAwakeNanoseconds() - start < pollTimeoutNs()) {
         var snapshot = fetchOrderSnapshot(self, order.order_url, types.AcmeError.OrderCreationFailed) catch
             return types.AcmeError.OrderCreationFailed;
         defer snapshot.deinit();
@@ -385,8 +388,8 @@ pub fn httpPost(self: anytype, url: []const u8, body: []const u8) ![]u8 {
 }
 
 fn waitForOrderValid(order: *types.Order, self: anytype) types.AcmeError!void {
-    const start = platform.nanoTimestamp();
-    while (platform.nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = nowAwakeNanoseconds();
+    while (nowAwakeNanoseconds() - start < pollTimeoutNs()) {
         var snapshot = fetchOrderSnapshot(self, order.order_url, types.AcmeError.FinalizeFailed) catch
             return types.AcmeError.FinalizeFailed;
         defer snapshot.deinit();
