@@ -9,6 +9,7 @@
 // never contend on the raft lock for heartbeat writes.
 
 const std = @import("std");
+const platform = @import("platform");
 const agent_types = @import("agent_types.zig");
 const registry = @import("registry.zig");
 
@@ -22,18 +23,20 @@ pub const Entry = struct {
 };
 
 pub const HeartbeatBatcher = struct {
-    mu: std.Thread.Mutex,
-    buffer: std.AutoArrayHashMap([12]u8, Entry),
+    alloc: Allocator,
+    mu: std.Io.Mutex,
+    buffer: std.AutoArrayHashMapUnmanaged([12]u8, Entry),
 
     pub fn init(alloc: Allocator) HeartbeatBatcher {
         return .{
-            .mu = .{},
-            .buffer = std.AutoArrayHashMap([12]u8, Entry).init(alloc),
+            .alloc = alloc,
+            .mu = .init,
+            .buffer = .empty,
         };
     }
 
     pub fn deinit(self: *HeartbeatBatcher) void {
-        self.buffer.deinit();
+        self.buffer.deinit(self.alloc);
     }
 
     /// record a heartbeat from an agent. deduplicates by agent ID,
@@ -44,10 +47,10 @@ pub const HeartbeatBatcher = struct {
         var key: [12]u8 = undefined;
         @memcpy(&key, id[0..12]);
 
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
 
-        self.buffer.put(key, .{
+        self.buffer.put(self.alloc, key, .{
             .id = key,
             .resources = resources,
             .timestamp = now,
@@ -60,8 +63,8 @@ pub const HeartbeatBatcher = struct {
         // swap entries out under lock
         var entries: []Entry = &.{};
         {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(std.Options.debug_io);
+            defer self.mu.unlock(std.Options.debug_io);
 
             if (self.buffer.count() == 0) return null;
 

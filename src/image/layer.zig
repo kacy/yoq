@@ -11,6 +11,7 @@
 // std.tar for tar extraction/creation. no external dependencies.
 
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const blob_store = @import("store.zig");
 const layer_create = @import("layer/create.zig");
@@ -34,9 +35,9 @@ fn layerPath(digest: blob_store.Digest, buf: *[max_path]u8) LayerError![]const u
 }
 
 fn writeTarEntry(
-    dir: std.fs.Dir,
+    dir: platform.Dir,
     tar_writer: *std.tar.Writer,
-    entry: std.fs.Dir.Walker.Entry,
+    entry: platform.Dir.Walker.Entry,
 ) !void {
     return layer_create.writeTarEntry(dir, tar_writer, entry);
 }
@@ -99,7 +100,7 @@ test "symlink target validation — unsafe targets rejected" {
 
 test "writeTarEntry rejects unsupported entry kinds" {
     var tar_writer: std.tar.Writer = undefined;
-    const entry = std.fs.Dir.Walker.Entry{
+    const entry = platform.Dir.Walker.Entry{
         .dir = undefined,
         .basename = "fifo",
         .path = "fifo",
@@ -141,9 +142,9 @@ test "extract layer — stale cache dir is not trusted without completion marker
     const path = try layerPath(digest, &path_buf);
     defer layer_path.deleteExtractedLayer(&digest_hex);
 
-    try std.fs.cwd().makePath(path);
+    try platform.cwd().makePath(path);
     try std.testing.expectError(LayerError.BlobNotFound, extractLayer(alloc, digest_str));
-    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(path, .{}));
+    try std.testing.expectError(error.FileNotFound, platform.cwd().access(path, .{}));
 }
 
 test "extract layer — corrupted blob is rejected before extraction" {
@@ -155,11 +156,11 @@ test "extract layer — corrupted blob is rejected before extraction" {
     var blob_path_buf: [max_path]u8 = undefined;
     const blob_path = try blob_store.blobPath(digest, &blob_path_buf);
     if (std.fs.path.dirname(blob_path)) |parent| {
-        try std.fs.cwd().makePath(parent);
+        try platform.cwd().makePath(parent);
     }
 
     defer blob_store.removeBlob(digest);
-    const file = try std.fs.cwd().createFile(blob_path, .{ .truncate = true });
+    const file = try platform.cwd().createFile(blob_path, .{ .truncate = true });
     try file.writeAll("corrupted blob");
     file.close();
 
@@ -175,8 +176,7 @@ test "assemble rootfs — empty layer list" {
 }
 
 test "create layer from empty dir returns null" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     // create a temp empty directory
@@ -184,7 +184,7 @@ test "create layer from empty dir returns null" {
     defer tmp_dir.cleanup();
 
     var path_buf: [max_path]u8 = undefined;
-    const dir_path = try tmp_dir.dir.realpath(".", &path_buf);
+    const dir_path = try platform.Dir.from(tmp_dir.dir).realpath(".", &path_buf);
 
     const result = try createLayerFromDir(alloc, dir_path);
     try std.testing.expect(result == null);
@@ -192,14 +192,11 @@ test "create layer from empty dir returns null" {
 
 fn requireLayerCreationTestHost() !void {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
-    // Skip slow I/O tests in CI or when YOQ_SKIP_SLOW_TESTS is set
-    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 }
 
 test "create layer from dir — round trip" {
     try requireLayerCreationTestHost();
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     // create a temp directory with some files
@@ -207,12 +204,12 @@ test "create layer from dir — round trip" {
     defer tmp_dir.cleanup();
 
     // create test files
-    try tmp_dir.dir.writeFile(.{ .sub_path = "hello.txt", .data = "hello world\n" });
-    try tmp_dir.dir.makeDir("subdir");
-    try tmp_dir.dir.writeFile(.{ .sub_path = "subdir/nested.txt", .data = "nested content\n" });
+    try platform.Dir.from(tmp_dir.dir).writeFile(.{ .sub_path = "hello.txt", .data = "hello world\n" });
+    try platform.Dir.from(tmp_dir.dir).makeDir("subdir");
+    try platform.Dir.from(tmp_dir.dir).writeFile(.{ .sub_path = "subdir/nested.txt", .data = "nested content\n" });
 
     var path_buf: [max_path]u8 = undefined;
-    const dir_path = try tmp_dir.dir.realpath(".", &path_buf);
+    const dir_path = try platform.Dir.from(tmp_dir.dir).realpath(".", &path_buf);
 
     const result = (try createLayerFromDir(alloc, dir_path)) orelse
         return error.ExpectedNonNull;
@@ -236,24 +233,23 @@ test "create layer from dir — round trip" {
 
 test "create layer from dir — deterministic digest" {
     try requireLayerCreationTestHost();
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     // create two identical directories
     var tmp1 = std.testing.tmpDir(.{});
     defer tmp1.cleanup();
-    try tmp1.dir.writeFile(.{ .sub_path = "file.txt", .data = "same content" });
+    try platform.Dir.from(tmp1.dir).writeFile(.{ .sub_path = "file.txt", .data = "same content" });
 
     var path_buf1: [max_path]u8 = undefined;
-    const dir1 = try tmp1.dir.realpath(".", &path_buf1);
+    const dir1 = try platform.Dir.from(tmp1.dir).realpath(".", &path_buf1);
 
     var tmp2 = std.testing.tmpDir(.{});
     defer tmp2.cleanup();
-    try tmp2.dir.writeFile(.{ .sub_path = "file.txt", .data = "same content" });
+    try platform.Dir.from(tmp2.dir).writeFile(.{ .sub_path = "file.txt", .data = "same content" });
 
     var path_buf2: [max_path]u8 = undefined;
-    const dir2 = try tmp2.dir.realpath(".", &path_buf2);
+    const dir2 = try platform.Dir.from(tmp2.dir).realpath(".", &path_buf2);
 
     const result1 = (try createLayerFromDir(alloc, dir1)).?;
     const result2 = (try createLayerFromDir(alloc, dir2)).?;
@@ -268,23 +264,22 @@ test "create layer from dir — deterministic digest" {
 
 test "different content produces different layer digests" {
     try requireLayerCreationTestHost();
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     var tmp1 = std.testing.tmpDir(.{});
     defer tmp1.cleanup();
-    try tmp1.dir.writeFile(.{ .sub_path = "file.txt", .data = "content alpha" });
+    try platform.Dir.from(tmp1.dir).writeFile(.{ .sub_path = "file.txt", .data = "content alpha" });
 
     var path_buf1: [max_path]u8 = undefined;
-    const dir1 = try tmp1.dir.realpath(".", &path_buf1);
+    const dir1 = try platform.Dir.from(tmp1.dir).realpath(".", &path_buf1);
 
     var tmp2 = std.testing.tmpDir(.{});
     defer tmp2.cleanup();
-    try tmp2.dir.writeFile(.{ .sub_path = "file.txt", .data = "content beta" });
+    try platform.Dir.from(tmp2.dir).writeFile(.{ .sub_path = "file.txt", .data = "content beta" });
 
     var path_buf2: [max_path]u8 = undefined;
-    const dir2 = try tmp2.dir.realpath(".", &path_buf2);
+    const dir2 = try platform.Dir.from(tmp2.dir).realpath(".", &path_buf2);
 
     const result1 = (try createLayerFromDir(alloc, dir1)).?;
     const result2 = (try createLayerFromDir(alloc, dir2)).?;
@@ -334,4 +329,8 @@ test "symlink target validation — deep escape attempt" {
     try std.testing.expect(isSafeSymlinkTarget("a/b/c/d/link", "../../../../root_file"));
     // one more ".." would escape
     try std.testing.expect(!isSafeSymlinkTarget("a/b/c/d/link", "../../../../../escape"));
+}
+
+fn hasHomeEnv() bool {
+    return std.c.getenv("HOME") != null;
 }

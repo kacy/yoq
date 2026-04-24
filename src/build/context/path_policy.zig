@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 pub const SourcePathError = error{
     NotFound,
@@ -21,14 +22,14 @@ pub fn validateContextSourcePath(
 ) SourcePathError!void {
     if (containsPathTraversal(src_path)) return error.PathTraversal;
 
-    const root_real = std.fs.cwd().realpathAlloc(alloc, context_dir) catch return error.NotFound;
+    const root_real = platform.cwd().realpathAlloc(alloc, context_dir) catch return error.NotFound;
     defer alloc.free(root_real);
 
     const joined = std.fs.path.join(alloc, &.{ context_dir, src_path }) catch
         return error.ValidationFailed;
     defer alloc.free(joined);
 
-    const source_real = std.fs.cwd().realpathAlloc(alloc, joined) catch |err| {
+    const source_real = platform.cwd().realpathAlloc(alloc, joined) catch |err| {
         return switch (err) {
             error.FileNotFound => error.NotFound,
             else => error.ValidationFailed,

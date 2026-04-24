@@ -195,7 +195,7 @@ test "base64url no padding" {
 test "buildJwk produces valid JSON" {
     const alloc = std.testing.allocator;
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     const jwk = try buildJwk(alloc, kp.public_key);
     defer alloc.free(jwk);
 
@@ -209,7 +209,7 @@ test "buildJwk produces valid JSON" {
 test "jwkThumbprint is deterministic" {
     const alloc = std.testing.allocator;
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
 
     const t1 = try jwkThumbprint(alloc, kp.public_key);
     defer alloc.free(t1);
@@ -222,7 +222,7 @@ test "jwkThumbprint is deterministic" {
 test "jwkThumbprint is base64url" {
     const alloc = std.testing.allocator;
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     const thumbprint = try jwkThumbprint(alloc, kp.public_key);
     defer alloc.free(thumbprint);
 
@@ -235,7 +235,7 @@ test "jwkThumbprint is base64url" {
 test "signJws with JWK header" {
     const alloc = std.testing.allocator;
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
 
     const jws = try signJws(
         alloc,
@@ -256,7 +256,7 @@ test "signJws with JWK header" {
 test "signJws with kid header" {
     const alloc = std.testing.allocator;
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
 
     const jws = try signJws(
         alloc,
@@ -276,7 +276,7 @@ test "signJws with kid header" {
 test "signJws signature verifies" {
     const alloc = std.testing.allocator;
 
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     const payload = "test payload";
     const url = "https://example.com/acme";
     const nonce = "nonce1";

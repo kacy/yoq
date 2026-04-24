@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const bridge = @import("../bridge.zig");
 const ip = @import("../ip.zig");
@@ -89,7 +90,7 @@ pub const ObservedMapping = struct {
     port: u16,
 };
 
-var mutex: std.Thread.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var applied_mappings: std.ArrayList(ObservedMapping) = .empty;
 var running: bool = false;
 var configured_services: u32 = 0;
@@ -109,8 +110,8 @@ var use_test_actual_mappings: bool = false;
 var test_actual_mappings: std.ArrayList(ObservedMapping) = .empty;
 
 pub fn resetForTest() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     clearAppliedMappingsLocked();
     running = false;
@@ -132,27 +133,27 @@ pub fn resetForTest() void {
 }
 
 pub fn setBridgeIpForTest(address: [4]u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     test_bridge_ip = address;
 }
 
 pub fn setPortMapperAvailableForTest(available: ?bool) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     test_port_mapper_available = available;
 }
 
 pub fn setMappingHooksForTest(apply_hook: ?MappingApplyHook, remove_hook: ?MappingRemoveHook) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     test_mapping_apply_hook = apply_hook;
     test_mapping_remove_hook = remove_hook;
 }
 
 pub fn setActualMappingsForTest(mappings: ?[]const ObservedMapping) !void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     test_actual_mappings.clearAndFree(std.heap.page_allocator);
     use_test_actual_mappings = mappings != null;
@@ -163,8 +164,8 @@ pub fn setActualMappingsForTest(mappings: ?[]const ObservedMapping) !void {
 }
 
 pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     const readiness = try summarizeServiceReadinessLocked(alloc);
     const applied_count = try appliedMappingCountLocked(alloc);
@@ -189,29 +190,29 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
 }
 
 pub fn previewDesiredMappings(alloc: std.mem.Allocator) !std.ArrayList(DesiredMapping) {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return buildDesiredMappingsLocked(alloc);
 }
 
 pub fn snapshotServiceStatus(alloc: std.mem.Allocator, service_name: []const u8) !ServiceStatus {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return buildServiceStatusLocked(alloc, service_name);
 }
 
 pub fn snapshotVipCutoverReadiness(alloc: std.mem.Allocator) !VipCutoverReadiness {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return summarizeVipCutoverReadinessLocked(alloc);
 }
 
 pub fn syncIfEnabled() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     sync_attempts_total += 1;
     syncLocked() catch |err| {
@@ -283,7 +284,7 @@ fn syncLocked() !void {
 
     desired_mappings = @intCast(desired.items.len);
     running = true;
-    last_sync_at = std.time.timestamp();
+    last_sync_at = platform.timestamp();
 }
 
 fn buildDesiredMappingsLocked(alloc: std.mem.Allocator) !std.ArrayList(DesiredMapping) {

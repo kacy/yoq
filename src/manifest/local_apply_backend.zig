@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cli = @import("../lib/cli.zig");
 const apply_release = @import("apply_release.zig");
 const release_history = @import("release_history.zig");
@@ -89,9 +90,10 @@ const ReplacementFailureDetailBuilder = struct {
     fn toOwnedJson(self: *ReplacementFailureDetailBuilder) !?[]u8 {
         if (self.items.items.len == 0) return null;
 
-        var json_buf: std.ArrayList(u8) = .empty;
-        errdefer json_buf.deinit(self.alloc);
-        const writer = json_buf.writer(self.alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |detail, i| {
@@ -105,7 +107,7 @@ const ReplacementFailureDetailBuilder = struct {
             try writer.writeByte('}');
         }
         try writer.writeByte(']');
-        const owned = try json_buf.toOwnedSlice(self.alloc);
+        const owned = try json_buf_writer.toOwnedSlice();
         return owned;
     }
 };
@@ -179,9 +181,10 @@ const ReplacementRolloutTargetBuilder = struct {
     fn toOwnedJson(self: *ReplacementRolloutTargetBuilder) !?[]u8 {
         if (self.items.items.len == 0) return null;
 
-        var json_buf: std.ArrayList(u8) = .empty;
-        errdefer json_buf.deinit(self.alloc);
-        const writer = json_buf.writer(self.alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |target, i| {
@@ -197,7 +200,7 @@ const ReplacementRolloutTargetBuilder = struct {
             try writer.writeByte('}');
         }
         try writer.writeByte(']');
-        return try json_buf.toOwnedSlice(self.alloc);
+        return try json_buf_writer.toOwnedSlice();
     }
 };
 
@@ -260,7 +263,7 @@ pub const PreparedLocalApply = struct {
         service_reconciler.ensureDataPlaneReadyIfEnabled();
         service_reconciler.bootstrapIfEnabled();
         service_reconciler.startAuditLoopIfEnabled();
-        listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+        listener_runtime.setStateChangeHook(proxy_control_plane.refreshListenerStateIfEnabled);
         listener_runtime.startIfEnabled(self.alloc);
         proxy_control_plane.startSyncLoopIfEnabled();
         orchestrator.installSignalHandlers();
@@ -305,7 +308,7 @@ pub const PreparedLocalApply = struct {
                 if (vol.kind != .bind) continue;
 
                 var resolve_buf: [4096]u8 = undefined;
-                const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch |e| {
+                const abs_source = platform.cwd().realpath(vol.source, &resolve_buf) catch |e| {
                     writeErr("warning: failed to resolve path {s}: {}\n", .{ vol.source, e });
                     any_watch_failed = true;
                     continue;
@@ -830,7 +833,7 @@ fn waitHealthyIfSupported(
 
 fn maybeDelayBetweenBatches(delay_seconds: u32, should_delay: bool) void {
     if (!should_delay or delay_seconds == 0) return;
-    std.Thread.sleep(@as(u64, delay_seconds) * std.time.ns_per_s);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(delay_seconds)), .awake) catch unreachable;
 }
 
 fn replacementFailureOutcome(
@@ -1048,9 +1051,9 @@ const LocalApplyBackend = struct {
             ) ![]ReplacementHealthResult {
                 const results = try alloc.alloc(ReplacementHealthResult, indexes.len);
                 @memset(results, .timeout);
-                const deadline = @as(u64, @intCast(@max(0, std.time.timestamp()))) + timeout;
+                const deadline = @as(u64, @intCast(@max(0, platform.timestamp()))) + timeout;
                 var remaining = indexes.len;
-                while (@as(u64, @intCast(@max(0, std.time.timestamp()))) < deadline) {
+                while (@as(u64, @intCast(@max(0, platform.timestamp()))) < deadline) {
                     if (runner_self.awaitControl()) {
                         for (results) |*result| {
                             if (result.* == .timeout) {
@@ -1083,7 +1086,7 @@ const LocalApplyBackend = struct {
                         }
                     }
                     if (remaining == 0) return results;
-                    std.Thread.sleep(100 * std.time.ns_per_ms);
+                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
                 }
                 return results;
             }

@@ -8,7 +8,7 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const requireArg = cli.requireArg;
 
-pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
+pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
     const domain = requireArg(args, "usage: yoq cert rm <domain>\n");
 
     var opened = store_support.openCertStore(alloc) catch |err|

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
@@ -22,11 +23,11 @@ pub fn copyFiles(
         };
     };
 
-    var ctx_dir = std.fs.cwd().openDir(context_dir, .{}) catch
+    var ctx_dir = platform.cwd().openDir(context_dir, .{}) catch
         return types.ContextError.NotFound;
     defer ctx_dir.close();
 
-    var dst_dir = std.fs.cwd().openDir(layer_dir, .{}) catch
+    var dst_dir = platform.cwd().openDir(layer_dir, .{}) catch
         return types.ContextError.CopyFailed;
     defer dst_dir.close();
 
@@ -56,9 +57,9 @@ pub fn copyFiles(
 }
 
 fn copyDirectory(
-    src_dir: std.fs.Dir,
+    src_dir: platform.Dir,
     src_sub: []const u8,
-    dst_dir: std.fs.Dir,
+    dst_dir: platform.Dir,
     dst_sub: []const u8,
 ) types.ContextError!void {
     var source = src_dir.openDir(src_sub, .{ .iterate = true }) catch

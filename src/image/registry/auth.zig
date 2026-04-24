@@ -83,7 +83,7 @@ pub fn parseAuthChallenge(head: std.http.Client.Response.Head) ?common.AuthChall
         var remaining = params;
 
         while (remaining.len > 0) {
-            remaining = std.mem.trimLeft(u8, remaining, " ,");
+            remaining = std.mem.trimStart(u8, remaining, " ,");
             if (remaining.len == 0) break;
 
             const eq_idx = std.mem.indexOfScalar(u8, remaining, '=') orelse break;

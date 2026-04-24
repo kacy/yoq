@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const spec = @import("../spec.zig");
@@ -34,11 +35,11 @@ const PreparedService = struct {
     gpu_indices_len: usize,
     mesh_support: ?gpu_runtime.MeshSupport,
 
-    fn init(orch: anytype, idx: usize) ?PreparedService {
+    fn init(io: std.Io, orch: anytype, idx: usize) ?PreparedService {
         const svc = orch.manifest.services[idx];
         const alloc = orch.alloc;
 
-        var img = service_runtime.resolveServiceImage(alloc, svc.image) orelse return null;
+        var img = service_runtime.resolveServiceImageWithIo(io, alloc, svc.image) orelse return null;
         errdefer img.deinit(alloc);
 
         var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, svc.command) catch {
@@ -144,7 +145,7 @@ const PreparedService = struct {
             .status = .created,
             .pid = null,
             .exit_code = null,
-            .created_at = std.time.timestamp(),
+            .created_at = platform.timestamp(),
         };
     }
 };
@@ -152,7 +153,10 @@ const PreparedService = struct {
 pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.atomic.Value(bool)) void {
     const svc = orch.manifest.services[idx];
 
-    var prepared = PreparedService.init(orch, idx) orelse {
+    var threaded_io = std.Io.Threaded.init(orch.alloc, .{});
+    defer threaded_io.deinit();
+
+    var prepared = PreparedService.init(threaded_io.io(), orch, idx) orelse {
         orch.states[idx].status = .failed;
         return;
     };
@@ -179,14 +183,14 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             .pid = null,
             .exit_code = null,
             .app_name = orch.app_name,
-            .created_at = std.time.timestamp(),
+            .created_at = platform.timestamp(),
         }) catch {
             orch.states[idx].status = .failed;
             return;
         };
 
         var c = prepared.createContainer(orch, idx, id, svc.name);
-        const start_time = std.time.nanoTimestamp();
+        const start_time = platform.nanoTimestamp();
 
         c.start() catch {
             cleanupContainerArtifacts(id);
@@ -203,7 +207,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         );
 
         const exit_code = c.wait() catch 255;
-        const run_duration_ns = std.time.nanoTimestamp() - start_time;
+        const run_duration_ns = platform.nanoTimestamp() - start_time;
         cleanupContainerArtifacts(id);
 
         if (shutdown_requested.load(.acquire)) break;
@@ -276,7 +280,7 @@ fn handleDevModeRestart(
             writeErr("restarting {s}...\n", .{service_name});
             return true;
         }
-        std.Thread.sleep(restart_poll_ms * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(restart_poll_ms)), .awake) catch unreachable;
     }
     return false;
 }
@@ -310,7 +314,7 @@ fn handleRestartPolicyExit(
         if (shutdown_requested.load(.acquire)) return false;
         const remaining = backoff_ms.* - slept_ms;
         const sleep_chunk: u64 = @min(remaining, restart_poll_ms);
-        std.Thread.sleep(sleep_chunk * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(sleep_chunk)), .awake) catch unreachable;
         slept_ms += sleep_chunk;
     }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const linux = std.os.linux;
 const syscall_util = @import("../../lib/syscall.zig");
 const log = @import("../../lib/log.zig");
@@ -142,7 +143,7 @@ fn createDeviceNodesAt(target_root: []const u8) void {
 }
 
 fn mkdirIfNeeded(path: []const u8) !void {
-    std.fs.cwd().makeDir(path) catch |e| switch (e) {
+    platform.cwd().makeDir(path) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };

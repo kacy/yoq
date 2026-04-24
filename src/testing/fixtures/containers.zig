@@ -8,6 +8,10 @@ const store = @import("../../state/store.zig");
 
 pub const ContainerRecord = store.ContainerRecord;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 /// Generate a valid 64-character hex container ID
 pub fn generateContainerId(allocator: std.mem.Allocator, prefix: u8) ![]const u8 {
     var buf: [65]u8 = undefined;
@@ -51,7 +55,7 @@ pub fn createRunningContainer(
         .ip_address = try alloc.dupe(u8, "10.0.0.1"),
         .veth_host = try alloc.dupe(u8, "veth0"),
         .app_name = try alloc.dupe(u8, "test-app"),
-        .created_at = std.time.timestamp(),
+        .created_at = nowRealSeconds(),
     };
 }
 
@@ -75,7 +79,7 @@ pub fn createStoppedContainer(
         .ip_address = null,
         .veth_host = null,
         .app_name = try alloc.dupe(u8, "test-app"),
-        .created_at = std.time.timestamp(),
+        .created_at = nowRealSeconds(),
     };
 }
 
@@ -99,7 +103,7 @@ pub fn createMinimalContainer(
         .ip_address = null,
         .veth_host = null,
         .app_name = null,
-        .created_at = std.time.timestamp(),
+        .created_at = nowRealSeconds(),
     };
 }
 

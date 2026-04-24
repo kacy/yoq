@@ -18,6 +18,7 @@
 // the raw sqlite database bytes.
 
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const db_runtime = @import("state_machine/db_runtime.zig");
 const types = @import("raft_types.zig");
@@ -357,7 +358,7 @@ test "takeSnapshot and restoreFromSnapshot round-trip" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
 
     // set up state machine with some data
     var sm_path_buf: [512]u8 = undefined;
@@ -526,7 +527,7 @@ test "snapshot round-trip preserves last_applied" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
 
     // create source state machine with data
     var sm_path_buf: [512]u8 = undefined;
@@ -573,7 +574,7 @@ test "init reloads persisted last_applied from disk" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = tmp.dir.realpath(".", &path_buf) catch return;
+    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
 
     var sm_path_buf: [512]u8 = undefined;
     const sm_path_slice = std.fmt.bufPrint(&sm_path_buf, "{s}/persisted.db", .{tmp_path}) catch return;

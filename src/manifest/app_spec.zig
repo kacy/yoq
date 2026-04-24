@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const spec = @import("spec.zig");
 const update_common = @import("update/common.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
@@ -197,9 +198,10 @@ pub const ApplicationSpec = struct {
     }
 
     pub fn toLegacyDeployJson(self: *const ApplicationSpec, alloc: std.mem.Allocator) ![]u8 {
-        var json_buf: std.ArrayList(u8) = .empty;
-        errdefer json_buf.deinit(alloc);
-        const writer = json_buf.writer(alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
 
         try writer.writeAll("{\"volume_app\":\"");
         try json_helpers.writeJsonEscaped(writer, self.app_name);
@@ -247,13 +249,14 @@ pub const ApplicationSpec = struct {
         }
 
         try writer.writeAll("]}");
-        return json_buf.toOwnedSlice(alloc);
+        return json_buf_writer.toOwnedSlice();
     }
 
     pub fn toApplyJson(self: *const ApplicationSpec, alloc: std.mem.Allocator) ![]u8 {
-        var json_buf: std.ArrayList(u8) = .empty;
-        errdefer json_buf.deinit(alloc);
-        const writer = json_buf.writer(alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
 
         try writer.writeAll("{\"app_name\":\"");
         try json_helpers.writeJsonEscaped(writer, self.app_name);
@@ -283,7 +286,7 @@ pub const ApplicationSpec = struct {
         }
 
         try writer.writeAll("]}");
-        return json_buf.toOwnedSlice(alloc);
+        return json_buf_writer.toOwnedSlice();
     }
 };
 

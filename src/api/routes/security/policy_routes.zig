@@ -7,6 +7,9 @@ const common = @import("../common.zig");
 
 const Response = common.Response;
 const extractJsonString = json_helpers.extractJsonString;
+const PolicyListContext = struct {
+    policies: []const store.NetworkPolicyRecord,
+};
 
 pub fn handleListPolicies(alloc: std.mem.Allocator) Response {
     var policies = store.listNetworkPolicies(alloc) catch return common.internalError();
@@ -15,25 +18,9 @@ pub fn handleListPolicies(alloc: std.mem.Allocator) Response {
         policies.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeByte('[') catch return common.internalError();
-    for (policies.items, 0..) |pol, i| {
-        if (i > 0) writer.writeByte(',') catch return common.internalError();
-        writer.writeAll("{\"source\":\"") catch return common.internalError();
-        json_helpers.writeJsonEscaped(writer, pol.source_service) catch return common.internalError();
-        writer.writeAll("\",\"target\":\"") catch return common.internalError();
-        json_helpers.writeJsonEscaped(writer, pol.target_service) catch return common.internalError();
-        writer.writeAll("\",\"action\":\"") catch return common.internalError();
-        json_helpers.writeJsonEscaped(writer, pol.action) catch return common.internalError();
-        writer.writeAll("\"}") catch return common.internalError();
-    }
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, PolicyListContext{
+        .policies = policies.items,
+    }, writePolicyListJson);
 }
 
 pub fn handleAddPolicy(alloc: std.mem.Allocator, request: http.Request) Response {
@@ -61,4 +48,19 @@ pub fn handleDeletePolicy(alloc: std.mem.Allocator, source: []const u8, target: 
     net_policy.syncPolicies(alloc);
 
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn writePolicyListJson(writer: *std.Io.Writer, ctx: PolicyListContext) !void {
+    try writer.writeByte('[');
+    for (ctx.policies, 0..) |policy, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"source\":\"");
+        try json_helpers.writeJsonEscaped(writer, policy.source_service);
+        try writer.writeAll("\",\"target\":\"");
+        try json_helpers.writeJsonEscaped(writer, policy.target_service);
+        try writer.writeAll("\",\"action\":\"");
+        try json_helpers.writeJsonEscaped(writer, policy.action);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
 }

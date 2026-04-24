@@ -1,12 +1,15 @@
 const std = @import("std");
-
 pub const rate_limit_per_sec: u32 = 10;
 pub const rate_limit_burst: u32 = 50;
 pub const rate_table_size: usize = 64;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 pub const RateLimiter = struct {
     entries: [rate_table_size]RateEntry,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     const RateEntry = struct {
         ip: u32,
@@ -25,17 +28,17 @@ pub const RateLimiter = struct {
     pub fn init() RateLimiter {
         return .{
             .entries = [_]RateEntry{empty_entry} ** rate_table_size,
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
     pub fn checkRate(self: *RateLimiter, ip: u32) bool {
-        return self.checkRateAt(ip, std.time.timestamp());
+        return self.checkRateAt(ip, nowRealSeconds());
     }
 
     pub fn checkRateAt(self: *RateLimiter, ip: u32, now: i64) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         const start_idx = @as(usize, ip *% 2654435761);
         var probe: usize = 0;
@@ -81,8 +84,8 @@ pub const RateLimiter = struct {
     }
 
     pub fn reset(self: *RateLimiter) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         self.entries = [_]RateEntry{empty_entry} ** rate_table_size;
     }
 };

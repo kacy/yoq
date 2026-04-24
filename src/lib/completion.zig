@@ -5,6 +5,7 @@
 // subcommand metadata live here to keep the completion concern isolated.
 
 const std = @import("std");
+const AppContext = @import("app_context.zig").AppContext;
 const cli = @import("cli.zig");
 const registry = @import("command_registry.zig");
 
@@ -131,7 +132,7 @@ fn findMeta(name: []const u8) ?*const CommandMeta {
 
 // -- handler --
 
-pub fn handler(args: *std.process.ArgIterator, _: std.mem.Allocator) !void {
+pub fn handler(args: *std.process.Args.Iterator, _: AppContext) !void {
     const shell = args.next() orelse {
         cli.writeErr("usage: yoq completion <bash|zsh|fish>\n", .{});
         return CompletionError.InvalidArgument;

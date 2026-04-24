@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 
 const log = @import("../lib/log.zig");
@@ -28,7 +29,7 @@ pub const ChallengeServer = struct {
 
     pub fn deinit(self: *ChallengeServer) void {
         self.stop();
-        posix.close(self.fd);
+        platform.posix.close(self.fd);
     }
 
     pub fn start(self: *ChallengeServer) void {
@@ -56,14 +57,14 @@ pub const ChallengeServer = struct {
             const poll_result = posix.poll(&poll_fds, 1000) catch continue;
             if (poll_result == 0) continue;
 
-            const client_fd = posix.accept(self.fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
+            const client_fd = platform.posix.accept(self.fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
                 if (err == error.WouldBlock) continue;
                 log.warn("acme challenge accept error: {}", .{err});
                 continue;
             };
 
             const thread = std.Thread.spawn(.{}, connectionHandler, .{ self.store, client_fd }) catch {
-                posix.close(client_fd);
+                platform.posix.close(client_fd);
                 continue;
             };
             thread.detach();
@@ -71,7 +72,7 @@ pub const ChallengeServer = struct {
     }
 
     fn connectionHandler(store: *proxy.ChallengeStore, client_fd: posix.fd_t) void {
-        defer posix.close(client_fd);
+        defer platform.posix.close(client_fd);
 
         var buf: [4096]u8 = undefined;
         const bytes_read = socket_support.readWithTimeout(client_fd, &buf, 5000) catch return;
@@ -93,7 +94,7 @@ pub const ChallengeServer = struct {
             key_auth.len,
             key_auth,
         }) catch return;
-        _ = posix.write(client_fd, response) catch |e| {
+        _ = platform.posix.write(client_fd, response) catch |e| {
             log.warn("acme challenge response write failed: {}", .{e});
         };
     }

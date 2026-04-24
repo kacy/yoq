@@ -4,6 +4,8 @@
 // through the `yoq gpu <topo|bench>` commands.
 
 const std = @import("std");
+const platform = @import("platform");
+const AppContext = @import("../lib/app_context.zig").AppContext;
 const cli_output = @import("../lib/cli_output.zig");
 const json_out = @import("../lib/json_output.zig");
 const detect = @import("detect.zig");
@@ -42,12 +44,12 @@ const Snapshot = struct {
     }
 };
 
-pub fn gpu(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn gpu(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const parsed = try parseGpuCommand(args);
 
     switch (parsed.subcommand) {
         .topo => topo(),
-        .bench => bench(alloc, parsed.bench_opts),
+        .bench => bench(ctx.alloc, parsed.bench_opts),
     }
 }
 
@@ -269,7 +271,7 @@ fn topoJson(snapshot: *Snapshot) void {
     w.flush();
 }
 
-fn parseGpuCommand(args: *std.process.ArgIterator) !ParsedGpuCommand {
+fn parseGpuCommand(args: *std.process.Args.Iterator) !ParsedGpuCommand {
     var subcmd: ?[]const u8 = null;
     var bench_opts = BenchOpts{};
 
@@ -320,7 +322,7 @@ fn parseGpuCommand(args: *std.process.ArgIterator) !ParsedGpuCommand {
 }
 
 fn parseRequiredValue(
-    args: *std.process.ArgIterator,
+    args: *std.process.Args.Iterator,
     flag: []const u8,
     comptime T: type,
     comptime invalid_fmt: []const u8,
@@ -398,16 +400,16 @@ fn formatGpuSm(info: *const detect.GpuInfo, buf: []u8) []const u8 {
 }
 
 fn formatGpuPeers(info: *const detect.GpuInfo, buf: []u8) []const u8 {
-    var stream = std.io.fixedBufferStream(buf);
+    var stream: std.Io.Writer = .fixed(buf);
 
     for (0..info.nvlink_peer_count) |i| {
         if (i > 0) {
-            stream.writer().writeByte(',') catch break;
+            stream.writeByte(',') catch break;
         }
-        std.fmt.format(stream.writer(), "{d}", .{info.nvlink_peers[i]}) catch break;
+        stream.print("{d}", .{info.nvlink_peers[i]}) catch break;
     }
 
-    const written = stream.getWritten();
+    const written = stream.buffered();
     return if (written.len > 0) written else "-";
 }
 

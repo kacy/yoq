@@ -19,7 +19,7 @@ pub fn parseCopyArgs(args: []const u8) types.CopyArgs {
         while (end < rest.len and rest[end] != ' ' and rest[end] != '\t') end += 1;
         from_stage = rest[0..end];
         trimmed = if (end < rest.len)
-            std.mem.trimLeft(u8, rest[end..], " \t")
+            std.mem.trimStart(u8, rest[end..], " \t")
         else
             "";
     }

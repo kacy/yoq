@@ -10,6 +10,7 @@
 // (which images are pulled, tags, etc.) lives in state/store.zig.
 
 const std = @import("std");
+const platform = @import("platform");
 const blob_runtime = @import("store/blob_runtime.zig");
 const digest_support = @import("store/digest_support.zig");
 const types = @import("store/types.zig");
@@ -110,8 +111,7 @@ test "digest parse — invalid" {
 }
 
 test "put and get blob" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
 
     const data = "test blob content for yoq store";
     const digest = try putBlob(data);
@@ -128,8 +128,7 @@ test "put and get blob" {
 }
 
 test "put blob is idempotent" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
 
     const data = "idempotent test blob";
     const d1 = try putBlob(data);
@@ -146,8 +145,7 @@ test "has blob returns false for missing" {
 }
 
 test "verify blob — valid blob passes" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
 
     const data = "verify blob test content";
     const digest = try putBlob(data);
@@ -157,8 +155,7 @@ test "verify blob — valid blob passes" {
 }
 
 test "verify blob — corrupted blob fails" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
 
     const data = "original content for corruption test";
     const digest = try putBlob(data);
@@ -166,7 +163,7 @@ test "verify blob — corrupted blob fails" {
 
     var path_buf: [max_path]u8 = undefined;
     const path = try blobPath(digest, &path_buf);
-    const file = try std.fs.cwd().createFile(path, .{});
+    const file = try platform.cwd().createFile(path, .{});
     defer file.close();
     try file.writeAll("corrupted data");
 
@@ -179,8 +176,7 @@ test "verify blob — missing blob returns false" {
 }
 
 test "putBlobDirect repairs corrupted existing blob" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
 
     const data = "repair corrupted blob content";
     const digest = try putBlob(data);
@@ -188,7 +184,7 @@ test "putBlobDirect repairs corrupted existing blob" {
 
     var path_buf: [max_path]u8 = undefined;
     const path = try blobPath(digest, &path_buf);
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    const file = try platform.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll("corrupted data");
     try std.testing.expect(!verifyBlob(digest));
@@ -208,8 +204,7 @@ test "remove blob — silently handles missing blob" {
 }
 
 test "listBlobsOnDisk returns stored blobs" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
     const alloc = std.testing.allocator;
 
     const d1 = try putBlob("blob one for list test");
@@ -235,8 +230,7 @@ test "listBlobsOnDisk returns stored blobs" {
 }
 
 test "getBlobSize returns correct size" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
 
     const data = "blob size test content";
     const digest = try putBlob(data);
@@ -258,8 +252,7 @@ test "blobAllocSize accepts blobs larger than 256 MiB" {
 }
 
 test "openBlob returns size and readable handle" {
-    const home = std.posix.getenv("HOME") orelse return;
-    _ = home;
+    if (!hasHomeEnv()) return;
 
     const data = "blob handle test content";
     const digest = putBlob(data) catch |err| switch (err) {
@@ -275,4 +268,8 @@ test "openBlob returns size and readable handle" {
     var read_buf: [64]u8 = undefined;
     const n = try blob.file.readAll(&read_buf);
     try std.testing.expectEqualStrings(data, read_buf[0..n]);
+}
+
+fn hasHomeEnv() bool {
+    return std.c.getenv("HOME") != null;
 }

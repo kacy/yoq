@@ -1,5 +1,4 @@
 const std = @import("std");
-
 pub const OutputMode = enum {
     human,
     json,
@@ -11,8 +10,12 @@ pub var stdout_write_failures: usize = 0;
 pub var stderr_write_failures: usize = 0;
 
 pub fn write(comptime fmt: []const u8, args: anytype) void {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
+    var w = std.Io.File.stdout().writer(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stdout_write_failures += 1;
@@ -25,8 +28,12 @@ pub fn write(comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
+    var w = std.Io.File.stderr().writer(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stderr_write_failures += 1;

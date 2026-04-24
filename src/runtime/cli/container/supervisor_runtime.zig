@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const container = @import("../../container.zig");
 const process = @import("../../process.zig");
 const run_state = @import("../../run_state.zig");
@@ -36,7 +37,7 @@ fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirr
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = std.time.timestamp(),
+        .created_at = platform.timestamp(),
         .runtime = .{ .mirror_output = mirror_output },
     };
 }
@@ -75,7 +76,7 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
         if (attach) {
             writeErr("container {s} exited ({d}), restarting in {d}ms...\n", .{ id, last_exit, backoff_ms });
         }
-        std.Thread.sleep(@as(u64, backoff_ms) * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(backoff_ms)), .awake) catch unreachable;
         backoff_ms = @min(std.math.mul(u32, backoff_ms, 2) catch 30_000, 30_000);
         first_start = false;
     }
@@ -83,23 +84,23 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
     return last_exit;
 }
 
-pub fn spawnSupervisor(alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
-    const exe_path = std.fs.selfExePathAlloc(alloc) catch return ContainerError.OutOfMemory;
+pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
+    const exe_path = readSelfExePathAlloc(io, alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
 
-    var child = std.process.Child.init(&.{ exe_path, "__run-supervisor", id }, alloc);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch |err| {
+    const child = std.process.spawn(io, .{
+        .argv = &.{ exe_path, "__run-supervisor", id },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| {
         writeErr("failed to spawn detached supervisor: {}\n", .{err});
         return ContainerError.ProcessNotFound;
     };
 
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
 
-    if (process.sendSignal(child.id, 0)) |_| {
+    if (process.sendSignal(child.id orelse return ContainerError.ProcessNotFound, 0)) |_| {
         return;
     } else |_| {
         writeErr("supervisor process exited immediately\n", .{});
@@ -116,7 +117,7 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
         } else |_| {
             return;
         }
@@ -127,7 +128,7 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     attempts = 0;
     while (attempts < 40) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
         } else |_| {
             return;
         }
@@ -137,13 +138,13 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     return ContainerError.StateUnknown;
 }
 
-fn forwardSignal(sig: c_int) callconv(.c) void {
+fn forwardSignal(sig: std.os.linux.SIG) callconv(.c) void {
     const pid = container.active_pid.load(.acquire);
     if (pid > 0) {
         _ = std.os.linux.syscall2(
             .kill,
             @as(usize, @bitCast(@as(isize, pid))),
-            @intCast(sig),
+            @intFromEnum(sig),
         );
     }
 }
@@ -158,7 +159,7 @@ pub fn installSignalHandlers() void {
     std.posix.sigaction(std.posix.SIG.TERM, &act, null);
 }
 
-pub fn runSupervisor(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const id = requireArg(args, "usage: yoq __run-supervisor <container-id>\n");
     var cfg = run_state.loadConfig(alloc, id) catch |err| {
         writeErr("failed to load container config for {s}: {}\n", .{ id, err });
@@ -168,4 +169,23 @@ pub fn runSupervisor(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !
 
     const exit_code = superviseSavedRun(id, &cfg, false);
     std.process.exit(exit_code);
+}
+
+fn readSelfExePathAlloc(io: std.Io, alloc: std.mem.Allocator) ![:0]u8 {
+    var size: usize = 256;
+    while (size <= 64 * 1024) : (size *= 2) {
+        const buffer = try alloc.alloc(u8, size);
+        defer alloc.free(buffer);
+
+        const path_len = std.Io.Dir.readLinkAbsolute(io, "/proc/self/exe", buffer) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            error.AccessDenied => return error.AccessDenied,
+            error.NameTooLong => continue,
+            else => return error.Unexpected,
+        };
+        if (path_len < buffer.len) {
+            return alloc.dupeZ(u8, buffer[0..path_len]);
+        }
+    }
+    return error.NameTooLong;
 }

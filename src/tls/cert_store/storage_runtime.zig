@@ -1,9 +1,14 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const secrets = @import("../../state/secrets.zig");
 const common = @import("common.zig");
 const key_support = @import("key_support.zig");
 const x509_parse = @import("x509_parse.zig");
+
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
 
 pub const CertStore = struct {
     db: *sqlite.Db,
@@ -41,7 +46,7 @@ pub const CertStore = struct {
         const not_after = x509_parse.parseExpiryFromPem(cert_pem) catch
             return common.CertError.InvalidCert;
 
-        const now: i64 = std.time.timestamp();
+        const now: i64 = nowRealSeconds();
         if (not_after <= now) return common.CertError.InvalidCert;
 
         const encrypted = secrets.encrypt(self.allocator, key_pem, self.key) catch
@@ -166,7 +171,7 @@ pub const CertStore = struct {
             .{domain},
         ) catch return common.CertError.ReadFailed) orelse return common.CertError.NotFound;
 
-        const threshold = std.time.timestamp() + (days * 86400);
+        const threshold = nowRealSeconds() + (days * 86400);
         return row.not_after <= threshold;
     }
 
@@ -175,7 +180,7 @@ pub const CertStore = struct {
             domain: sqlite.Text,
         };
 
-        const threshold = std.time.timestamp() + (days * 86400);
+        const threshold = nowRealSeconds() + (days * 86400);
         var results: std.ArrayList([]const u8) = .empty;
 
         var stmt = self.db.prepare(

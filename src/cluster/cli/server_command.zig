@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const api_server = @import("../../api/server.zig");
 const routes = @import("../../api/routes.zig");
@@ -25,7 +26,7 @@ const ServerCommandError = error{
     ConfigFailed,
 };
 
-pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn serve(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var port: u16 = 7700;
     var http_proxy_bind: [4]u8 = listener_runtime.default_bind_addr;
     var http_proxy_port: u16 = listener_runtime.default_listen_port;
@@ -81,7 +82,7 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
-    listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+    listener_runtime.setStateChangeHook(proxy_control_plane.refreshListenerStateIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
     defer listener_runtime.stop();
@@ -113,7 +114,7 @@ pub fn serve(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     server.run();
 }
 
-pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn initServer(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var node_id: u64 = 1;
     var raft_port: u16 = 9700;
     var api_port: u16 = 7700;
@@ -207,7 +208,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     service_reconciler.ensureDataPlaneReadyIfEnabled();
     service_reconciler.bootstrapIfEnabled();
     service_reconciler.startAuditLoopIfEnabled();
-    listener_runtime.setStateChangeHook(proxy_control_plane.refreshIfEnabled);
+    listener_runtime.setStateChangeHook(proxy_control_plane.refreshListenerStateIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
     listener_runtime.startIfEnabled(alloc);
     defer listener_runtime.stop();
@@ -319,7 +320,7 @@ pub fn initServer(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
 fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
     while (node.running.load(.acquire)) {
         if (!node.isLeader()) {
-            std.Thread.sleep(200 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(200), .awake) catch unreachable;
             continue;
         }
 
@@ -330,6 +331,6 @@ fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
             log.warn("cluster rollout recovery pass failed: {}", .{err});
         };
 
-        std.Thread.sleep(500 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(500), .awake) catch unreachable;
     }
 }

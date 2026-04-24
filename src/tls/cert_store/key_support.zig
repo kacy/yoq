@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const paths = @import("../../lib/paths.zig");
 const common = @import("common.zig");
 
@@ -39,14 +40,14 @@ pub fn loadOrCreateKey() KeyError![common.key_length]u8 {
     }
 
     var key: [common.key_length]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    platform.randomBytes(&key);
 
     saveKeyFile(key_path, &key) catch return KeyError.KeyCreateFailed;
     return key;
 }
 
 pub fn readKeyFile(path: []const u8) ReadKeyError![common.key_length]u8 {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+    const file = platform.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return ReadKeyError.NotFound,
         else => return ReadKeyError.KeyLoadFailed,
     };
@@ -60,7 +61,7 @@ pub fn readKeyFile(path: []const u8) ReadKeyError![common.key_length]u8 {
 }
 
 pub fn saveKeyFile(path: []const u8, key: *const [common.key_length]u8) !void {
-    const file = std.fs.cwd().createFile(path, .{ .mode = 0o600 }) catch
+    const file = platform.cwd().createFile(path, .{ .mode = 0o600 }) catch
         return error.KeyCreateFailed;
     defer file.close();
 

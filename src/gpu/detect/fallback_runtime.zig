@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const platform = @import("platform");
 const log = std.log;
 const types = @import("types.zig");
 
@@ -28,7 +29,7 @@ pub fn resetTestProbeRoots() void {
 }
 
 pub fn detectProcfs() ?DetectResult {
-    var dir = std.fs.openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
+    var dir = platform.openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
     defer dir.close();
 
     var result = emptyDetectResult(.procfs, null);
@@ -48,6 +49,7 @@ pub fn detectProcfs() ?DetectResult {
     }
 
     if (result.count > 0) {
+        sortGpusByPciBusId(result.gpus[0..result.count]);
         log.info("GPU: detected {d} GPU(s) via procfs", .{result.count});
         return result;
     }
@@ -56,7 +58,7 @@ pub fn detectProcfs() ?DetectResult {
 
 pub fn detectSysfs() ?DetectResult {
     var result = emptyDetectResult(.sysfs, null);
-    var drm_dir = std.fs.openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
+    var drm_dir = platform.openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
     defer drm_dir.close();
 
     var iter = drm_dir.iterate();
@@ -100,6 +102,14 @@ pub fn detectSysfs() ?DetectResult {
     return null;
 }
 
+fn sortGpusByPciBusId(gpus: []GpuInfo) void {
+    std.mem.sort(GpuInfo, gpus, {}, struct {
+        fn lessThan(_: void, a: GpuInfo, b: GpuInfo) bool {
+            return std.mem.order(u8, a.getPciBusId(), b.getPciBusId()) == .lt;
+        }
+    }.lessThan);
+}
+
 pub fn emptyDetectResult(source: DetectSource, nvml: ?NvmlHandle) DetectResult {
     return .{
         .gpus = undefined,
@@ -111,7 +121,7 @@ pub fn emptyDetectResult(source: DetectSource, nvml: ?NvmlHandle) DetectResult {
 
 pub fn readSysfsFile(path: []const u8) ?SysfsContent {
     var result = SysfsContent{ .buf = undefined, .len = 0 };
-    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    const file = platform.cwd().openFile(path, .{}) catch return null;
     defer file.close();
     result.len = file.read(&result.buf) catch return null;
     return result;

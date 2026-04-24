@@ -1,4 +1,6 @@
 const std = @import("std");
+const platform = @import("platform");
+const AppContext = @import("../lib/app_context.zig").AppContext;
 const cli = @import("../lib/cli.zig");
 const json_out = @import("../lib/json_output.zig");
 const secrets = @import("secrets.zig");
@@ -20,7 +22,8 @@ const SecretCommandsError = error{
     OutOfMemory,
 };
 
-pub fn secret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn secret(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    const alloc = ctx.alloc;
     var subcmd: ?[]const u8 = null;
 
     // peek at first arg — could be subcommand or --json
@@ -68,7 +71,7 @@ pub fn secret(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     }
 }
 
-fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
+fn set(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     var name: ?[]const u8 = null;
     var value_flag: ?[]const u8 = null;
     var stdin_data_owned: ?[]u8 = null;
@@ -98,14 +101,14 @@ fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsE
         v
     else blk: {
         // read from stdin
-        const stdin_file: std.fs.File = .{ .handle = std.posix.STDIN_FILENO };
+        const stdin_file: platform.File = .{ .handle = std.posix.STDIN_FILENO };
         const stdin_data = stdin_file.readToEndAlloc(alloc, 1024 * 1024) catch {
             writeErr("failed to read from stdin\n", .{});
             return SecretCommandsError.StoreFailed;
         };
         stdin_data_owned = stdin_data;
         // trim trailing newline — users typically pipe from echo or here-string
-        break :blk std.mem.trimRight(u8, stdin_data, "\n\r");
+        break :blk std.mem.trimEnd(u8, stdin_data, "\n\r");
     };
 
     var sec_store = secrets_cli.open(alloc);
@@ -119,7 +122,7 @@ fn set(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsE
     write("{s}\n", .{secret_name});
 }
 
-fn get(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
+fn get(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret get <name>\n");
 
     var sec_store = secrets_cli.open(alloc);
@@ -143,7 +146,7 @@ fn get(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsE
     write("{s}\n", .{value});
 }
 
-fn rm(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
+fn rm(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret rm <name>\n");
 
     var sec_store = secrets_cli.open(alloc);
@@ -196,7 +199,7 @@ fn list(alloc: std.mem.Allocator) SecretCommandsError!void {
     }
 }
 
-fn rotate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) SecretCommandsError!void {
+fn rotate(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) SecretCommandsError!void {
     const name = requireArg(args, "usage: yoq secret rotate <name>\n");
 
     var sec_store = secrets_cli.open(alloc);
@@ -223,8 +226,8 @@ const BackupCommandsError = error{
     RestoreFailed,
 };
 
-pub fn backupCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    _ = alloc;
+pub fn backupCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    _ = ctx;
     var output_path: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -238,7 +241,7 @@ pub fn backupCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
 
     // default output path with timestamp
     var default_buf: [256]u8 = undefined;
-    const ts = std.time.timestamp();
+    const ts = platform.timestamp();
     const path = output_path orelse std.fmt.bufPrint(&default_buf, "yoq-backup-{d}.db", .{ts}) catch {
         writeErr("failed to generate backup filename\n", .{});
         return BackupCommandsError.BackupFailed;
@@ -262,8 +265,8 @@ pub fn backupCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void
     write("backup saved to {s}\n", .{path});
 }
 
-pub fn restoreCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    _ = alloc;
+pub fn restoreCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    _ = ctx;
     var input_path: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -293,7 +296,7 @@ pub fn restoreCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     const path_z: [:0]const u8 = path_z_buf[0..path.len :0];
 
     // check if the input file exists
-    std.fs.cwd().access(path, .{}) catch {
+    platform.cwd().access(path, .{}) catch {
         writeErr("backup file not found: {s}\n", .{path});
         return BackupCommandsError.RestoreFailed;
     };

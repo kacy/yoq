@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const container = @import("../../runtime/container.zig");
@@ -57,13 +58,16 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
 
     try self.computeStartSet();
 
+    var pull_io = std.Io.Threaded.init(self.alloc, .{});
+    defer pull_io.deinit();
+
     for (services, 0..) |svc, i| {
         if (!shouldStart(self, svc.name)) continue;
 
         self.states[i].status = .pulling;
         writeErr("pulling {s}...\n", .{svc.image});
 
-        if (!service_runtime.ensureImageAvailable(self.alloc, svc.image)) {
+        if (!service_runtime.ensureImageAvailableWithIo(pull_io.io(), self.alloc, svc.image)) {
             writeErr("failed to pull image: {s}\n", .{svc.image});
             self.states[i].status = .failed;
             return OrchestratorError.PullFailed;
@@ -121,7 +125,12 @@ pub fn startServiceByIndex(
         if (self.manifest.workerByName(dep_name)) |worker| {
             if (!completed_workers.contains(dep_name)) {
                 writeErr("running worker {s}...\n", .{dep_name});
-                if (!service_runtime.runOneShot(
+
+                var worker_io = std.Io.Threaded.init(self.alloc, .{});
+                defer worker_io.deinit();
+
+                if (!service_runtime.runOneShotWithIo(
+                    worker_io.io(),
                     self.alloc,
                     worker.image,
                     worker.command,
@@ -239,7 +248,7 @@ pub fn waitForShutdown(self: anytype, shutdown_requested: *const std.atomic.Valu
         }
         if (all_done) break;
 
-        std.Thread.sleep(200 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(200), .awake) catch unreachable;
     }
 }
 
@@ -252,16 +261,16 @@ pub fn serviceIndex(self: anytype, name: []const u8) ?usize {
 
 pub fn waitForRunning(self: anytype, idx: usize) bool {
     const timeout_ns: u64 = 30 * std.time.ns_per_s;
-    const start = @as(u64, @intCast(std.time.nanoTimestamp()));
+    const start = @as(u64, @intCast(platform.nanoTimestamp()));
 
     while (true) {
         const status = self.states[idx].status;
         if (status == .running) return true;
         if (status == .failed or status == .stopped) return false;
 
-        const now = @as(u64, @intCast(std.time.nanoTimestamp()));
+        const now = @as(u64, @intCast(platform.nanoTimestamp()));
         if (now - start > timeout_ns) return false;
 
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
     }
 }

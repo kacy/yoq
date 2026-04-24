@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const linux = std.os.linux;
 const mem = std.mem;
@@ -9,7 +10,7 @@ const types = @import("types.zig");
 
 pub fn createInterface(name: []const u8, private_key: []const u8, listen_port: u16) types.WireguardError!void {
     const rt_fd = nl.openSocket() catch return types.WireguardError.DeviceCreateFailed;
-    defer posix.close(rt_fd);
+    defer platform.posix.close(rt_fd);
 
     {
         var buf: [nl.buf_size]u8 align(4) = undefined;
@@ -42,7 +43,7 @@ pub fn createInterface(name: []const u8, private_key: []const u8, listen_port: u
 
     {
         const genl_fd = nl.openGenericSocket() catch return types.WireguardError.DeviceCreateFailed;
-        defer posix.close(genl_fd);
+        defer platform.posix.close(genl_fd);
 
         const wg_family = nl.resolveFamily(genl_fd, "wireguard") catch {
             log.err("wireguard: failed to resolve genetlink family", .{});
@@ -76,7 +77,7 @@ pub fn createInterface(name: []const u8, private_key: []const u8, listen_port: u
 
 pub fn deleteInterface(name: []const u8) types.WireguardError!void {
     const fd = nl.openSocket() catch return types.WireguardError.DeviceDeleteFailed;
-    defer posix.close(fd);
+    defer platform.posix.close(fd);
 
     nl.deleteLink(fd, name) catch return types.WireguardError.DeviceDeleteFailed;
 }
@@ -91,7 +92,7 @@ pub fn addPeer(name: []const u8, peer: types.PeerConfig) types.WireguardError!vo
     const raw_pubkey = parse_support.decodeKey(peer.public_key) orelse return types.WireguardError.PeerAddFailed;
 
     const genl_fd = nl.openGenericSocket() catch return types.WireguardError.PeerAddFailed;
-    defer posix.close(genl_fd);
+    defer platform.posix.close(genl_fd);
 
     const wg_family = nl.resolveFamily(genl_fd, "wireguard") catch return types.WireguardError.PeerAddFailed;
 
@@ -140,7 +141,7 @@ pub fn removePeer(name: []const u8, public_key: []const u8) types.WireguardError
     const raw_pubkey = parse_support.decodeKey(public_key) orelse return types.WireguardError.PeerRemoveFailed;
 
     const genl_fd = nl.openGenericSocket() catch return types.WireguardError.PeerRemoveFailed;
-    defer posix.close(genl_fd);
+    defer platform.posix.close(genl_fd);
 
     const wg_family = nl.resolveFamily(genl_fd, "wireguard") catch return types.WireguardError.PeerRemoveFailed;
 
@@ -166,7 +167,7 @@ pub fn removePeer(name: []const u8, public_key: []const u8) types.WireguardError
 
 pub fn assignOverlayIp(name: []const u8, overlay_ip: [4]u8, prefix_len: u8) types.WireguardError!void {
     const fd = nl.openSocket() catch return types.WireguardError.AddressFailed;
-    defer posix.close(fd);
+    defer platform.posix.close(fd);
 
     const if_index = nl.getIfIndex(fd, name) catch return types.WireguardError.AddressFailed;
     if (if_index == 0) return types.WireguardError.AddressFailed;
@@ -176,14 +177,14 @@ pub fn assignOverlayIp(name: []const u8, overlay_ip: [4]u8, prefix_len: u8) type
 
 pub fn addRoute(dest: [4]u8, prefix_len: u8, via: [4]u8) types.WireguardError!void {
     const fd = nl.openSocket() catch return types.WireguardError.RouteFailed;
-    defer posix.close(fd);
+    defer platform.posix.close(fd);
 
     nl.addRoute(fd, &dest, prefix_len, &via) catch return types.WireguardError.RouteFailed;
 }
 
 pub fn removeRoute(dest: [4]u8, prefix_len: u8) types.WireguardError!void {
     const fd = nl.openSocket() catch return types.WireguardError.RouteFailed;
-    defer posix.close(fd);
+    defer platform.posix.close(fd);
 
     nl.removeRoute(fd, &dest, prefix_len) catch return types.WireguardError.RouteFailed;
 }

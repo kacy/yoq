@@ -4,6 +4,7 @@
 // in smaller modules under `network/setup/`.
 
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const sqlite = @import("sqlite");
 const nat = @import("nat.zig");
@@ -68,13 +69,13 @@ test "writeNetworkFiles sets resolv.conf to bridge gateway" {
     defer tmp_dir.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const rootfs_path = tmp_dir.dir.realpath(".", &path_buf) catch return;
+    const rootfs_path = platform.Dir.from(tmp_dir.dir).realpath(".", &path_buf) catch return;
 
     writeNetworkFiles(rootfs_path, .{ 10, 42, 0, 5 }, .{ 10, 42, 0, 1 }, "myhost");
 
     var resolv_path_buf: [600]u8 = undefined;
     const resolv_path = std.fmt.bufPrint(&resolv_path_buf, "{s}/etc/resolv.conf", .{rootfs_path}) catch return;
-    const content = std.fs.cwd().readFileAlloc(alloc, resolv_path, 4096) catch return;
+    const content = platform.cwd().readFileAlloc(alloc, resolv_path, 4096) catch return;
     defer alloc.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "10.42.0.1") != null);
@@ -87,13 +88,13 @@ test "writeNetworkFiles sets etc/hosts with hostname" {
     defer tmp_dir.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const rootfs_path = tmp_dir.dir.realpath(".", &path_buf) catch return;
+    const rootfs_path = platform.Dir.from(tmp_dir.dir).realpath(".", &path_buf) catch return;
 
     writeNetworkFiles(rootfs_path, .{ 10, 42, 0, 7 }, .{ 10, 42, 0, 1 }, "dbserver");
 
     var hosts_path_buf: [600]u8 = undefined;
     const hosts_path = std.fmt.bufPrint(&hosts_path_buf, "{s}/etc/hosts", .{rootfs_path}) catch return;
-    const content = std.fs.cwd().readFileAlloc(alloc, hosts_path, 4096) catch return;
+    const content = platform.cwd().readFileAlloc(alloc, hosts_path, 4096) catch return;
     defer alloc.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "dbserver") != null);

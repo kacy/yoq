@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const service_rollout = @import("../service_rollout.zig");
 const proxy_runtime = @import("runtime.zig");
 const service_registry_runtime_mod = @import("../service_registry_runtime.zig");
@@ -36,15 +37,20 @@ pub const Snapshot = struct {
 var sync_running = std.atomic.Value(bool).init(false);
 var sync_thread: ?std.Thread = null;
 var sync_interval_override_ms: ?u64 = null;
-var mutex: std.Thread.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var sync_passes_total: u64 = 0;
 var event_sync_passes_total: u64 = 0;
 var periodic_sync_passes_total: u64 = 0;
 var last_sync_trigger: ?SyncTrigger = null;
 var last_sync_pass_at: ?i64 = null;
+var sync_pass_active = std.atomic.Value(bool).init(false);
 
 pub fn refreshIfEnabled() void {
-    runSyncPass(.event);
+    runSyncPass(.event, true);
+}
+
+pub fn refreshListenerStateIfEnabled() void {
+    runSyncPass(.event, false);
 }
 
 pub fn startSyncLoopIfEnabled() void {
@@ -66,8 +72,8 @@ pub fn stopSyncLoop() void {
 }
 
 pub fn snapshot() Snapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return .{
         .enabled = controlPlaneEnabled(),
@@ -84,19 +90,20 @@ pub fn snapshot() Snapshot {
 
 pub fn resetForTest() void {
     stopSyncLoop();
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     sync_interval_override_ms = null;
     sync_passes_total = 0;
     event_sync_passes_total = 0;
     periodic_sync_passes_total = 0;
     last_sync_trigger = null;
     last_sync_pass_at = null;
+    sync_pass_active.store(false, .release);
 }
 
 pub fn setSyncIntervalMsForTest(interval_ms: ?u64) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     sync_interval_override_ms = interval_ms;
 }
 
@@ -108,32 +115,39 @@ fn vipSteeringEnabled() bool {
     return controlPlaneEnabled();
 }
 
-fn runSyncPass(trigger: SyncTrigger) void {
-    listener_runtime_mod.startIfEnabled(std.heap.page_allocator);
+fn runSyncPass(trigger: SyncTrigger, ensure_listener: bool) void {
+    if (sync_pass_active.swap(true, .acq_rel)) return;
+    defer sync_pass_active.store(false, .release);
+
+    if (ensure_listener) {
+        listener_runtime_mod.startIfEnabled(std.heap.page_allocator);
+    } else {
+        proxy_runtime.bootstrapIfEnabled();
+    }
     steering_runtime.syncIfEnabled();
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     sync_passes_total += 1;
     switch (trigger) {
         .event => event_sync_passes_total += 1,
         .periodic => periodic_sync_passes_total += 1,
     }
     last_sync_trigger = trigger;
-    last_sync_pass_at = std.time.timestamp();
+    last_sync_pass_at = platform.timestamp();
 }
 
 fn syncLoop() void {
-    runSyncPass(.periodic);
+    runSyncPass(.periodic, true);
 
     while (sync_running.load(.acquire)) {
         const interval_ms = blk: {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.Options.debug_io);
+            defer mutex.unlock(std.Options.debug_io);
             break :blk sync_interval_override_ms orelse (sync_interval_secs * std.time.ms_per_s);
         };
-        std.Thread.sleep(interval_ms * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(interval_ms)), .awake) catch unreachable;
         if (!sync_running.load(.acquire)) break;
-        runSyncPass(.periodic);
+        runSyncPass(.periodic, true);
     }
 }
 
@@ -191,7 +205,7 @@ test "periodic steering sync loop repairs drifted mappings" {
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    std.Thread.sleep(40 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(40), .awake) catch unreachable;
 
     const state = try steering_runtime.snapshotServiceStatus(std.testing.allocator, "api");
     try std.testing.expect(state.ready);
@@ -276,7 +290,7 @@ test "periodic control plane repairs routes while steering waits on prerequisite
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    std.Thread.sleep(40 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(40), .awake) catch unreachable;
 
     const proxy_state = try proxy_runtime.snapshot(std.testing.allocator);
     defer proxy_state.deinit(std.testing.allocator);
@@ -342,7 +356,7 @@ test "listener state changes trigger event-driven steering repair" {
     steering_runtime.setPortMapperAvailableForTest(true);
     steering_runtime.setBridgeIpForTest(.{ 10, 42, 0, 1 });
     try steering_runtime.setActualMappingsForTest(&.{});
-    listener_runtime.setStateChangeHook(refreshIfEnabled);
+    listener_runtime.setStateChangeHook(refreshListenerStateIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
 
     try listener_runtime.startOrSkipForTest(std.testing.allocator, 0);
@@ -373,7 +387,7 @@ test "listener state changes trigger event-driven steering repair" {
 }
 
 const TestUpstreamServer = struct {
-    listen_fd: posix.socket_t,
+    listen_fd: platform.posix.socket_t,
     port: u16,
     thread: ?std.Thread = null,
     request_buf: [2048]u8 = undefined,
@@ -381,19 +395,23 @@ const TestUpstreamServer = struct {
     response: []const u8,
 
     fn init(response: []const u8) !TestUpstreamServer {
-        const listen_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-        errdefer posix.close(listen_fd);
+        const listen_fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch
+            return error.SkipZigTest;
+        errdefer platform.posix.close(listen_fd);
 
         const reuseaddr: i32 = 1;
         posix.setsockopt(listen_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
-        const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-        try posix.bind(listen_fd, &addr.any, addr.getOsSockLen());
-        try posix.listen(listen_fd, 1);
+        const addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+        platform.posix.bind(listen_fd, &addr.any, addr.getOsSockLen()) catch
+            return error.SkipZigTest;
+        platform.posix.listen(listen_fd, 1) catch
+            return error.SkipZigTest;
 
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        try posix.getsockname(listen_fd, @ptrCast(&bound_addr), &bound_len);
+        platform.posix.getsockname(listen_fd, @ptrCast(&bound_addr), &bound_len) catch
+            return error.SkipZigTest;
 
         return .{
             .listen_fd = listen_fd,
@@ -404,7 +422,7 @@ const TestUpstreamServer = struct {
 
     fn deinit(self: *TestUpstreamServer) void {
         if (self.thread) |thread| thread.join();
-        posix.close(self.listen_fd);
+        platform.posix.close(self.listen_fd);
     }
 
     fn start(self: *TestUpstreamServer) !void {
@@ -416,8 +434,8 @@ const TestUpstreamServer = struct {
     }
 
     fn acceptOne(self: *TestUpstreamServer) void {
-        const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
-        defer posix.close(client_fd);
+        const client_fd = platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+        defer platform.posix.close(client_fd);
         self.request_len = posix.read(client_fd, &self.request_buf) catch 0;
         _ = socket_helpers.writeAll(client_fd, self.response) catch {};
     }
@@ -434,7 +452,6 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
     const store = @import("../../state/store.zig");
     const listener_runtime = @import("listener_runtime.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
-    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 
     var upstream = try TestUpstreamServer.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     defer upstream.deinit();
@@ -488,7 +505,7 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
     try steering_runtime.setActualMappingsForTest(&.{});
     steering_runtime.setMappingHooksForTest(recordMappedTarget, null);
     defer steering_runtime.setMappingHooksForTest(null, null);
-    listener_runtime.setStateChangeHook(refreshIfEnabled);
+    listener_runtime.setStateChangeHook(refreshListenerStateIfEnabled);
     defer listener_runtime.setStateChangeHook(null);
     recorded_target_port = 0;
 
@@ -497,10 +514,10 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
 
     try std.testing.expect(recorded_target_port != 0);
 
-    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer posix.close(client_fd);
-    const listener_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
-    try posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const listener_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
+    try platform.posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;
@@ -516,7 +533,6 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     const store = @import("../../state/store.zig");
     const listener_runtime = @import("listener_runtime.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
-    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
 
     var upstream = try TestUpstreamServer.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     defer upstream.deinit();
@@ -579,13 +595,13 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     startSyncLoopIfEnabled();
     defer stopSyncLoop();
 
-    std.Thread.sleep(40 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(40), .awake) catch unreachable;
     try std.testing.expect(recorded_target_port != 0);
 
-    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer posix.close(client_fd);
-    const listener_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
-    try posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const listener_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, recorded_target_port);
+    try platform.posix.connect(client_fd, &listener_addr.any, listener_addr.getOsSockLen());
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;

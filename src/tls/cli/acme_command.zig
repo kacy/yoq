@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const acme = @import("../acme.zig");
@@ -11,14 +12,14 @@ const store_support = @import("store_support.zig");
 const write = cli.write;
 const writeErr = cli.writeErr;
 
-pub fn provision(args: *std.process.ArgIterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
+pub fn provision(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
     const parsed = parseArgs(args) catch |err| return err;
-    try runAcmeCommand(alloc, parsed, false);
+    try runAcmeCommand(io, alloc, parsed, false);
 }
 
-pub fn renew(args: *std.process.ArgIterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
+pub fn renew(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.TlsCommandsError!void {
     const parsed = parseArgs(args) catch |err| return err;
-    try runAcmeCommand(alloc, parsed, true);
+    try runAcmeCommand(io, alloc, parsed, true);
 }
 
 const ParsedArgs = struct {
@@ -27,7 +28,7 @@ const ParsedArgs = struct {
     directory_url: []const u8,
 };
 
-fn parseArgs(args: *std.process.ArgIterator) common.TlsCommandsError!ParsedArgs {
+fn parseArgs(args: *std.process.Args.Iterator) common.TlsCommandsError!ParsedArgs {
     var domain: ?[]const u8 = null;
     var email: ?[]const u8 = null;
     var use_staging = false;
@@ -63,6 +64,7 @@ fn parseArgs(args: *std.process.ArgIterator) common.TlsCommandsError!ParsedArgs 
 }
 
 fn runAcmeCommand(
+    io: std.Io,
     alloc: std.mem.Allocator,
     parsed: ParsedArgs,
     require_existing: bool,
@@ -101,7 +103,7 @@ fn runAcmeCommand(
     defer server.deinit();
     server.start();
 
-    var client = acme.AcmeClient.init(alloc, parsed.directory_url);
+    var client = acme.AcmeClient.init(io, alloc, parsed.directory_url);
     defer client.deinit();
 
     var exported = client.issueAndExport(.{
@@ -128,11 +130,7 @@ fn resolveAccountEmail(
     domain: []const u8,
     explicit_email: ?[]const u8,
 ) ![]u8 {
-    const env_email = std.process.getEnvVarOwned(alloc, "YOQ_ACME_EMAIL") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        error.OutOfMemory => return error.OutOfMemory,
-        else => null,
-    };
+    const env_email = lookupEnvOwned(alloc, "YOQ_ACME_EMAIL") catch return error.OutOfMemory;
     errdefer if (env_email) |email| alloc.free(email);
     return resolveAccountEmailWithFallback(alloc, domain, explicit_email, env_email);
 }
@@ -204,4 +202,9 @@ fn resolveAccountEmailForTest(
 ) ![]u8 {
     const owned_env_email = if (env_email) |email| try alloc.dupe(u8, email) else null;
     return resolveAccountEmailWithFallback(alloc, domain, explicit_email, owned_env_email);
+}
+
+fn lookupEnvOwned(alloc: std.mem.Allocator, name: [:0]const u8) error{OutOfMemory}!?[]u8 {
+    const value = std.c.getenv(name.ptr) orelse return null;
+    return try alloc.dupe(u8, std.mem.span(value));
 }

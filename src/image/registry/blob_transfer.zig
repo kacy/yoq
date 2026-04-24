@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const blob_store = @import("../store.zig");
@@ -24,6 +25,7 @@ pub fn fetchBlob(
 }
 
 pub fn downloadLayerWorker(
+    io: std.Io,
     alloc: std.mem.Allocator,
     host: []const u8,
     repository: []const u8,
@@ -34,7 +36,7 @@ pub fn downloadLayerWorker(
 ) void {
     if (err_flag.load(.acquire)) return;
 
-    var thread_client: std.http.Client = .{ .allocator = alloc };
+    var thread_client: std.http.Client = .{ .io = io, .allocator = alloc };
     defer thread_client.deinit();
 
     downloadLayerBlob(alloc, &thread_client, host, repository, digest, token) catch |err| {
@@ -248,11 +250,11 @@ fn downloadBlobUrlToStore(
 
     var tmp_path_buf: [paths.max_path]u8 = undefined;
     const tmp_path = blob_store.tempBlobPath(&tmp_path_buf) catch return error.NetworkError;
-    const tmp_file = std.fs.cwd().createFile(tmp_path, .{}) catch return error.NetworkError;
+    const tmp_file = platform.cwd().createFile(tmp_path, .{}) catch return error.NetworkError;
     defer tmp_file.close();
 
     var committed = false;
-    defer if (!committed) std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer if (!committed) platform.cwd().deleteFile(tmp_path) catch {};
 
     var transfer_buf: [8192]u8 = undefined;
     const body_reader = response.reader(&transfer_buf);
@@ -279,7 +281,7 @@ fn downloadBlobUrlToStore(
 }
 
 fn verifyFileDigest(path: []const u8, expected: blob_store.Digest) !void {
-    const file = std.fs.cwd().openFile(path, .{}) catch return error.NetworkError;
+    const file = platform.cwd().openFile(path, .{}) catch return error.NetworkError;
     defer file.close();
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});

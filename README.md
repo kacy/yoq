@@ -114,7 +114,7 @@ current ACME/TLS limits:
 ### requirements
 
 - Linux kernel 6.1+ (sorry no Mac support)
-- Zig 0.15.2
+- Zig 0.16.0
 
 ### build
 

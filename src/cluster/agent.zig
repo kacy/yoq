@@ -15,6 +15,7 @@
 // running containers — same code path as the local orchestrator.
 
 const std = @import("std");
+const platform = @import("platform");
 const http_client = @import("http_client.zig");
 const agent_types = @import("agent_types.zig");
 const cli = @import("../lib/cli.zig");
@@ -74,7 +75,7 @@ pub const Agent = struct {
     /// tracks assignment_id → local container state.
     /// protected by mutex since container threads update it.
     local_containers: std.StringHashMap(ContainerState),
-    container_lock: std.Thread.Mutex,
+    container_lock: std.Io.Mutex,
 
     // wireguard mesh networking fields (set during registration if the
     // server assigns a node_id)
@@ -123,7 +124,10 @@ pub const Agent = struct {
         const resources = resource_support.getSystemResources();
 
         // generate a wireguard keypair for mesh networking
-        const kp = wireguard.generateKeyPair() catch {
+        var threaded_io = std.Io.Threaded.init(self.alloc, .{});
+        defer threaded_io.deinit();
+
+        const kp = wireguard.generateKeyPair(threaded_io.io()) catch {
             writeErr("failed to generate wireguard keypair\n", .{});
             return AgentError.RegisterFailed;
         };

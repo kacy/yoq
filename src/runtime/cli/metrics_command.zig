@@ -44,7 +44,7 @@ const MetricsError = error{
     StoreError,
 };
 
-pub fn metrics(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn metrics(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var service_filter: ?[]const u8 = null;
     var server: ?cli.ServerAddr = null;
     var pairs_mode = false;

@@ -11,6 +11,10 @@ pub const ContainerRecord = store.ContainerRecord;
 pub const ImageRecord = store.ImageRecord;
 pub const StoreError = store.StoreError;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 /// Mock store for testing container and image operations
 pub const MockStore = struct {
     alloc: std.mem.Allocator,
@@ -215,7 +219,7 @@ pub const MockStore = struct {
             .ip_address = null,
             .veth_host = null,
             .app_name = null,
-            .created_at = std.time.timestamp(),
+            .created_at = nowRealSeconds(),
         };
 
         try self.containers.append(record);
@@ -234,7 +238,7 @@ pub const MockStore = struct {
             .manifest_digest = try self.alloc.dupe(u8, "sha256:abcdef"),
             .config_digest = try self.alloc.dupe(u8, "sha256:123456"),
             .total_size = 1024,
-            .created_at = std.time.timestamp(),
+            .created_at = nowRealSeconds(),
         };
 
         try self.images.append(record);

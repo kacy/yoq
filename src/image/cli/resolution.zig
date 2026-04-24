@@ -28,14 +28,14 @@ pub const ImageResolution = struct {
     }
 };
 
-pub fn pullAndResolveImage(alloc: std.mem.Allocator, target: []const u8) common.ImageCommandsError!ImageResolution {
+pub fn pullAndResolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const u8) common.ImageCommandsError!ImageResolution {
     const ref = spec.parseImageRef(target);
 
     writeErr("pulling {s}...\n", .{target});
 
     var result = ImageResolution{ .rootfs = target };
 
-    result.pull_result = registry.pull(alloc, ref) catch |err| {
+    result.pull_result = registry.pull(io, alloc, ref) catch |err| {
         common.writePullError(target, err);
         return common.ImageCommandsError.PullFailed;
     };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const context = @import("../../context.zig");
 const layer = @import("../../../image/layer.zig");
@@ -56,7 +57,7 @@ fn processArchiveAdd(
 
     var layer_dir_buf: [paths.max_path]u8 = undefined;
     const layer_dir = try common.withTempLayerDir(&layer_dir_buf, "build-add-layer");
-    defer std.fs.cwd().deleteTree(layer_dir) catch {};
+    defer platform.cwd().deleteTree(layer_dir) catch {};
 
     var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try common.resolveDestination(state.workdir, dest, &actual_dest_buf);
@@ -68,7 +69,7 @@ fn processArchiveAdd(
             return types.BuildError.CopyStepFailed
     else
         layer_dir;
-    std.fs.cwd().makePath(extract_dir) catch return types.BuildError.CopyStepFailed;
+    platform.cwd().makePath(extract_dir) catch return types.BuildError.CopyStepFailed;
 
     const archive_path = buildArchivePath(alloc, context_dir, src) catch
         return types.BuildError.CopyStepFailed;

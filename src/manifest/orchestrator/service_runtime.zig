@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const spec = @import("../spec.zig");
@@ -49,6 +50,12 @@ pub const max_backoff_ms: u64 = 30_000;
 pub const healthy_run_threshold_ns: i128 = 10 * std.time.ns_per_s;
 
 pub fn ensureImageAvailable(alloc: std.mem.Allocator, image: []const u8) bool {
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+    return ensureImageAvailableWithIo(threaded_io.io(), alloc, image);
+}
+
+pub fn ensureImageAvailableWithIo(io: std.Io, alloc: std.mem.Allocator, image: []const u8) bool {
     const ref = image_spec.parseImageRef(image);
 
     const existing = store.findImage(alloc, ref.repository, ref.reference);
@@ -57,7 +64,7 @@ pub fn ensureImageAvailable(alloc: std.mem.Allocator, image: []const u8) bool {
         return true;
     } else |_| {}
 
-    var result = registry.pull(alloc, ref) catch return false;
+    var result = registry.pull(io, alloc, ref) catch return false;
     defer result.deinit();
 
     const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch return false;
@@ -82,12 +89,18 @@ pub fn ensureImageAvailable(alloc: std.mem.Allocator, image: []const u8) bool {
 }
 
 pub fn resolveServiceImage(alloc: std.mem.Allocator, image: []const u8) ?ServiceImageConfig {
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+    return resolveServiceImageWithIo(threaded_io.io(), alloc, image);
+}
+
+pub fn resolveServiceImageWithIo(io: std.Io, alloc: std.mem.Allocator, image: []const u8) ?ServiceImageConfig {
     const ref = image_spec.parseImageRef(image);
     const img = store.findImage(alloc, ref.repository, ref.reference) catch return null;
 
     var result = ServiceImageConfig{ .rootfs = "/", .img_record = img };
 
-    result.pull_result = registry.pull(alloc, ref) catch return null;
+    result.pull_result = registry.pull(io, alloc, ref) catch return null;
     result.config_parsed = image_spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch return null;
 
     if (result.config_parsed.?.value.config) |cc| {
@@ -153,7 +166,7 @@ pub fn resolveServiceVolumes(
         switch (vol.kind) {
             .bind => {
                 var resolve_buf: [4096]u8 = undefined;
-                const abs_source = std.fs.cwd().realpath(vol.source, &resolve_buf) catch {
+                const abs_source = platform.cwd().realpath(vol.source, &resolve_buf) catch {
                     log.warn("failed to resolve bind mount source: {s}", .{vol.source});
                     continue;
                 };
@@ -184,7 +197,7 @@ pub fn resolveServiceVolumes(
                     log.err("orchestrator: no database for volume creation", .{});
                     return error.VolumeFailed;
                 };
-                const timestamp = std.time.timestamp();
+                const timestamp = platform.timestamp();
                 volumes_mod.create(db, app_name, vol_def, timestamp, null) catch |err| {
                     log.err("failed to create volume '{s}': {}", .{ vol.source, err });
                     return error.VolumeFailed;
@@ -236,7 +249,24 @@ pub fn runOneShot(
     manifest_volumes: []const spec.Volume,
     app_name: []const u8,
 ) bool {
-    var img = resolveServiceImage(alloc, image) orelse {
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+    return runOneShotWithIo(threaded_io.io(), alloc, image, command, env, volumes, working_dir, hostname, manifest_volumes, app_name);
+}
+
+pub fn runOneShotWithIo(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    volumes: []const spec.VolumeMount,
+    working_dir: ?[]const u8,
+    hostname: []const u8,
+    manifest_volumes: []const spec.Volume,
+    app_name: []const u8,
+) bool {
+    var img = resolveServiceImageWithIo(io, alloc, image) orelse {
         writeErr("failed to resolve image for worker {s}\n", .{hostname});
         return false;
     };
@@ -276,7 +306,7 @@ pub fn runOneShot(
         .pid = null,
         .exit_code = null,
         .app_name = null,
-        .created_at = std.time.timestamp(),
+        .created_at = platform.timestamp(),
     }) catch return false;
 
     var c = container.Container{
@@ -294,7 +324,7 @@ pub fn runOneShot(
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = std.time.timestamp(),
+        .created_at = platform.timestamp(),
     };
 
     c.start() catch {

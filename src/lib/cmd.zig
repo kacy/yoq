@@ -24,24 +24,61 @@ pub fn exec(args: *const ArgList) ExecError!void {
         count += 1;
     }
 
-    // build argv for Child
-    var argv: [max_args][]const u8 = undefined;
+    var argv_z: [max_args + 1]?[*:0]const u8 = .{null} ** (max_args + 1);
+    var owned_args: [max_args][:0]u8 = undefined;
     for (0..count) |i| {
-        argv[i] = args[i].?;
+        owned_args[i] = std.heap.page_allocator.dupeZ(u8, args[i].?) catch return ExecError.ExecFailed;
+        argv_z[i] = owned_args[i].ptr;
+    }
+    defer for (owned_args[0..count]) |arg| std.heap.page_allocator.free(arg);
+
+    const linux = std.os.linux;
+    const fork_rc = linux.fork();
+    switch (linux.errno(fork_rc)) {
+        .SUCCESS => {},
+        else => return ExecError.ExecFailed,
     }
 
-    var child = std.process.Child.init(argv[0..count], std.heap.page_allocator);
-    child.stdin_behavior = .Close;
-    child.stdout_behavior = .Close;
-    child.stderr_behavior = .Close;
-
-    child.spawn() catch return ExecError.ExecFailed;
-    const result = child.wait() catch return ExecError.ExecFailed;
-
-    switch (result) {
-        .Exited => |code| if (code != 0) return ExecError.ExecFailed,
-        else => return ExecError.ExecFailed, // Signal, Stopped, Continued all indicate failure
+    if (fork_rc == 0) {
+        execInChild(@ptrCast(&argv_z));
     }
+
+    const pid: linux.pid_t = @intCast(fork_rc);
+    var status: u32 = 0;
+    while (true) {
+        const wait_rc = linux.waitpid(pid, &status, 0);
+        switch (linux.errno(wait_rc)) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return ExecError.ExecFailed,
+        }
+    }
+
+    if (!std.posix.W.IFEXITED(status) or std.posix.W.EXITSTATUS(status) != 0) {
+        return ExecError.ExecFailed;
+    }
+}
+
+fn execInChild(argv: [*:null]const ?[*:0]const u8) noreturn {
+    const linux = std.os.linux;
+    const envp: [*:null]const ?[*:0]const u8 = @ptrCast(std.c.environ);
+    const arg0 = argv[0] orelse linux.exit(127);
+    const arg0_slice = std.mem.span(arg0);
+
+    if (std.mem.indexOfScalar(u8, arg0_slice, '/') != null) {
+        _ = linux.execve(arg0, argv, envp);
+        linux.exit(127);
+    }
+
+    const path_env = if (std.c.getenv("PATH")) |value| std.mem.span(value) else "/usr/local/bin:/bin:/usr/bin";
+    var it = std.mem.tokenizeScalar(u8, path_env, ':');
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    while (it.next()) |dir| {
+        const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, arg0_slice }) catch continue;
+        _ = linux.execve(path.ptr, argv, envp);
+    }
+
+    linux.exit(127);
 }
 
 /// format a port number into a caller-provided buffer, returning the slice.

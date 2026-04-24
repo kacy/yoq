@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const attach_support = @import("attach_support.zig");
@@ -64,15 +65,15 @@ pub const PolicyEnforcer = struct {
             log.debug("ebpf: failed to detach policy enforcer: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            posix.close(self.prog_fd);
+            platform.posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
         }
         if (self.policy_fd >= 0) {
-            posix.close(self.policy_fd);
+            platform.posix.close(self.policy_fd);
             resource_support.releaseBpfFd();
         }
         if (self.isolation_fd >= 0) {
-            posix.close(self.isolation_fd);
+            platform.posix.close(self.isolation_fd);
             resource_support.releaseBpfFd();
         }
     }
@@ -86,7 +87,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!PolicyEnforcer {
         policy_prog.maps[0].max_entries,
     );
     errdefer {
-        posix.close(policy_fd);
+        platform.posix.close(policy_fd);
         resource_support.releaseBpfFd();
     }
 
@@ -97,14 +98,14 @@ pub fn load(bridge_if_index: u32) common.EbpfError!PolicyEnforcer {
         policy_prog.maps[1].max_entries,
     );
     errdefer {
-        posix.close(isolation_fd);
+        platform.posix.close(isolation_fd);
         resource_support.releaseBpfFd();
     }
 
     var map_fds = [_]posix.fd_t{ policy_fd, isolation_fd };
     const prog_fd = try program_support.loadProgram(policy_prog, &map_fds);
     errdefer {
-        posix.close(prog_fd);
+        platform.posix.close(prog_fd);
         resource_support.releaseBpfFd();
     }
 

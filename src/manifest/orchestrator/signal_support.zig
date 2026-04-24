@@ -24,7 +24,7 @@ pub fn installSignalHandlers(target: *std.atomic.Value(bool)) void {
     posix.sigaction(posix.SIG.PIPE, &ign, null);
 }
 
-fn sigHandler(_: c_int) callconv(.c) void {
+fn sigHandler(_: std.os.linux.SIG) callconv(.c) void {
     const target = shutdown_target orelse return;
     target.store(true, .release);
 }

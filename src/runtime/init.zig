@@ -43,7 +43,7 @@ pub fn run(workload_fn: WorkloadFn, ctx: ?*anyopaque) u8 {
     installHandlers();
 
     // fork the workload process
-    const fork_rc = linux.syscall4(.clone, linux.SIG.CHLD, 0, 0, 0);
+    const fork_rc = linux.syscall4(.clone, @intFromEnum(linux.SIG.CHLD), 0, 0, 0);
     if (syscall_util.isError(fork_rc)) return 1;
 
     const child_pid: i32 = @intCast(@as(isize, @bitCast(fork_rc)));
@@ -117,13 +117,13 @@ fn reapLoop(target_pid: i32) u8 {
 
 /// signal handler: forward SIGTERM and SIGINT to the workload.
 /// async-signal-safe: only uses atomic load + kill syscall.
-fn forwardSignal(sig: c_int) callconv(.c) void {
+fn forwardSignal(sig: std.os.linux.SIG) callconv(.c) void {
     const pid = workload_pid.load(.acquire);
     if (pid > 0) {
         _ = linux.syscall2(
             .kill,
             @as(usize, @bitCast(@as(isize, pid))),
-            @intCast(sig),
+            @intFromEnum(sig),
         );
     }
 }

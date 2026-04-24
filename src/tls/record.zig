@@ -15,6 +15,7 @@
 //   RFC 8446 §5.2 (Record Payload Protection)
 
 const std = @import("std");
+const platform = @import("platform");
 
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 
@@ -179,10 +180,10 @@ pub fn decryptRecord(
 
 test "encrypt and decrypt round-trip" {
     var key: [aead_key_size]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    platform.randomBytes(&key);
 
     var iv: [aead_nonce_size]u8 = undefined;
-    std.crypto.random.bytes(&iv);
+    platform.randomBytes(&iv);
 
     const plaintext = "hello, TLS 1.3!";
     var out: [plaintext.len + 1 + aead_tag_size]u8 = undefined;
@@ -203,12 +204,12 @@ test "encrypt and decrypt round-trip" {
 
 test "decrypt fails with wrong key" {
     var key: [aead_key_size]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    platform.randomBytes(&key);
     var wrong_key: [aead_key_size]u8 = undefined;
-    std.crypto.random.bytes(&wrong_key);
+    platform.randomBytes(&wrong_key);
 
     var iv: [aead_nonce_size]u8 = undefined;
-    std.crypto.random.bytes(&iv);
+    platform.randomBytes(&iv);
 
     const plaintext = "secret data";
     var out: [plaintext.len + 1 + aead_tag_size]u8 = undefined;
@@ -228,9 +229,9 @@ test "decrypt fails with wrong key" {
 
 test "decrypt fails with wrong sequence number" {
     var key: [aead_key_size]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    platform.randomBytes(&key);
     var iv: [aead_nonce_size]u8 = undefined;
-    std.crypto.random.bytes(&iv);
+    platform.randomBytes(&iv);
 
     const plaintext = "data";
     var out: [plaintext.len + 1 + aead_tag_size]u8 = undefined;
@@ -286,9 +287,9 @@ test "record header too short" {
 
 test "encrypt preserves content type" {
     var key: [aead_key_size]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    platform.randomBytes(&key);
     var iv: [aead_nonce_size]u8 = undefined;
-    std.crypto.random.bytes(&iv);
+    platform.randomBytes(&iv);
 
     const plaintext = "handshake data";
     var out: [plaintext.len + 1 + aead_tag_size]u8 = undefined;

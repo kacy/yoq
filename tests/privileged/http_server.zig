@@ -1,13 +1,8 @@
 const std = @import("std");
 const posix = std.posix;
 
-pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
-    const argv = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, argv);
+pub fn main(init: std.process.Init) !void {
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (argv.len != 3) {
         std.debug.print("usage: yoq-test-http-server <port> <body>\n", .{});

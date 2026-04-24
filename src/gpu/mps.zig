@@ -13,6 +13,7 @@
 // from multiple client processes onto a single GPU.
 
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../lib/log.zig");
 const env_buffer = @import("env_buffer.zig");
 
@@ -65,11 +66,11 @@ pub fn start(inst: *MpsInstance) bool {
     if (pipe_dir.len == 0 or log_dir.len == 0) return false;
 
     // create directories
-    std.fs.cwd().makePath(pipe_dir) catch {
+    platform.cwd().makePath(pipe_dir) catch {
         log.info("MPS: failed to create pipe dir {s}", .{pipe_dir});
         return false;
     };
-    std.fs.cwd().makePath(log_dir) catch {
+    platform.cwd().makePath(log_dir) catch {
         log.info("MPS: failed to create log dir {s}", .{log_dir});
         return false;
     };
@@ -87,7 +88,7 @@ pub fn stop(inst: *MpsInstance) void {
     var ctrl_path_buf: [256]u8 = undefined;
     const ctrl_path = std.fmt.bufPrint(&ctrl_path_buf, "{s}/control", .{inst.getPipeDir()}) catch return;
 
-    const file = std.fs.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch {
+    const file = platform.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch {
         log.info("MPS: no control pipe at {s}, daemon may not be running", .{ctrl_path});
         inst.active = false;
         return;
@@ -118,7 +119,7 @@ pub fn isMpsAvailable() bool {
         "/usr/local/cuda/bin/nvidia-cuda-mps-control",
     };
     for (paths) |p| {
-        std.fs.cwd().access(p, .{}) catch continue;
+        platform.cwd().access(p, .{}) catch continue;
         return true;
     }
     return false;
@@ -173,7 +174,7 @@ test "start creates directories and activates" {
         stop(&inst);
 
         // remove directories
-        std.fs.cwd().deleteDir(inst.getPipeDir()) catch {};
-        std.fs.cwd().deleteDir(inst.getLogDir()) catch {};
+        platform.cwd().deleteDir(inst.getPipeDir()) catch {};
+        platform.cwd().deleteDir(inst.getLogDir()) catch {};
     }
 }

@@ -11,6 +11,10 @@ const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const poll_interval_ns = 2 * std.time.ns_per_s;
 const poll_timeout_ns = 60 * std.time.ns_per_s;
 
+fn nowAwakeNanoseconds() i128 {
+    return @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds());
+}
+
 const HttpResponse = struct {
     status: http.Status,
     body: []u8,
@@ -73,7 +77,7 @@ pub fn createAccount(self: anytype, email: []const u8) types.AcmeError!void {
     };
 
     if (self.account_key == null) {
-        self.account_key = EcdsaP256.KeyPair.generate();
+        self.account_key = EcdsaP256.KeyPair.generate(self.io);
     }
 
     const nonce = try fetchNonce(self);
@@ -243,8 +247,8 @@ pub fn respondToChallenge(self: anytype, challenge_url: []const u8) types.AcmeEr
 }
 
 pub fn waitForAuthorizationValid(self: anytype, auth_url: []const u8) types.AcmeError!void {
-    const start = std.time.nanoTimestamp();
-    while (std.time.nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = nowAwakeNanoseconds();
+    while (nowAwakeNanoseconds() - start < pollTimeoutNs()) {
         var response = postAsGet(self, auth_url, types.AcmeError.AuthorizationFetchFailed) catch
             return types.AcmeError.AuthorizationFetchFailed;
         defer response.deinit();
@@ -256,15 +260,15 @@ pub fn waitForAuthorizationValid(self: anytype, auth_url: []const u8) types.Acme
         if (std.mem.eql(u8, status, "valid")) return;
         if (std.mem.eql(u8, status, "invalid")) return types.AcmeError.ChallengeFailed;
 
-        std.Thread.sleep(poll_interval_ns);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
     }
 
     return types.AcmeError.Timeout;
 }
 
 pub fn waitForOrderReady(self: anytype, order: *types.Order) types.AcmeError!void {
-    const start = std.time.nanoTimestamp();
-    while (std.time.nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = nowAwakeNanoseconds();
+    while (nowAwakeNanoseconds() - start < pollTimeoutNs()) {
         var snapshot = fetchOrderSnapshot(self, order.order_url, types.AcmeError.OrderCreationFailed) catch
             return types.AcmeError.OrderCreationFailed;
         defer snapshot.deinit();
@@ -279,14 +283,14 @@ pub fn waitForOrderReady(self: anytype, order: *types.Order) types.AcmeError!voi
         }
         if (std.mem.eql(u8, snapshot.status, "invalid")) return types.AcmeError.OrderCreationFailed;
 
-        std.Thread.sleep(poll_interval_ns);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
     }
 
     return types.AcmeError.Timeout;
 }
 
 pub fn finalize(self: anytype, order: *types.Order, domain: []const u8) types.AcmeError!types.FinalizeResult {
-    const csr_result = csr_mod.generateCsr(self.allocator, domain) catch return types.AcmeError.CsrGenerationFailed;
+    const csr_result = csr_mod.generateCsr(self.io, self.allocator, domain) catch return types.AcmeError.CsrGenerationFailed;
     defer self.allocator.free(csr_result.csr_der);
 
     const csr_b64 = jws.base64urlEncode(self.allocator, csr_result.csr_der) catch
@@ -384,8 +388,8 @@ pub fn httpPost(self: anytype, url: []const u8, body: []const u8) ![]u8 {
 }
 
 fn waitForOrderValid(order: *types.Order, self: anytype) types.AcmeError!void {
-    const start = std.time.nanoTimestamp();
-    while (std.time.nanoTimestamp() - start < pollTimeoutNs()) {
+    const start = nowAwakeNanoseconds();
+    while (nowAwakeNanoseconds() - start < pollTimeoutNs()) {
         var snapshot = fetchOrderSnapshot(self, order.order_url, types.AcmeError.FinalizeFailed) catch
             return types.AcmeError.FinalizeFailed;
         defer snapshot.deinit();
@@ -398,7 +402,7 @@ fn waitForOrderValid(order: *types.Order, self: anytype) types.AcmeError!void {
         if (std.mem.eql(u8, snapshot.status, "valid") and order.cert_url != null) return;
         if (std.mem.eql(u8, snapshot.status, "invalid")) return types.AcmeError.FinalizeFailed;
 
-        std.Thread.sleep(poll_interval_ns);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
     }
 
     return types.AcmeError.Timeout;

@@ -9,7 +9,7 @@ pub fn connectWithTimeout(
 ) !*std.http.Client.Connection {
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse
         return error.UnsupportedUriScheme;
-    var host_buf: [std.Uri.host_name_max]u8 = undefined;
+    var host_buf: [255]u8 = undefined;
     const host_name = uri.getHost(&host_buf) catch return error.NetworkError;
     const default_port: u16 = if (protocol == .tls) 443 else 80;
     const port = uri.port orelse default_port;
@@ -45,9 +45,9 @@ pub fn parseLocationHeader(host: []const u8, head: std.http.Client.Response.Head
 }
 
 fn setSocketTimeouts(conn: *std.http.Client.Connection) void {
-    const stream = conn.stream_reader.getStream();
+    const stream = conn.stream_reader.stream;
     const tv = posix.timeval{ .sec = common.registry_timeout_sec, .usec = 0 };
     const opt_bytes = std.mem.asBytes(&tv);
-    posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, opt_bytes) catch {};
-    posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, opt_bytes) catch {};
+    posix.setsockopt(stream.socket.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, opt_bytes) catch {};
+    posix.setsockopt(stream.socket.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, opt_bytes) catch {};
 }

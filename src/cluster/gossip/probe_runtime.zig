@@ -131,7 +131,7 @@ pub fn escalateToIndirect(self: anytype) !void {
     self.probe_phase = .indirect;
     self.ticks_in_phase = 0;
 
-    var candidates: std.ArrayListUnmanaged(u64) = .{};
+    var candidates: std.ArrayListUnmanaged(u64) = .empty;
     defer candidates.deinit(self.alloc);
 
     var iter = self.members.iterator();
@@ -187,7 +187,7 @@ pub fn suspectProbeTarget(self: anytype) !void {
 }
 
 pub fn checkSuspectTimeouts(self: anytype) !void {
-    var dead_list: std.ArrayListUnmanaged(u64) = .{};
+    var dead_list: std.ArrayListUnmanaged(u64) = .empty;
     defer dead_list.deinit(self.alloc);
 
     var iter = self.members.iterator();

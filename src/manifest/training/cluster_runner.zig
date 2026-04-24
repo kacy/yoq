@@ -1,32 +1,28 @@
 const std = @import("std");
+const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const state_support = @import("state_support.zig");
 
-pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
-    self.state = .scheduling;
-    state_support.generateClusterJobId(self) catch {};
-    state_support.createPersistentRecord(self);
-    state_support.persistState(self);
-
-    const http_client = @import("../../cluster/http_client.zig");
+fn buildDeployRequestBody(self: anytype) ![]u8 {
     const json_helpers = @import("../../lib/json_helpers.zig");
 
-    var json_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer json_buf.deinit(self.alloc);
-    const writer = json_buf.writer(self.alloc);
+    var body_writer = std.Io.Writer.Allocating.init(self.alloc);
+    defer body_writer.deinit();
 
-    writer.writeAll("{\"services\":[{\"image\":\"") catch return error.OutOfMemory;
-    json_helpers.writeJsonEscaped(writer, self.job.image) catch return error.OutOfMemory;
-    writer.writeAll("\",\"command\":\"") catch return error.OutOfMemory;
+    const writer = &body_writer.writer;
+
+    try writer.writeAll("{\"services\":[{\"image\":\"");
+    try json_helpers.writeJsonEscaped(writer, self.job.image);
+    try writer.writeAll("\",\"command\":\"");
 
     for (self.job.command, 0..) |arg, j| {
-        if (j > 0) writer.writeByte(' ') catch {};
-        json_helpers.writeJsonEscaped(writer, arg) catch {};
+        if (j > 0) try writer.writeByte(' ');
+        try json_helpers.writeJsonEscaped(writer, arg);
     }
 
     var resource_buf: [512]u8 = undefined;
-    const resource_str = std.fmt.bufPrint(
+    const resource_str = try std.fmt.bufPrint(
         &resource_buf,
         "\",\"cpu_limit\":{d},\"memory_limit_mb\":{d},\"gpu_limit\":{d},\"gang_world_size\":{d},\"gpus_per_rank\":1",
         .{
@@ -35,21 +31,37 @@ pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
             self.job.gpus,
             self.job.gpus,
         },
-    ) catch return error.OutOfMemory;
-    writer.writeAll(resource_str) catch return error.OutOfMemory;
+    );
+    try writer.writeAll(resource_str);
 
-    if (self.job.gpu_type) |gt| {
-        writer.writeAll(",\"gpu_model\":\"") catch return error.OutOfMemory;
-        json_helpers.writeJsonEscaped(writer, gt) catch return error.OutOfMemory;
-        writer.writeByte('"') catch return error.OutOfMemory;
+    if (self.job.gpu_type) |gpu_type| {
+        try writer.writeAll(",\"gpu_model\":\"");
+        try json_helpers.writeJsonEscaped(writer, gpu_type);
+        try writer.writeByte('"');
     }
 
-    writer.writeAll("}]}") catch return error.OutOfMemory;
+    try writer.writeAll("}]}");
+    return body_writer.toOwnedSlice();
+}
 
+pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
+    self.state = .scheduling;
+    state_support.generateClusterJobId(self) catch {};
+    state_support.createPersistentRecord(self);
+    state_support.persistState(self);
+
+    const http_client = @import("../../cluster/http_client.zig");
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
 
-    var resp = http_client.postWithAuth(self.alloc, server_ip, server_port, "/deploy", json_buf.items, token) catch {
+    const request_body = buildDeployRequestBody(self) catch {
+        self.state = .failed;
+        state_support.persistState(self);
+        return error.OutOfMemory;
+    };
+    defer self.alloc.free(request_body);
+
+    var resp = http_client.postWithAuth(self.alloc, server_ip, server_port, "/deploy", request_body, token) catch {
         self.state = .failed;
         state_support.persistState(self);
         return error.ConnectionFailed;

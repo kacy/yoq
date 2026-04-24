@@ -83,11 +83,15 @@ pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
 }
 
 /// send a signal to a process.
-pub fn sendSignal(pid: posix.pid_t, sig: u32) ProcessError!void {
+pub fn sendSignal(pid: posix.pid_t, sig: anytype) ProcessError!void {
+    const sig_num: u32 = switch (@typeInfo(@TypeOf(sig))) {
+        .@"enum" => @intFromEnum(sig),
+        else => @intCast(sig),
+    };
     const rc = linux.syscall2(
         .kill,
         @as(usize, @bitCast(@as(isize, pid))),
-        sig,
+        sig_num,
     );
     if (syscall_util.isError(rc)) return ProcessError.KillFailed;
 }

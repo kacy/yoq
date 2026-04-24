@@ -3,6 +3,10 @@ const log = @import("../../lib/log.zig");
 const deployment_store = @import("deployment_store.zig");
 const common = @import("common.zig");
 
+fn nowAwakeSeconds() u64 {
+    return @intCast(@max(0, std.Io.Clock.awake.now(std.Options.debug_io).toSeconds()));
+}
+
 pub fn pausedFailureStatus(progress: *const common.UpdateProgress) common.DeploymentStatus {
     return if (progress.replaced > 0) .partially_failed else .failed;
 }
@@ -57,10 +61,9 @@ pub fn waitForHealth(
     callbacks: common.UpdateCallbacks,
     timeout: u32,
 ) bool {
-    const now = std.time.timestamp();
-    const deadline = @as(u64, @intCast(@max(0, now))) + timeout;
+    const deadline = nowAwakeSeconds() + timeout;
 
-    while (@as(u64, @intCast(@max(0, std.time.timestamp()))) < deadline) {
+    while (nowAwakeSeconds() < deadline) {
         var all_healthy = true;
 
         for (container_ids.items) |id| {
@@ -71,7 +74,7 @@ pub fn waitForHealth(
         }
 
         if (all_healthy) return true;
-        std.Thread.sleep(1 * std.time.ns_per_s);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(1), .awake) catch unreachable;
     }
 
     return false;

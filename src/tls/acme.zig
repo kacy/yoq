@@ -64,17 +64,19 @@ pub const IssuanceOptions = types.IssuanceOptions;
 
 pub const AcmeClient = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     directory_url: []const u8,
     directory: ?Directory = null,
     account_key: ?EcdsaP256.KeyPair = null,
     account_url: ?[]const u8 = null,
     http_client: http.Client,
 
-    pub fn init(allocator: std.mem.Allocator, directory_url: []const u8) AcmeClient {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, directory_url: []const u8) AcmeClient {
         return .{
             .allocator = allocator,
+            .io = io,
             .directory_url = directory_url,
-            .http_client = .{ .allocator = allocator },
+            .http_client = .{ .io = io, .allocator = allocator },
         };
     }
 
@@ -260,6 +262,6 @@ test "Order deinit frees order url" {
 test "AcmeClient init and deinit" {
     const alloc = std.testing.allocator;
 
-    var client = AcmeClient.init(alloc, letsencrypt_staging);
+    var client = AcmeClient.init(std.testing.io, alloc, letsencrypt_staging);
     client.deinit();
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http = @import("../http.zig");
 const store = @import("../../state/store.zig");
 const monitor = @import("../../runtime/monitor.zig");
@@ -861,8 +862,8 @@ test "resolveIpToService returns unknown for empty records" {
 
 test "writeSnapshotJson produces valid JSON" {
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     const snap = monitor.ServiceSnapshot{
         .name = "test-service",
@@ -878,7 +879,7 @@ test "writeSnapshotJson produces valid JSON" {
     };
 
     writeSnapshotJson(writer, snap) catch unreachable;
-    const json = stream.getWritten();
+    const json = stream.buffered();
 
     // Verify JSON contains expected fields
     try testing.expect(std.mem.indexOf(u8, json, "test-service") != null);
@@ -889,8 +890,8 @@ test "writeSnapshotJson produces valid JSON" {
 
 test "writeSnapshotJson handles null health" {
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     const snap = monitor.ServiceSnapshot{
         .name = "test-service",
@@ -906,15 +907,15 @@ test "writeSnapshotJson handles null health" {
     };
 
     writeSnapshotJson(writer, snap) catch unreachable;
-    const json = stream.getWritten();
+    const json = stream.buffered();
 
     try testing.expect(std.mem.indexOf(u8, json, "null") != null);
 }
 
 test "writeSnapshotJson includes PSI metrics when present" {
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
+    var stream: std.Io.Writer = .fixed(&buf);
+    const writer = &stream;
 
     const psi = cgroups.PsiMetrics{ .some_avg10 = 1.5, .full_avg10 = 0.5 };
     const snap = monitor.ServiceSnapshot{
@@ -931,7 +932,7 @@ test "writeSnapshotJson includes PSI metrics when present" {
     };
 
     writeSnapshotJson(writer, snap) catch unreachable;
-    const json = stream.getWritten();
+    const json = stream.buffered();
 
     try testing.expect(std.mem.indexOf(u8, json, "psi_cpu") != null);
     try testing.expect(std.mem.indexOf(u8, json, "psi_mem") != null);

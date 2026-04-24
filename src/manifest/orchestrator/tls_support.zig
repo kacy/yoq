@@ -14,7 +14,21 @@ pub fn provisionAcmeCert(
     domain: []const u8,
     email: []const u8,
 ) void {
-    var client = acme_mod.AcmeClient.init(alloc, acme_mod.letsencrypt_production);
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+
+    provisionAcmeCertWithIo(threaded_io.io(), alloc, certs, challenges, domain, email);
+}
+
+pub fn provisionAcmeCertWithIo(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    certs: *cert_store_mod.CertStore,
+    challenges: *tls_proxy.ChallengeStore,
+    domain: []const u8,
+    email: []const u8,
+) void {
+    var client = acme_mod.AcmeClient.init(io, alloc, acme_mod.letsencrypt_production);
     defer client.deinit();
 
     var exported = client.issueAndExport(.{

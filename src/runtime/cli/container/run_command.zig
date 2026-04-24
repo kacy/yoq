@@ -1,7 +1,9 @@
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const cli = @import("../../../lib/cli.zig");
+const AppContext = @import("../../../lib/app_context.zig").AppContext;
 const container = @import("../../container.zig");
 const run_state = @import("../../run_state.zig");
 const net_setup = @import("../../../network/setup.zig");
@@ -29,7 +31,7 @@ fn isFilesystemTarget(target: []const u8) bool {
         std.mem.eql(u8, target, "..");
 }
 
-fn parseRunFlags(args: *std.process.ArgIterator, alloc: std.mem.Allocator) ContainerError!RunFlags {
+fn parseRunFlags(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) ContainerError!RunFlags {
     var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
     var env: std.ArrayList([]const u8) = .empty;
     var volume_specs: std.ArrayList(cli.VolumeMountSpec) = .empty;
@@ -232,7 +234,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
         return alloc.alloc(container.BindMount, 0) catch return ContainerError.OutOfMemory;
     }
 
-    const cwd = std.fs.cwd().realpathAlloc(alloc, ".") catch {
+    const cwd = platform.cwd().realpathAlloc(alloc, ".") catch {
         writeErr("failed to resolve current working directory\n", .{});
         return ContainerError.OutOfMemory;
     };
@@ -267,7 +269,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
             std.fs.path.resolve(alloc, &.{ cwd, spec.source }) catch return error.OutOfMemory;
         defer alloc.free(source_input);
 
-        const source = std.fs.cwd().realpathAlloc(alloc, source_input) catch {
+        const source = platform.cwd().realpathAlloc(alloc, source_input) catch {
             writeErr("volume source must exist and be canonicalizable: {s}\n", .{spec.source});
             return ContainerError.InvalidArgument;
         };
@@ -351,20 +353,22 @@ fn saveCreatedRecord(id: []const u8, cfg: *const run_state.SavedRunConfig) Conta
         .status = "created",
         .pid = null,
         .exit_code = null,
-        .created_at = std.time.timestamp(),
+        .created_at = platform.timestamp(),
     }) catch |err| {
         writeErr("failed to save container state: {}\n", .{err});
         return ContainerError.ConfigSaveFailed;
     };
 }
 
-pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn run(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    const alloc = ctx.alloc;
+
     if (builtin.os.tag != .linux) {
         writeErr("yoq run is only supported on linux (kernel 6.1+)\n", .{});
         return ContainerError.NotSupported;
     }
 
-    if (posix.getuid() != 0) {
+    if (platform.posix.getuid() != 0) {
         writeErr("warning: yoq run requires root privileges for cgroups and networking\n", .{});
     }
 
@@ -374,7 +378,7 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     const is_image = !isFilesystemTarget(flags.target);
 
     var img = if (is_image)
-        try image_cmds.pullAndResolveImage(alloc, flags.target)
+        try image_cmds.pullAndResolveImage(ctx.io, alloc, flags.target)
     else
         image_cmds.ImageResolution{ .rootfs = flags.target };
     defer img.deinit();
@@ -407,7 +411,7 @@ pub fn run(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 
     if (flags.detach) {
-        supervisor_runtime.spawnSupervisor(alloc, id) catch |e| return e;
+        supervisor_runtime.spawnSupervisor(ctx.io, alloc, id) catch |e| return e;
         state_support.waitForContainerStart(alloc, id) catch |e| return e;
         write("{s}\n", .{id});
         return;

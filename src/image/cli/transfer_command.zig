@@ -11,13 +11,13 @@ const write = cli.write;
 const writeErr = cli.writeErr;
 const requireArg = cli.requireArg;
 
-pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn pull(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const image_str = requireArg(args, "usage: yoq pull <image>\n");
     const ref = spec.parseImageRef(image_str);
 
     writeErr("pulling {s}...\n", .{image_str});
 
-    var result = registry.pull(alloc, ref) catch |err| {
+    var result = registry.pull(io, alloc, ref) catch |err| {
         common.writePullError(image_str, err);
         return common.ImageCommandsError.PullFailed;
     };
@@ -42,7 +42,7 @@ pub fn pull(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     });
 }
 
-pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn push(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const source_str = requireArg(args, "usage: yoq push <source> [target]\n");
     const target_str = args.next() orelse source_str;
 
@@ -73,7 +73,7 @@ pub fn push(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
 
     writeErr("pushing {s}...\n", .{target_str});
 
-    var result = registry.push(alloc, target_ref, blobs.manifest_bytes, blobs.config_bytes, layer_digest_strs.items) catch |err| {
+    var result = registry.push(io, alloc, target_ref, blobs.manifest_bytes, blobs.config_bytes, layer_digest_strs.items) catch |err| {
         writeErr("failed to push image: {}\n", .{err});
         return common.ImageCommandsError.PushFailed;
     };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const common = @import("common.zig");
 
@@ -10,7 +11,7 @@ pub const max_total_fds = 128;
 var total_bpf_fds: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 const CircuitBreaker = struct {
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     failures: u32,
     last_failure_time: i64,
     threshold: u32,
@@ -18,7 +19,7 @@ const CircuitBreaker = struct {
 
     fn init(threshold: u32, reset_timeout_ms: i64) CircuitBreaker {
         return .{
-            .mutex = .{},
+            .mutex = .init,
             .failures = 0,
             .last_failure_time = 0,
             .threshold = threshold,
@@ -27,12 +28,12 @@ const CircuitBreaker = struct {
     }
 
     fn allow(self: *CircuitBreaker) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         if (self.failures < self.threshold) return true;
 
-        const now = std.time.milliTimestamp();
+        const now = platform.milliTimestamp();
         if (now - self.last_failure_time > self.reset_timeout_ms) {
             self.failures = 0;
             self.last_failure_time = 0;
@@ -43,8 +44,8 @@ const CircuitBreaker = struct {
     }
 
     fn recordSuccess(self: *CircuitBreaker) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         if (self.failures > 0) {
             self.failures = 0;
@@ -52,11 +53,11 @@ const CircuitBreaker = struct {
     }
 
     fn recordFailure(self: *CircuitBreaker) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         self.failures += 1;
-        self.last_failure_time = std.time.milliTimestamp();
+        self.last_failure_time = platform.milliTimestamp();
     }
 };
 

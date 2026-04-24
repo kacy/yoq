@@ -5,6 +5,7 @@
 // modules to avoid duplicating common patterns.
 
 const std = @import("std");
+const platform = @import("platform");
 const ip = @import("../network/ip.zig");
 const net_setup = @import("../network/setup.zig");
 const paths = @import("paths.zig");
@@ -31,8 +32,12 @@ pub var stderr_write_failures: usize = 0;
 
 /// write formatted output to stdout. tracks failures but doesn't panic.
 pub fn write(comptime fmt: []const u8, args: anytype) void {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stdout().writer(&buf);
+    var w = std.Io.File.stdout().writer(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stdout_write_failures += 1;
@@ -46,8 +51,12 @@ pub fn write(comptime fmt: []const u8, args: anytype) void {
 
 /// write formatted output to stderr. tracks failures but doesn't panic.
 pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+
     var buf: [4096]u8 = undefined;
-    var w = std.fs.File.stderr().writer(&buf);
+    var w = std.Io.File.stderr().writer(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stderr_write_failures += 1;
@@ -63,7 +72,7 @@ pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
 
 /// require the next CLI argument, or print usage and exit.
 /// used by commands that take a single required positional argument.
-pub fn requireArg(args: *std.process.ArgIterator, comptime usage: []const u8) []const u8 {
+pub fn requireArg(args: *std.process.Args.Iterator, comptime usage: []const u8) []const u8 {
     return args.next() orelse {
         writeErr(usage, .{});
         std.process.exit(1);
@@ -251,7 +260,7 @@ pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
 
-    const file = std.fs.cwd().openFile(token_path, .{}) catch return null;
+    const file = platform.cwd().openFile(token_path, .{}) catch return null;
     defer file.close();
 
     if (!hasOwnerOnlyPermissions(file)) return null;
@@ -274,7 +283,7 @@ pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
 /// returns the hex string in the provided buffer, or null on failure.
 pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
     var raw: [32]u8 = undefined;
-    std.crypto.random.bytes(&raw);
+    platform.randomBytes(&raw);
     defer std.crypto.secureZero(u8, &raw);
 
     const hex = std.fmt.bytesToHex(raw, .lower);
@@ -288,7 +297,7 @@ pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
 
     if (tokenFileExistsWithWeakPermissions(token_path)) return null;
 
-    const file = std.fs.cwd().createFile(token_path, .{
+    const file = platform.cwd().createFile(token_path, .{
         .mode = 0o600,
         .truncate = true,
         .exclusive = false,
@@ -310,13 +319,13 @@ pub fn isValidApiToken(token: []const u8) bool {
     return true;
 }
 
-fn hasOwnerOnlyPermissions(file: std.fs.File) bool {
+fn hasOwnerOnlyPermissions(file: platform.File) bool {
     const stat = file.stat() catch return false;
     return (stat.mode & 0o077) == 0;
 }
 
 fn tokenFileExistsWithWeakPermissions(path: []const u8) bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    const file = platform.cwd().openFile(path, .{}) catch return false;
     defer file.close();
     return !hasOwnerOnlyPermissions(file);
 }
@@ -340,13 +349,13 @@ const TokenTestBackup = struct {
 
     fn restore(self: TokenTestBackup) void {
         if (!self.moved) return;
-        std.fs.cwd().rename(self.backupPath(), self.tokenPath()) catch |e| {
+        platform.cwd().rename(self.backupPath(), self.tokenPath()) catch |e| {
             log.warn("test cleanup: failed to restore token file: {}", .{e});
         };
     }
 };
 
-var token_test_mutex: std.Thread.Mutex = .{};
+var token_test_mutex: std.Io.Mutex = .init;
 
 fn backupExistingToken() ?TokenTestBackup {
     var backup: TokenTestBackup = .{
@@ -363,13 +372,13 @@ fn backupExistingToken() ?TokenTestBackup {
     backup.backup_path_len = backup_path.len;
 
     paths.ensureDataDirStrict("") catch return null;
-    std.fs.cwd().deleteFile(backup.backupPath()) catch |err| switch (err) {
+    platform.cwd().deleteFile(backup.backupPath()) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return null,
     };
 
     const moved = blk: {
-        std.fs.cwd().rename(token_path, backup_path) catch |err| switch (err) {
+        platform.cwd().rename(token_path, backup_path) catch |err| switch (err) {
             error.FileNotFound => break :blk false,
             else => return null,
         };
@@ -446,8 +455,8 @@ test "invalid container names" {
 }
 
 test "generateAndSaveToken produces valid 64-char hex string" {
-    token_test_mutex.lock();
-    defer token_test_mutex.unlock();
+    token_test_mutex.lockUncancelable(std.testing.io);
+    defer token_test_mutex.unlock(std.testing.io);
 
     const backup = backupExistingToken() orelse return;
     defer backup.restore();
@@ -462,12 +471,12 @@ test "generateAndSaveToken produces valid 64-char hex string" {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
-    std.fs.cwd().deleteFile(token_path) catch {};
+    platform.cwd().deleteFile(token_path) catch {};
 }
 
 test "readApiToken round-trip with generateAndSaveToken" {
-    token_test_mutex.lock();
-    defer token_test_mutex.unlock();
+    token_test_mutex.lockUncancelable(std.testing.io);
+    defer token_test_mutex.unlock(std.testing.io);
 
     const backup = backupExistingToken() orelse return;
     defer backup.restore();
@@ -483,12 +492,12 @@ test "readApiToken round-trip with generateAndSaveToken" {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
-    std.fs.cwd().deleteFile(token_path) catch {};
+    platform.cwd().deleteFile(token_path) catch {};
 }
 
 test "readApiToken returns null for missing file" {
-    token_test_mutex.lock();
-    defer token_test_mutex.unlock();
+    token_test_mutex.lockUncancelable(std.testing.io);
+    defer token_test_mutex.unlock(std.testing.io);
 
     const backup = backupExistingToken() orelse return;
     defer backup.restore();
@@ -498,8 +507,8 @@ test "readApiToken returns null for missing file" {
 }
 
 test "readApiToken rejects weak file permissions" {
-    token_test_mutex.lock();
-    defer token_test_mutex.unlock();
+    token_test_mutex.lockUncancelable(std.testing.io);
+    defer token_test_mutex.unlock(std.testing.io);
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
@@ -508,19 +517,19 @@ test "readApiToken rejects weak file permissions" {
     const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
 
     // move existing file out of the way
-    const moved = if (std.fs.cwd().rename(token_path, backup_path)) |_| true else |_| false;
-    defer if (moved) std.fs.cwd().rename(backup_path, token_path) catch |e| {
+    const moved = if (platform.cwd().rename(token_path, backup_path)) |_| true else |_| false;
+    defer if (moved) platform.cwd().rename(backup_path, token_path) catch |e| {
         log.warn("test cleanup: failed to restore token file: {}", .{e});
     };
 
-    const file = std.fs.cwd().createFile(token_path, .{ .mode = 0o644 }) catch |e| {
+    const file = platform.cwd().createFile(token_path, .{ .mode = 0o644 }) catch |e| {
         // If we can't create the test file, skip this test
         log.warn("test: skipping weak permissions test - cannot create file: {}", .{e});
         return;
     };
     defer {
         file.close();
-        std.fs.cwd().deleteFile(token_path) catch |e| {
+        platform.cwd().deleteFile(token_path) catch |e| {
             log.warn("test cleanup: failed to delete test token file: {}", .{e});
         };
     }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../lib/log.zig");
 const service_observability = @import("service_observability.zig");
 const service_registry_backfill = @import("service_registry_backfill.zig");
@@ -16,13 +17,13 @@ pub const RuntimeError = service_registry.Error || error{
     StoreWriteFailed,
 };
 
-var mutex: std.Thread.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var initialized: bool = false;
 var registry: service_registry.Registry = undefined;
 
 pub fn resetForTest() void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     if (initialized) {
         registry.deinit();
@@ -33,8 +34,8 @@ pub fn resetForTest() void {
 }
 
 pub fn syncServiceFromStore(service_name: []const u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     ensureInitializedLocked() catch |err| {
         log.warn("service registry runtime: failed to initialize before syncing {s}: {}", .{ service_name, err });
@@ -47,8 +48,8 @@ pub fn syncServiceFromStore(service_name: []const u8) void {
 }
 
 pub fn removeContainer(container_id: []const u8) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     ensureInitializedLocked() catch |err| {
         log.warn("service registry runtime: failed to initialize before removing {s}: {}", .{ container_id, err });
@@ -59,8 +60,8 @@ pub fn removeContainer(container_id: []const u8) void {
 }
 
 pub fn noteProbeResult(service_name: []const u8, endpoint_id: []const u8, healthy: bool) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     ensureInitializedLocked() catch |err| {
         log.warn("service registry runtime: failed to initialize before probe result for {s}: {}", .{ service_name, err });
@@ -74,8 +75,8 @@ pub fn noteProbeResult(service_name: []const u8, endpoint_id: []const u8, health
 }
 
 pub fn markEndpointPending(service_name: []const u8, endpoint_id: []const u8, generation: i64) ProbeOutcome {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     ensureInitializedLocked() catch |err| {
         log.warn("service registry runtime: failed to initialize before pending health gate for {s}: {}", .{ service_name, err });
@@ -89,8 +90,8 @@ pub fn markEndpointPending(service_name: []const u8, endpoint_id: []const u8, ge
 }
 
 pub fn noteProbeResultForGeneration(service_name: []const u8, endpoint_id: []const u8, generation: i64, healthy: bool) ProbeOutcome {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     ensureInitializedLocked() catch |err| {
         log.warn("service registry runtime: failed to initialize before probe result for {s}: {}", .{ service_name, err });
@@ -104,8 +105,8 @@ pub fn noteProbeResultForGeneration(service_name: []const u8, endpoint_id: []con
 }
 
 pub fn requestReconcile(service_name: []const u8) RuntimeError!void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     _ = try registry.requestReconcile(service_name);
@@ -113,24 +114,24 @@ pub fn requestReconcile(service_name: []const u8) RuntimeError!void {
 }
 
 pub fn noteNodeLost(node_id: i64) !usize {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     return registry.noteNodeLost(node_id);
 }
 
 pub fn noteNodeRecovered(node_id: i64) !usize {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     return registry.noteNodeRecovered(node_id);
 }
 
 pub fn markReconcileSucceeded(service_name: []const u8) RuntimeError!void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     try registry.markReconcileSucceeded(service_name);
@@ -138,8 +139,8 @@ pub fn markReconcileSucceeded(service_name: []const u8) RuntimeError!void {
 }
 
 pub fn markReconcileFailed(service_name: []const u8, message: []const u8) RuntimeError!void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     try registry.markReconcileFailed(service_name, message);
@@ -147,24 +148,24 @@ pub fn markReconcileFailed(service_name: []const u8, message: []const u8) Runtim
 }
 
 pub fn snapshotServices(alloc: Allocator) !std.ArrayList(ServiceSnapshot) {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     return registry.snapshotServices(alloc);
 }
 
 pub fn snapshotService(alloc: Allocator, service_name: []const u8) !ServiceSnapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     return registry.snapshotService(alloc, service_name);
 }
 
 pub fn snapshotServiceEndpoints(alloc: Allocator, service_name: []const u8) !std.ArrayList(EndpointSnapshot) {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     return registry.snapshotServiceEndpoints(alloc, service_name);
@@ -175,8 +176,8 @@ pub fn hasProxyConfiguredServices() bool {
 }
 
 pub fn countProxyConfiguredServices() usize {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     ensureInitializedLocked() catch return 0;
 
@@ -188,8 +189,8 @@ pub fn countProxyConfiguredServices() usize {
 }
 
 pub fn drainEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeError!void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     try registry.ensureEndpointExists(service_name, endpoint_id);
@@ -199,8 +200,8 @@ pub fn drainEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeE
 }
 
 pub fn deleteEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeError!void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     try ensureInitializedLocked();
     try registry.ensureEndpointExists(service_name, endpoint_id);

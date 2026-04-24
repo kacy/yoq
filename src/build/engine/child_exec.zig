@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -37,8 +38,8 @@ pub fn buildChildMain(arg: ?*anyopaque) callconv(.c) u8 {
 
     filesystem.mountEssential() catch return 1;
 
-    posix.chdir(ctx.workdir) catch {
-        posix.chdir("/") catch {};
+    platform.posix.chdir(ctx.workdir) catch {
+        platform.posix.chdir("/") catch {};
     };
 
     return execShellCommand(ctx.command, ctx.env, ctx.shell);

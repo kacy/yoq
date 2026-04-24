@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const proxy_runtime = @import("runtime.zig");
 const reverse_proxy = @import("reverse_proxy.zig");
@@ -29,7 +30,7 @@ pub const ConnectTarget = struct {
     port: u16,
 };
 
-var mutex: std.Thread.Mutex = .{};
+var mutex: std.Io.Mutex = .init;
 var listen_fd: ?posix.fd_t = null;
 var listener_thread: ?std.Thread = null;
 var stop_requested: bool = false;
@@ -44,8 +45,8 @@ var state_change_hook: ?StateChangeHook = null;
 pub fn resetForTest() void {
     stop();
 
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     listen_bind_addr = default_bind_addr;
     listen_port = default_listen_port;
     accepted_connections_total = 0;
@@ -55,21 +56,21 @@ pub fn resetForTest() void {
 }
 
 pub fn configure(bind_addr: [4]u8, port: u16) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     listen_bind_addr = bind_addr;
     listen_port = port;
 }
 
 pub fn setStateChangeHook(hook: ?StateChangeHook) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     state_change_hook = hook;
 }
 
 pub fn setRunningForTest(port: u16) void {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
     listen_bind_addr = default_bind_addr;
     listen_port = port;
     running = true;
@@ -92,7 +93,6 @@ pub fn startForTest(alloc: std.mem.Allocator, port: u16) void {
 }
 
 pub fn startOrSkipForTest(alloc: std.mem.Allocator, port: u16) !void {
-    if (std.posix.getenv("YOQ_SKIP_SLOW_TESTS")) |_| return error.SkipZigTest;
     configure(default_bind_addr, port);
     start(alloc);
     if (portIfRunning() != null) return;
@@ -118,7 +118,7 @@ pub fn stop() void {
     var port_to_wake: ?u16 = null;
     var hook_to_call: ?StateChangeHook = null;
 
-    mutex.lock();
+    mutex.lockUncancelable(std.Options.debug_io);
     stop_requested = true;
     if (running or listen_fd != null or listener_thread != null) hook_to_call = state_change_hook;
     running = false;
@@ -131,17 +131,17 @@ pub fn stop() void {
         thread_to_join = thread;
         listener_thread = null;
     }
-    mutex.unlock();
+    mutex.unlock(std.Options.debug_io);
 
     if (port_to_wake) |port| wakeAccept(port);
-    if (fd_to_close) |fd| posix.close(fd);
+    if (fd_to_close) |fd| platform.posix.close(fd);
     if (thread_to_join) |thread| thread.join();
     if (hook_to_call) |hook| hook();
 }
 
 pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     return .{
         .enabled = service_registry_runtime.hasProxyConfiguredServices(),
@@ -155,16 +155,16 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
 }
 
 pub fn portIfRunning() ?u16 {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     if (!running) return null;
     return listen_port;
 }
 
 pub fn connectTargetIfRunning() ?ConnectTarget {
-    mutex.lock();
-    defer mutex.unlock();
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
 
     if (!running) return null;
     return .{
@@ -177,9 +177,9 @@ pub fn connectTargetIfRunning() ?ConnectTarget {
 }
 
 fn start(alloc: std.mem.Allocator) void {
-    mutex.lock();
+    mutex.lockUncancelable(std.Options.debug_io);
     if (listener_thread != null) {
-        mutex.unlock();
+        mutex.unlock(std.Options.debug_io);
         return;
     }
     stop_requested = false;
@@ -190,10 +190,10 @@ fn start(alloc: std.mem.Allocator) void {
     const bind_addr = listen_bind_addr;
     const requested_port = listen_port;
 
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
+    const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
         setLastErrorLocked(error.SocketFailed);
         const hook = state_change_hook;
-        mutex.unlock();
+        mutex.unlock(std.Options.debug_io);
         if (hook) |callback| callback();
         return;
     };
@@ -201,20 +201,20 @@ fn start(alloc: std.mem.Allocator) void {
     const reuseaddr: c_int = 1;
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
-    const addr = std.net.Address.initIp4(bind_addr, requested_port);
-    posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
+    const addr = platform.net.Address.initIp4(bind_addr, requested_port);
+    platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
         setLastErrorLocked(error.BindFailed);
         const hook = state_change_hook;
-        mutex.unlock();
-        posix.close(fd);
+        mutex.unlock(std.Options.debug_io);
+        platform.posix.close(fd);
         if (hook) |callback| callback();
         return;
     };
-    posix.listen(fd, 128) catch {
+    platform.posix.listen(fd, 128) catch {
         setLastErrorLocked(error.ListenFailed);
         const hook = state_change_hook;
-        mutex.unlock();
-        posix.close(fd);
+        mutex.unlock(std.Options.debug_io);
+        platform.posix.close(fd);
         if (hook) |callback| callback();
         return;
     };
@@ -222,11 +222,11 @@ fn start(alloc: std.mem.Allocator) void {
     if (requested_port == 0) {
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
+        platform.posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
             setLastErrorLocked(error.BindFailed);
             const hook = state_change_hook;
-            mutex.unlock();
-            posix.close(fd);
+            mutex.unlock(std.Options.debug_io);
+            platform.posix.close(fd);
             if (hook) |callback| callback();
             return;
         };
@@ -240,29 +240,29 @@ fn start(alloc: std.mem.Allocator) void {
         running = false;
         listen_fd = null;
         const hook = state_change_hook;
-        mutex.unlock();
-        posix.close(fd);
+        mutex.unlock(std.Options.debug_io);
+        platform.posix.close(fd);
         if (hook) |callback| callback();
         return;
     };
     const hook = state_change_hook;
-    mutex.unlock();
+    mutex.unlock(std.Options.debug_io);
     if (hook) |callback| callback();
 }
 
 fn acceptLoop(alloc: std.mem.Allocator) void {
     while (true) {
         const fd = blk: {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.Options.debug_io);
+            defer mutex.unlock(std.Options.debug_io);
             if (stop_requested) break;
             break :blk listen_fd orelse break;
         };
 
-        const client_fd = posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch {
+        const client_fd = platform.posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch {
             const hook = blk: {
-                mutex.lock();
-                defer mutex.unlock();
+                mutex.lockUncancelable(std.Options.debug_io);
+                defer mutex.unlock(std.Options.debug_io);
                 if (stop_requested or listen_fd == null) break :blk null;
                 setLastErrorLocked(error.AcceptFailed);
                 running = false;
@@ -273,26 +273,26 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
         };
 
         const shutting_down = blk: {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.Options.debug_io);
+            defer mutex.unlock(std.Options.debug_io);
             break :blk stop_requested or listen_fd == null;
         };
         if (shutting_down) {
-            posix.close(client_fd);
+            platform.posix.close(client_fd);
             break;
         }
 
-        mutex.lock();
+        mutex.lockUncancelable(std.Options.debug_io);
         accepted_connections_total += 1;
         active_connections += 1;
-        mutex.unlock();
+        mutex.unlock(std.Options.debug_io);
 
         const thread = std.Thread.spawn(.{}, connectionWorker, .{ alloc, client_fd }) catch {
-            mutex.lock();
+            mutex.lockUncancelable(std.Options.debug_io);
             if (active_connections > 0) active_connections -= 1;
             setLastErrorLocked(error.ThreadSpawnFailed);
-            mutex.unlock();
-            posix.close(client_fd);
+            mutex.unlock(std.Options.debug_io);
+            platform.posix.close(client_fd);
             continue;
         };
         thread.detach();
@@ -301,13 +301,13 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
 
 fn connectionWorker(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
     defer {
-        mutex.lock();
+        mutex.lockUncancelable(std.Options.debug_io);
         if (active_connections > 0) active_connections -= 1;
-        mutex.unlock();
+        mutex.unlock(std.Options.debug_io);
     }
 
     var routes = proxy_runtime.snapshotRouteConfigs(alloc) catch {
-        posix.close(client_fd);
+        platform.posix.close(client_fd);
         return;
     };
     defer deinitRoutes(alloc, &routes);
@@ -318,11 +318,11 @@ fn connectionWorker(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
 }
 
 fn wakeAccept(port: u16) void {
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return;
-    defer posix.close(fd);
+    const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return;
+    defer platform.posix.close(fd);
 
-    const addr = std.net.Address.initIp4(wakeBindAddr(), port);
-    posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {};
+    const addr = platform.net.Address.initIp4(wakeBindAddr(), port);
+    platform.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {};
 }
 
 fn wakeBindAddr() [4]u8 {
@@ -337,6 +337,14 @@ fn deinitRoutes(alloc: std.mem.Allocator, routes: *std.ArrayList(router.Route)) 
         alloc.free(route.vip_address);
         if (route.match.host) |host| alloc.free(host);
         alloc.free(route.match.path_prefix);
+        if (route.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
+        for (route.method_matches) |method_match| method_match.deinit(alloc);
+        if (route.method_matches.len > 0) alloc.free(route.method_matches);
+        for (route.header_matches) |header_match| header_match.deinit(alloc);
+        if (route.header_matches.len > 0) alloc.free(route.header_matches);
+        for (route.backend_services) |backend| backend.deinit(alloc);
+        if (route.backend_services.len > 0) alloc.free(route.backend_services);
+        if (route.mirror_service) |mirror_service| alloc.free(mirror_service);
     }
     routes.deinit(alloc);
 }

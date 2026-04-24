@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const linux = std.os.linux;
 
 const context = @import("../../context.zig");
@@ -30,7 +31,7 @@ pub fn processCopy(
 
     var layer_dir_buf: [paths.max_path]u8 = undefined;
     const layer_dir = try common.withTempLayerDir(&layer_dir_buf, "build-copy-layer");
-    defer std.fs.cwd().deleteTree(layer_dir) catch {};
+    defer platform.cwd().deleteTree(layer_dir) catch {};
 
     var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try common.resolveDestination(state.workdir, split.dest, &actual_dest_buf);
@@ -79,19 +80,19 @@ pub fn processCopyFromStage(
     const merged_dir = paths.dataPathFmt(&merged_buf, "tmp/stage-copy-merged-{s}", .{id_buf}) catch
         return types.BuildError.CopyStepFailed;
 
-    std.fs.cwd().makePath(upper_dir) catch return types.BuildError.CopyStepFailed;
-    std.fs.cwd().makePath(work_dir) catch return types.BuildError.CopyStepFailed;
-    std.fs.cwd().makePath(merged_dir) catch return types.BuildError.CopyStepFailed;
+    platform.cwd().makePath(upper_dir) catch return types.BuildError.CopyStepFailed;
+    platform.cwd().makePath(work_dir) catch return types.BuildError.CopyStepFailed;
+    platform.cwd().makePath(merged_dir) catch return types.BuildError.CopyStepFailed;
 
     defer {
-        std.fs.cwd().deleteTree(upper_dir) catch {};
-        std.fs.cwd().deleteTree(work_dir) catch {};
+        platform.cwd().deleteTree(upper_dir) catch {};
+        platform.cwd().deleteTree(work_dir) catch {};
         if (std.posix.toPosixPath(merged_dir)) |merged_z| {
             _ = linux.syscall2(.umount2, @intFromPtr(&merged_z), 0);
         } else |_| {
             log.warn("copy handler: merged_dir path too long for unmount", .{});
         }
-        std.fs.cwd().deleteTree(merged_dir) catch {};
+        platform.cwd().deleteTree(merged_dir) catch {};
     }
 
     filesystem.mountOverlay(.{
@@ -104,9 +105,9 @@ pub fn processCopyFromStage(
     var layer_dir_buf: [paths.max_path]u8 = undefined;
     const layer_dir = paths.dataPathFmt(&layer_dir_buf, "tmp/build-stage-copy-layer-{s}", .{id_buf}) catch
         return types.BuildError.CopyStepFailed;
-    std.fs.cwd().deleteTree(layer_dir) catch {};
-    std.fs.cwd().makePath(layer_dir) catch return types.BuildError.CopyStepFailed;
-    defer std.fs.cwd().deleteTree(layer_dir) catch {};
+    platform.cwd().deleteTree(layer_dir) catch {};
+    platform.cwd().makePath(layer_dir) catch return types.BuildError.CopyStepFailed;
+    defer platform.cwd().deleteTree(layer_dir) catch {};
 
     var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try common.resolveDestination(state.workdir, dest, &actual_dest_buf);

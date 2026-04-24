@@ -4,6 +4,9 @@ const common = @import("../common.zig");
 const writers = @import("writers.zig");
 
 const Response = common.Response;
+const ImageListContext = struct {
+    images: []const store.ImageRecord,
+};
 
 pub fn handleListImages(alloc: std.mem.Allocator) Response {
     var images = store.listImages(alloc) catch return common.internalError();
@@ -12,24 +15,9 @@ pub fn handleListImages(alloc: std.mem.Allocator) Response {
         images.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeByte('[') catch return common.internalError();
-
-    var first = true;
-    for (images.items) |img| {
-        if (!first) writer.writeByte(',') catch return common.internalError();
-        first = false;
-
-        writers.writeImageJson(writer, img) catch return common.internalError();
-    }
-
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, ImageListContext{
+        .images = images.items,
+    }, writeImageListJson);
 }
 
 pub fn handleRemoveImage(id: []const u8) Response {
@@ -39,4 +27,13 @@ pub fn handleRemoveImage(id: []const u8) Response {
     };
 
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn writeImageListJson(writer: *std.Io.Writer, ctx: ImageListContext) !void {
+    try writer.writeByte('[');
+    for (ctx.images, 0..) |image, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writers.writeImageJson(writer, image);
+    }
+    try writer.writeByte(']');
 }

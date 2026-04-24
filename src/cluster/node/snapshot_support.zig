@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const types = @import("../raft_types.zig");
 const bootstrap = @import("bootstrap.zig");
 const logger = @import("../../lib/log.zig");
@@ -46,7 +47,7 @@ pub fn sendSnapshot(self: anytype, target: NodeId, args: types.InstallSnapshotAr
     var snap_path_buf: [512]u8 = undefined;
     const snap_path = bootstrap.snapshotPath(&snap_path_buf, self.config.data_dir) orelse return;
 
-    const data = std.fs.cwd().readFileAlloc(self.alloc, snap_path, 64 * 1024 * 1024) catch |e| {
+    const data = platform.cwd().readFileAlloc(self.alloc, snap_path, 64 * 1024 * 1024) catch |e| {
         logger.warn("snapshot: failed to read snapshot file for node {}: {}", .{ target, e });
         return;
     };

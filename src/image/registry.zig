@@ -18,8 +18,8 @@ pub const PushResult = common.PushResult;
 ///
 /// uses errdefer chains so each allocation is automatically cleaned up
 /// on any subsequent failure — no manual cleanup blocks needed.
-pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!PullResult {
-    var client: std.http.Client = .{ .allocator = alloc };
+pub fn pull(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!PullResult {
+    var client: std.http.Client = .{ .io = io, .allocator = alloc };
     defer client.deinit();
 
     var repo_buf: [256]u8 = undefined;
@@ -108,6 +108,7 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
             for (0..batch_size) |i| {
                 const layer = manifest.layers[batch_start + i];
                 threads[i] = std.Thread.spawn(.{}, blob_transfer.downloadLayerWorker, .{
+                    io,
                     alloc,
                     image_ref.host,
                     repository,
@@ -166,13 +167,14 @@ pub fn pull(alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!Pu
 }
 
 pub fn push(
+    io: std.Io,
     alloc: std.mem.Allocator,
     image_ref: spec.ImageRef,
     manifest_bytes: []const u8,
     config_bytes: []const u8,
     layer_digests: []const []const u8,
 ) RegistryError!PushResult {
-    var client: std.http.Client = .{ .allocator = alloc };
+    var client: std.http.Client = .{ .io = io, .allocator = alloc };
     defer client.deinit();
 
     var repo_buf: [256]u8 = undefined;

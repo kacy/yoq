@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
@@ -118,7 +119,7 @@ pub const ReverseProxy = struct {
 
     pub fn deinit(self: *ReverseProxy) void {
         while (self.active_mirror_requests.load(.acquire) != 0) {
-            std.Thread.sleep(std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch unreachable;
         }
     }
 
@@ -186,7 +187,7 @@ pub const ReverseProxy = struct {
     }
 
     pub fn handleConnection(self: *const ReverseProxy, client_fd: posix.fd_t) void {
-        defer posix.close(client_fd);
+        defer platform.posix.close(client_fd);
         socket_helpers.setSocketTimeoutMs(client_fd, 5000);
         var trace_id: [16]u8 = undefined;
         log.generateTraceId(&trace_id);
@@ -376,9 +377,10 @@ pub const ReverseProxy = struct {
         const inbound_tracestate = http.findHeaderValue(parsed.headers_raw, tracestate_header);
         const forwarded_proto = trustedForwardedProto(parsed.headers_raw, client_ip) orelse "http";
 
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(alloc);
-        const writer = buf.writer(alloc);
+        var buf_writer = std.Io.Writer.Allocating.init(alloc);
+        defer buf_writer.deinit();
+
+        const writer = &buf_writer.writer;
 
         try writer.print("{s} {s} HTTP/1.1\r\n", .{
             proxy_helpers.methodString(parsed.method),
@@ -405,7 +407,7 @@ pub const ReverseProxy = struct {
             } else {
                 try writer.print("{s}: ", .{x_forwarded_for_header});
             }
-            try writeIp4(&writer, address);
+            try writeIp4(writer, address);
             try writer.writeAll("\r\n");
         }
         try writer.print("{s}: {s}\r\n", .{ x_forwarded_host_header, inbound_host });
@@ -416,7 +418,7 @@ pub const ReverseProxy = struct {
         try writer.writeAll("Connection: close\r\n\r\n");
         try writer.writeAll(parsed.body);
 
-        return buf.toOwnedSlice(alloc);
+        return buf_writer.toOwnedSlice();
     }
 
     fn forwardPlan(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
@@ -538,7 +540,7 @@ pub const ReverseProxy = struct {
         client_ip: ?[4]u8,
     ) ![]u8 {
         const fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
-        defer posix.close(fd);
+        defer platform.posix.close(fd);
         const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
 
@@ -594,7 +596,7 @@ fn runMirrorTask(task: MirrorTask) void {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
-    defer posix.close(fd);
+    defer platform.posix.close(fd);
 
     const request = ReverseProxy.buildForwardRequestBytes(task.allocator, task.raw_request, .{
         .protocol = task.protocol,
@@ -627,7 +629,7 @@ fn runMirrorTask(task: MirrorTask) void {
     proxy_runtime.recordMirrorRouteResponseCode(task.route_name, task.route_service, task.mirror_service, status_code);
 }
 
-fn peerIpFromSocket(fd: posix.socket_t) ?[4]u8 {
+fn peerIpFromSocket(fd: platform.posix.socket_t) ?[4]u8 {
     var peer_addr: posix.sockaddr.in = undefined;
     var peer_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
     posix.getpeername(fd, @ptrCast(&peer_addr), &peer_len) catch return null;
@@ -652,7 +654,7 @@ fn trustedForwardedProtoFromRawRequest(raw_request: []const u8, client_ip: ?[4]u
     return null;
 }
 
-fn writeIp4(writer: anytype, address: [4]u8) !void {
+fn writeIp4(writer: *std.Io.Writer, address: [4]u8) !void {
     try writer.print("{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
 }
 
@@ -974,7 +976,7 @@ fn parseForwardedStatusCode(alloc: std.mem.Allocator, protocol: Protocol, respon
     };
 }
 
-fn readResponse(alloc: std.mem.Allocator, fd: posix.socket_t, max_bytes: usize) ![]u8 {
+fn readResponse(alloc: std.mem.Allocator, fd: platform.posix.socket_t, max_bytes: usize) ![]u8 {
     var response = try alloc.alloc(u8, max_bytes);
     errdefer alloc.free(response);
 
@@ -1006,7 +1008,7 @@ const ReadRequestError = error{
     ReadIncomplete,
 };
 
-fn readRequestBytes(fd: posix.socket_t, buf: []u8) ReadRequestError![]const u8 {
+fn readRequestBytes(fd: platform.posix.socket_t, buf: []u8) ReadRequestError![]const u8 {
     var total: usize = 0;
     while (total < buf.len) {
         const bytes_read = posix.read(fd, buf[total..]) catch break;
@@ -1889,7 +1891,7 @@ const TestUpstreamAction = union(enum) {
 };
 
 const TestUpstreamServer = struct {
-    listen_fd: posix.socket_t,
+    listen_fd: platform.posix.socket_t,
     port: u16,
     actions: []const TestUpstreamAction,
     thread: ?std.Thread = null,
@@ -1909,13 +1911,13 @@ const TestUpstreamServer = struct {
 
     fn deinit(self: *TestUpstreamServer) void {
         self.wait();
-        posix.close(self.listen_fd);
+        platform.posix.close(self.listen_fd);
     }
 
     fn start(self: *TestUpstreamServer) !void {
         socket_helpers.setSocketTimeoutMs(self.listen_fd, 5000);
         self.thread = try std.Thread.spawn(.{}, acceptOne, .{self});
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
     }
 
     fn wait(self: *TestUpstreamServer) void {
@@ -1932,7 +1934,7 @@ const TestUpstreamServer = struct {
 
     fn acceptOne(self: *TestUpstreamServer) void {
         for (self.actions, 0..) |action, index| {
-            const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            const client_fd = platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             socket_helpers.setSocketTimeoutMs(client_fd, 1000);
             self.request_lens[index] = captureRequestBytes(client_fd, &self.request_bufs[index]);
             self.accepted = index + 1;
@@ -1942,21 +1944,21 @@ const TestUpstreamServer = struct {
                 .respond => |response| _ = socket_helpers.writeAll(client_fd, response) catch {},
                 .stream_respond => |resp| {
                     _ = socket_helpers.writeAll(client_fd, resp.first) catch {};
-                    std.Thread.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
+                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(resp.delay_ms)), .awake) catch unreachable;
                     _ = socket_helpers.writeAll(client_fd, resp.second) catch {};
                 },
                 .delayed_respond => |resp| {
-                    std.Thread.sleep(@as(u64, resp.delay_ms) * std.time.ns_per_ms);
+                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(resp.delay_ms)), .awake) catch unreachable;
                     _ = socket_helpers.writeAll(client_fd, resp.response) catch {};
                 },
             }
-            posix.close(client_fd);
+            platform.posix.close(client_fd);
         }
     }
 };
 
 const TestListener = struct {
-    fd: posix.socket_t,
+    fd: platform.posix.socket_t,
     port: u16,
 
     fn init() !TestListener {
@@ -1969,49 +1971,49 @@ const TestListener = struct {
     }
 
     fn deinit(self: *TestListener) void {
-        posix.close(self.fd);
+        platform.posix.close(self.fd);
     }
 };
 
 const BoundTestListener = struct {
-    fd: posix.socket_t,
+    fd: platform.posix.socket_t,
     port: u16,
 };
 
 fn initTestListenerSocket() !BoundTestListener {
     const reuseaddr: i32 = 1;
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    const addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
 
     var attempt: usize = 0;
     while (attempt < 50) : (attempt += 1) {
-        const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
+        const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
-        errdefer posix.close(fd);
+        errdefer platform.posix.close(fd);
 
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
-        posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
+        platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            posix.close(fd);
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            platform.posix.close(fd);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
-        posix.listen(fd, 1) catch {
+        platform.posix.listen(fd, 1) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            posix.close(fd);
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            platform.posix.close(fd);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
+        platform.posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            posix.close(fd);
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            platform.posix.close(fd);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
@@ -2024,7 +2026,7 @@ fn initTestListenerSocket() !BoundTestListener {
     unreachable;
 }
 
-fn captureRequestBytes(fd: posix.socket_t, buf: []u8) usize {
+fn captureRequestBytes(fd: platform.posix.socket_t, buf: []u8) usize {
     var total: usize = 0;
     while (total < buf.len) {
         const bytes_read = posix.read(fd, buf[total..]) catch break;
@@ -2051,7 +2053,7 @@ fn captureRequestBytes(fd: posix.socket_t, buf: []u8) usize {
     return total;
 }
 
-fn readSocketBytes(fd: posix.socket_t, buf: []u8) usize {
+fn readSocketBytes(fd: platform.posix.socket_t, buf: []u8) usize {
     var total: usize = 0;
     while (total < buf.len) {
         const bytes_read = posix.read(fd, buf[total..]) catch break;
@@ -3034,7 +3036,7 @@ test "handleConnection proxies a client socket request" {
 
     const ConnectionHarness = struct {
         fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
-            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            const client_fd = platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             proxy_ptr.handleConnection(client_fd);
         }
     };
@@ -3042,10 +3044,10 @@ test "handleConnection proxies a client socket request" {
     const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
     defer server_thread.join();
 
-    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer posix.close(client_fd);
-    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
-    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const server_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
     var response_buf: [1024]u8 = undefined;
@@ -3068,7 +3070,7 @@ test "handleConnection returns framed HTTP/2 local response" {
 
     const ConnectionHarness = struct {
         fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
-            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            const client_fd = platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             proxy_ptr.handleConnection(client_fd);
         }
     };
@@ -3076,10 +3078,10 @@ test "handleConnection returns framed HTTP/2 local response" {
     const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
     defer server_thread.join();
 
-    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer posix.close(client_fd);
-    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
-    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const server_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
     const request = try buildTestHttp2Request(std.testing.allocator, 5, "POST", "grpc.internal", "/pkg.Service/Call");
     defer std.testing.allocator.free(request);
@@ -3185,7 +3187,7 @@ test "handleConnection proxies HTTP/2 upstream response bytes" {
 
     const ConnectionHarness = struct {
         fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
-            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            const client_fd = platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             proxy_ptr.handleConnection(client_fd);
         }
     };
@@ -3193,10 +3195,10 @@ test "handleConnection proxies HTTP/2 upstream response bytes" {
     const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
     defer server_thread.join();
 
-    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer posix.close(client_fd);
-    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
-    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const server_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
     const request = try buildTestHttp2Request(std.testing.allocator, 7, "POST", "grpc.internal", "/pkg.Service/Call");
     defer std.testing.allocator.free(request);
@@ -3306,7 +3308,7 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
 
     const ConnectionHarness = struct {
         fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
-            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            const client_fd = platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             proxy_ptr.handleConnection(client_fd);
         }
     };
@@ -3314,10 +3316,10 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
     const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
     defer server_thread.join();
 
-    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer posix.close(client_fd);
-    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
-    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const server_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
     const request = try buildTestHttp2Request(std.testing.allocator, 9, "POST", "grpc.internal", "/pkg.Service/Call");
     defer std.testing.allocator.free(request);
@@ -3415,7 +3417,7 @@ test "handleConnection relays HTTP/2 client data frames upstream" {
 
     const ConnectionHarness = struct {
         fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
-            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            const client_fd = platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             proxy_ptr.handleConnection(client_fd);
         }
     };
@@ -3423,10 +3425,10 @@ test "handleConnection relays HTTP/2 client data frames upstream" {
     const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
     defer server_thread.join();
 
-    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer posix.close(client_fd);
-    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
-    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const server_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
     const request = try buildTestHttp2RequestWithEndStream(std.testing.allocator, 11, "POST", "grpc.internal", "/pkg.Service/Call", false);
     defer std.testing.allocator.free(request);
@@ -3434,7 +3436,7 @@ test "handleConnection relays HTTP/2 client data frames upstream" {
     defer std.testing.allocator.free(data);
 
     try socket_helpers.writeAll(client_fd, request);
-    std.Thread.sleep(25 * std.time.ns_per_ms);
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(25), .awake) catch unreachable;
     try socket_helpers.writeAll(client_fd, data);
 
     const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
@@ -3601,7 +3603,7 @@ test "handleConnection routes later HTTP/2 streams independently on one client c
 
     const ConnectionHarness = struct {
         fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
-            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            const client_fd = platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             proxy_ptr.handleConnection(client_fd);
         }
     };
@@ -3609,10 +3611,10 @@ test "handleConnection routes later HTTP/2 streams independently on one client c
     const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
     defer server_thread.join();
 
-    const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    defer posix.close(client_fd);
-    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
-    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+    const client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(client_fd);
+    const server_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
     const first_request = try buildTestHttp2Request(std.testing.allocator, 13, "POST", "grpc-one.internal", "/pkg.First/Call");
     defer std.testing.allocator.free(first_request);
@@ -3652,7 +3654,7 @@ test "handleConnection rejects looped request after listener restart" {
 
     const ConnectionHarness = struct {
         fn serveOnce(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
-            const client_fd = posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            const client_fd = platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
             proxy_ptr.handleConnection(client_fd);
         }
     };
@@ -3661,9 +3663,9 @@ test "handleConnection rejects looped request after listener restart" {
     defer listener.deinit();
     var server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serveOnce, .{ &proxy, listener.fd });
 
-    var client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    const server_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
-    try posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+    var client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const server_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;
@@ -3671,22 +3673,22 @@ test "handleConnection rejects looped request after listener restart" {
     try std.testing.expect(bytes_read > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 502 Bad Gateway\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "{\"error\":\"proxy loop detected\"}") != null);
-    posix.close(client_fd);
+    platform.posix.close(client_fd);
     server_thread.join();
 
     listener.deinit();
     listener = try TestListener.init();
     server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serveOnce, .{ &proxy, listener.fd });
 
-    client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    const restarted_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
-    try posix.connect(client_fd, &restarted_addr.any, restarted_addr.getOsSockLen());
+    client_fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const restarted_addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try platform.posix.connect(client_fd, &restarted_addr.any, restarted_addr.getOsSockLen());
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\nX-Yoq-Proxy: 1\r\n\r\n");
 
     bytes_read = try posix.read(client_fd, &response_buf);
     try std.testing.expect(bytes_read > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 502 Bad Gateway\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "{\"error\":\"proxy loop detected\"}") != null);
-    posix.close(client_fd);
+    platform.posix.close(client_fd);
     server_thread.join();
 }

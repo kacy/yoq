@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http = @import("api/http.zig");
 const common = @import("api/routes/common.zig");
 const s3_gateway = @import("api/routes/s3_gateway.zig");
@@ -51,7 +52,7 @@ fn expectXmlTag(body: []const u8, tag: []const u8) ![]const u8 {
 }
 
 fn expectMissingPath(path: []const u8) !void {
-    std.fs.cwd().access(path, .{}) catch |err| switch (err) {
+    platform.cwd().access(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -77,7 +78,7 @@ test "contract: s3 route writes durable object bytes to storage" {
 
     var object_path_buf: [paths.max_path]u8 = undefined;
     const object_path = try paths.dataPathFmt(&object_path_buf, "s3/{s}/{s}", .{ "restart-bucket", "config.json" });
-    const raw = try std.fs.cwd().readFileAlloc(std.testing.allocator, object_path, 1024);
+    const raw = try platform.cwd().readFileAlloc(std.testing.allocator, object_path, 1024);
     defer std.testing.allocator.free(raw);
     try std.testing.expectEqualStrings("{\"version\":1}", raw);
 }
@@ -109,13 +110,13 @@ test "contract: multipart staging persists on disk until completion and then cle
 
     var meta_path_buf: [paths.max_path]u8 = undefined;
     const meta_path = try paths.dataPathFmt(&meta_path_buf, "s3-multipart/{s}/.upload-meta", .{upload_id});
-    const meta = try std.fs.cwd().readFileAlloc(std.testing.allocator, meta_path, 1024);
+    const meta = try platform.cwd().readFileAlloc(std.testing.allocator, meta_path, 1024);
     defer std.testing.allocator.free(meta);
     try std.testing.expectEqualStrings("restart-multipart\nblob.bin", meta);
 
     var part1_file_buf: [paths.max_path]u8 = undefined;
     const part1_file = try paths.dataPathFmt(&part1_file_buf, "s3-multipart/{s}/00001", .{upload_id});
-    const part1_data = try std.fs.cwd().readFileAlloc(std.testing.allocator, part1_file, 1024);
+    const part1_data = try platform.cwd().readFileAlloc(std.testing.allocator, part1_file, 1024);
     defer std.testing.allocator.free(part1_data);
     try std.testing.expectEqualStrings("hello ", part1_data);
 

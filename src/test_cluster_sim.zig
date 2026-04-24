@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const raft_mod = @import("cluster/raft.zig");
 const log_mod = @import("cluster/log.zig");
 const types = @import("cluster/raft_types.zig");
@@ -482,7 +483,7 @@ fn ensureRandomSimInvariants(nodes: []const *SimNode, prev_commit: *[8]u64) !voi
 }
 
 fn appendTrace(trace: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
-    try trace.writer(std.testing.allocator).print(fmt, args);
+    try trace.print(std.testing.allocator, fmt, args);
 }
 
 fn runRandomSeed(seed: u64, trace: *std.ArrayList(u8)) !void {

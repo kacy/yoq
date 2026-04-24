@@ -5,6 +5,7 @@ const http = @import("http.zig");
 const store = @import("../state/store.zig");
 const cluster_node = @import("../cluster/node.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
+const service_registry_runtime = @import("../network/service_registry_runtime.zig");
 const common = @import("routes/common.zig");
 const containers_images = @import("routes/containers_images.zig");
 const cluster_agents = @import("routes/cluster_agents.zig");
@@ -252,6 +253,8 @@ test "dispatch deploy without cluster returns error" {
 test "dispatch services routing" {
     store.initTestDb() catch return error.SkipZigTest;
     defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
 
     try store.createService(.{
         .service_name = "api",
@@ -260,6 +263,7 @@ test "dispatch services routing" {
         .created_at = 1000,
         .updated_at = 1000,
     });
+    service_registry_runtime.syncServiceFromStore("api");
 
     const req = (try http.parseRequest("GET /v1/services/api HTTP/1.1\r\nHost: localhost\r\n\r\n")).?;
     const resp = dispatch(req, std.testing.allocator);

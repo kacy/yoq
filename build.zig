@@ -1,7 +1,7 @@
 const std = @import("std");
 
-// sqlite version hash from build.zig.zon - bump this when updating sqlite
-const SQLITE_HASH = "sqlite-3.48.0-F2R_a9eODgDPCO5CDptJHZINZSIn48IFVIWUhuxxwGTb";
+// sqlite wrapper cache key - bump this when updating the vendored wrapper.
+const SQLITE_HASH = "sqlite-3.48.0-F2R_a8KPDgC9FKAvA3_lf1enn92aBWSbm5TV_W9J8bXx";
 
 /// check if we have a cached sqlite build matching current version
 fn hasCachedSqlite(b: *std.Build) bool {
@@ -14,12 +14,21 @@ fn hasCachedSqlite(b: *std.Build) bool {
     return std.mem.eql(u8, std.mem.trim(u8, hash_content, " \n\r\t"), SQLITE_HASH);
 }
 
-fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    _ = target;
-    _ = optimize;
+fn addPlatformImport(module: *std.Build.Module, b: *std.Build) void {
+    const mod_target = module.resolved_target orelse unreachable;
+    const mod_optimize = module.optimize orelse unreachable;
 
-    const mod_target = module.resolved_target.?;
-    const mod_optimize = module.optimize.?;
+    const platform_mod = b.createModule(.{
+        .root_source_file = b.path("src/lib/platform.zig"),
+        .target = mod_target,
+        .optimize = mod_optimize,
+    });
+    module.addImport("platform", platform_mod);
+}
+
+fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
+    const mod_target = module.resolved_target orelse unreachable;
+    const mod_optimize = module.optimize orelse unreachable;
 
     // get zig-sqlite for its Zig wrapper (sqlite.zig) and C headers
     const sqlite_dep = b.dependency("sqlite", .{
@@ -46,17 +55,17 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.Resolve
         "-DSQLITE_ENABLE_FTS5",
         "-DSQLITE_ENABLE_JSON1",
     };
-    sqlite_lib.addCSourceFile(.{
+    sqlite_lib.root_module.addCSourceFile(.{
         .file = sqlite_upstream.path("sqlite3.c"),
         .flags = c_flags,
     });
     // zig-sqlite's workaround.c provides sqliteTransientAsDestructor
-    sqlite_lib.addCSourceFile(.{
+    sqlite_lib.root_module.addCSourceFile(.{
         .file = sqlite_dep.path("c/workaround.c"),
         .flags = c_flags,
     });
-    sqlite_lib.addIncludePath(sqlite_upstream.path("."));
-    sqlite_lib.addIncludePath(sqlite_dep.path("c"));
+    sqlite_lib.root_module.addIncludePath(sqlite_upstream.path("."));
+    sqlite_lib.root_module.addIncludePath(sqlite_dep.path("c"));
 
     // create the sqlite module using zig-sqlite's Zig wrapper but our static lib
     const sqlite_mod = b.addModule("sqlite-import", .{
@@ -70,11 +79,32 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build, target: std.Build.Resolve
     sqlite_mod.linkLibrary(sqlite_lib);
 
     module.addImport("sqlite", sqlite_mod);
+    addPlatformImport(module, b);
+}
+
+fn createArtifactRunner(
+    b: *std.Build,
+    artifact: *std.Build.Step.Compile,
+    name: []const u8,
+    skip_slow_tests: bool,
+) *std.Build.Step.Run {
+    const run = std.Build.Step.Run.create(b, name);
+    run.producer = artifact;
+    run.addArtifactArg(artifact);
+    run.has_side_effects = true;
+    if (skip_slow_tests) {
+        run.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
+    }
+    if (b.args) |args| {
+        run.addArgs(args);
+    }
+    return run;
 }
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // Default to ReleaseSafe to work around Zig 0.15.2 segfault in Debug mode.
+    // Default to ReleaseSafe to keep local and CI behavior aligned for the
+    // heavier integration-style test lanes.
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode") orelse .ReleaseSafe;
     const test_filter = b.option([]const u8, "test-filter", "Only compile unit tests matching this substring");
 
@@ -87,7 +117,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    addSqlite(exe.root_module, b, target, optimize);
+    addSqlite(exe.root_module, b);
     b.installArtifact(exe);
 
     const test_http_server = b.addExecutable(.{
@@ -125,20 +155,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addSqlite(test_mod, b, target, optimize);
+    addSqlite(test_mod, b);
 
     const tests = b.addTest(.{
         .root_module = test_mod,
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
 
-    // workaround for zig 0.15.2: --listen=- flag causes tests to hang
-    // manually create run step without enableTestRunnerMode
     const test_step = b.step("test", "Run tests");
-    const run_tests = std.Build.Step.Run.create(b, "run test");
-    run_tests.producer = tests;
-    run_tests.addArtifactArg(tests);
-    run_tests.has_side_effects = true;
+    const run_tests = createArtifactRunner(b, tests, "run test", false);
     test_step.dependOn(&run_tests.step);
 
     // -- operator smoke tests (sqlite required, no root) --
@@ -152,20 +177,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addSqlite(operator_test_mod, b, target, optimize);
+    addSqlite(operator_test_mod, b);
 
     const operator_tests = b.addTest(.{
         .root_module = operator_test_mod,
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
-    const run_operator = std.Build.Step.Run.create(b, "run operator smoke tests");
-    run_operator.producer = operator_tests;
-    run_operator.addArtifactArg(operator_tests);
-    run_operator.has_side_effects = true;
-    run_operator.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
-    if (b.args) |args| {
-        run_operator.addArgs(args);
-    }
+    const run_operator = createArtifactRunner(b, operator_tests, "run operator smoke tests", true);
     operator_test_step.dependOn(&run_operator.step);
 
     // -- network rollout smoke tests (sqlite required, no root) --
@@ -180,20 +198,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addSqlite(network_test_mod, b, target, optimize);
+    addSqlite(network_test_mod, b);
 
     const network_tests = b.addTest(.{
         .root_module = network_test_mod,
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
-    const run_network = std.Build.Step.Run.create(b, "run network rollout smoke tests");
-    run_network.producer = network_tests;
-    run_network.addArtifactArg(network_tests);
-    run_network.has_side_effects = true;
-    run_network.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
-    if (b.args) |args| {
-        run_network.addArgs(args);
-    }
+    const run_network = createArtifactRunner(b, network_tests, "run network rollout smoke tests", true);
     network_test_step.dependOn(&run_network.step);
 
     // -- gpu tests (no hardware required) --
@@ -207,18 +218,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addSqlite(gpu_test_mod, b, target, optimize);
+    addSqlite(gpu_test_mod, b);
 
     const gpu_tests = b.addTest(.{
         .root_module = gpu_test_mod,
     });
-    const run_gpu_tests = std.Build.Step.Run.create(b, "run gpu tests");
-    run_gpu_tests.producer = gpu_tests;
-    run_gpu_tests.addArtifactArg(gpu_tests);
-    run_gpu_tests.has_side_effects = true;
-    if (b.args) |args| {
-        run_gpu_tests.addArgs(args);
-    }
+    const run_gpu_tests = createArtifactRunner(b, gpu_tests, "run gpu tests", false);
     gpu_test_step.dependOn(&run_gpu_tests.step);
 
     // -- integration tests (no sqlite required) --
@@ -243,11 +248,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    // workaround for zig 0.15.2: avoid --listen=- hang by manually creating run step
-    const run_integration = std.Build.Step.Run.create(b, "run integration tests");
-    run_integration.producer = integration_tests_mod;
-    run_integration.addArtifactArg(integration_tests_mod);
-    run_integration.has_side_effects = true;
+    const run_integration = createArtifactRunner(b, integration_tests_mod, "run integration tests", false);
     integration_test_step.dependOn(&run_integration.step);
 
     // helper module tests (subprocess runner, temp dirs)
@@ -258,11 +259,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    // workaround for zig 0.15.2: avoid --listen=- hang
-    const run_helpers = std.Build.Step.Run.create(b, "run helper tests");
-    run_helpers.producer = helper_tests;
-    run_helpers.addArtifactArg(helper_tests);
-    run_helpers.has_side_effects = true;
+    const run_helpers = createArtifactRunner(b, helper_tests, "run helper tests", false);
     integration_test_step.dependOn(&run_helpers.step);
 
     // -- contract tests (no sqlite/root required) --
@@ -276,19 +273,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addSqlite(contract_test_mod, b, target, optimize);
+    addSqlite(contract_test_mod, b);
     const contract_tests = b.addTest(.{
         .root_module = contract_test_mod,
         .filters = if (test_filter) |filter| &.{filter} else &.{"contract"},
     });
-    const run_contract = std.Build.Step.Run.create(b, "run contract tests");
-    run_contract.producer = contract_tests;
-    run_contract.addArtifactArg(contract_tests);
-    run_contract.has_side_effects = true;
-    run_contract.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
-    if (b.args) |args| {
-        run_contract.addArgs(args);
-    }
+    const run_contract = createArtifactRunner(b, contract_tests, "run contract tests", true);
     run_contract.step.dependOn(b.getInstallStep());
     contract_test_step.dependOn(&run_contract.step);
 
@@ -302,20 +292,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addSqlite(sim_test_mod, b, target, optimize);
+    addSqlite(sim_test_mod, b);
 
     const sim_tests = b.addTest(.{
         .root_module = sim_test_mod,
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
-    const run_sim = std.Build.Step.Run.create(b, "run simulation tests");
-    run_sim.producer = sim_tests;
-    run_sim.addArtifactArg(sim_tests);
-    run_sim.has_side_effects = true;
-    run_sim.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
-    if (b.args) |args| {
-        run_sim.addArgs(args);
-    }
+    const run_sim = createArtifactRunner(b, sim_tests, "run simulation tests", true);
     sim_test_step.dependOn(&run_sim.step);
 
     // -- privileged integration tests (require root + linux 6.1+) --
@@ -400,11 +383,7 @@ pub fn build(b: *std.Build) void {
         priv_mod.root_module.addImport("cgroups", cgroups_mod);
         priv_mod.root_module.addImport("cgroups_common", cgroups_common_mod);
         priv_mod.root_module.addImport("cluster_test_harness", cluster_harness_mod);
-        // workaround for zig 0.15.2: avoid --listen=- hang
-        const run_priv = std.Build.Step.Run.create(b, b.fmt("run {s}", .{test_file}));
-        run_priv.producer = priv_mod;
-        run_priv.addArtifactArg(priv_mod);
-        run_priv.has_side_effects = true;
+        const run_priv = createArtifactRunner(b, priv_mod, b.fmt("run {s}", .{test_file}), false);
         run_priv.step.dependOn(b.getInstallStep());
         run_priv.step.dependOn(&install_test_http_server.step);
         run_priv.step.dependOn(&install_test_net_probe.step);
@@ -439,7 +418,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    sqlite_lib.addCSourceFile(.{
+    sqlite_lib.root_module.addCSourceFile(.{
         .file = sqlite_c_path,
         .flags = &.{
             "-std=c99",
@@ -504,10 +483,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }));
             const comp = b.addTest(.{ .root_module = mod });
-            const run = std.Build.Step.Run.create(b, b.fmt("run {s}", .{ft.name}));
-            run.producer = comp;
-            run.addArtifactArg(comp);
-            run.has_side_effects = true;
+            const run = createArtifactRunner(b, comp, b.fmt("run {s}", .{ft.name}), false);
             step.dependOn(&run.step);
         }
 
@@ -520,10 +496,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             });
             const comp = b.addTest(.{ .root_module = mod });
-            const run = std.Build.Step.Run.create(b, "run fuzz-manifest");
-            run.producer = comp;
-            run.addArtifactArg(comp);
-            run.has_side_effects = true;
+            const run = createArtifactRunner(b, comp, "run fuzz-manifest", false);
             step.dependOn(&run.step);
         }
 
@@ -535,12 +508,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             });
-            addSqlite(mod, b, target, optimize);
+            addSqlite(mod, b);
             const comp = b.addTest(.{ .root_module = mod });
-            const run = std.Build.Step.Run.create(b, "run fuzz-dns");
-            run.producer = comp;
-            run.addArtifactArg(comp);
-            run.has_side_effects = true;
+            const run = createArtifactRunner(b, comp, "run fuzz-dns", false);
             step.dependOn(&run.step);
         }
 
@@ -553,10 +523,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             });
             const comp = b.addTest(.{ .root_module = mod });
-            const run = std.Build.Step.Run.create(b, "run fuzz-wireguard");
-            run.producer = comp;
-            run.addArtifactArg(comp);
-            run.has_side_effects = true;
+            const run = createArtifactRunner(b, comp, "run fuzz-wireguard", false);
             step.dependOn(&run.step);
         }
 

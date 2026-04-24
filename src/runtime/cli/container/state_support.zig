@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const store = @import("../../../state/store.zig");
 const process = @import("../../process.zig");
 const cgroups = @import("../../cgroups.zig");
@@ -59,7 +60,7 @@ pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         const record = store.load(alloc, id) catch {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
             continue;
         };
         defer record.deinit(alloc);
@@ -75,7 +76,7 @@ pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
                 .running => {},
             }
         }
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
     }
 
     return false;
@@ -85,7 +86,7 @@ pub fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) Container
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         const record = store.load(alloc, id) catch {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
             continue;
         };
         defer record.deinit(alloc);
@@ -96,7 +97,7 @@ pub fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) Container
             return ContainerError.ProcessNotFound;
         }
 
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
     }
 
     writeErr("timed out waiting for container start\n", .{});

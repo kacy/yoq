@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const service_observability = @import("../../network/service_observability.zig");
 const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
@@ -71,33 +72,33 @@ pub fn stopChecker() void {
 
 fn schedulerLoop() void {
     while (registry.checker_running.load(.acquire)) {
-        const now = std.time.timestamp();
+        const now = platform.timestamp();
         scheduleDueChecks(now);
-        std.Thread.sleep(types.scheduler_interval_ms * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(types.scheduler_interval_ms)), .awake) catch unreachable;
     }
 }
 
 fn workerLoop(_: usize) void {
     while (registry.checker_running.load(.acquire)) {
         const item = registry.dequeueCheck() orelse {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
             continue;
         };
 
-        const started_ns = std.time.nanoTimestamp();
+        const started_ns = platform.nanoTimestamp();
         const success = checks.runCheck(item.container_ip, item.config);
-        const completed_at = std.time.timestamp();
+        const completed_at = platform.timestamp();
         const completion = applyCompletedCheck(item, success, completed_at);
         registry.noteCompletedCheck(completion == .stale, completed_at);
-        const elapsed_ns = std.time.nanoTimestamp() - started_ns;
+        const elapsed_ns = platform.nanoTimestamp() - started_ns;
         const latency_seconds = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / @as(f64, std.time.ns_per_s);
         service_observability.noteHealthCheckCompleted(item.serviceName(), completion == .stale, latency_seconds);
     }
 }
 
 fn scheduleDueChecks(now: i64) void {
-    registry.health_mutex.lock();
-    defer registry.health_mutex.unlock();
+    registry.health_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry.health_mutex.unlock(std.Options.debug_io);
 
     for (registry.health_states.items) |*entry| {
         if (entry.in_flight) continue;
@@ -134,8 +135,8 @@ fn buildCheckItem(entry: *const types.ServiceHealth) types.CheckItem {
 
 fn applyCompletedCheck(item: types.CheckItem, success: bool, completed_at: i64) Completion {
     const transition = blk: {
-        registry.health_mutex.lock();
-        defer registry.health_mutex.unlock();
+        registry.health_mutex.lockUncancelable(std.Options.debug_io);
+        defer registry.health_mutex.unlock(std.Options.debug_io);
 
         const entry = findTrackedEntry(item) orelse break :blk null;
         if (entry.generation != item.generation or entry.registration_epoch != item.registration_epoch) break :blk null;

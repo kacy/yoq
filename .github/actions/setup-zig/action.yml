@@ -5,7 +5,7 @@ inputs:
   zig-version:
     description: zig version to install
     required: false
-    default: "0.15.2"
+    default: "0.16.0"
   cache-prefix:
     description: prefix for zig cache keys
     required: false
@@ -29,6 +29,12 @@ runs:
         restore-keys: |
           ${{ runner.os }}-${{ inputs.cache-prefix }}-${{ inputs.zig-version }}-
           ${{ runner.os }}-${{ inputs.cache-prefix }}-
+
+    - name: ensure zig cache directories
+      shell: bash
+      run: |
+        mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
+        mkdir -p "${ZIG_LOCAL_CACHE_DIR:-.zig-cache}/tmp"
 
     - name: print zig version
       shell: bash

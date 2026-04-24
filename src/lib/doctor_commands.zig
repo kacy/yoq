@@ -4,14 +4,15 @@
 // or JSON. exits with code 1 if any check fails.
 
 const std = @import("std");
+const AppContext = @import("app_context.zig").AppContext;
 const cli = @import("cli.zig");
 const json_out = @import("json_output.zig");
 const doctor = @import("doctor.zig");
 
 const write = cli.write;
 
-pub fn doctorCmd(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    _ = alloc;
+pub fn doctorCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    _ = ctx;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {

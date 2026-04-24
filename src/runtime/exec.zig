@@ -8,6 +8,7 @@
 // only takes effect for children, so we fork after setns.
 
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -54,7 +55,7 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
     var ns_fds: [ns_count]posix.fd_t = .{-1} ** ns_count;
     defer for (&ns_fds) |*fd| {
         if (fd.* >= 0) {
-            posix.close(fd.*);
+            platform.posix.close(fd.*);
             fd.* = -1;
         }
     };
@@ -83,12 +84,12 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
 
         // close inherited namespace fds (not needed after setns)
         for (ns_fds) |fd| {
-            if (fd >= 0) posix.close(fd);
+            if (fd >= 0) platform.posix.close(fd);
         }
 
         // chdir to working directory (fall back to / if it doesn't exist)
-        posix.chdir(config.working_dir) catch {
-            posix.chdir("/") catch {};
+        platform.posix.chdir(config.working_dir) catch {
+            platform.posix.chdir("/") catch {};
         };
 
         // apply seccomp + capability restrictions so exec'd commands
@@ -106,7 +107,7 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
     // the defer will skip fds already set to -1.
     for (&ns_fds) |*fd| {
         if (fd.* >= 0) {
-            posix.close(fd.*);
+            platform.posix.close(fd.*);
             fd.* = -1;
         }
     }
@@ -140,7 +141,7 @@ fn openNsFd(pid: posix.pid_t, ns: []const u8) ?posix.fd_t {
         pid, ns,
     }) catch return null;
 
-    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    const file = platform.cwd().openFile(path, .{}) catch return null;
     return file.handle;
 }
 
@@ -160,7 +161,7 @@ fn sysSetns(fd: posix.fd_t, nstype: u32) ExecError!void {
 fn sysFork() ExecError!posix.pid_t {
     const rc = linux.syscall2(
         .clone,
-        linux.SIG.CHLD,
+        @intFromEnum(linux.SIG.CHLD),
         @as(usize, 0),
     );
     if (syscall_util.isError(rc)) return ExecError.ForkFailed;

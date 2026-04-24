@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const store = @import("../../../state/store.zig");
 const process = @import("../../../runtime/process.zig");
 const logs = @import("../../../runtime/logs.zig");
@@ -11,6 +12,16 @@ const writers = @import("writers.zig");
 const Response = common.Response;
 const stop_poll_attempts: usize = 10;
 const stop_poll_interval_ms: u64 = 50;
+const ContainerListContext = struct {
+    alloc: std.mem.Allocator,
+    ids: []const []const u8,
+};
+const ContainerContext = struct {
+    record: store.ContainerRecord,
+};
+const ContainerLogsContext = struct {
+    log_data: []const u8,
+};
 
 pub fn handleListContainers(alloc: std.mem.Allocator) Response {
     var ids = store.listIds(alloc) catch return common.internalError();
@@ -19,27 +30,10 @@ pub fn handleListContainers(alloc: std.mem.Allocator) Response {
         ids.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeByte('[') catch return common.internalError();
-
-    var first = true;
-    for (ids.items) |id| {
-        const record = store.load(alloc, id) catch continue;
-        defer record.deinit(alloc);
-
-        if (!first) writer.writeByte(',') catch return common.internalError();
-        first = false;
-
-        writers.writeContainerJson(writer, record) catch return common.internalError();
-    }
-
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, ContainerListContext{
+        .alloc = alloc,
+        .ids = ids.items,
+    }, writeContainerListJson);
 }
 
 pub fn handleGetContainer(alloc: std.mem.Allocator, id: []const u8) Response {
@@ -49,14 +43,9 @@ pub fn handleGetContainer(alloc: std.mem.Allocator, id: []const u8) Response {
     };
     defer record.deinit(alloc);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writers.writeContainerJson(writer, record) catch return common.internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, ContainerContext{
+        .record = record,
+    }, writeContainerJson);
 }
 
 pub fn handleGetLogs(alloc: std.mem.Allocator, id: []const u8) Response {
@@ -72,16 +61,9 @@ pub fn handleGetLogs(alloc: std.mem.Allocator, id: []const u8) Response {
     };
     defer alloc.free(log_data);
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeAll("{\"logs\":\"") catch return common.internalError();
-    @import("../../../lib/json_helpers.zig").writeJsonEscaped(writer, log_data) catch return common.internalError();
-    writer.writeAll("\"}") catch return common.internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, ContainerLogsContext{
+        .log_data = log_data,
+    }, writeContainerLogsJson);
 }
 
 pub fn handleStopContainer(alloc: std.mem.Allocator, id: []const u8) Response {
@@ -124,7 +106,7 @@ pub fn waitForProcessExit(id: []const u8, pid: i32) bool {
         const cg = cgroups.Cgroup.open(id) catch return true;
         if (!cg.containsProcess(pid)) return true;
         process.sendSignal(pid, 0) catch return true;
-        std.Thread.sleep(stop_poll_interval_ms * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(stop_poll_interval_ms)), .awake) catch unreachable;
     }
     return false;
 }
@@ -146,4 +128,28 @@ pub fn handleRemoveContainer(alloc: std.mem.Allocator, id: []const u8) Response 
     container.cleanupContainerDirs(id);
 
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn writeContainerListJson(writer: *std.Io.Writer, ctx: ContainerListContext) !void {
+    try writer.writeByte('[');
+    var first = true;
+    for (ctx.ids) |id| {
+        const record = store.load(ctx.alloc, id) catch continue;
+        defer record.deinit(ctx.alloc);
+
+        if (!first) try writer.writeByte(',');
+        first = false;
+        try writers.writeContainerJson(writer, record);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeContainerJson(writer: *std.Io.Writer, ctx: ContainerContext) !void {
+    try writers.writeContainerJson(writer, ctx.record);
+}
+
+fn writeContainerLogsJson(writer: *std.Io.Writer, ctx: ContainerLogsContext) !void {
+    try writer.writeAll("{\"logs\":\"");
+    try @import("../../../lib/json_helpers.zig").writeJsonEscaped(writer, ctx.log_data);
+    try writer.writeAll("\"}");
 }

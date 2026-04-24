@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 
 const blob_store = @import("../../../image/store.zig");
@@ -16,6 +17,10 @@ const common = @import("common.zig");
 const types = @import("../types.zig");
 
 const signal_exit_base: u8 = 128;
+
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
 
 pub fn processFrom(
     alloc: std.mem.Allocator,
@@ -36,7 +41,10 @@ pub fn processFrom(
         return loadLocalBaseImage(alloc, state, img.manifest_digest);
     }
 
-    var result = registry.pull(alloc, ref) catch return types.BuildError.PullFailed;
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+
+    var result = registry.pull(threaded_io.io(), alloc, ref) catch return types.BuildError.PullFailed;
     defer result.deinit();
 
     const pulled_config_digest = blob_store.computeDigest(result.config_bytes);
@@ -50,7 +58,7 @@ pub fn processFrom(
         .manifest_digest = result.manifest_digest,
         .config_digest = pulled_config_str,
         .total_size = @intCast(result.total_size),
-        .created_at = std.time.timestamp(),
+        .created_at = nowRealSeconds(),
     }) catch |err| {
         log.warn("failed to save base image record: {}", .{err});
     };
@@ -118,8 +126,8 @@ pub fn processRun(
     ) catch return types.BuildError.RunStepFailed;
 
     spawn_result.signalReady();
-    posix.close(spawn_result.stdout_fd);
-    posix.close(spawn_result.stderr_fd);
+    platform.posix.close(spawn_result.stdout_fd);
+    platform.posix.close(spawn_result.stderr_fd);
 
     const wait_result = process.wait(spawn_result.pid, false) catch return types.BuildError.RunStepFailed;
     const exit_code: u8 = switch (wait_result.status) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const log = @import("../lib/log.zig");
 
 pub const Flags = struct {
@@ -13,7 +14,7 @@ pub const Mode = enum {
     shadow,
 };
 
-var flags_mutex: std.Thread.Mutex = .{};
+var flags_mutex: std.Io.Mutex = .init;
 var flags_initialized: bool = false;
 var flags: Flags = .{};
 var logged_rollout_state: bool = false;
@@ -39,30 +40,30 @@ pub fn mode() Mode {
 pub fn logStartupSummary() void {
     ensureInitialized();
 
-    flags_mutex.lock();
-    defer flags_mutex.unlock();
+    flags_mutex.lockUncancelable(std.Options.debug_io);
+    defer flags_mutex.unlock(std.Options.debug_io);
     logRolloutStateLocked();
 }
 
 pub fn resetForTest() void {
-    flags_mutex.lock();
-    defer flags_mutex.unlock();
+    flags_mutex.lockUncancelable(std.Options.debug_io);
+    defer flags_mutex.unlock(std.Options.debug_io);
     flags_initialized = false;
     flags = .{};
     logged_rollout_state = false;
 }
 
 pub fn setForTest(new_flags: Flags) void {
-    flags_mutex.lock();
-    defer flags_mutex.unlock();
+    flags_mutex.lockUncancelable(std.Options.debug_io);
+    defer flags_mutex.unlock(std.Options.debug_io);
     flags = new_flags;
     flags_initialized = true;
     logged_rollout_state = false;
 }
 
 fn ensureInitialized() void {
-    flags_mutex.lock();
-    defer flags_mutex.unlock();
+    flags_mutex.lockUncancelable(std.Options.debug_io);
+    defer flags_mutex.unlock(std.Options.debug_io);
 
     if (flags_initialized) return;
 
@@ -104,17 +105,25 @@ fn modeLabel(current_mode: Mode) []const u8 {
 }
 
 fn readDeprecatedAlwaysOnBoolEnv(name: []const u8, replacement: []const u8) bool {
-    const raw = std.posix.getenv(name) orelse return true;
+    const raw = getEnv(name) orelse return true;
     _ = parseBool(name, raw);
     log.warn("service discovery compatibility flag {s} is deprecated and ignored; {s}", .{ name, replacement });
     return true;
 }
 
 fn readAlwaysOnBoolEnv(name: []const u8) bool {
-    const raw = std.posix.getenv(name) orelse return true;
+    const raw = getEnv(name) orelse return true;
     _ = parseBool(name, raw);
     log.warn("service discovery compatibility flag {s} is deprecated and ignored; HTTP proxy routing is always on", .{name});
     return true;
+}
+
+fn getEnv(name: []const u8) ?[]const u8 {
+    var name_buf: [128]u8 = undefined;
+    if (name.len >= name_buf.len) return null;
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    return if (std.c.getenv(name_buf[0..name.len :0].ptr)) |value| std.mem.span(value) else null;
 }
 
 fn parseBool(name: []const u8, raw: []const u8) bool {

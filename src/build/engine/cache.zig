@@ -1,8 +1,13 @@
 const std = @import("std");
+const platform = @import("platform");
 const blob_store = @import("../../image/store.zig");
 const state_store = @import("../../state/store.zig");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
+
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
 
 pub const CacheStoreResult = struct {
     layer_digest: []const u8,
@@ -61,7 +66,7 @@ pub fn storeCache(cache_key: []const u8, layer_digest: []const u8, diff_id: []co
         .layer_digest = layer_digest,
         .diff_id = diff_id,
         .layer_size = @intCast(size),
-        .created_at = std.time.timestamp(),
+        .created_at = nowRealSeconds(),
     }) catch |err| {
         log.warn("failed to store build cache: {}", .{err});
     };

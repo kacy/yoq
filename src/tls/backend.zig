@@ -8,6 +8,7 @@
 // and the orchestrator lifecycle run on different threads.
 
 const std = @import("std");
+const platform = @import("platform");
 
 pub const Backend = struct {
     ip: []const u8,
@@ -15,13 +16,13 @@ pub const Backend = struct {
 };
 
 pub const BackendRegistry = struct {
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     backends: std.StringHashMapUnmanaged(Backend),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) BackendRegistry {
         return .{
-            .mutex = .{},
+            .mutex = .init,
             .backends = .empty,
             .allocator = allocator,
         };
@@ -38,8 +39,8 @@ pub const BackendRegistry = struct {
 
     /// register a backend for a domain. overwrites any existing mapping.
     pub fn register(self: *BackendRegistry, domain: []const u8, ip: []const u8, port: u16) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         // if domain already exists, free old values
         if (self.backends.getEntry(domain)) |entry| {
@@ -59,8 +60,8 @@ pub const BackendRegistry = struct {
 
     /// remove a backend for a domain.
     pub fn unregister(self: *BackendRegistry, domain: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         if (self.backends.fetchRemove(domain)) |kv| {
             self.allocator.free(kv.key);
@@ -72,15 +73,15 @@ pub const BackendRegistry = struct {
     /// the returned Backend is only valid while the mutex is not held —
     /// callers should copy what they need.
     pub fn lookup(self: *BackendRegistry, domain: []const u8) ?Backend {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         return self.backends.get(domain);
     }
 
     pub fn lookupOwned(self: *BackendRegistry, alloc: std.mem.Allocator, domain: []const u8) !?Backend {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
 
         const backend = self.backends.get(domain) orelse return null;
         return .{

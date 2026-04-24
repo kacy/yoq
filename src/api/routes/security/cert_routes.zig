@@ -5,6 +5,9 @@ const common = @import("../common.zig");
 const store_support = @import("store_support.zig");
 
 const Response = common.Response;
+const CertificateListContext = struct {
+    certs: []const cert_store.CertInfo,
+};
 
 pub fn handleListCertificates(alloc: std.mem.Allocator) Response {
     var cs = store_support.openCertStore(alloc) orelse return common.internalError();
@@ -16,25 +19,9 @@ pub fn handleListCertificates(alloc: std.mem.Allocator) Response {
         certs.deinit(alloc);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
-
-    writer.writeByte('[') catch return common.internalError();
-    for (certs.items, 0..) |cert, i| {
-        if (i > 0) writer.writeByte(',') catch return common.internalError();
-        writer.writeAll("{\"domain\":\"") catch return common.internalError();
-        json_helpers.writeJsonEscaped(writer, cert.domain) catch return common.internalError();
-        writer.writeAll("\",\"not_after\":") catch return common.internalError();
-        std.fmt.format(writer, "{d}", .{cert.not_after}) catch return common.internalError();
-        writer.writeAll(",\"source\":\"") catch return common.internalError();
-        json_helpers.writeJsonEscaped(writer, cert.source) catch return common.internalError();
-        writer.writeAll("\"}") catch return common.internalError();
-    }
-    writer.writeByte(']') catch return common.internalError();
-
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    return common.jsonOkWrite(alloc, CertificateListContext{
+        .certs = certs.items,
+    }, writeCertificateListJson);
 }
 
 pub fn handleDeleteCertificate(alloc: std.mem.Allocator, domain: []const u8) Response {
@@ -47,4 +34,19 @@ pub fn handleDeleteCertificate(alloc: std.mem.Allocator, domain: []const u8) Res
     };
 
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+fn writeCertificateListJson(writer: *std.Io.Writer, ctx: CertificateListContext) !void {
+    try writer.writeByte('[');
+    for (ctx.certs, 0..) |cert, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"domain\":\"");
+        try json_helpers.writeJsonEscaped(writer, cert.domain);
+        try writer.writeAll("\",\"not_after\":");
+        try writer.print("{d}", .{cert.not_after});
+        try writer.writeAll(",\"source\":\"");
+        try json_helpers.writeJsonEscaped(writer, cert.source);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const posix = std.posix;
 const hpack = @import("../../network/proxy/hpack.zig");
 const http2 = @import("../../network/proxy/http2.zig");
@@ -20,7 +21,7 @@ pub fn runCheck(container_ip: [4]u8, config: anytype) bool {
 
 pub fn runHttpCheck(container_ip: [4]u8, port: u16, path: []const u8, timeout: u32) bool {
     const sock = tcpConnect(container_ip, port, timeout) orelse return false;
-    defer posix.close(sock);
+    defer platform.posix.close(sock);
 
     var request_buf: [512]u8 = undefined;
     const request = std.fmt.bufPrint(
@@ -29,7 +30,7 @@ pub fn runHttpCheck(container_ip: [4]u8, port: u16, path: []const u8, timeout: u
         .{path},
     ) catch return false;
 
-    _ = posix.write(sock, request) catch return false;
+    _ = platform.posix.write(sock, request) catch return false;
 
     var response_buf: [256]u8 = undefined;
     const bytes_read = posix.read(sock, &response_buf) catch return false;
@@ -46,13 +47,13 @@ pub fn isHttp2xx(response: []const u8) bool {
 
 pub fn runTcpCheck(container_ip: [4]u8, port: u16, timeout: u32) bool {
     const sock = tcpConnect(container_ip, port, timeout) orelse return false;
-    posix.close(sock);
+    platform.posix.close(sock);
     return true;
 }
 
 pub fn runGrpcCheck(container_ip: [4]u8, port: u16, service: ?[]const u8, timeout: u32) bool {
     const sock = tcpConnect(container_ip, port, timeout) orelse return false;
-    defer posix.close(sock);
+    defer platform.posix.close(sock);
 
     writeGrpcHealthRequest(sock, service orelse "") catch return false;
     return readGrpcHealthResponse(sock);
@@ -65,7 +66,7 @@ pub fn isHttp2SettingsFrame(frame_header: []const u8) bool {
     return stream_id == 0;
 }
 
-fn writeGrpcHealthRequest(sock: posix.socket_t, service: []const u8) !void {
+fn writeGrpcHealthRequest(sock: platform.posix.socket_t, service: []const u8) !void {
     try writeAll(sock, http2.client_preface);
     try writeFrame(sock, .{
         .length = 0,
@@ -96,7 +97,7 @@ fn writeGrpcHealthRequest(sock: posix.socket_t, service: []const u8) !void {
     }, body);
 }
 
-fn readGrpcHealthResponse(sock: posix.socket_t) bool {
+fn readGrpcHealthResponse(sock: platform.posix.socket_t) bool {
     var payload_storage: [max_http2_frame_payload]u8 = undefined;
     var header_block_storage: [max_header_block_len]u8 = undefined;
     var grpc_payload_storage: [max_grpc_message_len]u8 = undefined;
@@ -186,7 +187,7 @@ const HeaderBlockResult = struct {
 };
 
 fn collectHeaderBlock(
-    sock: posix.socket_t,
+    sock: platform.posix.socket_t,
     initial_header: http2.FrameHeader,
     initial_payload: []const u8,
     payload_storage: *[max_http2_frame_payload]u8,
@@ -376,7 +377,7 @@ fn writeVarint(buf: []u8, value: usize) !usize {
     }
 }
 
-fn writeFrame(sock: posix.socket_t, header: http2.FrameHeader, payload: []const u8) !void {
+fn writeFrame(sock: platform.posix.socket_t, header: http2.FrameHeader, payload: []const u8) !void {
     var header_buf: [http2.frame_header_len]u8 = undefined;
     try http2.writeFrameHeader(&header_buf, header);
     try writeAll(sock, &header_buf);
@@ -388,7 +389,7 @@ const ReadFrame = struct {
     payload: []u8,
 };
 
-fn readFrame(sock: posix.socket_t, payload_storage: []u8) ?ReadFrame {
+fn readFrame(sock: platform.posix.socket_t, payload_storage: []u8) ?ReadFrame {
     var header_buf: [http2.frame_header_len]u8 = undefined;
     readExact(sock, &header_buf) catch return null;
     const header = http2.parseFrameHeader(&header_buf) orelse return null;
@@ -398,7 +399,7 @@ fn readFrame(sock: posix.socket_t, payload_storage: []u8) ?ReadFrame {
     return .{ .header = header, .payload = payload };
 }
 
-fn writeSettingsAck(sock: posix.socket_t) !void {
+fn writeSettingsAck(sock: platform.posix.socket_t) !void {
     try writeFrame(sock, .{
         .length = 0,
         .frame_type = .settings,
@@ -407,7 +408,7 @@ fn writeSettingsAck(sock: posix.socket_t) !void {
     }, "");
 }
 
-fn writePingAck(sock: posix.socket_t, opaque_data: []const u8) !void {
+fn writePingAck(sock: platform.posix.socket_t, opaque_data: []const u8) !void {
     try writeFrame(sock, .{
         .length = @intCast(opaque_data.len),
         .frame_type = .ping,
@@ -416,9 +417,9 @@ fn writePingAck(sock: posix.socket_t, opaque_data: []const u8) !void {
     }, opaque_data);
 }
 
-fn tcpConnect(container_ip: [4]u8, port: u16, timeout: u32) ?posix.socket_t {
-    const sock = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return null;
-    errdefer posix.close(sock);
+fn tcpConnect(container_ip: [4]u8, port: u16, timeout: u32) ?platform.posix.socket_t {
+    const sock = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return null;
+    errdefer platform.posix.close(sock);
 
     const tv = posix.timeval{
         .sec = @intCast(timeout),
@@ -432,20 +433,20 @@ fn tcpConnect(container_ip: [4]u8, port: u16, timeout: u32) ?posix.socket_t {
         .addr = @bitCast(container_ip),
     };
 
-    posix.connect(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch return null;
+    platform.posix.connect(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch return null;
     return sock;
 }
 
-fn writeAll(sock: posix.socket_t, bytes: []const u8) !void {
+fn writeAll(sock: platform.posix.socket_t, bytes: []const u8) !void {
     var written: usize = 0;
     while (written < bytes.len) {
-        const chunk = try posix.write(sock, bytes[written..]);
+        const chunk = try platform.posix.write(sock, bytes[written..]);
         if (chunk == 0) return error.WriteFailed;
         written += chunk;
     }
 }
 
-fn readExact(sock: posix.socket_t, buf: []u8) !void {
+fn readExact(sock: platform.posix.socket_t, buf: []u8) !void {
     var read_total: usize = 0;
     while (read_total < buf.len) {
         const chunk = try posix.read(sock, buf[read_total..]);
@@ -459,44 +460,44 @@ const TestServerMode = enum {
 };
 
 const BoundTestListener = struct {
-    fd: posix.socket_t,
+    fd: platform.posix.socket_t,
     port: u16,
 };
 
 fn initTestListenerSocket() !BoundTestListener {
     const reuseaddr: i32 = 1;
-    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    const addr = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
 
     var attempt: usize = 0;
     while (attempt < 50) : (attempt += 1) {
-        const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
+        const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
-        errdefer posix.close(fd);
+        errdefer platform.posix.close(fd);
 
         posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
-        posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
+        platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            posix.close(fd);
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            platform.posix.close(fd);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
-        posix.listen(fd, 1) catch {
+        platform.posix.listen(fd, 1) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            posix.close(fd);
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            platform.posix.close(fd);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
+        platform.posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
             if (attempt + 1 == 50) return error.SkipZigTest;
-            posix.close(fd);
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            platform.posix.close(fd);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
@@ -510,7 +511,7 @@ fn initTestListenerSocket() !BoundTestListener {
 }
 
 const TestServer = struct {
-    listen_fd: posix.socket_t,
+    listen_fd: platform.posix.socket_t,
     port: u16,
     mode: TestServerMode,
     thread: ?std.Thread = null,
@@ -532,7 +533,7 @@ const TestServer = struct {
 
     fn deinit(self: *TestServer) void {
         if (self.thread) |thread| thread.join();
-        posix.close(self.listen_fd);
+        platform.posix.close(self.listen_fd);
     }
 
     fn requestedService(self: *const TestServer) []const u8 {
@@ -540,8 +541,8 @@ const TestServer = struct {
     }
 
     fn run(self: *TestServer) void {
-        const client_fd = posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
-        defer posix.close(client_fd);
+        const client_fd = platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+        defer platform.posix.close(client_fd);
 
         switch (self.mode) {
             .capture_only => {
@@ -551,7 +552,7 @@ const TestServer = struct {
     }
 };
 
-fn readGrpcHealthRequestService(sock: posix.socket_t, service_storage: []u8) ?usize {
+fn readGrpcHealthRequestService(sock: platform.posix.socket_t, service_storage: []u8) ?usize {
     var preface: [http2.client_preface.len]u8 = undefined;
     readExact(sock, &preface) catch return null;
     if (!std.mem.eql(u8, &preface, http2.client_preface)) return null;
@@ -599,7 +600,7 @@ fn readGrpcHealthRequestService(sock: posix.socket_t, service_storage: []u8) ?us
     return service.len;
 }
 
-fn writeGrpcHealthTestResponse(sock: posix.socket_t, serving_status: u8, grpc_status: []const u8) !void {
+fn writeGrpcHealthTestResponse(sock: platform.posix.socket_t, serving_status: u8, grpc_status: []const u8) !void {
     try writeFrame(sock, .{
         .length = 0,
         .frame_type = .settings,
@@ -674,7 +675,7 @@ test "writeGrpcHealthRequest sends grpc service name" {
     try server.start();
 
     const sock = tcpConnect(.{ 127, 0, 0, 1 }, server.port, 1) orelse return error.SkipZigTest;
-    defer posix.close(sock);
+    defer platform.posix.close(sock);
     try writeGrpcHealthRequest(sock, "pkg.Health");
 
     server.deinit();
@@ -686,7 +687,7 @@ test "writeGrpcHealthRequest sends empty grpc service name by default" {
     try server.start();
 
     const sock = tcpConnect(.{ 127, 0, 0, 1 }, server.port, 1) orelse return error.SkipZigTest;
-    defer posix.close(sock);
+    defer platform.posix.close(sock);
     try writeGrpcHealthRequest(sock, "");
 
     server.deinit();

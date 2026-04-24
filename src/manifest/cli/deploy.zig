@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const app_spec = @import("../app_spec.zig");
 const local_apply_backend = @import("../local_apply_backend.zig");
@@ -22,7 +23,7 @@ const DeployError = error{
     UnknownService,
 };
 
-pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn up(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var dev_mode = false;
     var server_addr: ?[]const u8 = null;
@@ -55,7 +56,7 @@ pub fn up(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     defer manifest.deinit();
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch |err| {
         writeErr("failed to resolve working directory: {}\n", .{err});
         return DeployError.StoreError;
     };
@@ -150,7 +151,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, release: *con
     }
 }
 
-pub fn down(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn down(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
 
     while (args.next()) |arg| {
@@ -170,7 +171,7 @@ pub fn down(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     defer manifest.deinit();
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch |err| {
+    const cwd = platform.cwd().realpath(".", &cwd_buf) catch |err| {
         writeErr("failed to resolve working directory: {}\n", .{err});
         return DeployError.StoreError;
     };
@@ -211,7 +212,7 @@ pub fn down(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
                 while (waited < 100) : (waited += 1) {
                     const result = process.wait(pid, true) catch break;
                     switch (result.status) {
-                        .running => std.Thread.sleep(100 * std.time.ns_per_ms),
+                        .running => std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable,
                         else => break,
                     }
                 }

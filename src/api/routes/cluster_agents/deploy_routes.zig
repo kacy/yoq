@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const gpu_scheduler = @import("../../../gpu/scheduler.zig");
 const scheduler = @import("../../../cluster/scheduler.zig");
@@ -17,7 +18,15 @@ const common = @import("../common.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
-var active_rollout_mu: std.Thread.Mutex = .{};
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
+fn nowAwakeNanoseconds() i128 {
+    return @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds());
+}
+
+var active_rollout_mu: std.Io.Mutex = .init;
 var active_rollouts: std.StringHashMapUnmanaged(void) = .empty;
 
 const ResumeSeed = struct {
@@ -142,8 +151,8 @@ fn isTerminalStatus(status: @import("../../../manifest/update/common.zig").Deplo
 }
 
 fn markClusterRolloutActive(id: []const u8) !void {
-    active_rollout_mu.lock();
-    defer active_rollout_mu.unlock();
+    active_rollout_mu.lockUncancelable(std.Options.debug_io);
+    defer active_rollout_mu.unlock(std.Options.debug_io);
 
     const entry = try active_rollouts.getOrPut(std.heap.page_allocator, id);
     if (!entry.found_existing) {
@@ -152,8 +161,8 @@ fn markClusterRolloutActive(id: []const u8) !void {
 }
 
 fn markClusterRolloutInactive(id: []const u8) void {
-    active_rollout_mu.lock();
-    defer active_rollout_mu.unlock();
+    active_rollout_mu.lockUncancelable(std.Options.debug_io);
+    defer active_rollout_mu.unlock(std.Options.debug_io);
 
     if (active_rollouts.fetchRemove(id)) |entry| {
         std.heap.page_allocator.free(entry.key);
@@ -161,8 +170,8 @@ fn markClusterRolloutInactive(id: []const u8) void {
 }
 
 pub fn isClusterRolloutActive(id: []const u8) bool {
-    active_rollout_mu.lock();
-    defer active_rollout_mu.unlock();
+    active_rollout_mu.lockUncancelable(std.Options.debug_io);
+    defer active_rollout_mu.unlock(std.Options.debug_io);
     return active_rollouts.contains(id);
 }
 
@@ -231,7 +240,7 @@ pub const ClusterApplyBackend = struct {
 
             if (failed_targets > batch_failed_before) break;
             if (strategy.delay_between_batches > 0 and batch_end < self.requests.len) {
-                std.Thread.sleep(@as(u64, strategy.delay_between_batches) * std.time.ns_per_s);
+                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(strategy.delay_between_batches)), .awake) catch unreachable;
             }
             batch_start = batch_end;
             first_batch = false;
@@ -371,7 +380,7 @@ pub const ClusterApplyBackend = struct {
                     owned_id,
                     gp.agent_id,
                     req.request,
-                    std.time.timestamp(),
+                    nowRealSeconds(),
                     gp,
                 ) catch return ClusterApplyError.InternalError;
 
@@ -432,7 +441,7 @@ pub const ClusterApplyBackend = struct {
             owned_id,
             placement.agent_id,
             req.request,
-            std.time.timestamp(),
+            nowRealSeconds(),
         ) catch return ClusterApplyError.InternalError;
 
         _ = self.node.propose(sql) catch return ClusterApplyError.NotLeader;
@@ -654,9 +663,10 @@ const FailureDetailBuilder = struct {
     fn toOwnedJson(self: *FailureDetailBuilder) !?[]u8 {
         if (self.items.items.len == 0) return null;
 
-        var json_buf: std.ArrayList(u8) = .empty;
-        errdefer json_buf.deinit(self.alloc);
-        const writer = json_buf.writer(self.alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |detail, i| {
@@ -670,7 +680,7 @@ const FailureDetailBuilder = struct {
             try writer.writeByte('}');
         }
         try writer.writeByte(']');
-        const owned = try json_buf.toOwnedSlice(self.alloc);
+        const owned = try json_buf_writer.toOwnedSlice();
         return owned;
     }
 };
@@ -791,9 +801,10 @@ const RolloutTargetBuilder = struct {
     fn toOwnedJson(self: *RolloutTargetBuilder) !?[]u8 {
         if (self.items.items.len == 0) return null;
 
-        var json_buf: std.ArrayList(u8) = .empty;
-        errdefer json_buf.deinit(self.alloc);
-        const writer = json_buf.writer(self.alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
 
         try writer.writeByte('[');
         for (self.items.items, 0..) |target, i| {
@@ -809,7 +820,7 @@ const RolloutTargetBuilder = struct {
             try writer.writeByte('}');
         }
         try writer.writeByte(']');
-        return try json_buf.toOwnedSlice(self.alloc);
+        return try json_buf_writer.toOwnedSlice();
     }
 };
 
@@ -986,7 +997,7 @@ fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assign
             assignment.id,
             assignment.agent_id,
             request,
-            std.time.timestamp(),
+            nowRealSeconds(),
             .{
                 .agent_id = assignment.agent_id,
                 .rank = @intCast(assignment.gang_rank.?),
@@ -1003,7 +1014,7 @@ fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assign
             assignment.id,
             assignment.agent_id,
             request,
-            std.time.timestamp(),
+            nowRealSeconds(),
         ) catch return ClusterApplyError.InternalError;
 
     _ = node.propose(sql) catch return ClusterApplyError.NotLeader;
@@ -1066,7 +1077,7 @@ fn resolveTargetReadinessStates(
     errdefer alloc.free(states);
     @memset(states, .pending);
 
-    const deadline_ns: i128 = std.time.nanoTimestamp() + (@as(i128, timeout_secs) * std.time.ns_per_s);
+    const deadline_ns: i128 = nowAwakeNanoseconds() + (@as(i128, timeout_secs) * std.time.ns_per_s);
     var remaining = targets.len;
 
     while (remaining > 0) {
@@ -1084,8 +1095,8 @@ fn resolveTargetReadinessStates(
         }
 
         if (remaining == 0) return states;
-        if (std.time.nanoTimestamp() >= deadline_ns) break;
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        if (nowAwakeNanoseconds() >= deadline_ns) break;
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
     }
 
     return states;
@@ -1303,7 +1314,7 @@ fn reconcileCronSchedules(db: *sqlite.Db, alloc: std.mem.Allocator, app_name: []
         alloc,
         app_name,
         schedules.items,
-        std.time.timestamp(),
+        nowRealSeconds(),
     );
 }
 
@@ -1354,9 +1365,10 @@ fn formatAppApplyResponse(
     report: apply_release.ApplyReport,
     summary: app_snapshot.Summary,
 ) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeByte('{');
     try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
@@ -1417,7 +1429,7 @@ fn formatAppApplyResponse(
     try writer.writeByte('}');
     try writer.writeByte('}');
 
-    return json_buf.toOwnedSlice(alloc);
+    return json_buf_writer.toOwnedSlice();
 }
 
 const RolloutNodeHarness = struct {
@@ -1430,7 +1442,7 @@ const RolloutNodeHarness = struct {
         errdefer tmp.cleanup();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = tmp.dir.realpath(".", &path_buf) catch return error.SkipZigTest;
+        const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return error.SkipZigTest;
 
         const node = try alloc.create(cluster_node.Node);
         errdefer alloc.destroy(node);
@@ -1900,7 +1912,7 @@ test "resolveTargetReadinessStates waits for paused rollout control to resume" {
 
     const Resumer = struct {
         fn run() void {
-            std.Thread.sleep(150 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
             store.updateDeploymentRolloutControlState("dep-pause", "active") catch {};
         }
     };
@@ -1978,7 +1990,7 @@ test "resolveTargetReadinessStates exits when paused rollout is canceled" {
 
     const Canceler = struct {
         fn run() void {
-            std.Thread.sleep(150 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
             store.updateDeploymentRolloutControlState("dep-cancel", "cancel_requested") catch {};
         }
     };
@@ -2060,7 +2072,7 @@ test "finalizeBatchTargets honors paused rollout resume before cutover" {
 
     const Resumer = struct {
         fn run(db: *sqlite.Db) void {
-            std.Thread.sleep(150 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
             db.exec("UPDATE assignments SET status = 'running' WHERE id = 'new-web';", .{}, .{}) catch {};
             store.updateDeploymentRolloutControlState("dep-resume", "active") catch {};
         }
@@ -2200,7 +2212,7 @@ test "finalizeBatchTargets discards scheduled targets when paused rollout is can
 
     const Canceler = struct {
         fn run() void {
-            std.Thread.sleep(150 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
             store.updateDeploymentRolloutControlState("dep-cancel-finalize", "cancel_requested") catch {};
         }
     };

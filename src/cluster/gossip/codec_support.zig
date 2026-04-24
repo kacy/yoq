@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 
 pub fn encode(buf: []u8, msg: anytype, max_piggyback_updates: usize) !usize {
     var pos: usize = 0;
@@ -116,7 +117,7 @@ pub fn decodeUpdates(data: []const u8, count: u8, BoundedUpdates: type, MemberSt
                 .ip = data[pos + 8 ..][0..4].*,
                 .port = @as(u16, data[pos + 12]) | (@as(u16, data[pos + 13]) << 8),
             },
-            .state = std.meta.intToEnum(MemberState, data[pos + 14]) catch return .{},
+            .state = std.enums.fromInt(MemberState, data[pos + 14]) orelse return .{},
             .incarnation = readU64(data[pos + 15 ..]),
         };
         pos += 23;

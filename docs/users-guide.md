@@ -471,4 +471,4 @@ volume data is not included in backups.
 ### requirements
 
 - Linux kernel 6.1+
-- Zig 0.15.2 (for building from source)
+- Zig 0.16.0 (for building from source)

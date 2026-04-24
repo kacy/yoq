@@ -262,7 +262,7 @@ test "parseEcPrivateKey round-trip with derKeyToPem" {
     const alloc = std.testing.allocator;
 
     // generate a key and convert to PEM
-    const kp = EcdsaP256.KeyPair.generate();
+    const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     const key_bytes = kp.secret_key.toBytes();
     const pem = try csr.derKeyToPem(alloc, &key_bytes);
     defer alloc.free(pem);

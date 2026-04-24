@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const cluster_node = @import("../../../cluster/node.zig");
@@ -15,29 +16,33 @@ const http = @import("../../http.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 const TestProxyLogsOverride = struct {
     path: []const u8,
     body: []const u8,
 };
 
-var test_proxy_logs_mutex: std.Thread.Mutex = .{};
+var test_proxy_logs_mutex: std.Io.Mutex = .init;
 var test_proxy_logs_override: ?TestProxyLogsOverride = null;
 
 pub fn setTestProxyTrainingLogsResponse(path: []const u8, body: []const u8) void {
-    test_proxy_logs_mutex.lock();
-    defer test_proxy_logs_mutex.unlock();
+    test_proxy_logs_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_proxy_logs_mutex.unlock(std.Options.debug_io);
     test_proxy_logs_override = .{ .path = path, .body = body };
 }
 
 pub fn clearTestProxyTrainingLogsResponse() void {
-    test_proxy_logs_mutex.lock();
-    defer test_proxy_logs_mutex.unlock();
+    test_proxy_logs_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_proxy_logs_mutex.unlock(std.Options.debug_io);
     test_proxy_logs_override = null;
 }
 
 fn findTestProxyTrainingLogsResponse(path: []const u8) ?[]const u8 {
-    test_proxy_logs_mutex.lock();
-    defer test_proxy_logs_mutex.unlock();
+    test_proxy_logs_mutex.lockUncancelable(std.Options.debug_io);
+    defer test_proxy_logs_mutex.unlock(std.Options.debug_io);
     const override = test_proxy_logs_override orelse return null;
     if (!std.mem.eql(u8, override.path, path)) return null;
     return override.body;
@@ -208,7 +213,7 @@ fn handleTrainingScale(
     if (rec == null) return common.notFound();
     defer rec.?.deinit(alloc);
 
-    store.updateTrainingJobGpusInDb(node.stateMachineDb(), rec.?.id, @intCast(gpus), std.time.timestamp()) catch return common.internalError();
+    store.updateTrainingJobGpusInDb(node.stateMachineDb(), rec.?.id, @intCast(gpus), nowRealSeconds()) catch return common.internalError();
     return scheduleTrainingJob(alloc, app_name, job_name, rec.?.id, @intCast(gpus), ctx);
 }
 
@@ -228,7 +233,7 @@ fn handleTrainingStateChange(
         error.NotLeader => common.notLeader(alloc, node),
         else => common.internalError(),
     };
-    store.updateTrainingJobStateInDb(node.stateMachineDb(), rec.?.id, new_state, std.time.timestamp()) catch return common.internalError();
+    store.updateTrainingJobStateInDb(node.stateMachineDb(), rec.?.id, new_state, nowRealSeconds()) catch return common.internalError();
     const updated = store.getTrainingJobInDb(node.stateMachineDb(), alloc, rec.?.id) catch return common.internalError();
     defer updated.deinit(alloc);
     return formatTrainingRecordResponse(
@@ -384,7 +389,7 @@ fn scheduleTrainingJob(
         generateClusterTrainingJobId(alloc, app_name, job_name) catch return common.internalError();
     defer alloc.free(job_id);
 
-    const now = std.time.timestamp();
+    const now = nowRealSeconds();
     const existing = store.findTrainingJobInDb(node.stateMachineDb(), alloc, app_name, job_name) catch return common.internalError();
     defer if (existing) |rec| rec.deinit(alloc);
     const restarts = if (existing) |rec| rec.restart_count else 0;
@@ -428,7 +433,7 @@ fn scheduleTrainingJob(
     defer freeApplyOutcomePayloads(alloc, outcome);
 
     const final_state = if (outcome.failed == 0 and outcome.placed > 0) "running" else "failed";
-    store.updateTrainingJobStateInDb(node.stateMachineDb(), job_id, final_state, std.time.timestamp()) catch return common.internalError();
+    store.updateTrainingJobStateInDb(node.stateMachineDb(), job_id, final_state, nowRealSeconds()) catch return common.internalError();
 
     const rec = store.getTrainingJobInDb(node.stateMachineDb(), alloc, job_id) catch return common.internalError();
     defer rec.deinit(alloc);
@@ -483,7 +488,7 @@ fn freeApplyOutcomePayloads(alloc: std.mem.Allocator, outcome: apply_release.App
 }
 
 fn generateClusterTrainingJobId(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "cluster-{s}-{s}-{d}", .{ app_name, job_name, std.time.timestamp() });
+    return std.fmt.allocPrint(alloc, "cluster-{s}-{s}-{d}", .{ app_name, job_name, nowRealSeconds() });
 }
 
 fn formatTrainingRecordResponse(
@@ -502,9 +507,10 @@ fn formatTrainingRecordJson(
     state_override: ?[]const u8,
     message: ?[]const u8,
 ) ![]u8 {
-    var json_buf: std.ArrayList(u8) = .empty;
-    errdefer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     try writer.writeByte('{');
     try json_helpers.writeJsonStringField(writer, "app_name", record.app_name);
@@ -523,7 +529,7 @@ fn formatTrainingRecordJson(
         try json_helpers.writeJsonStringField(writer, "message", msg);
     }
     try writer.writeByte('}');
-    return json_buf.toOwnedSlice(alloc);
+    return json_buf_writer.toOwnedSlice();
 }
 
 const RouteFlowHarness = struct {
@@ -538,7 +544,7 @@ const RouteFlowHarness = struct {
         errdefer store.deinitTestDb();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = try tmp.dir.realpath(".", &path_buf);
+        const tmp_path = try platform.Dir.from(tmp.dir).realpath(".", &path_buf);
 
         const node = try alloc.create(cluster_node.Node);
         errdefer alloc.destroy(node);

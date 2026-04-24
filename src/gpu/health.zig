@@ -9,6 +9,7 @@
 //   - any double-bit ECC error marks the GPU unhealthy
 
 const std = @import("std");
+const platform = @import("platform");
 const detect = @import("detect.zig");
 const log = @import("../lib/log.zig");
 
@@ -43,13 +44,13 @@ pub const GpuMetrics = struct {
 
     /// format metrics as JSON fragment (no surrounding braces)
     pub fn writeJson(self: GpuMetrics, writer: anytype) !void {
-        try std.fmt.format(writer,
+        try writer.print(
             \\"temperature_c":{d},"utilization_gpu":{d},"utilization_mem":{d},
         , .{ self.temperature_c, self.utilization_gpu, self.utilization_mem });
-        try std.fmt.format(writer,
+        try writer.print(
             \\"memory_used_mb":{d},"memory_total_mb":{d},"power_watts":{d},
         , .{ self.memory_used_mb, self.memory_total_mb, self.power_watts });
-        try std.fmt.format(writer,
+        try writer.print(
             \\"ecc_single":{d},"ecc_double":{d},"health":"{s}"
         , .{ self.ecc_errors_single, self.ecc_errors_double, @tagName(self.health()) });
     }
@@ -132,7 +133,7 @@ pub fn writeMetricsJson(writer: anytype, metrics: [max_gpus]?GpuMetrics, count: 
         if (metrics[i]) |m| {
             if (written > 0) try writer.writeAll(",");
             try writer.writeAll("{\"index\":");
-            try std.fmt.format(writer, "{d},", .{i});
+            try writer.print("{d},", .{i});
             try m.writeJson(writer);
             try writer.writeAll("}");
             written += 1;
@@ -147,7 +148,7 @@ pub fn writePrometheus(writer: anytype, metrics: [max_gpus]?GpuMetrics, count: u
     try writer.writeAll("# TYPE yoq_gpu_temperature_celsius gauge\n");
     for (0..@min(count, max_gpus)) |i| {
         if (metrics[i]) |m| {
-            try std.fmt.format(writer, "yoq_gpu_temperature_celsius{{gpu=\"{d}\"}} {d}\n", .{ i, m.temperature_c });
+            try writer.print("yoq_gpu_temperature_celsius{{gpu=\"{d}\"}} {d}\n", .{ i, m.temperature_c });
         }
     }
 
@@ -155,7 +156,7 @@ pub fn writePrometheus(writer: anytype, metrics: [max_gpus]?GpuMetrics, count: u
     try writer.writeAll("# TYPE yoq_gpu_utilization_ratio gauge\n");
     for (0..@min(count, max_gpus)) |i| {
         if (metrics[i]) |m| {
-            try std.fmt.format(writer, "yoq_gpu_utilization_ratio{{gpu=\"{d}\"}} {d:.2}\n", .{ i, @as(f64, @floatFromInt(m.utilization_gpu)) / 100.0 });
+            try writer.print("yoq_gpu_utilization_ratio{{gpu=\"{d}\"}} {d:.2}\n", .{ i, @as(f64, @floatFromInt(m.utilization_gpu)) / 100.0 });
         }
     }
 
@@ -163,7 +164,7 @@ pub fn writePrometheus(writer: anytype, metrics: [max_gpus]?GpuMetrics, count: u
     try writer.writeAll("# TYPE yoq_gpu_memory_used_bytes gauge\n");
     for (0..@min(count, max_gpus)) |i| {
         if (metrics[i]) |m| {
-            try std.fmt.format(writer, "yoq_gpu_memory_used_bytes{{gpu=\"{d}\"}} {d}\n", .{ i, m.memory_used_mb * 1024 * 1024 });
+            try writer.print("yoq_gpu_memory_used_bytes{{gpu=\"{d}\"}} {d}\n", .{ i, m.memory_used_mb * 1024 * 1024 });
         }
     }
 
@@ -171,7 +172,7 @@ pub fn writePrometheus(writer: anytype, metrics: [max_gpus]?GpuMetrics, count: u
     try writer.writeAll("# TYPE yoq_gpu_memory_total_bytes gauge\n");
     for (0..@min(count, max_gpus)) |i| {
         if (metrics[i]) |m| {
-            try std.fmt.format(writer, "yoq_gpu_memory_total_bytes{{gpu=\"{d}\"}} {d}\n", .{ i, m.memory_total_mb * 1024 * 1024 });
+            try writer.print("yoq_gpu_memory_total_bytes{{gpu=\"{d}\"}} {d}\n", .{ i, m.memory_total_mb * 1024 * 1024 });
         }
     }
 
@@ -179,7 +180,7 @@ pub fn writePrometheus(writer: anytype, metrics: [max_gpus]?GpuMetrics, count: u
     try writer.writeAll("# TYPE yoq_gpu_power_watts gauge\n");
     for (0..@min(count, max_gpus)) |i| {
         if (metrics[i]) |m| {
-            try std.fmt.format(writer, "yoq_gpu_power_watts{{gpu=\"{d}\"}} {d}\n", .{ i, m.power_watts });
+            try writer.print("yoq_gpu_power_watts{{gpu=\"{d}\"}} {d}\n", .{ i, m.power_watts });
         }
     }
 
@@ -187,8 +188,8 @@ pub fn writePrometheus(writer: anytype, metrics: [max_gpus]?GpuMetrics, count: u
     try writer.writeAll("# TYPE yoq_gpu_ecc_errors_total counter\n");
     for (0..@min(count, max_gpus)) |i| {
         if (metrics[i]) |m| {
-            try std.fmt.format(writer, "yoq_gpu_ecc_errors_total{{gpu=\"{d}\",type=\"single_bit\"}} {d}\n", .{ i, m.ecc_errors_single });
-            try std.fmt.format(writer, "yoq_gpu_ecc_errors_total{{gpu=\"{d}\",type=\"double_bit\"}} {d}\n", .{ i, m.ecc_errors_double });
+            try writer.print("yoq_gpu_ecc_errors_total{{gpu=\"{d}\",type=\"single_bit\"}} {d}\n", .{ i, m.ecc_errors_single });
+            try writer.print("yoq_gpu_ecc_errors_total{{gpu=\"{d}\",type=\"double_bit\"}} {d}\n", .{ i, m.ecc_errors_double });
         }
     }
 }
@@ -240,9 +241,9 @@ test "GpuMetrics writeJson" {
     };
 
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try m.writeJson(fbs.writer());
-    const json = fbs.getWritten();
+    var fbs: std.Io.Writer = .fixed(&buf);
+    try m.writeJson(&fbs);
+    const json = fbs.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"temperature_c\":72") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"utilization_gpu\":85") != null);
@@ -260,29 +261,29 @@ test "pollAllMetrics returns nulls without NVML" {
 
 test "writeMetricsJson empty" {
     var buf: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs: std.Io.Writer = .fixed(&buf);
     const metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
-    try writeMetricsJson(fbs.writer(), metrics, 0);
-    try std.testing.expectEqualStrings("\"gpu_metrics\":[]", fbs.getWritten());
+    try writeMetricsJson(&fbs, metrics, 0);
+    try std.testing.expectEqualStrings("\"gpu_metrics\":[]", fbs.buffered());
 }
 
 test "writeMetricsJson with one GPU" {
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs: std.Io.Writer = .fixed(&buf);
     var metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
     metrics[0] = .{ .temperature_c = 65, .utilization_gpu = 50, .memory_used_mb = 8000, .memory_total_mb = 16384 };
-    try writeMetricsJson(fbs.writer(), metrics, 1);
-    const json = fbs.getWritten();
+    try writeMetricsJson(&fbs, metrics, 1);
+    const json = fbs.buffered();
     try std.testing.expect(std.mem.indexOf(u8, json, "\"gpu_metrics\":[{") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"temperature_c\":65") != null);
 }
 
 test "writePrometheus empty" {
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs: std.Io.Writer = .fixed(&buf);
     const metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
-    try writePrometheus(fbs.writer(), metrics, 0);
-    const output = fbs.getWritten();
+    try writePrometheus(&fbs, metrics, 0);
+    const output = fbs.buffered();
     // should have HELP/TYPE headers but no data lines
     try std.testing.expect(std.mem.indexOf(u8, output, "# HELP yoq_gpu_temperature_celsius") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "gpu=\"0\"") == null);
@@ -290,7 +291,7 @@ test "writePrometheus empty" {
 
 test "writePrometheus with one GPU" {
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs: std.Io.Writer = .fixed(&buf);
     var metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
     metrics[0] = .{
         .temperature_c = 72,
@@ -301,8 +302,8 @@ test "writePrometheus with one GPU" {
         .ecc_errors_single = 0,
         .ecc_errors_double = 0,
     };
-    try writePrometheus(fbs.writer(), metrics, 1);
-    const output = fbs.getWritten();
+    try writePrometheus(&fbs, metrics, 1);
+    const output = fbs.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, output, "yoq_gpu_temperature_celsius{gpu=\"0\"} 72\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "yoq_gpu_utilization_ratio{gpu=\"0\"} 0.85\n") != null);
@@ -313,12 +314,12 @@ test "writePrometheus with one GPU" {
 
 test "writePrometheus with multiple GPUs" {
     var buf: [8192]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs: std.Io.Writer = .fixed(&buf);
     var metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
     metrics[0] = .{ .temperature_c = 70, .utilization_gpu = 80, .power_watts = 250 };
     metrics[1] = .{ .temperature_c = 65, .utilization_gpu = 50, .power_watts = 200 };
-    try writePrometheus(fbs.writer(), metrics, 2);
-    const output = fbs.getWritten();
+    try writePrometheus(&fbs, metrics, 2);
+    const output = fbs.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, output, "yoq_gpu_temperature_celsius{gpu=\"0\"} 70\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "yoq_gpu_temperature_celsius{gpu=\"1\"} 65\n") != null);

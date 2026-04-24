@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const builtin = @import("builtin");
 const sqlite = @import("sqlite");
 const log = @import("../../lib/log.zig");
@@ -146,37 +147,37 @@ var service_views: [max_services]ServiceView = [_]ServiceView{.{
     .backends = undefined,
     .active = false,
 }} ** max_services;
-var registry_mutex: std.Thread.Mutex = .{};
+var registry_mutex: std.Io.Mutex = .init;
 
 var cluster_db: ?*sqlite.Db = null;
-var cluster_db_mutex: std.Thread.Mutex = .{};
+var cluster_db_mutex: std.Io.Mutex = .init;
 var cluster_lookup_fault_mode: ClusterLookupFaultMode = .none;
 var cluster_lookup_fault_ip: [4]u8 = .{ 10, 255, 255, 254 };
 var cluster_lookup_fault_injections: u64 = 0;
-var dns_interceptor_fault_mutex: std.Thread.Mutex = .{};
+var dns_interceptor_fault_mutex: std.Io.Mutex = .init;
 var dns_interceptor_fault_mode: DnsInterceptorFaultMode = .none;
 var dns_interceptor_fault_injections: u64 = 0;
-var load_balancer_fault_mutex: std.Thread.Mutex = .{};
+var load_balancer_fault_mutex: std.Io.Mutex = .init;
 var load_balancer_fault_mode: LoadBalancerFaultMode = .none;
 var load_balancer_fault_injections: u64 = 0;
 
 pub fn setClusterDb(db: ?*sqlite.Db) void {
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
     cluster_db = db;
 }
 
 pub fn currentClusterDb() ?*sqlite.Db {
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
     return cluster_db;
 }
 
 pub fn lookupClusterService(name: []const u8) ?[4]u8 {
     if (name.len == 0 or name.len > max_name_len) return null;
 
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
 
     switch (cluster_lookup_fault_mode) {
         .none => {},
@@ -254,8 +255,8 @@ pub fn registerService(name: []const u8, container_id: []const u8, container_ip:
         return;
     }
 
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
 
     for (&registry) |*entry| {
         if (entry.active and
@@ -310,8 +311,8 @@ pub fn unregisterService(container_id: []const u8) void {
         return;
     }
 
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
 
     const cid_len = @min(container_id.len, 12);
     for (&registry) |*entry| {
@@ -341,8 +342,8 @@ pub fn unregisterServiceEndpoint(name: []const u8, container_id: []const u8) voi
         return;
     }
 
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
 
     const cid_len = @min(container_id.len, 12);
     for (&registry) |*entry| {
@@ -372,8 +373,8 @@ pub fn replaceServiceState(name: []const u8, dns_ip: [4]u8, backends: []const Ba
     if (name.len == 0 or name.len > max_name_len) return;
     if (!isSafeIpForDns(dns_ip)) return;
 
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
 
     const view_index = findOrCreateServiceViewLocked(name) orelse {
         log.warn("dns: service view full, cannot replace state for {s}", .{name});
@@ -406,8 +407,8 @@ pub fn replaceServiceState(name: []const u8, dns_ip: [4]u8, backends: []const Ba
 pub fn removeServiceState(name: []const u8) void {
     if (name.len == 0 or name.len > max_name_len) return;
 
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
 
     const view_index = findServiceViewIndexLocked(name) orelse {
         deleteBpfMap(name);
@@ -424,8 +425,8 @@ pub fn removeServiceState(name: []const u8) void {
 
 pub fn lookupService(name: []const u8) ?[4]u8 {
     {
-        registry_mutex.lock();
-        defer registry_mutex.unlock();
+        registry_mutex.lockUncancelable(std.Options.debug_io);
+        defer registry_mutex.unlock(std.Options.debug_io);
 
         if (findServiceViewLocked(name)) |view| return view.dns_ip;
 
@@ -447,8 +448,8 @@ pub fn lookupService(name: []const u8) ?[4]u8 {
 
 pub fn lookupServiceForDns(name: []const u8) ?[4]u8 {
     {
-        registry_mutex.lock();
-        defer registry_mutex.unlock();
+        registry_mutex.lockUncancelable(std.Options.debug_io);
+        defer registry_mutex.unlock(std.Options.debug_io);
 
         if (findServiceViewLocked(name)) |view| {
             if (ebpf.getLoadBalancer() == null and view.backend_count > 0) {
@@ -475,8 +476,8 @@ pub fn lookupServiceForDns(name: []const u8) ?[4]u8 {
 }
 
 pub fn lookupLocalService(name: []const u8) ?[4]u8 {
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
 
     if (findServiceViewLocked(name)) |view| return view.dns_ip;
 
@@ -520,8 +521,8 @@ pub fn snapshotServiceEntries(alloc: std.mem.Allocator, name: []const u8) !std.A
         entries.deinit(alloc);
     }
 
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
 
     if (findServiceViewLocked(name)) |view| {
         for (view.backends[0..view.backend_count]) |backend| {
@@ -555,8 +556,8 @@ pub fn lookupDnsInterceptorService(name: []const u8) ?[4]u8 {
 }
 
 pub fn currentLoadBalancerVip(name: []const u8) ?[4]u8 {
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
     if (findServiceViewLocked(name)) |view| return view.dns_ip;
     return getServiceVip(name);
 }
@@ -610,7 +611,7 @@ pub fn parseResolvConf(content: []const u8) ?[4]u8 {
         const line = content[pos..line_end];
         pos = if (line_end < content.len) line_end + 1 else content.len;
 
-        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        const trimmed = std.mem.trimStart(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
 
         const prefix = "nameserver";
@@ -618,8 +619,8 @@ pub fn parseResolvConf(content: []const u8) ?[4]u8 {
         if (!std.mem.eql(u8, trimmed[0..prefix.len], prefix)) continue;
         if (trimmed[prefix.len] != ' ' and trimmed[prefix.len] != '\t') continue;
 
-        const addr_str = std.mem.trimLeft(u8, trimmed[prefix.len..], " \t");
-        const addr_clean = std.mem.trimRight(u8, addr_str, " \t\r");
+        const addr_str = std.mem.trimStart(u8, trimmed[prefix.len..], " \t");
+        const addr_clean = std.mem.trimEnd(u8, addr_str, " \t\r");
         if (addr_clean.len == 0) continue;
         if (ip_mod.parseIp(addr_clean)) |addr| return addr;
     }
@@ -627,8 +628,8 @@ pub fn parseResolvConf(content: []const u8) ?[4]u8 {
 }
 
 pub fn detectNameConflict(name: []const u8, new_container_id: []const u8, ip_addr: [4]u8) ?ConflictInfo {
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
     return detectNameConflictLocked(name, new_container_id, ip_addr);
 }
 
@@ -661,8 +662,8 @@ fn detectNameConflictLocked(name: []const u8, new_container_id: []const u8, _: [
 }
 
 pub fn resetRegistryForTest() void {
-    registry_mutex.lock();
-    defer registry_mutex.unlock();
+    registry_mutex.lockUncancelable(std.Options.debug_io);
+    defer registry_mutex.unlock(std.Options.debug_io);
 
     for (&registry) |*entry| {
         entry.active = false;
@@ -675,84 +676,84 @@ pub fn resetRegistryForTest() void {
 }
 
 pub fn clusterLookupFaultMode() ClusterLookupFaultMode {
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
     return cluster_lookup_fault_mode;
 }
 
 pub fn clusterLookupFaultIp() [4]u8 {
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
     return cluster_lookup_fault_ip;
 }
 
 pub fn clusterLookupFaultInjectionCount() u64 {
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
     return cluster_lookup_fault_injections;
 }
 
 pub fn setClusterLookupFaultForTest(mode: ClusterLookupFaultMode, ip: ?[4]u8) void {
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
     cluster_lookup_fault_mode = mode;
     if (ip) |fault_ip| cluster_lookup_fault_ip = fault_ip;
 }
 
 pub fn resetClusterLookupFaultsForTest() void {
-    cluster_db_mutex.lock();
-    defer cluster_db_mutex.unlock();
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
     cluster_lookup_fault_mode = .none;
     cluster_lookup_fault_ip = .{ 10, 255, 255, 254 };
     cluster_lookup_fault_injections = 0;
 }
 
 pub fn dnsInterceptorFaultMode() DnsInterceptorFaultMode {
-    dns_interceptor_fault_mutex.lock();
-    defer dns_interceptor_fault_mutex.unlock();
+    dns_interceptor_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer dns_interceptor_fault_mutex.unlock(std.Options.debug_io);
     return dns_interceptor_fault_mode;
 }
 
 pub fn dnsInterceptorFaultInjectionCount() u64 {
-    dns_interceptor_fault_mutex.lock();
-    defer dns_interceptor_fault_mutex.unlock();
+    dns_interceptor_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer dns_interceptor_fault_mutex.unlock(std.Options.debug_io);
     return dns_interceptor_fault_injections;
 }
 
 pub fn setDnsInterceptorFaultModeForTest(mode: DnsInterceptorFaultMode) void {
-    dns_interceptor_fault_mutex.lock();
-    defer dns_interceptor_fault_mutex.unlock();
+    dns_interceptor_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer dns_interceptor_fault_mutex.unlock(std.Options.debug_io);
     dns_interceptor_fault_mode = mode;
 }
 
 pub fn resetDnsInterceptorFaultsForTest() void {
-    dns_interceptor_fault_mutex.lock();
-    defer dns_interceptor_fault_mutex.unlock();
+    dns_interceptor_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer dns_interceptor_fault_mutex.unlock(std.Options.debug_io);
     dns_interceptor_fault_mode = .none;
     dns_interceptor_fault_injections = 0;
 }
 
 pub fn loadBalancerFaultMode() LoadBalancerFaultMode {
-    load_balancer_fault_mutex.lock();
-    defer load_balancer_fault_mutex.unlock();
+    load_balancer_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer load_balancer_fault_mutex.unlock(std.Options.debug_io);
     return load_balancer_fault_mode;
 }
 
 pub fn loadBalancerFaultInjectionCount() u64 {
-    load_balancer_fault_mutex.lock();
-    defer load_balancer_fault_mutex.unlock();
+    load_balancer_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer load_balancer_fault_mutex.unlock(std.Options.debug_io);
     return load_balancer_fault_injections;
 }
 
 pub fn setLoadBalancerFaultModeForTest(mode: LoadBalancerFaultMode) void {
-    load_balancer_fault_mutex.lock();
-    defer load_balancer_fault_mutex.unlock();
+    load_balancer_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer load_balancer_fault_mutex.unlock(std.Options.debug_io);
     load_balancer_fault_mode = mode;
 }
 
 pub fn resetLoadBalancerFaultsForTest() void {
-    load_balancer_fault_mutex.lock();
-    defer load_balancer_fault_mutex.unlock();
+    load_balancer_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer load_balancer_fault_mutex.unlock(std.Options.debug_io);
     load_balancer_fault_mode = .none;
     load_balancer_fault_injections = 0;
 }
@@ -851,8 +852,8 @@ fn findLatestActiveEntryLocked(name: []const u8) ?*const ServiceEntry {
 }
 
 fn shouldSkipDnsInterceptorApply(operation: []const u8, name: []const u8) bool {
-    dns_interceptor_fault_mutex.lock();
-    defer dns_interceptor_fault_mutex.unlock();
+    dns_interceptor_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer dns_interceptor_fault_mutex.unlock(std.Options.debug_io);
 
     if (dns_interceptor_fault_mode == .none) return false;
 
@@ -867,8 +868,8 @@ fn shouldSkipDnsInterceptorApply(operation: []const u8, name: []const u8) bool {
 }
 
 fn shouldSkipLoadBalancerAdd(name: []const u8, vip: [4]u8, backend_ip: [4]u8) bool {
-    load_balancer_fault_mutex.lock();
-    defer load_balancer_fault_mutex.unlock();
+    load_balancer_fault_mutex.lockUncancelable(std.Options.debug_io);
+    defer load_balancer_fault_mutex.unlock(std.Options.debug_io);
 
     if (load_balancer_fault_mode == .none) return false;
 

@@ -151,16 +151,20 @@ pub const JsonWriter = struct {
     /// tracks if flush failed in flush_failed field.
     /// if the output was truncated, emits a warning to stderr.
     pub fn flush(self: *JsonWriter) void {
+        const io = std.Options.debug_io;
+        const prev = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(prev);
+
         if (self.truncated) {
             var err_buf: [128]u8 = undefined;
-            var err_w = std.fs.File.stderr().writer(&err_buf);
+            var err_w = std.Io.File.stderr().writer(io, &err_buf);
             err_w.interface.writeAll("warning: JSON output truncated (exceeded 8192 byte buffer)\n") catch {};
             err_w.interface.flush() catch {};
         }
 
         const data = self.buf[0..self.pos];
         var buf: [4096]u8 = undefined;
-        var w = std.fs.File.stdout().writer(&buf);
+        var w = std.Io.File.stdout().writer(io, &buf);
         const out = &w.interface;
 
         out.writeAll(data) catch {

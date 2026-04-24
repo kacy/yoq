@@ -13,7 +13,7 @@ const InitValidateError = error{
     ValidationFailed,
 };
 
-pub fn init(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn init(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var opts: init_mod.Options = .{};
 
     while (args.next()) |arg| {
@@ -41,7 +41,7 @@ pub fn init(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
     };
 }
 
-pub fn validate(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+pub fn validate(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var quiet = false;
 

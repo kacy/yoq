@@ -1,10 +1,15 @@
 const std = @import("std");
+const platform = @import("platform");
 const dockerfile = @import("../dockerfile.zig");
 const blob_store = @import("../../image/store.zig");
 const state_store = @import("../../state/store.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
+
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
 
 pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]const u8) types.BuildError!types.BuildResult {
     const config_json = buildConfigJson(alloc, state) catch return types.BuildError.ImageStoreFailed;
@@ -44,7 +49,7 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
         .manifest_digest = owned_digest,
         .config_digest = config_digest_str,
         .total_size = @intCast(state.total_size),
-        .created_at = std.time.timestamp(),
+        .created_at = nowRealSeconds(),
     }) catch |err| {
         log.warn("failed to save built image record: {}", .{err});
     };
@@ -58,9 +63,10 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
 }
 
 pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState) ![]const u8 {
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(alloc);
-    const writer = buf.writer(alloc);
+    var buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer buf_writer.deinit();
+
+    const writer = &buf_writer.writer;
 
     try writer.writeAll("{");
     try writer.writeAll("\"architecture\":\"amd64\",\"os\":\"linux\"");
@@ -187,7 +193,7 @@ pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState)
     }
     try writer.writeAll("]}}");
 
-    return try buf.toOwnedSlice(alloc);
+    return try buf_writer.toOwnedSlice();
 }
 
 pub fn buildManifestJson(
@@ -196,9 +202,10 @@ pub fn buildManifestJson(
     config_digest: blob_store.Digest,
     config_size: usize,
 ) ![]const u8 {
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(alloc);
-    const writer = buf.writer(alloc);
+    var buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer buf_writer.deinit();
+
+    const writer = &buf_writer.writer;
 
     try writer.writeAll("{\"schemaVersion\":2");
     try writer.writeAll(",\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\"");
@@ -208,7 +215,7 @@ pub fn buildManifestJson(
     try writer.writeAll(",\"digest\":\"");
     try writer.writeAll(config_digest.string(&digest_buf));
     try writer.writeAll("\"");
-    try std.fmt.format(writer, ",\"size\":{d}", .{config_size});
+    try writer.print(",\"size\":{d}", .{config_size});
     try writer.writeAll("}");
 
     try writer.writeAll(",\"layers\":[");
@@ -218,12 +225,12 @@ pub fn buildManifestJson(
         try writer.writeAll(",\"digest\":\"");
         try writer.writeAll(digest);
         try writer.writeAll("\"");
-        try std.fmt.format(writer, ",\"size\":{d}", .{state.layer_sizes.items[i]});
+        try writer.print(",\"size\":{d}", .{state.layer_sizes.items[i]});
         try writer.writeAll("}");
     }
     try writer.writeAll("]}");
 
-    return try buf.toOwnedSlice(alloc);
+    return try buf_writer.toOwnedSlice();
 }
 
 test "config json format" {

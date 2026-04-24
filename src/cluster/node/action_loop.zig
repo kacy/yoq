@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const transport_mod = @import("../transport.zig");
 const types = @import("../raft_types.zig");
 const agent_registry = @import("../registry.zig");
@@ -24,10 +25,10 @@ pub fn tickLoop(self: anytype) void {
         var do_cleanup = false;
 
         {
-            self.mu.lock();
+            self.mu.lockUncancelable(std.Options.debug_io);
             const is_leader = self.raft.role == .leader;
             const tick = self.tick_count +% 1;
-            self.mu.unlock();
+            self.mu.unlock(std.Options.debug_io);
 
             if (is_leader) {
                 do_health = tick % 300 == 0;
@@ -56,8 +57,8 @@ pub fn tickLoop(self: anytype) void {
         var still_leader = false;
         var gossip_tick_due = false;
         {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(std.Options.debug_io);
+            defer self.mu.unlock(std.Options.debug_io);
 
             self.raft.tick();
             processActions(self);
@@ -76,37 +77,37 @@ pub fn tickLoop(self: anytype) void {
                 if (do_cleanup) membership_sync.cleanupDeadAgents(self, records);
             }
             if (heartbeat_batch) |batch| {
-                self.mu.lock();
+                self.mu.lockUncancelable(std.Options.debug_io);
                 _ = self.raft.propose(batch) catch |e| {
                     logger.warn("failed to propose heartbeat batch: {}", .{e});
                 };
-                self.mu.unlock();
+                self.mu.unlock(std.Options.debug_io);
             }
         }
 
         if (gossip_tick_due) {
             membership_sync.tickGossip(self);
         }
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
     }
 }
 
 pub fn recvLoop(self: anytype) void {
     while (self.running.load(.acquire)) {
         const msg = self.transport.receive(self.alloc) catch {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
             continue;
         };
 
         if (msg) |received| {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(std.Options.debug_io);
+            defer self.mu.unlock(std.Options.debug_io);
 
             handleMessage(self, received);
             processActions(self);
         } else {
             membership_sync.receiveGossipMessages(self);
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
         }
     }
 }
@@ -216,9 +217,9 @@ pub fn handleMessage(self: anytype, received: transport_mod.ReceivedMessage) voi
     }
 }
 
-pub fn resolveNodeId(self: anytype, addr: std.net.Address) ?NodeId {
-    const from_ip: [4]u8 = @bitCast(addr.in.sa.addr);
-    const from_port = std.mem.bigToNative(u16, addr.in.sa.port);
+pub fn resolveNodeId(self: anytype, addr: platform.net.Address) ?NodeId {
+    const from_ip: [4]u8 = @bitCast(addr.in.addr);
+    const from_port = std.mem.bigToNative(u16, addr.in.port);
 
     for (self.config.peers) |peer| {
         if (std.mem.eql(u8, &peer.addr, &from_ip) and peer.port == from_port) {
@@ -300,8 +301,8 @@ pub fn processActions(self: anytype) void {
 
     if (!has_sends) return;
 
-    self.mu.unlock();
-    defer self.mu.lock();
+    self.mu.unlock(std.Options.debug_io);
+    defer self.mu.lockUncancelable(std.Options.debug_io);
 
     for (actions) |action| {
         switch (action) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const AppContext = @import("app_context.zig").AppContext;
 const cli = @import("cli.zig");
 const image_cmds = @import("../image/commands.zig");
 const cluster_cmds = @import("../cluster/commands.zig");
@@ -15,7 +16,7 @@ const completion = @import("completion.zig");
 
 const write = cli.write;
 
-pub const CommandHandler = *const fn (*std.process.ArgIterator, std.mem.Allocator) anyerror!void;
+pub const CommandHandler = *const fn (*std.process.Args.Iterator, AppContext) anyerror!void;
 
 pub const CommandGroup = enum {
     runtime,
@@ -169,8 +170,8 @@ fn printGroup(group: CommandGroup, title: []const u8) void {
     write("\n", .{});
 }
 
-fn versionHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
-    _ = alloc;
+fn versionHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    _ = ctx;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
     }
@@ -186,31 +187,31 @@ fn versionHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !voi
     }
 }
 
-fn helpHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn helpHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     _ = args;
-    _ = alloc;
+    _ = ctx;
     printUsage();
 }
 
-fn psHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn psHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
     }
-    try container_cmds.ps(alloc);
+    try container_cmds.ps(ctx.alloc);
 }
 
-fn imagesHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn imagesHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
     }
-    try image_cmds.images(alloc);
+    try image_cmds.images(ctx.alloc);
 }
 
-fn pruneHandler(args: *std.process.ArgIterator, alloc: std.mem.Allocator) !void {
+fn pruneHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
     }
-    try image_cmds.prune(alloc);
+    try image_cmds.prune(ctx.alloc);
 }
 
 test "every command name is unique" {

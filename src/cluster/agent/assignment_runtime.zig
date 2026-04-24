@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const http_client = @import("../http_client.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const log = @import("../../lib/log.zig");
@@ -14,6 +15,14 @@ const agent_store = @import("../agent_store.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
+
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
+fn nowAwakeNanoseconds() i128 {
+    return @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds());
+}
 
 pub const GangInfo = struct {
     rank: u32,
@@ -43,7 +52,7 @@ pub fn reconcile(self: anytype) void {
     };
     defer resp.deinit(self.alloc);
 
-    const now = std.time.timestamp();
+    const now = nowRealSeconds();
     var iter = json_helpers.extractJsonObjects(resp.body);
     while (iter.next()) |obj| {
         const assignment_id = extractJsonString(obj, "id") orelse continue;
@@ -108,9 +117,9 @@ fn reconcileFromCache(self: anytype) void {
 }
 
 fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
-    self.container_lock.lock();
+    self.container_lock.lockUncancelable(std.Options.debug_io);
     const already_tracked = self.local_containers.contains(id);
-    self.container_lock.unlock();
+    self.container_lock.unlock(std.Options.debug_io);
     if (already_tracked) return;
 
     const id_copy = self.alloc.dupe(u8, id) catch return;
@@ -184,9 +193,9 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         };
     } else null;
 
-    self.container_lock.lock();
+    self.container_lock.lockUncancelable(std.Options.debug_io);
     self.local_containers.put(id_copy, .starting) catch {
-        self.container_lock.unlock();
+        self.container_lock.unlock(std.Options.debug_io);
         self.alloc.free(id_copy);
         self.alloc.free(image_copy);
         self.alloc.free(command_copy);
@@ -197,7 +206,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         if (gang_copy) |gang| self.alloc.free(gang.master_addr);
         return;
     };
-    self.container_lock.unlock();
+    self.container_lock.unlock(std.Options.debug_io);
 
     if (gang_copy) |gang| {
         log.info("starting gang assignment {s} (image: {s}, rank {d}/{d})", .{ id_copy, image_copy, gang.rank, gang.world_size });
@@ -212,9 +221,9 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         .health_check_json = health_check_json_copy,
     } }) catch {
         log.warn("failed to spawn thread for assignment {s}", .{id_copy});
-        self.container_lock.lock();
+        self.container_lock.lockUncancelable(std.Options.debug_io);
         _ = self.local_containers.remove(id_copy);
-        self.container_lock.unlock();
+        self.container_lock.unlock(std.Options.debug_io);
         self.alloc.free(id_copy);
         self.alloc.free(image_copy);
         self.alloc.free(command_copy);
@@ -244,7 +253,10 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     }
 
     const ref = image_spec.parseImageRef(image);
-    var pull_result = image_registry.pull(self.alloc, ref) catch {
+    var threaded_io = std.Io.Threaded.init(self.alloc, .{});
+    defer threaded_io.deinit();
+
+    var pull_result = image_registry.pull(threaded_io.io(), self.alloc, ref) catch {
         log.warn("failed to pull image {s} for assignment {s}", .{ image, assignment_id });
         setContainerState(self, assignment_id, .failed);
         reportStatus(self, assignment_id, "failed", "image_pull_failed");
@@ -286,7 +298,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         .pid = null,
         .exit_code = null,
         .app_name = meta.app_name,
-        .created_at = std.time.timestamp(),
+        .created_at = nowRealSeconds(),
     }) catch {
         log.warn("failed to save container record for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
@@ -337,7 +349,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = std.time.timestamp(),
+        .created_at = nowRealSeconds(),
     };
 
     log.info("starting container {s} for assignment {s}", .{ container_id, assignment_id });
@@ -407,16 +419,16 @@ fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, m
     manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return .invalid;
     manifest_health.startChecker();
 
-    const deadline_ns = std.time.nanoTimestamp() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
+    const deadline_ns = nowAwakeNanoseconds() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
     defer {
         const final_status = manifest_health.getStatus(service_name) orelse .starting;
         if (final_status != .healthy) manifest_health.unregisterService(service_name);
     }
-    while (std.time.nanoTimestamp() < deadline_ns) {
+    while (nowAwakeNanoseconds() < deadline_ns) {
         switch (manifest_health.getStatus(service_name) orelse .starting) {
             .healthy => return .healthy,
             .unhealthy => return .unhealthy,
-            .starting => std.Thread.sleep(100 * std.time.ns_per_ms),
+            .starting => std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable,
         }
     }
     return .timeout;
@@ -539,8 +551,8 @@ fn reportStatus(self: anytype, assignment_id: []const u8, status: []const u8, re
 }
 
 fn setContainerState(self: anytype, assignment_id: []const u8, state: anytype) void {
-    self.container_lock.lock();
-    defer self.container_lock.unlock();
+    self.container_lock.lockUncancelable(std.Options.debug_io);
+    defer self.container_lock.unlock(std.Options.debug_io);
     if (self.local_containers.getPtr(assignment_id)) |container_state| {
         container_state.* = state;
     }

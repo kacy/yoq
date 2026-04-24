@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const paths = @import("../lib/paths.zig");
 const cgroups = @import("cgroups.zig");
 const container = @import("container.zig");
@@ -91,8 +92,8 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     const tmp_path = paths.uniqueDataTempPath(&tmp_buf, configs_subdir, id, ".bin.tmp") catch
         return RunStateError.CreateFailed;
 
-    var file = std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch return RunStateError.CreateFailed;
-    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+    var file = platform.cwd().createFile(tmp_path, .{ .truncate = true }) catch return RunStateError.CreateFailed;
+    errdefer platform.cwd().deleteFile(tmp_path) catch {};
     defer file.close();
 
     var buf: [4096]u8 = undefined;
@@ -114,7 +115,7 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     out.writeByte(@intFromEnum(cfg.restart_policy)) catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
     file.sync() catch return RunStateError.WriteFailed;
-    std.fs.cwd().rename(tmp_path, path) catch return RunStateError.WriteFailed;
+    platform.cwd().rename(tmp_path, path) catch return RunStateError.WriteFailed;
 }
 
 pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedRunConfig {
@@ -124,7 +125,7 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     var path_buf: [paths.max_path]u8 = undefined;
     const path = try configPath(&path_buf, id);
 
-    var file = std.fs.cwd().openFile(path, .{}) catch |err| return switch (err) {
+    var file = platform.cwd().openFile(path, .{}) catch |err| return switch (err) {
         error.FileNotFound => RunStateError.NotFound,
         else => RunStateError.ReadFailed,
     };
@@ -164,7 +165,7 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     errdefer alloc.free(port_maps);
     const limits = readLimits(input) catch |err| return mapReadError(err);
     const restart_raw = readByte(input) catch return RunStateError.ReadFailed;
-    const restart_policy: RestartPolicy = std.meta.intToEnum(RestartPolicy, restart_raw) catch
+    const restart_policy = std.enums.fromInt(RestartPolicy, restart_raw) orelse
         return RunStateError.InvalidFormat;
 
     return .{
@@ -196,7 +197,7 @@ pub fn removeConfig(id: []const u8) void {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const path = configPath(&path_buf, id) catch return;
-    std.fs.cwd().deleteFile(path) catch {};
+    platform.cwd().deleteFile(path) catch {};
 }
 
 fn writeString(writer: anytype, value: []const u8) !void {
@@ -294,7 +295,7 @@ fn readPortMaps(alloc: std.mem.Allocator, reader: anytype) ![]net_setup.PortMap 
             .container_port = try readInt(reader, u16),
         };
         const protocol_raw = try readByte(reader);
-        pm.protocol = std.meta.intToEnum(net_setup.Protocol, protocol_raw) catch
+        pm.protocol = std.enums.fromInt(net_setup.Protocol, protocol_raw) orelse
             return error.InvalidFormat;
     }
     return port_maps;
@@ -349,7 +350,7 @@ fn readLimits(reader: anytype) !cgroups.ResourceLimits {
 
 fn uniqueTestConfigId() [12]u8 {
     var raw: [6]u8 = undefined;
-    std.crypto.random.bytes(&raw);
+    platform.randomBytes(&raw);
     return std.fmt.bytesToHex(raw, .lower);
 }
 
@@ -513,7 +514,7 @@ test "loadConfig rejects oversized serialized string length" {
 
     removeConfig(&config_id);
 
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    var file = try platform.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     defer removeConfig(&config_id);
 

@@ -12,6 +12,10 @@ const RouteContext = common.RouteContext;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
+
 pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     const expected_token = ctx.join_token orelse return common.badRequest("no join token configured");
@@ -121,7 +125,7 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
             .gpu_model = gpu_model_str,
             .gpu_vram_mb = if (gpu_vram_val) |v| @intCast(@max(0, v)) else 0,
         },
-        std.time.timestamp(),
+        nowRealSeconds(),
         .{
             .node_id = assigned_node_id,
             .agent_api_port = if (agent_api_port) |port| @intCast(port) else null,
@@ -146,16 +150,17 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
         };
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeAll("{\"id\":\"") catch return common.internalError();
     writer.writeAll(&id_buf) catch return common.internalError();
     writer.writeByte('"') catch return common.internalError();
 
     if (assigned_node_id) |nid| {
-        std.fmt.format(writer, ",\"node_id\":{d}", .{nid}) catch return common.internalError();
+        writer.print(",\"node_id\":{d}", .{nid}) catch return common.internalError();
     }
     if (overlay_ip_str) |oip| {
         writer.writeAll(",\"overlay_ip\":\"") catch return common.internalError();
@@ -172,7 +177,7 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
         else
             agent_registry.listWireguardPeers(alloc, db)) catch {
             writer.writeByte('}') catch return common.internalError();
-            const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+            const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
             return .{ .status = .ok, .body = body, .allocated = true };
         };
         defer {
@@ -210,7 +215,7 @@ pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     writer.writeByte('}') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -241,7 +246,7 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
             .gpu_used = @intCast(@max(0, gpu_used)),
             .gpu_health = if (gpu_health_str) |s| agent_types.AgentResources.GpuHealthBuf.fromSlice(s) else .{},
         },
-        std.time.timestamp(),
+        nowRealSeconds(),
     );
 
     const db = node.stateMachineDb();
@@ -257,9 +262,10 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
 
     if (agent) |a| {
         defer a.deinit(alloc);
-        var json_buf: std.ArrayList(u8) = .empty;
-        defer json_buf.deinit(alloc);
-        const writer = json_buf.writer(alloc);
+        var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+        defer json_buf_writer.deinit();
+
+        const writer = &json_buf_writer.writer;
         writer.writeAll("{\"status\":\"") catch return common.internalError();
         writer.writeAll(a.status) catch return common.internalError();
         writer.print("\",\"peers_count\":{d}", .{peers_count}) catch return common.internalError();
@@ -270,7 +276,7 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
             writer.writeByte('"') catch return common.internalError();
         }
         writer.writeByte('}') catch return common.internalError();
-        const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+        const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
         return .{ .status = .ok, .body = body, .allocated = true };
     }
 
@@ -287,9 +293,10 @@ pub fn handleListAgents(alloc: std.mem.Allocator, ctx: RouteContext) Response {
         alloc.free(agents);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('[') catch return common.internalError();
     for (agents, 0..) |a, i| {
@@ -298,7 +305,7 @@ pub fn handleListAgents(alloc: std.mem.Allocator, ctx: RouteContext) Response {
     }
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -318,9 +325,10 @@ pub fn handleWireguardPeers(alloc: std.mem.Allocator, request: http.Request, ctx
         alloc.free(peers);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('[') catch return common.internalError();
     for (peers, 0..) |peer, i| {
@@ -329,7 +337,7 @@ pub fn handleWireguardPeers(alloc: std.mem.Allocator, request: http.Request, ctx
     }
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -343,9 +351,10 @@ pub fn handleAgentAssignments(alloc: std.mem.Allocator, agent_id: []const u8, ct
         alloc.free(assignments);
     }
 
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(alloc);
-    const writer = json_buf.writer(alloc);
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+
+    const writer = &json_buf_writer.writer;
 
     writer.writeByte('[') catch return common.internalError();
     for (assignments, 0..) |a, i| {
@@ -354,7 +363,7 @@ pub fn handleAgentAssignments(alloc: std.mem.Allocator, agent_id: []const u8, ct
     }
     writer.writeByte(']') catch return common.internalError();
 
-    const body = json_buf.toOwnedSlice(alloc) catch return common.internalError();
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 

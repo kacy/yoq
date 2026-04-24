@@ -133,7 +133,7 @@ fn splitFirst(line: []const u8) KeywordSplit {
         if (c == ' ' or c == '\t') {
             return .{
                 .keyword = line[0..i],
-                .rest = std.mem.trimLeft(u8, line[i + 1 ..], " \t"),
+                .rest = std.mem.trimStart(u8, line[i + 1 ..], " \t"),
             };
         }
     }

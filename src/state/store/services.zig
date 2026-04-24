@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
 const schema = @import("../schema.zig");
@@ -7,6 +8,10 @@ const vip_allocator = @import("../../network/vip_allocator.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
+
+fn nowRealSeconds() i64 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+}
 
 const ServiceNameIpRow = struct {
     ip_address: sqlite.Text,
@@ -795,7 +800,7 @@ pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []co
     };
     var vip_buf: [16]u8 = undefined;
     const vip_address = @import("../../network/ip.zig").formatIp(vip, &vip_buf);
-    const now = std.time.timestamp();
+    const now = nowRealSeconds();
 
     db.exec(
         "INSERT INTO services (service_name, vip_address, lb_policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?);",
@@ -841,7 +846,7 @@ pub fn syncServiceConfig(
     defer existing.deinit(alloc);
 
     const db = try common.getDb();
-    const now = std.time.timestamp();
+    const now = nowRealSeconds();
     db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
     var committed = false;
     errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
@@ -1002,7 +1007,7 @@ pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_addres
     db.exec(
         "INSERT OR REPLACE INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
         .{},
-        .{ name, container_id, ip_address, @as(i64, std.time.timestamp()) },
+        .{ name, container_id, ip_address, nowRealSeconds() },
     ) catch return StoreError.WriteFailed;
 }
 
@@ -1074,7 +1079,7 @@ pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const 
     db.exec(
         "INSERT OR REPLACE INTO network_policies (source_service, target_service, action, created_at) VALUES (?, ?, ?, ?);",
         .{},
-        .{ source, target, action, @as(i64, std.time.timestamp()) },
+        .{ source, target, action, nowRealSeconds() },
     ) catch return StoreError.WriteFailed;
 }
 

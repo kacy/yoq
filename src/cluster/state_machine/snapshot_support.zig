@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform");
 const sqlite = @import("sqlite");
 const types = @import("../raft_types.zig");
 const db_runtime = @import("db_runtime.zig");
@@ -32,7 +33,7 @@ pub const snapshot_header_size = 24;
 pub const max_snapshot_size: u64 = 64 * 1024 * 1024;
 
 pub fn readSnapshotMeta(path: []const u8) SnapshotError!SnapshotMeta {
-    const file = std.fs.cwd().openFile(path, .{}) catch return SnapshotError.IoError;
+    const file = platform.cwd().openFile(path, .{}) catch return SnapshotError.IoError;
     defer file.close();
 
     var header: [snapshot_header_size]u8 = undefined;
@@ -49,7 +50,7 @@ pub fn readSnapshotMeta(path: []const u8) SnapshotError!SnapshotMeta {
 pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) SnapshotError!void {
     var tmp_path_buf: [512]u8 = undefined;
     var tmp = try createUniqueTempFile(&tmp_path_buf, dest_path, ".tmp");
-    defer std.fs.cwd().deleteFile(tmp.path) catch {};
+    defer platform.cwd().deleteFile(tmp.path) catch {};
     tmp.file.close();
 
     var dest_db: ?*c.sqlite3 = null;
@@ -70,12 +71,12 @@ pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) Sn
     _ = c.sqlite3_close(dest_db);
     dest_db = null;
 
-    const tmp_data = std.fs.cwd().readFileAlloc(std.heap.page_allocator, tmp.path, @intCast(max_snapshot_size)) catch {
+    const tmp_data = platform.cwd().readFileAlloc(std.heap.page_allocator, tmp.path, @intCast(max_snapshot_size)) catch {
         return SnapshotError.IoError;
     };
     defer std.heap.page_allocator.free(tmp_data);
 
-    const file = std.fs.cwd().createFile(dest_path, .{ .truncate = true, .mode = 0o600 }) catch return SnapshotError.IoError;
+    const file = platform.cwd().createFile(dest_path, .{ .truncate = true, .mode = 0o600 }) catch return SnapshotError.IoError;
     defer file.close();
 
     var header: [snapshot_header_size]u8 = undefined;
@@ -88,7 +89,7 @@ pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) Sn
 }
 
 pub fn restoreFromSnapshot(self: anytype, src_path: []const u8) SnapshotError!SnapshotMeta {
-    const data = std.fs.cwd().readFileAlloc(std.heap.page_allocator, src_path, @intCast(max_snapshot_size)) catch {
+    const data = platform.cwd().readFileAlloc(std.heap.page_allocator, src_path, @intCast(max_snapshot_size)) catch {
         return SnapshotError.IoError;
     };
     defer std.heap.page_allocator.free(data);
@@ -108,7 +109,7 @@ pub fn restoreFromBytes(self: anytype, data: []const u8) SnapshotError!SnapshotM
 
     var tmp_path_buf: [128]u8 = undefined;
     var tmp = try createUniqueTempFile(&tmp_path_buf, "/tmp/yoq_snap_restore", ".db");
-    defer std.fs.cwd().deleteFile(tmp.path) catch {};
+    defer platform.cwd().deleteFile(tmp.path) catch {};
     tmp.file.writeAll(sqlite_data) catch return SnapshotError.IoError;
     tmp.file.close();
 
@@ -139,17 +140,17 @@ pub fn restoreFromBytes(self: anytype, data: []const u8) SnapshotError!SnapshotM
 
 fn createUniqueTempFile(buf: []u8, prefix: []const u8, suffix: []const u8) SnapshotError!struct {
     path: [:0]const u8,
-    file: std.fs.File,
+    file: platform.File,
 } {
     var attempts: usize = 0;
     while (attempts < 16) : (attempts += 1) {
-        const slice = std.fmt.bufPrint(buf, "{s}.{x}{s}", .{ prefix, std.crypto.random.int(u64), suffix }) catch {
+        const slice = std.fmt.bufPrint(buf, "{s}.{x}{s}", .{ prefix, randomU64(), suffix }) catch {
             return SnapshotError.IoError;
         };
         if (slice.len >= buf.len) return SnapshotError.IoError;
         buf[slice.len] = 0;
         const path: [:0]const u8 = buf[0..slice.len :0];
-        const file = std.fs.cwd().createFile(path, .{ .exclusive = true, .mode = 0o600 }) catch |err| switch (err) {
+        const file = platform.cwd().createFile(path, .{ .exclusive = true, .mode = 0o600 }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return SnapshotError.IoError,
         };
@@ -158,10 +159,16 @@ fn createUniqueTempFile(buf: []u8, prefix: []const u8, suffix: []const u8) Snaps
     return SnapshotError.IoError;
 }
 
+fn randomU64() u64 {
+    var bytes: [8]u8 = undefined;
+    platform.randomBytes(&bytes);
+    return std.mem.readInt(u64, &bytes, .little);
+}
+
 test "createUniqueTempFile uses owner-only permissions" {
     var buf: [128]u8 = undefined;
     var tmp = try createUniqueTempFile(&buf, "/tmp/yoq-snapshot-perm-test", ".db");
-    defer std.fs.cwd().deleteFile(tmp.path) catch {};
+    defer platform.cwd().deleteFile(tmp.path) catch {};
     defer tmp.file.close();
 
     const stat = try tmp.file.stat();
