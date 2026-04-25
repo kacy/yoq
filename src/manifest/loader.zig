@@ -14,7 +14,6 @@
 //   7. return Manifest with services in dependency order
 
 const std = @import("std");
-const platform = @import("platform");
 const spec = @import("spec.zig");
 const toml = @import("../lib/toml.zig");
 const log = @import("../lib/log.zig");
@@ -32,7 +31,7 @@ pub const default_filename = "manifest.toml";
 /// reads the file, parses it, and returns a typed Manifest.
 /// caller must call result.deinit() when done.
 pub fn load(alloc: std.mem.Allocator, path: []const u8) LoadError!spec.Manifest {
-    const content = platform.cwd().readFileAlloc(alloc, path, 1024 * 1024) catch |err| {
+    const content = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, alloc, .limited(1024 * 1024)) catch |err| {
         switch (err) {
             error.FileNotFound => {
                 log.err("manifest: file not found: {s}", .{path});
@@ -701,10 +700,10 @@ test "load from file — writes and reads back" {
 
     // write a temp file
     const path = "/tmp/yoq_test_manifest.toml";
-    const file = platform.cwd().createFile(path, .{}) catch return;
-    defer platform.cwd().deleteFile(path) catch {};
-    file.writeAll(content) catch return;
-    file.close();
+    var file = std.Io.Dir.cwd().createFile(std.testing.io, path, .{}) catch return;
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    file.writeStreamingAll(std.testing.io, content) catch return;
+    file.close(std.testing.io);
 
     var manifest = try load(alloc, path);
     defer manifest.deinit();
