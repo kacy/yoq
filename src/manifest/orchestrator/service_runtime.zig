@@ -166,10 +166,11 @@ pub fn resolveServiceVolumes(
         switch (vol.kind) {
             .bind => {
                 var resolve_buf: [4096]u8 = undefined;
-                const abs_source = platform.cwd().realpath(vol.source, &resolve_buf) catch {
+                const abs_source_len = std.Io.Dir.cwd().realPathFile(std.Options.debug_io, vol.source, &resolve_buf) catch {
                     log.warn("failed to resolve bind mount source: {s}", .{vol.source});
                     continue;
                 };
+                const abs_source = resolve_buf[0..abs_source_len];
 
                 const duped = alloc.dupe(u8, abs_source) catch {
                     log.warn("orchestrator: failed to allocate bind mount source: {s}", .{vol.source});

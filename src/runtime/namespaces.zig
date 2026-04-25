@@ -317,12 +317,12 @@ fn writeProc(path: []const u8, value: []const u8) !void {
     @memcpy(path_z[0..path.len], path);
     path_z[path.len] = 0;
 
-    const file = platform.cwd().openFile(path_z[0..path.len :0], .{ .mode = .write_only }) catch |e| {
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, path_z[0..path.len :0], .{ .mode = .write_only }) catch |e| {
         log.err("namespace: failed to open {s}: {s}", .{ path, @errorName(e) });
         return error.WriteFailed;
     };
-    defer file.close();
-    file.writeAll(value) catch |e| {
+    defer file.close(std.Options.debug_io);
+    file.writeStreamingAll(std.Options.debug_io, value) catch |e| {
         log.err("namespace: failed to write to {s}: {s}", .{ path, @errorName(e) });
         return error.WriteFailed;
     };

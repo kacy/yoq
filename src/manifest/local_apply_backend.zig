@@ -308,11 +308,12 @@ pub const PreparedLocalApply = struct {
                 if (vol.kind != .bind) continue;
 
                 var resolve_buf: [4096]u8 = undefined;
-                const abs_source = platform.cwd().realpath(vol.source, &resolve_buf) catch |e| {
+                const abs_source_len = std.Io.Dir.cwd().realPathFile(std.Options.debug_io, vol.source, &resolve_buf) catch |e| {
                     writeErr("warning: failed to resolve path {s}: {}\n", .{ vol.source, e });
                     any_watch_failed = true;
                     continue;
                 };
+                const abs_source = resolve_buf[0..abs_source_len];
 
                 runtime.watcher.?.addRecursive(abs_source, i) catch |e| {
                     writeErr("warning: failed to watch {s}: {}\n", .{ vol.source, e });
