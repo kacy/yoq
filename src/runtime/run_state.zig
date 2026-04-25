@@ -6,6 +6,10 @@ const container = @import("container.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
 
+fn cwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
 pub const RestartPolicy = enum {
     no,
     always,
@@ -92,12 +96,12 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     const tmp_path = paths.uniqueDataTempPath(&tmp_buf, configs_subdir, id, ".bin.tmp") catch
         return RunStateError.CreateFailed;
 
-    var file = platform.cwd().createFile(tmp_path, .{ .truncate = true }) catch return RunStateError.CreateFailed;
-    errdefer platform.cwd().deleteFile(tmp_path) catch {};
-    defer file.close();
+    var file = cwd().createFile(std.Options.debug_io, tmp_path, .{ .truncate = true }) catch return RunStateError.CreateFailed;
+    errdefer cwd().deleteFile(std.Options.debug_io, tmp_path) catch {};
+    defer file.close(std.Options.debug_io);
 
     var buf: [4096]u8 = undefined;
-    var writer = file.writer(&buf);
+    var writer = file.writer(std.Options.debug_io, &buf);
     const out = &writer.interface;
 
     writeInt(out, u32, format_version) catch return RunStateError.WriteFailed;
@@ -114,8 +118,8 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     writeLimits(out, cfg.limits) catch return RunStateError.WriteFailed;
     out.writeByte(@intFromEnum(cfg.restart_policy)) catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
-    file.sync() catch return RunStateError.WriteFailed;
-    platform.cwd().rename(tmp_path, path) catch return RunStateError.WriteFailed;
+    file.sync(std.Options.debug_io) catch return RunStateError.WriteFailed;
+    cwd().rename(tmp_path, cwd(), path, std.Options.debug_io) catch return RunStateError.WriteFailed;
 }
 
 pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedRunConfig {
@@ -125,14 +129,14 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     var path_buf: [paths.max_path]u8 = undefined;
     const path = try configPath(&path_buf, id);
 
-    var file = platform.cwd().openFile(path, .{}) catch |err| return switch (err) {
+    var file = cwd().openFile(std.Options.debug_io, path, .{}) catch |err| return switch (err) {
         error.FileNotFound => RunStateError.NotFound,
         else => RunStateError.ReadFailed,
     };
-    defer file.close();
+    defer file.close(std.Options.debug_io);
 
     var buf: [4096]u8 = undefined;
-    var reader = file.reader(&buf);
+    var reader = file.reader(std.Options.debug_io, &buf);
     const input = &reader.interface;
 
     const version = readInt(input, u32) catch return RunStateError.ReadFailed;
@@ -197,7 +201,7 @@ pub fn removeConfig(id: []const u8) void {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const path = configPath(&path_buf, id) catch return;
-    platform.cwd().deleteFile(path) catch {};
+    cwd().deleteFile(std.Options.debug_io, path) catch {};
 }
 
 fn writeString(writer: anytype, value: []const u8) !void {
@@ -514,12 +518,12 @@ test "loadConfig rejects oversized serialized string length" {
 
     removeConfig(&config_id);
 
-    var file = try platform.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
+    var file = try cwd().createFile(std.testing.io, path, .{ .truncate = true });
+    defer file.close(std.testing.io);
     defer removeConfig(&config_id);
 
     var buf: [16]u8 = undefined;
-    var writer = file.writer(&buf);
+    var writer = file.writer(std.testing.io, &buf);
     const out = &writer.interface;
     try writeInt(out, u32, format_version);
     try writeInt(out, u32, max_serialized_string_bytes + 1);

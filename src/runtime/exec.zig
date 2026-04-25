@@ -141,7 +141,7 @@ fn openNsFd(pid: posix.pid_t, ns: []const u8) ?posix.fd_t {
         pid, ns,
     }) catch return null;
 
-    const file = platform.cwd().openFile(path, .{}) catch return null;
+    const file = std.Io.Dir.cwd().openFile(std.Options.debug_io, path, .{}) catch return null;
     return file.handle;
 }
 
