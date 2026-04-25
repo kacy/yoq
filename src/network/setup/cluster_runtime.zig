@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const wireguard = @import("../wireguard.zig");
 const log = @import("../../lib/log.zig");
 const common = @import("common.zig");
@@ -41,9 +40,9 @@ pub fn setupClusterNetworking(config: common.ClusterNetworkConfig) !void {
 
     if (config.role == .server) {
         const fwd_path = "/proc/sys/net/ipv4/conf/wg-yoq/forwarding";
-        if (platform.cwd().openFile(fwd_path, .{ .mode = .write_only })) |file| {
-            defer file.close();
-            file.writeAll("1") catch return error.ConfigFailed;
+        if (std.Io.Dir.cwd().openFile(std.Options.debug_io, fwd_path, .{ .mode = .write_only })) |file| {
+            defer file.close(std.Options.debug_io);
+            file.writeStreamingAll(std.Options.debug_io, "1") catch return error.ConfigFailed;
             log.info("IP forwarding enabled on wg-yoq (server role)", .{});
         } else |e| {
             log.warn("failed to enable IP forwarding on wg-yoq: {}", .{e});

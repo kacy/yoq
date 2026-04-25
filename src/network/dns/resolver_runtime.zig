@@ -121,7 +121,7 @@ fn initUpstreamDns() void {
     if (upstream_initialized) return;
     upstream_initialized = true;
 
-    const content = platform.cwd().readFileAlloc(std.heap.page_allocator, "/etc/resolv.conf", 4096) catch {
+    const content = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, "/etc/resolv.conf", std.heap.page_allocator, .limited(4096)) catch {
         log.info("dns: /etc/resolv.conf not readable, using 8.8.8.8", .{});
         return;
     };

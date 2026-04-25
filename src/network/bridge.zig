@@ -294,14 +294,14 @@ pub fn configurableContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8, plen: u8) B
         return BridgeError.NamespaceFailed;
 
     // save current namespace
-    const self_ns = platform.cwd().openFile("/proc/self/ns/net", .{}) catch
+    const self_ns = std.Io.Dir.cwd().openFile(std.Options.debug_io, "/proc/self/ns/net", .{}) catch
         return BridgeError.NamespaceFailed;
-    defer self_ns.close();
+    defer self_ns.close(std.Options.debug_io);
 
     // open target namespace
-    const target_ns = platform.cwd().openFile(ns_path, .{}) catch
+    const target_ns = std.Io.Dir.cwd().openFile(std.Options.debug_io, ns_path, .{}) catch
         return BridgeError.NamespaceFailed;
-    defer target_ns.close();
+    defer target_ns.close(std.Options.debug_io);
 
     // enter container namespace
     setns(target_ns.handle) catch return BridgeError.NamespaceFailed;

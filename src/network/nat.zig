@@ -33,13 +33,14 @@ pub const NatError = error{
 /// enable IPv4 forwarding by writing to /proc/sys/net/ipv4/ip_forward.
 /// required for traffic to flow between container namespace and host.
 pub fn enableForwarding() NatError!void {
-    const file = platform.cwd().openFile(
+    var file = std.Io.Dir.cwd().openFile(
+        std.Options.debug_io,
         "/proc/sys/net/ipv4/ip_forward",
         .{ .mode = .write_only },
     ) catch return NatError.ForwardingFailed;
-    defer file.close();
+    defer file.close(std.Options.debug_io);
 
-    file.writeAll("1\n") catch return NatError.ForwardingFailed;
+    file.writeStreamingAll(std.Options.debug_io, "1\n") catch return NatError.ForwardingFailed;
 }
 
 /// ensure masquerade rule exists for container subnet.
@@ -333,9 +334,9 @@ fn enableRouteLocalnet(interface: []const u8) NatError!void {
     var path_buf: [128]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/sys/net/ipv4/conf/{s}/route_localnet", .{interface}) catch
         return NatError.RouteLocalnetFailed;
-    const file = platform.cwd().openFile(path, .{ .mode = .write_only }) catch return NatError.RouteLocalnetFailed;
-    defer file.close();
-    file.writeAll("1\n") catch return NatError.RouteLocalnetFailed;
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, path, .{ .mode = .write_only }) catch return NatError.RouteLocalnetFailed;
+    defer file.close(std.Options.debug_io);
+    file.writeStreamingAll(std.Options.debug_io, "1\n") catch return NatError.RouteLocalnetFailed;
 }
 
 // -- string formatting --
