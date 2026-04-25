@@ -124,7 +124,7 @@ pub const Watcher = struct {
     fn walkDir(self: *Watcher, dir: std.Io.Dir, parent_path: []const u8, service_idx: usize) void {
         var iter = dir.iterate();
         while (true) {
-            const entry = iter.next() catch |e| {
+            const entry = iter.next(std.Options.debug_io) catch |e| {
                 log.warn("watcher: directory iteration failed for '{s}': {}", .{ parent_path, e });
                 break; // stop walking this directory on iteration errors
             } orelse break; // null means no more entries

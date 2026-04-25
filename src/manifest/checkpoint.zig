@@ -41,7 +41,7 @@ pub fn scanCheckpointDir(buf: []CheckpointEntry, checkpoint_path: []const u8) us
     var count: usize = 0;
     var iter = dir.iterate();
 
-    while (iter.next() catch null) |entry| {
+    while (iter.next(std.Options.debug_io) catch null) |entry| {
         if (count >= buf.len) break;
         if (entry.kind != .directory) continue;
 
