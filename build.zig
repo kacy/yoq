@@ -14,16 +14,16 @@ fn hasCachedSqlite(b: *std.Build) bool {
     return std.mem.eql(u8, std.mem.trim(u8, hash_content, " \n\r\t"), SQLITE_HASH);
 }
 
-fn addPlatformImport(module: *std.Build.Module, b: *std.Build) void {
+fn addLinuxImport(module: *std.Build.Module, b: *std.Build) void {
     const mod_target = module.resolved_target orelse unreachable;
     const mod_optimize = module.optimize orelse unreachable;
 
-    const platform_mod = b.createModule(.{
-        .root_source_file = b.path("src/lib/platform.zig"),
+    const linux_mod = b.createModule(.{
+        .root_source_file = b.path("src/lib/linux_platform.zig"),
         .target = mod_target,
         .optimize = mod_optimize,
     });
-    module.addImport("platform", platform_mod);
+    module.addImport("linux_platform", linux_mod);
 }
 
 fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
@@ -79,7 +79,7 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
     sqlite_mod.linkLibrary(sqlite_lib);
 
     module.addImport("sqlite", sqlite_mod);
-    addPlatformImport(module, b);
+    addLinuxImport(module, b);
 }
 
 fn createArtifactRunner(

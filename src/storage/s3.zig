@@ -8,7 +8,7 @@
 // for blob storage without external dependencies.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const log = @import("../lib/log.zig");
 const paths = @import("../lib/paths.zig");
 
@@ -67,6 +67,10 @@ const MultipartMeta = struct {
     key: []const u8,
 };
 
+fn cwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
 fn validateUploadId(upload_id: []const u8) S3Error!void {
     if (upload_id.len != 24) return S3Error.InvalidUploadId;
     for (upload_id) |c| {
@@ -117,13 +121,13 @@ pub fn createBucket(name: []const u8) S3Error!void {
     const dir_path = try storagePath(&buf, storage_subdir ++ "/{s}", .{name});
 
     // use makeDir (not makePath) so it fails if the directory already exists
-    platform.cwd().makeDir(dir_path) catch |e| switch (e) {
+    cwd().createDir(std.Options.debug_io, dir_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => return S3Error.BucketAlreadyExists,
         else => {
             // ensure parent directories exist, then retry
             if (std.mem.lastIndexOfScalar(u8, dir_path, '/')) |last_sep| {
-                platform.cwd().makePath(dir_path[0..last_sep]) catch return S3Error.IoError;
-                platform.cwd().makeDir(dir_path) catch |e2| switch (e2) {
+                cwd().createDirPath(std.Options.debug_io, dir_path[0..last_sep]) catch return S3Error.IoError;
+                cwd().createDir(std.Options.debug_io, dir_path, .default_dir) catch |e2| switch (e2) {
                     error.PathAlreadyExists => return S3Error.BucketAlreadyExists,
                     else => return S3Error.IoError,
                 };
@@ -143,7 +147,7 @@ pub fn deleteBucket(name: []const u8) S3Error!void {
     const dir_path = try storagePath(&buf, storage_subdir ++ "/{s}", .{name});
 
     // try to remove as empty dir first
-    platform.cwd().deleteDir(dir_path) catch |e| switch (e) {
+    cwd().deleteDir(std.Options.debug_io, dir_path) catch |e| switch (e) {
         error.FileNotFound => return S3Error.BucketNotFound,
         error.DirNotEmpty => return S3Error.BucketNotEmpty,
         else => {
@@ -159,10 +163,10 @@ pub fn listBuckets(alloc: std.mem.Allocator) S3Error!struct { names: [][]const u
     const dir_path = try storagePath(&buf, storage_subdir, .{});
 
     // ensure storage dir exists
-    platform.cwd().makePath(dir_path) catch return S3Error.IoError;
+    cwd().createDirPath(std.Options.debug_io, dir_path) catch return S3Error.IoError;
 
-    var dir = platform.cwd().openDir(dir_path, .{ .iterate = true }) catch return S3Error.IoError;
-    defer dir.close();
+    var dir = cwd().openDir(std.Options.debug_io, dir_path, .{ .iterate = true }) catch return S3Error.IoError;
+    defer dir.close(std.Options.debug_io);
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     var timestamps: std.ArrayListUnmanaged(i64) = .empty;
@@ -173,7 +177,7 @@ pub fn listBuckets(alloc: std.mem.Allocator) S3Error!struct { names: [][]const u
     }
 
     var iter = dir.iterate();
-    while (iter.next() catch return S3Error.IoError) |entry| {
+    while (iter.next(std.Options.debug_io) catch return S3Error.IoError) |entry| {
         if (entry.kind != .directory) continue;
         const name_copy = alloc.dupe(u8, entry.name) catch return S3Error.IoError;
         names.append(alloc, name_copy) catch {
@@ -181,11 +185,11 @@ pub fn listBuckets(alloc: std.mem.Allocator) S3Error!struct { names: [][]const u
             return S3Error.IoError;
         };
         // get creation time from directory stat
-        const stat = dir.statFile(entry.name) catch {
+        const stat = dir.statFile(std.Options.debug_io, entry.name, .{}) catch {
             timestamps.append(alloc, 0) catch return S3Error.IoError;
             continue;
         };
-        const mtime_s: i64 = @intCast(@divFloor(stat.mtime, std.time.ns_per_s));
+        const mtime_s: i64 = @intCast(stat.mtime.toSeconds());
         timestamps.append(alloc, mtime_s) catch return S3Error.IoError;
     }
 
@@ -199,7 +203,7 @@ pub fn listBuckets(alloc: std.mem.Allocator) S3Error!struct { names: [][]const u
 pub fn bucketExists(name: []const u8) bool {
     var buf: [paths.max_path]u8 = undefined;
     const dir_path = storagePath(&buf, storage_subdir ++ "/{s}", .{name}) catch return false;
-    platform.cwd().access(dir_path, .{}) catch return false;
+    cwd().access(std.Options.debug_io, dir_path, .{}) catch return false;
     return true;
 }
 
@@ -218,14 +222,14 @@ pub fn putObject(name: []const u8, key: []const u8, data: []const u8) S3Error![3
 
     // ensure parent directories exist (for keys like "dir/subdir/file.txt")
     if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_sep| {
-        platform.cwd().makePath(file_path[0..last_sep]) catch return S3Error.IoError;
+        cwd().createDirPath(std.Options.debug_io, file_path[0..last_sep]) catch return S3Error.IoError;
     }
 
-    const file = platform.cwd().createFile(file_path, .{}) catch {
+    var file = cwd().createFile(std.Options.debug_io, file_path, .{}) catch {
         return S3Error.IoError;
     };
-    defer file.close();
-    file.writeAll(data) catch return S3Error.IoError;
+    defer file.close(std.Options.debug_io);
+    file.writeStreamingAll(std.Options.debug_io, data) catch return S3Error.IoError;
 
     return computeEtag(data);
 }
@@ -238,7 +242,7 @@ pub fn getObject(alloc: std.mem.Allocator, name: []const u8, key: []const u8) S3
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
 
-    return platform.cwd().readFileAlloc(alloc, file_path, 256 * 1024 * 1024) catch |e| switch (e) {
+    return cwd().readFileAlloc(std.Options.debug_io, file_path, alloc, .limited(256 * 1024 * 1024)) catch |e| switch (e) {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
@@ -252,7 +256,7 @@ pub fn deleteObject(name: []const u8, key: []const u8) S3Error!void {
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
 
-    platform.cwd().deleteFile(file_path) catch |e| switch (e) {
+    cwd().deleteFile(std.Options.debug_io, file_path) catch |e| switch (e) {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
@@ -268,19 +272,20 @@ pub fn headObject(name: []const u8, key: []const u8) S3Error!ObjectMeta {
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
 
-    const stat = platform.cwd().statFile(file_path) catch |e| switch (e) {
+    const stat = cwd().statFile(std.Options.debug_io, file_path, .{}) catch |e| switch (e) {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
 
     // stream file through MD5 in fixed-size chunks to avoid loading entire file
-    const file = platform.cwd().openFile(file_path, .{}) catch return S3Error.IoError;
-    defer file.close();
+    var file = cwd().openFile(std.Options.debug_io, file_path, .{}) catch return S3Error.IoError;
+    defer file.close(std.Options.debug_io);
 
     var hasher = std.crypto.hash.Md5.init(.{});
     var read_buf: [8192]u8 = undefined;
+    var reader = file.readerStreaming(std.Options.debug_io, &read_buf);
     while (true) {
-        const n = file.read(&read_buf) catch return S3Error.IoError;
+        const n = reader.interface.readSliceShort(&read_buf) catch return S3Error.IoError;
         if (n == 0) break;
         hasher.update(read_buf[0..n]);
     }
@@ -289,7 +294,7 @@ pub fn headObject(name: []const u8, key: []const u8) S3Error!ObjectMeta {
 
     return .{
         .size = stat.size,
-        .last_modified = @intCast(@divFloor(stat.mtime, std.time.ns_per_s)),
+        .last_modified = @intCast(stat.mtime.toSeconds()),
         .etag = std.fmt.bytesToHex(digest, .lower),
         .etag_len = 32,
     };
@@ -308,11 +313,11 @@ pub fn listObjects(
     var buf: [paths.max_path]u8 = undefined;
     const dir_path = try storagePath(&buf, storage_subdir ++ "/{s}", .{name});
 
-    var dir = platform.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| switch (e) {
+    var dir = cwd().openDir(std.Options.debug_io, dir_path, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return S3Error.BucketNotFound,
         else => return S3Error.IoError,
     };
-    defer dir.close();
+    defer dir.close(std.Options.debug_io);
 
     var entries: std.ArrayListUnmanaged(s3_xml.ObjectEntry) = .empty;
     errdefer {
@@ -324,7 +329,7 @@ pub fn listObjects(
     var walker = dir.walk(alloc) catch return S3Error.IoError;
     defer walker.deinit();
 
-    while (walker.next() catch return S3Error.IoError) |entry| {
+    while (walker.next(std.Options.debug_io) catch return S3Error.IoError) |entry| {
         if (entry.kind == .directory) continue;
 
         const key = entry.path;
@@ -332,12 +337,12 @@ pub fn listObjects(
         // apply prefix filter
         if (prefix.len > 0 and !std.mem.startsWith(u8, key, prefix)) continue;
 
-        const stat = entry.dir.statFile(entry.basename) catch continue;
+        const stat = entry.dir.statFile(std.Options.debug_io, entry.basename, .{}) catch continue;
         const key_copy = alloc.dupe(u8, key) catch return S3Error.IoError;
         entries.append(alloc, .{
             .key = key_copy,
             .size = stat.size,
-            .last_modified = @intCast(@divFloor(stat.mtime, std.time.ns_per_s)),
+            .last_modified = @intCast(stat.mtime.toSeconds()),
             .etag = "d41d8cd98f00b204e9800998ecf8427e", // placeholder for listing
         }) catch {
             alloc.free(key_copy);
@@ -361,15 +366,15 @@ pub fn initiateMultipartUpload(name: []const u8, key: []const u8) S3Error![24]u8
     // generate upload ID
     var upload_id: [24]u8 = undefined;
     var random_bytes: [12]u8 = undefined;
-    platform.randomBytes(&random_bytes);
+    linux_platform.randomBytes(&random_bytes);
     upload_id = std.fmt.bytesToHex(random_bytes, .lower);
 
     // create staging directory
     var buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&buf, multipart_subdir ++ "/{s}", .{upload_id});
-    platform.cwd().makePath(staging_path) catch return S3Error.IoError;
+    cwd().createDirPath(std.Options.debug_io, staging_path) catch return S3Error.IoError;
     writeMultipartMeta(staging_path, name, key) catch {
-        platform.cwd().deleteTree(staging_path) catch {};
+        cwd().deleteTree(std.Options.debug_io, staging_path) catch {};
         return S3Error.IoError;
     };
 
@@ -391,12 +396,12 @@ pub fn uploadPart(upload_id: []const u8, bucket_name: []const u8, key: []const u
     // verify staging directory exists
     var parent_buf: [paths.max_path]u8 = undefined;
     const parent = try storagePath(&parent_buf, multipart_subdir ++ "/{s}", .{upload_id});
-    platform.cwd().access(parent, .{}) catch return S3Error.UploadNotFound;
+    cwd().access(std.Options.debug_io, parent, .{}) catch return S3Error.UploadNotFound;
     try verifyMultipartTarget(parent, bucket_name, key);
 
-    const file = platform.cwd().createFile(staging_path, .{}) catch return S3Error.IoError;
-    defer file.close();
-    file.writeAll(data) catch return S3Error.IoError;
+    var file = cwd().createFile(std.Options.debug_io, staging_path, .{}) catch return S3Error.IoError;
+    defer file.close(std.Options.debug_io);
+    file.writeStreamingAll(std.Options.debug_io, data) catch return S3Error.IoError;
 
     return computeEtag(data);
 }
@@ -418,8 +423,8 @@ pub fn completeMultipartUpload(
     const staging_path = try storagePath(&staging_buf, multipart_subdir ++ "/{s}", .{upload_id});
     try verifyMultipartTarget(staging_path, bucket_name, key);
 
-    var dir = platform.cwd().openDir(staging_path, .{ .iterate = true }) catch return S3Error.UploadNotFound;
-    defer dir.close();
+    var dir = cwd().openDir(std.Options.debug_io, staging_path, .{ .iterate = true }) catch return S3Error.UploadNotFound;
+    defer dir.close(std.Options.debug_io);
 
     // collect part filenames and sort them
     var part_names: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -429,7 +434,7 @@ pub fn completeMultipartUpload(
     }
 
     var iter = dir.iterate();
-    while (iter.next() catch return S3Error.IoError) |entry| {
+    while (iter.next(std.Options.debug_io) catch return S3Error.IoError) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.eql(u8, entry.name, multipart_meta_name)) continue;
         if (!isPartFileName(entry.name)) return S3Error.UploadNotFound;
@@ -450,7 +455,7 @@ pub fn completeMultipartUpload(
     const etag = try writeMultipartObject(dir, bucket_name, key, part_names.items);
 
     // clean up staging directory
-    platform.cwd().deleteTree(staging_path) catch {};
+    cwd().deleteTree(std.Options.debug_io, staging_path) catch {};
 
     return etag;
 }
@@ -461,7 +466,7 @@ pub fn abortMultipartUpload(upload_id: []const u8) S3Error!void {
     var buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&buf, multipart_subdir ++ "/{s}", .{upload_id});
 
-    platform.cwd().deleteTree(staging_path) catch {
+    cwd().deleteTree(std.Options.debug_io, staging_path) catch {
         return S3Error.IoError;
     };
 }
@@ -477,28 +482,29 @@ pub fn computeEtag(data: []const u8) [32]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-fn writeMultipartObject(dir: platform.Dir, bucket_name: []const u8, key: []const u8, part_names: []const []const u8) S3Error![32]u8 {
+fn writeMultipartObject(dir: std.Io.Dir, bucket_name: []const u8, key: []const u8, part_names: []const []const u8) S3Error![32]u8 {
     var out_path_buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&out_path_buf, storage_subdir ++ "/{s}/{s}", .{ bucket_name, key });
 
     if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_sep| {
-        platform.cwd().makePath(file_path[0..last_sep]) catch return S3Error.IoError;
+        cwd().createDirPath(std.Options.debug_io, file_path[0..last_sep]) catch return S3Error.IoError;
     }
 
-    const out_file = platform.cwd().createFile(file_path, .{ .truncate = true }) catch return S3Error.IoError;
-    defer out_file.close();
+    var out_file = cwd().createFile(std.Options.debug_io, file_path, .{ .truncate = true }) catch return S3Error.IoError;
+    defer out_file.close(std.Options.debug_io);
 
     var hasher = std.crypto.hash.Md5.init(.{});
     var buf: [8192]u8 = undefined;
 
     for (part_names) |pn| {
-        const part_file = dir.openFile(pn, .{}) catch return S3Error.IoError;
-        defer part_file.close();
+        var part_file = dir.openFile(std.Options.debug_io, pn, .{}) catch return S3Error.IoError;
+        defer part_file.close(std.Options.debug_io);
+        var part_reader = part_file.readerStreaming(std.Options.debug_io, &buf);
 
         while (true) {
-            const bytes_read = part_file.read(&buf) catch return S3Error.IoError;
+            const bytes_read = part_reader.interface.readSliceShort(&buf) catch return S3Error.IoError;
             if (bytes_read == 0) break;
-            out_file.writeAll(buf[0..bytes_read]) catch return S3Error.IoError;
+            out_file.writeStreamingAll(std.Options.debug_io, buf[0..bytes_read]) catch return S3Error.IoError;
             hasher.update(buf[0..bytes_read]);
         }
     }
@@ -512,18 +518,18 @@ fn writeMultipartMeta(staging_path: []const u8, bucket: []const u8, key: []const
     var meta_path_buf: [paths.max_path]u8 = undefined;
     const meta_path = std.fmt.bufPrint(&meta_path_buf, "{s}/{s}", .{ staging_path, multipart_meta_name }) catch
         return error.PathTooLong;
-    const meta_file = try platform.cwd().createFile(meta_path, .{ .truncate = true });
-    defer meta_file.close();
-    try meta_file.writeAll(bucket);
-    try meta_file.writeAll("\n");
-    try meta_file.writeAll(key);
+    var meta_file = try cwd().createFile(std.Options.debug_io, meta_path, .{ .truncate = true });
+    defer meta_file.close(std.Options.debug_io);
+    try meta_file.writeStreamingAll(std.Options.debug_io, bucket);
+    try meta_file.writeStreamingAll(std.Options.debug_io, "\n");
+    try meta_file.writeStreamingAll(std.Options.debug_io, key);
 }
 
 fn loadMultipartMeta(staging_path: []const u8, buf: []u8) S3Error!MultipartMeta {
     var meta_path_buf: [paths.max_path]u8 = undefined;
     const meta_path = std.fmt.bufPrint(&meta_path_buf, "{s}/{s}", .{ staging_path, multipart_meta_name }) catch
         return S3Error.PathTooLong;
-    const content = platform.cwd().readFile(meta_path, buf) catch |err| switch (err) {
+    const content = cwd().readFile(std.Options.debug_io, meta_path, buf) catch |err| switch (err) {
         error.FileNotFound => return S3Error.UploadNotFound,
         else => return S3Error.IoError,
     };
@@ -556,7 +562,7 @@ fn cleanupEmptyObjectDirs(bucket: []const u8, key: []const u8) S3Error!void {
     while (true) {
         var dir_buf: [paths.max_path]u8 = undefined;
         const dir_path = try storagePath(&dir_buf, storage_subdir ++ "/{s}/{s}", .{ bucket, parent });
-        platform.cwd().deleteDir(dir_path) catch |err| switch (err) {
+        cwd().deleteDir(std.Options.debug_io, dir_path) catch |err| switch (err) {
             error.DirNotEmpty, error.FileNotFound => return,
             else => return S3Error.IoError,
         };
@@ -640,11 +646,11 @@ test "verifyMultipartTarget rejects reused upload id for different object" {
     const staging = try std.fmt.bufPrint(
         &path_buf,
         "/tmp/yoq-s3-multipart-{d}",
-        .{platform.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds()},
     );
-    defer platform.cwd().deleteTree(staging) catch {};
+    defer cwd().deleteTree(std.Options.debug_io, staging) catch {};
 
-    try platform.cwd().makePath(staging);
+    try cwd().createDirPath(std.Options.debug_io, staging);
     try writeMultipartMeta(staging, "bucket-a", "key-a");
 
     try verifyMultipartTarget(staging, "bucket-a", "key-a");
@@ -658,15 +664,15 @@ test "completeMultipartUpload streams parts into final object" {
 
     var bucket_path_buf: [paths.max_path]u8 = undefined;
     const bucket_path = try storagePath(&bucket_path_buf, storage_subdir ++ "/{s}", .{bucket});
-    platform.cwd().deleteTree(bucket_path) catch {};
-    defer platform.cwd().deleteTree(bucket_path) catch {};
+    cwd().deleteTree(std.Options.debug_io, bucket_path) catch {};
+    defer cwd().deleteTree(std.Options.debug_io, bucket_path) catch {};
 
     try createBucket(bucket);
     const upload_id = try initiateMultipartUpload(bucket, key);
 
     var staging_path_buf: [paths.max_path]u8 = undefined;
     const staging_path = try storagePath(&staging_path_buf, multipart_subdir ++ "/{s}", .{upload_id});
-    defer platform.cwd().deleteTree(staging_path) catch {};
+    defer cwd().deleteTree(std.Options.debug_io, staging_path) catch {};
 
     _ = try uploadPart(&upload_id, bucket, key, 1, "hello ");
     _ = try uploadPart(&upload_id, bucket, key, 2, "streamed ");

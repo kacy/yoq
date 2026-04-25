@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const json_out = @import("../../lib/json_output.zig");
 const apply_release = @import("../../manifest/apply_release.zig");
@@ -26,7 +25,7 @@ const StatusError = error{
     OutOfMemory,
 };
 
-pub fn status(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn status(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var verbose = false;
     var server: ?cli.ServerAddr = null;
     var app_mode = false;
@@ -56,12 +55,12 @@ pub fn status(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void 
     }
 
     if (app_mode) {
-        const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+        const owned_app_name = if (target_name == null) try currentAppNameAlloc(io, alloc) else null;
         defer if (owned_app_name) |name| alloc.free(name);
         const app_name = target_name orelse owned_app_name.?;
 
         if (server) |s| {
-            try statusRemoteApp(alloc, s.ip, s.port, app_name);
+            try statusRemoteApp(io, alloc, s.ip, s.port, app_name);
         } else {
             try statusLocalApp(alloc, app_name);
         }
@@ -69,14 +68,14 @@ pub fn status(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void 
     }
 
     if (server) |s| {
-        try statusRemote(alloc, s.ip, s.port, verbose);
+        try statusRemote(io, alloc, s.ip, s.port, verbose);
         return;
     }
 
     try statusLocal(alloc, verbose);
 }
 
-pub fn apps(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn apps(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var server: ?cli.ServerAddr = null;
     var filters = AppListFilters{};
 
@@ -105,7 +104,7 @@ pub fn apps(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     }
 
     if (server) |s| {
-        try appsRemote(alloc, s.ip, s.port, filters);
+        try appsRemote(io, alloc, s.ip, s.port, filters);
     } else {
         try appsLocal(alloc, filters);
     }
@@ -291,9 +290,9 @@ fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!vo
     printAppStatus(snapshot);
 }
 
-fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) StatusError!void {
+fn statusRemote(io: std.Io, alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) StatusError!void {
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.getWithAuth(alloc, addr, port, "/v1/status", token) catch {
         writeErr("failed to connect to server\n", .{});
@@ -367,12 +366,12 @@ fn statusRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool)
     printStatusTable(snapshots.items, verbose);
 }
 
-fn statusRemoteApp(alloc: std.mem.Allocator, addr: [4]u8, port: u16, app_name: []const u8) StatusError!void {
+fn statusRemoteApp(io: std.Io, alloc: std.mem.Allocator, addr: [4]u8, port: u16, app_name: []const u8) StatusError!void {
     const path = std.fmt.allocPrint(alloc, "/apps/{s}/status", .{app_name}) catch return StatusError.OutOfMemory;
     defer alloc.free(path);
 
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.getWithAuth(alloc, addr, port, path, token) catch {
         writeErr("failed to connect to server\n", .{});
@@ -410,9 +409,9 @@ fn loadPreviousSuccessfulDeployment(
     };
 }
 
-fn appsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, filters: AppListFilters) StatusError!void {
+fn appsRemote(io: std.Io, alloc: std.mem.Allocator, addr: [4]u8, port: u16, filters: AppListFilters) StatusError!void {
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.getWithAuth(alloc, addr, port, "/apps", token) catch {
         writeErr("failed to connect to server\n", .{});
@@ -852,9 +851,10 @@ fn snapshotFromDeployments(
     );
 }
 
-fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
+fn currentAppNameAlloc(io: std.Io, alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.cwd().realpath(".", &cwd_buf) catch return StatusError.StoreError;
+    const cwd_len = std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf) catch return StatusError.StoreError;
+    const cwd = cwd_buf[0..cwd_len];
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return StatusError.OutOfMemory;
 }
 

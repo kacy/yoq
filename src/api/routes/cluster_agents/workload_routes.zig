@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const sqlite = @import("sqlite");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const cluster_node = @import("../../../cluster/node.zig");
@@ -544,7 +543,8 @@ const RouteFlowHarness = struct {
         errdefer store.deinitTestDb();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = try platform.Dir.from(tmp.dir).realpath(".", &path_buf);
+        const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
+        const tmp_path = path_buf[0..tmp_path_len];
 
         const node = try alloc.create(cluster_node.Node);
         errdefer alloc.destroy(node);
@@ -881,8 +881,8 @@ test "training logs route prefers local logs when available" {
         .created_at = 100,
     });
     var file = try @import("../../../runtime/logs.zig").createLogFile("abc123def456");
-    try file.writeAll("local rank logs\n");
-    file.close();
+    try file.writeStreamingAll(std.Options.debug_io, "local rank logs\n");
+    file.close(std.Options.debug_io);
 
     try seedTrainingAssignment(&harness, "demo-app", "finetune", 0);
     try clearHarnessAgentEndpoint(&harness);

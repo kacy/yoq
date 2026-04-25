@@ -11,7 +11,7 @@
 // - closing the inotify fd unblocks the waiting thread for clean shutdown
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
@@ -61,7 +61,7 @@ pub const Watcher = struct {
         for (self.watches[0..self.watch_count]) |entry| {
             self.alloc.free(entry.path);
         }
-        platform.posix.close(self.fd);
+        linux_platform.posix.close(self.fd);
         self.fd = -1; // Mark as invalid to prevent use-after-close
         self.watch_count = 0;
     }
@@ -109,11 +109,11 @@ pub const Watcher = struct {
         try self.addDir(root_path, service_idx);
 
         // open and iterate subdirectories
-        var dir = platform.cwd().openDir(root_path, .{ .iterate = true }) catch |e| {
+        var dir = std.Io.Dir.cwd().openDir(std.Options.debug_io, root_path, .{ .iterate = true }) catch |e| {
             log.warn("cannot open directory for recursive watch '{s}': {}", .{ root_path, e });
             return error.OpenFailed;
         };
-        defer dir.close();
+        defer dir.close(std.Options.debug_io);
 
         self.walkDir(dir, root_path, service_idx);
     }
@@ -121,10 +121,10 @@ pub const Watcher = struct {
     /// internal recursive directory walker. adds inotify watches for each
     /// subdirectory found. skips hidden directories (starting with '.').
     /// logs errors but continues walking on partial failures.
-    fn walkDir(self: *Watcher, dir: platform.Dir, parent_path: []const u8, service_idx: usize) void {
+    fn walkDir(self: *Watcher, dir: std.Io.Dir, parent_path: []const u8, service_idx: usize) void {
         var iter = dir.iterate();
         while (true) {
-            const entry = iter.next() catch |e| {
+            const entry = iter.next(std.Options.debug_io) catch |e| {
                 log.warn("watcher: directory iteration failed for '{s}': {}", .{ parent_path, e });
                 break; // stop walking this directory on iteration errors
             } orelse break; // null means no more entries
@@ -147,11 +147,11 @@ pub const Watcher = struct {
             };
 
             // recurse into the subdirectory
-            var subdir = dir.openDir(entry.name, .{ .iterate = true }) catch |e| {
+            var subdir = dir.openDir(std.Options.debug_io, entry.name, .{ .iterate = true }) catch |e| {
                 log.warn("watcher: failed to open subdirectory '{s}/{s}': {}", .{ parent_path, entry.name, e });
                 continue;
             };
-            defer subdir.close();
+            defer subdir.close(std.Options.debug_io);
             self.walkDir(subdir, full_path, service_idx);
         }
     }
@@ -258,12 +258,12 @@ pub const Watcher = struct {
         var count = initial_count;
 
         // set nonblocking temporarily to drain without waiting
-        const flags = platform.posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
+        const flags = linux_platform.posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
             log.warn("watcher: failed to get fd flags: {}", .{e});
             return count;
         };
         const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-        _ = platform.posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
+        _ = linux_platform.posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
             log.warn("watcher: failed to set non-blocking mode: {}", .{e});
             return count;
         };
@@ -297,7 +297,7 @@ pub const Watcher = struct {
 
         // restore original flags - but only if fd is still valid
         if (self.fd >= 0) {
-            _ = platform.posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
+            _ = linux_platform.posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
                 log.warn("watcher: failed to restore fd flags: {}", .{e});
             };
         }
@@ -427,7 +427,8 @@ test "watch temp directory and detect file change" {
 
     // get the real path for inotify (needs an absolute path)
     var path_buf: [4096]u8 = undefined;
-    const tmp_path = try platform.Dir.from(tmp.dir).realpath(".", &path_buf);
+    const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
+    const tmp_path = path_buf[0..tmp_path_len];
 
     try w.addDir(tmp_path, 42);
     try std.testing.expectEqual(@as(usize, 1), w.watch_count);
@@ -457,9 +458,9 @@ test "watch temp directory and detect file change" {
     std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
 
     // write a file to trigger the event
-    var file = try platform.Dir.from(tmp.dir).createFile("test.txt", .{});
-    try file.writeAll("hello");
-    file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "test.txt", .{});
+    try file.writeStreamingAll(std.testing.io, "hello");
+    file.close(std.testing.io);
 
     // wait for the watcher thread to finish (debounce is 500ms)
     thread.join();

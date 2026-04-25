@@ -5,7 +5,7 @@
 // modules to avoid duplicating common patterns.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const ip = @import("../network/ip.zig");
 const net_setup = @import("../network/setup.zig");
 const paths = @import("paths.zig");
@@ -257,16 +257,22 @@ pub fn truncate(s: []const u8, max_len: usize) []const u8 {
 /// read the API auth token from ~/.local/share/yoq/api_token.
 /// returns the 64-char hex string in the provided buffer, or null on failure.
 pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
+    return readApiTokenWithIo(std.Options.debug_io, buf);
+}
+
+/// read the API auth token from ~/.local/share/yoq/api_token.
+/// returns the 64-char hex string in the provided buffer, or null on failure.
+pub fn readApiTokenWithIo(io: std.Io, buf: *[64]u8) ?[]const u8 {
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
 
-    const file = platform.cwd().openFile(token_path, .{}) catch return null;
-    defer file.close();
+    var file = std.Io.Dir.cwd().openFile(io, token_path, .{}) catch return null;
+    defer file.close(io);
 
-    if (!hasOwnerOnlyPermissions(file)) return null;
+    if (!hasOwnerOnlyPermissions(io, file)) return null;
 
-    const bytes_read = file.readAll(buf) catch return null;
-    if (bytes_read != 64) return null;
+    var file_reader = file.reader(io, &.{});
+    file_reader.interface.readSliceAll(buf) catch return null;
 
     // validate it's all hex
     for (buf) |c| {
@@ -282,29 +288,36 @@ pub fn readApiToken(buf: *[64]u8) ?[]const u8 {
 /// ~/.local/share/yoq/api_token with 0o600 permissions.
 /// returns the hex string in the provided buffer, or null on failure.
 pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
+    return generateAndSaveTokenWithIo(std.Options.debug_io, buf);
+}
+
+/// generate 32 random bytes, hex-encode to 64 chars, write to
+/// ~/.local/share/yoq/api_token with 0o600 permissions.
+/// returns the hex string in the provided buffer, or null on failure.
+pub fn generateAndSaveTokenWithIo(io: std.Io, buf: *[64]u8) ?[]const u8 {
     var raw: [32]u8 = undefined;
-    platform.randomBytes(&raw);
+    linux_platform.randomBytes(&raw);
     defer std.crypto.secureZero(u8, &raw);
 
     const hex = std.fmt.bytesToHex(raw, .lower);
     buf.* = hex;
 
     // ensure data directory exists
-    paths.ensureDataDirStrict("") catch return null;
+    paths.ensureDataDirStrictWithIo(io, "") catch return null;
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return null;
 
-    if (tokenFileExistsWithWeakPermissions(token_path)) return null;
+    if (tokenFileExistsWithWeakPermissions(io, token_path)) return null;
 
-    const file = platform.cwd().createFile(token_path, .{
-        .mode = 0o600,
+    var file = std.Io.Dir.cwd().createFile(io, token_path, .{
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
         .truncate = true,
         .exclusive = false,
     }) catch return null;
-    defer file.close();
+    defer file.close(io);
 
-    file.writeAll(buf) catch return null;
+    file.writeStreamingAll(io, buf) catch return null;
     return buf;
 }
 
@@ -319,15 +332,15 @@ pub fn isValidApiToken(token: []const u8) bool {
     return true;
 }
 
-fn hasOwnerOnlyPermissions(file: platform.File) bool {
-    const stat = file.stat() catch return false;
-    return (stat.mode & 0o077) == 0;
+fn hasOwnerOnlyPermissions(io: std.Io, file: std.Io.File) bool {
+    const stat = file.stat(io) catch return false;
+    return (stat.permissions.toMode() & 0o077) == 0;
 }
 
-fn tokenFileExistsWithWeakPermissions(path: []const u8) bool {
-    const file = platform.cwd().openFile(path, .{}) catch return false;
-    defer file.close();
-    return !hasOwnerOnlyPermissions(file);
+fn tokenFileExistsWithWeakPermissions(io: std.Io, path: []const u8) bool {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer file.close(io);
+    return !hasOwnerOnlyPermissions(io, file);
 }
 
 // -- tests --
@@ -349,7 +362,7 @@ const TokenTestBackup = struct {
 
     fn restore(self: TokenTestBackup) void {
         if (!self.moved) return;
-        platform.cwd().rename(self.backupPath(), self.tokenPath()) catch |e| {
+        std.Io.Dir.cwd().rename(self.backupPath(), std.Io.Dir.cwd(), self.tokenPath(), std.testing.io) catch |e| {
             log.warn("test cleanup: failed to restore token file: {}", .{e});
         };
     }
@@ -372,13 +385,13 @@ fn backupExistingToken() ?TokenTestBackup {
     backup.backup_path_len = backup_path.len;
 
     paths.ensureDataDirStrict("") catch return null;
-    platform.cwd().deleteFile(backup.backupPath()) catch |err| switch (err) {
+    std.Io.Dir.cwd().deleteFile(std.testing.io, backup.backupPath()) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return null,
     };
 
     const moved = blk: {
-        platform.cwd().rename(token_path, backup_path) catch |err| switch (err) {
+        std.Io.Dir.cwd().rename(token_path, std.Io.Dir.cwd(), backup_path, std.testing.io) catch |err| switch (err) {
             error.FileNotFound => break :blk false,
             else => return null,
         };
@@ -471,7 +484,7 @@ test "generateAndSaveToken produces valid 64-char hex string" {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
-    platform.cwd().deleteFile(token_path) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, token_path) catch {};
 }
 
 test "readApiToken round-trip with generateAndSaveToken" {
@@ -492,7 +505,7 @@ test "readApiToken round-trip with generateAndSaveToken" {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const token_path = paths.dataPath(&path_buf, "api_token") catch return;
-    platform.cwd().deleteFile(token_path) catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, token_path) catch {};
 }
 
 test "readApiToken returns null for missing file" {
@@ -517,23 +530,25 @@ test "readApiToken rejects weak file permissions" {
     const backup_path = paths.dataPath(&backup_buf, "api_token.test_backup") catch return;
 
     // move existing file out of the way
-    const moved = if (platform.cwd().rename(token_path, backup_path)) |_| true else |_| false;
-    defer if (moved) platform.cwd().rename(backup_path, token_path) catch |e| {
+    const moved = if (std.Io.Dir.cwd().rename(token_path, std.Io.Dir.cwd(), backup_path, std.testing.io)) |_| true else |_| false;
+    defer if (moved) std.Io.Dir.cwd().rename(backup_path, std.Io.Dir.cwd(), token_path, std.testing.io) catch |e| {
         log.warn("test cleanup: failed to restore token file: {}", .{e});
     };
 
-    const file = platform.cwd().createFile(token_path, .{ .mode = 0o644 }) catch |e| {
+    var file = std.Io.Dir.cwd().createFile(std.testing.io, token_path, .{
+        .permissions = std.Io.File.Permissions.fromMode(0o644),
+    }) catch |e| {
         // If we can't create the test file, skip this test
         log.warn("test: skipping weak permissions test - cannot create file: {}", .{e});
         return;
     };
     defer {
-        file.close();
-        platform.cwd().deleteFile(token_path) catch |e| {
+        file.close(std.testing.io);
+        std.Io.Dir.cwd().deleteFile(std.testing.io, token_path) catch |e| {
             log.warn("test cleanup: failed to delete test token file: {}", .{e});
         };
     }
-    file.writeAll("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") catch |e| {
+    file.writeStreamingAll(std.testing.io, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") catch |e| {
         log.warn("test: failed to write test token: {}", .{e});
         return;
     };

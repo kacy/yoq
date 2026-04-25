@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const acme = @import("../acme.zig");

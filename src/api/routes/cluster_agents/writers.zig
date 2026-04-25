@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const agent_registry = @import("../../../cluster/registry.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 

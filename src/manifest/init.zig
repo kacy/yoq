@@ -6,7 +6,7 @@
 // silently.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const loader = @import("loader.zig");
 
 pub const Options = struct {
@@ -34,7 +34,7 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
 
     // check if file already exists (unless --force)
     if (!opts.force) {
-        if (platform.cwd().statFile(opts.output_path)) |_| {
+        if (std.Io.Dir.cwd().statFile(io, opts.output_path, .{})) |_| {
             writeToStderr(io, "{s} already exists (use -f to specify a different path)\n", .{opts.output_path});
             return InitError.FileExists;
         } else |_| {
@@ -42,7 +42,7 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
         }
     }
 
-    const is_tty = platform.isatty(std.posix.STDIN_FILENO);
+    const is_tty = linux_platform.isatty(std.posix.STDIN_FILENO);
 
     const answers = if (is_tty)
         gatherInteractive(io, alloc) orelse return InitError.CwdFailed
@@ -52,7 +52,7 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
     const content = generateManifest(alloc, answers) catch return InitError.WriteFailed;
     defer alloc.free(content);
 
-    platform.cwd().writeFile(.{
+    std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = opts.output_path,
         .data = content,
     }) catch return InitError.WriteFailed;
@@ -68,7 +68,8 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
 /// derive default project name from basename of cwd
 fn defaultProjectName(alloc: std.mem.Allocator) ?[]const u8 {
     var buf: [4096]u8 = undefined;
-    const cwd = platform.cwd().realpath(".", &buf) catch return null;
+    const cwd_len = std.Io.Dir.cwd().realPath(std.Options.debug_io, &buf) catch return null;
+    const cwd = buf[0..cwd_len];
     const basename = std.fs.path.basename(cwd);
     return alloc.dupe(u8, basename) catch null;
 }

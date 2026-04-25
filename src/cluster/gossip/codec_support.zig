@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 pub fn encode(buf: []u8, msg: anytype, max_piggyback_updates: usize) !usize {
     var pos: usize = 0;

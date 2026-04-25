@@ -1,11 +1,14 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const blob_store = @import("../../../image/store.zig");
 const layer = @import("../../../image/layer.zig");
 const paths = @import("../../../lib/paths.zig");
 const cache = @import("../cache.zig");
 const types = @import("../types.zig");
+
+fn cwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
 
 pub fn commitLayerResult(
     state: *types.BuildState,
@@ -24,9 +27,9 @@ pub fn ensureDestParents(layer_dir: []const u8, dest: []const u8) types.BuildErr
     if (dest.len == 0) return;
     const dest_in_layer = if (dest[0] == '/') dest[1..] else dest;
     if (std.fs.path.dirname(dest_in_layer)) |parent| {
-        var dir = platform.cwd().openDir(layer_dir, .{}) catch return types.BuildError.CopyStepFailed;
-        defer dir.close();
-        dir.makePath(parent) catch return types.BuildError.CopyStepFailed;
+        var dir = cwd().openDir(std.Options.debug_io, layer_dir, .{}) catch return types.BuildError.CopyStepFailed;
+        defer dir.close(std.Options.debug_io);
+        dir.createDirPath(std.Options.debug_io, parent) catch return types.BuildError.CopyStepFailed;
     }
 }
 
@@ -52,7 +55,7 @@ pub fn withTempLayerDir(
     paths.ensureDataDir("tmp") catch return types.BuildError.CopyStepFailed;
     const layer_dir = paths.uniqueDataTempPath(out_path, "tmp", prefix, "") catch
         return types.BuildError.CopyStepFailed;
-    platform.cwd().makePath(layer_dir) catch return types.BuildError.CopyStepFailed;
+    cwd().createDirPath(std.Options.debug_io, layer_dir) catch return types.BuildError.CopyStepFailed;
     return layer_dir;
 }
 

@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const http = @import("../http.zig");
 const agent_registry = @import("../../cluster/registry.zig");
 const common = @import("common.zig");

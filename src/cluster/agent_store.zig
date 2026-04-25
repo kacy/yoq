@@ -5,7 +5,6 @@
 // global-db pattern as state/store.zig.
 
 const std = @import("std");
-const platform = @import("platform");
 const sqlite = @import("sqlite");
 const paths = @import("../lib/paths.zig");
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 
 const blob_store = @import("../../../image/store.zig");
@@ -126,8 +126,8 @@ pub fn processRun(
     ) catch return types.BuildError.RunStepFailed;
 
     spawn_result.signalReady();
-    platform.posix.close(spawn_result.stdout_fd);
-    platform.posix.close(spawn_result.stderr_fd);
+    linux_platform.posix.close(spawn_result.stdout_fd);
+    linux_platform.posix.close(spawn_result.stderr_fd);
 
     const wait_result = process.wait(spawn_result.pid, false) catch return types.BuildError.RunStepFailed;
     const exit_code: u8 = switch (wait_result.status) {

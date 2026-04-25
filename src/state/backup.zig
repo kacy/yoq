@@ -9,7 +9,6 @@
 // is NOT included.
 
 const std = @import("std");
-const platform = @import("platform");
 const sqlite = @import("sqlite");
 const schema = @import("schema.zig");
 const paths = @import("../lib/paths.zig");
@@ -151,8 +150,9 @@ test "validateBackupSchema rejects incomplete database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try platform.Dir.from(tmp.dir).realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(path);
+    var tmp_path_buf: [paths.max_path]u8 = undefined;
+    const path_len = try tmp.dir.realPathFile(std.testing.io, ".", &tmp_path_buf);
+    const path = tmp_path_buf[0..path_len];
 
     var path_buf: [paths.max_path]u8 = undefined;
     const db_path = try std.fmt.bufPrintZ(&path_buf, "{s}/bad.db", .{path});

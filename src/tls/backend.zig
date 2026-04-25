@@ -8,7 +8,6 @@
 // and the orchestrator lifecycle run on different threads.
 
 const std = @import("std");
-const platform = @import("platform");
 
 pub const Backend = struct {
     ip: []const u8,

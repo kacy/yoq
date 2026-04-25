@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const blob_store = @import("../store.zig");
 const paths = @import("../../lib/paths.zig");
@@ -8,6 +7,10 @@ const types = @import("types.zig");
 
 pub const layer_subdir = "layers/sha256";
 const max_path = paths.max_path;
+
+fn cwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
 
 pub fn layerPath(digest: blob_store.Digest, buf: *[max_path]u8) types.LayerError![]const u8 {
     const hex = digest.hex();
@@ -23,10 +26,10 @@ pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) types.LayerError!std.
     var dir_buf: [max_path]u8 = undefined;
     const dir_path = layerDir(&dir_buf) catch return types.LayerError.PathTooLong;
 
-    var dir = platform.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = cwd().openDir(std.Options.debug_io, dir_path, .{ .iterate = true }) catch {
         return std.ArrayList([]const u8).empty;
     };
-    defer dir.close();
+    defer dir.close(std.Options.debug_io);
 
     var layers = std.ArrayList([]const u8).empty;
     errdefer {
@@ -35,7 +38,7 @@ pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) types.LayerError!std.
     }
 
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(std.Options.debug_io) catch null) |entry| {
         if (entry.kind != .directory) continue;
         if (entry.name.len != 64) continue;
         const owned = alloc.dupe(u8, entry.name) catch continue;
@@ -51,7 +54,7 @@ pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) types.LayerError!std.
 pub fn deleteExtractedLayer(hex: []const u8) void {
     var path_buf: [max_path]u8 = undefined;
     const path = paths.dataPathFmt(&path_buf, "{s}/{s}", .{ layer_subdir, hex }) catch return;
-    platform.cwd().deleteTree(path) catch |err| {
+    cwd().deleteTree(std.Options.debug_io, path) catch |err| {
         if (err != error.FileNotFound) {
             log.warn("failed to delete extracted layer {s}: {}", .{ hex, err });
         }

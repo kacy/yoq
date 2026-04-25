@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const bridge = @import("../bridge.zig");
 const nl = @import("../netlink.zig");
@@ -11,7 +11,7 @@ pub fn loadDnsInterceptorOnBridge() void {
     if (ebpf.getDnsInterceptor() != null) return;
 
     const sock = nl.openSocket() catch return;
-    defer platform.posix.close(sock);
+    defer linux_platform.posix.close(sock);
 
     const if_index = nl.getIfIndex(sock, bridge.default_bridge) catch return;
     if (if_index == 0) return;

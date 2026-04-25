@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../lib/log.zig");
 
 pub const Flags = struct {

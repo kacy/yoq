@@ -10,7 +10,7 @@
 // we setns() into /proc/<pid>/ns/net, do the work, then setns() back.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const linux = std.os.linux;
 const posix = std.posix;
 const nl = @import("netlink.zig");
@@ -66,7 +66,7 @@ pub fn ensureBridge(name: []const u8) BridgeError!void {
 
 pub fn currentGatewayIp(name: []const u8) BridgeError![4]u8 {
     const fd = nl.openSocket() catch return BridgeError.AddressFailed;
-    defer platform.posix.close(fd);
+    defer linux_platform.posix.close(fd);
 
     const bridge_idx = nl.getIfIndex(fd, name) catch return BridgeError.InterfaceNotFound;
     if (bridge_idx == 0) return BridgeError.InterfaceNotFound;
@@ -79,7 +79,7 @@ pub fn currentGatewayIp(name: []const u8) BridgeError![4]u8 {
 /// used in cluster mode where each node has a different subnet.
 pub fn ensureBridgeWithConfig(config: BridgeConfig) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.CreateFailed;
-    defer platform.posix.close(fd);
+    defer linux_platform.posix.close(fd);
 
     // check if bridge already exists (TOCTOU race possible here, but NLM_F_EXCL handles it)
     const existing = nl.getIfIndex(fd, config.name) catch 0;
@@ -140,7 +140,7 @@ fn reconcileExistingBridge(fd: posix.fd_t, bridge_idx: u32, config: BridgeConfig
 /// delete a bridge interface
 pub fn deleteBridge(name: []const u8) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.DeleteFailed;
-    defer platform.posix.close(fd);
+    defer linux_platform.posix.close(fd);
 
     const idx = nl.getIfIndex(fd, name) catch return;
     if (idx == 0) return; // doesn't exist
@@ -168,7 +168,7 @@ pub fn deleteBridge(name: []const u8) BridgeError!void {
 /// bridge_name: bridge to attach host end to (e.g. "yoq0")
 pub fn createVethPair(host_name: []const u8, peer_name: []const u8, bridge_name: []const u8) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.VethCreateFailed;
-    defer platform.posix.close(fd);
+    defer linux_platform.posix.close(fd);
 
     // look up bridge index for attaching host end
     const bridge_idx = nl.getIfIndex(fd, bridge_name) catch return BridgeError.InterfaceNotFound;
@@ -224,7 +224,7 @@ pub fn createVethPair(host_name: []const u8, peer_name: []const u8, bridge_name:
 /// move an interface into a container's network namespace
 pub fn moveToNamespace(if_name: []const u8, pid: posix.pid_t) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.NamespaceFailed;
-    defer platform.posix.close(fd);
+    defer linux_platform.posix.close(fd);
 
     const idx = nl.getIfIndex(fd, if_name) catch return BridgeError.InterfaceNotFound;
     if (idx == 0) return BridgeError.InterfaceNotFound;
@@ -251,7 +251,7 @@ pub fn moveToNamespace(if_name: []const u8, pid: posix.pid_t) BridgeError!void {
 /// the kernel automatically removes the peer when one end is deleted.
 pub fn deleteVeth(host_name: []const u8) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.VethDeleteFailed;
-    defer platform.posix.close(fd);
+    defer linux_platform.posix.close(fd);
 
     const idx = nl.getIfIndex(fd, host_name) catch return;
     if (idx == 0) return; // already gone
@@ -294,21 +294,21 @@ pub fn configurableContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8, plen: u8) B
         return BridgeError.NamespaceFailed;
 
     // save current namespace
-    const self_ns = platform.cwd().openFile("/proc/self/ns/net", .{}) catch
+    const self_ns = std.Io.Dir.cwd().openFile(std.Options.debug_io, "/proc/self/ns/net", .{}) catch
         return BridgeError.NamespaceFailed;
-    defer self_ns.close();
+    defer self_ns.close(std.Options.debug_io);
 
     // open target namespace
-    const target_ns = platform.cwd().openFile(ns_path, .{}) catch
+    const target_ns = std.Io.Dir.cwd().openFile(std.Options.debug_io, ns_path, .{}) catch
         return BridgeError.NamespaceFailed;
-    defer target_ns.close();
+    defer target_ns.close(std.Options.debug_io);
 
     // enter container namespace
     setns(target_ns.handle) catch return BridgeError.NamespaceFailed;
 
     const config_result: BridgeError!void = blk: {
         const fd = nl.openSocket() catch break :blk BridgeError.CreateFailed;
-        defer platform.posix.close(fd);
+        defer linux_platform.posix.close(fd);
 
         // bring up loopback
         bringUpLoopback(fd) catch |e| {

@@ -43,7 +43,7 @@ pub fn rm(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 }
 
 pub fn log(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return query_commands.log(args, ctx.alloc);
+    return query_commands.log(args, ctx.io, ctx.alloc);
 }
 
 pub fn restart(args: *std.process.Args.Iterator, ctx: AppContext) !void {

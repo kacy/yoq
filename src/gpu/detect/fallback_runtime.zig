@@ -1,6 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const log = std.log;
 const types = @import("types.zig");
 
@@ -29,7 +29,7 @@ pub fn resetTestProbeRoots() void {
 }
 
 pub fn detectProcfs() ?DetectResult {
-    var dir = platform.openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
+    var dir = linux_platform.openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
     defer dir.close();
 
     var result = emptyDetectResult(.procfs, null);
@@ -58,7 +58,7 @@ pub fn detectProcfs() ?DetectResult {
 
 pub fn detectSysfs() ?DetectResult {
     var result = emptyDetectResult(.sysfs, null);
-    var drm_dir = platform.openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
+    var drm_dir = linux_platform.openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
     defer drm_dir.close();
 
     var iter = drm_dir.iterate();
@@ -121,9 +121,8 @@ pub fn emptyDetectResult(source: DetectSource, nvml: ?NvmlHandle) DetectResult {
 
 pub fn readSysfsFile(path: []const u8) ?SysfsContent {
     var result = SysfsContent{ .buf = undefined, .len = 0 };
-    const file = platform.cwd().openFile(path, .{}) catch return null;
-    defer file.close();
-    result.len = file.read(&result.buf) catch return null;
+    const content = std.Io.Dir.cwd().readFile(std.Options.debug_io, path, &result.buf) catch return null;
+    result.len = content.len;
     return result;
 }
 

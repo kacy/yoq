@@ -10,7 +10,6 @@
 // the training container can restore from it.
 
 const std = @import("std");
-const platform = @import("platform");
 const store = @import("../state/store.zig");
 const spec = @import("spec.zig");
 
@@ -35,13 +34,13 @@ pub const CheckpointEntry = struct {
 /// looks for subdirs matching step_N or checkpoint-N patterns.
 /// returns entries sorted by step ascending.
 pub fn scanCheckpointDir(buf: []CheckpointEntry, checkpoint_path: []const u8) usize {
-    var dir = platform.cwd().openDir(checkpoint_path, .{ .iterate = true }) catch return 0;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(std.Options.debug_io, checkpoint_path, .{ .iterate = true }) catch return 0;
+    defer dir.close(std.Options.debug_io);
 
     var count: usize = 0;
     var iter = dir.iterate();
 
-    while (iter.next() catch null) |entry| {
+    while (iter.next(std.Options.debug_io) catch null) |entry| {
         if (count >= buf.len) break;
         if (entry.kind != .directory) continue;
 
@@ -109,7 +108,7 @@ pub fn syncCheckpoints(alloc: std.mem.Allocator, job_id: []const u8, checkpoint_
 
     // find which steps are already recorded and save new ones
     var new_count: u32 = 0;
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 
     for (entries[0..count]) |entry| {
         var found = false;
@@ -136,7 +135,7 @@ pub fn syncCheckpoints(alloc: std.mem.Allocator, job_id: []const u8, checkpoint_
             const delete_from = if (new_count >= keep) 0 else keep - new_count;
             if (delete_from < existing.items.len) {
                 for (existing.items[delete_from..]) |old| {
-                    platform.cwd().deleteTree(old.path) catch {};
+                    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, old.path) catch {};
                     store.deleteCheckpoint(old.id) catch {};
                 }
             }
@@ -255,16 +254,16 @@ test "scanCheckpointDir finds step directories" {
     // create temp dir with step subdirs
     const alloc = std.testing.allocator;
     var tmp_path_buf: [256]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/yoq_ckpt_test_{d}", .{platform.milliTimestamp()}) catch unreachable;
+    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/yoq_ckpt_test_{d}", .{std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds()}) catch unreachable;
 
-    platform.cwd().makeDir(tmp_path) catch return;
-    defer platform.cwd().deleteTree(tmp_path) catch {};
+    std.Io.Dir.cwd().createDir(std.Options.debug_io, tmp_path, .default_dir) catch return;
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, tmp_path) catch {};
 
     // create step subdirs
     var step_buf: [256]u8 = undefined;
     for ([_][]const u8{ "step_100", "step_200", "step_50", "not_a_step" }) |name| {
         const sub = std.fmt.bufPrint(&step_buf, "{s}/{s}", .{ tmp_path, name }) catch continue;
-        platform.cwd().makeDir(sub) catch continue;
+        std.Io.Dir.cwd().createDir(std.Options.debug_io, sub, .default_dir) catch continue;
     }
     _ = alloc;
 

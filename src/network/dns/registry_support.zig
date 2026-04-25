@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const builtin = @import("builtin");
 const sqlite = @import("sqlite");
 const log = @import("../../lib/log.zig");

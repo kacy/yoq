@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const raft_mod = @import("cluster/raft.zig");
 const log_mod = @import("cluster/log.zig");
 const types = @import("cluster/raft_types.zig");

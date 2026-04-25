@@ -1,11 +1,11 @@
 const std = @import("std");
-const platform = @import("platform");
 const posix = std.posix;
 const log_mux = @import("../../dev/log_mux.zig");
 const common = @import("common.zig");
 
-pub fn writeLogLine(log_file: platform.File, stream: []const u8, line: []const u8) void {
-    const ts = platform.timestamp();
+pub fn writeLogLine(log_file: std.Io.File, stream: []const u8, line: []const u8) void {
+    const io = std.Options.debug_io;
+    const ts = std.Io.Clock.real.now(io).toSeconds();
     const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
     const day_seconds = epoch_seconds.getDaySeconds();
     const year_day = epoch_seconds.getEpochDay().calculateYearDay();
@@ -34,19 +34,23 @@ pub fn writeLogLine(log_file: platform.File, stream: []const u8, line: []const u
         pos += 1;
     }
 
-    if (log_file.getEndPos()) |end_pos| {
-        if (end_pos > common.max_log_size) {
-            log_file.seekTo(0) catch {};
-            platform.posix.ftruncate(log_file.handle, 0) catch {};
-            log_file.writeAll("--- log truncated (exceeded 50 MB) ---\n") catch {};
-        }
-    } else |_| {}
+    const end_pos = log_file.length(io) catch return;
+    var writer = log_file.writer(io, &.{});
 
-    log_file.writeAll(buf[0..pos]) catch return;
+    if (end_pos > common.max_log_size) {
+        writer.seekTo(0) catch return;
+        log_file.setLength(io, 0) catch return;
+        writer.interface.writeAll("--- log truncated (exceeded 50 MB) ---\n") catch return;
+    } else {
+        writer.seekTo(end_pos) catch return;
+    }
+
+    writer.interface.writeAll(buf[0..pos]) catch return;
+    writer.interface.flush() catch {};
 }
 
 pub fn captureStream(
-    log_file: platform.File,
+    log_file: std.Io.File,
     pipe_fd: posix.fd_t,
     stream_label: []const u8,
     dev_service: ?[]const u8,
@@ -109,7 +113,7 @@ pub fn captureStream(
         if (dev_service) |svc| log_mux.writeLine(svc, dev_color, leftover[0..leftover_len]);
     }
 
-    platform.posix.close(pipe_fd);
+    _ = std.os.linux.close(pipe_fd);
 }
 
 fn writeTerminalLine(stream_label: []const u8, line: []const u8) void {
@@ -130,16 +134,14 @@ fn writeTerminalLine(stream_label: []const u8, line: []const u8) void {
 test "write and read log line" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const file = platform.Dir.from(tmp_dir.dir).createFile("test.log", .{ .read = true }) catch unreachable;
-    defer file.close();
+    var file = tmp_dir.dir.createFile(std.testing.io, "test.log", .{ .read = true }) catch unreachable;
+    defer file.close(std.testing.io);
 
     writeLogLine(file, "stdout", "hello world");
     writeLogLine(file, "stderr", "something broke");
 
-    file.seekTo(0) catch unreachable;
-    var buf: [1024]u8 = undefined;
-    const bytes_read = file.readAll(&buf) catch unreachable;
-    const content = buf[0..bytes_read];
+    const content = try tmp_dir.dir.readFileAlloc(std.testing.io, "test.log", std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "stdout | hello world\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "stderr | something broke\n") != null);
@@ -148,36 +150,34 @@ test "write and read log line" {
 test "log file truncated when exceeding max size" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const file = platform.Dir.from(tmp_dir.dir).createFile("test_trunc.log", .{ .read = true }) catch unreachable;
-    defer file.close();
+    var file = tmp_dir.dir.createFile(std.testing.io, "test_trunc.log", .{ .read = true }) catch unreachable;
+    defer file.close(std.testing.io);
 
-    file.seekTo(common.max_log_size + 1) catch unreachable;
-    file.writeAll("x") catch unreachable;
+    var writer = file.writer(std.testing.io, &.{});
+    try writer.seekTo(common.max_log_size + 1);
+    try writer.interface.writeAll("x");
+    try writer.interface.flush();
 
     writeLogLine(file, "stdout", "after truncation");
 
-    const end = file.getEndPos() catch unreachable;
+    const end = file.length(std.testing.io) catch unreachable;
     try std.testing.expect(end < 1024);
 
-    file.seekTo(0) catch unreachable;
-    var buf: [512]u8 = undefined;
-    const bytes_read = file.readAll(&buf) catch unreachable;
-    const content = buf[0..bytes_read];
+    const content = try tmp_dir.dir.readFileAlloc(std.testing.io, "test_trunc.log", std.testing.allocator, .limited(512));
+    defer std.testing.allocator.free(content);
     try std.testing.expect(std.mem.startsWith(u8, content, "--- log truncated"));
 }
 
 test "write log line adds newline" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const file = platform.Dir.from(tmp_dir.dir).createFile("test.log", .{ .read = true }) catch unreachable;
-    defer file.close();
+    var file = tmp_dir.dir.createFile(std.testing.io, "test.log", .{ .read = true }) catch unreachable;
+    defer file.close(std.testing.io);
 
     writeLogLine(file, "stdout", "no newline");
 
-    file.seekTo(0) catch unreachable;
-    var buf: [512]u8 = undefined;
-    const bytes_read = file.readAll(&buf) catch unreachable;
-    const content = buf[0..bytes_read];
+    const content = try tmp_dir.dir.readFileAlloc(std.testing.io, "test.log", std.testing.allocator, .limited(512));
+    defer std.testing.allocator.free(content);
 
     try std.testing.expect(content[content.len - 1] == '\n');
     try std.testing.expect(content[content.len - 2] != '\n');

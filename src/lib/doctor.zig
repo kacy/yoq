@@ -7,7 +7,7 @@
 // each check returns pass/warn/fail with a diagnostic message.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const mesh = @import("../gpu/mesh.zig");
 
 pub const CheckStatus = enum {
@@ -121,7 +121,7 @@ pub fn checkKernel() Check {
 }
 
 pub fn checkCgroupV2() Check {
-    const file = platform.openFileAbsolute("/sys/fs/cgroup/cgroup.controllers", .{}) catch {
+    const file = linux_platform.openFileAbsolute("/sys/fs/cgroup/cgroup.controllers", .{}) catch {
         return makeCheck("cgroup-v2", .fail, "/sys/fs/cgroup/cgroup.controllers not found");
     };
     file.close();
@@ -129,7 +129,7 @@ pub fn checkCgroupV2() Check {
 }
 
 pub fn checkEbpf() Check {
-    platform.accessAbsolute("/sys/fs/bpf", .{}) catch {
+    linux_platform.accessAbsolute("/sys/fs/bpf", .{}) catch {
         return makeCheck("ebpf", .fail, "/sys/fs/bpf not mounted");
     };
     return makeCheck("ebpf", .pass, "bpf filesystem available");
@@ -144,7 +144,7 @@ pub fn checkGpu() Check {
 }
 
 pub fn checkWireguard() Check {
-    platform.accessAbsolute("/sys/module/wireguard", .{}) catch {
+    linux_platform.accessAbsolute("/sys/module/wireguard", .{}) catch {
         return makeCheck("wireguard", .warn, "wireguard module not loaded (cluster networking unavailable)");
     };
     return makeCheck("wireguard", .pass, "wireguard module loaded");

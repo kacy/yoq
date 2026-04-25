@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const service_observability = @import("../../network/service_observability.zig");
 const service_registry_bridge = @import("../../network/service_registry_bridge.zig");
@@ -72,7 +71,7 @@ pub fn stopChecker() void {
 
 fn schedulerLoop() void {
     while (registry.checker_running.load(.acquire)) {
-        const now = platform.timestamp();
+        const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
         scheduleDueChecks(now);
         std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(types.scheduler_interval_ms)), .awake) catch unreachable;
     }
@@ -85,12 +84,12 @@ fn workerLoop(_: usize) void {
             continue;
         };
 
-        const started_ns = platform.nanoTimestamp();
+        const started_ns = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
         const success = checks.runCheck(item.container_ip, item.config);
-        const completed_at = platform.timestamp();
+        const completed_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
         const completion = applyCompletedCheck(item, success, completed_at);
         registry.noteCompletedCheck(completion == .stale, completed_at);
-        const elapsed_ns = platform.nanoTimestamp() - started_ns;
+        const elapsed_ns = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() - started_ns;
         const latency_seconds = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / @as(f64, std.time.ns_per_s);
         service_observability.noteHealthCheckCompleted(item.serviceName(), completion == .stale, latency_seconds);
     }

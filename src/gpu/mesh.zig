@@ -9,7 +9,7 @@
 // falls back gracefully to TCP when no InfiniBand is detected.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const builtin = @import("builtin");
 const detect = @import("detect.zig");
 const log = @import("../lib/log.zig");
@@ -72,7 +72,7 @@ pub fn detectInfiniband() IbDetectResult {
     // check for GPUDirect RDMA (nvidia-peermem)
     result.gdr_available = checkGdr();
 
-    var ib_dir = platform.openDirAbsolute(detect_paths.ib_root, .{ .iterate = true }) catch return result;
+    var ib_dir = linux_platform.openDirAbsolute(detect_paths.ib_root, .{ .iterate = true }) catch return result;
     defer ib_dir.close();
 
     var iter = ib_dir.iterate();
@@ -110,10 +110,10 @@ pub fn detectInfiniband() IbDetectResult {
 /// check if GPUDirect RDMA is available.
 fn checkGdr() bool {
     // nvidia-peermem kernel module
-    const file = platform.cwd().openFile(detect_paths.peermem_path, .{}) catch {
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, detect_paths.peermem_path, .{}) catch {
         return false;
     };
-    file.close();
+    file.close(std.Options.debug_io);
     return true;
 }
 
@@ -328,7 +328,7 @@ pub const gpu_prio_bpf_path = "bpf/gpu_prio.o";
 /// and detachment via:
 ///   tc filter del dev wg-yoq egress
 pub fn isGpuPrioAvailable() bool {
-    platform.cwd().access(gpu_prio_bpf_path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.Options.debug_io, gpu_prio_bpf_path, .{}) catch return false;
     return true;
 }
 
@@ -364,18 +364,20 @@ test "detectInfiniband discovers fake IB tree" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try platform.Dir.from(tmp.dir).makePath("sys/class/infiniband/mlx5_0/ports/1");
-    try platform.Dir.from(tmp.dir).makePath("sys/class/infiniband/mlx5_0/device");
-    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/state", .data = "4: ACTIVE\n" });
-    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/rate", .data = "200 Gb/sec\n" });
-    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "sys/class/infiniband/mlx5_0/device/uevent", .data = "PCI_SLOT_NAME=0000:81:00.0\n" });
-    try platform.Dir.from(tmp.dir).makePath("proc/driver");
-    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "proc/driver/nvidia-peermem", .data = "loaded\n" });
+    try tmp.dir.createDirPath(std.testing.io, "sys/class/infiniband/mlx5_0/ports/1");
+    try tmp.dir.createDirPath(std.testing.io, "sys/class/infiniband/mlx5_0/device");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/state", .data = "4: ACTIVE\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sys/class/infiniband/mlx5_0/ports/1/rate", .data = "200 Gb/sec\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sys/class/infiniband/mlx5_0/device/uevent", .data = "PCI_SLOT_NAME=0000:81:00.0\n" });
+    try tmp.dir.createDirPath(std.testing.io, "proc/driver");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "proc/driver/nvidia-peermem", .data = "loaded\n" });
 
     var ib_buf: [std.fs.max_path_bytes]u8 = undefined;
     var peermem_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const ib_root = try platform.Dir.from(tmp.dir).realpath("sys/class/infiniband", &ib_buf);
-    const peermem_path = try platform.Dir.from(tmp.dir).realpath("proc/driver/nvidia-peermem", &peermem_buf);
+    const ib_root_len = try tmp.dir.realPathFile(std.testing.io, "sys/class/infiniband", &ib_buf);
+    const peermem_path_len = try tmp.dir.realPathFile(std.testing.io, "proc/driver/nvidia-peermem", &peermem_buf);
+    const ib_root = ib_buf[0..ib_root_len];
+    const peermem_path = peermem_buf[0..peermem_path_len];
 
     setTestDetectPaths(.{
         .ib_root = ib_root,

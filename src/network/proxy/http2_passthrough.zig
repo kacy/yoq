@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const hpack = @import("hpack.zig");
 const http2 = @import("http2.zig");
@@ -57,8 +57,8 @@ pub fn streamEndSeen(buf: []const u8, target_stream_id: u32) bool {
 }
 
 pub fn relaySocketConnection(
-    client_fd: platform.posix.socket_t,
-    upstream_fd: platform.posix.socket_t,
+    client_fd: linux_platform.posix.socket_t,
+    upstream_fd: linux_platform.posix.socket_t,
     timeout_ms: u32,
 ) Error!void {
     var client_open = true;

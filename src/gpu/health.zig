@@ -9,7 +9,6 @@
 //   - any double-bit ECC error marks the GPU unhealthy
 
 const std = @import("std");
-const platform = @import("platform");
 const detect = @import("detect.zig");
 const log = @import("../lib/log.zig");
 

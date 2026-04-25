@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const AppContext = @import("../lib/app_context.zig").AppContext;
 const cli = @import("../lib/cli.zig");
 const json_out = @import("../lib/json_output.zig");
@@ -101,8 +100,8 @@ fn set(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) SecretCommand
         v
     else blk: {
         // read from stdin
-        const stdin_file: platform.File = .{ .handle = std.posix.STDIN_FILENO };
-        const stdin_data = stdin_file.readToEndAlloc(alloc, 1024 * 1024) catch {
+        var stdin_reader = std.Io.File.stdin().reader(std.Options.debug_io, &.{});
+        const stdin_data = stdin_reader.interface.allocRemaining(alloc, .limited(1024 * 1024)) catch {
             writeErr("failed to read from stdin\n", .{});
             return SecretCommandsError.StoreFailed;
         };
@@ -241,7 +240,7 @@ pub fn backupCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 
     // default output path with timestamp
     var default_buf: [256]u8 = undefined;
-    const ts = platform.timestamp();
+    const ts = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const path = output_path orelse std.fmt.bufPrint(&default_buf, "yoq-backup-{d}.db", .{ts}) catch {
         writeErr("failed to generate backup filename\n", .{});
         return BackupCommandsError.BackupFailed;
@@ -296,7 +295,7 @@ pub fn restoreCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const path_z: [:0]const u8 = path_z_buf[0..path.len :0];
 
     // check if the input file exists
-    platform.cwd().access(path, .{}) catch {
+    std.Io.Dir.cwd().access(std.Options.debug_io, path, .{}) catch {
         writeErr("backup file not found: {s}\n", .{path});
         return BackupCommandsError.RestoreFailed;
     };

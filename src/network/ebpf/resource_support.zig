@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const common = @import("common.zig");
 
@@ -33,7 +32,7 @@ const CircuitBreaker = struct {
 
         if (self.failures < self.threshold) return true;
 
-        const now = platform.milliTimestamp();
+        const now = std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds();
         if (now - self.last_failure_time > self.reset_timeout_ms) {
             self.failures = 0;
             self.last_failure_time = 0;
@@ -57,7 +56,7 @@ const CircuitBreaker = struct {
         defer self.mutex.unlock(std.Options.debug_io);
 
         self.failures += 1;
-        self.last_failure_time = platform.milliTimestamp();
+        self.last_failure_time = std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds();
     }
 };
 

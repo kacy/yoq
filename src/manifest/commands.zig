@@ -20,29 +20,29 @@ pub fn validate(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 }
 
 pub fn up(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return deploy.up(args, ctx.alloc);
+    return deploy.up(args, ctx.io, ctx.alloc);
 }
 
 pub fn down(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return deploy.down(args, ctx.alloc);
+    return deploy.down(args, ctx.io, ctx.alloc);
 }
 
 pub fn rollback(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return ops.rollback(args, ctx.alloc);
+    return ops.rollback(args, ctx.io, ctx.alloc);
 }
 
 pub fn history(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return ops.history(args, ctx.alloc);
+    return ops.history(args, ctx.io, ctx.alloc);
 }
 
 pub fn rollout(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return ops.rollout(args, ctx.alloc);
+    return ops.rollout(args, ctx.io, ctx.alloc);
 }
 
 pub fn runWorker(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return ops.runWorker(args, ctx.alloc);
+    return ops.runWorker(args, ctx.io, ctx.alloc);
 }
 
 pub fn train(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return train_cmd.train(args, ctx.alloc);
+    return train_cmd.train(args, ctx.io, ctx.alloc);
 }

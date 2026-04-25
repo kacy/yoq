@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const app_spec = @import("../app_spec.zig");
 const local_apply_backend = @import("../local_apply_backend.zig");
@@ -23,7 +22,7 @@ const DeployError = error{
     UnknownService,
 };
 
-pub fn up(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn up(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var dev_mode = false;
     var server_addr: ?[]const u8 = null;
@@ -56,10 +55,11 @@ pub fn up(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     defer manifest.deinit();
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.cwd().realpath(".", &cwd_buf) catch |err| {
+    const cwd_len = std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf) catch |err| {
         writeErr("failed to resolve working directory: {}\n", .{err});
         return DeployError.StoreError;
     };
+    const cwd = cwd_buf[0..cwd_len];
     const app_name = std.fs.path.basename(cwd);
 
     var app = app_spec.fromManifest(alloc, app_name, &manifest) catch return DeployError.OutOfMemory;
@@ -76,7 +76,7 @@ pub fn up(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     defer release.deinit();
 
     if (server_addr) |addr| {
-        try deployToCluster(alloc, addr, &release);
+        try deployToCluster(io, alloc, addr, &release);
         return;
     }
 
@@ -129,12 +129,12 @@ pub fn up(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     writeErr("stopped\n", .{});
 }
 
-fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, release: *const release_plan.ReleasePlan) DeployError!void {
+fn deployToCluster(io: std.Io, alloc: std.mem.Allocator, addr_str: []const u8, release: *const release_plan.ReleasePlan) DeployError!void {
     const server = cli.parseServerAddr(addr_str);
     writeErr("deploying {d} services to cluster {s}...\n", .{ release.resolvedServiceCount(), addr_str });
 
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.postWithAuth(alloc, server.ip, server.port, "/apps/apply", release.config_snapshot, token) catch |err| {
         writeErr("failed to connect to cluster server: {}\n", .{err});
@@ -151,7 +151,7 @@ fn deployToCluster(alloc: std.mem.Allocator, addr_str: []const u8, release: *con
     }
 }
 
-pub fn down(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn down(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
 
     while (args.next()) |arg| {
@@ -171,10 +171,11 @@ pub fn down(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     defer manifest.deinit();
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.cwd().realpath(".", &cwd_buf) catch |err| {
+    const cwd_len = std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf) catch |err| {
         writeErr("failed to resolve working directory: {}\n", .{err});
         return DeployError.StoreError;
     };
+    const cwd = cwd_buf[0..cwd_len];
     const app_name = std.fs.path.basename(cwd);
 
     var ids = store.listAppContainerIds(alloc, app_name) catch |err| {

@@ -12,7 +12,10 @@ pub const logs_subdir = "logs";
 pub const max_log_size: u64 = 50 * 1024 * 1024;
 
 pub fn writeToStdout(data: []const u8) LogError!void {
-    const io = std.Options.debug_io;
+    return writeToStdoutWithIo(std.Options.debug_io, data);
+}
+
+pub fn writeToStdoutWithIo(io: std.Io, data: []const u8) LogError!void {
     const prev = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(prev);
 

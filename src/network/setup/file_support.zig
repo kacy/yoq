@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const ip = @import("../ip.zig");
 const log = @import("../../lib/log.zig");
 
@@ -51,15 +50,15 @@ fn writeFileInRootfs(rootfs: []const u8, rel_path: []const u8, content: []const 
     const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ rootfs, rel_path }) catch return;
 
     if (std.fs.path.dirname(full_path)) |dir| {
-        platform.cwd().makePath(dir) catch {};
+        std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir) catch {};
     }
 
-    const file = platform.cwd().createFile(full_path, .{}) catch |e| {
+    var file = std.Io.Dir.cwd().createFile(std.Options.debug_io, full_path, .{}) catch |e| {
         log.warn("failed to create {s}: {}", .{ full_path, e });
         return;
     };
-    defer file.close();
-    file.writeAll(content) catch |e| {
+    defer file.close(std.Options.debug_io);
+    file.writeStreamingAll(std.Options.debug_io, content) catch |e| {
         log.warn("failed to write {s}: {}", .{ full_path, e });
     };
 }

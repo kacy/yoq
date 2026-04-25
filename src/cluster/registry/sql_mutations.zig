@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const agent_types = @import("../agent_types.zig");
 const sql_escape = @import("../../lib/sql.zig");
 

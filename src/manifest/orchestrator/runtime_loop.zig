@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const spec = @import("../spec.zig");
@@ -145,7 +144,7 @@ const PreparedService = struct {
             .status = .created,
             .pid = null,
             .exit_code = null,
-            .created_at = platform.timestamp(),
+            .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
         };
     }
 };
@@ -183,14 +182,14 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             .pid = null,
             .exit_code = null,
             .app_name = orch.app_name,
-            .created_at = platform.timestamp(),
+            .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
         }) catch {
             orch.states[idx].status = .failed;
             return;
         };
 
         var c = prepared.createContainer(orch, idx, id, svc.name);
-        const start_time = platform.nanoTimestamp();
+        const start_time = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
 
         c.start() catch {
             cleanupContainerArtifacts(id);
@@ -207,7 +206,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         );
 
         const exit_code = c.wait() catch 255;
-        const run_duration_ns = platform.nanoTimestamp() - start_time;
+        const run_duration_ns = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() - start_time;
         cleanupContainerArtifacts(id);
 
         if (shutdown_requested.load(.acquire)) break;

@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const http = @import("../http.zig");
 const routes = @import("../routes.zig");
@@ -45,7 +45,7 @@ fn getPeerIp(fd: posix.fd_t) u32 {
 }
 
 pub fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
-    defer platform.posix.close(client_fd);
+    defer linux_platform.posix.close(client_fd);
 
     const client_ip = getPeerIp(client_fd);
     if (client_ip != 0 and !rate_limit.rate_limiter.checkRate(client_ip)) {
@@ -194,7 +194,7 @@ pub fn findHeaderEnd(buf: []const u8) ?usize {
 fn setReadTimeout(fd: posix.fd_t, seconds: i64) void {
     var sock_addr: posix.sockaddr.storage = undefined;
     var sock_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-    platform.posix.getsockname(fd, @ptrCast(&sock_addr), &sock_len) catch return;
+    linux_platform.posix.getsockname(fd, @ptrCast(&sock_addr), &sock_len) catch return;
 
     const timeout = posix.timeval{ .sec = seconds, .usec = 0 };
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |e| {
@@ -223,7 +223,7 @@ fn writeResponse(fd: posix.fd_t, status: http.StatusCode, content_type: []const 
 fn writeAll(fd: posix.fd_t, data: []const u8) void {
     var written: usize = 0;
     while (written < data.len) {
-        const bytes_written = platform.posix.write(fd, data[written..]) catch return;
+        const bytes_written = linux_platform.posix.write(fd, data[written..]) catch return;
         if (bytes_written == 0) return;
         written += bytes_written;
     }
@@ -233,8 +233,8 @@ test "readRequestAlloc handles body larger than legacy buffer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try platform.Dir.from(tmp.dir).createFile("large-request.txt", .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "large-request.txt", .{ .read = true });
+    defer file.close(std.testing.io);
 
     const body_len = 96 * 1024;
     const body = try std.testing.allocator.alloc(u8, body_len);
@@ -248,9 +248,9 @@ test "readRequestAlloc handles body larger than legacy buffer" {
     );
     defer std.testing.allocator.free(request_head);
 
-    try file.writeAll(request_head);
-    try file.writeAll(body);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, request_head);
+    try file.writeStreamingAll(std.testing.io, body);
+    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
     const owned = try readRequestAlloc(std.testing.allocator, file.handle);
     defer owned.deinit(std.testing.allocator);
@@ -264,8 +264,8 @@ test "writeResponse streams body larger than response scratch buffer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try platform.Dir.from(tmp.dir).createFile("large-response.txt", .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "large-response.txt", .{ .read = true });
+    defer file.close(std.testing.io);
 
     const body_len = 12 * 1024;
     const body = try std.testing.allocator.alloc(u8, body_len);
@@ -273,9 +273,9 @@ test "writeResponse streams body larger than response scratch buffer" {
     @memset(body, 'R');
 
     writeResponse(file.handle, .ok, "application/octet-stream", body, false);
-    try file.seekTo(0);
+    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
-    const response = try file.readToEndAlloc(std.testing.allocator, body_len + 512);
+    const response = try tmp.dir.readFileAlloc(std.testing.io, "large-response.txt", std.testing.allocator, .limited(body_len + 512));
     defer std.testing.allocator.free(response);
 
     try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
@@ -287,13 +287,13 @@ test "writeResponse omits body for HEAD semantics while preserving content lengt
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try platform.Dir.from(tmp.dir).createFile("head-response.txt", .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "head-response.txt", .{ .read = true });
+    defer file.close(std.testing.io);
 
     writeResponse(file.handle, .ok, "application/json", "metadata", true);
-    try file.seekTo(0);
+    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
-    const response = try file.readToEndAlloc(std.testing.allocator, 512);
+    const response = try tmp.dir.readFileAlloc(std.testing.io, "head-response.txt", std.testing.allocator, .limited(512));
     defer std.testing.allocator.free(response);
 
     try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));

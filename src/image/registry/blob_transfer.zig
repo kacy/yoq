@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const blob_store = @import("../store.zig");
@@ -250,11 +249,11 @@ fn downloadBlobUrlToStore(
 
     var tmp_path_buf: [paths.max_path]u8 = undefined;
     const tmp_path = blob_store.tempBlobPath(&tmp_path_buf) catch return error.NetworkError;
-    const tmp_file = platform.cwd().createFile(tmp_path, .{}) catch return error.NetworkError;
-    defer tmp_file.close();
+    var tmp_file = std.Io.Dir.cwd().createFile(std.Options.debug_io, tmp_path, .{}) catch return error.NetworkError;
+    defer tmp_file.close(std.Options.debug_io);
 
     var committed = false;
-    defer if (!committed) platform.cwd().deleteFile(tmp_path) catch {};
+    defer if (!committed) std.Io.Dir.cwd().deleteFile(std.Options.debug_io, tmp_path) catch {};
 
     var transfer_buf: [8192]u8 = undefined;
     const body_reader = response.reader(&transfer_buf);
@@ -271,23 +270,25 @@ fn downloadBlobUrlToStore(
         bytes_read_total += bytes_read;
         if (bytes_read_total > common.max_blob_size) return error.ResponseTooLarge;
 
-        tmp_file.writeAll(chunk_buf[0..bytes_read]) catch return error.NetworkError;
+        tmp_file.writeStreamingAll(std.Options.debug_io, chunk_buf[0..bytes_read]) catch return error.NetworkError;
     }
 
-    tmp_file.sync() catch {};
+    tmp_file.sync(std.Options.debug_io) catch {};
     try verifyFileDigest(tmp_path, expected);
     blob_store.commitTempBlob(tmp_path, expected) catch return error.NetworkError;
     committed = true;
 }
 
 fn verifyFileDigest(path: []const u8, expected: blob_store.Digest) !void {
-    const file = platform.cwd().openFile(path, .{}) catch return error.NetworkError;
-    defer file.close();
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, path, .{}) catch return error.NetworkError;
+    defer file.close(std.Options.debug_io);
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var reader_buf: [8192]u8 = undefined;
+    var reader = file.readerStreaming(std.Options.debug_io, &reader_buf);
     var buffer: [8192]u8 = undefined;
     while (true) {
-        const bytes_read = file.read(&buffer) catch return error.NetworkError;
+        const bytes_read = reader.interface.readSliceShort(&buffer) catch return error.NetworkError;
         if (bytes_read == 0) break;
         hasher.update(buffer[0..bytes_read]);
     }

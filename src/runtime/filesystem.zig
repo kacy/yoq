@@ -8,7 +8,7 @@
 // this runs inside the child process after namespace creation.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const common = @import("filesystem/common.zig");
 const path_support = @import("filesystem/path_support.zig");
@@ -179,17 +179,19 @@ test "isSymlink detects symlinks" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try platform.Dir.from(tmp.dir).makeDir("realdir");
-    try platform.Dir.from(tmp.dir).symLink("realdir", "linkdir", .{});
+    try tmp.dir.createDir(std.testing.io, "realdir", .default_dir);
+    try tmp.dir.symLink(std.testing.io, "realdir", "linkdir", .{});
 
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real_path = try platform.Dir.from(tmp.dir).realpath("realdir", &real_buf);
+    const real_path_len = try tmp.dir.realPathFile(std.testing.io, "realdir", &real_buf);
+    const real_path = real_buf[0..real_path_len];
     try std.testing.expect(!isSymlink(real_path));
 
     // for the symlink, we need the path without resolving it.
     // realpath resolves symlinks, so we build the path manually.
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base_path = try platform.Dir.from(tmp.dir).realpath(".", &base_buf);
+    const base_len = try tmp.dir.realPathFile(std.testing.io, ".", &base_buf);
+    const base_path = base_buf[0..base_len];
     var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/linkdir", .{base_path}) catch unreachable;
     try std.testing.expect(isSymlink(link_path));
@@ -205,14 +207,16 @@ test "isCanonicalAbsolutePath rejects non-canonical and relative paths" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try platform.Dir.from(tmp.dir).makeDir("real");
-    try platform.Dir.from(tmp.dir).symLink("real", "link", .{});
+    try tmp.dir.createDir(std.testing.io, "real", .default_dir);
+    try tmp.dir.symLink(std.testing.io, "real", "link", .{});
 
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = try platform.Dir.from(tmp.dir).realpath(".", &base_buf);
+    const base_len = try tmp.dir.realPathFile(std.testing.io, ".", &base_buf);
+    const base = base_buf[0..base_len];
 
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real = try platform.Dir.from(tmp.dir).realpath("real", &real_buf);
+    const real_len = try tmp.dir.realPathFile(std.testing.io, "real", &real_buf);
+    const real = real_buf[0..real_len];
     try std.testing.expect(isCanonicalAbsolutePath(real));
 
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -227,13 +231,14 @@ test "validatePathNoSymlink accepts regular files" {
     defer tmp.cleanup();
 
     // create a regular file
-    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "testfile", .data = "test content" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "testfile", .data = "test content" });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try platform.Dir.from(tmp.dir).realpath("testfile", &path_buf);
+    const path_len = try tmp.dir.realPathFile(std.testing.io, "testfile", &path_buf);
+    const path = path_buf[0..path_len];
 
     const fd = try validatePathNoSymlink(path);
-    platform.posix.close(fd);
+    linux_platform.posix.close(fd);
 }
 
 test "validatePathNoSymlink accepts directories" {
@@ -241,13 +246,14 @@ test "validatePathNoSymlink accepts directories" {
     defer tmp.cleanup();
 
     // create a directory
-    try platform.Dir.from(tmp.dir).makeDir("testdir");
+    try tmp.dir.createDir(std.testing.io, "testdir", .default_dir);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try platform.Dir.from(tmp.dir).realpath("testdir", &path_buf);
+    const path_len = try tmp.dir.realPathFile(std.testing.io, "testdir", &path_buf);
+    const path = path_buf[0..path_len];
 
     const fd = try validatePathNoSymlink(path);
-    platform.posix.close(fd);
+    linux_platform.posix.close(fd);
 }
 
 test "validatePathNoSymlink rejects symlinks" {
@@ -255,11 +261,12 @@ test "validatePathNoSymlink rejects symlinks" {
     defer tmp.cleanup();
 
     // create a file and symlink to it
-    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "realfile", .data = "content" });
-    try platform.Dir.from(tmp.dir).symLink("realfile", "linkfile", .{});
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "realfile", .data = "content" });
+    try tmp.dir.symLink(std.testing.io, "realfile", "linkfile", .{});
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = try platform.Dir.from(tmp.dir).realpath(".", &path_buf);
+    const base_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
+    const base = path_buf[0..base_len];
 
     var link_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/linkfile", .{base});

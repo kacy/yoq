@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const cluster_registry = @import("../cluster/registry.zig");
 const dns = @import("dns.zig");
 const dns_registry_support = @import("dns/registry_support.zig");
@@ -525,7 +524,7 @@ fn buildEvent(kind: EventKind, source: EventSource, service_name: []const u8, co
     var event = Event{
         .kind = kind,
         .source = source,
-        .recorded_at = platform.timestamp(),
+        .recorded_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
         .ip = endpoint_ip,
     };
 
@@ -560,7 +559,7 @@ fn runAuditPassLocked() void {
     refreshComponentStateLocked();
     quarantineStaleEndpointsLocked();
     audit_passes_total += 1;
-    last_audit_at = platform.timestamp();
+    last_audit_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     clearLastAuditErrorLocked();
     deinitDegradedServicesLocked();
 
@@ -605,7 +604,7 @@ fn auditOnceLocked() !void {
 
 fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.ArrayList(service_registry_runtime.ServiceSnapshot)) !void {
     const alloc = std.heap.page_allocator;
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const authoritative = auditEnabled(rollout.current());
 
     const runtime_service = findRuntimeService(runtime_services.items, service_name);
@@ -769,7 +768,7 @@ fn quarantineStaleEndpointsLocked() void {
     if (quarantined == 0) return;
 
     stale_endpoint_quarantines_total += quarantined;
-    last_stale_quarantine_at = platform.timestamp();
+    last_stale_quarantine_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 
     for (changed_services.items) |service_name| {
         service_registry_runtime.syncServiceFromStore(service_name);
@@ -935,7 +934,7 @@ fn refreshComponentStateLocked() void {
 
     component_state = next_state;
     component_state_changes_total += 1;
-    component_last_change_at = platform.timestamp();
+    component_last_change_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 
     log.info(
         "service reconciler: component state changed resolver={} dns_interceptor={} load_balancer={}",

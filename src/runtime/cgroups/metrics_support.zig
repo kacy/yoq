@@ -1,16 +1,13 @@
 const std = @import("std");
-const platform = @import("platform");
 const common = @import("common.zig");
 
 pub const PsiMetrics = common.PsiMetrics;
 pub const IoStats = common.IoStats;
 pub const CgroupMetrics = common.CgroupMetrics;
 
-pub fn readFromDir(dir: platform.Dir, filename: []const u8, buf: []u8) ?[]const u8 {
-    const file = dir.openFile(filename, .{}) catch return null;
-    defer file.close();
-    const bytes_read = file.readAll(buf) catch return null;
-    return std.mem.trimEnd(u8, buf[0..bytes_read], "\n ");
+pub fn readFromDir(dir: std.Io.Dir, filename: []const u8, buf: []u8) ?[]const u8 {
+    const content = dir.readFile(std.Options.debug_io, filename, buf) catch return null;
+    return std.mem.trimEnd(u8, content, "\n ");
 }
 
 pub fn procsContainsPid(content: []const u8, pid: std.posix.pid_t) bool {

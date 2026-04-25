@@ -15,7 +15,7 @@
 // fine for a management API and keeps the implementation simple.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
@@ -51,12 +51,12 @@ pub const Server = struct {
     ///   - .{ 0, 0, 0, 0 }   for cluster mode (all interfaces)
     pub fn init(alloc: std.mem.Allocator, port: u16, bind_addr: [4]u8) ServerError!Server {
         // create TCP socket
-        const fd = platform.posix.socket(
+        const fd = linux_platform.posix.socket(
             posix.AF.INET,
             posix.SOCK.STREAM | posix.SOCK.CLOEXEC,
             0,
         ) catch return ServerError.SocketFailed;
-        errdefer platform.posix.close(fd);
+        errdefer linux_platform.posix.close(fd);
 
         // allow address reuse so we can restart quickly
         const optval: c_int = 1;
@@ -64,11 +64,11 @@ pub const Server = struct {
             log.warn("api server failed to set SO_REUSEADDR: {}", .{e});
         };
 
-        const addr = platform.net.Address.initIp4(bind_addr, port);
-        platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch return ServerError.BindFailed;
+        const addr = linux_platform.net.Address.initIp4(bind_addr, port);
+        linux_platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch return ServerError.BindFailed;
 
         // start listening with a backlog of 128
-        platform.posix.listen(fd, 128) catch return ServerError.ListenFailed;
+        linux_platform.posix.listen(fd, 128) catch return ServerError.ListenFailed;
 
         return .{
             .alloc = alloc,
@@ -79,7 +79,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
-        platform.posix.close(self.listen_fd);
+        linux_platform.posix.close(self.listen_fd);
     }
 
     /// run the server event loop. blocks until shutdown is requested.
@@ -153,7 +153,7 @@ pub const Server = struct {
     /// blocking accept loop fallback.
     fn runBlocking(self: *Server) void {
         while (!orchestrator.shutdown_requested.load(.acquire)) {
-            const client_fd = platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch {
+            const client_fd = linux_platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch {
                 if (orchestrator.shutdown_requested.load(.acquire)) break;
                 continue;
             };
@@ -165,14 +165,14 @@ pub const Server = struct {
     /// spawn a detached worker thread to handle a single connection.
     fn spawnWorker(self: *Server, client_fd: posix.fd_t) void {
         if (!tryAcquireConnectionSlot()) {
-            platform.posix.close(client_fd);
+            linux_platform.posix.close(client_fd);
             return;
         }
 
         const alloc = self.alloc;
         const thread = std.Thread.spawn(.{}, connectionWrapper, .{ alloc, client_fd }) catch {
             releaseConnectionSlot();
-            platform.posix.close(client_fd);
+            linux_platform.posix.close(client_fd);
             return;
         };
         thread.detach();

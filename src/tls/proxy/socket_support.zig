@@ -1,11 +1,11 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const backend_mod = @import("../backend.zig");
 
 pub fn createListenSocket(port: u16) !posix.fd_t {
-    const fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
-    errdefer platform.posix.close(fd);
+    const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+    errdefer linux_platform.posix.close(fd);
 
     const reuseaddr: i32 = 1;
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
@@ -15,15 +15,15 @@ pub fn createListenSocket(port: u16) !posix.fd_t {
         .addr = 0,
     };
 
-    try platform.posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in));
-    try platform.posix.listen(fd, 128);
+    try linux_platform.posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in));
+    try linux_platform.posix.listen(fd, 128);
 
     return fd;
 }
 
 pub fn connectToBackend(backend: backend_mod.Backend) !posix.fd_t {
-    const fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    errdefer platform.posix.close(fd);
+    const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    errdefer linux_platform.posix.close(fd);
 
     const ip_addr = parseIpv4(backend.ip) orelse return error.InvalidBackendAddress;
 
@@ -32,7 +32,7 @@ pub fn connectToBackend(backend: backend_mod.Backend) !posix.fd_t {
         .addr = ip_addr,
     };
 
-    platform.posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch
+    linux_platform.posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch
         return error.BackendConnectFailed;
 
     return fd;

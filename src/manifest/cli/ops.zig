@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const json_out = @import("../../lib/json_output.zig");
@@ -27,7 +26,7 @@ const OpsError = error{
     UnknownService,
 };
 
-pub fn rollback(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn rollback(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var target_name: ?[]const u8 = null;
     var app_mode = false;
     var server_addr: ?[]const u8 = null;
@@ -59,15 +58,15 @@ pub fn rollback(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
             writeErr("remote rollback currently requires --app [name]\n", .{});
             return OpsError.InvalidArgument;
         }
-        const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+        const owned_app_name = if (target_name == null) try currentAppNameAlloc(io, alloc) else null;
         defer if (owned_app_name) |name| alloc.free(name);
         const app_name = target_name orelse owned_app_name.?;
-        try rollbackRemoteApp(alloc, server_addr.?, app_name, release_id, print_only);
+        try rollbackRemoteApp(io, alloc, server_addr.?, app_name, release_id, print_only);
         return;
     }
 
     if (app_mode) {
-        const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+        const owned_app_name = if (target_name == null) try currentAppNameAlloc(io, alloc) else null;
         defer if (owned_app_name) |name| alloc.free(name);
         const app_name = target_name orelse owned_app_name.?;
         try rollbackLocalApp(alloc, app_name, release_id, print_only);
@@ -103,7 +102,7 @@ pub fn rollback(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
     write("\nto apply this rollback, redeploy with this config using 'yoq up'\n", .{});
 }
 
-pub fn rollout(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn rollout(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     const action = args.next() orelse {
         writeErr("usage: yoq rollout <pause|resume|cancel> --app [name] [--server host:port]\n", .{});
         return OpsError.InvalidArgument;
@@ -142,12 +141,12 @@ pub fn rollout(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
         return OpsError.InvalidArgument;
     };
 
-    const owned_app_name = if (target_name == null) try currentAppNameAlloc(alloc) else null;
+    const owned_app_name = if (target_name == null) try currentAppNameAlloc(io, alloc) else null;
     defer if (owned_app_name) |name| alloc.free(name);
     const app_name = target_name orelse owned_app_name.?;
 
     if (server_addr) |addr| {
-        try rolloutRemoteApp(alloc, addr, app_name, action);
+        try rolloutRemoteApp(io, alloc, addr, app_name, action);
     } else {
         try rolloutLocalApp(alloc, app_name, action, control_state);
     }
@@ -239,7 +238,7 @@ fn rollbackLocalApp(
     writeErr("stopped\n", .{});
 }
 
-pub fn history(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn history(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var target_name: ?[]const u8 = null;
     var app_mode = false;
     var server_addr: ?[]const u8 = null;
@@ -264,7 +263,7 @@ pub fn history(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
         return OpsError.InvalidArgument;
     }
 
-    const owned_label = if (app_mode and target_name == null) try currentAppNameAlloc(alloc) else null;
+    const owned_label = if (app_mode and target_name == null) try currentAppNameAlloc(io, alloc) else null;
     defer if (owned_label) |label| alloc.free(label);
 
     const label = if (app_mode)
@@ -277,7 +276,7 @@ pub fn history(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
         };
 
     if (server_addr) |addr| {
-        try printRemoteAppHistory(alloc, addr, label);
+        try printRemoteAppHistory(io, alloc, addr, label);
         return;
     }
 
@@ -331,19 +330,20 @@ pub fn history(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
     }
 }
 
-fn currentAppNameAlloc(alloc: std.mem.Allocator) ![]u8 {
+fn currentAppNameAlloc(io: std.Io, alloc: std.mem.Allocator) ![]u8 {
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.cwd().realpath(".", &cwd_buf) catch return OpsError.StoreError;
+    const cwd_len = std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf) catch return OpsError.StoreError;
+    const cwd = cwd_buf[0..cwd_len];
     return alloc.dupe(u8, std.fs.path.basename(cwd)) catch return OpsError.StoreError;
 }
 
-fn printRemoteAppHistory(alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8) !void {
+fn printRemoteAppHistory(io: std.Io, alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8) !void {
     const server = cli.parseServerAddr(addr_str);
     const path = std.fmt.allocPrint(alloc, "/apps/{s}/history", .{app_name}) catch return OpsError.StoreError;
     defer alloc.free(path);
 
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.getWithAuth(alloc, server.ip, server.port, path, token) catch |err| {
         writeErr("failed to connect to cluster server: {}\n", .{err});
@@ -604,6 +604,7 @@ fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void
 }
 
 fn rollbackRemoteApp(
+    io: std.Io,
     alloc: std.mem.Allocator,
     addr_str: []const u8,
     app_name: []const u8,
@@ -620,7 +621,7 @@ fn rollbackRemoteApp(
     defer alloc.free(body);
 
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.postWithAuth(alloc, server.ip, server.port, path, body, token) catch |err| {
         writeErr("failed to connect to cluster server: {}\n", .{err});
@@ -702,13 +703,13 @@ fn rolloutLocalApp(alloc: std.mem.Allocator, app_name: []const u8, action: []con
     write("rollout control updated for app {s}: {s} ({s})\n", .{ app_name, control_state, active.id });
 }
 
-fn rolloutRemoteApp(alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8, action: []const u8) !void {
+fn rolloutRemoteApp(io: std.Io, alloc: std.mem.Allocator, addr_str: []const u8, app_name: []const u8, action: []const u8) !void {
     const server = cli.parseServerAddr(addr_str);
     const path = std.fmt.allocPrint(alloc, "/apps/{s}/rollout/{s}", .{ app_name, action }) catch return OpsError.StoreError;
     defer alloc.free(path);
 
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.postWithAuth(alloc, server.ip, server.port, path, "{}", token) catch |err| {
         writeErr("failed to connect to cluster server: {}\n", .{err});
@@ -1279,7 +1280,7 @@ test "formatHistoryMessage appends failure detail summary" {
     try std.testing.expect(std.mem.indexOf(u8, text, "db: placement_failed") != null);
 }
 
-pub fn runWorker(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn runWorker(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var manifest_path: []const u8 = manifest_loader.default_filename;
     var worker_name: ?[]const u8 = null;
     var server_addr: ?[]const u8 = null;
@@ -1306,7 +1307,7 @@ pub fn runWorker(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !vo
     };
 
     if (server_addr) |addr_str| {
-        const app_name = try currentAppNameAlloc(alloc);
+        const app_name = try currentAppNameAlloc(io, alloc);
         defer alloc.free(app_name);
 
         const server = cli.parseServerAddr(addr_str);
@@ -1314,7 +1315,7 @@ pub fn runWorker(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !vo
         defer alloc.free(path);
 
         var token_buf: [64]u8 = undefined;
-        const token = cli.readApiToken(&token_buf);
+        const token = cli.readApiTokenWithIo(io, &token_buf);
         var resp = http_client.postWithAuth(alloc, server.ip, server.port, path, "{}", token) catch {
             writeErr("failed to connect to cluster server\n", .{});
             return OpsError.ConnectionFailed;
@@ -1349,7 +1350,8 @@ pub fn runWorker(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !vo
     }
 
     var cwd_buf: [4096]u8 = undefined;
-    const cwd = platform.cwd().realpath(".", &cwd_buf) catch "app";
+    const cwd_len = std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf) catch return OpsError.StoreError;
+    const cwd = cwd_buf[0..cwd_len];
     const app_name = std.fs.path.basename(cwd);
 
     writeErr("running worker {s}...\n", .{name});

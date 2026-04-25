@@ -8,7 +8,7 @@
 // duplicating socket setup code across agent operations.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
@@ -80,9 +80,9 @@ pub fn postWithAuth(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, 
 }
 
 fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) HttpClientError!Response {
-    const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch
+    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch
         return HttpClientError.ConnectFailed;
-    defer platform.posix.close(fd);
+    defer linux_platform.posix.close(fd);
 
     // set timeouts — send timeout must be set before connect() because
     // Linux uses SO_SNDTIMEO as the connect timeout
@@ -91,8 +91,8 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     // connect
-    const sock_addr = platform.net.Address.initIp4(addr, port);
-    platform.posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch
+    const sock_addr = linux_platform.net.Address.initIp4(addr, port);
+    linux_platform.posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch
         return HttpClientError.ConnectFailed;
 
     // send
@@ -135,10 +135,10 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
     };
 }
 
-fn writeAll(fd: platform.posix.socket_t, data: []const u8) !void {
+fn writeAll(fd: linux_platform.posix.socket_t, data: []const u8) !void {
     var total: usize = 0;
     while (total < data.len) {
-        const written = platform.posix.write(fd, data[total..]) catch return error.WriteFailed;
+        const written = linux_platform.posix.write(fd, data[total..]) catch return error.WriteFailed;
         if (written == 0) return error.WriteFailed;
         total += written;
     }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const http = @import("api/http.zig");
 const routes = @import("api/routes.zig");
@@ -11,17 +11,17 @@ fn runHandleConnectionRaw(alloc: std.mem.Allocator, raw_request: []const u8) ![]
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try platform.Dir.from(tmp.dir).createFile("raw-http.txt", .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "raw-http.txt", .{ .read = true });
+    defer file.close(std.testing.io);
 
-    try file.writeAll(raw_request);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, raw_request);
+    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
     const dup_fd = try posix.dup(file.handle);
     connection_runtime.handleConnection(alloc, dup_fd);
 
-    try file.seekTo(0);
-    const contents = try file.readToEndAlloc(alloc, raw_request.len + 16 * 1024);
+    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
+    const contents = try tmp.dir.readFileAlloc(std.testing.io, "raw-http.txt", alloc, .limited(raw_request.len + 16 * 1024));
     errdefer alloc.free(contents);
 
     if (contents.len < raw_request.len) return error.ResponseMissing;

@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const cert_store = @import("../cert_store.zig");
 const common = @import("common.zig");
@@ -42,13 +41,13 @@ pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) common.Tl
         return common.TlsCommandsError.InvalidArgument;
     };
 
-    const cert_pem = platform.cwd().readFileAlloc(alloc, cp, 1024 * 1024) catch {
+    const cert_pem = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, cp, alloc, .limited(1024 * 1024)) catch {
         writeErr("failed to read certificate file: {s}\n", .{cp});
         return common.TlsCommandsError.ReadFailed;
     };
     defer alloc.free(cert_pem);
 
-    const key_pem = platform.cwd().readFileAlloc(alloc, kp, 1024 * 1024) catch {
+    const key_pem = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, kp, alloc, .limited(1024 * 1024)) catch {
         writeErr("failed to read key file: {s}\n", .{kp});
         return common.TlsCommandsError.ReadFailed;
     };

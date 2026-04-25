@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const transport_mod = @import("../transport.zig");
 const types = @import("../raft_types.zig");
 const agent_registry = @import("../registry.zig");
@@ -217,7 +217,7 @@ pub fn handleMessage(self: anytype, received: transport_mod.ReceivedMessage) voi
     }
 }
 
-pub fn resolveNodeId(self: anytype, addr: platform.net.Address) ?NodeId {
+pub fn resolveNodeId(self: anytype, addr: linux_platform.net.Address) ?NodeId {
     const from_ip: [4]u8 = @bitCast(addr.in.addr);
     const from_port = std.mem.bigToNative(u16, addr.in.port);
 

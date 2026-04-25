@@ -10,7 +10,6 @@
 // (which images are pulled, tags, etc.) lives in state/store.zig.
 
 const std = @import("std");
-const platform = @import("platform");
 const blob_runtime = @import("store/blob_runtime.zig");
 const digest_support = @import("store/digest_support.zig");
 const types = @import("store/types.zig");
@@ -163,9 +162,9 @@ test "verify blob — corrupted blob fails" {
 
     var path_buf: [max_path]u8 = undefined;
     const path = try blobPath(digest, &path_buf);
-    const file = try platform.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll("corrupted data");
+    var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, "corrupted data");
 
     try std.testing.expect(!verifyBlob(digest));
 }
@@ -184,9 +183,9 @@ test "putBlobDirect repairs corrupted existing blob" {
 
     var path_buf: [max_path]u8 = undefined;
     const path = try blobPath(digest, &path_buf);
-    const file = try platform.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll("corrupted data");
+    var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{ .truncate = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, "corrupted data");
     try std.testing.expect(!verifyBlob(digest));
 
     try putBlobDirect(data, digest);
@@ -265,8 +264,10 @@ test "openBlob returns size and readable handle" {
     defer blob.close();
 
     try std.testing.expectEqual(@as(u64, data.len), blob.size);
+    var reader_buf: [64]u8 = undefined;
+    var reader = blob.file.readerStreaming(std.testing.io, &reader_buf);
     var read_buf: [64]u8 = undefined;
-    const n = try blob.file.readAll(&read_buf);
+    const n = try reader.interface.readSliceShort(&read_buf);
     try std.testing.expectEqualStrings(data, read_buf[0..n]);
 }
 

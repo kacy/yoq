@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const blob_store = @import("../store.zig");
 const paths = @import("../../lib/paths.zig");
@@ -11,6 +10,10 @@ const max_path = paths.max_path;
 const max_file_size: u64 = 10 * 1024 * 1024 * 1024;
 const cache_marker_name = ".yoq_complete";
 
+fn cwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
 pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.LayerError![]const u8 {
     const digest = blob_store.Digest.parse(digest_str) orelse return types.LayerError.BlobNotFound;
 
@@ -19,7 +22,7 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
         return types.LayerError.PathTooLong;
     const dest_owned = alloc.dupe(u8, dest_path) catch return types.LayerError.ExtractionFailed;
 
-    if (platform.cwd().access(dest_path, .{})) |_| {
+    if (cwd().access(std.Options.debug_io, dest_path, .{})) |_| {
         if (hasCompleteCacheMarker(dest_path)) {
             if (blob_store.verifyBlob(digest)) {
                 return dest_owned;
@@ -39,11 +42,11 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
 
     var parent_buf: [max_path]u8 = undefined;
     const parent_path = layer_path.layerDir(&parent_buf) catch return types.LayerError.PathTooLong;
-    platform.cwd().makePath(parent_path) catch |err| {
+    cwd().createDirPath(std.Options.debug_io, parent_path) catch |err| {
         log.warn("failed to create layer cache dir: {}", .{err});
     };
 
-    platform.cwd().makePath(dest_path) catch return types.LayerError.ExtractionFailed;
+    cwd().createDirPath(std.Options.debug_io, dest_path) catch return types.LayerError.ExtractionFailed;
 
     var blob_path_buf: [max_path]u8 = undefined;
     const blob_path = blob_store.blobPath(digest, &blob_path_buf) catch
@@ -134,14 +137,14 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     paths.ensureDataDir("tmp") catch return error.FileNotFound;
 
     {
-        const gz_file = try platform.cwd().openFile(gz_path, .{});
-        defer gz_file.close();
+        var gz_file = try cwd().openFile(std.Options.debug_io, gz_path, .{});
+        defer gz_file.close(std.Options.debug_io);
 
-        const tmp_file = try platform.cwd().createFile(tmp_path, .{});
-        defer tmp_file.close();
+        var tmp_file = try cwd().createFile(std.Options.debug_io, tmp_path, .{});
+        defer tmp_file.close(std.Options.debug_io);
 
         var read_buf: [4096]u8 = undefined;
-        var gz_reader = gz_file.reader(&read_buf);
+        var gz_reader = gz_file.reader(std.Options.debug_io, &read_buf);
 
         var decompress = std.compress.flate.Decompress.init(
             &gz_reader.interface,
@@ -150,22 +153,22 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
         );
 
         var write_buf: [std.compress.flate.max_window_len]u8 = undefined;
-        var tmp_writer = tmp_file.writer(&write_buf);
+        var tmp_writer = tmp_file.writer(std.Options.debug_io, &write_buf);
 
         _ = try decompress.reader.streamRemaining(&tmp_writer.interface);
         tmp_writer.interface.flush() catch return error.FileNotFound;
-        tmp_file.sync() catch {};
+        tmp_file.sync(std.Options.debug_io) catch {};
     }
-    defer platform.cwd().deleteFile(tmp_path) catch {};
+    defer cwd().deleteFile(std.Options.debug_io, tmp_path) catch {};
 
-    const tar_file = try platform.cwd().openFile(tmp_path, .{});
-    defer tar_file.close();
+    var tar_file = try cwd().openFile(std.Options.debug_io, tmp_path, .{});
+    defer tar_file.close(std.Options.debug_io);
 
     var tar_read_buf: [4096]u8 = undefined;
-    var tar_reader = tar_file.reader(&tar_read_buf);
+    var tar_reader = tar_file.reader(std.Options.debug_io, &tar_read_buf);
 
-    var dest_dir = try platform.cwd().openDir(dest_path, .{});
-    defer dest_dir.close();
+    var dest_dir = try cwd().openDir(std.Options.debug_io, dest_path, .{});
+    defer dest_dir.close(std.Options.debug_io);
 
     var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -179,12 +182,12 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
 
         switch (entry.kind) {
             .directory => {
-                if (entry.name.len > 0) try dest_dir.makePath(entry.name);
+                if (entry.name.len > 0) try dest_dir.createDirPath(std.Options.debug_io, entry.name);
             },
             .file => {
-                const mode: platform.File.Mode = @intCast(entry.mode & 0o777);
-                const fs_file = try createDirAndFile(dest_dir, entry.name, mode);
-                defer fs_file.close();
+                const permissions = std.Io.File.Permissions.fromMode(@intCast(entry.mode & 0o777));
+                var fs_file = try createDirAndFile(dest_dir, entry.name, permissions);
+                defer fs_file.close(std.Options.debug_io);
                 try copyTarEntryToFile(&it, entry, fs_file);
             },
             .sym_link => {
@@ -201,7 +204,7 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     }
 }
 
-fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: platform.File) !void {
+fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: std.Io.File) !void {
     if (entry.size > max_file_size) {
         log.warn("tar entry exceeds max file size ({d} bytes): skipping", .{entry.size});
         return error.FileTooBig;
@@ -212,31 +215,31 @@ fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_fi
     while (remaining > 0) {
         const chunk_len: usize = @intCast(@min(remaining, buf.len));
         try it.reader.readSliceAll(buf[0..chunk_len]);
-        try fs_file.writeAll(buf[0..chunk_len]);
+        try fs_file.writeStreamingAll(std.Options.debug_io, buf[0..chunk_len]);
         remaining -= chunk_len;
     }
 
     it.unread_file_bytes = 0;
 }
 
-fn createDirAndFile(dir: platform.Dir, name: []const u8, mode: platform.File.Mode) !platform.File {
-    return dir.createFile(name, .{ .mode = mode }) catch |err| {
+fn createDirAndFile(dir: std.Io.Dir, name: []const u8, permissions: std.Io.File.Permissions) !std.Io.File {
+    return dir.createFile(std.Options.debug_io, name, .{ .permissions = permissions }) catch |err| {
         if (err == error.FileNotFound) {
             if (std.fs.path.dirname(name)) |dir_name| {
-                try dir.makePath(dir_name);
-                return try dir.createFile(name, .{ .mode = mode });
+                try dir.createDirPath(std.Options.debug_io, dir_name);
+                return try dir.createFile(std.Options.debug_io, name, .{ .permissions = permissions });
             }
         }
         return err;
     };
 }
 
-fn createDirAndSymlink(dir: platform.Dir, link_name: []const u8, file_name: []const u8) !void {
-    dir.symLink(link_name, file_name, .{}) catch |err| {
+fn createDirAndSymlink(dir: std.Io.Dir, link_name: []const u8, file_name: []const u8) !void {
+    dir.symLink(std.Options.debug_io, link_name, file_name, .{}) catch |err| {
         if (err == error.FileNotFound) {
             if (std.fs.path.dirname(file_name)) |dir_name| {
-                try dir.makePath(dir_name);
-                return try dir.symLink(link_name, file_name, .{});
+                try dir.createDirPath(std.Options.debug_io, dir_name);
+                return try dir.symLink(std.Options.debug_io, link_name, file_name, .{});
             }
         }
         return err;
@@ -246,16 +249,16 @@ fn createDirAndSymlink(dir: platform.Dir, link_name: []const u8, file_name: []co
 fn hasCompleteCacheMarker(dest_path: []const u8) bool {
     var marker_buf: [max_path]u8 = undefined;
     const marker_path = cacheMarkerPath(&marker_buf, dest_path) catch return false;
-    platform.cwd().access(marker_path, .{}) catch return false;
+    cwd().access(std.Options.debug_io, marker_path, .{}) catch return false;
     return true;
 }
 
 fn createCompleteCacheMarker(dest_path: []const u8) !void {
     var marker_buf: [max_path]u8 = undefined;
     const marker_path = try cacheMarkerPath(&marker_buf, dest_path);
-    const file = try platform.cwd().createFile(marker_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll("ok\n");
+    var file = try cwd().createFile(std.Options.debug_io, marker_path, .{ .truncate = true });
+    defer file.close(std.Options.debug_io);
+    try file.writeStreamingAll(std.Options.debug_io, "ok\n");
 }
 
 fn cacheMarkerPath(buf: *[max_path]u8, dest_path: []const u8) ![]const u8 {
@@ -263,7 +266,7 @@ fn cacheMarkerPath(buf: *[max_path]u8, dest_path: []const u8) ![]const u8 {
 }
 
 fn removeExtractedLayer(dest_path: []const u8) void {
-    platform.cwd().deleteTree(dest_path) catch {
-        platform.cwd().deleteFile(dest_path) catch {};
+    cwd().deleteTree(std.Options.debug_io, dest_path) catch {
+        cwd().deleteFile(std.Options.debug_io, dest_path) catch {};
     };
 }

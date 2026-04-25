@@ -11,11 +11,11 @@ const membership_command = @import("cli/membership_command.zig");
 const query_command = @import("cli/query_command.zig");
 
 pub fn serve(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return server_command.serve(args, ctx.alloc);
+    return server_command.serve(args, ctx.io, ctx.alloc);
 }
 
 pub fn initServer(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return server_command.initServer(args, ctx.alloc);
+    return server_command.initServer(args, ctx.io, ctx.alloc);
 }
 
 pub fn join(args: *std.process.Args.Iterator, ctx: AppContext) !void {
@@ -23,13 +23,13 @@ pub fn join(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 }
 
 pub fn cluster(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return query_command.cluster(args, ctx.alloc);
+    return query_command.cluster(args, ctx.io, ctx.alloc);
 }
 
 pub fn nodes(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return query_command.nodes(args, ctx.alloc);
+    return query_command.nodes(args, ctx.io, ctx.alloc);
 }
 
 pub fn drain(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    return query_command.drain(args, ctx.alloc);
+    return query_command.drain(args, ctx.io, ctx.alloc);
 }

@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const spec = @import("spec.zig");
 const update_common = @import("update/common.zig");
 const json_helpers = @import("../lib/json_helpers.zig");

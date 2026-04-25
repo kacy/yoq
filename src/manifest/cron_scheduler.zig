@@ -12,7 +12,6 @@
 //   sched.deinit();
 
 const std = @import("std");
-const platform = @import("platform");
 const spec = @import("spec.zig");
 const orchestrator = @import("orchestrator.zig");
 const cli = @import("../lib/cli.zig");

@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const types = @import("../raft_types.zig");
 const common = @import("common.zig");
@@ -15,17 +15,17 @@ const VerifiedBody = common.VerifiedBody;
 pub fn sendBytes(self: anytype, peer_id: NodeId, peer: PeerAddr, data: []const u8) !void {
     _ = self;
     _ = peer_id;
-    const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return TransportError.ConnectFailed;
-    defer platform.posix.close(fd);
+    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return TransportError.ConnectFailed;
+    defer linux_platform.posix.close(fd);
 
     const timeout = posix.timeval{ .sec = 1, .usec = 0 };
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
 
-    platform.posix.connect(fd, &peer.addr.any, peer.addr.getOsSockLen()) catch return TransportError.ConnectFailed;
+    linux_platform.posix.connect(fd, &peer.addr.any, peer.addr.getOsSockLen()) catch return TransportError.ConnectFailed;
 
     var total: usize = 0;
     while (total < data.len) {
-        const bytes_written = platform.posix.write(fd, data[total..]) catch return TransportError.SendFailed;
+        const bytes_written = linux_platform.posix.write(fd, data[total..]) catch return TransportError.SendFailed;
         if (bytes_written == 0) return TransportError.SendFailed;
         total += bytes_written;
     }
@@ -35,15 +35,15 @@ pub fn receive(self: anytype, alloc: std.mem.Allocator) TransportError!?Received
     var client_addr: posix.sockaddr = undefined;
     var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
 
-    const client_fd = platform.posix.accept(self.listen_fd, &client_addr, &addr_len, 0) catch |err| {
+    const client_fd = linux_platform.posix.accept(self.listen_fd, &client_addr, &addr_len, 0) catch |err| {
         return switch (err) {
             error.WouldBlock => null,
             else => TransportError.ReceiveFailed,
         };
     };
-    defer platform.posix.close(client_fd);
+    defer linux_platform.posix.close(client_fd);
 
-    const from_addr = platform.net.Address{ .any = client_addr };
+    const from_addr = linux_platform.net.Address{ .any = client_addr };
     const timeout = posix.timeval{ .sec = 5, .usec = 0 };
     posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 

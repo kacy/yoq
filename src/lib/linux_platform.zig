@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Linux platform boundary for blocking OS primitives and filesystem adapters.
+/// Linux boundary for blocking OS primitives and filesystem adapters.
 /// Generic formatting or buffer-writing helpers belong in library support
 /// modules, not here.
 pub const net = struct {
@@ -28,18 +28,6 @@ pub const net = struct {
     };
 };
 
-pub fn timestamp() i64 {
-    return @intCast(@divTrunc(realTimeNanos(), std.time.ns_per_s));
-}
-
-pub fn milliTimestamp() i64 {
-    return @intCast(@divTrunc(realTimeNanos(), std.time.ns_per_ms));
-}
-
-pub fn nanoTimestamp() i128 {
-    return realTimeNanos();
-}
-
 pub fn randomBytes(buffer: []u8) void {
     var offset: usize = 0;
     while (offset < buffer.len) {
@@ -58,13 +46,6 @@ pub fn randomBytes(buffer: []u8) void {
 pub fn isatty(fd: std.posix.fd_t) bool {
     _ = std.posix.tcgetattr(fd) catch return false;
     return true;
-}
-
-fn realTimeNanos() i128 {
-    var ts: std.os.linux.timespec = undefined;
-    const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
-    if (std.os.linux.errno(rc) != .SUCCESS) return 0;
-    return (@as(i128, ts.sec) * std.time.ns_per_s) + ts.nsec;
 }
 
 fn linuxVoid(rc: usize) !void {

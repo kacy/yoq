@@ -4,7 +4,6 @@
 // implementation lives in smaller modules under `state/secrets/`.
 
 const std = @import("std");
-const platform = @import("platform");
 const sqlite = @import("sqlite");
 
 const common = @import("secrets/common.zig");
@@ -157,12 +156,15 @@ test "readKeyFile rejects weak permissions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try platform.Dir.from(tmp.dir).createFile("secrets.key", .{ .mode = 0o644 });
-    defer file.close();
-    try file.writeAll(&([_]u8{0x11} ** key_length));
+    var file = try tmp.dir.createFile(std.testing.io, "secrets.key", .{
+        .permissions = std.Io.File.Permissions.fromMode(0o644),
+    });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, &([_]u8{0x11} ** key_length));
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try platform.Dir.from(tmp.dir).realpath("secrets.key", &path_buf);
+    const path_len = try tmp.dir.realPathFile(std.testing.io, "secrets.key", &path_buf);
+    const path = path_buf[0..path_len];
     try std.testing.expectError(error.KeyLoadFailed, readKeyFile(path));
 }
 

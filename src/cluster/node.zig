@@ -25,7 +25,7 @@
 //   node.stop();
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const sqlite = @import("sqlite");
 const raft_mod = @import("raft.zig");
 const transport_mod = @import("transport.zig");
@@ -484,7 +484,7 @@ pub const Node = struct {
     /// resolve a network address to a peer's NodeId by matching against
     /// the configured peer list. returns null if the address doesn't
     /// match any known peer (e.g. a stale connection from a removed node).
-    fn resolveNodeId(self: *const Node, addr: platform.net.Address) ?NodeId {
+    fn resolveNodeId(self: *const Node, addr: linux_platform.net.Address) ?NodeId {
         return action_loop.resolveNodeId(self, addr);
     }
 
@@ -546,6 +546,11 @@ fn getAgentStatusForTest(alloc: std.mem.Allocator, db: *sqlite.Db, id: []const u
     return row.status.data;
 }
 
+fn testDirPath(dir: std.Io.Dir, buf: []u8) ![]const u8 {
+    const len = try dir.realPathFile(std.testing.io, ".", buf);
+    return buf[0..len];
+}
+
 // -- tests --
 
 test "resolveNodeId matches configured peer" {
@@ -561,7 +566,7 @@ test "resolveNodeId matches configured peer" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -572,19 +577,19 @@ test "resolveNodeId matches configured peer" {
     defer node.deinit();
 
     // build an address matching peer 2 (10.0.0.2:9700)
-    const addr2 = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700);
+    const addr2 = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700);
     try std.testing.expectEqual(@as(?NodeId, 2), node.resolveNodeId(addr2));
 
     // build an address matching peer 3
-    const addr3 = platform.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700);
+    const addr3 = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700);
     try std.testing.expectEqual(@as(?NodeId, 3), node.resolveNodeId(addr3));
 
     // unknown address should return null
-    const unknown = platform.net.Address.initIp4(.{ 192, 168, 1, 1 }, 9700);
+    const unknown = linux_platform.net.Address.initIp4(.{ 192, 168, 1, 1 }, 9700);
     try std.testing.expect(node.resolveNodeId(unknown) == null);
 
     // right IP, wrong port should return null
-    const wrong_port = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 8080);
+    const wrong_port = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 8080);
     try std.testing.expect(node.resolveNodeId(wrong_port) == null);
 }
 
@@ -599,7 +604,7 @@ test "node init and deinit" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -623,7 +628,7 @@ test "handleMessage drops request_vote with mismatched sender id" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -634,7 +639,7 @@ test "handleMessage drops request_vote with mismatched sender id" {
     defer node.deinit();
 
     node.handleMessage(.{
-        .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .request_vote = .{
             .term = 1,
@@ -658,7 +663,7 @@ test "handleMessage accepts append_entries only from authenticated leader" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -669,7 +674,7 @@ test "handleMessage accepts append_entries only from authenticated leader" {
     defer node.deinit();
 
     node.handleMessage(.{
-        .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .append_entries = .{
             .term = 1,
@@ -683,7 +688,7 @@ test "handleMessage accepts append_entries only from authenticated leader" {
     try std.testing.expectEqual(@as(types.Term, 0), node.currentTerm());
 
     node.handleMessage(.{
-        .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .append_entries = .{
             .term = 1,
@@ -706,7 +711,7 @@ test "leader_id defaults to null" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -728,7 +733,7 @@ test "become_leader sets leader_id to self" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -752,7 +757,7 @@ test "become_follower sets leader_id to provided id" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -776,7 +781,7 @@ test "leaderAddrBuf returns null when leader is self" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -800,7 +805,7 @@ test "leaderAddrBuf returns null when no leader known" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -823,7 +828,7 @@ test "leaderAddrBuf returns peer address when leader is a peer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     var node = Node.init(alloc, .{
         .id = 1,
@@ -847,7 +852,7 @@ test "processActions snapshot restart preserves last_applied continuity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     {
         var node = Node.init(alloc, .{
@@ -919,7 +924,7 @@ test "install_snapshot restart preserves recovered state and future applies" {
     var snapshot_dir = std.testing.tmpDir(.{});
     defer snapshot_dir.cleanup();
     var snapshot_root_buf: [512]u8 = undefined;
-    const snapshot_root = platform.Dir.from(snapshot_dir.dir).realpath(".", &snapshot_root_buf) catch return;
+    const snapshot_root = testDirPath(snapshot_dir.dir, &snapshot_root_buf) catch return;
 
     var snapshot_path_buf: [640]u8 = undefined;
     const snapshot_path = std.fmt.bufPrint(&snapshot_path_buf, "{s}/cluster-snapshot.dat", .{snapshot_root}) catch return;
@@ -933,13 +938,13 @@ test "install_snapshot restart preserves recovered state and future applies" {
         .data_len = 0,
     });
 
-    const snapshot_bytes = platform.cwd().readFileAlloc(alloc, snapshot_path, 1024 * 1024) catch return;
+    const snapshot_bytes = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, snapshot_path, alloc, .limited(1024 * 1024)) catch return;
     defer alloc.free(snapshot_bytes);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     const peers = &[_]PeerConfig{
         .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
@@ -965,7 +970,7 @@ test "install_snapshot restart preserves recovered state and future applies" {
         node.mu.unlock(std.Options.debug_io);
 
         node.handleMessage(.{
-            .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+            .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
             .sender_id = 2,
             .message = .{ .install_snapshot = .{
                 .term = 2,
@@ -1022,7 +1027,7 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
     var snapshot_dir = std.testing.tmpDir(.{});
     defer snapshot_dir.cleanup();
     var snapshot_root_buf: [512]u8 = undefined;
-    const snapshot_root = platform.Dir.from(snapshot_dir.dir).realpath(".", &snapshot_root_buf) catch return;
+    const snapshot_root = testDirPath(snapshot_dir.dir, &snapshot_root_buf) catch return;
 
     var newer_path_buf: [640]u8 = undefined;
     const newer_path = std.fmt.bufPrint(&newer_path_buf, "{s}/snapshot-newer.dat", .{snapshot_root}) catch return;
@@ -1047,15 +1052,15 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
         .data_len = 0,
     });
 
-    const newer_bytes = platform.cwd().readFileAlloc(alloc, newer_path, 1024 * 1024) catch return;
+    const newer_bytes = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, newer_path, alloc, .limited(1024 * 1024)) catch return;
     defer alloc.free(newer_bytes);
-    const older_bytes = platform.cwd().readFileAlloc(alloc, older_path, 1024 * 1024) catch return;
+    const older_bytes = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, older_path, alloc, .limited(1024 * 1024)) catch return;
     defer alloc.free(older_bytes);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
 
     const peers = &[_]PeerConfig{
         .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
@@ -1071,7 +1076,7 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
         defer node.deinit();
 
         node.handleMessage(.{
-            .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+            .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
             .sender_id = 2,
             .message = .{ .install_snapshot = .{
                 .term = 2,
@@ -1100,7 +1105,7 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
     try std.testing.expectEqual(@as(LogIndex, 5), restarted.state_machine.last_applied);
 
     restarted.handleMessage(.{
-        .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .install_snapshot = .{
             .term = 2,

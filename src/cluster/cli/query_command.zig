@@ -5,7 +5,6 @@ const json_helpers = @import("../../lib/json_helpers.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
-const readApiToken = cli.readApiToken;
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
 
@@ -15,7 +14,7 @@ const QueryError = error{
     ServerError,
 };
 
-pub fn cluster(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn cluster(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var subcommand: ?[]const u8 = null;
 
     while (args.next()) |arg| {
@@ -32,16 +31,16 @@ pub fn cluster(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
     };
 
     if (std.mem.eql(u8, subcmd, "status")) {
-        clusterStatus(alloc);
+        clusterStatus(io, alloc);
     } else {
         writeErr("unknown cluster subcommand: {s}\n", .{subcmd});
         return QueryError.InvalidArgument;
     }
 }
 
-fn clusterStatus(alloc: std.mem.Allocator) void {
+fn clusterStatus(io: std.Io, alloc: std.mem.Allocator) void {
     var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.getWithAuth(alloc, .{ 127, 0, 0, 1 }, 7700, "/cluster/status", token) catch |err| {
         writeErr("cannot connect to API server at localhost:7700: {}\n", .{err});
@@ -58,7 +57,7 @@ fn clusterStatus(alloc: std.mem.Allocator) void {
     write("{s}\n", .{resp.body});
 }
 
-pub fn nodes(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn nodes(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var server: cli.ServerAddr = .{};
 
     while (args.next()) |arg| {
@@ -76,7 +75,7 @@ pub fn nodes(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const server_port = server.port;
 
     var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.getWithAuth(alloc, server_addr, server_port, "/agents", token) catch |err| {
         writeErr("failed to connect to server: {}\n", .{err});
@@ -124,7 +123,7 @@ pub fn nodes(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     }
 }
 
-pub fn drain(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn drain(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var node_id: ?[]const u8 = null;
     var server: cli.ServerAddr = .{};
 
@@ -154,7 +153,7 @@ pub fn drain(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     };
 
     var token_buf: [64]u8 = undefined;
-    const token = readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.postWithAuth(alloc, server_addr, server_port, path, "", token) catch |err| {
         writeErr("failed to connect to server: {}\n", .{err});

@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const container = @import("../../container.zig");
 const process = @import("../../process.zig");
 const run_state = @import("../../run_state.zig");
@@ -37,7 +36,7 @@ fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirr
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = platform.timestamp(),
+        .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
         .runtime = .{ .mirror_output = mirror_output },
     };
 }

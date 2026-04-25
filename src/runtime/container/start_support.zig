@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 
 const namespaces = @import("../namespaces.zig");
@@ -117,8 +117,8 @@ pub fn setupGpu(config: anytype, dirs: ?*const id_paths.OverlayDirs) void {
 pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespaces.SpawnResult) void {
     runtime.log_file = logs.createLogFile(config.id) catch |err| blk: {
         log.warn("failed to create log file for {s}: {}", .{ config.id, err });
-        platform.posix.close(spawn_result.stdout_fd);
-        platform.posix.close(spawn_result.stderr_fd);
+        linux_platform.posix.close(spawn_result.stdout_fd);
+        linux_platform.posix.close(spawn_result.stderr_fd);
         break :blk null;
     };
 
@@ -132,7 +132,7 @@ pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespa
             runtime.mirror_output,
         }) catch |err| blk: {
             log.warn("failed to spawn stdout capture thread: {}", .{err});
-            platform.posix.close(spawn_result.stdout_fd);
+            linux_platform.posix.close(spawn_result.stdout_fd);
             break :blk null;
         };
 
@@ -145,7 +145,7 @@ pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespa
             runtime.mirror_output,
         }) catch |err| blk: {
             log.warn("failed to spawn stderr capture thread: {}", .{err});
-            platform.posix.close(spawn_result.stderr_fd);
+            linux_platform.posix.close(spawn_result.stderr_fd);
             break :blk null;
         };
     }
@@ -166,11 +166,11 @@ pub fn cleanupFailedSpawn(
     process.kill(spawn_result.pid) catch {};
     self.runtime.cgroup.?.destroy() catch {};
     if (spawn_result.ready_fd >= 0) {
-        platform.posix.close(spawn_result.ready_fd);
+        linux_platform.posix.close(spawn_result.ready_fd);
         spawn_result.ready_fd = -1;
     }
-    platform.posix.close(spawn_result.stdout_fd);
-    platform.posix.close(spawn_result.stderr_fd);
+    linux_platform.posix.close(spawn_result.stdout_fd);
+    linux_platform.posix.close(spawn_result.stderr_fd);
     self.pid = null;
     self.status = .created;
     active_pid.store(0, .release);
@@ -179,7 +179,7 @@ pub fn cleanupFailedSpawn(
 pub fn finalizeRuntime(self: anytype, exit_code: u8) void {
     if (self.runtime.stdout_thread) |thread| thread.join();
     if (self.runtime.stderr_thread) |thread| thread.join();
-    if (self.runtime.log_file) |log_file| log_file.close();
+    if (self.runtime.log_file) |log_file| log_file.close(std.Options.debug_io);
 
     var final_status: []const u8 = "stopped";
 

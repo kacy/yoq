@@ -5,7 +5,7 @@
 // don't each reimplement the HOME lookup and bufPrint boilerplate.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const builtin = @import("builtin");
 const fmtx = std.fmt;
 const log = @import("log.zig");
@@ -43,9 +43,14 @@ pub fn dataPathFmt(buf: *[max_path]u8, comptime fmt: []const u8, args: anytype) 
 
 /// ensure a data subdirectory exists, creating parents as needed
 pub fn ensureDataDir(subpath: []const u8) PathError!void {
+    return ensureDataDirWithIo(std.Options.debug_io, subpath);
+}
+
+/// ensure a data subdirectory exists, creating parents as needed
+pub fn ensureDataDirWithIo(io: std.Io, subpath: []const u8) PathError!void {
     var buf: [max_path]u8 = undefined;
     const path = try dataPath(&buf, subpath);
-    platform.cwd().makePath(path) catch |e| {
+    std.Io.Dir.cwd().createDirPath(io, path) catch |e| {
         log.warn("paths: failed to create directory {s}: {}. " ++
             "This may cause subsequent operations to fail.", .{ path, e });
         // Don't propagate the error - let callers decide if this is fatal
@@ -55,9 +60,15 @@ pub fn ensureDataDir(subpath: []const u8) PathError!void {
 /// ensure a data subdirectory exists and propagate creation failures.
 /// use this when subsequent work cannot succeed without the directory.
 pub fn ensureDataDirStrict(subpath: []const u8) (PathError || error{CreateFailed})!void {
+    return ensureDataDirStrictWithIo(std.Options.debug_io, subpath);
+}
+
+/// ensure a data subdirectory exists and propagate creation failures.
+/// use this when subsequent work cannot succeed without the directory.
+pub fn ensureDataDirStrictWithIo(io: std.Io, subpath: []const u8) (PathError || error{CreateFailed})!void {
     var buf: [max_path]u8 = undefined;
     const path = try dataPath(&buf, subpath);
-    platform.cwd().makePath(path) catch return error.CreateFailed;
+    std.Io.Dir.cwd().createDirPath(io, path) catch return error.CreateFailed;
 }
 
 /// build a unique temp path under ~/.local/share/yoq/<subdir>/.
@@ -69,7 +80,7 @@ pub fn uniqueDataTempPath(
     suffix: []const u8,
 ) PathError![]const u8 {
     var rand: [6]u8 = undefined;
-    platform.randomBytes(&rand);
+    linux_platform.randomBytes(&rand);
 
     var hex: [12]u8 = undefined;
     _ = fmtx.bufPrint(&hex, "{s}", .{fmtx.bytesToHex(rand, .lower)}) catch

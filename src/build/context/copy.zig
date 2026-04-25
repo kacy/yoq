@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
@@ -23,17 +22,17 @@ pub fn copyFiles(
         };
     };
 
-    var ctx_dir = platform.cwd().openDir(context_dir, .{}) catch
+    var ctx_dir = std.Io.Dir.cwd().openDir(std.Options.debug_io, context_dir, .{}) catch
         return types.ContextError.NotFound;
-    defer ctx_dir.close();
+    defer ctx_dir.close(std.Options.debug_io);
 
-    var dst_dir = platform.cwd().openDir(layer_dir, .{}) catch
+    var dst_dir = std.Io.Dir.cwd().openDir(std.Options.debug_io, layer_dir, .{}) catch
         return types.ContextError.CopyFailed;
-    defer dst_dir.close();
+    defer dst_dir.close(std.Options.debug_io);
 
     const dest_clean = normalizeDestination(dest) catch return types.ContextError.PathTraversal;
 
-    const stat = ctx_dir.statFile(src) catch {
+    const stat = ctx_dir.statFile(std.Options.debug_io, src, .{}) catch {
         return copyDirectory(ctx_dir, src, dst_dir, dest_clean);
     };
 
@@ -42,7 +41,7 @@ pub fn copyFiles(
     }
 
     if (std.fs.path.dirname(dest_clean)) |parent| {
-        dst_dir.makePath(parent) catch return types.ContextError.CopyFailed;
+        dst_dir.createDirPath(std.Options.debug_io, parent) catch return types.ContextError.CopyFailed;
     }
 
     const target_path = if (dest.len > 0 and dest[dest.len - 1] == '/') blk: {
@@ -53,42 +52,42 @@ pub fn copyFiles(
         break :blk combined;
     } else dest_clean;
 
-    ctx_dir.copyFile(src, dst_dir, target_path, .{}) catch return types.ContextError.CopyFailed;
+    ctx_dir.copyFile(src, dst_dir, target_path, std.Options.debug_io, .{}) catch return types.ContextError.CopyFailed;
 }
 
 fn copyDirectory(
-    src_dir: platform.Dir,
+    src_dir: std.Io.Dir,
     src_sub: []const u8,
-    dst_dir: platform.Dir,
+    dst_dir: std.Io.Dir,
     dst_sub: []const u8,
 ) types.ContextError!void {
-    var source = src_dir.openDir(src_sub, .{ .iterate = true }) catch
+    var source = src_dir.openDir(std.Options.debug_io, src_sub, .{ .iterate = true }) catch
         return types.ContextError.NotFound;
-    defer source.close();
+    defer source.close(std.Options.debug_io);
 
     if (dst_sub.len > 0) {
-        dst_dir.makePath(dst_sub) catch return types.ContextError.CopyFailed;
+        dst_dir.createDirPath(std.Options.debug_io, dst_sub) catch return types.ContextError.CopyFailed;
     }
 
     var target = if (dst_sub.len > 0)
-        dst_dir.openDir(dst_sub, .{}) catch return types.ContextError.CopyFailed
+        dst_dir.openDir(std.Options.debug_io, dst_sub, .{}) catch return types.ContextError.CopyFailed
     else
-        dst_dir.openDir(".", .{}) catch return types.ContextError.CopyFailed;
-    defer target.close();
+        dst_dir.openDir(std.Options.debug_io, ".", .{}) catch return types.ContextError.CopyFailed;
+    defer target.close(std.Options.debug_io);
 
     var walker = source.walk(std.heap.page_allocator) catch return types.ContextError.CopyFailed;
     defer walker.deinit();
 
-    while (walker.next() catch return types.ContextError.CopyFailed) |entry| {
+    while (walker.next(std.Options.debug_io) catch return types.ContextError.CopyFailed) |entry| {
         switch (entry.kind) {
             .directory => {
-                target.makePath(entry.path) catch return types.ContextError.CopyFailed;
+                target.createDirPath(std.Options.debug_io, entry.path) catch return types.ContextError.CopyFailed;
             },
             .file => {
                 if (std.fs.path.dirname(entry.path)) |parent| {
-                    target.makePath(parent) catch return types.ContextError.CopyFailed;
+                    target.createDirPath(std.Options.debug_io, parent) catch return types.ContextError.CopyFailed;
                 }
-                source.copyFile(entry.path, target, entry.path, .{}) catch
+                source.copyFile(entry.path, target, entry.path, std.Options.debug_io, .{}) catch
                     return types.ContextError.CopyFailed;
             },
             else => continue,

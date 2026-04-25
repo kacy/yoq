@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const store = @import("../../../state/store.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const health = @import("../../../manifest/health.zig");

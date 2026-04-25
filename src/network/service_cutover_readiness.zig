@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const dns_registry = @import("dns/registry_support.zig");
 const ebpf_map_support = @import("ebpf/map_support.zig");
 const service_registry_backfill = @import("service_registry_backfill.zig");
@@ -34,7 +33,7 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
     defer audit.deinit(alloc);
     const steering = try steering_runtime.snapshotVipCutoverReadiness(alloc);
     const components = service_reconciler.snapshotComponentState();
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 
     const backfill_complete = !backfill.enabled or (backfill.runs_total > 0 and backfill.last_error == null);
     const audit_fresh = blk: {

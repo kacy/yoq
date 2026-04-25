@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const context = @import("../../context.zig");
 const layer = @import("../../../image/layer.zig");
@@ -9,6 +8,10 @@ const archive = @import("archive.zig");
 const copy = @import("copy.zig");
 const copy_args = @import("copy_args.zig");
 const types = @import("../types.zig");
+
+fn cwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
 
 pub fn processAdd(
     alloc: std.mem.Allocator,
@@ -57,7 +60,7 @@ fn processArchiveAdd(
 
     var layer_dir_buf: [paths.max_path]u8 = undefined;
     const layer_dir = try common.withTempLayerDir(&layer_dir_buf, "build-add-layer");
-    defer platform.cwd().deleteTree(layer_dir) catch {};
+    defer cwd().deleteTree(std.Options.debug_io, layer_dir) catch {};
 
     var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try common.resolveDestination(state.workdir, dest, &actual_dest_buf);
@@ -69,7 +72,7 @@ fn processArchiveAdd(
             return types.BuildError.CopyStepFailed
     else
         layer_dir;
-    platform.cwd().makePath(extract_dir) catch return types.BuildError.CopyStepFailed;
+    cwd().createDirPath(std.Options.debug_io, extract_dir) catch return types.BuildError.CopyStepFailed;
 
     const archive_path = buildArchivePath(alloc, context_dir, src) catch
         return types.BuildError.CopyStepFailed;

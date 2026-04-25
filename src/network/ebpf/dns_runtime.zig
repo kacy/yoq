@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const attach_support = @import("attach_support.zig");
@@ -40,12 +40,12 @@ pub const DnsInterceptor = struct {
             log.debug("ebpf: failed to detach DNS interceptor: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            platform.posix.close(self.prog_fd);
+            linux_platform.posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
             self.prog_fd = -1;
         }
         if (self.map_fd >= 0) {
-            platform.posix.close(self.map_fd);
+            linux_platform.posix.close(self.map_fd);
             resource_support.releaseBpfFd();
             self.map_fd = -1;
         }
@@ -92,14 +92,14 @@ pub fn load(bridge_if_index: u32) common.EbpfError!DnsInterceptor {
         map_def.max_entries,
     );
     errdefer {
-        platform.posix.close(map_fd);
+        linux_platform.posix.close(map_fd);
         resource_support.releaseBpfFd();
     }
 
     var map_fds = [_]posix.fd_t{map_fd};
     const prog_fd = try program_support.loadProgram(dns_intercept, &map_fds);
     errdefer {
-        platform.posix.close(prog_fd);
+        linux_platform.posix.close(prog_fd);
         resource_support.releaseBpfFd();
     }
 

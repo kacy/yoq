@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const paths = @import("../../lib/paths.zig");
 
 pub const BlobError = error{
@@ -15,10 +14,10 @@ pub const max_path = paths.max_path;
 pub const blob_subdir = "blobs/sha256";
 
 pub const BlobHandle = struct {
-    file: platform.File,
+    file: std.Io.File,
     size: u64,
 
     pub fn close(self: *BlobHandle) void {
-        self.file.close();
+        self.file.close(std.Options.debug_io);
     }
 };

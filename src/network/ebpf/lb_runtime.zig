@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const attach_support = @import("attach_support.zig");
@@ -113,23 +113,23 @@ pub const LoadBalancer = struct {
             log.debug("ebpf: failed to detach load balancer: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            platform.posix.close(self.prog_fd);
+            linux_platform.posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
         }
         if (self.egress_prog_fd >= 0) {
-            platform.posix.close(self.egress_prog_fd);
+            linux_platform.posix.close(self.egress_prog_fd);
             resource_support.releaseBpfFd();
         }
         if (self.backends_fd >= 0) {
-            platform.posix.close(self.backends_fd);
+            linux_platform.posix.close(self.backends_fd);
             resource_support.releaseBpfFd();
         }
         if (self.conntrack_fd >= 0) {
-            platform.posix.close(self.conntrack_fd);
+            linux_platform.posix.close(self.conntrack_fd);
             resource_support.releaseBpfFd();
         }
         if (self.rev_conntrack_fd >= 0) {
-            platform.posix.close(self.rev_conntrack_fd);
+            linux_platform.posix.close(self.rev_conntrack_fd);
             resource_support.releaseBpfFd();
         }
     }
@@ -147,7 +147,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
         lb_prog.maps[0].max_entries,
     );
     errdefer {
-        platform.posix.close(backends_fd);
+        linux_platform.posix.close(backends_fd);
         resource_support.releaseBpfFd();
     }
 
@@ -158,7 +158,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
         lb_prog.maps[1].max_entries,
     );
     errdefer {
-        platform.posix.close(conntrack_fd);
+        linux_platform.posix.close(conntrack_fd);
         resource_support.releaseBpfFd();
     }
 
@@ -169,14 +169,14 @@ pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
         lb_prog.maps[2].max_entries,
     );
     errdefer {
-        platform.posix.close(rev_conntrack_fd);
+        linux_platform.posix.close(rev_conntrack_fd);
         resource_support.releaseBpfFd();
     }
 
     var map_fds = [_]posix.fd_t{ backends_fd, conntrack_fd, rev_conntrack_fd };
     const prog_fd = try program_support.loadProgram(lb_prog, &map_fds);
     errdefer {
-        platform.posix.close(prog_fd);
+        linux_platform.posix.close(prog_fd);
         resource_support.releaseBpfFd();
     }
 
@@ -188,7 +188,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
         if (egress_fd >= 0) {
             attach_support.attachTC(bridge_if_index, .egress, egress_fd, 1) catch |e| {
                 log.warn("ebpf: failed to attach LB egress: {}", .{e});
-                platform.posix.close(egress_fd);
+                linux_platform.posix.close(egress_fd);
                 resource_support.releaseBpfFd();
                 egress_fd = -1;
             };

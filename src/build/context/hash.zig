@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const blob_store = @import("../../image/store.zig");
 const log = @import("../../lib/log.zig");
@@ -22,12 +21,12 @@ pub fn hashFiles(
         };
     };
 
-    var dir = platform.cwd().openDir(context_dir, .{}) catch return types.ContextError.NotFound;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(std.Options.debug_io, context_dir, .{}) catch return types.ContextError.NotFound;
+    defer dir.close(std.Options.debug_io);
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
-    const stat = dir.statFile(src_path) catch {
+    const stat = dir.statFile(std.Options.debug_io, src_path, .{}) catch {
         return hashDirectory(alloc, dir, src_path, &hasher);
     };
 
@@ -44,13 +43,13 @@ pub fn hashFiles(
 
 fn hashDirectory(
     alloc: std.mem.Allocator,
-    base_dir: platform.Dir,
+    base_dir: std.Io.Dir,
     sub_path: []const u8,
     hasher: *std.crypto.hash.sha2.Sha256,
 ) types.ContextError!blob_store.Digest {
-    var sub_dir = base_dir.openDir(sub_path, .{ .iterate = true }) catch
+    var sub_dir = base_dir.openDir(std.Options.debug_io, sub_path, .{ .iterate = true }) catch
         return types.ContextError.NotFound;
-    defer sub_dir.close();
+    defer sub_dir.close(std.Options.debug_io);
 
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
@@ -61,7 +60,7 @@ fn hashDirectory(
     var walker = sub_dir.walk(alloc) catch return types.ContextError.HashFailed;
     defer walker.deinit();
 
-    while (walker.next() catch return types.ContextError.HashFailed) |entry| {
+    while (walker.next(std.Options.debug_io) catch return types.ContextError.HashFailed) |entry| {
         if (entry.kind != .file) continue;
 
         const owned_path = alloc.dupe(u8, entry.path) catch return types.ContextError.HashFailed;
@@ -87,17 +86,19 @@ fn hashDirectory(
 }
 
 fn hashOpenFile(
-    dir: platform.Dir,
+    dir: std.Io.Dir,
     path: []const u8,
     hasher: *std.crypto.hash.sha2.Sha256,
 ) types.ContextError!void {
-    var file = dir.openFile(path, .{}) catch return types.ContextError.HashFailed;
-    defer file.close();
+    var file = dir.openFile(std.Options.debug_io, path, .{}) catch return types.ContextError.HashFailed;
+    defer file.close(std.Options.debug_io);
 
     var buf: [8192]u8 = undefined;
+    var reader = file.reader(std.Options.debug_io, &buf);
+    var read_buf: [8192]u8 = undefined;
     while (true) {
-        const n = file.read(&buf) catch return types.ContextError.HashFailed;
+        const n = reader.interface.readSliceShort(&read_buf) catch return types.ContextError.HashFailed;
         if (n == 0) break;
-        hasher.update(buf[0..n]);
+        hasher.update(read_buf[0..n]);
     }
 }

@@ -4,7 +4,6 @@
 // through the `yoq gpu <topo|bench>` commands.
 
 const std = @import("std");
-const platform = @import("platform");
 const AppContext = @import("../lib/app_context.zig").AppContext;
 const cli_output = @import("../lib/cli_output.zig");
 const json_out = @import("../lib/json_output.zig");
