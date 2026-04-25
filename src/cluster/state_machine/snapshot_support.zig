@@ -33,12 +33,12 @@ pub const snapshot_header_size = 24;
 pub const max_snapshot_size: u64 = 64 * 1024 * 1024;
 
 pub fn readSnapshotMeta(path: []const u8) SnapshotError!SnapshotMeta {
-    const file = platform.cwd().openFile(path, .{}) catch return SnapshotError.IoError;
-    defer file.close();
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, path, .{}) catch return SnapshotError.IoError;
+    defer file.close(std.Options.debug_io);
 
     var header: [snapshot_header_size]u8 = undefined;
-    const bytes_read = file.readAll(&header) catch return SnapshotError.IoError;
-    if (bytes_read < snapshot_header_size) return SnapshotError.InvalidSnapshot;
+    var reader = file.reader(std.Options.debug_io, &.{});
+    reader.interface.readSliceAll(&header) catch return SnapshotError.InvalidSnapshot;
 
     return .{
         .last_included_index = std.mem.readInt(u64, header[0..8], .little),
@@ -50,8 +50,8 @@ pub fn readSnapshotMeta(path: []const u8) SnapshotError!SnapshotMeta {
 pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) SnapshotError!void {
     var tmp_path_buf: [512]u8 = undefined;
     var tmp = try createUniqueTempFile(&tmp_path_buf, dest_path, ".tmp");
-    defer platform.cwd().deleteFile(tmp.path) catch {};
-    tmp.file.close();
+    defer std.Io.Dir.cwd().deleteFile(std.Options.debug_io, tmp.path) catch {};
+    tmp.file.close(std.Options.debug_io);
 
     var dest_db: ?*c.sqlite3 = null;
     defer {
@@ -71,25 +71,28 @@ pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) Sn
     _ = c.sqlite3_close(dest_db);
     dest_db = null;
 
-    const tmp_data = platform.cwd().readFileAlloc(std.heap.page_allocator, tmp.path, @intCast(max_snapshot_size)) catch {
+    const tmp_data = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, tmp.path, std.heap.page_allocator, .limited(@intCast(max_snapshot_size))) catch {
         return SnapshotError.IoError;
     };
     defer std.heap.page_allocator.free(tmp_data);
 
-    const file = platform.cwd().createFile(dest_path, .{ .truncate = true, .mode = 0o600 }) catch return SnapshotError.IoError;
-    defer file.close();
+    var file = std.Io.Dir.cwd().createFile(std.Options.debug_io, dest_path, .{
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+        .truncate = true,
+    }) catch return SnapshotError.IoError;
+    defer file.close(std.Options.debug_io);
 
     var header: [snapshot_header_size]u8 = undefined;
     std.mem.writeInt(u64, header[0..8], meta.last_included_index, .little);
     std.mem.writeInt(u64, header[8..16], meta.last_included_term, .little);
     std.mem.writeInt(u64, header[16..24], @intCast(tmp_data.len), .little);
 
-    file.writeAll(&header) catch return SnapshotError.IoError;
-    file.writeAll(tmp_data) catch return SnapshotError.IoError;
+    file.writeStreamingAll(std.Options.debug_io, &header) catch return SnapshotError.IoError;
+    file.writeStreamingAll(std.Options.debug_io, tmp_data) catch return SnapshotError.IoError;
 }
 
 pub fn restoreFromSnapshot(self: anytype, src_path: []const u8) SnapshotError!SnapshotMeta {
-    const data = platform.cwd().readFileAlloc(std.heap.page_allocator, src_path, @intCast(max_snapshot_size)) catch {
+    const data = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, src_path, std.heap.page_allocator, .limited(@intCast(max_snapshot_size))) catch {
         return SnapshotError.IoError;
     };
     defer std.heap.page_allocator.free(data);
@@ -109,9 +112,9 @@ pub fn restoreFromBytes(self: anytype, data: []const u8) SnapshotError!SnapshotM
 
     var tmp_path_buf: [128]u8 = undefined;
     var tmp = try createUniqueTempFile(&tmp_path_buf, "/tmp/yoq_snap_restore", ".db");
-    defer platform.cwd().deleteFile(tmp.path) catch {};
-    tmp.file.writeAll(sqlite_data) catch return SnapshotError.IoError;
-    tmp.file.close();
+    defer std.Io.Dir.cwd().deleteFile(std.Options.debug_io, tmp.path) catch {};
+    tmp.file.writeStreamingAll(std.Options.debug_io, sqlite_data) catch return SnapshotError.IoError;
+    tmp.file.close(std.Options.debug_io);
 
     var src_db: ?*c.sqlite3 = null;
     defer {
@@ -140,7 +143,7 @@ pub fn restoreFromBytes(self: anytype, data: []const u8) SnapshotError!SnapshotM
 
 fn createUniqueTempFile(buf: []u8, prefix: []const u8, suffix: []const u8) SnapshotError!struct {
     path: [:0]const u8,
-    file: platform.File,
+    file: std.Io.File,
 } {
     var attempts: usize = 0;
     while (attempts < 16) : (attempts += 1) {
@@ -150,7 +153,10 @@ fn createUniqueTempFile(buf: []u8, prefix: []const u8, suffix: []const u8) Snaps
         if (slice.len >= buf.len) return SnapshotError.IoError;
         buf[slice.len] = 0;
         const path: [:0]const u8 = buf[0..slice.len :0];
-        const file = platform.cwd().createFile(path, .{ .exclusive = true, .mode = 0o600 }) catch |err| switch (err) {
+        const file = std.Io.Dir.cwd().createFile(std.Options.debug_io, path, .{
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+            .exclusive = true,
+        }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return SnapshotError.IoError,
         };
@@ -168,9 +174,9 @@ fn randomU64() u64 {
 test "createUniqueTempFile uses owner-only permissions" {
     var buf: [128]u8 = undefined;
     var tmp = try createUniqueTempFile(&buf, "/tmp/yoq-snapshot-perm-test", ".db");
-    defer platform.cwd().deleteFile(tmp.path) catch {};
-    defer tmp.file.close();
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp.path) catch {};
+    defer tmp.file.close(std.testing.io);
 
-    const stat = try tmp.file.stat();
-    try std.testing.expectEqual(@as(u32, 0), stat.mode & 0o077);
+    const stat = try tmp.file.stat(std.testing.io);
+    try std.testing.expectEqual(@as(u32, 0), stat.permissions.toMode() & 0o077);
 }
