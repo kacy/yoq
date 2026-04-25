@@ -109,11 +109,11 @@ pub const Watcher = struct {
         try self.addDir(root_path, service_idx);
 
         // open and iterate subdirectories
-        var dir = platform.cwd().openDir(root_path, .{ .iterate = true }) catch |e| {
+        var dir = std.Io.Dir.cwd().openDir(std.Options.debug_io, root_path, .{ .iterate = true }) catch |e| {
             log.warn("cannot open directory for recursive watch '{s}': {}", .{ root_path, e });
             return error.OpenFailed;
         };
-        defer dir.close();
+        defer dir.close(std.Options.debug_io);
 
         self.walkDir(dir, root_path, service_idx);
     }
@@ -121,7 +121,7 @@ pub const Watcher = struct {
     /// internal recursive directory walker. adds inotify watches for each
     /// subdirectory found. skips hidden directories (starting with '.').
     /// logs errors but continues walking on partial failures.
-    fn walkDir(self: *Watcher, dir: platform.Dir, parent_path: []const u8, service_idx: usize) void {
+    fn walkDir(self: *Watcher, dir: std.Io.Dir, parent_path: []const u8, service_idx: usize) void {
         var iter = dir.iterate();
         while (true) {
             const entry = iter.next() catch |e| {
@@ -147,11 +147,11 @@ pub const Watcher = struct {
             };
 
             // recurse into the subdirectory
-            var subdir = dir.openDir(entry.name, .{ .iterate = true }) catch |e| {
+            var subdir = dir.openDir(std.Options.debug_io, entry.name, .{ .iterate = true }) catch |e| {
                 log.warn("watcher: failed to open subdirectory '{s}/{s}': {}", .{ parent_path, entry.name, e });
                 continue;
             };
-            defer subdir.close();
+            defer subdir.close(std.Options.debug_io);
             self.walkDir(subdir, full_path, service_idx);
         }
     }
@@ -427,7 +427,8 @@ test "watch temp directory and detect file change" {
 
     // get the real path for inotify (needs an absolute path)
     var path_buf: [4096]u8 = undefined;
-    const tmp_path = try platform.Dir.from(tmp.dir).realpath(".", &path_buf);
+    const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
+    const tmp_path = path_buf[0..tmp_path_len];
 
     try w.addDir(tmp_path, 42);
     try std.testing.expectEqual(@as(usize, 1), w.watch_count);
@@ -457,9 +458,9 @@ test "watch temp directory and detect file change" {
     std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
 
     // write a file to trigger the event
-    var file = try platform.Dir.from(tmp.dir).createFile("test.txt", .{});
-    try file.writeAll("hello");
-    file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "test.txt", .{});
+    try file.writeStreamingAll(std.testing.io, "hello");
+    file.close(std.testing.io);
 
     // wait for the watcher thread to finish (debounce is 500ms)
     thread.join();
