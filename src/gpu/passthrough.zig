@@ -204,9 +204,9 @@ pub fn applyNumaAffinity(cgroup_path: []const u8, numa_node: i32) void {
 fn writeCgroupFile(cgroup_path: []const u8, filename: []const u8, value: []const u8) void {
     var path_buf: [512]u8 = undefined;
     const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cgroup_path, filename }) catch return;
-    const file = platform.cwd().openFile(file_path, .{ .mode = .write_only }) catch return;
-    defer file.close();
-    file.writeAll(value) catch |e| {
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, file_path, .{ .mode = .write_only }) catch return;
+    defer file.close(std.Options.debug_io);
+    file.writeStreamingAll(std.Options.debug_io, value) catch |e| {
         log.warn("gpu cgroup write failed for {s}/{s}: {}", .{ cgroup_path, filename, e });
     };
 }
@@ -214,7 +214,7 @@ fn writeCgroupFile(cgroup_path: []const u8, filename: []const u8, value: []const
 fn ensureContainerDevDir(merged_dir: []const u8) !void {
     var dev_path_buf: [512]u8 = undefined;
     const dev_path = std.fmt.bufPrint(&dev_path_buf, "{s}/dev", .{merged_dir}) catch return error.PathTooLong;
-    platform.cwd().makeDir(dev_path) catch |e| switch (e) {
+    std.Io.Dir.cwd().createDir(std.Options.debug_io, dev_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return error.MkdirFailed,
     };
@@ -229,7 +229,7 @@ fn createCommonDeviceNodes(merged_dir: []const u8) void {
 fn ensureContainerLibDir(merged_dir: []const u8) !void {
     var lib_dir_buf: [512]u8 = undefined;
     const lib_dir = std.fmt.bufPrint(&lib_dir_buf, "{s}/usr/lib", .{merged_dir}) catch return error.PathTooLong;
-    try platform.cwd().makePath(lib_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, lib_dir);
 }
 
 fn mountFirstAvailableLib(merged_dir: []const u8, lib_name: []const u8) void {
@@ -257,12 +257,12 @@ fn findHostLibraryInPaths(buf: []u8, lib_name: []const u8, search_paths: []const
 }
 
 fn ensureMountTargetExists(target: []const u8) !void {
-    const file = try platform.cwd().createFile(target, .{});
-    file.close();
+    var file = try std.Io.Dir.cwd().createFile(std.Options.debug_io, target, .{});
+    file.close(std.Options.debug_io);
 }
 
 fn pathExists(path: []const u8) bool {
-    platform.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.Options.debug_io, path, .{}) catch return false;
     return true;
 }
 
@@ -310,14 +310,16 @@ test "findHostLibraryInPaths finds fake library roots" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try platform.Dir.from(tmp.dir).makePath("lib-a");
-    try platform.Dir.from(tmp.dir).makePath("lib-b");
-    try platform.Dir.from(tmp.dir).writeFile(.{ .sub_path = "lib-b/libnvidia-ml.so.1", .data = "" });
+    try tmp.dir.createDirPath(std.testing.io, "lib-a");
+    try tmp.dir.createDirPath(std.testing.io, "lib-b");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib-b/libnvidia-ml.so.1", .data = "" });
 
     var root_a_buf: [std.fs.max_path_bytes]u8 = undefined;
     var root_b_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_a = try platform.Dir.from(tmp.dir).realpath("lib-a", &root_a_buf);
-    const root_b = try platform.Dir.from(tmp.dir).realpath("lib-b", &root_b_buf);
+    const root_a_len = try tmp.dir.realPathFile(std.testing.io, "lib-a", &root_a_buf);
+    const root_b_len = try tmp.dir.realPathFile(std.testing.io, "lib-b", &root_b_buf);
+    const root_a = root_a_buf[0..root_a_len];
+    const root_b = root_b_buf[0..root_b_len];
 
     var path_buf: [512]u8 = undefined;
     const found = findHostLibraryInPaths(&path_buf, "libnvidia-ml.so.1", &.{ root_a, root_b });
@@ -333,7 +335,8 @@ test "findHostLibraryInPaths returns null for missing library" {
     defer tmp.cleanup();
 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try platform.Dir.from(tmp.dir).realpath(".", &root_buf);
+    const root_len = try tmp.dir.realPathFile(std.testing.io, ".", &root_buf);
+    const root = root_buf[0..root_len];
 
     var path_buf: [512]u8 = undefined;
     try std.testing.expect(findHostLibraryInPaths(&path_buf, "libcuda.so.999", &.{root}) == null);

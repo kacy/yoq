@@ -66,11 +66,11 @@ pub fn start(inst: *MpsInstance) bool {
     if (pipe_dir.len == 0 or log_dir.len == 0) return false;
 
     // create directories
-    platform.cwd().makePath(pipe_dir) catch {
+    std.Io.Dir.cwd().createDirPath(std.Options.debug_io, pipe_dir) catch {
         log.info("MPS: failed to create pipe dir {s}", .{pipe_dir});
         return false;
     };
-    platform.cwd().makePath(log_dir) catch {
+    std.Io.Dir.cwd().createDirPath(std.Options.debug_io, log_dir) catch {
         log.info("MPS: failed to create log dir {s}", .{log_dir});
         return false;
     };
@@ -88,14 +88,14 @@ pub fn stop(inst: *MpsInstance) void {
     var ctrl_path_buf: [256]u8 = undefined;
     const ctrl_path = std.fmt.bufPrint(&ctrl_path_buf, "{s}/control", .{inst.getPipeDir()}) catch return;
 
-    const file = platform.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch {
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, ctrl_path, .{ .mode = .write_only }) catch {
         log.info("MPS: no control pipe at {s}, daemon may not be running", .{ctrl_path});
         inst.active = false;
         return;
     };
-    defer file.close();
+    defer file.close(std.Options.debug_io);
 
-    file.writeAll("quit\n") catch {};
+    file.writeStreamingAll(std.Options.debug_io, "quit\n") catch {};
     inst.active = false;
     log.info("MPS: stopped daemon for GPU {d}", .{inst.gpu_index});
 }
@@ -119,7 +119,7 @@ pub fn isMpsAvailable() bool {
         "/usr/local/cuda/bin/nvidia-cuda-mps-control",
     };
     for (paths) |p| {
-        platform.cwd().access(p, .{}) catch continue;
+        std.Io.Dir.cwd().access(std.Options.debug_io, p, .{}) catch continue;
         return true;
     }
     return false;
@@ -174,7 +174,7 @@ test "start creates directories and activates" {
         stop(&inst);
 
         // remove directories
-        platform.cwd().deleteDir(inst.getPipeDir()) catch {};
-        platform.cwd().deleteDir(inst.getLogDir()) catch {};
+        std.Io.Dir.cwd().deleteDir(std.Options.debug_io, inst.getPipeDir()) catch {};
+        std.Io.Dir.cwd().deleteDir(std.Options.debug_io, inst.getLogDir()) catch {};
     }
 }
