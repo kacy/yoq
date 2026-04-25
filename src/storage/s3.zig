@@ -659,7 +659,12 @@ test "verifyMultipartTarget rejects reused upload id for different object" {
 }
 
 test "completeMultipartUpload streams parts into final object" {
-    const bucket = "multipart-stream-bucket";
+    var bucket_buf: [48]u8 = undefined;
+    const bucket = try std.fmt.bufPrint(
+        &bucket_buf,
+        "multipart-stream-{x}",
+        .{std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds()},
+    );
     const key = "nested/object.bin";
 
     var bucket_path_buf: [paths.max_path]u8 = undefined;

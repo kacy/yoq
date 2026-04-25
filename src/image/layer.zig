@@ -236,6 +236,51 @@ test "create layer from dir — round trip" {
     try blob_store.deleteBlob(result.compressed_digest);
 }
 
+test "create layer then extract layer preserves file contents" {
+    try requireLayerCreationTestHost();
+    if (!hasHomeEnv()) return;
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "hello.txt", .data = "hello world\n" });
+    try tmp_dir.dir.createDir(std.testing.io, "subdir", .default_dir);
+    try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "subdir/nested.txt", .data = "nested content\n" });
+    try tmp_dir.dir.symLink(std.testing.io, "hello.txt", "hello.link", .{});
+
+    var path_buf: [max_path]u8 = undefined;
+    const dir_path_len = try tmp_dir.dir.realPathFile(std.testing.io, ".", &path_buf);
+    const dir_path = path_buf[0..dir_path_len];
+
+    const result = (try createLayerFromDir(alloc, dir_path)) orelse return error.ExpectedNonNull;
+    defer blob_store.deleteBlob(result.compressed_digest) catch {};
+
+    const digest_hex = result.compressed_digest.hex();
+    defer layer_path.deleteExtractedLayer(&digest_hex);
+
+    var digest_buf: [71]u8 = undefined;
+    const digest_str = result.compressed_digest.string(&digest_buf);
+
+    const extracted_path = try extractLayer(alloc, digest_str);
+    defer alloc.free(extracted_path);
+
+    var extracted_dir = try cwd().openDir(std.testing.io, extracted_path, .{});
+    defer extracted_dir.close(std.testing.io);
+
+    var hello_buf: [64]u8 = undefined;
+    const hello = try extracted_dir.readFile(std.testing.io, "hello.txt", &hello_buf);
+    try std.testing.expectEqualStrings("hello world\n", hello);
+
+    var nested_buf: [64]u8 = undefined;
+    const nested = try extracted_dir.readFile(std.testing.io, "subdir/nested.txt", &nested_buf);
+    try std.testing.expectEqualStrings("nested content\n", nested);
+
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link_len = try extracted_dir.readLink(std.testing.io, "hello.link", &link_buf);
+    try std.testing.expectEqualStrings("hello.txt", link_buf[0..link_len]);
+}
+
 test "create layer from dir — deterministic digest" {
     try requireLayerCreationTestHost();
     if (!hasHomeEnv()) return;
@@ -301,6 +346,41 @@ test "different content produces different layer digests" {
     blob_store.deleteBlob(result2.compressed_digest) catch {};
 }
 
+test "extract layer — invalid gzip blob fails" {
+    if (!hasHomeEnv()) return;
+    const alloc = std.testing.allocator;
+
+    const digest = try blob_store.putBlob("not a gzip stream");
+    defer blob_store.deleteBlob(digest) catch {};
+
+    const digest_hex = digest.hex();
+    defer layer_path.deleteExtractedLayer(&digest_hex);
+
+    var digest_buf: [71]u8 = undefined;
+    const digest_str = digest.string(&digest_buf);
+
+    try std.testing.expectError(LayerError.ExtractionFailed, extractLayer(alloc, digest_str));
+}
+
+test "extract layer — gzip stream with invalid tar payload fails" {
+    if (!hasHomeEnv()) return;
+    const alloc = std.testing.allocator;
+
+    const gzip_payload = try gzipBytes(alloc, "not a tar archive");
+    defer alloc.free(gzip_payload);
+
+    const digest = try blob_store.putBlob(gzip_payload);
+    defer blob_store.deleteBlob(digest) catch {};
+
+    const digest_hex = digest.hex();
+    defer layer_path.deleteExtractedLayer(&digest_hex);
+
+    var digest_buf: [71]u8 = undefined;
+    const digest_str = digest.string(&digest_buf);
+
+    try std.testing.expectError(LayerError.ExtractionFailed, extractLayer(alloc, digest_str));
+}
+
 test "listExtractedLayersOnDisk returns empty for fresh install" {
     const alloc = std.testing.allocator;
     var layers = try listExtractedLayersOnDisk(alloc);
@@ -342,4 +422,26 @@ test "symlink target validation — deep escape attempt" {
 
 fn hasHomeEnv() bool {
     return std.c.getenv("HOME") != null;
+}
+
+fn gzipBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
+    var out = std.Io.Writer.Allocating.init(alloc);
+    defer out.deinit();
+    try out.ensureUnusedCapacity(64);
+
+    const compressor = try alloc.create(std.compress.flate.Compress);
+    defer alloc.destroy(compressor);
+
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    compressor.* = std.compress.flate.Compress.init(
+        &out.writer,
+        &window,
+        .gzip,
+        .default,
+    ) catch return error.CompressFailed;
+
+    compressor.writer.writeAll(data) catch return error.CompressFailed;
+    compressor.finish() catch return error.CompressFailed;
+
+    return out.toOwnedSlice();
 }
