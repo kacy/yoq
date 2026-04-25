@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const spec = @import("../spec.zig");
@@ -198,7 +197,7 @@ pub fn resolveServiceVolumes(
                     log.err("orchestrator: no database for volume creation", .{});
                     return error.VolumeFailed;
                 };
-                const timestamp = platform.timestamp();
+                const timestamp = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
                 volumes_mod.create(db, app_name, vol_def, timestamp, null) catch |err| {
                     log.err("failed to create volume '{s}': {}", .{ vol.source, err });
                     return error.VolumeFailed;
@@ -307,7 +306,7 @@ pub fn runOneShotWithIo(
         .pid = null,
         .exit_code = null,
         .app_name = null,
-        .created_at = platform.timestamp(),
+        .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     }) catch return false;
 
     var c = container.Container{
@@ -325,7 +324,7 @@ pub fn runOneShotWithIo(
         .status = .created,
         .pid = null,
         .exit_code = null,
-        .created_at = platform.timestamp(),
+        .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     };
 
     c.start() catch {

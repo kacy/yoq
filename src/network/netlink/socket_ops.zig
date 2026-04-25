@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const linux = std.os.linux;
 const posix = std.posix;
 const common = @import("common.zig");
@@ -9,7 +9,7 @@ const MessageBuilder = builder_mod.MessageBuilder;
 
 pub fn openSocket() common.NetlinkError!posix.fd_t {
     const NETLINK_ROUTE = 0;
-    return platform.posix.socket(
+    return linux_platform.posix.socket(
         linux.AF.NETLINK,
         posix.SOCK.RAW | posix.SOCK.CLOEXEC,
         NETLINK_ROUTE,
@@ -17,7 +17,7 @@ pub fn openSocket() common.NetlinkError!posix.fd_t {
 }
 
 pub fn openGenericSocket() common.NetlinkError!posix.fd_t {
-    return platform.posix.socket(
+    return linux_platform.posix.socket(
         linux.AF.NETLINK,
         posix.SOCK.RAW | posix.SOCK.CLOEXEC,
         common.NETLINK_GENERIC,
@@ -32,11 +32,11 @@ pub fn resolveFamily(fd: posix.fd_t, name: []const u8) common.NetlinkError!u16 {
     try mb.putAttrStr(hdr, common.CTRL_ATTR_FAMILY_NAME, name);
 
     const msg = mb.message();
-    const sent = platform.posix.send(fd, msg, 0) catch return common.NetlinkError.SendFailed;
+    const sent = linux_platform.posix.send(fd, msg, 0) catch return common.NetlinkError.SendFailed;
     if (sent != msg.len) return common.NetlinkError.SendFailed;
 
     var recv_buf: [common.buf_size]u8 align(4) = undefined;
-    const recv_len = platform.posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
+    const recv_len = linux_platform.posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
 
     const min_resp = @sizeOf(linux.nlmsghdr) + @sizeOf(common.GenlMsgHdr);
     if (recv_len < min_resp) return common.NetlinkError.InvalidResponse;
@@ -65,11 +65,11 @@ pub fn resolveFamily(fd: posix.fd_t, name: []const u8) common.NetlinkError!u16 {
 }
 
 pub fn sendAndCheck(fd: posix.fd_t, msg: []const u8) common.NetlinkError!void {
-    const sent = platform.posix.send(fd, msg, 0) catch return common.NetlinkError.SendFailed;
+    const sent = linux_platform.posix.send(fd, msg, 0) catch return common.NetlinkError.SendFailed;
     if (sent != msg.len) return common.NetlinkError.SendFailed;
 
     var recv_buf: [common.buf_size]u8 align(4) = undefined;
-    const recv_len = platform.posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
+    const recv_len = linux_platform.posix.recv(fd, &recv_buf, 0) catch return common.NetlinkError.RecvFailed;
     if (recv_len < @sizeOf(linux.nlmsghdr)) return common.NetlinkError.InvalidResponse;
 
     const resp_hdr: *const linux.nlmsghdr = @ptrCast(@alignCast(&recv_buf));
@@ -90,6 +90,6 @@ pub fn sendAndCheck(fd: posix.fd_t, msg: []const u8) common.NetlinkError!void {
 }
 
 pub fn sendOnly(fd: posix.fd_t, msg: []const u8) common.NetlinkError!void {
-    const sent = platform.posix.send(fd, msg, 0) catch return common.NetlinkError.SendFailed;
+    const sent = linux_platform.posix.send(fd, msg, 0) catch return common.NetlinkError.SendFailed;
     if (sent != msg.len) return common.NetlinkError.SendFailed;
 }

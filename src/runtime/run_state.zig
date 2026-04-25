@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const paths = @import("../lib/paths.zig");
 const cgroups = @import("cgroups.zig");
 const container = @import("container.zig");
@@ -354,7 +354,7 @@ fn readLimits(reader: anytype) !cgroups.ResourceLimits {
 
 fn uniqueTestConfigId() [12]u8 {
     var raw: [6]u8 = undefined;
-    platform.randomBytes(&raw);
+    linux_platform.randomBytes(&raw);
     return std.fmt.bytesToHex(raw, .lower);
 }
 

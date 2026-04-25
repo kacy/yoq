@@ -8,7 +8,7 @@
 // this runs inside the child process after namespace creation.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const common = @import("filesystem/common.zig");
 const path_support = @import("filesystem/path_support.zig");
@@ -238,7 +238,7 @@ test "validatePathNoSymlink accepts regular files" {
     const path = path_buf[0..path_len];
 
     const fd = try validatePathNoSymlink(path);
-    platform.posix.close(fd);
+    linux_platform.posix.close(fd);
 }
 
 test "validatePathNoSymlink accepts directories" {
@@ -253,7 +253,7 @@ test "validatePathNoSymlink accepts directories" {
     const path = path_buf[0..path_len];
 
     const fd = try validatePathNoSymlink(path);
-    platform.posix.close(fd);
+    linux_platform.posix.close(fd);
 }
 
 test "validatePathNoSymlink rejects symlinks" {

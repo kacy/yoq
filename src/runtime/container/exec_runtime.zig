@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -143,8 +143,8 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     }
 
     if (host_mode) {
-        platform.posix.chdir(ctx.working_dir) catch {
-            platform.posix.chdir("/") catch {};
+        linux_platform.posix.chdir(ctx.working_dir) catch {
+            linux_platform.posix.chdir("/") catch {};
         };
         return execCommandWrapper(@ptrCast(@constCast(ctx)));
     }
@@ -152,8 +152,8 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     setHostname(ctx.hostname);
     _ = linux.syscall1(.umask, 0o022);
 
-    platform.posix.chdir(ctx.working_dir) catch {
-        platform.posix.chdir("/") catch {};
+    linux_platform.posix.chdir(ctx.working_dir) catch {
+        linux_platform.posix.chdir("/") catch {};
     };
 
     security.apply() catch return @intFromEnum(ExitCode.security_failed);

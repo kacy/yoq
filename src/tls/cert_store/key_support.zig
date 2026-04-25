@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const paths = @import("../../lib/paths.zig");
 const common = @import("common.zig");
 
@@ -40,7 +40,7 @@ pub fn loadOrCreateKey() KeyError![common.key_length]u8 {
     }
 
     var key: [common.key_length]u8 = undefined;
-    platform.randomBytes(&key);
+    linux_platform.randomBytes(&key);
 
     saveKeyFile(key_path, &key) catch return KeyError.KeyCreateFailed;
     return key;

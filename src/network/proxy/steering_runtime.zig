@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const bridge = @import("../bridge.zig");
 const ip = @import("../ip.zig");
@@ -284,7 +283,7 @@ fn syncLocked() !void {
 
     desired_mappings = @intCast(desired.items.len);
     running = true;
-    last_sync_at = platform.timestamp();
+    last_sync_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 }
 
 fn buildDesiredMappingsLocked(alloc: std.mem.Allocator) !std.ArrayList(DesiredMapping) {

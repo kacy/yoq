@@ -8,7 +8,7 @@
 // for blob storage without external dependencies.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const log = @import("../lib/log.zig");
 const paths = @import("../lib/paths.zig");
 
@@ -366,7 +366,7 @@ pub fn initiateMultipartUpload(name: []const u8, key: []const u8) S3Error![24]u8
     // generate upload ID
     var upload_id: [24]u8 = undefined;
     var random_bytes: [12]u8 = undefined;
-    platform.randomBytes(&random_bytes);
+    linux_platform.randomBytes(&random_bytes);
     upload_id = std.fmt.bytesToHex(random_bytes, .lower);
 
     // create staging directory
@@ -646,7 +646,7 @@ test "verifyMultipartTarget rejects reused upload id for different object" {
     const staging = try std.fmt.bufPrint(
         &path_buf,
         "/tmp/yoq-s3-multipart-{d}",
-        .{platform.nanoTimestamp()},
+        .{std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds()},
     );
     defer cwd().deleteTree(std.Options.debug_io, staging) catch {};
 

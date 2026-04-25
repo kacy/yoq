@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const AppContext = @import("../lib/app_context.zig").AppContext;
 const cli = @import("../lib/cli.zig");
 const json_out = @import("../lib/json_output.zig");
@@ -241,7 +240,7 @@ pub fn backupCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 
     // default output path with timestamp
     var default_buf: [256]u8 = undefined;
-    const ts = platform.timestamp();
+    const ts = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const path = output_path orelse std.fmt.bufPrint(&default_buf, "yoq-backup-{d}.db", .{ts}) catch {
         writeErr("failed to generate backup filename\n", .{});
         return BackupCommandsError.BackupFailed;

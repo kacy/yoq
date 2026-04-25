@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const cli = @import("../../lib/cli.zig");
 const container = @import("../../runtime/container.zig");
@@ -261,14 +260,14 @@ pub fn serviceIndex(self: anytype, name: []const u8) ?usize {
 
 pub fn waitForRunning(self: anytype, idx: usize) bool {
     const timeout_ns: u64 = 30 * std.time.ns_per_s;
-    const start = @as(u64, @intCast(platform.nanoTimestamp()));
+    const start = @as(u64, @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds()));
 
     while (true) {
         const status = self.states[idx].status;
         if (status == .running) return true;
         if (status == .failed or status == .stopped) return false;
 
-        const now = @as(u64, @intCast(platform.nanoTimestamp()));
+        const now = @as(u64, @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds()));
         if (now - start > timeout_ns) return false;
 
         std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;

@@ -1,6 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const log = std.log;
 const types = @import("types.zig");
 
@@ -29,7 +29,7 @@ pub fn resetTestProbeRoots() void {
 }
 
 pub fn detectProcfs() ?DetectResult {
-    var dir = platform.openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
+    var dir = linux_platform.openDirAbsolute(probe_roots.procfs_gpus, .{ .iterate = true }) catch return null;
     defer dir.close();
 
     var result = emptyDetectResult(.procfs, null);
@@ -58,7 +58,7 @@ pub fn detectProcfs() ?DetectResult {
 
 pub fn detectSysfs() ?DetectResult {
     var result = emptyDetectResult(.sysfs, null);
-    var drm_dir = platform.openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
+    var drm_dir = linux_platform.openDirAbsolute(probe_roots.drm_root, .{ .iterate = true }) catch return null;
     defer drm_dir.close();
 
     var iter = drm_dir.iterate();

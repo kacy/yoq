@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const store = @import("../../state/store.zig");
 const health = @import("../../manifest/health.zig");
 const cgroups = @import("../cgroups.zig");
@@ -86,7 +85,7 @@ fn collectServiceSnapshot(name: []const u8, containers: []const store.ContainerR
         }
     }
 
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const cpu_pct = if (has_cpu) blk: {
         const elapsed_secs = now - earliest_start;
         if (elapsed_secs <= 0) break :blk @as(f64, 0.0);

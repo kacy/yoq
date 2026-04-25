@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 
 const gpu_detect = @import("../gpu/detect.zig");
 const gpu_mesh = @import("../gpu/mesh.zig");
@@ -24,7 +24,7 @@ pub const MeshSupport = struct {
 
     pub fn deinit(self: *MeshSupport) void {
         if (self.topo_file_path) |path| {
-            platform.deleteFileAbsolute(path) catch {};
+            linux_platform.deleteFileAbsolute(path) catch {};
             self.alloc.free(path);
             self.topo_file_path = null;
         }
@@ -109,7 +109,7 @@ fn createTopologyFile(alloc: Allocator, ib_result: gpu_mesh.IbDetectResult) ?[]c
             .{randomU64()},
         ) catch return null;
 
-        var file = platform.createFileAbsolute(path, .{ .exclusive = true }) catch |err| switch (err) {
+        var file = linux_platform.createFileAbsolute(path, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => {
                 log.warn("failed to create NCCL topology file: {}", .{err});
@@ -120,12 +120,12 @@ fn createTopologyFile(alloc: Allocator, ib_result: gpu_mesh.IbDetectResult) ?[]c
 
         file.writeAll(topo_xml) catch |err| {
             log.warn("failed to write NCCL topology file: {}", .{err});
-            platform.deleteFileAbsolute(path) catch {};
+            linux_platform.deleteFileAbsolute(path) catch {};
             return null;
         };
 
         return alloc.dupe(u8, path) catch {
-            platform.deleteFileAbsolute(path) catch {};
+            linux_platform.deleteFileAbsolute(path) catch {};
             return null;
         };
     }
@@ -136,7 +136,7 @@ fn createTopologyFile(alloc: Allocator, ib_result: gpu_mesh.IbDetectResult) ?[]c
 
 fn randomU64() u64 {
     var bytes: [8]u8 = undefined;
-    platform.randomBytes(&bytes);
+    linux_platform.randomBytes(&bytes);
     return std.mem.readInt(u64, &bytes, .little);
 }
 

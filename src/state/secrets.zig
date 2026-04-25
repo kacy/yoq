@@ -4,7 +4,6 @@
 // implementation lives in smaller modules under `state/secrets/`.
 
 const std = @import("std");
-const platform = @import("platform");
 const sqlite = @import("sqlite");
 
 const common = @import("secrets/common.zig");

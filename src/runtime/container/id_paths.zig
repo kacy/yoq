@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const paths = @import("../../lib/paths.zig");
 
 pub const ContainerId = [12]u8;
@@ -99,7 +99,7 @@ pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGene
     var collision_count: u32 = 0;
     while (collision_count < max_collision_attempts) : (collision_count += 1) {
         var bytes: [6]u8 = undefined;
-        platform.randomBytes(&bytes);
+        linux_platform.randomBytes(&bytes);
 
         for (bytes, 0..) |b, i| {
             buf[i * 2] = chars[b >> 4];
@@ -114,7 +114,7 @@ pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGene
         cwd().access(std.Options.debug_io, dir_path, .{}) catch return;
     }
 
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     var counter: u16 = 0;
     while (counter < 1000) : (counter += 1) {
         const unique_val: u64 = @as(u64, @intCast(now)) << 16 | counter;

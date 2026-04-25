@@ -4,7 +4,6 @@
 // manually-built JSON output.
 
 const std = @import("std");
-const platform = @import("platform");
 
 /// write a string with JSON escaping (backslash, quotes, control chars).
 /// handles all control characters below 0x20 with \u00XX encoding.

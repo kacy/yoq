@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const http = @import("../../api/http.zig");
 const connection_runtime = @import("../../api/server/connection_runtime.zig");
@@ -27,19 +27,19 @@ pub const LogServer = struct {
     started: std.atomic.Value(bool),
 
     pub fn init(alloc: std.mem.Allocator, port: u16, token: []const u8) !LogServer {
-        const fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
-        errdefer platform.posix.close(fd);
+        const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+        errdefer linux_platform.posix.close(fd);
 
         const one: c_int = 1;
         _ = posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
 
-        const addr = platform.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-        try platform.posix.bind(fd, &addr.any, addr.getOsSockLen());
-        try platform.posix.listen(fd, 32);
+        const addr = linux_platform.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+        try linux_platform.posix.bind(fd, &addr.any, addr.getOsSockLen());
+        try linux_platform.posix.listen(fd, 32);
 
         var actual_addr: posix.sockaddr.in = undefined;
         var actual_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        try platform.posix.getsockname(fd, @ptrCast(&actual_addr), &actual_len);
+        try linux_platform.posix.getsockname(fd, @ptrCast(&actual_addr), &actual_len);
 
         return .{
             .alloc = alloc,
@@ -53,13 +53,13 @@ pub const LogServer = struct {
 
     pub fn deinit(self: *LogServer) void {
         self.running.store(false, .release);
-        platform.posix.close(self.listen_fd);
+        linux_platform.posix.close(self.listen_fd);
     }
 
     pub fn run(self: *LogServer) void {
         self.started.store(true, .release);
         while (self.running.load(.acquire)) {
-            const client_fd = platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| switch (err) {
+            const client_fd = linux_platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| switch (err) {
                 error.WouldBlock => {
                     std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
                     continue;
@@ -131,7 +131,7 @@ fn findTestLogContainerId(app_name: []const u8, job_name: []const u8, rank: u32)
 }
 
 fn handleConnection(self: *LogServer, client_fd: posix.fd_t) void {
-    defer platform.posix.close(client_fd);
+    defer linux_platform.posix.close(client_fd);
 
     const owned_request = connection_runtime.readRequestAlloc(self.alloc, client_fd) catch {
         sendError(client_fd, .bad_request, "malformed request");
@@ -239,7 +239,7 @@ fn writeResponse(fd: posix.fd_t, status: http.StatusCode, content_type: []const 
 fn writeAll(fd: posix.fd_t, data: []const u8) void {
     var written: usize = 0;
     while (written < data.len) {
-        const bytes_written = platform.posix.write(fd, data[written..]) catch return;
+        const bytes_written = linux_platform.posix.write(fd, data[written..]) catch return;
         if (bytes_written == 0) return;
         written += bytes_written;
     }
@@ -260,14 +260,14 @@ test "log server serves remote training logs with auth" {
 
     var sockets: [2]std.posix.fd_t = undefined;
     if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
-    defer platform.posix.close(sockets[0]);
+    defer linux_platform.posix.close(sockets[0]);
 
     const request =
         "GET /training/" ++ app_name ++ "/" ++ job_name ++ "/logs?rank=0 HTTP/1.1\r\n" ++
         "Host: localhost\r\n" ++
         "Connection: close\r\n" ++
         "Authorization: Bearer join-token\r\n\r\n";
-    _ = try platform.posix.write(sockets[0], request);
+    _ = try linux_platform.posix.write(sockets[0], request);
 
     var server = LogServer{
         .alloc = std.heap.page_allocator,

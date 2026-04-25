@@ -7,7 +7,6 @@
 // format: "\x1b[36m[web]     \x1b[0m | log line here"
 
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../lib/log.zig");
 
 /// ansi colors for service name prefixes

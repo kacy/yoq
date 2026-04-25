@@ -5,7 +5,7 @@
 // don't each reimplement the HOME lookup and bufPrint boilerplate.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const builtin = @import("builtin");
 const fmtx = std.fmt;
 const log = @import("log.zig");
@@ -80,7 +80,7 @@ pub fn uniqueDataTempPath(
     suffix: []const u8,
 ) PathError![]const u8 {
     var rand: [6]u8 = undefined;
-    platform.randomBytes(&rand);
+    linux_platform.randomBytes(&rand);
 
     var hex: [12]u8 = undefined;
     _ = fmtx.bufPrint(&hex, "{s}", .{fmtx.bytesToHex(rand, .lower)}) catch

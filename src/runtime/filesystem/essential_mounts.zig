@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const linux = std.os.linux;
 const syscall_util = @import("../../lib/syscall.zig");
 const log = @import("../../lib/log.zig");

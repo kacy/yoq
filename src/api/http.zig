@@ -8,7 +8,6 @@
 // only supports methods we actually use (GET, POST, PUT, DELETE).
 
 const std = @import("std");
-const platform = @import("platform");
 
 pub const Method = enum {
     GET,

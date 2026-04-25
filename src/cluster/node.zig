@@ -25,7 +25,7 @@
 //   node.stop();
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const sqlite = @import("sqlite");
 const raft_mod = @import("raft.zig");
 const transport_mod = @import("transport.zig");
@@ -484,7 +484,7 @@ pub const Node = struct {
     /// resolve a network address to a peer's NodeId by matching against
     /// the configured peer list. returns null if the address doesn't
     /// match any known peer (e.g. a stale connection from a removed node).
-    fn resolveNodeId(self: *const Node, addr: platform.net.Address) ?NodeId {
+    fn resolveNodeId(self: *const Node, addr: linux_platform.net.Address) ?NodeId {
         return action_loop.resolveNodeId(self, addr);
     }
 
@@ -577,19 +577,19 @@ test "resolveNodeId matches configured peer" {
     defer node.deinit();
 
     // build an address matching peer 2 (10.0.0.2:9700)
-    const addr2 = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700);
+    const addr2 = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700);
     try std.testing.expectEqual(@as(?NodeId, 2), node.resolveNodeId(addr2));
 
     // build an address matching peer 3
-    const addr3 = platform.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700);
+    const addr3 = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 3 }, 9700);
     try std.testing.expectEqual(@as(?NodeId, 3), node.resolveNodeId(addr3));
 
     // unknown address should return null
-    const unknown = platform.net.Address.initIp4(.{ 192, 168, 1, 1 }, 9700);
+    const unknown = linux_platform.net.Address.initIp4(.{ 192, 168, 1, 1 }, 9700);
     try std.testing.expect(node.resolveNodeId(unknown) == null);
 
     // right IP, wrong port should return null
-    const wrong_port = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 8080);
+    const wrong_port = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 8080);
     try std.testing.expect(node.resolveNodeId(wrong_port) == null);
 }
 
@@ -639,7 +639,7 @@ test "handleMessage drops request_vote with mismatched sender id" {
     defer node.deinit();
 
     node.handleMessage(.{
-        .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .request_vote = .{
             .term = 1,
@@ -674,7 +674,7 @@ test "handleMessage accepts append_entries only from authenticated leader" {
     defer node.deinit();
 
     node.handleMessage(.{
-        .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .append_entries = .{
             .term = 1,
@@ -688,7 +688,7 @@ test "handleMessage accepts append_entries only from authenticated leader" {
     try std.testing.expectEqual(@as(types.Term, 0), node.currentTerm());
 
     node.handleMessage(.{
-        .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .append_entries = .{
             .term = 1,
@@ -970,7 +970,7 @@ test "install_snapshot restart preserves recovered state and future applies" {
         node.mu.unlock(std.Options.debug_io);
 
         node.handleMessage(.{
-            .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+            .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
             .sender_id = 2,
             .message = .{ .install_snapshot = .{
                 .term = 2,
@@ -1076,7 +1076,7 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
         defer node.deinit();
 
         node.handleMessage(.{
-            .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+            .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
             .sender_id = 2,
             .message = .{ .install_snapshot = .{
                 .term = 2,
@@ -1105,7 +1105,7 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
     try std.testing.expectEqual(@as(LogIndex, 5), restarted.state_machine.last_applied);
 
     restarted.handleMessage(.{
-        .from_addr = platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .install_snapshot = .{
             .term = 2,

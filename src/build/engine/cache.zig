@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const blob_store = @import("../../image/store.zig");
 const state_store = @import("../../state/store.zig");
 const log = @import("../../lib/log.zig");

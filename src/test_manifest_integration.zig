@@ -5,7 +5,6 @@
 // runs without sqlite or root.
 
 const std = @import("std");
-const platform = @import("platform");
 const loader = @import("manifest/loader.zig");
 const validator = @import("manifest/validate.zig");
 

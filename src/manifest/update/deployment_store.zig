@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const sqlite = @import("sqlite");
 const store = @import("../../state/store.zig");
 const common = @import("common.zig");
@@ -7,7 +7,7 @@ const common = @import("common.zig");
 pub fn generateDeploymentId(alloc: std.mem.Allocator) ![]const u8 {
     const chars = "0123456789abcdef";
     var bytes: [6]u8 = undefined;
-    platform.randomBytes(&bytes);
+    linux_platform.randomBytes(&bytes);
 
     const hex = try alloc.alloc(u8, 12);
     for (bytes, 0..) |b, i| {
@@ -59,7 +59,7 @@ pub fn recordDeployment(
         .rollout_targets_json = rollout_targets_json,
         .rollout_checkpoint_json = rollout_checkpoint_json,
         .rollout_control_state = "active",
-        .created_at = platform.timestamp(),
+        .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     }) catch return error.StoreFailed;
 }
 
@@ -98,7 +98,7 @@ pub fn recordDeploymentInDb(
         .rollout_targets_json = rollout_targets_json,
         .rollout_checkpoint_json = rollout_checkpoint_json,
         .rollout_control_state = "active",
-        .created_at = platform.timestamp(),
+        .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     }) catch return error.StoreFailed;
 }
 

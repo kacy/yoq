@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const http = @import("api/http.zig");
 const common = @import("api/routes/common.zig");
 const s3_gateway = @import("api/routes/s3_gateway.zig");

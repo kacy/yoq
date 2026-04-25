@@ -16,7 +16,6 @@
 // containers work without NAT (just no internet or port mapping).
 
 const std = @import("std");
-const platform = @import("platform");
 const cmd = @import("../lib/cmd.zig");
 const log = @import("../lib/log.zig");
 const network_bridge = @import("bridge.zig");

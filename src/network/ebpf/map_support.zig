@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;

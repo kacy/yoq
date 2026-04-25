@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const common = @import("common.zig");
@@ -15,12 +15,12 @@ pub fn isPathSafe(path: []const u8) bool {
 }
 
 pub fn isSymlink(path: []const u8) bool {
-    const stat = platform.posix.fstatat(posix.AT.FDCWD, path, posix.AT.SYMLINK_NOFOLLOW) catch return false;
+    const stat = linux_platform.posix.fstatat(posix.AT.FDCWD, path, posix.AT.SYMLINK_NOFOLLOW) catch return false;
     return stat.mode & posix.S.IFMT == posix.S.IFLNK;
 }
 
 pub fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
-    const fd = platform.posix.open(path, .{ .NOFOLLOW = true, .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |e| {
+    const fd = linux_platform.posix.open(path, .{ .NOFOLLOW = true, .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |e| {
         if (e == error.NotDir or e == error.SymLinkLoop) {
             log.warn("filesystem: path is a symlink or contains symlinks: {s}", .{path});
             return FilesystemError.BindSourceIsSymlink;
@@ -29,13 +29,13 @@ pub fn validatePathNoSymlink(path: []const u8) FilesystemError!posix.fd_t {
         return FilesystemError.BindSourceValidationFailed;
     };
 
-    const stat = platform.posix.fstat(fd) catch {
-        platform.posix.close(fd);
+    const stat = linux_platform.posix.fstat(fd) catch {
+        linux_platform.posix.close(fd);
         return FilesystemError.BindSourceValidationFailed;
     };
 
     if (stat.mode & posix.S.IFMT == posix.S.IFLNK) {
-        platform.posix.close(fd);
+        linux_platform.posix.close(fd);
         log.warn("filesystem: path is a symlink: {s}", .{path});
         return FilesystemError.BindSourceIsSymlink;
     }

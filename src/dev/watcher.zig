@@ -11,7 +11,7 @@
 // - closing the inotify fd unblocks the waiting thread for clean shutdown
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
@@ -61,7 +61,7 @@ pub const Watcher = struct {
         for (self.watches[0..self.watch_count]) |entry| {
             self.alloc.free(entry.path);
         }
-        platform.posix.close(self.fd);
+        linux_platform.posix.close(self.fd);
         self.fd = -1; // Mark as invalid to prevent use-after-close
         self.watch_count = 0;
     }
@@ -258,12 +258,12 @@ pub const Watcher = struct {
         var count = initial_count;
 
         // set nonblocking temporarily to drain without waiting
-        const flags = platform.posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
+        const flags = linux_platform.posix.fcntl(self.fd, posix.F.GETFL, 0) catch |e| {
             log.warn("watcher: failed to get fd flags: {}", .{e});
             return count;
         };
         const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-        _ = platform.posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
+        _ = linux_platform.posix.fcntl(self.fd, posix.F.SETFL, flags | nonblock) catch |e| {
             log.warn("watcher: failed to set non-blocking mode: {}", .{e});
             return count;
         };
@@ -297,7 +297,7 @@ pub const Watcher = struct {
 
         // restore original flags - but only if fd is still valid
         if (self.fd >= 0) {
-            _ = platform.posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
+            _ = linux_platform.posix.fcntl(self.fd, posix.F.SETFL, flags) catch |e| {
                 log.warn("watcher: failed to restore fd flags: {}", .{e});
             };
         }

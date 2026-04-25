@@ -15,7 +15,6 @@
 // running containers — same code path as the local orchestrator.
 
 const std = @import("std");
-const platform = @import("platform");
 const http_client = @import("http_client.zig");
 const agent_types = @import("agent_types.zig");
 const cli = @import("../lib/cli.zig");

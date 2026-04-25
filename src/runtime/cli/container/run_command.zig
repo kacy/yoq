@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const builtin = @import("builtin");
 const posix = std.posix;
 const cli = @import("../../../lib/cli.zig");
@@ -353,7 +353,7 @@ fn saveCreatedRecord(id: []const u8, cfg: *const run_state.SavedRunConfig) Conta
         .status = "created",
         .pid = null,
         .exit_code = null,
-        .created_at = platform.timestamp(),
+        .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     }) catch |err| {
         writeErr("failed to save container state: {}\n", .{err});
         return ContainerError.ConfigSaveFailed;
@@ -368,7 +368,7 @@ pub fn run(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         return ContainerError.NotSupported;
     }
 
-    if (platform.posix.getuid() != 0) {
+    if (linux_platform.posix.getuid() != 0) {
         writeErr("warning: yoq run requires root privileges for cgroups and networking\n", .{});
     }
 

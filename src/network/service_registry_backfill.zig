@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../lib/log.zig");
 const rollout = @import("service_rollout.zig");
 const store = @import("../state/store.zig");
@@ -31,7 +30,7 @@ pub fn runIfEnabled() void {
     defer mutex.unlock(std.Options.debug_io);
 
     runs_total += 1;
-    last_run_at = platform.timestamp();
+    last_run_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     clearLastErrorLocked();
 
     runLocked() catch |err| {

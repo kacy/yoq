@@ -7,7 +7,7 @@
 // trace IDs correlate log lines across a single API request.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 
 pub const Level = enum {
     debug,
@@ -115,7 +115,7 @@ fn logMsg(level: Level, comptime fmt: []const u8, args: anytype) void {
             };
 
             // get timestamp
-            const ts = platform.timestamp();
+            const ts = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 
             out.writeAll("{\"ts\":") catch {
                 log_write_failures += 1;
@@ -196,7 +196,7 @@ fn writeJsonEscaped(out: anytype, s: []const u8) !void {
 /// generate a random trace ID as hex string. writes 16 hex chars.
 pub fn generateTraceId(out: *[16]u8) void {
     var random_bytes: [8]u8 = undefined;
-    platform.randomBytes(&random_bytes);
+    linux_platform.randomBytes(&random_bytes);
     const hex = "0123456789abcdef";
     for (random_bytes, 0..) |b, i| {
         out[i * 2] = hex[b >> 4];

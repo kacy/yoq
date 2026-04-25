@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const sqlite = @import("sqlite");
 const schema = @import("../schema.zig");
 const paths = @import("../../lib/paths.zig");

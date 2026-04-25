@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const http = @import("../../api/http.zig");
 const log = @import("../../lib/log.zig");
 const proxy_policy = @import("policy.zig");

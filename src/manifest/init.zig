@@ -6,7 +6,7 @@
 // silently.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const loader = @import("loader.zig");
 
 pub const Options = struct {
@@ -42,7 +42,7 @@ pub fn run(alloc: std.mem.Allocator, opts: Options) InitError!void {
         }
     }
 
-    const is_tty = platform.isatty(std.posix.STDIN_FILENO);
+    const is_tty = linux_platform.isatty(std.posix.STDIN_FILENO);
 
     const answers = if (is_tty)
         gatherInteractive(io, alloc) orelse return InitError.CwdFailed

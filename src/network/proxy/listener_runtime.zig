@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const proxy_runtime = @import("runtime.zig");
 const reverse_proxy = @import("reverse_proxy.zig");
@@ -134,7 +134,7 @@ pub fn stop() void {
     mutex.unlock(std.Options.debug_io);
 
     if (port_to_wake) |port| wakeAccept(port);
-    if (fd_to_close) |fd| platform.posix.close(fd);
+    if (fd_to_close) |fd| linux_platform.posix.close(fd);
     if (thread_to_join) |thread| thread.join();
     if (hook_to_call) |hook| hook();
 }
@@ -190,7 +190,7 @@ fn start(alloc: std.mem.Allocator) void {
     const bind_addr = listen_bind_addr;
     const requested_port = listen_port;
 
-    const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
+    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
         setLastErrorLocked(error.SocketFailed);
         const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
@@ -201,20 +201,20 @@ fn start(alloc: std.mem.Allocator) void {
     const reuseaddr: c_int = 1;
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuseaddr)) catch {};
 
-    const addr = platform.net.Address.initIp4(bind_addr, requested_port);
-    platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
+    const addr = linux_platform.net.Address.initIp4(bind_addr, requested_port);
+    linux_platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
         setLastErrorLocked(error.BindFailed);
         const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
-        platform.posix.close(fd);
+        linux_platform.posix.close(fd);
         if (hook) |callback| callback();
         return;
     };
-    platform.posix.listen(fd, 128) catch {
+    linux_platform.posix.listen(fd, 128) catch {
         setLastErrorLocked(error.ListenFailed);
         const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
-        platform.posix.close(fd);
+        linux_platform.posix.close(fd);
         if (hook) |callback| callback();
         return;
     };
@@ -222,11 +222,11 @@ fn start(alloc: std.mem.Allocator) void {
     if (requested_port == 0) {
         var bound_addr: posix.sockaddr.in = undefined;
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        platform.posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
+        linux_platform.posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
             setLastErrorLocked(error.BindFailed);
             const hook = state_change_hook;
             mutex.unlock(std.Options.debug_io);
-            platform.posix.close(fd);
+            linux_platform.posix.close(fd);
             if (hook) |callback| callback();
             return;
         };
@@ -241,7 +241,7 @@ fn start(alloc: std.mem.Allocator) void {
         listen_fd = null;
         const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
-        platform.posix.close(fd);
+        linux_platform.posix.close(fd);
         if (hook) |callback| callback();
         return;
     };
@@ -259,7 +259,7 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
             break :blk listen_fd orelse break;
         };
 
-        const client_fd = platform.posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch {
+        const client_fd = linux_platform.posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch {
             const hook = blk: {
                 mutex.lockUncancelable(std.Options.debug_io);
                 defer mutex.unlock(std.Options.debug_io);
@@ -278,7 +278,7 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
             break :blk stop_requested or listen_fd == null;
         };
         if (shutting_down) {
-            platform.posix.close(client_fd);
+            linux_platform.posix.close(client_fd);
             break;
         }
 
@@ -292,7 +292,7 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
             if (active_connections > 0) active_connections -= 1;
             setLastErrorLocked(error.ThreadSpawnFailed);
             mutex.unlock(std.Options.debug_io);
-            platform.posix.close(client_fd);
+            linux_platform.posix.close(client_fd);
             continue;
         };
         thread.detach();
@@ -307,7 +307,7 @@ fn connectionWorker(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
     }
 
     var routes = proxy_runtime.snapshotRouteConfigs(alloc) catch {
-        platform.posix.close(client_fd);
+        linux_platform.posix.close(client_fd);
         return;
     };
     defer deinitRoutes(alloc, &routes);
@@ -318,11 +318,11 @@ fn connectionWorker(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
 }
 
 fn wakeAccept(port: u16) void {
-    const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return;
-    defer platform.posix.close(fd);
+    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return;
+    defer linux_platform.posix.close(fd);
 
-    const addr = platform.net.Address.initIp4(wakeBindAddr(), port);
-    platform.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {};
+    const addr = linux_platform.net.Address.initIp4(wakeBindAddr(), port);
+    linux_platform.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {};
 }
 
 fn wakeBindAddr() [4]u8 {

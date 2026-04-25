@@ -18,7 +18,6 @@
 // the raw sqlite database bytes.
 
 const std = @import("std");
-const platform = @import("platform");
 const sqlite = @import("sqlite");
 const db_runtime = @import("state_machine/db_runtime.zig");
 const types = @import("raft_types.zig");

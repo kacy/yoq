@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const sqlite = @import("sqlite");
 
 const Allocator = std.mem.Allocator;
@@ -83,7 +83,7 @@ pub fn validateToken(token: []const u8, expected: []const u8) bool {
 
 pub fn generateAgentId(buf: *[12]u8) void {
     var random_bytes: [6]u8 = undefined;
-    platform.randomBytes(&random_bytes);
+    linux_platform.randomBytes(&random_bytes);
     const hex = "0123456789abcdef";
     for (random_bytes, 0..) |byte, i| {
         buf[i * 2] = hex[byte >> 4];

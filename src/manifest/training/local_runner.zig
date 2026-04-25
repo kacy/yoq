@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 
 const orchestrator = @import("../orchestrator.zig");
 const gpu_runtime = @import("../gpu_runtime.zig");
@@ -116,7 +115,7 @@ fn shouldAutoRestart(self: anytype, failed_ranks: u32) bool {
 
     self.restart_count += 1;
     if (self.job_id) |jid| {
-        store.incrementTrainingJobRestarts(jid, platform.timestamp()) catch {};
+        store.incrementTrainingJobRestarts(jid, std.Io.Clock.real.now(std.Options.debug_io).toSeconds()) catch {};
     }
     writeErr("{d}/{d} ranks failed, restarting (attempt {d}/{d})...\n", .{
         failed_ranks,

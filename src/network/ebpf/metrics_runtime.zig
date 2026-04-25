@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const attach_support = @import("attach_support.zig");
@@ -81,15 +81,15 @@ pub const MetricsCollector = struct {
             log.debug("ebpf: failed to detach metrics collector: {}", .{e});
         };
         if (self.prog_fd >= 0) {
-            platform.posix.close(self.prog_fd);
+            linux_platform.posix.close(self.prog_fd);
             resource_support.releaseBpfFd();
         }
         if (self.metrics_fd >= 0) {
-            platform.posix.close(self.metrics_fd);
+            linux_platform.posix.close(self.metrics_fd);
             resource_support.releaseBpfFd();
         }
         if (self.pair_metrics_fd >= 0) {
-            platform.posix.close(self.pair_metrics_fd);
+            linux_platform.posix.close(self.pair_metrics_fd);
             resource_support.releaseBpfFd();
         }
     }
@@ -104,7 +104,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!MetricsCollector {
         map0_def.max_entries,
     );
     errdefer {
-        platform.posix.close(map_fd);
+        linux_platform.posix.close(map_fd);
         resource_support.releaseBpfFd();
     }
 
@@ -116,14 +116,14 @@ pub fn load(bridge_if_index: u32) common.EbpfError!MetricsCollector {
         map1_def.max_entries,
     );
     errdefer {
-        platform.posix.close(pair_fd);
+        linux_platform.posix.close(pair_fd);
         resource_support.releaseBpfFd();
     }
 
     var map_fds = [_]posix.fd_t{ map_fd, pair_fd };
     const prog_fd = try program_support.loadProgram(metrics_prog, &map_fds);
     errdefer {
-        platform.posix.close(prog_fd);
+        linux_platform.posix.close(prog_fd);
         resource_support.releaseBpfFd();
     }
 

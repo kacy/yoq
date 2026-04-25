@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const cli = @import("../lib/cli.zig");
 const apply_release = @import("apply_release.zig");
 const release_history = @import("release_history.zig");
@@ -1052,9 +1051,9 @@ const LocalApplyBackend = struct {
             ) ![]ReplacementHealthResult {
                 const results = try alloc.alloc(ReplacementHealthResult, indexes.len);
                 @memset(results, .timeout);
-                const deadline = @as(u64, @intCast(@max(0, platform.timestamp()))) + timeout;
+                const deadline = @as(u64, @intCast(@max(0, std.Io.Clock.real.now(std.Options.debug_io).toSeconds()))) + timeout;
                 var remaining = indexes.len;
-                while (@as(u64, @intCast(@max(0, platform.timestamp()))) < deadline) {
+                while (@as(u64, @intCast(@max(0, std.Io.Clock.real.now(std.Options.debug_io).toSeconds()))) < deadline) {
                     if (runner_self.awaitControl()) {
                         for (results) |*result| {
                             if (result.* == .timeout) {

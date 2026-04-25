@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../../lib/log.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const service_observability = @import("../../network/service_observability.zig");
@@ -33,7 +32,7 @@ pub fn registerService(
     var endpoint_id_buf: [96]u8 = undefined;
     const endpoint_id = activeEndpointId(&container_id, &endpoint_id_buf);
     const generation = resolveEndpointGeneration(service_name, endpoint_id);
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 
     service_registry_runtime.syncServiceFromStore(service_name);
     proxy_control_plane.refreshIfEnabled();

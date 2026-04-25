@@ -9,7 +9,6 @@
 // and before pivotRoot.
 
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../lib/log.zig");
 const syscall_util = @import("../lib/syscall.zig");
 const env_buffer = @import("env_buffer.zig");

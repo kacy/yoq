@@ -9,7 +9,6 @@
 // the NvmlHandle is kept open for health polling if NVML was available.
 
 const std = @import("std");
-const platform = @import("platform");
 const fallback_runtime = @import("detect/fallback_runtime.zig");
 const nvml_runtime = @import("detect/nvml_runtime.zig");
 const types = @import("detect/types.zig");

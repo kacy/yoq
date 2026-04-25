@@ -16,7 +16,6 @@
 //   const result = performRollingUpdate(alloc, strategy, &context);
 
 const std = @import("std");
-const platform = @import("platform");
 const store = @import("../state/store.zig");
 const log = @import("../lib/log.zig");
 const common = @import("update/common.zig");

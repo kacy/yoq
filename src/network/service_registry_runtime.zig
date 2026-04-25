@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../lib/log.zig");
 const service_observability = @import("service_observability.zig");
 const service_registry_backfill = @import("service_registry_backfill.zig");

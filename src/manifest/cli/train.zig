@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const manifest_loader = @import("../loader.zig");
 const manifest_spec = @import("../spec.zig");
@@ -558,7 +557,7 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
     }
 
     if (ctrl.job_id) |jid| {
-        store.updateTrainingJobGpus(jid, gpus, platform.timestamp()) catch {
+        store.updateTrainingJobGpus(jid, gpus, std.Io.Clock.real.now(std.Options.debug_io).toSeconds()) catch {
             writeErr("failed to update GPU count in store\n", .{});
             return TrainError.StoreError;
         };

@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const ip = @import("../ip.zig");
 const log = @import("../../lib/log.zig");
@@ -9,7 +9,7 @@ pub fn clampPollTimeout(timeout_ms: u32) i32 {
     return @intCast(@min(timeout_ms, @as(u32, @intCast(std.math.maxInt(i32)))));
 }
 
-pub fn waitForConnect(fd: platform.posix.socket_t, timeout_ms: u32) !void {
+pub fn waitForConnect(fd: linux_platform.posix.socket_t, timeout_ms: u32) !void {
     var poll_fds = [_]posix.pollfd{
         .{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 },
     };
@@ -20,19 +20,19 @@ pub fn waitForConnect(fd: platform.posix.socket_t, timeout_ms: u32) !void {
         return error.ConnectFailed;
     }
 
-    platform.posix.getsockoptError(fd) catch |err| switch (err) {
+    linux_platform.posix.getsockoptError(fd) catch |err| switch (err) {
         error.ConnectionTimedOut => return error.ConnectTimedOut,
         else => return error.ConnectFailed,
     };
 }
 
-pub fn setSocketBlocking(fd: platform.posix.socket_t) !void {
-    const flags = platform.posix.fcntl(fd, posix.F.GETFL, 0) catch return error.ConnectFailed;
+pub fn setSocketBlocking(fd: linux_platform.posix.socket_t) !void {
+    const flags = linux_platform.posix.fcntl(fd, posix.F.GETFL, 0) catch return error.ConnectFailed;
     const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-    _ = platform.posix.fcntl(fd, posix.F.SETFL, flags & ~nonblock) catch return error.ConnectFailed;
+    _ = linux_platform.posix.fcntl(fd, posix.F.SETFL, flags & ~nonblock) catch return error.ConnectFailed;
 }
 
-pub fn setSocketTimeoutMs(fd: platform.posix.socket_t, timeout_ms: u32) void {
+pub fn setSocketTimeoutMs(fd: linux_platform.posix.socket_t, timeout_ms: u32) void {
     const tv = posix.timeval{
         .sec = @divTrunc(timeout_ms, 1000),
         .usec = @as(i64, @intCast(@rem(timeout_ms, 1000))) * 1000,
@@ -45,24 +45,24 @@ pub fn setSocketTimeoutMs(fd: platform.posix.socket_t, timeout_ms: u32) void {
     };
 }
 
-pub fn writeAll(fd: platform.posix.socket_t, data: []const u8) !void {
+pub fn writeAll(fd: linux_platform.posix.socket_t, data: []const u8) !void {
     var written: usize = 0;
     while (written < data.len) {
-        const bytes_written = platform.posix.write(fd, data[written..]) catch return error.WriteFailed;
+        const bytes_written = linux_platform.posix.write(fd, data[written..]) catch return error.WriteFailed;
         if (bytes_written == 0) return error.WriteFailed;
         written += bytes_written;
     }
 }
 
-pub fn connectToUpstream(connect_timeout_ms: u32, request_timeout_ms: u32, upstream: *const upstream_mod.Upstream) !platform.posix.socket_t {
+pub fn connectToUpstream(connect_timeout_ms: u32, request_timeout_ms: u32, upstream: *const upstream_mod.Upstream) !linux_platform.posix.socket_t {
     const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
 
-    const fd = platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0) catch
+    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0) catch
         return error.ConnectFailed;
-    errdefer platform.posix.close(fd);
+    errdefer linux_platform.posix.close(fd);
 
-    const addr = platform.net.Address.initIp4(upstream_ip, upstream.port);
-    platform.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+    const addr = linux_platform.net.Address.initIp4(upstream_ip, upstream.port);
+    linux_platform.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
         error.WouldBlock, error.ConnectionPending => try waitForConnect(fd, connect_timeout_ms),
         error.ConnectionTimedOut => return error.ConnectTimedOut,
         else => return error.ConnectFailed,

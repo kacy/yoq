@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const http = @import("../../http.zig");
 const sqlite = @import("sqlite");
 const cluster_node = @import("../../../cluster/node.zig");

@@ -9,7 +9,7 @@
 // falls back gracefully to TCP when no InfiniBand is detected.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const builtin = @import("builtin");
 const detect = @import("detect.zig");
 const log = @import("../lib/log.zig");
@@ -72,7 +72,7 @@ pub fn detectInfiniband() IbDetectResult {
     // check for GPUDirect RDMA (nvidia-peermem)
     result.gdr_available = checkGdr();
 
-    var ib_dir = platform.openDirAbsolute(detect_paths.ib_root, .{ .iterate = true }) catch return result;
+    var ib_dir = linux_platform.openDirAbsolute(detect_paths.ib_root, .{ .iterate = true }) catch return result;
     defer ib_dir.close();
 
     var iter = ib_dir.iterate();

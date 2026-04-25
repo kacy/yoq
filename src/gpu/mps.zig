@@ -13,7 +13,6 @@
 // from multiple client processes onto a single GPU.
 
 const std = @import("std");
-const platform = @import("platform");
 const log = @import("../lib/log.zig");
 const env_buffer = @import("env_buffer.zig");
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const http2_request = @import("../../network/proxy/http2_request.zig");
@@ -48,7 +48,7 @@ pub fn handleTlsSession(
     transcript.update(client_hello[5 .. 5 + rec_len]);
 
     var server_random: [32]u8 = undefined;
-    platform.randomBytes(&server_random);
+    linux_platform.randomBytes(&server_random);
 
     var sh_buf: [512]u8 = undefined;
     const sh_len = handshake.buildServerHello(
@@ -62,13 +62,13 @@ pub fn handleTlsSession(
     var sh_record: [5 + 512]u8 = undefined;
     record.writeHeader(&sh_record, .handshake, @intCast(sh_len)) catch return error.HandshakeFailed;
     @memcpy(sh_record[5 .. 5 + sh_len], sh_buf[0..sh_len]);
-    _ = platform.posix.write(client_fd, sh_record[0 .. 5 + sh_len]) catch return error.WriteFailed;
+    _ = linux_platform.posix.write(client_fd, sh_record[0 .. 5 + sh_len]) catch return error.WriteFailed;
     transcript.update(sh_buf[0..sh_len]);
 
     const ccs = [_]u8{
         0x14, 0x03, 0x03, 0x00, 0x01, 0x01,
     };
-    _ = platform.posix.write(client_fd, &ccs) catch return error.WriteFailed;
+    _ = linux_platform.posix.write(client_fd, &ccs) catch return error.WriteFailed;
 
     var transcript_hash: [hash_len]u8 = undefined;
     transcript_hash = transcript.peek();
@@ -167,7 +167,7 @@ pub fn handleTlsSession(
     handshake_complete.* = true;
 
     const backend_fd = socket_support.connectToBackend(backend_info) catch return error.BackendConnectFailed;
-    defer platform.posix.close(backend_fd);
+    defer linux_platform.posix.close(backend_fd);
 
     var client_app_seq: u64 = 0;
     var server_app_seq: u64 = 0;
@@ -223,7 +223,7 @@ pub fn handleTlsSession(
                         if (rewritten_chunk == null) break;
                         defer rewritten_chunk.?.deinit(std.heap.page_allocator);
                         if (rewritten_chunk.?.bytes.len > 0) {
-                            _ = platform.posix.write(backend_fd, rewritten_chunk.?.bytes) catch break;
+                            _ = linux_platform.posix.write(backend_fd, rewritten_chunk.?.bytes) catch break;
                         }
                         initial_plaintext.replaceRange(std.heap.page_allocator, 0, rewritten_chunk.?.consumed, "") catch break;
                     }
@@ -235,11 +235,11 @@ pub fn handleTlsSession(
                     };
                     if (first_request) |request| {
                         defer std.heap.page_allocator.free(request);
-                        _ = platform.posix.write(backend_fd, request) catch break;
+                        _ = linux_platform.posix.write(backend_fd, request) catch break;
                         initial_request_forwarded = true;
                     }
                 } else {
-                    _ = platform.posix.write(backend_fd, decrypted.plaintext) catch break;
+                    _ = linux_platform.posix.write(backend_fd, decrypted.plaintext) catch break;
                 }
             }
         }
@@ -263,7 +263,7 @@ pub fn handleTlsSession(
             var out_rec: [5 + record.max_ciphertext_size]u8 = undefined;
             record.writeHeader(&out_rec, .application_data, @intCast(ct_len)) catch break;
             @memcpy(out_rec[5 .. 5 + ct_len], ct_out[0..ct_len]);
-            _ = platform.posix.write(client_fd, out_rec[0 .. 5 + ct_len]) catch break;
+            _ = linux_platform.posix.write(client_fd, out_rec[0 .. 5 + ct_len]) catch break;
         }
     }
 
@@ -318,7 +318,7 @@ pub fn sendEncryptedHandshake(fd: posix.fd_t, msg: []const u8, keys: handshake.T
     var out: [5 + record.max_ciphertext_size]u8 = undefined;
     record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return error.EncryptFailed;
     @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
-    _ = platform.posix.write(fd, out[0 .. 5 + ct_len]) catch return error.WriteFailed;
+    _ = linux_platform.posix.write(fd, out[0 .. 5 + ct_len]) catch return error.WriteFailed;
     seq.* += 1;
 }
 
@@ -337,7 +337,7 @@ pub fn sendEncryptedCloseNotify(fd: posix.fd_t, keys: handshake.TrafficKeys, seq
     var out: [5 + 64]u8 = undefined;
     record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return;
     @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
-    _ = platform.posix.write(fd, out[0 .. 5 + ct_len]) catch |e| {
+    _ = linux_platform.posix.write(fd, out[0 .. 5 + ct_len]) catch |e| {
         log.warn("tls encrypted data write failed: {}", .{e});
         return;
     };

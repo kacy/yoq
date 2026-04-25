@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const sqlite = @import("sqlite");
 const schema = @import("../schema.zig");
 const common = @import("common.zig");
@@ -43,7 +42,7 @@ pub const SecretsStore = struct {
             return common.SecretsError.EncryptionFailed;
         defer self.allocator.free(encrypted.ciphertext);
 
-        const now: i64 = platform.timestamp();
+        const now: i64 = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
         const existing = self.getTimestamp(name);
         const created_at = existing orelse now;
 
@@ -150,7 +149,7 @@ pub const SecretsStore = struct {
         var transaction_open = true;
         errdefer if (transaction_open) self.db.exec("ROLLBACK;", .{}, .{}) catch {};
 
-        const now = platform.timestamp();
+        const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
         for (names.items, 0..) |name, i| {
             const created_at = self.getTimestamp(name) orelse now;
             const encrypted = crypto_runtime.encrypt(self.allocator, plaintexts.items[i], new_key) catch

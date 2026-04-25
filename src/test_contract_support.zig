@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const paths = @import("lib/paths.zig");
 
 pub var contract_lock: std.Io.Mutex = .init;

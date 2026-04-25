@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const dns = @import("dns.zig");
 const dns_registry = @import("dns/registry_support.zig");
 const log = @import("../lib/log.zig");
@@ -155,7 +154,7 @@ fn persistEndpoint(service_name: []const u8, endpoint_id: []const u8, container_
 
     var ip_buf: [16]u8 = undefined;
     const ip_address = @import("ip.zig").formatIp(container_ip, &ip_buf);
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const persisted_node_id = resolveNodeId(service_name, endpoint_id, node_id);
     const existing = store.getServiceEndpoint(alloc, service_name, endpoint_id) catch |err| switch (err) {
         store.StoreError.NotFound => null,

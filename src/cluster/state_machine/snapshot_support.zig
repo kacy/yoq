@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const sqlite = @import("sqlite");
 const types = @import("../raft_types.zig");
 const db_runtime = @import("db_runtime.zig");
@@ -167,7 +167,7 @@ fn createUniqueTempFile(buf: []u8, prefix: []const u8, suffix: []const u8) Snaps
 
 fn randomU64() u64 {
     var bytes: [8]u8 = undefined;
-    platform.randomBytes(&bytes);
+    linux_platform.randomBytes(&bytes);
     return std.mem.readInt(u64, &bytes, .little);
 }
 

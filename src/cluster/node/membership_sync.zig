@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const agent_registry = @import("../registry.zig");
 const scheduler = @import("../scheduler.zig");
 const gossip_mod = @import("../gossip.zig");
@@ -17,7 +16,7 @@ fn proposeUnderLock(self: anytype, sql: []const u8) !void {
 }
 
 pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecord) void {
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const base_timeout: i64 = 30;
     const multiplier: i64 = if (self.gossip) |g| blk: {
         const member_count = g.members.count() + 1;
@@ -81,7 +80,7 @@ pub fn reconcileOrphanedAssignments(
 }
 
 pub fn cleanupDeadAgents(self: anytype, agents: []const agent_registry.AgentRecord) void {
-    const now = platform.timestamp();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const dead_timeout: i64 = 3600;
 
     for (agents) |agent| {

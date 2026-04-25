@@ -4,7 +4,6 @@
 // imports the actual test content from tests/fuzz/.
 
 const std = @import("std");
-const platform = @import("platform");
 const loader = @import("manifest/loader.zig");
 
 const alloc = std.testing.allocator;

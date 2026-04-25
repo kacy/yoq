@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const types = @import("../raft_types.zig");
 
@@ -31,13 +31,13 @@ pub const Message = union(enum) {
 };
 
 pub const ReceivedMessage = struct {
-    from_addr: platform.net.Address,
+    from_addr: linux_platform.net.Address,
     sender_id: ?NodeId,
     message: Message,
 };
 
 pub const PeerAddr = struct {
-    addr: platform.net.Address,
+    addr: linux_platform.net.Address,
 };
 
 pub const VerifiedBody = struct {
@@ -47,7 +47,7 @@ pub const VerifiedBody = struct {
 
 pub const GossipReceiveResult = struct {
     sender_id: u64,
-    from_addr: platform.net.Address,
+    from_addr: linux_platform.net.Address,
     payload: []const u8,
 };
 
@@ -60,7 +60,7 @@ pub const msg_install_snapshot_reply: u8 = 0x06;
 
 pub const max_receive_size: u32 = 64 * 1024 * 1024;
 
-pub fn samePeerIp(expected: platform.net.Address, actual: platform.net.Address) bool {
+pub fn samePeerIp(expected: linux_platform.net.Address, actual: linux_platform.net.Address) bool {
     if (expected.any.family != actual.any.family) return false;
     return std.mem.eql(u8, std.mem.asBytes(&expected.in.addr), std.mem.asBytes(&actual.in.addr));
 }
@@ -81,7 +81,7 @@ pub fn readU32(buf: []const u8) u32 {
     return std.mem.readInt(u32, buf[0..4], .little);
 }
 
-pub fn readExact(fd: platform.posix.socket_t, buf: []u8) !void {
+pub fn readExact(fd: linux_platform.posix.socket_t, buf: []u8) !void {
     var total: usize = 0;
     while (total < buf.len) {
         const bytes_read = posix.read(fd, buf[total..]) catch return error.ReadFailed;

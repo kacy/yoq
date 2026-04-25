@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const http = @import("api/http.zig");
 const routes = @import("api/routes.zig");
@@ -15,12 +15,12 @@ fn runHandleConnectionRaw(alloc: std.mem.Allocator, raw_request: []const u8) ![]
     defer file.close(std.testing.io);
 
     try file.writeStreamingAll(std.testing.io, raw_request);
-    _ = try platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
+    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
     const dup_fd = try posix.dup(file.handle);
     connection_runtime.handleConnection(alloc, dup_fd);
 
-    _ = try platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
+    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
     const contents = try tmp.dir.readFileAlloc(std.testing.io, "raw-http.txt", alloc, .limited(raw_request.len + 16 * 1024));
     errdefer alloc.free(contents);
 

@@ -5,7 +5,7 @@
 // modules to avoid duplicating common patterns.
 
 const std = @import("std");
-const platform = @import("platform");
+const linux_platform = @import("linux_platform");
 const ip = @import("../network/ip.zig");
 const net_setup = @import("../network/setup.zig");
 const paths = @import("paths.zig");
@@ -296,7 +296,7 @@ pub fn generateAndSaveToken(buf: *[64]u8) ?[]const u8 {
 /// returns the hex string in the provided buffer, or null on failure.
 pub fn generateAndSaveTokenWithIo(io: std.Io, buf: *[64]u8) ?[]const u8 {
     var raw: [32]u8 = undefined;
-    platform.randomBytes(&raw);
+    linux_platform.randomBytes(&raw);
     defer std.crypto.secureZero(u8, &raw);
 
     const hex = std.fmt.bytesToHex(raw, .lower);

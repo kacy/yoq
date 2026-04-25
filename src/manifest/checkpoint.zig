@@ -10,7 +10,6 @@
 // the training container can restore from it.
 
 const std = @import("std");
-const platform = @import("platform");
 const store = @import("../state/store.zig");
 const spec = @import("spec.zig");
 
