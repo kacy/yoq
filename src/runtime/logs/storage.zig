@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const paths = @import("../../lib/paths.zig");
 const container = @import("../container.zig");
 const common = @import("common.zig");
@@ -12,44 +11,50 @@ pub fn logPath(buf: *[paths.max_path]u8, container_id: []const u8) LogError![]co
         return LogError.PathTooLong;
 }
 
-pub fn createLogFile(container_id: []const u8) LogError!platform.File {
+pub fn createLogFile(container_id: []const u8) LogError!std.Io.File {
     if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
 
-    paths.ensureDataDir(common.logs_subdir) catch {};
+    paths.ensureDataDirWithIo(std.Options.debug_io, common.logs_subdir) catch {};
 
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
-    return platform.cwd().createFile(file_path, .{}) catch
+    return std.Io.Dir.cwd().createFile(std.Options.debug_io, file_path, .{}) catch
         return LogError.CreateFailed;
 }
 
 pub fn readLogs(alloc: std.mem.Allocator, container_id: []const u8) LogError![]const u8 {
+    return readLogsWithIo(std.Options.debug_io, alloc, container_id);
+}
+
+pub fn readLogsWithIo(io: std.Io, alloc: std.mem.Allocator, container_id: []const u8) LogError![]const u8 {
     if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
 
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
-    const file = platform.cwd().openFile(file_path, .{}) catch
-        return LogError.NotFound;
-    defer file.close();
-
-    return file.readToEndAlloc(alloc, 10 * 1024 * 1024) catch
-        return LogError.ReadFailed;
+    return std.Io.Dir.cwd().readFileAlloc(io, file_path, alloc, .limited(10 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return LogError.NotFound,
+        else => return LogError.ReadFailed,
+    };
 }
 
 pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
+    return readTailWithIo(std.Options.debug_io, alloc, container_id, n);
+}
+
+pub fn readTailWithIo(io: std.Io, alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
     if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
-    if (n == 0) return readLogs(alloc, container_id);
+    if (n == 0) return readLogsWithIo(io, alloc, container_id);
 
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
-    const file = platform.cwd().openFile(file_path, .{}) catch
+    var file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch
         return LogError.NotFound;
-    defer file.close();
+    defer file.close(io);
 
-    const file_size = file.getEndPos() catch return LogError.ReadFailed;
+    const file_size = file.length(io) catch return LogError.ReadFailed;
     if (file_size == 0) {
         return alloc.dupe(u8, "") catch return LogError.ReadFailed;
     }
@@ -58,10 +63,11 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
     const read_size = @min(file_size, tail_chunk_size);
     const seek_pos = file_size - read_size;
 
-    file.seekTo(seek_pos) catch return LogError.ReadFailed;
+    var file_reader = file.reader(io, &.{});
+    file_reader.seekTo(seek_pos) catch return LogError.ReadFailed;
 
     const buf = alloc.alloc(u8, @intCast(read_size)) catch return LogError.ReadFailed;
-    const bytes_read = file.readAll(buf) catch {
+    const bytes_read = file_reader.interface.readSliceShort(buf) catch {
         alloc.free(buf);
         return LogError.ReadFailed;
     };
@@ -80,13 +86,17 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
     if (seek_pos == 0) return buf;
 
     alloc.free(buf);
-    return readTailFull(alloc, container_id, n);
+    return readTailFullWithIo(io, alloc, container_id, n);
 }
 
 fn readTailFull(alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
+    return readTailFullWithIo(std.Options.debug_io, alloc, container_id, n);
+}
+
+fn readTailFullWithIo(io: std.Io, alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
     if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
 
-    const full = try readLogs(alloc, container_id);
+    const full = try readLogsWithIo(io, alloc, container_id);
 
     const tail = extractLastNLines(full, n);
     if (tail.ptr != full.ptr) {
@@ -121,7 +131,7 @@ pub fn deleteLogFile(container_id: []const u8) void {
 
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = logPath(&path_buf, container_id) catch return;
-    platform.cwd().deleteFile(file_path) catch {};
+    std.Io.Dir.cwd().deleteFile(std.Options.debug_io, file_path) catch {};
 }
 
 test "logPath validates container ID" {

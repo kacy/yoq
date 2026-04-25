@@ -255,8 +255,8 @@ test "log server serves remote training logs with auth" {
     defer clearTestLogLookupOverride(app_name, job_name, 0);
 
     var file = try logs.createLogFile(container_id);
-    defer file.close();
-    try file.writeAll("rank zero logs\n");
+    defer file.close(std.Options.debug_io);
+    try file.writeStreamingAll(std.Options.debug_io, "rank zero logs\n");
 
     var sockets: [2]std.posix.fd_t = undefined;
     if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;

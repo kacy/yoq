@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const posix = std.posix;
 const linux = std.os.linux;
 const paths = @import("../../lib/paths.zig");
@@ -12,18 +11,24 @@ const storage = @import("storage.zig");
 pub const LogError = common.LogError;
 
 pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t) LogError!void {
+    return followLogsWithIo(std.Options.debug_io, container_id, tail_lines, pid);
+}
+
+pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t) LogError!void {
     if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
 
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try storage.logPath(&path_buf, container_id);
 
-    const file = platform.cwd().openFile(file_path, .{}) catch return LogError.NotFound;
-    defer file.close();
+    var file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch return LogError.NotFound;
+    defer file.close(io);
 
-    const tail = try prepareFollowStart(file, container_id, tail_lines);
+    var file_buffer: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &file_buffer);
+    const tail = try prepareFollowStart(io, &file_reader, container_id, tail_lines);
     defer if (tail) |data| std.heap.page_allocator.free(data);
     if (tail) |data| {
-        if (data.len > 0) try common.writeToStdout(data);
+        if (data.len > 0) try common.writeToStdoutWithIo(io, data);
     }
 
     const fd = @as(posix.fd_t, @intCast(syscall.unwrap(linux.inotify_init1(linux.IN.CLOEXEC)) catch return LogError.ReadFailed));
@@ -35,40 +40,39 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t
 
     defer {
         _ = linux.inotify_rm_watch(fd, @intCast(wd));
-        platform.posix.close(fd);
+        _ = linux.close(fd);
     }
 
     var event_buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
     var read_buf: [4096]u8 = undefined;
 
     while (true) {
-        if (drainNewBytes(file, &read_buf) == false and !isContainerPidRunning(container_id, pid)) break;
+        if (drainNewBytes(io, &file_reader, &read_buf) == false and !isContainerPidRunning(io, container_id, pid)) break;
         _ = posix.read(fd, &event_buf) catch break;
     }
 
-    _ = drainNewBytes(file, &read_buf);
+    _ = drainNewBytes(io, &file_reader, &read_buf);
 }
 
-fn prepareFollowStart(file: platform.File, container_id: []const u8, tail_lines: usize) LogError!?[]const u8 {
+fn prepareFollowStart(io: std.Io, file_reader: *std.Io.File.Reader, container_id: []const u8, tail_lines: usize) LogError!?[]const u8 {
     if (tail_lines > 0) {
-        const tail = try storage.readTail(std.heap.page_allocator, container_id, tail_lines);
+        const tail = try storage.readTailWithIo(io, std.heap.page_allocator, container_id, tail_lines);
         errdefer std.heap.page_allocator.free(tail);
 
-        try seekToEnd(file);
+        try seekToEnd(file_reader);
         return tail;
     }
 
-    try seekToEnd(file);
+    try seekToEnd(file_reader);
     return null;
 }
 
-fn seekToEnd(file: platform.File) LogError!void {
-    const end_pos = file.getEndPos() catch return LogError.ReadFailed;
-    file.seekTo(end_pos) catch return LogError.ReadFailed;
+fn seekToEnd(file_reader: *std.Io.File.Reader) LogError!void {
+    const end_pos = file_reader.getSize() catch return LogError.ReadFailed;
+    file_reader.seekTo(end_pos) catch return LogError.ReadFailed;
 }
 
-fn drainNewBytes(file: platform.File, buf: []u8) bool {
-    const io = std.Options.debug_io;
+fn drainNewBytes(io: std.Io, file_reader: *std.Io.File.Reader, buf: []u8) bool {
     const prev = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(prev);
 
@@ -76,7 +80,7 @@ fn drainNewBytes(file: platform.File, buf: []u8) bool {
     var stdout_writer = std.Io.File.stdout().writer(io, &out_buf);
     var saw_bytes = false;
     while (true) {
-        const bytes_read = file.read(buf) catch return saw_bytes;
+        const bytes_read = file_reader.interface.readSliceShort(buf) catch return saw_bytes;
         if (bytes_read == 0) break;
         saw_bytes = true;
         stdout_writer.interface.writeAll(buf[0..bytes_read]) catch return saw_bytes;
@@ -85,25 +89,27 @@ fn drainNewBytes(file: platform.File, buf: []u8) bool {
     return saw_bytes;
 }
 
-fn isContainerPidRunning(container_id: []const u8, pid: ?posix.pid_t) bool {
+fn isContainerPidRunning(io: std.Io, container_id: []const u8, pid: ?posix.pid_t) bool {
     const proc_pid = pid orelse return false;
-    if (!procCgroupMatchesContainer(proc_pid, container_id)) return false;
+    if (!procCgroupMatchesContainer(io, proc_pid, container_id)) return false;
     process.sendSignal(proc_pid, 0) catch return false;
     return true;
 }
 
-fn procCgroupMatchesContainer(pid: posix.pid_t, container_id: []const u8) bool {
+fn procCgroupMatchesContainer(io: std.Io, pid: posix.pid_t, container_id: []const u8) bool {
     if (!container.isValidContainerId(container_id)) return false;
 
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cgroup", .{pid}) catch return false;
 
-    const file = platform.cwd().openFile(path, .{}) catch return false;
-    defer file.close();
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer file.close(io);
 
-    var buf: [4096]u8 = undefined;
-    const bytes_read = file.readAll(&buf) catch return false;
-    return procCgroupContentMatchesContainer(buf[0..bytes_read], container_id);
+    var file_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &file_buf);
+    var content_buf: [4096]u8 = undefined;
+    const bytes_read = reader.interface.readSliceShort(&content_buf) catch return false;
+    return procCgroupContentMatchesContainer(content_buf[0..bytes_read], container_id);
 }
 
 fn procCgroupContentMatchesContainer(content: []const u8, container_id: []const u8) bool {
@@ -136,14 +142,17 @@ test "procCgroupContentMatchesContainer matches exact yoq cgroup path" {
 test "seekToEnd moves watched file to end" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    const file = platform.Dir.from(tmp_dir.dir).createFile("follow.log", .{ .read = true }) catch unreachable;
-    defer file.close();
+    var file = tmp_dir.dir.createFile(std.testing.io, "follow.log", .{ .read = true }) catch unreachable;
+    defer file.close(std.testing.io);
 
-    file.writeAll("one\ntwo\nthree\n") catch unreachable;
-    const end_pos = file.getEndPos() catch unreachable;
-    try file.seekTo(0);
-    try seekToEnd(file);
-    try std.testing.expectEqual(end_pos, try file.getPos());
+    try file.writeStreamingAll(std.testing.io, "one\ntwo\nthree\n");
+    const end_pos = file.length(std.testing.io) catch unreachable;
+
+    var file_buf: [128]u8 = undefined;
+    var reader = file.reader(std.testing.io, &file_buf);
+    try reader.seekTo(0);
+    try seekToEnd(&reader);
+    try std.testing.expectEqual(end_pos, reader.logicalPos());
 }
 
 test "followLogs validates container ID" {

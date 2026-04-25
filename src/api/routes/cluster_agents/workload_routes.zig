@@ -881,8 +881,8 @@ test "training logs route prefers local logs when available" {
         .created_at = 100,
     });
     var file = try @import("../../../runtime/logs.zig").createLogFile("abc123def456");
-    try file.writeAll("local rank logs\n");
-    file.close();
+    try file.writeStreamingAll(std.Options.debug_io, "local rank logs\n");
+    file.close(std.Options.debug_io);
 
     try seedTrainingAssignment(&harness, "demo-app", "finetune", 0);
     try clearHarnessAgentEndpoint(&harness);

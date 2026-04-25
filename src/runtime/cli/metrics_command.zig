@@ -44,7 +44,7 @@ const MetricsError = error{
     StoreError,
 };
 
-pub fn metrics(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn metrics(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var service_filter: ?[]const u8 = null;
     var server: ?cli.ServerAddr = null;
     var pairs_mode = false;
@@ -66,12 +66,12 @@ pub fn metrics(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
     }
 
     if (pairs_mode) {
-        if (server) |s| try metricsPairsRemote(alloc, s.ip, s.port) else try metricsPairs(alloc);
+        if (server) |s| try metricsPairsRemote(io, alloc, s.ip, s.port) else try metricsPairs(alloc);
         return;
     }
 
     if (server) |s| {
-        try metricsRemote(alloc, s.ip, s.port, service_filter);
+        try metricsRemote(io, alloc, s.ip, s.port, service_filter);
         return;
     }
 
@@ -149,7 +149,7 @@ fn metricsLocal(alloc: std.mem.Allocator, service_filter: ?[]const u8) MetricsEr
     }
 }
 
-fn metricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filter: ?[]const u8) MetricsError!void {
+fn metricsRemote(io: std.Io, alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filter: ?[]const u8) MetricsError!void {
     var path_buf: [128]u8 = undefined;
     const path = if (service_filter) |svc|
         std.fmt.bufPrint(&path_buf, "/v1/metrics?service={s}", .{svc}) catch "/v1/metrics"
@@ -157,7 +157,7 @@ fn metricsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16, service_filte
         @as([]const u8, "/v1/metrics");
 
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.getWithAuth(alloc, addr, port, path, token) catch {
         writeErr("failed to connect to server\n", .{});
@@ -253,9 +253,9 @@ fn metricsPairs(alloc: std.mem.Allocator) MetricsError!void {
     }
 }
 
-fn metricsPairsRemote(alloc: std.mem.Allocator, addr: [4]u8, port: u16) MetricsError!void {
+fn metricsPairsRemote(io: std.Io, alloc: std.mem.Allocator, addr: [4]u8, port: u16) MetricsError!void {
     var token_buf: [64]u8 = undefined;
-    const token = cli.readApiToken(&token_buf);
+    const token = cli.readApiTokenWithIo(io, &token_buf);
 
     var resp = http_client.getWithAuth(alloc, addr, port, "/v1/metrics?mode=pairs", token) catch {
         writeErr("failed to connect to server\n", .{});

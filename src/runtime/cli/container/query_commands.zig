@@ -122,7 +122,7 @@ pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
     std.process.exit(exit_code);
 }
 
-pub fn log(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn log(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     const ref = cli.requireArg(args, "usage: yoq logs <container-id|name> [--tail N] [-f]\n");
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
@@ -145,7 +145,7 @@ pub fn log(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     }
 
     if (follow) {
-        logs.followLogs(record.id, tail_lines, record.pid) catch |err| {
+        logs.followLogsWithIo(io, record.id, tail_lines, record.pid) catch |err| {
             writeErr("failed to follow logs for container: {s} ({})\n", .{ record.id, err });
             std.process.exit(1);
         };
@@ -153,9 +153,9 @@ pub fn log(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     }
 
     const content = if (tail_lines > 0)
-        logs.readTail(alloc, record.id, tail_lines)
+        logs.readTailWithIo(io, alloc, record.id, tail_lines)
     else
-        logs.readLogs(alloc, record.id);
+        logs.readLogsWithIo(io, alloc, record.id);
 
     const data = content catch |err| {
         writeErr("no logs found for container: {s} ({})\n", .{ record.id, err });

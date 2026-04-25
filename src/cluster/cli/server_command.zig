@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform");
 const cli = @import("../../lib/cli.zig");
 const api_server = @import("../../api/server.zig");
 const routes = @import("../../api/routes.zig");
@@ -16,8 +15,8 @@ const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
 
 const writeErr = cli.writeErr;
-const readApiToken = cli.readApiToken;
-const generateAndSaveToken = cli.generateAndSaveToken;
+const readApiTokenWithIo = cli.readApiTokenWithIo;
+const generateAndSaveTokenWithIo = cli.generateAndSaveTokenWithIo;
 const isValidApiToken = cli.isValidApiToken;
 
 const ServerCommandError = error{
@@ -26,7 +25,7 @@ const ServerCommandError = error{
     ConfigFailed,
 };
 
-pub fn serve(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn serve(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var port: u16 = 7700;
     var http_proxy_bind: [4]u8 = listener_runtime.default_bind_addr;
     var http_proxy_port: u16 = listener_runtime.default_listen_port;
@@ -90,7 +89,7 @@ pub fn serve(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     defer proxy_control_plane.stopSyncLoop();
 
     var token_buf: [64]u8 = undefined;
-    const token: ?[]const u8 = readApiToken(&token_buf) orelse generateAndSaveToken(&token_buf);
+    const token: ?[]const u8 = readApiTokenWithIo(io, &token_buf) orelse generateAndSaveTokenWithIo(io, &token_buf);
 
     if (token) |t| {
         routes.api_token = t;
@@ -114,7 +113,7 @@ pub fn serve(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     server.run();
 }
 
-pub fn initServer(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var node_id: u64 = 1;
     var raft_port: u16 = 9700;
     var api_port: u16 = 7700;
@@ -250,7 +249,7 @@ pub fn initServer(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !v
             break :blk provided;
         }
 
-        const from_file = readApiToken(&api_token_buf) orelse {
+        const from_file = readApiTokenWithIo(io, &api_token_buf) orelse {
             writeErr("cluster mode requires an API token. provide --api-token or create ~/.local/share/yoq/api_token with 0o600 permissions\n", .{});
             return ServerCommandError.InvalidArgument;
         };

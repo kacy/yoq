@@ -179,7 +179,7 @@ pub fn cleanupFailedSpawn(
 pub fn finalizeRuntime(self: anytype, exit_code: u8) void {
     if (self.runtime.stdout_thread) |thread| thread.join();
     if (self.runtime.stderr_thread) |thread| thread.join();
-    if (self.runtime.log_file) |log_file| log_file.close();
+    if (self.runtime.log_file) |log_file| log_file.close(std.Options.debug_io);
 
     var final_status: []const u8 = "stopped";
 

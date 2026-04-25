@@ -5,7 +5,6 @@
 // create, start, stop, remove.
 
 const std = @import("std");
-const platform = @import("platform");
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -124,7 +123,7 @@ pub const ContainerConfig = struct {
 pub const Container = struct {
     const RuntimeHandles = struct {
         cgroup: ?cgroups.Cgroup = null,
-        log_file: ?platform.File = null,
+        log_file: ?std.Io.File = null,
         stdout_thread: ?std.Thread = null,
         stderr_thread: ?std.Thread = null,
         mirror_output: bool = false,
@@ -497,15 +496,17 @@ test "canonical bind source rejects symlink path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try platform.Dir.from(tmp.dir).makeDir("real");
-    try platform.Dir.from(tmp.dir).symLink("real", "link", .{});
+    try tmp.dir.createDir(std.testing.io, "real", .default_dir);
+    try tmp.dir.symLink(std.testing.io, "real", "link", .{});
 
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real_path = try platform.Dir.from(tmp.dir).realpath("real", &real_buf);
+    const real_len = try tmp.dir.realPathFile(std.testing.io, "real", &real_buf);
+    const real_path = real_buf[0..real_len];
     try std.testing.expect(isCanonicalBindSource(real_path));
 
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base_path = try platform.Dir.from(tmp.dir).realpath(".", &base_buf);
+    const base_len = try tmp.dir.realPathFile(std.testing.io, ".", &base_buf);
+    const base_path = base_buf[0..base_len];
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_buf, "{s}/link", .{base_path});
     try std.testing.expect(!isCanonicalBindSource(link_path));
