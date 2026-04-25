@@ -34,7 +34,7 @@ pub const Cgroup = struct {
     var v2_cached: enum { unknown, yes, no } = .unknown;
     pub fn isV2Available() bool {
         if (v2_cached != .unknown) return v2_cached == .yes;
-        platform.cwd().access(cgroup_root ++ "/cgroup.controllers", .{}) catch {
+        std.Io.Dir.cwd().access(std.Options.debug_io, cgroup_root ++ "/cgroup.controllers", .{}) catch {
             v2_cached = .no;
             return false;
         };
@@ -48,7 +48,7 @@ pub const Cgroup = struct {
 
         const cg = open(container_id) catch return CgroupError.CreateFailed;
 
-        platform.cwd().makeDir(cgroup_root ++ "/" ++ yoq_prefix) catch |e| switch (e) {
+        std.Io.Dir.cwd().createDir(std.Options.debug_io, cgroup_root ++ "/" ++ yoq_prefix, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return CgroupError.CreateFailed,
         };
@@ -57,7 +57,7 @@ pub const Cgroup = struct {
             subtree_controllers_enabled = enableSubtreeControllers(cgroup_root ++ "/" ++ yoq_prefix);
         }
 
-        platform.cwd().makeDir(cg.path()) catch |e| switch (e) {
+        std.Io.Dir.cwd().createDir(std.Options.debug_io, cg.path(), .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return CgroupError.CreateFailed,
         };
@@ -182,8 +182,8 @@ pub const Cgroup = struct {
     pub fn readAllMetrics(self: *const Cgroup) common.CgroupMetrics {
         var metrics: common.CgroupMetrics = .{};
 
-        var dir = platform.cwd().openDir(self.path(), .{}) catch return metrics;
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(std.Options.debug_io, self.path(), .{}) catch return metrics;
+        defer dir.close(std.Options.debug_io);
 
         {
             var buf: [64]u8 = undefined;
@@ -258,7 +258,7 @@ pub const Cgroup = struct {
             return CgroupError.DeleteFailed;
         }
 
-        platform.cwd().deleteDir(self.path()) catch return CgroupError.DeleteFailed;
+        std.Io.Dir.cwd().deleteDir(std.Options.debug_io, self.path()) catch return CgroupError.DeleteFailed;
     }
 
     fn isEmpty(self: *const Cgroup) bool {
@@ -306,21 +306,17 @@ pub const Cgroup = struct {
         var path_buf: [512]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ self.path(), filename }) catch return error.WriteFailed;
 
-        const file = platform.cwd().openFile(file_path, .{ .mode = .write_only }) catch return error.WriteFailed;
-        defer file.close();
-
-        file.writeAll(value) catch return error.WriteFailed;
+        var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, file_path, .{ .mode = .write_only }) catch return error.WriteFailed;
+        defer file.close(std.Options.debug_io);
+        file.writeStreamingAll(std.Options.debug_io, value) catch return error.WriteFailed;
     }
 
     fn readFile(self: *const Cgroup, filename: []const u8, buf: []u8) ![]const u8 {
         var path_buf: [512]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ self.path(), filename }) catch return error.ReadFailed;
 
-        const file = platform.cwd().openFile(file_path, .{}) catch return error.ReadFailed;
-        defer file.close();
-
-        const bytes_read = file.readAll(buf) catch return error.ReadFailed;
-        return std.mem.trimEnd(u8, buf[0..bytes_read], "\n ");
+        const content = std.Io.Dir.cwd().readFile(std.Options.debug_io, file_path, buf) catch return error.ReadFailed;
+        return std.mem.trimEnd(u8, content, "\n ");
     }
 
     fn readU64(self: *const Cgroup, filename: []const u8) CgroupError!u64 {
@@ -339,22 +335,19 @@ pub const Cgroup = struct {
 fn enableSubtreeControllers(dir_path: []const u8) bool {
     var ctrl_buf: [512]u8 = undefined;
     const ctrl_path = std.fmt.bufPrint(&ctrl_buf, "{s}/cgroup.subtree_control", .{dir_path}) catch return false;
-    const file = platform.cwd().openFile(ctrl_path, .{ .mode = .write_only }) catch return false;
-    defer file.close();
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, ctrl_path, .{ .mode = .write_only }) catch return false;
+    defer file.close(std.Options.debug_io);
 
     var controllers_path_buf: [512]u8 = undefined;
     const controllers_path = std.fmt.bufPrint(&controllers_path_buf, "{s}/cgroup.controllers", .{dir_path}) catch return false;
-    const controllers_file = platform.cwd().openFile(controllers_path, .{}) catch return false;
-    defer controllers_file.close();
-
     var available_buf: [256]u8 = undefined;
-    const available_len = controllers_file.readAll(&available_buf) catch return false;
-    const available = std.mem.trim(u8, available_buf[0..available_len], " \n\r\t");
+    const available = std.Io.Dir.cwd().readFile(std.Options.debug_io, controllers_path, &available_buf) catch return false;
+    const available_trimmed = std.mem.trim(u8, available, " \n\r\t");
 
     var desired_buf: [64]u8 = undefined;
-    const desired = buildDesiredSubtreeControl(available, &desired_buf) orelse return false;
+    const desired = buildDesiredSubtreeControl(available_trimmed, &desired_buf) orelse return false;
 
-    file.writeAll(desired) catch {
+    file.writeStreamingAll(std.Options.debug_io, desired) catch {
         log.warn("cgroup: failed to enable subtree controllers '{s}' for {s}", .{ desired, dir_path });
         return false;
     };

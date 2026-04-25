@@ -145,7 +145,7 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
 
     const full_target: [*:0]const u8 = @ptrCast(&target_buf);
 
-    platform.cwd().makePath(target_buf[0..target_pos]) catch return FilesystemError.MkdirFailed;
+    std.Io.Dir.cwd().createDirPath(std.Options.debug_io, target_buf[0..target_pos]) catch return FilesystemError.MkdirFailed;
 
     var flags: u32 = linux.MS.BIND | linux.MS.REC;
     const rc = linux.mount(source_z, full_target, null, flags, 0);

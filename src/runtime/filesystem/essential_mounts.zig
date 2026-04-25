@@ -143,7 +143,7 @@ fn createDeviceNodesAt(target_root: []const u8) void {
 }
 
 fn mkdirIfNeeded(path: []const u8) !void {
-    platform.cwd().makeDir(path) catch |e| switch (e) {
+    std.Io.Dir.cwd().createDir(std.Options.debug_io, path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };

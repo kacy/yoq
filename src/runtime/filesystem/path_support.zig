@@ -47,7 +47,8 @@ pub fn isCanonicalAbsolutePath(path: []const u8) bool {
     if (path.len == 0 or path[0] != '/') return false;
 
     var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = platform.cwd().realpath(path, &resolved_buf) catch return false;
+    const resolved_len = std.Io.Dir.cwd().realPathFile(std.Options.debug_io, path, &resolved_buf) catch return false;
+    const resolved = resolved_buf[0..resolved_len];
     return std.mem.eql(u8, resolved, path);
 }
 
