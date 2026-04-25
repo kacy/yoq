@@ -61,7 +61,7 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
             },
             .file => {
                 const permissions = std.Io.File.Permissions.fromMode(@intCast(entry.mode & 0o777));
-                var fs_file = try createDirAndFile(dest_dir, entry.name, permissions);
+                var fs_file = try createNestedFile(dest_dir, entry.name, permissions);
                 defer fs_file.close(std.Options.debug_io);
                 try copyTarEntryToFile(&it, entry, fs_file);
             },
@@ -74,7 +74,7 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
                     });
                     continue;
                 }
-                try createDirAndSymlink(dest_dir, entry.link_name, entry.name);
+                try createNestedSymlink(dest_dir, entry.link_name, entry.name);
             },
         }
     }
@@ -138,26 +138,27 @@ fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_fi
     it.unread_file_bytes = 0;
 }
 
-fn createDirAndFile(dir: std.Io.Dir, name: []const u8, permissions: std.Io.File.Permissions) !std.Io.File {
+fn createNestedFile(dir: std.Io.Dir, name: []const u8, permissions: std.Io.File.Permissions) !std.Io.File {
     return dir.createFile(std.Options.debug_io, name, .{ .permissions = permissions }) catch |err| {
         if (err == error.FileNotFound) {
-            if (std.fs.path.dirname(name)) |dir_name| {
-                try dir.createDirPath(std.Options.debug_io, dir_name);
-                return try dir.createFile(std.Options.debug_io, name, .{ .permissions = permissions });
-            }
+            try ensureParentDir(dir, name);
+            return try dir.createFile(std.Options.debug_io, name, .{ .permissions = permissions });
         }
         return err;
     };
 }
 
-fn createDirAndSymlink(dir: std.Io.Dir, link_name: []const u8, file_name: []const u8) !void {
+fn createNestedSymlink(dir: std.Io.Dir, link_name: []const u8, file_name: []const u8) !void {
     dir.symLink(std.Options.debug_io, link_name, file_name, .{}) catch |err| {
         if (err == error.FileNotFound) {
-            if (std.fs.path.dirname(file_name)) |dir_name| {
-                try dir.createDirPath(std.Options.debug_io, dir_name);
-                return try dir.symLink(std.Options.debug_io, link_name, file_name, .{});
-            }
+            try ensureParentDir(dir, file_name);
+            return try dir.symLink(std.Options.debug_io, link_name, file_name, .{});
         }
         return err;
     };
+}
+
+fn ensureParentDir(dir: std.Io.Dir, path: []const u8) !void {
+    const parent = std.fs.path.dirname(path) orelse return error.FileNotFound;
+    try dir.createDirPath(std.Options.debug_io, parent);
 }

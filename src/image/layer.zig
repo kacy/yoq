@@ -137,9 +137,9 @@ test "extract layer — missing blob returns error" {
 test "extract layer — stale cache dir is not trusted without completion marker" {
     const alloc = std.testing.allocator;
     const digest = blob_store.computeDigest("stale cache layer");
-    var digest_buf: [71]u8 = undefined;
-    const digest_str = digest.string(&digest_buf);
     const digest_hex = digest.hex();
+    var digest_buf: [71]u8 = undefined;
+    const digest_str = digestString(digest, &digest_buf);
 
     var path_buf: [max_path]u8 = undefined;
     const path = try layerPath(digest, &path_buf);
@@ -154,7 +154,7 @@ test "extract layer — corrupted blob is rejected before extraction" {
     const alloc = std.testing.allocator;
     const digest = blob_store.computeDigest("expected layer blob");
     var digest_buf: [71]u8 = undefined;
-    const digest_str = digest.string(&digest_buf);
+    const digest_str = digestString(digest, &digest_buf);
 
     var blob_path_buf: [max_path]u8 = undefined;
     const blob_path = try blob_store.blobPath(digest, &blob_path_buf);
@@ -187,8 +187,7 @@ test "create layer from empty dir returns null" {
     defer tmp_dir.cleanup();
 
     var path_buf: [max_path]u8 = undefined;
-    const dir_path_len = try tmp_dir.dir.realPathFile(std.testing.io, ".", &path_buf);
-    const dir_path = path_buf[0..dir_path_len];
+    const dir_path = try tmpDirPath(&tmp_dir, &path_buf);
 
     const result = try createLayerFromDir(alloc, dir_path);
     try std.testing.expect(result == null);
@@ -213,8 +212,7 @@ test "create layer from dir — round trip" {
     try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "subdir/nested.txt", .data = "nested content\n" });
 
     var path_buf: [max_path]u8 = undefined;
-    const dir_path_len = try tmp_dir.dir.realPathFile(std.testing.io, ".", &path_buf);
-    const dir_path = path_buf[0..dir_path_len];
+    const dir_path = try tmpDirPath(&tmp_dir, &path_buf);
 
     const result = (try createLayerFromDir(alloc, dir_path)) orelse
         return error.ExpectedNonNull;
@@ -256,11 +254,9 @@ test "create layer then extract layer preserves file contents" {
     const result = (try createLayerFromDir(alloc, dir_path)) orelse return error.ExpectedNonNull;
     defer blob_store.deleteBlob(result.compressed_digest) catch {};
 
-    const digest_hex = result.compressed_digest.hex();
-    defer layer_path.deleteExtractedLayer(&digest_hex);
-
     var digest_buf: [71]u8 = undefined;
-    const digest_str = result.compressed_digest.string(&digest_buf);
+    const digest_str = digestString(result.compressed_digest, &digest_buf);
+    defer deleteExtractedLayerForDigest(result.compressed_digest);
 
     const extracted_path = try extractLayer(alloc, digest_str);
     defer alloc.free(extracted_path);
@@ -292,16 +288,14 @@ test "create layer from dir — deterministic digest" {
     try tmp1.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "same content" });
 
     var path_buf1: [max_path]u8 = undefined;
-    const dir1_len = try tmp1.dir.realPathFile(std.testing.io, ".", &path_buf1);
-    const dir1 = path_buf1[0..dir1_len];
+    const dir1 = try tmpDirPath(&tmp1, &path_buf1);
 
     var tmp2 = std.testing.tmpDir(.{});
     defer tmp2.cleanup();
     try tmp2.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "same content" });
 
     var path_buf2: [max_path]u8 = undefined;
-    const dir2_len = try tmp2.dir.realPathFile(std.testing.io, ".", &path_buf2);
-    const dir2 = path_buf2[0..dir2_len];
+    const dir2 = try tmpDirPath(&tmp2, &path_buf2);
 
     const result1 = (try createLayerFromDir(alloc, dir1)).?;
     const result2 = (try createLayerFromDir(alloc, dir2)).?;
@@ -324,16 +318,14 @@ test "different content produces different layer digests" {
     try tmp1.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "content alpha" });
 
     var path_buf1: [max_path]u8 = undefined;
-    const dir1_len = try tmp1.dir.realPathFile(std.testing.io, ".", &path_buf1);
-    const dir1 = path_buf1[0..dir1_len];
+    const dir1 = try tmpDirPath(&tmp1, &path_buf1);
 
     var tmp2 = std.testing.tmpDir(.{});
     defer tmp2.cleanup();
     try tmp2.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "content beta" });
 
     var path_buf2: [max_path]u8 = undefined;
-    const dir2_len = try tmp2.dir.realPathFile(std.testing.io, ".", &path_buf2);
-    const dir2 = path_buf2[0..dir2_len];
+    const dir2 = try tmpDirPath(&tmp2, &path_buf2);
 
     const result1 = (try createLayerFromDir(alloc, dir1)).?;
     const result2 = (try createLayerFromDir(alloc, dir2)).?;
@@ -353,11 +345,9 @@ test "extract layer — invalid gzip blob fails" {
     const digest = try blob_store.putBlob("not a gzip stream");
     defer blob_store.deleteBlob(digest) catch {};
 
-    const digest_hex = digest.hex();
-    defer layer_path.deleteExtractedLayer(&digest_hex);
-
     var digest_buf: [71]u8 = undefined;
-    const digest_str = digest.string(&digest_buf);
+    const digest_str = digestString(digest, &digest_buf);
+    defer deleteExtractedLayerForDigest(digest);
 
     try std.testing.expectError(LayerError.ExtractionFailed, extractLayer(alloc, digest_str));
 }
@@ -372,11 +362,9 @@ test "extract layer — gzip stream with invalid tar payload fails" {
     const digest = try blob_store.putBlob(gzip_payload);
     defer blob_store.deleteBlob(digest) catch {};
 
-    const digest_hex = digest.hex();
-    defer layer_path.deleteExtractedLayer(&digest_hex);
-
     var digest_buf: [71]u8 = undefined;
-    const digest_str = digest.string(&digest_buf);
+    const digest_str = digestString(digest, &digest_buf);
+    defer deleteExtractedLayerForDigest(digest);
 
     try std.testing.expectError(LayerError.ExtractionFailed, extractLayer(alloc, digest_str));
 }
@@ -422,6 +410,20 @@ test "symlink target validation — deep escape attempt" {
 
 fn hasHomeEnv() bool {
     return std.c.getenv("HOME") != null;
+}
+
+fn tmpDirPath(tmp_dir: *std.testing.TmpDir, buf: *[max_path]u8) ![]const u8 {
+    const len = try tmp_dir.dir.realPathFile(std.testing.io, ".", buf);
+    return buf[0..len];
+}
+
+fn digestString(digest: blob_store.Digest, buf: *[71]u8) []const u8 {
+    return digest.string(buf);
+}
+
+fn deleteExtractedLayerForDigest(digest: blob_store.Digest) void {
+    const digest_hex = digest.hex();
+    layer_path.deleteExtractedLayer(&digest_hex);
 }
 
 fn gzipBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
