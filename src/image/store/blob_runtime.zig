@@ -121,8 +121,12 @@ pub fn getBlob(alloc: std.mem.Allocator, digest: digest_support.Digest) types.Bl
 
     const stat = file.stat(std.Options.debug_io) catch return types.BlobError.NotFound;
     const alloc_size = blobAllocSize(stat.size) catch return types.BlobError.ReadFailed;
-    return cwd().readFileAlloc(std.Options.debug_io, path, alloc, .limited(alloc_size)) catch
-        return types.BlobError.NotFound;
+    const limit_size = std.math.add(usize, alloc_size, 1) catch alloc_size;
+    return cwd().readFileAlloc(std.Options.debug_io, path, alloc, .limited(limit_size)) catch |err| switch (err) {
+        error.FileNotFound => types.BlobError.NotFound,
+        error.StreamTooLong => types.BlobError.ReadFailed,
+        else => types.BlobError.ReadFailed,
+    };
 }
 
 pub fn openBlob(digest: digest_support.Digest) types.BlobError!types.BlobHandle {
