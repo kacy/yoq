@@ -44,42 +44,45 @@ pub fn loadOrCreateKey() KeyError![common.key_length]u8 {
 }
 
 pub fn readKeyFile(path: []const u8) ReadKeyError![common.key_length]u8 {
-    const file = platform.cwd().openFile(path, .{}) catch |err| switch (err) {
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return ReadKeyError.NotFound,
         else => return ReadKeyError.KeyLoadFailed,
     };
-    defer file.close();
+    defer file.close(std.Options.debug_io);
 
-    const stat = file.stat() catch return ReadKeyError.KeyLoadFailed;
-    if ((stat.mode & 0o077) != 0) return ReadKeyError.KeyLoadFailed;
+    const stat = file.stat(std.Options.debug_io) catch return ReadKeyError.KeyLoadFailed;
+    if ((stat.permissions.toMode() & 0o077) != 0) return ReadKeyError.KeyLoadFailed;
 
     var key: [common.key_length]u8 = undefined;
-    const bytes_read = file.readAll(&key) catch return ReadKeyError.KeyLoadFailed;
-    if (bytes_read != common.key_length) return ReadKeyError.KeyLoadFailed;
+    var reader = file.reader(std.Options.debug_io, &.{});
+    reader.interface.readSliceAll(&key) catch return ReadKeyError.KeyLoadFailed;
 
     return key;
 }
 
 pub fn keyFileExists(path: []const u8) bool {
-    platform.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.Options.debug_io, path, .{}) catch return false;
     return true;
 }
 
 pub fn keyFileHasOwnerOnlyPermissions(path: []const u8) bool {
-    const file = platform.cwd().openFile(path, .{}) catch return false;
-    defer file.close();
+    var file = std.Io.Dir.cwd().openFile(std.Options.debug_io, path, .{}) catch return false;
+    defer file.close(std.Options.debug_io);
 
-    const stat = file.stat() catch return false;
-    return (stat.mode & 0o077) == 0;
+    const stat = file.stat(std.Options.debug_io) catch return false;
+    return (stat.permissions.toMode() & 0o077) == 0;
 }
 
 pub fn saveKeyFile(path: []const u8, key: *const [common.key_length]u8) !void {
-    const file = platform.cwd().createFile(path, .{ .mode = 0o600 }) catch
+    var file = std.Io.Dir.cwd().createFile(std.Options.debug_io, path, .{
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+        .truncate = true,
+    }) catch
         return error.KeyCreateFailed;
-    defer file.close();
+    defer file.close(std.Options.debug_io);
 
-    file.writeAll(key) catch return error.KeyCreateFailed;
-    file.sync() catch return error.KeyCreateFailed;
+    file.writeStreamingAll(std.Options.debug_io, key) catch return error.KeyCreateFailed;
+    file.sync(std.Options.debug_io) catch return error.KeyCreateFailed;
 }
 
 pub fn secureZero(buf: []u8) void {
