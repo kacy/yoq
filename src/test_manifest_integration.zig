@@ -379,8 +379,8 @@ test "load from nonexistent file returns FileNotFound" {
 }
 
 test "checked-in example manifests load and validate cleanly" {
-    var examples_dir = try platform.cwd().openDir("examples", .{ .iterate = true });
-    defer examples_dir.close();
+    var examples_dir = try std.Io.Dir.cwd().openDir(std.testing.io, "examples", .{ .iterate = true });
+    defer examples_dir.close(std.testing.io);
 
     var walker = try examples_dir.walk(alloc);
     defer walker.deinit();
