@@ -358,7 +358,8 @@ test "takeSnapshot and restoreFromSnapshot round-trip" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path_len = tmp.dir.realPathFile(std.testing.io, ".", &path_buf) catch return;
+    const tmp_path = path_buf[0..tmp_path_len];
 
     // set up state machine with some data
     var sm_path_buf: [512]u8 = undefined;
@@ -527,7 +528,8 @@ test "snapshot round-trip preserves last_applied" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path_len = tmp.dir.realPathFile(std.testing.io, ".", &path_buf) catch return;
+    const tmp_path = path_buf[0..tmp_path_len];
 
     // create source state machine with data
     var sm_path_buf: [512]u8 = undefined;
@@ -574,7 +576,8 @@ test "init reloads persisted last_applied from disk" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = platform.Dir.from(tmp.dir).realpath(".", &path_buf) catch return;
+    const tmp_path_len = tmp.dir.realPathFile(std.testing.io, ".", &path_buf) catch return;
+    const tmp_path = path_buf[0..tmp_path_len];
 
     var sm_path_buf: [512]u8 = undefined;
     const sm_path_slice = std.fmt.bufPrint(&sm_path_buf, "{s}/persisted.db", .{tmp_path}) catch return;

@@ -674,7 +674,8 @@ const RouteFlowHarness = struct {
         errdefer tmp.cleanup();
 
         var path_buf: [512]u8 = undefined;
-        const tmp_path = try platform.Dir.from(tmp.dir).realpath(".", &path_buf);
+        const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
+        const tmp_path = path_buf[0..tmp_path_len];
 
         const node = try alloc.create(cluster_node.Node);
         errdefer alloc.destroy(node);
