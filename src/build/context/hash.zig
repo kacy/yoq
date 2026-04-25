@@ -60,7 +60,7 @@ fn hashDirectory(
     var walker = sub_dir.walk(alloc) catch return types.ContextError.HashFailed;
     defer walker.deinit();
 
-    while (walker.next() catch return types.ContextError.HashFailed) |entry| {
+    while (walker.next(std.Options.debug_io) catch return types.ContextError.HashFailed) |entry| {
         if (entry.kind != .file) continue;
 
         const owned_path = alloc.dupe(u8, entry.path) catch return types.ContextError.HashFailed;

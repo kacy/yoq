@@ -125,11 +125,14 @@ pub fn uploadBlobFile(
     var body_writer = req.sendBody(&body_buf) catch return common.RegistryError.UploadFailed;
 
     var file_reader_buf: [8192]u8 = undefined;
+    var file_reader = blob.file.readerStreaming(std.Options.debug_io, &file_reader_buf);
+    var chunk_buf: [8192]u8 = undefined;
     var sent: u64 = 0;
     while (sent < blob.size) {
-        const bytes_read = blob.file.read(&file_reader_buf) catch return common.RegistryError.UploadFailed;
+        const bytes_read = file_reader.interface.readSliceShort(&chunk_buf) catch
+            return common.RegistryError.UploadFailed;
         if (bytes_read == 0) break;
-        body_writer.writer.writeAll(file_reader_buf[0..bytes_read]) catch return common.RegistryError.UploadFailed;
+        body_writer.writer.writeAll(chunk_buf[0..bytes_read]) catch return common.RegistryError.UploadFailed;
         sent += bytes_read;
     }
     if (sent != blob.size) return common.RegistryError.UploadFailed;

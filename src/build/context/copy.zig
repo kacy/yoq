@@ -78,7 +78,7 @@ fn copyDirectory(
     var walker = source.walk(std.heap.page_allocator) catch return types.ContextError.CopyFailed;
     defer walker.deinit();
 
-    while (walker.next() catch return types.ContextError.CopyFailed) |entry| {
+    while (walker.next(std.Options.debug_io) catch return types.ContextError.CopyFailed) |entry| {
         switch (entry.kind) {
             .directory => {
                 target.createDirPath(std.Options.debug_io, entry.path) catch return types.ContextError.CopyFailed;
