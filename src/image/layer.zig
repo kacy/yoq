@@ -11,7 +11,6 @@
 // std.tar for tar extraction/creation. no external dependencies.
 
 const std = @import("std");
-const platform = @import("platform");
 const builtin = @import("builtin");
 const blob_store = @import("store.zig");
 const layer_create = @import("layer/create.zig");
@@ -30,14 +29,18 @@ pub const deleteExtractedLayer = layer_path.deleteExtractedLayer;
 
 const max_path = @import("../lib/paths.zig").max_path;
 
+fn cwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
 fn layerPath(digest: blob_store.Digest, buf: *[max_path]u8) LayerError![]const u8 {
     return layer_path.layerPath(digest, buf);
 }
 
 fn writeTarEntry(
-    dir: platform.Dir,
+    dir: std.Io.Dir,
     tar_writer: *std.tar.Writer,
-    entry: platform.Dir.Walker.Entry,
+    entry: std.Io.Dir.Walker.Entry,
 ) !void {
     return layer_create.writeTarEntry(dir, tar_writer, entry);
 }
@@ -100,7 +103,7 @@ test "symlink target validation — unsafe targets rejected" {
 
 test "writeTarEntry rejects unsupported entry kinds" {
     var tar_writer: std.tar.Writer = undefined;
-    const entry = platform.Dir.Walker.Entry{
+    const entry = std.Io.Dir.Walker.Entry{
         .dir = undefined,
         .basename = "fifo",
         .path = "fifo",
@@ -142,9 +145,9 @@ test "extract layer — stale cache dir is not trusted without completion marker
     const path = try layerPath(digest, &path_buf);
     defer layer_path.deleteExtractedLayer(&digest_hex);
 
-    try platform.cwd().makePath(path);
+    try cwd().createDirPath(std.testing.io, path);
     try std.testing.expectError(LayerError.BlobNotFound, extractLayer(alloc, digest_str));
-    try std.testing.expectError(error.FileNotFound, platform.cwd().access(path, .{}));
+    try std.testing.expectError(error.FileNotFound, cwd().access(std.testing.io, path, .{}));
 }
 
 test "extract layer — corrupted blob is rejected before extraction" {
@@ -156,13 +159,13 @@ test "extract layer — corrupted blob is rejected before extraction" {
     var blob_path_buf: [max_path]u8 = undefined;
     const blob_path = try blob_store.blobPath(digest, &blob_path_buf);
     if (std.fs.path.dirname(blob_path)) |parent| {
-        try platform.cwd().makePath(parent);
+        try cwd().createDirPath(std.testing.io, parent);
     }
 
     defer blob_store.removeBlob(digest);
-    const file = try platform.cwd().createFile(blob_path, .{ .truncate = true });
-    try file.writeAll("corrupted blob");
-    file.close();
+    var file = try cwd().createFile(std.testing.io, blob_path, .{ .truncate = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, "corrupted blob");
 
     try std.testing.expectError(LayerError.BlobNotFound, extractLayer(alloc, digest_str));
     try std.testing.expect(!blob_store.hasBlob(digest));
@@ -184,7 +187,8 @@ test "create layer from empty dir returns null" {
     defer tmp_dir.cleanup();
 
     var path_buf: [max_path]u8 = undefined;
-    const dir_path = try platform.Dir.from(tmp_dir.dir).realpath(".", &path_buf);
+    const dir_path_len = try tmp_dir.dir.realPathFile(std.testing.io, ".", &path_buf);
+    const dir_path = path_buf[0..dir_path_len];
 
     const result = try createLayerFromDir(alloc, dir_path);
     try std.testing.expect(result == null);
@@ -204,12 +208,13 @@ test "create layer from dir — round trip" {
     defer tmp_dir.cleanup();
 
     // create test files
-    try platform.Dir.from(tmp_dir.dir).writeFile(.{ .sub_path = "hello.txt", .data = "hello world\n" });
-    try platform.Dir.from(tmp_dir.dir).makeDir("subdir");
-    try platform.Dir.from(tmp_dir.dir).writeFile(.{ .sub_path = "subdir/nested.txt", .data = "nested content\n" });
+    try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "hello.txt", .data = "hello world\n" });
+    try tmp_dir.dir.createDir(std.testing.io, "subdir", .default_dir);
+    try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "subdir/nested.txt", .data = "nested content\n" });
 
     var path_buf: [max_path]u8 = undefined;
-    const dir_path = try platform.Dir.from(tmp_dir.dir).realpath(".", &path_buf);
+    const dir_path_len = try tmp_dir.dir.realPathFile(std.testing.io, ".", &path_buf);
+    const dir_path = path_buf[0..dir_path_len];
 
     const result = (try createLayerFromDir(alloc, dir_path)) orelse
         return error.ExpectedNonNull;
@@ -239,17 +244,19 @@ test "create layer from dir — deterministic digest" {
     // create two identical directories
     var tmp1 = std.testing.tmpDir(.{});
     defer tmp1.cleanup();
-    try platform.Dir.from(tmp1.dir).writeFile(.{ .sub_path = "file.txt", .data = "same content" });
+    try tmp1.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "same content" });
 
     var path_buf1: [max_path]u8 = undefined;
-    const dir1 = try platform.Dir.from(tmp1.dir).realpath(".", &path_buf1);
+    const dir1_len = try tmp1.dir.realPathFile(std.testing.io, ".", &path_buf1);
+    const dir1 = path_buf1[0..dir1_len];
 
     var tmp2 = std.testing.tmpDir(.{});
     defer tmp2.cleanup();
-    try platform.Dir.from(tmp2.dir).writeFile(.{ .sub_path = "file.txt", .data = "same content" });
+    try tmp2.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "same content" });
 
     var path_buf2: [max_path]u8 = undefined;
-    const dir2 = try platform.Dir.from(tmp2.dir).realpath(".", &path_buf2);
+    const dir2_len = try tmp2.dir.realPathFile(std.testing.io, ".", &path_buf2);
+    const dir2 = path_buf2[0..dir2_len];
 
     const result1 = (try createLayerFromDir(alloc, dir1)).?;
     const result2 = (try createLayerFromDir(alloc, dir2)).?;
@@ -269,17 +276,19 @@ test "different content produces different layer digests" {
 
     var tmp1 = std.testing.tmpDir(.{});
     defer tmp1.cleanup();
-    try platform.Dir.from(tmp1.dir).writeFile(.{ .sub_path = "file.txt", .data = "content alpha" });
+    try tmp1.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "content alpha" });
 
     var path_buf1: [max_path]u8 = undefined;
-    const dir1 = try platform.Dir.from(tmp1.dir).realpath(".", &path_buf1);
+    const dir1_len = try tmp1.dir.realPathFile(std.testing.io, ".", &path_buf1);
+    const dir1 = path_buf1[0..dir1_len];
 
     var tmp2 = std.testing.tmpDir(.{});
     defer tmp2.cleanup();
-    try platform.Dir.from(tmp2.dir).writeFile(.{ .sub_path = "file.txt", .data = "content beta" });
+    try tmp2.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "content beta" });
 
     var path_buf2: [max_path]u8 = undefined;
-    const dir2 = try platform.Dir.from(tmp2.dir).realpath(".", &path_buf2);
+    const dir2_len = try tmp2.dir.realPathFile(std.testing.io, ".", &path_buf2);
+    const dir2 = path_buf2[0..dir2_len];
 
     const result1 = (try createLayerFromDir(alloc, dir1)).?;
     const result2 = (try createLayerFromDir(alloc, dir2)).?;
