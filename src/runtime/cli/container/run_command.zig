@@ -234,7 +234,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
         return alloc.alloc(container.BindMount, 0) catch return ContainerError.OutOfMemory;
     }
 
-    const cwd = platform.cwd().realpathAlloc(alloc, ".") catch {
+    const cwd = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, ".", alloc) catch {
         writeErr("failed to resolve current working directory\n", .{});
         return ContainerError.OutOfMemory;
     };
@@ -269,7 +269,7 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
             std.fs.path.resolve(alloc, &.{ cwd, spec.source }) catch return error.OutOfMemory;
         defer alloc.free(source_input);
 
-        const source = platform.cwd().realpathAlloc(alloc, source_input) catch {
+        const source = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, source_input, alloc) catch {
             writeErr("volume source must exist and be canonicalizable: {s}\n", .{spec.source});
             return ContainerError.InvalidArgument;
         };

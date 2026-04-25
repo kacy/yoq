@@ -25,6 +25,10 @@ pub const OverlayDirs = struct {
     }
 };
 
+fn cwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
 pub fn isValidContainerId(id: []const u8) bool {
     if (id.len != 12) return false;
     for (id) |c| {
@@ -70,9 +74,9 @@ pub fn createContainerDirs(containers_subdir: []const u8, container_id: []const 
     }) catch return error.CreateFailed;
     dirs.merged_len = merged_slice.len;
 
-    platform.cwd().makePath(dirs.upperPath()) catch return error.CreateFailed;
-    platform.cwd().makePath(dirs.workPath()) catch return error.CreateFailed;
-    platform.cwd().makePath(dirs.mergedPath()) catch return error.CreateFailed;
+    cwd().createDirPath(std.Options.debug_io, dirs.upperPath()) catch return error.CreateFailed;
+    cwd().createDirPath(std.Options.debug_io, dirs.workPath()) catch return error.CreateFailed;
+    cwd().createDirPath(std.Options.debug_io, dirs.mergedPath()) catch return error.CreateFailed;
 
     return dirs;
 }
@@ -85,7 +89,7 @@ pub fn cleanupContainerDirs(containers_subdir: []const u8, container_id: []const
         containers_subdir, container_id,
     }) catch return;
 
-    platform.cwd().deleteTree(dir_path) catch {};
+    cwd().deleteTree(std.Options.debug_io, dir_path) catch {};
 }
 
 pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGenerationFailed}!void {
@@ -107,7 +111,7 @@ pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGene
             containers_subdir, buf,
         }) catch continue;
 
-        platform.cwd().access(dir_path, .{}) catch return;
+        cwd().access(std.Options.debug_io, dir_path, .{}) catch return;
     }
 
     const now = platform.timestamp();
@@ -132,7 +136,7 @@ pub fn generateId(containers_subdir: []const u8, buf: *ContainerId) error{IdGene
             containers_subdir, buf,
         }) catch continue;
 
-        platform.cwd().access(dir_path, .{}) catch return;
+        cwd().access(std.Options.debug_io, dir_path, .{}) catch return;
     }
 
     return error.IdGenerationFailed;
