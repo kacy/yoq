@@ -6,6 +6,7 @@ const log = @import("../../lib/log.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
 const socket_helpers = @import("socket_helpers.zig");
 const ip = @import("../ip.zig");
+const h2c_upgrade = @import("h2c_upgrade.zig");
 const http2 = @import("http2.zig");
 const http2_connection_router = @import("http2_connection_router.zig");
 const http2_passthrough = @import("http2_passthrough.zig");
@@ -225,6 +226,69 @@ pub const ReverseProxy = struct {
             return;
         };
 
+        const client_ip = peerIpFromSocket(client_fd);
+        const upgraded = h2c_upgrade.parseUpgradeRequest(self.allocator, request) catch |err| {
+            proxy_runtime.recordResponse(.bad_request);
+            const body = switch (err) {
+                error.MissingHostHeader => "{\"error\":\"missing host header\"}",
+                error.InvalidSettings => "{\"error\":\"invalid http2-settings header\"}",
+                error.UnsupportedBody => "{\"error\":\"h2c upgrade request body not supported\"}",
+                error.InvalidUpgrade => "{\"error\":\"invalid h2c upgrade request\"}",
+                else => "{\"error\":\"invalid h2c upgrade request\"}",
+            };
+            const response = formatProxyResponse(self.allocator, .{
+                .status = .bad_request,
+                .body = body,
+            }) catch return;
+            defer self.allocator.free(response);
+            _ = socket_helpers.writeAll(client_fd, response) catch |e| {
+                log.warn("l7 proxy client write failed: {}", .{e});
+            };
+            return;
+        };
+        if (upgraded) |upgrade| {
+            defer upgrade.deinit(self.allocator);
+
+            _ = socket_helpers.writeAll(client_fd, h2c_upgrade.switching_protocols_response) catch |e| {
+                log.warn("l7 proxy client write failed: {}", .{e});
+                return;
+            };
+
+            const settings = http2.buildFrame(self.allocator, .{
+                .length = 0,
+                .frame_type = .settings,
+                .flags = 0,
+                .stream_id = 0,
+            }, "") catch return;
+            defer self.allocator.free(settings);
+            _ = socket_helpers.writeAll(client_fd, settings) catch |e| {
+                log.warn("l7 proxy client write failed: {}", .{e});
+                return;
+            };
+
+            http2_connection_router.proxyUpgradedConnection(
+                self.allocator,
+                self.routes,
+                client_fd,
+                upgrade,
+                client_ip,
+            ) catch {
+                proxy_runtime.recordResponse(.internal_server_error);
+                const internal = http2_response.formatSimpleStreamResponse(
+                    self.allocator,
+                    1,
+                    @intFromEnum(http.StatusCode.internal_server_error),
+                    "application/json",
+                    "{\"error\":\"proxy request failed\"}",
+                ) catch return;
+                defer self.allocator.free(internal);
+                _ = socket_helpers.writeAll(client_fd, internal) catch |e| {
+                    log.warn("l7 proxy client write failed: {}", .{e});
+                };
+            };
+            return;
+        }
+
         const handled = self.handleRequest(request) catch {
             proxy_runtime.recordResponse(.internal_server_error);
             const internal = formatProxyResponse(self.allocator, .{
@@ -254,7 +318,7 @@ pub const ReverseProxy = struct {
                         self.routes,
                         client_fd,
                         request,
-                        peerIpFromSocket(client_fd),
+                        client_ip,
                     ) catch {
                         proxy_runtime.recordResponse(.internal_server_error);
                         const internal = http2_response.formatSimpleResponse(
@@ -273,8 +337,8 @@ pub const ReverseProxy = struct {
                 }
 
                 proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
-                self.startMirrorRequest(request, &plan, peerIpFromSocket(client_fd));
-                const response = self.forwardPlanWithClient(request, &plan, peerIpFromSocket(client_fd)) catch {
+                self.startMirrorRequest(request, &plan, client_ip);
+                const response = self.forwardPlanWithClient(request, &plan, client_ip) catch {
                     proxy_runtime.recordResponse(.internal_server_error);
                     const internal = formatProxyResponse(self.allocator, .{
                         .status = .internal_server_error,
@@ -2184,6 +2248,23 @@ fn buildHttp2SettingsAckFrame(alloc: std.mem.Allocator) ![]u8 {
         .stream_id = 0,
     }, "");
 }
+
+fn buildEmptyHttp2SettingsFrame(alloc: std.mem.Allocator) ![]u8 {
+    return buildHttp2Frame(alloc, .{
+        .length = 0,
+        .frame_type = .settings,
+        .flags = 0,
+        .stream_id = 0,
+    }, "");
+}
+
+fn buildH2cUpgradeRequest(alloc: std.mem.Allocator, method: []const u8, host: []const u8, path: []const u8, extra_headers: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        alloc,
+        "{s} {s} HTTP/1.1\r\nHost: {s}\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n{s}\r\n",
+        .{ method, path, host, extra_headers },
+    );
+}
 test "forwardRequest proxies upstream response bytes" {
     const store = @import("../../state/store.zig");
     const service_rollout = @import("../service_rollout.zig");
@@ -3218,6 +3299,214 @@ test "handleConnection proxies HTTP/2 upstream response bytes" {
 
     upstream.wait();
     try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream.request(0)[0..http2.client_preface.len]));
+}
+
+test "handleConnection upgrades h2c request and proxies stream 1 response" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const upstream_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        1,
+        200,
+        "application/grpc",
+        "ok",
+    );
+    defer std.testing.allocator.free(upstream_response);
+
+    const upstream_headers_start = http2.frame_header_len;
+    const upstream_settings = http2.parseFrameHeader(upstream_response[0..http2.frame_header_len]).?;
+    const stripped_upstream = upstream_response[upstream_headers_start + upstream_settings.length ..];
+
+    const actions = [_]TestUpstreamAction{
+        .{ .respond = upstream_response },
+    };
+    var upstream = try TestUpstreamServer.init(&actions);
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc",
+        .endpoint_id = "grpc-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc:/pkg.Service",
+            .service = "grpc",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = linux_platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer linux_platform.posix.close(client_fd);
+    const server_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try linux_platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const upgrade_request = try buildH2cUpgradeRequest(
+        std.testing.allocator,
+        "GET",
+        "grpc.internal",
+        "/pkg.Service/Call",
+        "X-Env: canary\r\n",
+    );
+    defer std.testing.allocator.free(upgrade_request);
+    try socket_helpers.writeAll(client_fd, upgrade_request);
+
+    const server_settings = try buildEmptyHttp2SettingsFrame(std.testing.allocator);
+    defer std.testing.allocator.free(server_settings);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(std.testing.allocator);
+    try expected.appendSlice(std.testing.allocator, h2c_upgrade.switching_protocols_response);
+    try expected.appendSlice(std.testing.allocator, server_settings);
+    try expected.appendSlice(std.testing.allocator, stripped_upstream);
+
+    var response_buf: [2048]u8 = undefined;
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
+    const bytes_read = readSocketBytes(client_fd, &response_buf);
+    try std.testing.expectEqualSlices(u8, expected.items, response_buf[0..bytes_read]);
+
+    upstream.wait();
+    try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream.request(0)[0..http2.client_preface.len]));
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try http2_request.parseClientConnectionPreface(arena.allocator(), upstream.request(0));
+    try std.testing.expectEqualStrings("GET", parsed.request.method);
+    try std.testing.expectEqualStrings("grpc.internal", parsed.request.authority);
+    try std.testing.expectEqualStrings("/pkg.Service/Call", parsed.request.path);
+
+    var saw_env = false;
+    var saw_forwarded_proto = false;
+    for (parsed.headers) |header| {
+        if (std.mem.eql(u8, header.name, "x-env")) saw_env = std.mem.eql(u8, header.value, "canary");
+        if (std.mem.eql(u8, header.name, "x-forwarded-proto")) saw_forwarded_proto = std.mem.eql(u8, header.value, "http");
+    }
+    try std.testing.expect(saw_env);
+    try std.testing.expect(saw_forwarded_proto);
+}
+
+test "handleConnection returns framed not found after h2c upgrade" {
+    const service_rollout = @import("../service_rollout.zig");
+
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = linux_platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer linux_platform.posix.close(client_fd);
+    const server_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try linux_platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const upgrade_request = try buildH2cUpgradeRequest(
+        std.testing.allocator,
+        "GET",
+        "grpc.internal",
+        "/pkg.Service/Call",
+        "",
+    );
+    defer std.testing.allocator.free(upgrade_request);
+    try socket_helpers.writeAll(client_fd, upgrade_request);
+
+    const server_settings = try buildEmptyHttp2SettingsFrame(std.testing.allocator);
+    defer std.testing.allocator.free(server_settings);
+
+    var response_buf: [2048]u8 = undefined;
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
+    const bytes_read = readSocketBytes(client_fd, &response_buf);
+    try std.testing.expect(bytes_read > h2c_upgrade.switching_protocols_response.len + server_settings.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        h2c_upgrade.switching_protocols_response,
+        response_buf[0..h2c_upgrade.switching_protocols_response.len],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        server_settings,
+        response_buf[h2c_upgrade.switching_protocols_response.len .. h2c_upgrade.switching_protocols_response.len + server_settings.len],
+    );
+
+    const framed = response_buf[h2c_upgrade.switching_protocols_response.len + server_settings.len .. bytes_read];
+    try std.testing.expectEqual(@as(u16, 404), try http2_passthrough.parseStatusCode(std.testing.allocator, framed));
 }
 
 test "handleConnection streams HTTP/2 upstream frames before stream end" {

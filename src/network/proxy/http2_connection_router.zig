@@ -3,6 +3,7 @@ const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const http = @import("../../api/http.zig");
 const http2 = @import("http2.zig");
+const h2c_upgrade = @import("h2c_upgrade.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
 const socket_helpers = @import("socket_helpers.zig");
 const http2_request = @import("http2_request.zig");
@@ -30,6 +31,26 @@ pub fn proxyConnection(
     defer connection.deinit();
 
     try connection.downstream_buf.appendSlice(alloc, initial_request);
+    try connection.run();
+}
+
+pub fn proxyUpgradedConnection(
+    alloc: std.mem.Allocator,
+    routes: []const router.Route,
+    client_fd: linux_platform.posix.socket_t,
+    upgraded: h2c_upgrade.ParsedUpgrade,
+    client_ip: ?[4]u8,
+) !void {
+    var connection = ConnectionRouter{
+        .allocator = alloc,
+        .routes = routes,
+        .client_fd = client_fd,
+        .client_ip = client_ip,
+        .sent_settings = true,
+    };
+    defer connection.deinit();
+
+    try connection.bootstrapUpgradedStream(upgraded);
     try connection.run();
 }
 
@@ -126,6 +147,104 @@ const ConnectionRouter = struct {
                     .mirror => try self.readMirrorUpstream(target.stream_idx),
                 }
             }
+        }
+    }
+
+    fn bootstrapUpgradedStream(self: *ConnectionRouter, upgraded: h2c_upgrade.ParsedUpgrade) !void {
+        proxy_runtime.recordRequestStart();
+
+        const route = router.matchRoute(
+            self.routes,
+            upgraded.method,
+            proxy_helpers.normalizeHost(upgraded.authority),
+            upgraded.path,
+            upgraded.request_headers,
+        ) orelse {
+            proxy_runtime.recordResponse(.not_found);
+            try self.sendLocalStreamResponse(1, .not_found, "{\"error\":\"route not found\"}");
+            return;
+        };
+
+        const method_enum = proxy_helpers.parseMethodString(upgraded.method) orelse {
+            proxy_runtime.recordResponse(.bad_request);
+            try self.sendLocalStreamResponse(1, .bad_request, "{\"error\":\"unsupported http2 method\"}");
+            return;
+        };
+        _ = method_enum;
+
+        const normalized_host = proxy_helpers.normalizeHost(upgraded.authority);
+        const selection_key = routeSelectionKey(upgraded.method, normalized_host, upgraded.path);
+        const request_policy = proxy_policy.RequestPolicy{ .retries = route.retries, .retry_on_5xx = route.retry_on_5xx };
+        const cb_policy = proxy_policy.CircuitBreakerPolicy{
+            .failure_threshold = route.circuit_breaker_threshold,
+            .open_timeout_ms = route.circuit_breaker_timeout_ms,
+        };
+
+        var attempt: u8 = 0;
+        while (true) : (attempt += 1) {
+            const backend_service = proxy_runtime.selectBackendService(route, selection_key, attempt);
+            proxy_runtime.recordRouteRequestStart(route.name, route.service, backend_service);
+
+            var upstream = proxy_runtime.resolveUpstreamWithPolicy(self.allocator, backend_service, cb_policy) catch |err| switch (err) {
+                error.NoHealthyUpstream => {
+                    proxy_runtime.recordRouteFailure(route.name, .no_eligible_upstream);
+                    proxy_runtime.recordResponse(.service_unavailable);
+                    try self.sendLocalStreamResponse(1, .service_unavailable, "{\"error\":\"no eligible upstream\"}");
+                    return;
+                },
+                else => return err,
+            };
+            errdefer upstream.deinit(self.allocator);
+
+            const outbound_path = try proxy_helpers.buildOutboundPath(
+                self.allocator,
+                upgraded.path,
+                route.match.path_prefix,
+                route.rewrite_prefix,
+            );
+            defer self.allocator.free(outbound_path);
+
+            const outbound_authority = if (route.preserve_host) upgraded.authority else backend_service;
+            const request_bytes = try h2c_upgrade.buildStream1HeadersFrame(
+                self.allocator,
+                outbound_authority,
+                upgraded.method,
+                outbound_path,
+                upgraded.request_headers,
+                "http",
+            );
+            defer self.allocator.free(request_bytes);
+
+            const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, request_bytes) catch |connect_err| {
+                proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
+                const failure_kind: proxy_runtime.UpstreamFailureKind = if (connect_err == error.ConnectFailed or connect_err == error.ConnectTimedOut) .connect else .send;
+                proxy_runtime.recordUpstreamFailure(failure_kind);
+                proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
+                upstream.deinit(self.allocator);
+                if (proxy_policy.shouldRetry(request_policy, upgraded.method, attempt, null, true)) {
+                    proxy_runtime.recordRetry();
+                    proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
+                    continue;
+                }
+                const route_failure: proxy_runtime.RouteFailureKind = if (failure_kind == .connect) .connect else .send;
+                proxy_runtime.recordRouteFailure(route.name, route_failure);
+                proxy_runtime.recordResponse(.bad_gateway);
+                const body = if (failure_kind == .connect) "{\"error\":\"upstream connect failed\"}" else "{\"error\":\"upstream send failed\"}";
+                try self.sendLocalStreamResponse(1, .bad_gateway, body);
+                return;
+            };
+
+            try self.streams.append(self.allocator, .{
+                .downstream_stream_id = 1,
+                .route = route,
+                .backend_service = try self.allocator.dupe(u8, backend_service),
+                .upstream = upstream,
+                .upstream_fd = upstream_fd,
+                .request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms)),
+                .mirror = self.startMirrorSessionForUpgrade(route, upgraded),
+                .downstream_end_stream = true,
+            });
+            return;
         }
     }
 
@@ -672,6 +791,58 @@ const ConnectionRouter = struct {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
+
+        return .{
+            .backend_service = self.allocator.dupe(u8, mirror_service) catch {
+                proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+                return null;
+            },
+            .upstream = upstream,
+            .upstream_fd = upstream_fd,
+            .request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms)),
+        };
+    }
+
+    fn startMirrorSessionForUpgrade(self: *ConnectionRouter, route: router.Route, upgraded: h2c_upgrade.ParsedUpgrade) ?MirrorSession {
+        const mirror_service = route.mirror_service orelse return null;
+        proxy_runtime.recordMirrorRouteRequestStart(route.name, route.service, mirror_service);
+
+        var upstream = proxy_runtime.resolveUpstream(self.allocator, mirror_service) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        errdefer upstream.deinit(self.allocator);
+
+        const outbound_path = proxy_helpers.buildOutboundPath(
+            self.allocator,
+            upgraded.path,
+            route.match.path_prefix,
+            route.rewrite_prefix,
+        ) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        defer self.allocator.free(outbound_path);
+
+        const outbound_authority = if (route.preserve_host) upgraded.authority else mirror_service;
+        const request_bytes = h2c_upgrade.buildStream1HeadersFrame(
+            self.allocator,
+            outbound_authority,
+            upgraded.method,
+            outbound_path,
+            upgraded.request_headers,
+            "http",
+        ) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        defer self.allocator.free(request_bytes);
+
+        const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, request_bytes) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        errdefer linux_platform.posix.close(upstream_fd);
 
         return .{
             .backend_service = self.allocator.dupe(u8, mirror_service) catch {

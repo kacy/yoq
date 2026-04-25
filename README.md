@@ -56,13 +56,13 @@ Kubernetes has a vast ecosystem and years of production hardening. yoq doesn't t
 - built-in DNS-based service discovery
 - port mapping, outbound NAT, and eBPF-based load balancing and policy enforcement where available
 - WireGuard-based cluster networking for multi-node deployments
-- HTTP routing for HTTP/1.1, prior-knowledge HTTP/2 (`h2c`), and TLS-terminated HTTP/2 via ALPN when a routed host is also bound to `service.<name>.tls.domain`
+- HTTP routing for HTTP/1.1, plaintext HTTP/2 via prior-knowledge `h2c` or HTTP/1.1 `Upgrade: h2c`, and TLS-terminated HTTP/2 via ALPN when a routed host is also bound to `service.<name>.tls.domain`
 - gRPC health checks using the standard `grpc.health.v1.Health/Check` RPC
 - route-level rewrites, method/header matching, weighted backend selection, and best-effort request mirroring
 
 current gRPC routing limits:
 
-- direct listener traffic still uses prior-knowledge `h2c`; TLS/ALPN HTTP/2 routing works through the TLS terminator when the routed host matches a service `tls.domain`
+- direct listener traffic supports both prior-knowledge `h2c` and HTTP/1.1 `Upgrade: h2c`; TLS/ALPN HTTP/2 routing works through the TLS terminator when the routed host matches a service `tls.domain`
 
 ### production features
 

@@ -258,7 +258,7 @@ for weighted and mirrored routes, the JSON service and status payloads include a
 
 current HTTP/2 and gRPC routing limits:
 
-- the routing listener itself still accepts prior-knowledge HTTP/2 (`h2c`) only; TLS/ALPN HTTP/2 routing works through the TLS terminator when the routed host matches `service.<name>.tls.domain`
+- the routing listener accepts plaintext HTTP/2 through prior-knowledge `h2c` and HTTP/1.1 `Upgrade: h2c`; TLS/ALPN HTTP/2 routing works through the TLS terminator when the routed host matches `service.<name>.tls.domain`
 
 ---
 
@@ -301,7 +301,7 @@ port = 5432
 
 requires `port`. yoq sends `grpc.health.v1.Health/Check` over HTTP/2 and requires a `SERVING` response. `service` is optional and defaults to the empty service name.
 
-when a service also uses `http_proxy` or `http_routes`, yoq forwards prior-knowledge HTTP/2 (h2c) traffic end to end for that routed service. if the same host is also declared under `[service.<name>.tls]`, the TLS proxy can terminate HTTPS, negotiate ALPN `h2`, and forward the decrypted traffic into that routed service. this supports unary and streaming gRPC traffic on a single routed connection, subject to the HTTP/2 routing limits above.
+when a service also uses `http_proxy` or `http_routes`, yoq forwards plaintext HTTP/2 traffic end to end for that routed service, including both prior-knowledge `h2c` and HTTP/1.1 `Upgrade: h2c`. if the same host is also declared under `[service.<name>.tls]`, the TLS proxy can terminate HTTPS, negotiate ALPN `h2`, and forward the decrypted traffic into that routed service. this supports unary and streaming gRPC traffic on a single routed connection, subject to the HTTP/2 routing limits above.
 
 ```toml
 [service.api.health_check]
