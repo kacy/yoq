@@ -1,9 +1,11 @@
 const std = @import("std");
 const http = std.http;
+const sqlite = @import("sqlite");
 
 const json_support = @import("json_support.zig");
 const acme_config = @import("config.zig");
 const types = @import("types.zig");
+const json_helpers = @import("../../lib/json_helpers.zig");
 const secrets = @import("../../state/secrets.zig");
 
 pub const Runtime = struct {
@@ -129,25 +131,64 @@ fn initState(
 ) types.AcmeError!Runtime.State {
     const provider = config.dns_provider orelse return types.AcmeError.ChallengeFailed;
     return switch (provider) {
-        .cloudflare => .{ .cloudflare = .{
-            .api_token = try requireSecret(config, secrets_store, "api_token"),
-            .zone_id = try requireConfigValue(allocator, config, "zone_id"),
-        } },
-        .route53 => .{ .route53 = .{
-            .access_key_id = try requireSecret(config, secrets_store, "access_key_id"),
-            .secret_access_key = try requireSecret(config, secrets_store, "secret_access_key"),
-            .hosted_zone_id = try requireConfigValue(allocator, config, "hosted_zone_id"),
-            .region = try optionalConfigValue(allocator, config, "region", "us-east-1"),
-        } },
-        .gcloud => .{ .gcloud = .{
-            .access_token = try requireSecret(config, secrets_store, "access_token"),
-            .project = try requireConfigValue(allocator, config, "project"),
-            .managed_zone = try requireConfigValue(allocator, config, "managed_zone"),
-        } },
+        .cloudflare => .{ .cloudflare = try initCloudflareState(allocator, config, secrets_store) },
+        .route53 => .{ .route53 = try initRoute53State(allocator, config, secrets_store) },
+        .gcloud => .{ .gcloud = try initGcloudState(allocator, config, secrets_store) },
         .exec => .{ .exec = .{
             .env_pairs = try resolveAllSecrets(allocator, config, secrets_store),
         } },
     };
+}
+
+fn initCloudflareState(
+    allocator: std.mem.Allocator,
+    config: acme_config.ManagedConfig,
+    secrets_store: ?*secrets.SecretsStore,
+) types.AcmeError!CloudflareState {
+    var state = CloudflareState{
+        .api_token = try requireSecret(config, secrets_store, "api_token"),
+        .zone_id = &.{},
+    };
+    errdefer state.deinit(allocator);
+
+    state.zone_id = try requireConfigValue(allocator, config, "zone_id");
+    return state;
+}
+
+fn initRoute53State(
+    allocator: std.mem.Allocator,
+    config: acme_config.ManagedConfig,
+    secrets_store: ?*secrets.SecretsStore,
+) types.AcmeError!Route53State {
+    var state = Route53State{
+        .access_key_id = try requireSecret(config, secrets_store, "access_key_id"),
+        .secret_access_key = &.{},
+        .hosted_zone_id = &.{},
+        .region = &.{},
+    };
+    errdefer state.deinit(allocator);
+
+    state.secret_access_key = try requireSecret(config, secrets_store, "secret_access_key");
+    state.hosted_zone_id = try requireConfigValue(allocator, config, "hosted_zone_id");
+    state.region = try optionalConfigValue(allocator, config, "region", "us-east-1");
+    return state;
+}
+
+fn initGcloudState(
+    allocator: std.mem.Allocator,
+    config: acme_config.ManagedConfig,
+    secrets_store: ?*secrets.SecretsStore,
+) types.AcmeError!GcloudState {
+    var state = GcloudState{
+        .access_token = try requireSecret(config, secrets_store, "access_token"),
+        .project = &.{},
+        .managed_zone = &.{},
+    };
+    errdefer state.deinit(allocator);
+
+    state.project = try requireConfigValue(allocator, config, "project");
+    state.managed_zone = try requireConfigValue(allocator, config, "managed_zone");
+    return state;
 }
 
 fn presentCloudflare(ctx: *anyopaque, record_name: []const u8, value: []const u8) types.AcmeError!void {
@@ -157,16 +198,11 @@ fn presentCloudflare(ctx: *anyopaque, record_name: []const u8, value: []const u8
         else => unreachable,
     };
 
-    const body = std.fmt.allocPrint(
-        runtime.allocator,
-        "{{\"type\":\"TXT\",\"name\":\"{s}\",\"content\":\"{s}\",\"ttl\":120}}",
-        .{ record_name, value },
-    ) catch return types.AcmeError.AllocFailed;
+    const body = try buildCloudflareCreateBody(runtime.allocator, record_name, value);
     defer runtime.allocator.free(body);
 
     var auth_buf: [1024]u8 = undefined;
-    const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{state.api_token}) catch
-        return types.AcmeError.AllocFailed;
+    const auth = try bearerAuth(&auth_buf, state.api_token);
     const url = std.fmt.allocPrint(
         runtime.allocator,
         "https://api.cloudflare.com/client/v4/zones/{s}/dns_records",
@@ -174,7 +210,7 @@ fn presentCloudflare(ctx: *anyopaque, record_name: []const u8, value: []const u8
     ) catch return types.AcmeError.AllocFailed;
     defer runtime.allocator.free(url);
 
-    const response = sendRequest(
+    const response = try sendDnsRequest(
         runtime,
         .POST,
         url,
@@ -183,10 +219,10 @@ fn presentCloudflare(ctx: *anyopaque, record_name: []const u8, value: []const u8
         &.{
             .{ .name = "Authorization", .value = auth },
         },
-    ) catch return types.AcmeError.ChallengeFailed;
+    );
     defer runtime.allocator.free(response.body);
 
-    if (@intFromEnum(response.status) / 100 != 2) return types.AcmeError.ChallengeFailed;
+    try requireSuccess(response.status);
     const record_id = json_support.extractJsonString(runtime.allocator, response.body, "id") catch
         return types.AcmeError.ChallengeFailed;
     if (state.record_id) |existing| runtime.allocator.free(existing);
@@ -204,7 +240,7 @@ fn cleanupCloudflare(ctx: *anyopaque, record_name: []const u8, value: []const u8
     const record_id = state.record_id orelse return;
 
     var auth_buf: [1024]u8 = undefined;
-    const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{state.api_token}) catch return;
+    const auth = bearerAuth(&auth_buf, state.api_token) catch return;
     const url = std.fmt.allocPrint(
         runtime.allocator,
         "https://api.cloudflare.com/client/v4/zones/{s}/dns_records/{s}",
@@ -212,7 +248,7 @@ fn cleanupCloudflare(ctx: *anyopaque, record_name: []const u8, value: []const u8
     ) catch return;
     defer runtime.allocator.free(url);
 
-    const response = sendRequest(
+    const response = sendDnsRequest(
         runtime,
         .DELETE,
         url,
@@ -242,17 +278,7 @@ fn route53Change(runtime: *Runtime, action: []const u8, record_name: []const u8,
     };
     const name = ensureTrailingDot(runtime.allocator, record_name) catch return types.AcmeError.AllocFailed;
     defer runtime.allocator.free(name);
-    const quoted_value = std.fmt.allocPrint(runtime.allocator, "\"{s}\"", .{value}) catch
-        return types.AcmeError.AllocFailed;
-    defer runtime.allocator.free(quoted_value);
-    const body = std.fmt.allocPrint(
-        runtime.allocator,
-        "<ChangeResourceRecordSetsRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\">" ++
-            "<ChangeBatch><Changes><Change><Action>{s}</Action><ResourceRecordSet>" ++
-            "<Name>{s}</Name><Type>TXT</Type><TTL>60</TTL><ResourceRecords><ResourceRecord><Value>{s}</Value></ResourceRecord></ResourceRecords>" ++
-            "</ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>",
-        .{ action, name, quoted_value },
-    ) catch return types.AcmeError.AllocFailed;
+    const body = try buildRoute53ChangeBody(runtime.allocator, action, name, value);
     defer runtime.allocator.free(body);
 
     const host = "route53.amazonaws.com";
@@ -284,7 +310,7 @@ fn route53Change(runtime: *Runtime, action: []const u8, record_name: []const u8,
     ) catch return types.AcmeError.ChallengeFailed;
     defer runtime.allocator.free(auth_value);
 
-    const response = sendRequest(
+    const response = try sendDnsRequest(
         runtime,
         .POST,
         url,
@@ -295,10 +321,10 @@ fn route53Change(runtime: *Runtime, action: []const u8, record_name: []const u8,
             .{ .name = "X-Amz-Date", .value = &amz_date_buf },
             .{ .name = "X-Amz-Content-Sha256", .value = payload_hash[0..] },
         },
-    ) catch return types.AcmeError.ChallengeFailed;
+    );
     defer runtime.allocator.free(response.body);
 
-    if (@intFromEnum(response.status) / 100 != 2) return types.AcmeError.ChallengeFailed;
+    try requireSuccess(response.status);
 }
 
 fn presentGcloud(ctx: *anyopaque, record_name: []const u8, value: []const u8) types.AcmeError!void {
@@ -316,19 +342,11 @@ fn gcloudChange(runtime: *Runtime, field_name: []const u8, record_name: []const 
     };
     const name = ensureTrailingDot(runtime.allocator, record_name) catch return types.AcmeError.AllocFailed;
     defer runtime.allocator.free(name);
-    const quoted = std.fmt.allocPrint(runtime.allocator, "\"{s}\"", .{value}) catch
-        return types.AcmeError.AllocFailed;
-    defer runtime.allocator.free(quoted);
-    const body = std.fmt.allocPrint(
-        runtime.allocator,
-        "{{\"{s}\":[{{\"name\":\"{s}\",\"type\":\"TXT\",\"ttl\":60,\"rrdatas\":[{s}]}}]}}",
-        .{ field_name, name, quoted },
-    ) catch return types.AcmeError.AllocFailed;
+    const body = try buildGcloudChangeBody(runtime.allocator, field_name, name, value);
     defer runtime.allocator.free(body);
 
     var auth_buf: [2048]u8 = undefined;
-    const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{state.access_token}) catch
-        return types.AcmeError.AllocFailed;
+    const auth = try bearerAuth(&auth_buf, state.access_token);
     const url = std.fmt.allocPrint(
         runtime.allocator,
         "https://dns.googleapis.com/dns/v1/projects/{s}/managedZones/{s}/changes",
@@ -336,7 +354,7 @@ fn gcloudChange(runtime: *Runtime, field_name: []const u8, record_name: []const 
     ) catch return types.AcmeError.AllocFailed;
     defer runtime.allocator.free(url);
 
-    const response = sendRequest(
+    const response = try sendDnsRequest(
         runtime,
         .POST,
         url,
@@ -345,10 +363,10 @@ fn gcloudChange(runtime: *Runtime, field_name: []const u8, record_name: []const 
         &.{
             .{ .name = "Authorization", .value = auth },
         },
-    ) catch return types.AcmeError.ChallengeFailed;
+    );
     defer runtime.allocator.free(response.body);
 
-    if (@intFromEnum(response.status) / 100 != 2) return types.AcmeError.ChallengeFailed;
+    try requireSuccess(response.status);
 }
 
 fn presentExec(ctx: *anyopaque, record_name: []const u8, value: []const u8) types.AcmeError!void {
@@ -444,6 +462,78 @@ const HttpResponse = struct {
     body: []u8,
 };
 
+fn sendDnsRequest(
+    runtime: *Runtime,
+    method: http.Method,
+    url: []const u8,
+    content_type: ?[]const u8,
+    body: ?[]const u8,
+    extra_headers: []const http.Header,
+) types.AcmeError!HttpResponse {
+    return sendRequest(runtime, method, url, content_type, body, extra_headers) catch
+        return types.AcmeError.ChallengeFailed;
+}
+
+fn requireSuccess(status: http.Status) types.AcmeError!void {
+    if (@intFromEnum(status) / 100 != 2) return types.AcmeError.ChallengeFailed;
+}
+
+fn bearerAuth(buf: []u8, token: []const u8) types.AcmeError![]const u8 {
+    return std.fmt.bufPrint(buf, "Bearer {s}", .{token}) catch
+        return types.AcmeError.AllocFailed;
+}
+
+fn buildCloudflareCreateBody(
+    allocator: std.mem.Allocator,
+    record_name: []const u8,
+    value: []const u8,
+) types.AcmeError![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    aw.writer.writeAll("{\"type\":\"TXT\",\"name\":\"") catch return types.AcmeError.AllocFailed;
+    json_helpers.writeJsonEscaped(&aw.writer, record_name) catch return types.AcmeError.AllocFailed;
+    aw.writer.writeAll("\",\"content\":\"") catch return types.AcmeError.AllocFailed;
+    json_helpers.writeJsonEscaped(&aw.writer, value) catch return types.AcmeError.AllocFailed;
+    aw.writer.writeAll("\",\"ttl\":120}") catch return types.AcmeError.AllocFailed;
+    return aw.toOwnedSlice() catch return types.AcmeError.AllocFailed;
+}
+
+fn buildRoute53ChangeBody(
+    allocator: std.mem.Allocator,
+    action: []const u8,
+    record_name: []const u8,
+    value: []const u8,
+) types.AcmeError![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "<ChangeResourceRecordSetsRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\">" ++
+            "<ChangeBatch><Changes><Change><Action>{s}</Action><ResourceRecordSet>" ++
+            "<Name>{s}</Name><Type>TXT</Type><TTL>60</TTL><ResourceRecords><ResourceRecord><Value>\"{s}\"</Value></ResourceRecord></ResourceRecords>" ++
+            "</ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>",
+        .{ action, record_name, value },
+    ) catch return types.AcmeError.AllocFailed;
+}
+
+fn buildGcloudChangeBody(
+    allocator: std.mem.Allocator,
+    field_name: []const u8,
+    record_name: []const u8,
+    value: []const u8,
+) types.AcmeError![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    aw.writer.writeAll("{\"") catch return types.AcmeError.AllocFailed;
+    json_helpers.writeJsonEscaped(&aw.writer, field_name) catch return types.AcmeError.AllocFailed;
+    aw.writer.writeAll("\":[{\"name\":\"") catch return types.AcmeError.AllocFailed;
+    json_helpers.writeJsonEscaped(&aw.writer, record_name) catch return types.AcmeError.AllocFailed;
+    aw.writer.writeAll("\",\"type\":\"TXT\",\"ttl\":60,\"rrdatas\":[\"") catch return types.AcmeError.AllocFailed;
+    json_helpers.writeJsonEscaped(&aw.writer, value) catch return types.AcmeError.AllocFailed;
+    aw.writer.writeAll("\"]}]}") catch return types.AcmeError.AllocFailed;
+    return aw.toOwnedSlice() catch return types.AcmeError.AllocFailed;
+}
+
 fn requireSecret(
     config: acme_config.ManagedConfig,
     secrets_store: ?*secrets.SecretsStore,
@@ -490,11 +580,12 @@ fn resolveAllSecrets(
 
     for (config.secret_refs) |entry| {
         const value = store.get(entry.value) catch return types.AcmeError.ChallengeFailed;
-        errdefer {
-            allocator.free(value);
-        }
+        errdefer allocator.free(value);
+        const key = allocator.dupe(u8, entry.key) catch return types.AcmeError.AllocFailed;
+        errdefer allocator.free(key);
+
         out.append(allocator, .{
-            .key = allocator.dupe(u8, entry.key) catch return types.AcmeError.AllocFailed,
+            .key = key,
             .value = value,
         }) catch return types.AcmeError.AllocFailed;
     }
@@ -660,6 +751,76 @@ test "buildHookArgv appends action" {
     try std.testing.expectEqualStrings("/bin/hook", argv[0]);
     try std.testing.expectEqualStrings("--flag", argv[1]);
     try std.testing.expectEqualStrings("present", argv[2]);
+}
+
+test "Runtime.init frees partial cloudflare state when config is invalid" {
+    const alloc = std.testing.allocator;
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    const key = [_]u8{0xAB} ** secrets.key_length;
+    var store = try secrets.SecretsStore.initWithKey(&db, alloc, key);
+    try store.set("cf-token", "secret-token");
+
+    var config = acme_config.ManagedConfig{
+        .email = try alloc.dupe(u8, "ops@example.com"),
+        .directory_url = try alloc.dupe(u8, "https://acme.example/directory"),
+        .challenge_type = .dns_01,
+        .dns_provider = .cloudflare,
+        .secret_refs = try acme_config.cloneKeyValueRefs(alloc, &.{.{ .key = "api_token", .value = "cf-token" }}),
+        .config_pairs = try acme_config.cloneKeyValueRefs(alloc, &.{}),
+        .hook_command = try acme_config.cloneStringArray(alloc, &.{}),
+    };
+    defer config.deinit(alloc);
+
+    try std.testing.expectError(
+        types.AcmeError.ChallengeFailed,
+        Runtime.init(std.testing.io, alloc, config, &store),
+    );
+}
+
+test "Runtime.init resolves exec secret environment pairs" {
+    const alloc = std.testing.allocator;
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    const key = [_]u8{0xCD} ** secrets.key_length;
+    var store = try secrets.SecretsStore.initWithKey(&db, alloc, key);
+    try store.set("hook-token", "resolved-token");
+
+    var config = acme_config.ManagedConfig{
+        .email = try alloc.dupe(u8, "ops@example.com"),
+        .directory_url = try alloc.dupe(u8, "https://acme.example/directory"),
+        .challenge_type = .dns_01,
+        .dns_provider = .exec,
+        .secret_refs = try acme_config.cloneKeyValueRefs(alloc, &.{.{ .key = "HOOK_TOKEN", .value = "hook-token" }}),
+        .config_pairs = try acme_config.cloneKeyValueRefs(alloc, &.{}),
+        .hook_command = try acme_config.cloneStringArray(alloc, &.{"/bin/hook"}),
+    };
+    defer config.deinit(alloc);
+
+    var runtime = try Runtime.init(std.testing.io, alloc, config, &store);
+    defer runtime.deinit();
+
+    const exec_state = switch (runtime.state) {
+        .exec => |state| state,
+        else => unreachable,
+    };
+    try std.testing.expectEqual(@as(usize, 1), exec_state.env_pairs.len);
+    try std.testing.expectEqualStrings("HOOK_TOKEN", exec_state.env_pairs[0].key);
+    try std.testing.expectEqualStrings("resolved-token", exec_state.env_pairs[0].value);
+}
+
+test "provider JSON bodies escape strings" {
+    const alloc = std.testing.allocator;
+
+    const cloudflare_body = try buildCloudflareCreateBody(alloc, "_acme-challenge.example.com", "a\"b\\c");
+    defer alloc.free(cloudflare_body);
+    try std.testing.expect(std.mem.indexOf(u8, cloudflare_body, "\"content\":\"a\\\"b\\\\c\"") != null);
+
+    const gcloud_body = try buildGcloudChangeBody(alloc, "additions", "_acme-challenge.example.com.", "a\"b\\c");
+    defer alloc.free(gcloud_body);
+    try std.testing.expect(std.mem.indexOf(u8, gcloud_body, "\"rrdatas\":[\"a\\\"b\\\\c\"]") != null);
 }
 
 test "buildRoute53Authorization includes credential scope" {

@@ -76,17 +76,21 @@ pub const ManagedConfig = struct {
     }
 
     pub fn clone(self: ManagedConfig, alloc: std.mem.Allocator) !ManagedConfig {
-        return .{
+        var copy = ManagedConfig{
             .email = try alloc.dupe(u8, self.email),
-            .directory_url = try alloc.dupe(u8, self.directory_url),
+            .directory_url = &.{},
             .challenge_type = self.challenge_type,
-            .dns_provider = self.dns_provider,
-            .secret_refs = try cloneKeyValueRefs(alloc, self.secret_refs),
-            .config_pairs = try cloneKeyValueRefs(alloc, self.config_pairs),
-            .hook_command = try cloneStringArray(alloc, self.hook_command),
-            .propagation_timeout_secs = self.propagation_timeout_secs,
-            .poll_interval_secs = self.poll_interval_secs,
         };
+        errdefer copy.deinit(alloc);
+
+        copy.directory_url = try alloc.dupe(u8, self.directory_url);
+        copy.dns_provider = self.dns_provider;
+        copy.secret_refs = try cloneKeyValueRefs(alloc, self.secret_refs);
+        copy.config_pairs = try cloneKeyValueRefs(alloc, self.config_pairs);
+        copy.hook_command = try cloneStringArray(alloc, self.hook_command);
+        copy.propagation_timeout_secs = self.propagation_timeout_secs;
+        copy.poll_interval_secs = self.poll_interval_secs;
+        return copy;
     }
 
     pub fn writeJson(writer: *std.Io.Writer, config: ManagedConfig) !void {
@@ -123,10 +127,10 @@ pub const ManagedConfig = struct {
     }
 };
 
-fn cloneKeyValueRefs(alloc: std.mem.Allocator, entries: []const KeyValueRef) ![]const KeyValueRef {
+pub fn cloneKeyValueRefs(alloc: std.mem.Allocator, entries: []const KeyValueRef) ![]const KeyValueRef {
     var out: std.ArrayListUnmanaged(KeyValueRef) = .empty;
     errdefer {
-        for (out.items) |entry| entry.deinit(alloc);
+        freeKeyValueRefs(alloc, out.items);
         out.deinit(alloc);
     }
     for (entries) |entry| {
@@ -138,16 +142,26 @@ fn cloneKeyValueRefs(alloc: std.mem.Allocator, entries: []const KeyValueRef) ![]
     return try out.toOwnedSlice(alloc);
 }
 
-fn cloneStringArray(alloc: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
+pub fn cloneStringArray(alloc: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
     var out: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
-        for (out.items) |entry| alloc.free(entry);
+        freeStringArray(alloc, out.items);
         out.deinit(alloc);
     }
     for (values) |value| {
         try out.append(alloc, try alloc.dupe(u8, value));
     }
     return try out.toOwnedSlice(alloc);
+}
+
+pub fn freeKeyValueRefs(alloc: std.mem.Allocator, entries: []const KeyValueRef) void {
+    for (entries) |entry| entry.deinit(alloc);
+    alloc.free(entries);
+}
+
+pub fn freeStringArray(alloc: std.mem.Allocator, values: []const []const u8) void {
+    for (values) |value| alloc.free(value);
+    alloc.free(values);
 }
 
 fn writeKeyValueRefArray(writer: *std.Io.Writer, entries: []const KeyValueRef) !void {

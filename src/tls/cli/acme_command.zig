@@ -26,10 +26,7 @@ pub fn renew(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Alloca
     try runAcmeCommand(io, alloc, parsed, true);
 }
 
-const BorrowedKeyValue = struct {
-    key: []const u8,
-    value: []const u8,
-};
+const BorrowedKeyValue = acme.KeyValueRef;
 
 const ParsedArgs = struct {
     domain: []const u8,
@@ -289,115 +286,103 @@ fn buildManagedConfig(
     const challenge_type = parsed.challenge_type orelse if (existing) |cfg| cfg.challenge_type else .http_01;
     const dns_provider_value = parsed.dns_provider orelse if (existing) |cfg| cfg.dns_provider else null;
 
-    const secret_refs = if (parsed.dns_secret_refs.len > 0)
-        try cloneBorrowedKeyValues(alloc, parsed.dns_secret_refs)
-    else if (existing) |cfg|
-        try cloneManagedKeyValues(alloc, cfg.secret_refs)
-    else
-        try alloc.alloc(acme.KeyValueRef, 0);
-    errdefer freeKeyValues(alloc, secret_refs);
+    const secret_refs = try selectedKeyValues(alloc, parsed.dns_secret_refs, existing, .secret_refs);
+    errdefer acme.freeKeyValueRefs(alloc, secret_refs);
 
-    const config_pairs = if (parsed.dns_config.len > 0)
-        try cloneBorrowedKeyValues(alloc, parsed.dns_config)
-    else if (existing) |cfg|
-        try cloneManagedKeyValues(alloc, cfg.config_pairs)
-    else
-        try alloc.alloc(acme.KeyValueRef, 0);
-    errdefer freeKeyValues(alloc, config_pairs);
+    const config_pairs = try selectedKeyValues(alloc, parsed.dns_config, existing, .config_pairs);
+    errdefer acme.freeKeyValueRefs(alloc, config_pairs);
 
-    const hook_command = if (parsed.dns_hook.len > 0)
-        try cloneStrings(alloc, parsed.dns_hook)
-    else if (existing) |cfg|
-        try cloneStrings(alloc, cfg.hook_command)
-    else
-        try alloc.alloc([]const u8, 0);
-    errdefer freeStrings(alloc, hook_command);
+    const hook_command = try selectedHookCommand(alloc, parsed, existing);
+    errdefer acme.freeStringArray(alloc, hook_command);
 
-    const propagation_timeout_secs = parsed.propagation_timeout_secs orelse if (existing) |cfg|
-        cfg.propagation_timeout_secs
-    else
-        300;
-    const poll_interval_secs = parsed.poll_interval_secs orelse if (existing) |cfg|
-        cfg.poll_interval_secs
-    else
-        5;
-    const directory_url = if (existing) |cfg|
-        if (std.mem.eql(u8, parsed.directory_url, acme.letsencrypt_production) and
-            std.mem.eql(u8, cfg.directory_url, acme.letsencrypt_staging))
-            cfg.directory_url
-        else
-            parsed.directory_url
-    else
-        parsed.directory_url;
+    try validateManagedConfig(.{
+        .challenge_type = challenge_type,
+        .dns_provider = dns_provider_value,
+        .secret_refs_len = secret_refs.len,
+        .config_pairs_len = config_pairs.len,
+        .hook_command_len = hook_command.len,
+    });
 
-    if (challenge_type == .dns_01 and dns_provider_value == null) return error.InvalidConfig;
-    if (challenge_type == .http_01 and (dns_provider_value != null or secret_refs.len > 0 or config_pairs.len > 0 or hook_command.len > 0))
-        return error.InvalidConfig;
-    if (dns_provider_value != null and dns_provider_value.? == .exec and hook_command.len == 0) return error.InvalidConfig;
+    const owned_email = try alloc.dupe(u8, account_email);
+    errdefer alloc.free(owned_email);
+    const owned_directory_url = try alloc.dupe(u8, selectedDirectoryUrl(parsed, existing));
+    errdefer alloc.free(owned_directory_url);
 
     return .{
-        .email = try alloc.dupe(u8, account_email),
-        .directory_url = try alloc.dupe(u8, directory_url),
+        .email = owned_email,
+        .directory_url = owned_directory_url,
         .challenge_type = challenge_type,
         .dns_provider = dns_provider_value,
         .secret_refs = secret_refs,
         .config_pairs = config_pairs,
         .hook_command = hook_command,
-        .propagation_timeout_secs = propagation_timeout_secs,
-        .poll_interval_secs = poll_interval_secs,
+        .propagation_timeout_secs = parsed.propagation_timeout_secs orelse if (existing) |cfg| cfg.propagation_timeout_secs else 300,
+        .poll_interval_secs = parsed.poll_interval_secs orelse if (existing) |cfg| cfg.poll_interval_secs else 5,
     };
 }
 
-fn cloneBorrowedKeyValues(alloc: std.mem.Allocator, values: []const BorrowedKeyValue) ![]const acme.KeyValueRef {
-    var out: std.ArrayListUnmanaged(acme.KeyValueRef) = .empty;
-    errdefer {
-        freeKeyValues(alloc, out.items);
-        out.deinit(alloc);
-    }
-    for (values) |entry| {
-        try out.append(alloc, .{
-            .key = try alloc.dupe(u8, entry.key),
-            .value = try alloc.dupe(u8, entry.value),
+const KeyValueSource = enum {
+    secret_refs,
+    config_pairs,
+};
+
+fn selectedKeyValues(
+    alloc: std.mem.Allocator,
+    parsed_values: []const BorrowedKeyValue,
+    existing: ?acme.ManagedConfig,
+    source: KeyValueSource,
+) ![]const acme.KeyValueRef {
+    if (parsed_values.len > 0) return acme.cloneKeyValueRefs(alloc, parsed_values);
+    if (existing) |cfg| {
+        return acme.cloneKeyValueRefs(alloc, switch (source) {
+            .secret_refs => cfg.secret_refs,
+            .config_pairs => cfg.config_pairs,
         });
     }
-    return try out.toOwnedSlice(alloc);
+    return try alloc.alloc(acme.KeyValueRef, 0);
 }
 
-fn cloneManagedKeyValues(alloc: std.mem.Allocator, values: []const acme.KeyValueRef) ![]const acme.KeyValueRef {
-    var out: std.ArrayListUnmanaged(acme.KeyValueRef) = .empty;
-    errdefer {
-        freeKeyValues(alloc, out.items);
-        out.deinit(alloc);
-    }
-    for (values) |entry| {
-        try out.append(alloc, .{
-            .key = try alloc.dupe(u8, entry.key),
-            .value = try alloc.dupe(u8, entry.value),
-        });
-    }
-    return try out.toOwnedSlice(alloc);
+fn selectedHookCommand(
+    alloc: std.mem.Allocator,
+    parsed: ParsedArgs,
+    existing: ?acme.ManagedConfig,
+) ![]const []const u8 {
+    if (parsed.dns_hook.len > 0) return acme.cloneStringArray(alloc, parsed.dns_hook);
+    if (existing) |cfg| return acme.cloneStringArray(alloc, cfg.hook_command);
+    return try alloc.alloc([]const u8, 0);
 }
 
-fn cloneStrings(alloc: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
-    var out: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer {
-        freeStrings(alloc, out.items);
-        out.deinit(alloc);
+fn selectedDirectoryUrl(parsed: ParsedArgs, existing: ?acme.ManagedConfig) []const u8 {
+    const cfg = existing orelse return parsed.directory_url;
+    if (std.mem.eql(u8, parsed.directory_url, acme.letsencrypt_production) and
+        std.mem.eql(u8, cfg.directory_url, acme.letsencrypt_staging))
+    {
+        return cfg.directory_url;
     }
-    for (values) |value| {
-        try out.append(alloc, try alloc.dupe(u8, value));
-    }
-    return try out.toOwnedSlice(alloc);
+    return parsed.directory_url;
 }
 
-fn freeKeyValues(alloc: std.mem.Allocator, values: []const acme.KeyValueRef) void {
-    for (values) |entry| entry.deinit(alloc);
-    alloc.free(values);
-}
+const ManagedConfigValidation = struct {
+    challenge_type: acme.ChallengeType,
+    dns_provider: ?acme.DnsProvider,
+    secret_refs_len: usize,
+    config_pairs_len: usize,
+    hook_command_len: usize,
+};
 
-fn freeStrings(alloc: std.mem.Allocator, values: []const []const u8) void {
-    for (values) |value| alloc.free(value);
-    alloc.free(values);
+fn validateManagedConfig(config: ManagedConfigValidation) !void {
+    if (config.challenge_type == .dns_01 and config.dns_provider == null) return error.InvalidConfig;
+    if (config.challenge_type == .http_01 and
+        (config.dns_provider != null or
+            config.secret_refs_len > 0 or
+            config.config_pairs_len > 0 or
+            config.hook_command_len > 0))
+    {
+        return error.InvalidConfig;
+    }
+    if (config.dns_provider != null and config.dns_provider.? == .exec and config.hook_command_len == 0) {
+        return error.InvalidConfig;
+    }
 }
 
 fn resolveAccountEmail(
@@ -507,9 +492,9 @@ test "buildManagedConfig uses existing dns metadata by default" {
         .directory_url = try alloc.dupe(u8, acme.letsencrypt_staging),
         .challenge_type = .dns_01,
         .dns_provider = .cloudflare,
-        .secret_refs = try cloneBorrowedKeyValues(alloc, &.{.{ .key = "api_token", .value = "cf-token" }}),
-        .config_pairs = try cloneBorrowedKeyValues(alloc, &.{.{ .key = "zone_id", .value = "zone123" }}),
-        .hook_command = try cloneStrings(alloc, &.{}),
+        .secret_refs = try acme.cloneKeyValueRefs(alloc, &.{.{ .key = "api_token", .value = "cf-token" }}),
+        .config_pairs = try acme.cloneKeyValueRefs(alloc, &.{.{ .key = "zone_id", .value = "zone123" }}),
+        .hook_command = try acme.cloneStringArray(alloc, &.{}),
     };
     defer existing.deinit(alloc);
 
