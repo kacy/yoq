@@ -25,8 +25,7 @@ const sni = @import("sni.zig");
 const cert_store = @import("cert_store.zig");
 const backend_mod = @import("backend.zig");
 const acme_mod = @import("acme.zig");
-const dns_provider = @import("acme/dns_provider.zig");
-const secrets = @import("../state/secrets.zig");
+const managed_runtime = @import("acme/managed_runtime.zig");
 
 const max_connections: u32 = 256;
 var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
@@ -344,47 +343,15 @@ pub const TlsProxy = struct {
         var client = acme_mod.AcmeClient.init(self.threaded_io.io(), self.allocator, managed_config.directory_url);
         defer client.deinit();
 
-        var exported = switch (managed_config.challenge_type) {
-            .http_01 => client.issueAndExport(.{
-                .domain = domain,
-                .email = managed_config.email,
-                .directory_url = managed_config.directory_url,
-                .challenge_type = .http_01,
-                .challenge_registrar = challengeRegistrar(&self.challenges),
-            }),
-            .dns_01 => blk: {
-                var maybe_secret_store: ?secrets.SecretsStore = null;
-                if (managed_config.dns_provider) |provider| {
-                    if (provider != .exec or managed_config.secret_refs.len > 0) {
-                        maybe_secret_store = secrets.SecretsStore.init(self.certs.db, self.allocator) catch {
-                            log.warn("  renewal: failed to open secrets store", .{});
-                            return RenewError.StoreFailed;
-                        };
-                    }
-                }
-
-                var runtime = dns_provider.Runtime.init(
-                    self.threaded_io.io(),
-                    self.allocator,
-                    managed_config,
-                    if (maybe_secret_store) |*store| store else null,
-                ) catch {
-                    log.warn("  renewal: failed to initialize DNS provider", .{});
-                    return RenewError.AcmeFailed;
-                };
-                defer runtime.deinit();
-
-                break :blk client.issueAndExport(.{
-                    .domain = domain,
-                    .email = managed_config.email,
-                    .directory_url = managed_config.directory_url,
-                    .challenge_type = .dns_01,
-                    .dns_solver = runtime.solver(),
-                    .dns_propagation_timeout_secs = managed_config.propagation_timeout_secs,
-                    .dns_poll_interval_secs = managed_config.poll_interval_secs,
-                });
-            },
-        } catch {
+        var exported = managed_runtime.issueAndExport(
+            self.threaded_io.io(),
+            self.allocator,
+            self.certs.db,
+            &client,
+            domain,
+            managed_config,
+            challengeRegistrar(&self.challenges),
+        ) catch {
             log.warn("  renewal: failed to finalize order", .{});
             return RenewError.AcmeFailed;
         };

@@ -42,7 +42,8 @@ restart = "always"
 
 [service.web.tls]
 domain = "myapp.example.com"
-acme = true
+
+[service.web.tls.acme]
 email = "ops@example.com"
 
 [cron.backup]

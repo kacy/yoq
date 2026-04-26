@@ -1313,14 +1313,15 @@ test "tls config — domain and acme" {
         \\
         \\[service.web.tls]
         \\domain = "example.com"
-        \\acme = true
+        \\
+        \\[service.web.tls.acme]
         \\email = "admin@example.com"
     );
     defer manifest.deinit();
 
     const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("example.com", tls.domain);
-    try std.testing.expect(tls.acme);
+    try std.testing.expect(tls.acme != null);
 }
 
 test "tls config — domain only, acme defaults to false" {
@@ -1337,7 +1338,7 @@ test "tls config — domain only, acme defaults to false" {
 
     const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
     try std.testing.expectEqualStrings("test.org", tls.domain);
-    try std.testing.expect(!tls.acme);
+    try std.testing.expect(tls.acme == null);
 }
 
 test "tls config — not specified" {
@@ -1360,7 +1361,9 @@ test "tls config — missing domain returns error" {
         \\image = "nginx:latest"
         \\
         \\[service.web.tls]
-        \\acme = true
+        \\
+        \\[service.web.tls.acme]
+        \\email = "admin@example.com"
     ));
 }
 
@@ -1373,25 +1376,30 @@ test "tls config — dns-01 provider settings" {
         \\
         \\[service.web.tls]
         \\domain = "example.com"
-        \\acme = true
+        \\
+        \\[service.web.tls.acme]
         \\email = "admin@example.com"
-        \\acme_challenge = "dns-01"
-        \\acme_dns_provider = "cloudflare"
-        \\acme_dns_secret_refs = ["api_token=cf-token"]
-        \\acme_dns_config = ["zone_id=zone-123"]
-        \\acme_dns_propagation_timeout_secs = 120
-        \\acme_dns_poll_interval_secs = 3
+        \\challenge = "dns-01"
+        \\
+        \\[service.web.tls.acme.dns]
+        \\provider = "cloudflare"
+        \\secrets = ["api_token=cf-token"]
+        \\config = ["zone_id=zone-123"]
+        \\propagation_timeout_secs = 120
+        \\poll_interval_secs = 3
     );
     defer manifest.deinit();
 
     const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
-    try std.testing.expectEqual(spec.TlsConfig.ChallengeType.dns_01, tls.acme_challenge);
-    try std.testing.expectEqual(spec.TlsConfig.DnsProvider.cloudflare, tls.acme_dns_provider.?);
-    try std.testing.expectEqual(@as(usize, 1), tls.acme_dns_secret_refs.len);
-    try std.testing.expectEqualStrings("api_token", tls.acme_dns_secret_refs[0].key);
-    try std.testing.expectEqualStrings("cf-token", tls.acme_dns_secret_refs[0].value);
-    try std.testing.expectEqual(@as(u32, 120), tls.acme_dns_propagation_timeout_secs);
-    try std.testing.expectEqual(@as(u32, 3), tls.acme_dns_poll_interval_secs);
+    const acme = tls.acme.?;
+    const dns = acme.dns.?;
+    try std.testing.expectEqual(spec.TlsConfig.ChallengeType.dns_01, acme.challenge);
+    try std.testing.expectEqual(spec.TlsConfig.DnsProvider.cloudflare, dns.provider);
+    try std.testing.expectEqual(@as(usize, 1), dns.secrets.len);
+    try std.testing.expectEqualStrings("api_token", dns.secrets[0].key);
+    try std.testing.expectEqualStrings("cf-token", dns.secrets[0].value);
+    try std.testing.expectEqual(@as(u32, 120), dns.propagation_timeout_secs);
+    try std.testing.expectEqual(@as(u32, 3), dns.poll_interval_secs);
 }
 
 test "http proxy config — host and path prefix" {

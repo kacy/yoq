@@ -331,20 +331,32 @@ defined under `[service.<name>.tls]`. enables TLS termination with automatic or 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
 | `domain` | string | yes | — | domain name for the certificate |
-| `acme` | boolean | no | `false` | auto-provision via Let's Encrypt |
-| `email` | string | conditional | — | required if `acme = true` |
-| `acme_challenge` | string | no | `"http-01"` | `http-01` or `dns-01` |
-| `acme_dns_provider` | string | conditional | — | `cloudflare`, `route53`, `gcloud`, or `exec`; required for `dns-01` |
-| `acme_dns_secret_refs` | string array | no | `[]` | provider credential references in `key=secret-name` form |
-| `acme_dns_config` | string array | no | `[]` | provider-specific non-secret config in `key=value` form |
-| `acme_dns_hook` | string array | conditional | `[]` | exec fallback command and arguments |
-| `acme_dns_propagation_timeout_secs` | integer | no | `300` | DNS-01 TXT propagation timeout |
-| `acme_dns_poll_interval_secs` | integer | no | `5` | DNS-01 TXT polling interval |
+
+ACME is enabled by adding `[service.<name>.tls.acme]`.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `email` | string | yes | — | ACME account email |
+| `staging` | boolean | no | `false` | use the Let's Encrypt staging directory |
+| `directory_url` | string | no | production Let's Encrypt | custom ACME directory URL; cannot be combined with `staging` |
+| `challenge` | string | no | `"http-01"` | `http-01` or `dns-01` |
+
+DNS-01 settings live under `[service.<name>.tls.acme.dns]`.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `provider` | string | yes | — | `cloudflare`, `route53`, `gcloud`, or `exec` |
+| `secrets` | string array | no | `[]` | provider credential references in `key=secret-name` form |
+| `config` | string array | no | `[]` | provider-specific non-secret config in `key=value` form |
+| `hook` | string array | conditional | `[]` | exec fallback command and arguments |
+| `propagation_timeout_secs` | integer | no | `300` | DNS TXT propagation timeout |
+| `poll_interval_secs` | integer | no | `5` | DNS TXT polling interval |
 
 ```toml
 [service.web.tls]
 domain = "example.com"
-acme = true
+
+[service.web.tls.acme]
 email = "admin@example.com"
 ```
 
@@ -355,12 +367,15 @@ DNS-01 is also supported:
 ```toml
 [service.web.tls]
 domain = "example.com"
-acme = true
+
+[service.web.tls.acme]
 email = "admin@example.com"
-acme_challenge = "dns-01"
-acme_dns_provider = "cloudflare"
-acme_dns_secret_refs = ["api_token=cf-acme-token"]
-acme_dns_config = ["zone_id=zone-123"]
+challenge = "dns-01"
+
+[service.web.tls.acme.dns]
+provider = "cloudflare"
+secrets = ["api_token=cf-acme-token"]
+config = ["zone_id=zone-123"]
 ```
 
 Built-in DNS-01 providers:
@@ -368,7 +383,7 @@ Built-in DNS-01 providers:
 - `cloudflare`: secret ref `api_token`, config `zone_id`
 - `route53`: secret refs `access_key_id` and `secret_access_key`, config `hosted_zone_id`, optional config `region`
 - `gcloud`: secret ref `access_token`, config `project` and `managed_zone`
-- `exec`: `acme_dns_hook = ["/path/to/hook", "arg1", ...]`; `acme_dns_secret_refs` become environment variables passed to the hook
+- `exec`: `hook = ["/path/to/hook", "arg1", ...]`; `secrets` become environment variables passed to the hook
 
 for manual certificates, use `yoq cert install` first:
 
@@ -382,7 +397,7 @@ standalone certificate commands:
 ```text
 yoq cert provision example.com
 yoq cert renew example.com
-yoq cert provision example.com --challenge dns-01 --dns-provider cloudflare --dns-secret api_token=cf-acme-token --dns-config zone_id=zone-123
+yoq cert provision example.com --dns-provider cloudflare --dns-secret api_token=cf-acme-token --dns-config zone_id=zone-123
 ```
 
 `--email` remains available for the standalone ACME flow. When it is omitted, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.

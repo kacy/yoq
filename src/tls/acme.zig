@@ -1,15 +1,15 @@
 // acme — ACME client for automatic certificate provisioning
 //
 // implements the ACME protocol (RFC 8555) for obtaining TLS certificates
-// from Let's Encrypt or any ACME-compatible CA. uses HTTP-01 challenges
+// from Let's Encrypt or any ACME-compatible CA. uses HTTP-01 or DNS-01 challenges
 // to prove domain ownership.
 //
 // flow:
 //   1. fetch directory (discover API endpoints)
 //   2. create account (or use existing)
 //   3. create order for a domain
-//   4. get authorization + HTTP-01 challenge
-//   5. register challenge token with the HTTP server (port 80)
+//   4. get authorization + supported challenge
+//   5. publish the challenge response
 //   6. tell the CA we're ready
 //   7. poll for validation
 //   8. finalize with a CSR
@@ -52,6 +52,8 @@ pub const HttpChallenge = types.HttpChallenge;
 pub const DnsChallenge = types.DnsChallenge;
 pub const ChallengeType = @import("acme/config.zig").ChallengeType;
 pub const DnsProvider = @import("acme/config.zig").DnsProvider;
+pub const DnsConfig = @import("acme/config.zig").DnsConfig;
+pub const ChallengeConfig = @import("acme/config.zig").ChallengeConfig;
 pub const ManagedConfig = @import("acme/config.zig").ManagedConfig;
 pub const KeyValueRef = @import("acme/config.zig").KeyValueRef;
 pub const cloneKeyValueRefs = @import("acme/config.zig").cloneKeyValueRefs;

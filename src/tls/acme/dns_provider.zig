@@ -129,20 +129,20 @@ fn initState(
     config: acme_config.ManagedConfig,
     secrets_store: ?*secrets.SecretsStore,
 ) types.AcmeError!Runtime.State {
-    const provider = config.dns_provider orelse return types.AcmeError.ChallengeFailed;
-    return switch (provider) {
-        .cloudflare => .{ .cloudflare = try initCloudflareState(allocator, config, secrets_store) },
-        .route53 => .{ .route53 = try initRoute53State(allocator, config, secrets_store) },
-        .gcloud => .{ .gcloud = try initGcloudState(allocator, config, secrets_store) },
+    const dns = config.dnsConfig() orelse return types.AcmeError.ChallengeFailed;
+    return switch (dns.provider) {
+        .cloudflare => .{ .cloudflare = try initCloudflareState(allocator, dns, secrets_store) },
+        .route53 => .{ .route53 = try initRoute53State(allocator, dns, secrets_store) },
+        .gcloud => .{ .gcloud = try initGcloudState(allocator, dns, secrets_store) },
         .exec => .{ .exec = .{
-            .env_pairs = try resolveAllSecrets(allocator, config, secrets_store),
+            .env_pairs = try resolveAllSecrets(allocator, dns, secrets_store),
         } },
     };
 }
 
 fn initCloudflareState(
     allocator: std.mem.Allocator,
-    config: acme_config.ManagedConfig,
+    config: acme_config.DnsConfig,
     secrets_store: ?*secrets.SecretsStore,
 ) types.AcmeError!CloudflareState {
     var state = CloudflareState{
@@ -157,7 +157,7 @@ fn initCloudflareState(
 
 fn initRoute53State(
     allocator: std.mem.Allocator,
-    config: acme_config.ManagedConfig,
+    config: acme_config.DnsConfig,
     secrets_store: ?*secrets.SecretsStore,
 ) types.AcmeError!Route53State {
     var state = Route53State{
@@ -176,7 +176,7 @@ fn initRoute53State(
 
 fn initGcloudState(
     allocator: std.mem.Allocator,
-    config: acme_config.ManagedConfig,
+    config: acme_config.DnsConfig,
     secrets_store: ?*secrets.SecretsStore,
 ) types.AcmeError!GcloudState {
     var state = GcloudState{
@@ -380,7 +380,8 @@ fn cleanupExec(ctx: *anyopaque, record_name: []const u8, value: []const u8) void
 }
 
 fn execHook(runtime: *Runtime, action: []const u8, record_name: []const u8, value: []const u8) !void {
-    if (runtime.config.hook_command.len == 0) return error.MissingHook;
+    const dns = runtime.config.dnsConfig() orelse return error.MissingHook;
+    if (dns.hook.len == 0) return error.MissingHook;
 
     var env_map = std.process.Environ.Map.init(runtime.allocator);
     defer env_map.deinit();
@@ -400,7 +401,7 @@ fn execHook(runtime: *Runtime, action: []const u8, record_name: []const u8, valu
         try env_map.put(entry.key, entry.value);
     }
 
-    const argv = try buildHookArgv(runtime.allocator, runtime.config.hook_command, action);
+    const argv = try buildHookArgv(runtime.allocator, dns.hook, action);
     defer runtime.allocator.free(argv);
 
     var child = try std.process.spawn(runtime.io, .{
@@ -535,7 +536,7 @@ fn buildGcloudChangeBody(
 }
 
 fn requireSecret(
-    config: acme_config.ManagedConfig,
+    config: acme_config.DnsConfig,
     secrets_store: ?*secrets.SecretsStore,
     key: []const u8,
 ) types.AcmeError![]const u8 {
@@ -546,26 +547,26 @@ fn requireSecret(
 
 fn requireConfigValue(
     allocator: std.mem.Allocator,
-    config: acme_config.ManagedConfig,
+    config: acme_config.DnsConfig,
     key: []const u8,
 ) types.AcmeError![]const u8 {
-    const value = findPairValue(config.config_pairs, key) orelse return types.AcmeError.ChallengeFailed;
+    const value = findPairValue(config.config, key) orelse return types.AcmeError.ChallengeFailed;
     return allocator.dupe(u8, value) catch return types.AcmeError.AllocFailed;
 }
 
 fn optionalConfigValue(
     allocator: std.mem.Allocator,
-    config: acme_config.ManagedConfig,
+    config: acme_config.DnsConfig,
     key: []const u8,
     default_value: []const u8,
 ) types.AcmeError![]const u8 {
-    const value = findPairValue(config.config_pairs, key) orelse default_value;
+    const value = findPairValue(config.config, key) orelse default_value;
     return allocator.dupe(u8, value) catch return types.AcmeError.AllocFailed;
 }
 
 fn resolveAllSecrets(
     allocator: std.mem.Allocator,
-    config: acme_config.ManagedConfig,
+    config: acme_config.DnsConfig,
     secrets_store: ?*secrets.SecretsStore,
 ) types.AcmeError![]const acme_config.KeyValueRef {
     if (config.secret_refs.len == 0) {
@@ -765,11 +766,12 @@ test "Runtime.init frees partial cloudflare state when config is invalid" {
     var config = acme_config.ManagedConfig{
         .email = try alloc.dupe(u8, "ops@example.com"),
         .directory_url = try alloc.dupe(u8, "https://acme.example/directory"),
-        .challenge_type = .dns_01,
-        .dns_provider = .cloudflare,
-        .secret_refs = try acme_config.cloneKeyValueRefs(alloc, &.{.{ .key = "api_token", .value = "cf-token" }}),
-        .config_pairs = try acme_config.cloneKeyValueRefs(alloc, &.{}),
-        .hook_command = try acme_config.cloneStringArray(alloc, &.{}),
+        .challenge = .{ .dns_01 = .{
+            .provider = .cloudflare,
+            .secret_refs = try acme_config.cloneKeyValueRefs(alloc, &.{.{ .key = "api_token", .value = "cf-token" }}),
+            .config = try acme_config.cloneKeyValueRefs(alloc, &.{}),
+            .hook = try acme_config.cloneStringArray(alloc, &.{}),
+        } },
     };
     defer config.deinit(alloc);
 
@@ -791,11 +793,12 @@ test "Runtime.init resolves exec secret environment pairs" {
     var config = acme_config.ManagedConfig{
         .email = try alloc.dupe(u8, "ops@example.com"),
         .directory_url = try alloc.dupe(u8, "https://acme.example/directory"),
-        .challenge_type = .dns_01,
-        .dns_provider = .exec,
-        .secret_refs = try acme_config.cloneKeyValueRefs(alloc, &.{.{ .key = "HOOK_TOKEN", .value = "hook-token" }}),
-        .config_pairs = try acme_config.cloneKeyValueRefs(alloc, &.{}),
-        .hook_command = try acme_config.cloneStringArray(alloc, &.{"/bin/hook"}),
+        .challenge = .{ .dns_01 = .{
+            .provider = .exec,
+            .secret_refs = try acme_config.cloneKeyValueRefs(alloc, &.{.{ .key = "HOOK_TOKEN", .value = "hook-token" }}),
+            .config = try acme_config.cloneKeyValueRefs(alloc, &.{}),
+            .hook = try acme_config.cloneStringArray(alloc, &.{"/bin/hook"}),
+        } },
     };
     defer config.deinit(alloc);
 

@@ -382,7 +382,7 @@ fn provisionAcmeCerts(
     for (services) |svc| {
         if (!shouldStart(start_set, svc.name)) continue;
         const tls = svc.tls orelse continue;
-        if (!tls.acme) continue;
+        if (tls.acme == null) continue;
 
         const needs = certs.needsRenewal(tls.domain, 30) catch |err| blk: {
             if (err == cert_store_mod.CertError.NotFound) break :blk true;
@@ -415,7 +415,7 @@ fn hasManagedAcmeService(
     for (services) |svc| {
         if (!shouldStart(start_set, svc.name)) continue;
         const tls = svc.tls orelse continue;
-        if (!tls.acme) continue;
+        if (tls.acme == null) continue;
         return true;
     }
     return false;

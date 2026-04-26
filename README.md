@@ -294,9 +294,9 @@ yoq secret get <name>                read a secret
 yoq secret rm <name>                 delete a secret
 yoq secret list                      list secrets
 yoq secret rotate <name>             rotate a secret
-yoq cert provision <domain> [--email <email>] [--staging] [--challenge http-01|dns-01]
+yoq cert provision <domain> [--email <email>] [--staging] [--dns-provider <provider>]
                                      provision a TLS certificate via ACME
-yoq cert renew <domain> [--email <email>] [--staging] [--challenge http-01|dns-01]
+yoq cert renew <domain> [--email <email>] [--staging] [--dns-provider <provider>]
                                      renew a TLS certificate via ACME
 yoq cert install <domain> --cert <path> --key <path>
 yoq cert list                        list certificates

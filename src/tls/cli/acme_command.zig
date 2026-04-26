@@ -1,13 +1,11 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
 
 const cli = @import("../../lib/cli.zig");
 const acme = @import("../acme.zig");
-const dns_provider = @import("../acme/dns_provider.zig");
+const managed_runtime = @import("../acme/managed_runtime.zig");
 const cert_store = @import("../cert_store.zig");
 const challenge_server = @import("../challenge_server.zig");
 const proxy = @import("../proxy.zig");
-const secrets = @import("../../state/secrets.zig");
 const common = @import("common.zig");
 const store_support = @import("store_support.zig");
 
@@ -32,7 +30,6 @@ const ParsedArgs = struct {
     domain: []const u8,
     email: ?[]const u8,
     directory_url: []const u8,
-    challenge_type: ?acme.ChallengeType = null,
     dns_provider: ?acme.DnsProvider = null,
     dns_secret_refs: []const BorrowedKeyValue,
     dns_config: []const BorrowedKeyValue,
@@ -51,7 +48,6 @@ fn parseArgs(alloc: std.mem.Allocator, args: *std.process.Args.Iterator) common.
     var domain: ?[]const u8 = null;
     var email: ?[]const u8 = null;
     var directory_url: []const u8 = acme.letsencrypt_production;
-    var challenge_type: ?acme.ChallengeType = null;
     var provider: ?acme.DnsProvider = null;
     var dns_secret_refs: std.ArrayListUnmanaged(BorrowedKeyValue) = .empty;
     errdefer dns_secret_refs.deinit(alloc);
@@ -69,12 +65,6 @@ fn parseArgs(alloc: std.mem.Allocator, args: *std.process.Args.Iterator) common.
         }
         if (std.mem.eql(u8, arg, "--staging")) {
             directory_url = acme.letsencrypt_staging;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--challenge")) {
-            const value = args.next() orelse return invalidArg("--challenge requires a value\n");
-            challenge_type = parseChallengeType(value) orelse
-                return invalidArg("--challenge must be http-01 or dns-01\n");
             continue;
         }
         if (std.mem.eql(u8, arg, "--dns-provider")) {
@@ -132,7 +122,6 @@ fn parseArgs(alloc: std.mem.Allocator, args: *std.process.Args.Iterator) common.
         .domain = domain orelse return invalidArg("domain is required\n"),
         .email = email,
         .directory_url = directory_url,
-        .challenge_type = challenge_type,
         .dns_provider = provider,
         .dns_secret_refs = dns_secret_refs.toOwnedSlice(alloc) catch return common.TlsCommandsError.OutOfMemory,
         .dns_config = dns_config.toOwnedSlice(alloc) catch return common.TlsCommandsError.OutOfMemory,
@@ -196,9 +185,9 @@ fn runAcmeCommand(
     var client = acme.AcmeClient.init(io, alloc, managed_config.directory_url);
     defer client.deinit();
 
-    var exported = switch (managed_config.challenge_type) {
-        .http_01 => issueHttp01(alloc, &client, parsed.domain, managed_config),
-        .dns_01 => issueDns01(io, alloc, opened.db, &client, parsed.domain, managed_config),
+    var exported = switch (managed_config.challengeType()) {
+        .http_01 => issueHttp01(io, alloc, &client, parsed.domain, managed_config),
+        .dns_01 => managed_runtime.issueAndExport(io, alloc, opened.db, &client, parsed.domain, managed_config, null),
     } catch |err| {
         writeErr("acme certificate issuance failed: {}\n", .{err});
         return common.TlsCommandsError.AcmeFailed;
@@ -218,6 +207,7 @@ fn runAcmeCommand(
 }
 
 fn issueHttp01(
+    io: std.Io,
     alloc: std.mem.Allocator,
     client: *acme.AcmeClient,
     domain: []const u8,
@@ -233,48 +223,8 @@ fn issueHttp01(
     defer server.deinit();
     server.start();
 
-    return client.issueAndExport(.{
-        .domain = domain,
-        .email = managed_config.email,
-        .directory_url = managed_config.directory_url,
-        .challenge_type = .http_01,
-        .challenge_registrar = challengeRegistrar(&challenges),
-    }) catch return common.TlsCommandsError.AcmeFailed;
-}
-
-fn issueDns01(
-    io: std.Io,
-    alloc: std.mem.Allocator,
-    db: *sqlite.Db,
-    client: *acme.AcmeClient,
-    domain: []const u8,
-    managed_config: acme.ManagedConfig,
-) common.TlsCommandsError!acme.ExportResult {
-    var maybe_secret_store: ?secrets.SecretsStore = null;
-    if (managed_config.dns_provider) |provider| {
-        if (provider != .exec or managed_config.secret_refs.len > 0) {
-            maybe_secret_store = secrets.SecretsStore.init(db, alloc) catch {
-                writeErr("failed to open secrets store\n", .{});
-                return common.TlsCommandsError.StoreFailed;
-            };
-        }
-    }
-
-    var runtime = dns_provider.Runtime.init(io, alloc, managed_config, if (maybe_secret_store) |*store| store else null) catch {
-        writeErr("failed to initialize DNS provider\n", .{});
+    return managed_runtime.issueAndExport(io, alloc, null, client, domain, managed_config, challengeRegistrar(&challenges)) catch
         return common.TlsCommandsError.AcmeFailed;
-    };
-    defer runtime.deinit();
-
-    return client.issueAndExport(.{
-        .domain = domain,
-        .email = managed_config.email,
-        .directory_url = managed_config.directory_url,
-        .challenge_type = .dns_01,
-        .dns_solver = runtime.solver(),
-        .dns_propagation_timeout_secs = managed_config.propagation_timeout_secs,
-        .dns_poll_interval_secs = managed_config.poll_interval_secs,
-    }) catch return common.TlsCommandsError.AcmeFailed;
 }
 
 fn buildManagedConfig(
@@ -283,72 +233,95 @@ fn buildManagedConfig(
     existing: ?acme.ManagedConfig,
     account_email: []const u8,
 ) !acme.ManagedConfig {
-    const challenge_type = parsed.challenge_type orelse if (existing) |cfg| cfg.challenge_type else .http_01;
-    const dns_provider_value = parsed.dns_provider orelse if (existing) |cfg| cfg.dns_provider else null;
-
-    const secret_refs = try selectedKeyValues(alloc, parsed.dns_secret_refs, existing, .secret_refs);
-    errdefer acme.freeKeyValueRefs(alloc, secret_refs);
-
-    const config_pairs = try selectedKeyValues(alloc, parsed.dns_config, existing, .config_pairs);
-    errdefer acme.freeKeyValueRefs(alloc, config_pairs);
-
-    const hook_command = try selectedHookCommand(alloc, parsed, existing);
-    errdefer acme.freeStringArray(alloc, hook_command);
-
-    try validateManagedConfig(.{
-        .challenge_type = challenge_type,
-        .dns_provider = dns_provider_value,
-        .secret_refs_len = secret_refs.len,
-        .config_pairs_len = config_pairs.len,
-        .hook_command_len = hook_command.len,
-    });
-
     const owned_email = try alloc.dupe(u8, account_email);
     errdefer alloc.free(owned_email);
     const owned_directory_url = try alloc.dupe(u8, selectedDirectoryUrl(parsed, existing));
     errdefer alloc.free(owned_directory_url);
+    const challenge = if (hasDnsOverrides(parsed))
+        try buildDnsChallenge(alloc, parsed, existing)
+    else if (existing) |cfg|
+        try cfg.challenge.clone(alloc)
+    else
+        @as(acme.ChallengeConfig, .http_01);
+    errdefer challenge.deinit(alloc);
 
     return .{
         .email = owned_email,
         .directory_url = owned_directory_url,
-        .challenge_type = challenge_type,
-        .dns_provider = dns_provider_value,
-        .secret_refs = secret_refs,
-        .config_pairs = config_pairs,
-        .hook_command = hook_command,
-        .propagation_timeout_secs = parsed.propagation_timeout_secs orelse if (existing) |cfg| cfg.propagation_timeout_secs else 300,
-        .poll_interval_secs = parsed.poll_interval_secs orelse if (existing) |cfg| cfg.poll_interval_secs else 5,
+        .challenge = challenge,
     };
 }
 
 const KeyValueSource = enum {
     secret_refs,
-    config_pairs,
+    config,
 };
+
+fn hasDnsOverrides(parsed: ParsedArgs) bool {
+    return parsed.dns_provider != null or
+        parsed.dns_secret_refs.len > 0 or
+        parsed.dns_config.len > 0 or
+        parsed.dns_hook.len > 0 or
+        parsed.propagation_timeout_secs != null or
+        parsed.poll_interval_secs != null;
+}
+
+fn buildDnsChallenge(
+    alloc: std.mem.Allocator,
+    parsed: ParsedArgs,
+    existing: ?acme.ManagedConfig,
+) !acme.ChallengeConfig {
+    const existing_dns = if (existing) |cfg| cfg.dnsConfig() else null;
+    const provider = parsed.dns_provider orelse
+        if (parsed.dns_hook.len > 0)
+            acme.DnsProvider.exec
+        else if (existing_dns) |dns|
+            dns.provider
+        else
+            return error.InvalidConfig;
+
+    const secret_refs = try selectedKeyValues(alloc, parsed.dns_secret_refs, existing_dns, .secret_refs);
+    errdefer acme.freeKeyValueRefs(alloc, secret_refs);
+    const config = try selectedKeyValues(alloc, parsed.dns_config, existing_dns, .config);
+    errdefer acme.freeKeyValueRefs(alloc, config);
+    const hook = try selectedHook(alloc, parsed.dns_hook, existing_dns);
+    errdefer acme.freeStringArray(alloc, hook);
+
+    if (provider == .exec and hook.len == 0) return error.InvalidConfig;
+
+    return .{ .dns_01 = .{
+        .provider = provider,
+        .secret_refs = secret_refs,
+        .config = config,
+        .hook = hook,
+        .propagation_timeout_secs = parsed.propagation_timeout_secs orelse if (existing_dns) |dns| dns.propagation_timeout_secs else 300,
+        .poll_interval_secs = parsed.poll_interval_secs orelse if (existing_dns) |dns| dns.poll_interval_secs else 5,
+    } };
+}
 
 fn selectedKeyValues(
     alloc: std.mem.Allocator,
     parsed_values: []const BorrowedKeyValue,
-    existing: ?acme.ManagedConfig,
+    existing: ?acme.DnsConfig,
     source: KeyValueSource,
 ) ![]const acme.KeyValueRef {
     if (parsed_values.len > 0) return acme.cloneKeyValueRefs(alloc, parsed_values);
     if (existing) |cfg| {
         return acme.cloneKeyValueRefs(alloc, switch (source) {
             .secret_refs => cfg.secret_refs,
-            .config_pairs => cfg.config_pairs,
+            .config => cfg.config,
         });
     }
     return try alloc.alloc(acme.KeyValueRef, 0);
 }
 
-fn selectedHookCommand(
+fn selectedHook(
     alloc: std.mem.Allocator,
-    parsed: ParsedArgs,
-    existing: ?acme.ManagedConfig,
+    parsed_hook: []const []const u8,
+    existing: ?acme.DnsConfig,
 ) ![]const []const u8 {
-    if (parsed.dns_hook.len > 0) return acme.cloneStringArray(alloc, parsed.dns_hook);
-    if (existing) |cfg| return acme.cloneStringArray(alloc, cfg.hook_command);
+    if (parsed_hook.len > 0) return acme.cloneStringArray(alloc, parsed_hook);
+    if (existing) |cfg| return acme.cloneStringArray(alloc, cfg.hook);
     return try alloc.alloc([]const u8, 0);
 }
 
@@ -360,29 +333,6 @@ fn selectedDirectoryUrl(parsed: ParsedArgs, existing: ?acme.ManagedConfig) []con
         return cfg.directory_url;
     }
     return parsed.directory_url;
-}
-
-const ManagedConfigValidation = struct {
-    challenge_type: acme.ChallengeType,
-    dns_provider: ?acme.DnsProvider,
-    secret_refs_len: usize,
-    config_pairs_len: usize,
-    hook_command_len: usize,
-};
-
-fn validateManagedConfig(config: ManagedConfigValidation) !void {
-    if (config.challenge_type == .dns_01 and config.dns_provider == null) return error.InvalidConfig;
-    if (config.challenge_type == .http_01 and
-        (config.dns_provider != null or
-            config.secret_refs_len > 0 or
-            config.config_pairs_len > 0 or
-            config.hook_command_len > 0))
-    {
-        return error.InvalidConfig;
-    }
-    if (config.dns_provider != null and config.dns_provider.? == .exec and config.hook_command_len == 0) {
-        return error.InvalidConfig;
-    }
 }
 
 fn resolveAccountEmail(
@@ -428,10 +378,6 @@ fn registerChallenge(ctx: *anyopaque, token: []const u8, key_authorization: []co
 fn removeChallenge(ctx: *anyopaque, token: []const u8) void {
     const store: *proxy.ChallengeStore = @ptrCast(@alignCast(ctx));
     store.remove(token);
-}
-
-fn parseChallengeType(value: []const u8) ?acme.ChallengeType {
-    return acme.ChallengeType.parse(value);
 }
 
 fn parseDnsProvider(value: []const u8) ?acme.DnsProvider {
@@ -490,11 +436,12 @@ test "buildManagedConfig uses existing dns metadata by default" {
     var existing = acme.ManagedConfig{
         .email = try alloc.dupe(u8, "ops@example.com"),
         .directory_url = try alloc.dupe(u8, acme.letsencrypt_staging),
-        .challenge_type = .dns_01,
-        .dns_provider = .cloudflare,
-        .secret_refs = try acme.cloneKeyValueRefs(alloc, &.{.{ .key = "api_token", .value = "cf-token" }}),
-        .config_pairs = try acme.cloneKeyValueRefs(alloc, &.{.{ .key = "zone_id", .value = "zone123" }}),
-        .hook_command = try acme.cloneStringArray(alloc, &.{}),
+        .challenge = .{ .dns_01 = .{
+            .provider = .cloudflare,
+            .secret_refs = try acme.cloneKeyValueRefs(alloc, &.{.{ .key = "api_token", .value = "cf-token" }}),
+            .config = try acme.cloneKeyValueRefs(alloc, &.{.{ .key = "zone_id", .value = "zone123" }}),
+            .hook = try acme.cloneStringArray(alloc, &.{}),
+        } },
     };
     defer existing.deinit(alloc);
 
@@ -509,8 +456,8 @@ test "buildManagedConfig uses existing dns metadata by default" {
     var built = try buildManagedConfig(alloc, parsed, existing, "ops@example.com");
     defer built.deinit(alloc);
 
-    try std.testing.expectEqual(acme.ChallengeType.dns_01, built.challenge_type);
-    try std.testing.expectEqual(acme.DnsProvider.cloudflare, built.dns_provider.?);
+    try std.testing.expectEqual(acme.ChallengeType.dns_01, built.challengeType());
+    try std.testing.expectEqual(acme.DnsProvider.cloudflare, built.dnsConfig().?.provider);
     try std.testing.expectEqualStrings(acme.letsencrypt_staging, built.directory_url);
 }
 

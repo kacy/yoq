@@ -148,7 +148,7 @@ current limits:
 
 ### TLS and ACME
 
-services can enable TLS termination with `[service.<name>.tls]`. when `acme = true`, yoq provisions and renews certificates through the built-in TLS proxy. `http-01` remains the default. `dns-01` is also supported with built-in `cloudflare`, `route53`, and `gcloud` providers plus an `exec` fallback.
+services can enable TLS termination with `[service.<name>.tls]`. add `[service.<name>.tls.acme]` to let yoq provision and renew certificates through the built-in TLS proxy. `http-01` remains the default. `dns-01` is also supported with built-in `cloudflare`, `route53`, and `gcloud` providers plus an `exec` fallback under `[service.<name>.tls.acme.dns]`.
 
 current limits:
 

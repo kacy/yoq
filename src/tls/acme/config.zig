@@ -53,44 +53,96 @@ pub const KeyValueRef = struct {
     }
 };
 
+pub const DnsConfig = struct {
+    provider: DnsProvider,
+    secret_refs: []const KeyValueRef = &.{},
+    config: []const KeyValueRef = &.{},
+    hook: []const []const u8 = &.{},
+    propagation_timeout_secs: u32 = 300,
+    poll_interval_secs: u32 = 5,
+
+    pub fn deinit(self: DnsConfig, alloc: std.mem.Allocator) void {
+        freeKeyValueRefs(alloc, self.secret_refs);
+        freeKeyValueRefs(alloc, self.config);
+        freeStringArray(alloc, self.hook);
+    }
+
+    pub fn clone(self: DnsConfig, alloc: std.mem.Allocator) !DnsConfig {
+        var copy = DnsConfig{ .provider = self.provider };
+        errdefer copy.deinit(alloc);
+
+        copy.secret_refs = try cloneKeyValueRefs(alloc, self.secret_refs);
+        copy.config = try cloneKeyValueRefs(alloc, self.config);
+        copy.hook = try cloneStringArray(alloc, self.hook);
+        copy.propagation_timeout_secs = self.propagation_timeout_secs;
+        copy.poll_interval_secs = self.poll_interval_secs;
+        return copy;
+    }
+};
+
+pub const ChallengeConfig = union(ChallengeType) {
+    http_01,
+    dns_01: DnsConfig,
+
+    pub fn deinit(self: ChallengeConfig, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .http_01 => {},
+            .dns_01 => |dns| dns.deinit(alloc),
+        }
+    }
+
+    pub fn clone(self: ChallengeConfig, alloc: std.mem.Allocator) !ChallengeConfig {
+        return switch (self) {
+            .http_01 => .http_01,
+            .dns_01 => |dns| .{ .dns_01 = try dns.clone(alloc) },
+        };
+    }
+
+    pub fn challengeType(self: ChallengeConfig) ChallengeType {
+        return switch (self) {
+            .http_01 => .http_01,
+            .dns_01 => .dns_01,
+        };
+    }
+
+    pub fn dnsConfig(self: ChallengeConfig) ?DnsConfig {
+        return switch (self) {
+            .http_01 => null,
+            .dns_01 => |dns| dns,
+        };
+    }
+};
+
 pub const ManagedConfig = struct {
     email: []const u8,
     directory_url: []const u8,
-    challenge_type: ChallengeType,
-    dns_provider: ?DnsProvider = null,
-    secret_refs: []const KeyValueRef = &.{},
-    config_pairs: []const KeyValueRef = &.{},
-    hook_command: []const []const u8 = &.{},
-    propagation_timeout_secs: u32 = 300,
-    poll_interval_secs: u32 = 5,
+    challenge: ChallengeConfig,
 
     pub fn deinit(self: ManagedConfig, alloc: std.mem.Allocator) void {
         alloc.free(self.email);
         alloc.free(self.directory_url);
-        for (self.secret_refs) |entry| entry.deinit(alloc);
-        alloc.free(self.secret_refs);
-        for (self.config_pairs) |entry| entry.deinit(alloc);
-        alloc.free(self.config_pairs);
-        for (self.hook_command) |entry| alloc.free(entry);
-        alloc.free(self.hook_command);
+        self.challenge.deinit(alloc);
     }
 
     pub fn clone(self: ManagedConfig, alloc: std.mem.Allocator) !ManagedConfig {
         var copy = ManagedConfig{
             .email = try alloc.dupe(u8, self.email),
             .directory_url = &.{},
-            .challenge_type = self.challenge_type,
+            .challenge = .http_01,
         };
         errdefer copy.deinit(alloc);
 
         copy.directory_url = try alloc.dupe(u8, self.directory_url);
-        copy.dns_provider = self.dns_provider;
-        copy.secret_refs = try cloneKeyValueRefs(alloc, self.secret_refs);
-        copy.config_pairs = try cloneKeyValueRefs(alloc, self.config_pairs);
-        copy.hook_command = try cloneStringArray(alloc, self.hook_command);
-        copy.propagation_timeout_secs = self.propagation_timeout_secs;
-        copy.poll_interval_secs = self.poll_interval_secs;
+        copy.challenge = try self.challenge.clone(alloc);
         return copy;
+    }
+
+    pub fn challengeType(self: ManagedConfig) ChallengeType {
+        return self.challenge.challengeType();
+    }
+
+    pub fn dnsConfig(self: ManagedConfig) ?DnsConfig {
+        return self.challenge.dnsConfig();
     }
 
     pub fn writeJson(writer: *std.Io.Writer, config: ManagedConfig) !void {
@@ -98,34 +150,40 @@ pub const ManagedConfig = struct {
         try json_helpers.writeJsonStringField(writer, "email", config.email);
         try writer.writeByte(',');
         try json_helpers.writeJsonStringField(writer, "directory_url", config.directory_url);
-        try writer.writeAll(",\"challenge_type\":\"");
-        try writer.writeAll(config.challenge_type.label());
-        try writer.writeByte('"');
-        try writer.writeAll(",\"dns_provider\":");
-        if (config.dns_provider) |provider| {
-            try writer.writeByte('"');
-            try writer.writeAll(provider.label());
-            try writer.writeByte('"');
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll(",\"secret_refs\":[");
-        try writeKeyValueRefArray(writer, config.secret_refs);
-        try writer.writeAll("],\"config_pairs\":[");
-        try writeKeyValueRefArray(writer, config.config_pairs);
-        try writer.writeAll("],\"hook_command\":[");
-        for (config.hook_command, 0..) |entry, idx| {
-            if (idx > 0) try writer.writeByte(',');
-            try writer.writeByte('"');
-            try json_helpers.writeJsonEscaped(writer, entry);
-            try writer.writeByte('"');
-        }
-        try writer.print(
-            "],\"propagation_timeout_secs\":{d},\"poll_interval_secs\":{d}}}",
-            .{ config.propagation_timeout_secs, config.poll_interval_secs },
-        );
+        try writer.writeAll(",\"challenge\":");
+        try writeChallengeJson(writer, config.challenge);
+        try writer.writeByte('}');
     }
 };
+
+fn writeChallengeJson(writer: *std.Io.Writer, challenge: ChallengeConfig) !void {
+    try writer.writeByte('{');
+    try json_helpers.writeJsonStringField(writer, "type", challenge.challengeType().label());
+    switch (challenge) {
+        .http_01 => {},
+        .dns_01 => |dns| {
+            try writer.writeAll(",\"provider\":\"");
+            try writer.writeAll(dns.provider.label());
+            try writer.writeByte('"');
+            try writer.writeAll(",\"secret_refs\":[");
+            try writeKeyValueRefArray(writer, dns.secret_refs);
+            try writer.writeAll("],\"config\":[");
+            try writeKeyValueRefArray(writer, dns.config);
+            try writer.writeAll("],\"hook\":[");
+            for (dns.hook, 0..) |entry, idx| {
+                if (idx > 0) try writer.writeByte(',');
+                try writer.writeByte('"');
+                try json_helpers.writeJsonEscaped(writer, entry);
+                try writer.writeByte('"');
+            }
+            try writer.print(
+                "],\"propagation_timeout_secs\":{d},\"poll_interval_secs\":{d}",
+                .{ dns.propagation_timeout_secs, dns.poll_interval_secs },
+            );
+        },
+    }
+    try writer.writeByte('}');
+}
 
 pub fn cloneKeyValueRefs(alloc: std.mem.Allocator, entries: []const KeyValueRef) ![]const KeyValueRef {
     var out: std.ArrayListUnmanaged(KeyValueRef) = .empty;
@@ -134,10 +192,15 @@ pub fn cloneKeyValueRefs(alloc: std.mem.Allocator, entries: []const KeyValueRef)
         out.deinit(alloc);
     }
     for (entries) |entry| {
-        try out.append(alloc, .{
-            .key = try alloc.dupe(u8, entry.key),
-            .value = try alloc.dupe(u8, entry.value),
-        });
+        const cloned = blk: {
+            const key = try alloc.dupe(u8, entry.key);
+            errdefer alloc.free(key);
+            break :blk KeyValueRef{
+                .key = key,
+                .value = try alloc.dupe(u8, entry.value),
+            };
+        };
+        try out.append(alloc, cloned);
     }
     return try out.toOwnedSlice(alloc);
 }

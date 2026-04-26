@@ -283,13 +283,14 @@ test "acme config metadata round-trip" {
     var config = common.AcmeManagedConfig{
         .email = try alloc.dupe(u8, "ops@example.com"),
         .directory_url = try alloc.dupe(u8, "https://acme-staging-v02.api.letsencrypt.org/directory"),
-        .challenge_type = .dns_01,
-        .dns_provider = .cloudflare,
-        .secret_refs = secret_refs,
-        .config_pairs = config_pairs,
-        .hook_command = try alloc.alloc([]const u8, 0),
-        .propagation_timeout_secs = 90,
-        .poll_interval_secs = 4,
+        .challenge = .{ .dns_01 = .{
+            .provider = .cloudflare,
+            .secret_refs = secret_refs,
+            .config = config_pairs,
+            .hook = try alloc.alloc([]const u8, 0),
+            .propagation_timeout_secs = 90,
+            .poll_interval_secs = 4,
+        } },
     };
     defer config.deinit(alloc);
 
@@ -299,12 +300,13 @@ test "acme config metadata round-trip" {
     defer loaded.deinit(alloc);
 
     try std.testing.expectEqualStrings("ops@example.com", loaded.email);
-    try std.testing.expectEqual(.dns_01, loaded.challenge_type);
-    try std.testing.expectEqual(.cloudflare, loaded.dns_provider.?);
-    try std.testing.expectEqual(@as(usize, 1), loaded.secret_refs.len);
-    try std.testing.expectEqualStrings("api_token", loaded.secret_refs[0].key);
-    try std.testing.expectEqualStrings("cf-secret", loaded.secret_refs[0].value);
-    try std.testing.expectEqual(@as(u32, 90), loaded.propagation_timeout_secs);
+    try std.testing.expectEqual(.dns_01, loaded.challengeType());
+    const loaded_dns = loaded.dnsConfig().?;
+    try std.testing.expectEqual(.cloudflare, loaded_dns.provider);
+    try std.testing.expectEqual(@as(usize, 1), loaded_dns.secret_refs.len);
+    try std.testing.expectEqualStrings("api_token", loaded_dns.secret_refs[0].key);
+    try std.testing.expectEqualStrings("cf-secret", loaded_dns.secret_refs[0].value);
+    try std.testing.expectEqual(@as(u32, 90), loaded_dns.propagation_timeout_secs);
 }
 
 test "manual install removes acme metadata" {
@@ -321,10 +323,7 @@ test "manual install removes acme metadata" {
     var config = common.AcmeManagedConfig{
         .email = try alloc.dupe(u8, "ops@example.com"),
         .directory_url = try alloc.dupe(u8, acme.letsencrypt_staging),
-        .challenge_type = .http_01,
-        .secret_refs = try alloc.alloc(acme.KeyValueRef, 0),
-        .config_pairs = try alloc.alloc(acme.KeyValueRef, 0),
-        .hook_command = try alloc.alloc([]const u8, 0),
+        .challenge = .http_01,
     };
     defer config.deinit(alloc);
     try cs.setAcmeConfig("example.com", config);

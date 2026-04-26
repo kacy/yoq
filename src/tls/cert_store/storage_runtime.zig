@@ -329,38 +329,58 @@ fn decodeManagedConfig(alloc: std.mem.Allocator, json: []const u8) !common.AcmeM
         key: []const u8,
         value: []const u8,
     };
+    const JsonChallenge = struct {
+        type: []const u8,
+        provider: ?[]const u8 = null,
+        secret_refs: []const JsonKeyValue = &.{},
+        config: []const JsonKeyValue = &.{},
+        hook: []const []const u8 = &.{},
+        propagation_timeout_secs: u32 = 300,
+        poll_interval_secs: u32 = 5,
+    };
     const JsonConfig = struct {
         email: []const u8,
         directory_url: []const u8,
-        challenge_type: []const u8,
-        dns_provider: ?[]const u8 = null,
-        secret_refs: []const JsonKeyValue = &.{},
-        config_pairs: []const JsonKeyValue = &.{},
-        hook_command: []const []const u8 = &.{},
-        propagation_timeout_secs: u32 = 300,
-        poll_interval_secs: u32 = 5,
+        challenge: JsonChallenge,
     };
 
     const parsed = try std.json.parseFromSlice(JsonConfig, alloc, json, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    const challenge_type = acme_config.ChallengeType.parse(parsed.value.challenge_type) orelse
+    const challenge_type = acme_config.ChallengeType.parse(parsed.value.challenge.type) orelse
         return error.ReadFailed;
-    const dns_provider = if (parsed.value.dns_provider) |value|
-        acme_config.DnsProvider.parse(value) orelse return error.ReadFailed
-    else
-        null;
+    const challenge: acme_config.ChallengeConfig = switch (challenge_type) {
+        .http_01 => .http_01,
+        .dns_01 => blk: {
+            const provider_raw = parsed.value.challenge.provider orelse return error.ReadFailed;
+            const provider = acme_config.DnsProvider.parse(provider_raw) orelse return error.ReadFailed;
+            const secret_refs = try cloneJsonKeyValues(JsonKeyValue, alloc, parsed.value.challenge.secret_refs);
+            errdefer acme_config.freeKeyValueRefs(alloc, secret_refs);
+            const config_pairs = try cloneJsonKeyValues(JsonKeyValue, alloc, parsed.value.challenge.config);
+            errdefer acme_config.freeKeyValueRefs(alloc, config_pairs);
+            const hook = try cloneJsonStrings(alloc, parsed.value.challenge.hook);
+            errdefer acme_config.freeStringArray(alloc, hook);
+
+            break :blk .{ .dns_01 = .{
+                .provider = provider,
+                .secret_refs = secret_refs,
+                .config = config_pairs,
+                .hook = hook,
+                .propagation_timeout_secs = parsed.value.challenge.propagation_timeout_secs,
+                .poll_interval_secs = parsed.value.challenge.poll_interval_secs,
+            } };
+        },
+    };
+    errdefer challenge.deinit(alloc);
+    const email = try alloc.dupe(u8, parsed.value.email);
+    errdefer alloc.free(email);
+    const directory_url = try alloc.dupe(u8, parsed.value.directory_url);
+    errdefer alloc.free(directory_url);
 
     return .{
-        .email = try alloc.dupe(u8, parsed.value.email),
-        .directory_url = try alloc.dupe(u8, parsed.value.directory_url),
-        .challenge_type = challenge_type,
-        .dns_provider = dns_provider,
-        .secret_refs = try cloneJsonKeyValues(JsonKeyValue, alloc, parsed.value.secret_refs),
-        .config_pairs = try cloneJsonKeyValues(JsonKeyValue, alloc, parsed.value.config_pairs),
-        .hook_command = try cloneJsonStrings(alloc, parsed.value.hook_command),
-        .propagation_timeout_secs = parsed.value.propagation_timeout_secs,
-        .poll_interval_secs = parsed.value.poll_interval_secs,
+        .email = email,
+        .directory_url = directory_url,
+        .challenge = challenge,
     };
 }
 
@@ -375,10 +395,15 @@ fn cloneJsonKeyValues(
         result.deinit(alloc);
     }
     for (values) |entry| {
-        try result.append(alloc, .{
-            .key = try alloc.dupe(u8, entry.key),
-            .value = try alloc.dupe(u8, entry.value),
-        });
+        const cloned = blk: {
+            const key = try alloc.dupe(u8, entry.key);
+            errdefer alloc.free(key);
+            break :blk acme_config.KeyValueRef{
+                .key = key,
+                .value = try alloc.dupe(u8, entry.value),
+            };
+        };
+        try result.append(alloc, cloned);
     }
     return try result.toOwnedSlice(alloc);
 }

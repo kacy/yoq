@@ -4,9 +4,8 @@ const cli = @import("../../lib/cli.zig");
 const spec = @import("../spec.zig");
 const cert_store_mod = @import("../../tls/cert_store.zig");
 const acme_mod = @import("../../tls/acme.zig");
-const dns_provider = @import("../../tls/acme/dns_provider.zig");
+const managed_runtime = @import("../../tls/acme/managed_runtime.zig");
 const tls_proxy = @import("../../tls/proxy.zig");
-const secrets = @import("../../state/secrets.zig");
 
 const writeErr = cli.writeErr;
 
@@ -38,16 +37,15 @@ pub fn provisionAcmeCertWithIo(
     var client = acme_mod.AcmeClient.init(io, alloc, managed_config.directory_url);
     defer client.deinit();
 
-    var exported = switch (managed_config.challenge_type) {
-        .http_01 => client.issueAndExport(.{
-            .domain = tls.domain,
-            .email = managed_config.email,
-            .directory_url = managed_config.directory_url,
-            .challenge_type = .http_01,
-            .challenge_registrar = challengeRegistrar(challenges),
-        }),
-        .dns_01 => issueDns01(io, alloc, certs, &client, tls.domain, managed_config),
-    } catch {
+    var exported = managed_runtime.issueAndExport(
+        io,
+        alloc,
+        certs.db,
+        &client,
+        tls.domain,
+        managed_config,
+        challengeRegistrar(challenges),
+    ) catch {
         writeErr("    failed to finalize certificate order\n", .{});
         return;
     };
@@ -65,58 +63,48 @@ pub fn provisionAcmeCertWithIo(
     writeErr("    provisioned certificate for {s}\n", .{tls.domain});
 }
 
-fn issueDns01(
-    io: std.Io,
-    alloc: std.mem.Allocator,
-    certs: *cert_store_mod.CertStore,
-    client: *acme_mod.AcmeClient,
-    domain: []const u8,
-    managed_config: acme_mod.ManagedConfig,
-) acme_mod.AcmeError!acme_mod.ExportResult {
-    var maybe_secret_store: ?secrets.SecretsStore = null;
-    if (managed_config.dns_provider) |provider| {
-        if (provider != .exec or managed_config.secret_refs.len > 0) {
-            maybe_secret_store = secrets.SecretsStore.init(certs.db, alloc) catch
-                return acme_mod.AcmeError.ChallengeFailed;
-        }
-    }
-
-    var runtime = try dns_provider.Runtime.init(io, alloc, managed_config, if (maybe_secret_store) |*store| store else null);
-    defer runtime.deinit();
-
-    return client.issueAndExport(.{
-        .domain = domain,
-        .email = managed_config.email,
-        .directory_url = managed_config.directory_url,
-        .challenge_type = .dns_01,
-        .dns_solver = runtime.solver(),
-        .dns_propagation_timeout_secs = managed_config.propagation_timeout_secs,
-        .dns_poll_interval_secs = managed_config.poll_interval_secs,
-    });
-}
-
 fn buildManagedConfig(alloc: std.mem.Allocator, tls: spec.TlsConfig) !acme_mod.ManagedConfig {
-    if (!tls.acme) return error.InvalidConfig;
-    const email = tls.email orelse return error.InvalidConfig;
+    const acme = tls.acme orelse return error.InvalidConfig;
+    const challenge = try buildChallengeConfig(alloc, acme);
+    errdefer challenge.deinit(alloc);
+    const email = try alloc.dupe(u8, acme.email);
+    errdefer alloc.free(email);
+    const directory_url = try alloc.dupe(u8, acme.directory_url);
+    errdefer alloc.free(directory_url);
 
     return .{
-        .email = try alloc.dupe(u8, email),
-        .directory_url = try alloc.dupe(u8, acme_mod.letsencrypt_production),
-        .challenge_type = switch (tls.acme_challenge) {
-            .http_01 => .http_01,
-            .dns_01 => .dns_01,
+        .email = email,
+        .directory_url = directory_url,
+        .challenge = challenge,
+    };
+}
+
+fn buildChallengeConfig(alloc: std.mem.Allocator, config: spec.TlsConfig.AcmeConfig) !acme_mod.ChallengeConfig {
+    return switch (config.challenge) {
+        .http_01 => .http_01,
+        .dns_01 => blk: {
+            const dns = config.dns orelse return error.InvalidConfig;
+            const secret_refs = try cloneKeyValueRefs(alloc, dns.secrets);
+            errdefer acme_mod.freeKeyValueRefs(alloc, secret_refs);
+            const config_pairs = try cloneKeyValueRefs(alloc, dns.config);
+            errdefer acme_mod.freeKeyValueRefs(alloc, config_pairs);
+            const hook = try cloneStrings(alloc, dns.hook);
+            errdefer acme_mod.freeStringArray(alloc, hook);
+
+            break :blk .{ .dns_01 = .{
+                .provider = switch (dns.provider) {
+                    .cloudflare => .cloudflare,
+                    .route53 => .route53,
+                    .gcloud => .gcloud,
+                    .exec => .exec,
+                },
+                .secret_refs = secret_refs,
+                .config = config_pairs,
+                .hook = hook,
+                .propagation_timeout_secs = dns.propagation_timeout_secs,
+                .poll_interval_secs = dns.poll_interval_secs,
+            } };
         },
-        .dns_provider = if (tls.acme_dns_provider) |provider| switch (provider) {
-            .cloudflare => .cloudflare,
-            .route53 => .route53,
-            .gcloud => .gcloud,
-            .exec => .exec,
-        } else null,
-        .secret_refs = try cloneKeyValueRefs(alloc, tls.acme_dns_secret_refs),
-        .config_pairs = try cloneKeyValueRefs(alloc, tls.acme_dns_config),
-        .hook_command = try cloneStrings(alloc, tls.acme_dns_hook),
-        .propagation_timeout_secs = tls.acme_dns_propagation_timeout_secs,
-        .poll_interval_secs = tls.acme_dns_poll_interval_secs,
     };
 }
 
@@ -127,10 +115,15 @@ fn cloneKeyValueRefs(alloc: std.mem.Allocator, input: []const spec.TlsConfig.Key
         out.deinit(alloc);
     }
     for (input) |entry| {
-        try out.append(alloc, .{
-            .key = try alloc.dupe(u8, entry.key),
-            .value = try alloc.dupe(u8, entry.value),
-        });
+        const cloned = blk: {
+            const key = try alloc.dupe(u8, entry.key);
+            errdefer alloc.free(key);
+            break :blk acme_mod.KeyValueRef{
+                .key = key,
+                .value = try alloc.dupe(u8, entry.value),
+            };
+        };
+        try out.append(alloc, cloned);
     }
     return try out.toOwnedSlice(alloc);
 }

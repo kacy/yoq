@@ -203,7 +203,7 @@ if you want to validate automatic certificates on the cluster example:
 
 - point `myapp.example.com` at the node serving ports 80 and 443
 - keep port 80 reachable during issuance and renewal if you use `http-01`
-- for `dns-01`, create the referenced `yoq secret` entries first and configure a built-in provider or exec hook in `[service.<name>.tls]`
+- for `dns-01`, create the referenced `yoq secret` entries first and configure a built-in provider or exec hook in `[service.<name>.tls.acme.dns]`
 
 ## what this path is for
 

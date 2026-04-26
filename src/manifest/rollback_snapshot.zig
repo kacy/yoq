@@ -28,15 +28,23 @@ const JsonHealthCheck = struct {
 
 const JsonTls = struct {
     domain: []const u8,
-    acme: bool = false,
-    email: ?[]const u8 = null,
-    acme_challenge: []const u8 = "http-01",
-    acme_dns_provider: ?[]const u8 = null,
-    acme_dns_secret_refs: []const JsonKeyValue = &.{},
-    acme_dns_config: []const JsonKeyValue = &.{},
-    acme_dns_hook: []const []const u8 = &.{},
-    acme_dns_propagation_timeout_secs: u32 = 300,
-    acme_dns_poll_interval_secs: u32 = 5,
+    acme: ?JsonTlsAcme = null,
+};
+
+const JsonTlsAcme = struct {
+    email: []const u8,
+    directory_url: []const u8,
+    challenge: []const u8 = "http-01",
+    dns: ?JsonTlsDns = null,
+};
+
+const JsonTlsDns = struct {
+    provider: []const u8,
+    secrets: []const JsonKeyValue = &.{},
+    config: []const JsonKeyValue = &.{},
+    hook: []const []const u8 = &.{},
+    propagation_timeout_secs: u32 = 300,
+    poll_interval_secs: u32 = 5,
 };
 
 const JsonKeyValue = struct {
@@ -383,38 +391,84 @@ fn dupHealthCheck(alloc: std.mem.Allocator, health_check: JsonHealthCheck) !spec
 }
 
 fn dupTls(alloc: std.mem.Allocator, tls: JsonTls) !spec.TlsConfig {
+    const domain = try alloc.dupe(u8, tls.domain);
+    errdefer alloc.free(domain);
+    const acme = if (tls.acme) |value| try dupTlsAcme(alloc, value) else null;
+    errdefer if (acme) |config| config.deinit(alloc);
+
     return .{
-        .domain = try alloc.dupe(u8, tls.domain),
-        .acme = tls.acme,
-        .email = if (tls.email) |email| try alloc.dupe(u8, email) else null,
-        .acme_challenge = if (std.mem.eql(u8, tls.acme_challenge, "dns-01")) .dns_01 else .http_01,
-        .acme_dns_provider = if (tls.acme_dns_provider) |provider|
-            if (std.mem.eql(u8, provider, "cloudflare"))
-                .cloudflare
-            else if (std.mem.eql(u8, provider, "route53"))
-                .route53
-            else if (std.mem.eql(u8, provider, "gcloud"))
-                .gcloud
-            else
-                .exec
+        .domain = domain,
+        .acme = acme,
+    };
+}
+
+fn dupTlsAcme(alloc: std.mem.Allocator, acme: JsonTlsAcme) !spec.TlsConfig.AcmeConfig {
+    const email = try alloc.dupe(u8, acme.email);
+    errdefer alloc.free(email);
+    const directory_url = try alloc.dupe(u8, acme.directory_url);
+    errdefer alloc.free(directory_url);
+    const dns = if (acme.dns) |value| try dupTlsDns(alloc, value) else null;
+    errdefer if (dns) |config| config.deinit(alloc);
+
+    return .{
+        .email = email,
+        .directory_url = directory_url,
+        .challenge = if (std.mem.eql(u8, acme.challenge, "dns-01")) .dns_01 else .http_01,
+        .dns = dns,
+    };
+}
+
+fn dupTlsDns(alloc: std.mem.Allocator, dns: JsonTlsDns) !spec.TlsConfig.DnsConfig {
+    const secrets = try dupTlsKeyValues(alloc, dns.secrets);
+    errdefer {
+        for (secrets) |entry| entry.deinit(alloc);
+        alloc.free(secrets);
+    }
+    const config = try dupTlsKeyValues(alloc, dns.config);
+    errdefer {
+        for (config) |entry| entry.deinit(alloc);
+        alloc.free(config);
+    }
+    const hook = try dupeStringArray(alloc, dns.hook);
+    errdefer {
+        for (hook) |entry| alloc.free(entry);
+        alloc.free(hook);
+    }
+
+    return .{
+        .provider = if (std.mem.eql(u8, dns.provider, "cloudflare"))
+            .cloudflare
+        else if (std.mem.eql(u8, dns.provider, "route53"))
+            .route53
+        else if (std.mem.eql(u8, dns.provider, "gcloud"))
+            .gcloud
         else
-            null,
-        .acme_dns_secret_refs = try dupTlsKeyValues(alloc, tls.acme_dns_secret_refs),
-        .acme_dns_config = try dupTlsKeyValues(alloc, tls.acme_dns_config),
-        .acme_dns_hook = try dupeStringArray(alloc, tls.acme_dns_hook),
-        .acme_dns_propagation_timeout_secs = tls.acme_dns_propagation_timeout_secs,
-        .acme_dns_poll_interval_secs = tls.acme_dns_poll_interval_secs,
+            .exec,
+        .secrets = secrets,
+        .config = config,
+        .hook = hook,
+        .propagation_timeout_secs = dns.propagation_timeout_secs,
+        .poll_interval_secs = dns.poll_interval_secs,
     };
 }
 
 fn dupTlsKeyValues(alloc: std.mem.Allocator, input: []const JsonKeyValue) ![]const spec.TlsConfig.KeyValueRef {
     const out = try alloc.alloc(spec.TlsConfig.KeyValueRef, input.len);
-    errdefer alloc.free(out);
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |entry| entry.deinit(alloc);
+        alloc.free(out);
+    }
     for (input, 0..) |entry, idx| {
-        out[idx] = .{
-            .key = try alloc.dupe(u8, entry.key),
-            .value = try alloc.dupe(u8, entry.value),
+        out[idx] = blk: {
+            const key = try alloc.dupe(u8, entry.key);
+            errdefer alloc.free(key);
+            break :blk .{
+                .key = key,
+                .value = try alloc.dupe(u8, entry.value),
+            };
         };
+        initialized += 1;
     }
     return out;
 }
@@ -526,7 +580,7 @@ fn parseRestartPolicy(text: []const u8) spec.RestartPolicy {
 test "loadLocalRollbackSnapshot preserves mixed workload snapshot and rollout strategy" {
     const alloc = std.testing.allocator;
     const snapshot =
-        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","command":["nginx","-g","daemon off"],"ports":[{"host_port":8080,"container_port":80}],"env":["MODE=prod"],"depends_on":["db"],"working_dir":"/srv/app","volumes":[{"source":"./src","target":"/app","kind":"bind"}],"health_check":{"kind":"http","path":"/health","port":8080,"interval":11,"timeout":6,"retries":4,"start_period":2},"restart":"always","rollout":{"strategy":"canary","parallelism":2,"delay_between_batches":3,"failure_action":"pause","health_check_timeout":12},"tls":{"domain":"demo.internal","acme":true,"email":"ops@example.com"},"http_routes":[{"name":"default","host":"demo.internal","path_prefix":"/","retries":2,"connect_timeout_ms":1500,"request_timeout_ms":6000,"http2_idle_timeout_ms":30000,"preserve_host":false,"retry_on_5xx":true,"circuit_breaker_threshold":3,"circuit_breaker_timeout_ms":30000,"match_methods":[{"method":"GET"}],"match_headers":[{"name":"x-env","value":"prod"}],"backend_services":[{"service_name":"web","weight":100}]}],"gpu":{"count":1,"model":"L4","vram_min_mb":24576},"gpu_mesh":{"world_size":2,"gpus_per_rank":1,"master_port":29501}}],"workers":[{"name":"migrate","image":"postgres:16","command":["/bin/sh","-c","psql -f /m.sql"],"env":["DB=prod"],"depends_on":["db"],"working_dir":"/work","volumes":[{"source":"./migrations","target":"/m","kind":"bind"}],"gpu":{"count":1,"model":"L4","vram_min_mb":16384},"gpu_mesh":{"world_size":2,"gpus_per_rank":1,"master_port":29600}}],"crons":[{"name":"nightly","image":"alpine:3","command":["/bin/sh","-c","echo nightly"],"env":["TZ=UTC"],"working_dir":"/cron","volumes":[{"source":"backup-cache","target":"/cache","kind":"named"}],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["torchrun","train.py"],"env":["EPOCHS=3"],"working_dir":"/train","volumes":[{"source":"./data","target":"/data","kind":"bind"}],"gpus":4,"gpu_type":"H100","data":{"dataset":"s3://bucket/ds","sharding":"tensor","preprocessing":"normalize"},"checkpoint":{"path":"/ckpt","interval_secs":600,"keep":7},"cpu_limit":2000,"memory_limit_mb":131072,"ib_required":true,"spare_ranks":1,"auto_restart":false,"max_restarts":3}]}
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1","command":["nginx","-g","daemon off"],"ports":[{"host_port":8080,"container_port":80}],"env":["MODE=prod"],"depends_on":["db"],"working_dir":"/srv/app","volumes":[{"source":"./src","target":"/app","kind":"bind"}],"health_check":{"kind":"http","path":"/health","port":8080,"interval":11,"timeout":6,"retries":4,"start_period":2},"restart":"always","rollout":{"strategy":"canary","parallelism":2,"delay_between_batches":3,"failure_action":"pause","health_check_timeout":12},"tls":{"domain":"demo.internal","acme":{"email":"ops@example.com","directory_url":"https://acme-v02.api.letsencrypt.org/directory","challenge":"http-01"}},"http_routes":[{"name":"default","host":"demo.internal","path_prefix":"/","retries":2,"connect_timeout_ms":1500,"request_timeout_ms":6000,"http2_idle_timeout_ms":30000,"preserve_host":false,"retry_on_5xx":true,"circuit_breaker_threshold":3,"circuit_breaker_timeout_ms":30000,"match_methods":[{"method":"GET"}],"match_headers":[{"name":"x-env","value":"prod"}],"backend_services":[{"service_name":"web","weight":100}]}],"gpu":{"count":1,"model":"L4","vram_min_mb":24576},"gpu_mesh":{"world_size":2,"gpus_per_rank":1,"master_port":29501}}],"workers":[{"name":"migrate","image":"postgres:16","command":["/bin/sh","-c","psql -f /m.sql"],"env":["DB=prod"],"depends_on":["db"],"working_dir":"/work","volumes":[{"source":"./migrations","target":"/m","kind":"bind"}],"gpu":{"count":1,"model":"L4","vram_min_mb":16384},"gpu_mesh":{"world_size":2,"gpus_per_rank":1,"master_port":29600}}],"crons":[{"name":"nightly","image":"alpine:3","command":["/bin/sh","-c","echo nightly"],"env":["TZ=UTC"],"working_dir":"/cron","volumes":[{"source":"backup-cache","target":"/cache","kind":"named"}],"every":3600}],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["torchrun","train.py"],"env":["EPOCHS=3"],"working_dir":"/train","volumes":[{"source":"./data","target":"/data","kind":"bind"}],"gpus":4,"gpu_type":"H100","data":{"dataset":"s3://bucket/ds","sharding":"tensor","preprocessing":"normalize"},"checkpoint":{"path":"/ckpt","interval_secs":600,"keep":7},"cpu_limit":2000,"memory_limit_mb":131072,"ib_required":true,"spare_ranks":1,"auto_restart":false,"max_restarts":3}]}
     ;
 
     var loaded = try loadLocalRollbackSnapshot(alloc, snapshot);

@@ -211,15 +211,16 @@ test "load manifest with tls config" {
         \\
         \\[service.web.tls]
         \\domain = "example.com"
-        \\acme = true
+        \\
+        \\[service.web.tls.acme]
         \\email = "admin@example.com"
     );
     defer manifest.deinit();
 
     const tls = manifest.services[0].tls orelse return error.ExpectedTlsConfig;
     try std.testing.expectEqualStrings("example.com", tls.domain);
-    try std.testing.expect(tls.acme);
-    try std.testing.expectEqualStrings("admin@example.com", tls.email.?);
+    try std.testing.expect(tls.acme != null);
+    try std.testing.expectEqualStrings("admin@example.com", tls.acme.?.email);
 }
 
 // -- error cases --
