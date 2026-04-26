@@ -30,6 +30,18 @@ const JsonTls = struct {
     domain: []const u8,
     acme: bool = false,
     email: ?[]const u8 = null,
+    acme_challenge: []const u8 = "http-01",
+    acme_dns_provider: ?[]const u8 = null,
+    acme_dns_secret_refs: []const JsonKeyValue = &.{},
+    acme_dns_config: []const JsonKeyValue = &.{},
+    acme_dns_hook: []const []const u8 = &.{},
+    acme_dns_propagation_timeout_secs: u32 = 300,
+    acme_dns_poll_interval_secs: u32 = 5,
+};
+
+const JsonKeyValue = struct {
+    key: []const u8,
+    value: []const u8,
 };
 
 const JsonRollout = struct {
@@ -375,7 +387,36 @@ fn dupTls(alloc: std.mem.Allocator, tls: JsonTls) !spec.TlsConfig {
         .domain = try alloc.dupe(u8, tls.domain),
         .acme = tls.acme,
         .email = if (tls.email) |email| try alloc.dupe(u8, email) else null,
+        .acme_challenge = if (std.mem.eql(u8, tls.acme_challenge, "dns-01")) .dns_01 else .http_01,
+        .acme_dns_provider = if (tls.acme_dns_provider) |provider|
+            if (std.mem.eql(u8, provider, "cloudflare"))
+                .cloudflare
+            else if (std.mem.eql(u8, provider, "route53"))
+                .route53
+            else if (std.mem.eql(u8, provider, "gcloud"))
+                .gcloud
+            else
+                .exec
+        else
+            null,
+        .acme_dns_secret_refs = try dupTlsKeyValues(alloc, tls.acme_dns_secret_refs),
+        .acme_dns_config = try dupTlsKeyValues(alloc, tls.acme_dns_config),
+        .acme_dns_hook = try dupeStringArray(alloc, tls.acme_dns_hook),
+        .acme_dns_propagation_timeout_secs = tls.acme_dns_propagation_timeout_secs,
+        .acme_dns_poll_interval_secs = tls.acme_dns_poll_interval_secs,
     };
+}
+
+fn dupTlsKeyValues(alloc: std.mem.Allocator, input: []const JsonKeyValue) ![]const spec.TlsConfig.KeyValueRef {
+    const out = try alloc.alloc(spec.TlsConfig.KeyValueRef, input.len);
+    errdefer alloc.free(out);
+    for (input, 0..) |entry, idx| {
+        out[idx] = .{
+            .key = try alloc.dupe(u8, entry.key),
+            .value = try alloc.dupe(u8, entry.value),
+        };
+    }
+    return out;
 }
 
 fn parseRolloutPolicy(rollout: JsonRollout) spec.RolloutPolicy {

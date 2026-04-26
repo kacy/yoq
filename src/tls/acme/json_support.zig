@@ -25,25 +25,26 @@ pub fn extractJsonArray(json: []const u8, key: []const u8) ?[]const u8 {
 }
 
 pub fn extractHttpChallengeToken(json: []const u8) ?[]const u8 {
-    const http01_pos = std.mem.indexOf(u8, json, "\"http-01\"") orelse return null;
-
-    const token_marker = "\"token\":\"";
-    const token_start_search = json[http01_pos..];
-    const rel_start = (std.mem.indexOf(u8, token_start_search, token_marker) orelse return null) + token_marker.len;
-    const abs_start = http01_pos + rel_start;
-
-    const end = std.mem.indexOfPos(u8, json, abs_start, "\"") orelse return null;
-    return json[abs_start..end];
+    return extractChallengeField(json, "\"http-01\"", "\"token\":\"");
 }
 
 pub fn extractHttpChallengeUrl(json: []const u8) ?[]const u8 {
-    const http01_pos = std.mem.indexOf(u8, json, "\"http-01\"") orelse return null;
+    return extractChallengeField(json, "\"http-01\"", "\"url\":\"");
+}
 
-    const url_marker = "\"url\":\"";
-    const url_start_search = json[http01_pos..];
-    const rel_start = (std.mem.indexOf(u8, url_start_search, url_marker) orelse return null) + url_marker.len;
-    const abs_start = http01_pos + rel_start;
+pub fn extractDnsChallengeToken(json: []const u8) ?[]const u8 {
+    return extractChallengeField(json, "\"dns-01\"", "\"token\":\"");
+}
 
+pub fn extractDnsChallengeUrl(json: []const u8) ?[]const u8 {
+    return extractChallengeField(json, "\"dns-01\"", "\"url\":\"");
+}
+
+fn extractChallengeField(json: []const u8, challenge_marker: []const u8, field_marker: []const u8) ?[]const u8 {
+    const challenge_pos = std.mem.indexOf(u8, json, challenge_marker) orelse return null;
+    const field_search = json[challenge_pos..];
+    const rel_start = (std.mem.indexOf(u8, field_search, field_marker) orelse return null) + field_marker.len;
+    const abs_start = challenge_pos + rel_start;
     const end = std.mem.indexOfPos(u8, json, abs_start, "\"") orelse return null;
     return json[abs_start..end];
 }

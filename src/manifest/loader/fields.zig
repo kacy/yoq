@@ -85,6 +85,40 @@ pub fn validateEnvVar(s: []const u8) bool {
     return eq > 0;
 }
 
+pub fn parseKeyValueRefs(
+    alloc: std.mem.Allocator,
+    raw: ?[]const []const u8,
+    context: []const u8,
+) common.LoadError![]const spec.TlsConfig.KeyValueRef {
+    const items = raw orelse {
+        return alloc.alloc(spec.TlsConfig.KeyValueRef, 0) catch return common.LoadError.OutOfMemory;
+    };
+
+    var result: std.ArrayListUnmanaged(spec.TlsConfig.KeyValueRef) = .empty;
+    errdefer {
+        for (result.items) |entry| entry.deinit(alloc);
+        result.deinit(alloc);
+    }
+
+    for (items) |item| {
+        const eq = std.mem.indexOfScalar(u8, item, '=') orelse {
+            log.err("manifest: invalid {s} entry '{s}' (expected key=value)", .{ context, item });
+            return common.LoadError.InvalidTlsConfig;
+        };
+        if (eq == 0 or eq == item.len - 1) {
+            log.err("manifest: invalid {s} entry '{s}' (expected key=value)", .{ context, item });
+            return common.LoadError.InvalidTlsConfig;
+        }
+
+        result.append(alloc, .{
+            .key = alloc.dupe(u8, item[0..eq]) catch return common.LoadError.OutOfMemory,
+            .value = alloc.dupe(u8, item[eq + 1 ..]) catch return common.LoadError.OutOfMemory,
+        }) catch return common.LoadError.OutOfMemory;
+    }
+
+    return result.toOwnedSlice(alloc) catch return common.LoadError.OutOfMemory;
+}
+
 pub fn parseVolumeMounts(alloc: std.mem.Allocator, raw: ?[]const []const u8) common.LoadError![]const spec.VolumeMount {
     const items = raw orelse {
         return alloc.alloc(spec.VolumeMount, 0) catch return common.LoadError.OutOfMemory;
@@ -232,6 +266,89 @@ pub fn parseTlsConfig(
         return common.LoadError.InvalidTlsConfig;
     }
 
+    const challenge_raw = tls_table.getString("acme_challenge") orelse "http-01";
+    const acme_challenge: spec.TlsConfig.ChallengeType = if (std.mem.eql(u8, challenge_raw, "http-01"))
+        .http_01
+    else if (std.mem.eql(u8, challenge_raw, "dns-01"))
+        .dns_01
+    else {
+        log.err("manifest: service '{s}' tls acme_challenge must be 'http-01' or 'dns-01'", .{service_name});
+        return common.LoadError.InvalidTlsConfig;
+    };
+
+    const provider_raw = tls_table.getString("acme_dns_provider");
+    const acme_dns_provider: ?spec.TlsConfig.DnsProvider = if (provider_raw) |provider|
+        if (std.mem.eql(u8, provider, "cloudflare"))
+            .cloudflare
+        else if (std.mem.eql(u8, provider, "route53"))
+            .route53
+        else if (std.mem.eql(u8, provider, "gcloud"))
+            .gcloud
+        else if (std.mem.eql(u8, provider, "exec"))
+            .exec
+        else {
+            log.err("manifest: service '{s}' tls acme_dns_provider must be one of cloudflare, route53, gcloud, exec", .{service_name});
+            return common.LoadError.InvalidTlsConfig;
+        }
+    else
+        null;
+
+    const secret_refs = try parseKeyValueRefs(alloc, tls_table.getArray("acme_dns_secret_refs"), "acme_dns_secret_refs");
+    errdefer {
+        for (secret_refs) |entry| entry.deinit(alloc);
+        alloc.free(secret_refs);
+    }
+    const dns_config = try parseKeyValueRefs(alloc, tls_table.getArray("acme_dns_config"), "acme_dns_config");
+    errdefer {
+        for (dns_config) |entry| entry.deinit(alloc);
+        alloc.free(dns_config);
+    }
+    const dns_hook = try parseStringArray(alloc, tls_table.getArray("acme_dns_hook"));
+    errdefer {
+        for (dns_hook) |entry| alloc.free(entry);
+        alloc.free(dns_hook);
+    }
+
+    const propagation_timeout_raw = tls_table.getInt("acme_dns_propagation_timeout_secs");
+    const poll_interval_raw = tls_table.getInt("acme_dns_poll_interval_secs");
+    const propagation_timeout_secs: u32 = if (propagation_timeout_raw) |value| blk: {
+        if (value <= 0 or value > std.math.maxInt(u32)) {
+            log.err("manifest: service '{s}' tls acme_dns_propagation_timeout_secs must be between 1 and {d}", .{ service_name, std.math.maxInt(u32) });
+            return common.LoadError.InvalidTlsConfig;
+        }
+        break :blk @intCast(value);
+    } else 300;
+    const poll_interval_secs: u32 = if (poll_interval_raw) |value| blk: {
+        if (value <= 0 or value > std.math.maxInt(u32)) {
+            log.err("manifest: service '{s}' tls acme_dns_poll_interval_secs must be between 1 and {d}", .{ service_name, std.math.maxInt(u32) });
+            return common.LoadError.InvalidTlsConfig;
+        }
+        break :blk @intCast(value);
+    } else 5;
+
+    if (!acme and (acme_challenge != .http_01 or acme_dns_provider != null or secret_refs.len > 0 or dns_config.len > 0 or dns_hook.len > 0)) {
+        log.err("manifest: service '{s}' tls dns/acme settings require acme = true", .{service_name});
+        return common.LoadError.InvalidTlsConfig;
+    }
+    if (acme and acme_challenge == .dns_01) {
+        if (acme_dns_provider == null) {
+            log.err("manifest: service '{s}' tls dns-01 requires acme_dns_provider", .{service_name});
+            return common.LoadError.InvalidTlsConfig;
+        }
+        if (acme_dns_provider.? == .exec and dns_hook.len == 0) {
+            log.err("manifest: service '{s}' tls exec dns-01 requires acme_dns_hook", .{service_name});
+            return common.LoadError.InvalidTlsConfig;
+        }
+    }
+    if (acme and acme_challenge == .http_01 and (acme_dns_provider != null or secret_refs.len > 0 or dns_config.len > 0 or dns_hook.len > 0)) {
+        log.err("manifest: service '{s}' tls http-01 does not accept acme_dns_* settings", .{service_name});
+        return common.LoadError.InvalidTlsConfig;
+    }
+    if (acme_dns_provider != null and acme_challenge != .dns_01) {
+        log.err("manifest: service '{s}' tls acme_dns_provider requires acme_challenge = 'dns-01'", .{service_name});
+        return common.LoadError.InvalidTlsConfig;
+    }
+
     const email: ?[]const u8 = if (email_raw) |e|
         alloc.dupe(u8, e) catch return common.LoadError.OutOfMemory
     else
@@ -241,6 +358,13 @@ pub fn parseTlsConfig(
         .domain = alloc.dupe(u8, domain) catch return common.LoadError.OutOfMemory,
         .acme = acme,
         .email = email,
+        .acme_challenge = acme_challenge,
+        .acme_dns_provider = acme_dns_provider,
+        .acme_dns_secret_refs = secret_refs,
+        .acme_dns_config = dns_config,
+        .acme_dns_hook = dns_hook,
+        .acme_dns_propagation_timeout_secs = propagation_timeout_secs,
+        .acme_dns_poll_interval_secs = poll_interval_secs,
     };
 }
 

@@ -313,11 +313,11 @@ key files:
 
 certificate management and TLS termination.
 
-**ACME:** Let's Encrypt-compatible client implementing HTTP-01 challenge validation. registers accounts, creates orders, serves challenge tokens on port 80, polls authorization and order state, and downloads signed certificates.
+**ACME:** Let's Encrypt-compatible client implementing HTTP-01 and DNS-01 challenge validation. HTTP-01 serves challenge tokens on port 80. DNS-01 computes `_acme-challenge` TXT values, updates records through built-in providers (`cloudflare`, `route53`, `gcloud`) or an exec hook, polls DNS visibility, and then finalizes the order.
 
 **TLS proxy:** a reverse proxy that terminates TLS 1.3 (AES-256-GCM). routes connections based on SNI (Server Name Indication) extracted from the ClientHello message.
 
-**certificate store:** persists certificates by domain with expiry tracking. the TLS proxy checks for expiring ACME certificates and renews them in place.
+**certificate store:** persists certificates by domain with expiry tracking plus stored per-domain ACME renewal metadata. the TLS proxy checks for expiring managed certificates and renews each one using its own stored challenge and provider settings.
 
 key files:
 - `acme.zig` — ACME client

@@ -148,14 +148,14 @@ current limits:
 
 ### TLS and ACME
 
-services can enable TLS termination with `[service.<name>.tls]`. when `acme = true`, yoq provisions and renews certificates with ACME HTTP-01 validation through the built-in TLS proxy on ports 443 and 80.
+services can enable TLS termination with `[service.<name>.tls]`. when `acme = true`, yoq provisions and renews certificates through the built-in TLS proxy. `http-01` remains the default. `dns-01` is also supported with built-in `cloudflare`, `route53`, and `gcloud` providers plus an `exec` fallback.
 
 current limits:
 
-- ACME currently uses HTTP-01 only
-- the target host must be reachable on port 80 during provision and renewal
+- provider credentials must be supplied through `yoq secret`
+- `http-01` still requires the target host to be reachable on port 80 during provision and renewal
 
-For standalone `yoq cert provision` and `yoq cert renew`, `--email` is optional. yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
+For standalone `yoq cert provision` and `yoq cert renew`, `--email` is optional. yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`. DNS-01 uses `--dns-provider cloudflare|route53|gcloud|exec`, provider-specific `--dns-secret key=name` references, optional `--dns-config key=value`, and `--dns-hook` / `--dns-hook-arg` for the exec fallback.
 
 ### rolling updates
 

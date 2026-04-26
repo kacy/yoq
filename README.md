@@ -74,8 +74,8 @@ current gRPC routing limits:
 
 current ACME/TLS limits:
 
-- HTTP-01 challenge validation only
-- port 80 on the target host must be reachable during provision and renewal
+- DNS-01 requires explicit provider configuration and provider credentials in `yoq secret`
+- HTTP-01 still requires port 80 on the target host during provision and renewal
 
 ### GPU & training
 
@@ -294,9 +294,9 @@ yoq secret get <name>                read a secret
 yoq secret rm <name>                 delete a secret
 yoq secret list                      list secrets
 yoq secret rotate <name>             rotate a secret
-yoq cert provision <domain> [--email <email>] [--staging]
+yoq cert provision <domain> [--email <email>] [--staging] [--challenge http-01|dns-01]
                                      provision a TLS certificate via ACME
-yoq cert renew <domain> [--email <email>] [--staging]
+yoq cert renew <domain> [--email <email>] [--staging] [--challenge http-01|dns-01]
                                      renew a TLS certificate via ACME
 yoq cert install <domain> --cert <path> --key <path>
 yoq cert list                        list certificates
@@ -304,6 +304,7 @@ yoq cert rm <domain>                 remove a certificate
 ```
 
 If `--email` is omitted for the standalone ACME flow, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
+DNS-01 supports built-in `cloudflare`, `route53`, and `gcloud` providers plus an `exec` fallback. Provider credentials are referenced through `yoq secret` entries rather than embedded directly in manifests.
 
 For app rollbacks, omitting `--release` picks the previous successful release before the current one. Use `--print` to inspect the selected stored app snapshot without applying it.
 For app rollouts, status and history expose a nested `rollout` view with rollout state, control state, target counts, failure details, and checkpoint data. The older top-level fields are still there for compatibility.

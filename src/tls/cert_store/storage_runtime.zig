@@ -4,6 +4,7 @@ const secrets = @import("../../state/secrets.zig");
 const common = @import("common.zig");
 const key_support = @import("key_support.zig");
 const x509_parse = @import("x509_parse.zig");
+const acme_config = @import("../acme/config.zig");
 
 fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
@@ -71,6 +72,10 @@ pub const CertStore = struct {
                 now,
             },
         ) catch return common.CertError.WriteFailed;
+
+        if (!std.mem.eql(u8, source, "acme")) {
+            self.db.exec("DELETE FROM certificate_acme_config WHERE domain = ?;", .{}, .{domain}) catch {};
+        }
     }
 
     pub fn get(self: *CertStore, domain: []const u8) common.CertError!struct { cert_pem: []u8, key_pem: []u8 } {
@@ -124,6 +129,12 @@ pub const CertStore = struct {
         if (existing == null) return common.CertError.NotFound;
 
         self.db.exec(
+            "DELETE FROM certificate_acme_config WHERE domain = ?;",
+            .{},
+            .{domain},
+        ) catch return common.CertError.WriteFailed;
+
+        self.db.exec(
             "DELETE FROM certificates WHERE domain = ?;",
             .{},
             .{domain},
@@ -156,6 +167,45 @@ pub const CertStore = struct {
         }
 
         return results;
+    }
+
+    pub fn setAcmeConfig(self: *CertStore, domain: []const u8, config: common.AcmeManagedConfig) common.CertError!void {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        try acme_config.ManagedConfig.writeJson(&aw.writer, config);
+
+        const now: i64 = nowRealSeconds();
+        const created_at = self.getAcmeConfigCreatedAt(domain) orelse now;
+        self.db.exec(
+            "INSERT OR REPLACE INTO certificate_acme_config (domain, config_json, created_at, updated_at) VALUES (?, ?, ?, ?);",
+            .{},
+            .{ domain, aw.writer.buffered(), created_at, now },
+        ) catch return common.CertError.WriteFailed;
+    }
+
+    pub fn getAcmeConfig(self: *CertStore, domain: []const u8) common.CertError!common.AcmeManagedConfig {
+        const Row = struct {
+            config_json: sqlite.Text,
+        };
+
+        const row = (self.db.oneAlloc(
+            Row,
+            self.allocator,
+            "SELECT config_json FROM certificate_acme_config WHERE domain = ?;",
+            .{},
+            .{domain},
+        ) catch return common.CertError.ReadFailed) orelse return common.CertError.NotFound;
+        defer self.allocator.free(row.config_json.data);
+
+        return decodeManagedConfig(self.allocator, row.config_json.data) catch return common.CertError.ReadFailed;
+    }
+
+    pub fn removeAcmeConfig(self: *CertStore, domain: []const u8) common.CertError!void {
+        self.db.exec(
+            "DELETE FROM certificate_acme_config WHERE domain = ?;",
+            .{},
+            .{domain},
+        ) catch return common.CertError.WriteFailed;
     }
 
     pub fn needsRenewal(self: *CertStore, domain: []const u8, days: i64) common.CertError!bool {
@@ -195,6 +245,29 @@ pub const CertStore = struct {
         return results;
     }
 
+    pub fn listExpiringManagedSoon(self: *CertStore, days: i64) common.CertError!std.ArrayList([]const u8) {
+        const DomainRow = struct {
+            domain: sqlite.Text,
+        };
+
+        const threshold = nowRealSeconds() + (days * 86400);
+        var results: std.ArrayList([]const u8) = .empty;
+
+        var stmt = self.db.prepare(
+            "SELECT c.domain FROM certificates c " ++
+                "JOIN certificate_acme_config a ON a.domain = c.domain " ++
+                "WHERE c.not_after <= ? ORDER BY c.not_after ASC;",
+        ) catch return common.CertError.ReadFailed;
+        defer stmt.deinit();
+
+        var iter = stmt.iterator(DomainRow, .{threshold}) catch return common.CertError.ReadFailed;
+        while (iter.nextAlloc(self.allocator, .{}) catch return common.CertError.ReadFailed) |row| {
+            results.append(self.allocator, row.domain.data) catch return common.CertError.AllocFailed;
+        }
+
+        return results;
+    }
+
     fn getCreatedAt(self: *CertStore, domain: []const u8) ?i64 {
         const TimestampRow = struct {
             created_at: i64,
@@ -203,6 +276,21 @@ pub const CertStore = struct {
         const row = (self.db.one(
             TimestampRow,
             "SELECT created_at FROM certificates WHERE domain = ?;",
+            .{},
+            .{domain},
+        ) catch return null) orelse return null;
+
+        return row.created_at;
+    }
+
+    fn getAcmeConfigCreatedAt(self: *CertStore, domain: []const u8) ?i64 {
+        const TimestampRow = struct {
+            created_at: i64,
+        };
+
+        const row = (self.db.one(
+            TimestampRow,
+            "SELECT created_at FROM certificate_acme_config WHERE domain = ?;",
             .{},
             .{domain},
         ) catch return null) orelse return null;
@@ -224,5 +312,85 @@ pub const CertStore = struct {
             \\    updated_at INTEGER NOT NULL
             \\);
         , .{}, .{}) catch return error.TableCreationFailed;
+        db.exec(
+            \\CREATE TABLE IF NOT EXISTS certificate_acme_config (
+            \\    domain TEXT PRIMARY KEY,
+            \\    config_json TEXT NOT NULL,
+            \\    created_at INTEGER NOT NULL,
+            \\    updated_at INTEGER NOT NULL,
+            \\    FOREIGN KEY (domain) REFERENCES certificates(domain) ON DELETE CASCADE
+            \\);
+        , .{}, .{}) catch return error.TableCreationFailed;
     }
 };
+
+fn decodeManagedConfig(alloc: std.mem.Allocator, json: []const u8) !common.AcmeManagedConfig {
+    const JsonKeyValue = struct {
+        key: []const u8,
+        value: []const u8,
+    };
+    const JsonConfig = struct {
+        email: []const u8,
+        directory_url: []const u8,
+        challenge_type: []const u8,
+        dns_provider: ?[]const u8 = null,
+        secret_refs: []const JsonKeyValue = &.{},
+        config_pairs: []const JsonKeyValue = &.{},
+        hook_command: []const []const u8 = &.{},
+        propagation_timeout_secs: u32 = 300,
+        poll_interval_secs: u32 = 5,
+    };
+
+    const parsed = try std.json.parseFromSlice(JsonConfig, alloc, json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    const challenge_type = acme_config.ChallengeType.parse(parsed.value.challenge_type) orelse
+        return error.ReadFailed;
+    const dns_provider = if (parsed.value.dns_provider) |value|
+        acme_config.DnsProvider.parse(value) orelse return error.ReadFailed
+    else
+        null;
+
+    return .{
+        .email = try alloc.dupe(u8, parsed.value.email),
+        .directory_url = try alloc.dupe(u8, parsed.value.directory_url),
+        .challenge_type = challenge_type,
+        .dns_provider = dns_provider,
+        .secret_refs = try cloneJsonKeyValues(JsonKeyValue, alloc, parsed.value.secret_refs),
+        .config_pairs = try cloneJsonKeyValues(JsonKeyValue, alloc, parsed.value.config_pairs),
+        .hook_command = try cloneJsonStrings(alloc, parsed.value.hook_command),
+        .propagation_timeout_secs = parsed.value.propagation_timeout_secs,
+        .poll_interval_secs = parsed.value.poll_interval_secs,
+    };
+}
+
+fn cloneJsonKeyValues(
+    comptime T: type,
+    alloc: std.mem.Allocator,
+    values: []const T,
+) ![]const acme_config.KeyValueRef {
+    var result: std.ArrayListUnmanaged(acme_config.KeyValueRef) = .empty;
+    errdefer {
+        for (result.items) |entry| entry.deinit(alloc);
+        result.deinit(alloc);
+    }
+    for (values) |entry| {
+        try result.append(alloc, .{
+            .key = try alloc.dupe(u8, entry.key),
+            .value = try alloc.dupe(u8, entry.value),
+        });
+    }
+    return try result.toOwnedSlice(alloc);
+}
+
+fn cloneJsonStrings(alloc: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
+    var result: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (result.items) |entry| alloc.free(entry);
+        result.deinit(alloc);
+    }
+    for (values) |entry| {
+        try result.append(alloc, try alloc.dupe(u8, entry));
+    }
+    return try result.toOwnedSlice(alloc);
+}

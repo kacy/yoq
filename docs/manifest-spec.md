@@ -333,6 +333,13 @@ defined under `[service.<name>.tls]`. enables TLS termination with automatic or 
 | `domain` | string | yes | — | domain name for the certificate |
 | `acme` | boolean | no | `false` | auto-provision via Let's Encrypt |
 | `email` | string | conditional | — | required if `acme = true` |
+| `acme_challenge` | string | no | `"http-01"` | `http-01` or `dns-01` |
+| `acme_dns_provider` | string | conditional | — | `cloudflare`, `route53`, `gcloud`, or `exec`; required for `dns-01` |
+| `acme_dns_secret_refs` | string array | no | `[]` | provider credential references in `key=secret-name` form |
+| `acme_dns_config` | string array | no | `[]` | provider-specific non-secret config in `key=value` form |
+| `acme_dns_hook` | string array | conditional | `[]` | exec fallback command and arguments |
+| `acme_dns_propagation_timeout_secs` | integer | no | `300` | DNS-01 TXT propagation timeout |
+| `acme_dns_poll_interval_secs` | integer | no | `5` | DNS-01 TXT polling interval |
 
 ```toml
 [service.web.tls]
@@ -342,6 +349,26 @@ email = "admin@example.com"
 ```
 
 automatic certificate management uses ACME HTTP-01 validation. the host running the TLS proxy must be reachable on port 80 while the certificate is being issued or renewed.
+
+DNS-01 is also supported:
+
+```toml
+[service.web.tls]
+domain = "example.com"
+acme = true
+email = "admin@example.com"
+acme_challenge = "dns-01"
+acme_dns_provider = "cloudflare"
+acme_dns_secret_refs = ["api_token=cf-acme-token"]
+acme_dns_config = ["zone_id=zone-123"]
+```
+
+Built-in DNS-01 providers:
+
+- `cloudflare`: secret ref `api_token`, config `zone_id`
+- `route53`: secret refs `access_key_id` and `secret_access_key`, config `hosted_zone_id`, optional config `region`
+- `gcloud`: secret ref `access_token`, config `project` and `managed_zone`
+- `exec`: `acme_dns_hook = ["/path/to/hook", "arg1", ...]`; `acme_dns_secret_refs` become environment variables passed to the hook
 
 for manual certificates, use `yoq cert install` first:
 
@@ -355,14 +382,15 @@ standalone certificate commands:
 ```text
 yoq cert provision example.com
 yoq cert renew example.com
+yoq cert provision example.com --challenge dns-01 --dns-provider cloudflare --dns-secret api_token=cf-acme-token --dns-config zone_id=zone-123
 ```
 
 `--email` remains available for the standalone ACME flow. When it is omitted, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
 
 current limits:
 
-- ACME uses HTTP-01 only
-- the standalone CLI flow can only complete when this host can bind port 80 and serve the challenge path
+- `http-01` still requires this host to bind port 80 and serve the challenge path
+- `dns-01` depends on explicit provider config and the referenced `yoq secret` entries
 
 ---
 

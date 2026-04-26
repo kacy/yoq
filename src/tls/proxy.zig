@@ -25,6 +25,8 @@ const sni = @import("sni.zig");
 const cert_store = @import("cert_store.zig");
 const backend_mod = @import("backend.zig");
 const acme_mod = @import("acme.zig");
+const dns_provider = @import("acme/dns_provider.zig");
+const secrets = @import("../state/secrets.zig");
 
 const max_connections: u32 = 256;
 var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
@@ -107,8 +109,6 @@ pub const ChallengeStore = struct {
 /// if set, the proxy will periodically check for expiring certs and renew
 /// them via ACME. the check runs every 12 hours by default.
 pub const RenewalConfig = struct {
-    email: []const u8,
-    directory_url: []const u8,
     /// number of days before expiry to trigger renewal
     renewal_days: i64 = 30,
     /// interval between renewal checks in seconds (default: 12 hours)
@@ -302,7 +302,7 @@ pub const TlsProxy = struct {
     }
 
     fn checkAndRenew(self: *TlsProxy, config: RenewalConfig) void {
-        var expiring = self.certs.listExpiringSoon(config.renewal_days) catch {
+        var expiring = self.certs.listExpiringManagedSoon(config.renewal_days) catch {
             log.warn("failed to list expiring certificates", .{});
             return;
         };
@@ -320,7 +320,7 @@ pub const TlsProxy = struct {
 
         for (expiring.items) |domain| {
             if (!self.running.load(.acquire)) break;
-            self.renewCertificate(domain, config) catch |err| {
+            self.renewCertificate(domain) catch |err| {
                 log.warn("failed to renew certificate for {s}: {}", .{ domain, err });
             };
         }
@@ -332,18 +332,59 @@ pub const TlsProxy = struct {
         AllocFailed,
     };
 
-    fn renewCertificate(self: *TlsProxy, domain: []const u8, config: RenewalConfig) RenewError!void {
+    fn renewCertificate(self: *TlsProxy, domain: []const u8) RenewError!void {
         log.info("renewing certificate for {s}", .{domain});
 
-        var client = acme_mod.AcmeClient.init(self.threaded_io.io(), self.allocator, config.directory_url);
+        var managed_config = self.certs.getAcmeConfig(domain) catch {
+            log.warn("  renewal: failed to load ACME metadata", .{});
+            return RenewError.StoreFailed;
+        };
+        defer managed_config.deinit(self.allocator);
+
+        var client = acme_mod.AcmeClient.init(self.threaded_io.io(), self.allocator, managed_config.directory_url);
         defer client.deinit();
 
-        var exported = client.issueAndExport(.{
-            .domain = domain,
-            .email = config.email,
-            .directory_url = config.directory_url,
-            .challenge_registrar = challengeRegistrar(&self.challenges),
-        }) catch {
+        var exported = switch (managed_config.challenge_type) {
+            .http_01 => client.issueAndExport(.{
+                .domain = domain,
+                .email = managed_config.email,
+                .directory_url = managed_config.directory_url,
+                .challenge_type = .http_01,
+                .challenge_registrar = challengeRegistrar(&self.challenges),
+            }),
+            .dns_01 => blk: {
+                var maybe_secret_store: ?secrets.SecretsStore = null;
+                if (managed_config.dns_provider) |provider| {
+                    if (provider != .exec or managed_config.secret_refs.len > 0) {
+                        maybe_secret_store = secrets.SecretsStore.init(self.certs.db, self.allocator) catch {
+                            log.warn("  renewal: failed to open secrets store", .{});
+                            return RenewError.StoreFailed;
+                        };
+                    }
+                }
+
+                var runtime = dns_provider.Runtime.init(
+                    self.threaded_io.io(),
+                    self.allocator,
+                    managed_config,
+                    if (maybe_secret_store) |*store| store else null,
+                ) catch {
+                    log.warn("  renewal: failed to initialize DNS provider", .{});
+                    return RenewError.AcmeFailed;
+                };
+                defer runtime.deinit();
+
+                break :blk client.issueAndExport(.{
+                    .domain = domain,
+                    .email = managed_config.email,
+                    .directory_url = managed_config.directory_url,
+                    .challenge_type = .dns_01,
+                    .dns_solver = runtime.solver(),
+                    .dns_propagation_timeout_secs = managed_config.propagation_timeout_secs,
+                    .dns_poll_interval_secs = managed_config.poll_interval_secs,
+                });
+            },
+        } catch {
             log.warn("  renewal: failed to finalize order", .{});
             return RenewError.AcmeFailed;
         };
@@ -352,6 +393,10 @@ pub const TlsProxy = struct {
         // store the new certificate (cert_store.install replaces existing)
         self.certs.install(domain, exported.cert_pem, exported.key_pem, "acme") catch {
             log.warn("  renewal: failed to store renewed certificate", .{});
+            return RenewError.StoreFailed;
+        };
+        self.certs.setAcmeConfig(domain, managed_config) catch {
+            log.warn("  renewal: failed to persist renewal metadata", .{});
             return RenewError.StoreFailed;
         };
 

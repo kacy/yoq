@@ -195,7 +195,7 @@ pub fn createOrder(self: anytype, domain: []const u8) types.AcmeError!types.Orde
     };
 }
 
-pub fn getHttpChallenge(self: anytype, auth_url: []const u8) types.AcmeError!types.Challenge {
+pub fn getHttpChallenge(self: anytype, auth_url: []const u8) types.AcmeError!types.HttpChallenge {
     var response = postAsGet(self, auth_url, types.AcmeError.AuthorizationFetchFailed) catch
         return types.AcmeError.AuthorizationFetchFailed;
     defer response.deinit();
@@ -218,6 +218,42 @@ pub fn getHttpChallenge(self: anytype, auth_url: []const u8) types.AcmeError!typ
         .url = self.allocator.dupe(u8, challenge_url) catch return types.AcmeError.AllocFailed,
         .token = self.allocator.dupe(u8, token) catch return types.AcmeError.AllocFailed,
         .key_authorization = key_auth,
+        .allocator = self.allocator,
+    };
+}
+
+pub fn getDnsChallenge(self: anytype, auth_url: []const u8, domain: []const u8) types.AcmeError!types.DnsChallenge {
+    var response = postAsGet(self, auth_url, types.AcmeError.AuthorizationFetchFailed) catch
+        return types.AcmeError.AuthorizationFetchFailed;
+    defer response.deinit();
+
+    if (response.status != .ok) return types.AcmeError.AuthorizationFetchFailed;
+
+    const token = json_support.extractDnsChallengeToken(response.body) orelse
+        return types.AcmeError.NoDnsChallenge;
+    const challenge_url = json_support.extractDnsChallengeUrl(response.body) orelse
+        return types.AcmeError.NoDnsChallenge;
+
+    const thumbprint = jws.jwkThumbprint(self.allocator, self.account_key.?.public_key) catch
+        return types.AcmeError.ChallengeFailed;
+    defer self.allocator.free(thumbprint);
+
+    const key_auth = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ token, thumbprint }) catch
+        return types.AcmeError.AllocFailed;
+    defer self.allocator.free(key_auth);
+
+    var hash: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(key_auth, &hash, .{});
+    const record_value = jws.base64urlEncode(self.allocator, &hash) catch
+        return types.AcmeError.AllocFailed;
+
+    const record_name = std.fmt.allocPrint(self.allocator, "_acme-challenge.{s}", .{domain}) catch
+        return types.AcmeError.AllocFailed;
+
+    return .{
+        .url = self.allocator.dupe(u8, challenge_url) catch return types.AcmeError.AllocFailed,
+        .record_name = record_name,
+        .record_value = record_value,
         .allocator = self.allocator,
     };
 }

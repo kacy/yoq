@@ -7,6 +7,7 @@ const std = @import("std");
 const sqlite = @import("sqlite");
 
 const common = @import("cert_store/common.zig");
+const acme = @import("acme.zig");
 const key_support = @import("cert_store/key_support.zig");
 const storage_runtime = @import("cert_store/storage_runtime.zig");
 const x509_parse = @import("cert_store/x509_parse.zig");
@@ -255,6 +256,81 @@ test "listExpiringSoon with distant expiry" {
     }
 
     try std.testing.expectEqual(@as(usize, 0), expiring.items.len);
+}
+
+test "acme config metadata round-trip" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    const alloc = std.testing.allocator;
+    const key = [_]u8{0xAB} ** key_length;
+    var cs = try CertStore.initWithKey(&db, alloc, key);
+
+    const cert_pem = @embedFile("testdata/cert.pem");
+    try cs.install("example.com", cert_pem, "key", "acme");
+
+    const secret_refs = try alloc.alloc(acme.KeyValueRef, 1);
+    secret_refs[0] = .{
+        .key = try alloc.dupe(u8, "api_token"),
+        .value = try alloc.dupe(u8, "cf-secret"),
+    };
+    const config_pairs = try alloc.alloc(acme.KeyValueRef, 1);
+    config_pairs[0] = .{
+        .key = try alloc.dupe(u8, "zone_id"),
+        .value = try alloc.dupe(u8, "zone-123"),
+    };
+
+    var config = common.AcmeManagedConfig{
+        .email = try alloc.dupe(u8, "ops@example.com"),
+        .directory_url = try alloc.dupe(u8, "https://acme-staging-v02.api.letsencrypt.org/directory"),
+        .challenge_type = .dns_01,
+        .dns_provider = .cloudflare,
+        .secret_refs = secret_refs,
+        .config_pairs = config_pairs,
+        .hook_command = try alloc.alloc([]const u8, 0),
+        .propagation_timeout_secs = 90,
+        .poll_interval_secs = 4,
+    };
+    defer config.deinit(alloc);
+
+    try cs.setAcmeConfig("example.com", config);
+
+    var loaded = try cs.getAcmeConfig("example.com");
+    defer loaded.deinit(alloc);
+
+    try std.testing.expectEqualStrings("ops@example.com", loaded.email);
+    try std.testing.expectEqual(.dns_01, loaded.challenge_type);
+    try std.testing.expectEqual(.cloudflare, loaded.dns_provider.?);
+    try std.testing.expectEqual(@as(usize, 1), loaded.secret_refs.len);
+    try std.testing.expectEqualStrings("api_token", loaded.secret_refs[0].key);
+    try std.testing.expectEqualStrings("cf-secret", loaded.secret_refs[0].value);
+    try std.testing.expectEqual(@as(u32, 90), loaded.propagation_timeout_secs);
+}
+
+test "manual install removes acme metadata" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+
+    const alloc = std.testing.allocator;
+    const key = [_]u8{0xAB} ** key_length;
+    var cs = try CertStore.initWithKey(&db, alloc, key);
+
+    const cert_pem = @embedFile("testdata/cert.pem");
+    try cs.install("example.com", cert_pem, "key", "acme");
+
+    var config = common.AcmeManagedConfig{
+        .email = try alloc.dupe(u8, "ops@example.com"),
+        .directory_url = try alloc.dupe(u8, acme.letsencrypt_staging),
+        .challenge_type = .http_01,
+        .secret_refs = try alloc.alloc(acme.KeyValueRef, 0),
+        .config_pairs = try alloc.alloc(acme.KeyValueRef, 0),
+        .hook_command = try alloc.alloc([]const u8, 0),
+    };
+    defer config.deinit(alloc);
+    try cs.setAcmeConfig("example.com", config);
+
+    try cs.install("example.com", cert_pem, "manual-key", "manual");
+    try std.testing.expectError(CertError.NotFound, cs.getAcmeConfig("example.com"));
 }
 
 test "parseUtcTime" {

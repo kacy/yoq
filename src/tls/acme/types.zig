@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 
 pub const AcmeError = error{
     DirectoryFetchFailed,
@@ -10,6 +11,7 @@ pub const AcmeError = error{
     FinalizeFailed,
     CertificateDownloadFailed,
     NoHttpChallenge,
+    NoDnsChallenge,
     InvalidResponse,
     CsrGenerationFailed,
     AllocFailed,
@@ -44,16 +46,29 @@ pub const Order = struct {
     }
 };
 
-pub const Challenge = struct {
+pub const HttpChallenge = struct {
     url: []const u8,
     token: []const u8,
     key_authorization: []const u8,
     allocator: std.mem.Allocator,
 
-    pub fn deinit(self: *Challenge) void {
+    pub fn deinit(self: *HttpChallenge) void {
         self.allocator.free(self.url);
         self.allocator.free(self.token);
         self.allocator.free(self.key_authorization);
+    }
+};
+
+pub const DnsChallenge = struct {
+    url: []const u8,
+    record_name: []const u8,
+    record_value: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *DnsChallenge) void {
+        self.allocator.free(self.url);
+        self.allocator.free(self.record_name);
+        self.allocator.free(self.record_value);
     }
 };
 
@@ -95,9 +110,27 @@ pub const ChallengeRegistrar = struct {
     }
 };
 
+pub const DnsSolver = struct {
+    ctx: *anyopaque,
+    present_fn: *const fn (ctx: *anyopaque, record_name: []const u8, value: []const u8) AcmeError!void,
+    cleanup_fn: *const fn (ctx: *anyopaque, record_name: []const u8, value: []const u8) void,
+
+    pub fn present(self: DnsSolver, record_name: []const u8, value: []const u8) AcmeError!void {
+        return self.present_fn(self.ctx, record_name, value);
+    }
+
+    pub fn cleanup(self: DnsSolver, record_name: []const u8, value: []const u8) void {
+        self.cleanup_fn(self.ctx, record_name, value);
+    }
+};
+
 pub const IssuanceOptions = struct {
     domain: []const u8,
     email: []const u8,
     directory_url: []const u8,
-    challenge_registrar: ChallengeRegistrar,
+    challenge_type: config.ChallengeType = .http_01,
+    challenge_registrar: ?ChallengeRegistrar = null,
+    dns_solver: ?DnsSolver = null,
+    dns_propagation_timeout_secs: u32 = 300,
+    dns_poll_interval_secs: u32 = 5,
 };

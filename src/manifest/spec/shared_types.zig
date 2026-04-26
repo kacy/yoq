@@ -126,13 +126,48 @@ pub const HealthCheck = struct {
 };
 
 pub const TlsConfig = struct {
+    pub const ChallengeType = enum {
+        http_01,
+        dns_01,
+    };
+
+    pub const DnsProvider = enum {
+        cloudflare,
+        route53,
+        gcloud,
+        exec,
+    };
+
+    pub const KeyValueRef = struct {
+        key: []const u8,
+        value: []const u8,
+
+        pub fn deinit(self: KeyValueRef, alloc: std.mem.Allocator) void {
+            alloc.free(self.key);
+            alloc.free(self.value);
+        }
+    };
+
     domain: []const u8,
     acme: bool = false,
     email: ?[]const u8 = null,
+    acme_challenge: ChallengeType = .http_01,
+    acme_dns_provider: ?DnsProvider = null,
+    acme_dns_secret_refs: []const KeyValueRef = &.{},
+    acme_dns_config: []const KeyValueRef = &.{},
+    acme_dns_hook: []const []const u8 = &.{},
+    acme_dns_propagation_timeout_secs: u32 = 300,
+    acme_dns_poll_interval_secs: u32 = 5,
 
     pub fn deinit(self: TlsConfig, alloc: std.mem.Allocator) void {
         alloc.free(self.domain);
         if (self.email) |e| alloc.free(e);
+        for (self.acme_dns_secret_refs) |entry| entry.deinit(alloc);
+        alloc.free(self.acme_dns_secret_refs);
+        for (self.acme_dns_config) |entry| entry.deinit(alloc);
+        alloc.free(self.acme_dns_config);
+        for (self.acme_dns_hook) |entry| alloc.free(entry);
+        alloc.free(self.acme_dns_hook);
     }
 };
 

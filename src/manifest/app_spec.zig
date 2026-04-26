@@ -633,7 +633,46 @@ fn writeJsonTls(writer: anytype, tls: spec.TlsConfig) !void {
         try json_helpers.writeJsonEscaped(writer, email);
         try writer.writeByte('"');
     }
+    try writer.writeAll(",\"acme_challenge\":\"");
+    try writer.writeAll(switch (tls.acme_challenge) {
+        .http_01 => "http-01",
+        .dns_01 => "dns-01",
+    });
+    try writer.writeByte('"');
+    if (tls.acme_dns_provider) |provider| {
+        try writer.writeAll(",\"acme_dns_provider\":\"");
+        try writer.writeAll(switch (provider) {
+            .cloudflare => "cloudflare",
+            .route53 => "route53",
+            .gcloud => "gcloud",
+            .exec => "exec",
+        });
+        try writer.writeByte('"');
+    }
+    try writer.print(
+        ",\"acme_dns_propagation_timeout_secs\":{d},\"acme_dns_poll_interval_secs\":{d}",
+        .{ tls.acme_dns_propagation_timeout_secs, tls.acme_dns_poll_interval_secs },
+    );
+    try writer.writeAll(",\"acme_dns_secret_refs\":");
+    try writeJsonKeyValueRefs(writer, tls.acme_dns_secret_refs);
+    try writer.writeAll(",\"acme_dns_config\":");
+    try writeJsonKeyValueRefs(writer, tls.acme_dns_config);
+    try writer.writeAll(",\"acme_dns_hook\":");
+    try writeJsonStringArray(writer, tls.acme_dns_hook);
     try writer.writeByte('}');
+}
+
+fn writeJsonKeyValueRefs(writer: anytype, refs: []const spec.TlsConfig.KeyValueRef) !void {
+    try writer.writeByte('[');
+    for (refs, 0..) |entry, idx| {
+        if (idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"key\":\"");
+        try json_helpers.writeJsonEscaped(writer, entry.key);
+        try writer.writeAll("\",\"value\":\"");
+        try json_helpers.writeJsonEscaped(writer, entry.value);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
 }
 
 fn writeJsonHttpRoutes(writer: anytype, routes: []const spec.HttpProxyRoute) !void {
