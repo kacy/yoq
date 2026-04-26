@@ -275,6 +275,15 @@ pub fn initSecurityTables(db: *sqlite.Db) SchemaError!void {
         \\    updated_at INTEGER NOT NULL
         \\);
     );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS certificate_acme_config (
+        \\    domain TEXT PRIMARY KEY,
+        \\    config_json TEXT NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    updated_at INTEGER NOT NULL,
+        \\    FOREIGN KEY (domain) REFERENCES certificates(domain) ON DELETE CASCADE
+        \\);
+    );
 }
 
 pub fn initStorageTables(db: *sqlite.Db) SchemaError!void {

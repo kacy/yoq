@@ -10,7 +10,6 @@ const health = @import("../health.zig");
 const tls_proxy = @import("../../tls/proxy.zig");
 const tls_backend = @import("../../tls/backend.zig");
 const cert_store_mod = @import("../../tls/cert_store.zig");
-const acme_mod = @import("../../tls/acme.zig");
 const sqlite = @import("sqlite");
 const cli = @import("../../lib/cli.zig");
 const tls_support = @import("tls_support.zig");
@@ -270,12 +269,8 @@ pub fn startTlsProxy(
         return null;
     };
 
-    const acme_email = findAcmeEmail(services, start_set);
-    if (acme_email) |email| {
-        proxy.setRenewalConfig(.{
-            .email = email,
-            .directory_url = acme_mod.letsencrypt_production,
-        });
+    if (hasManagedAcmeService(services, start_set)) {
+        proxy.setRenewalConfig(.{});
     }
 
     proxy.start();
@@ -408,23 +403,22 @@ fn provisionAcmeCerts(
             alloc,
             certs,
             challenges,
-            tls.domain,
-            tls.email orelse "admin@localhost",
+            tls,
         );
     }
 }
 
-fn findAcmeEmail(
+fn hasManagedAcmeService(
     services: []const spec.Service,
     start_set: ?std.StringHashMapUnmanaged(void),
-) ?[]const u8 {
+) bool {
     for (services) |svc| {
         if (!shouldStart(start_set, svc.name)) continue;
         const tls = svc.tls orelse continue;
         if (!tls.acme) continue;
-        return tls.email;
+        return true;
     }
-    return null;
+    return false;
 }
 
 test "syncServiceDefinitions persists http proxy config for started services" {

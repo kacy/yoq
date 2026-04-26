@@ -48,7 +48,16 @@ pub const Directory = types.Directory;
 pub const Order = types.Order;
 
 /// HTTP-01 challenge details.
-pub const Challenge = types.Challenge;
+pub const HttpChallenge = types.HttpChallenge;
+pub const DnsChallenge = types.DnsChallenge;
+pub const ChallengeType = @import("acme/config.zig").ChallengeType;
+pub const DnsProvider = @import("acme/config.zig").DnsProvider;
+pub const ManagedConfig = @import("acme/config.zig").ManagedConfig;
+pub const KeyValueRef = @import("acme/config.zig").KeyValueRef;
+pub const cloneKeyValueRefs = @import("acme/config.zig").cloneKeyValueRefs;
+pub const cloneStringArray = @import("acme/config.zig").cloneStringArray;
+pub const freeKeyValueRefs = @import("acme/config.zig").freeKeyValueRefs;
+pub const freeStringArray = @import("acme/config.zig").freeStringArray;
 
 /// result of finalizing an ACME order.
 /// cert_pem is the PEM certificate chain, key_der is the raw private key.
@@ -107,8 +116,12 @@ pub const AcmeClient = struct {
     }
 
     /// get the HTTP-01 challenge for an authorization.
-    pub fn getHttpChallenge(self: *AcmeClient, auth_url: []const u8) AcmeError!Challenge {
+    pub fn getHttpChallenge(self: *AcmeClient, auth_url: []const u8) AcmeError!HttpChallenge {
         return client_runtime.getHttpChallenge(self, auth_url);
+    }
+
+    pub fn getDnsChallenge(self: *AcmeClient, auth_url: []const u8, domain: []const u8) AcmeError!DnsChallenge {
+        return client_runtime.getDnsChallenge(self, auth_url, domain);
     }
 
     /// tell the CA we're ready for challenge validation.
@@ -232,10 +245,10 @@ test "Directory deinit" {
     dir.deinit(alloc);
 }
 
-test "Challenge deinit" {
+test "HttpChallenge deinit" {
     const alloc = std.testing.allocator;
 
-    var ch = Challenge{
+    var ch = HttpChallenge{
         .url = try alloc.dupe(u8, "https://example.com/chall"),
         .token = try alloc.dupe(u8, "token123"),
         .key_authorization = try alloc.dupe(u8, "token123.thumbprint"),

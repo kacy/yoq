@@ -1,4 +1,5 @@
 const std = @import("std");
+const acme_config = @import("../acme/config.zig");
 
 const XChaCha20Poly1305 = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
 
@@ -31,3 +32,5 @@ pub const CertInfo = struct {
         allocator.free(self.source);
     }
 };
+
+pub const AcmeManagedConfig = acme_config.ManagedConfig;
