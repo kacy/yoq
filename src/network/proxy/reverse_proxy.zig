@@ -3509,6 +3509,368 @@ test "handleConnection returns framed not found after h2c upgrade" {
     try std.testing.expectEqual(@as(u16, 404), try http2_passthrough.parseStatusCode(std.testing.allocator, framed));
 }
 
+test "handleConnection prefers header-matched route for h2c upgrade" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const canary_upstream_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        1,
+        200,
+        "application/grpc",
+        "canary",
+    );
+    defer std.testing.allocator.free(canary_upstream_response);
+
+    const upstream_headers_start = http2.frame_header_len;
+    const upstream_settings = http2.parseFrameHeader(canary_upstream_response[0..http2.frame_header_len]).?;
+    const stripped_upstream = canary_upstream_response[upstream_headers_start + upstream_settings.length ..];
+
+    const canary_actions = [_]TestUpstreamAction{
+        .{ .respond = canary_upstream_response },
+    };
+    var canary_upstream = try TestUpstreamServer.init(&canary_actions);
+    defer canary_upstream.deinit();
+    try canary_upstream.start();
+
+    const dead_listener = try initTestListenerSocket();
+    const default_port = dead_listener.port;
+    linux_platform.posix.close(dead_listener.fd);
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc-default",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{
+        .service_name = "grpc-canary",
+        .vip_address = "10.43.0.10",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc.internal",
+        .http_proxy_path_prefix = "/pkg.Service",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc-default",
+        .endpoint_id = "grpc-default-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = default_port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc-canary",
+        .endpoint_id = "grpc-canary-1",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = canary_upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc-default:/pkg.Service",
+            .service = "grpc-default",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+        .{
+            .name = "grpc-canary:/pkg.Service",
+            .service = "grpc-canary",
+            .vip_address = "10.43.0.10",
+            .match = .{ .host = "grpc.internal", .path_prefix = "/pkg.Service" },
+            .header_matches = &.{
+                .{ .name = "x-env", .value = "canary" },
+            },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = linux_platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer linux_platform.posix.close(client_fd);
+    const server_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try linux_platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const upgrade_request = try buildH2cUpgradeRequest(
+        std.testing.allocator,
+        "GET",
+        "grpc.internal",
+        "/pkg.Service/Call",
+        "X-Env: canary\r\n",
+    );
+    defer std.testing.allocator.free(upgrade_request);
+    try socket_helpers.writeAll(client_fd, upgrade_request);
+
+    const server_settings = try buildEmptyHttp2SettingsFrame(std.testing.allocator);
+    defer std.testing.allocator.free(server_settings);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(std.testing.allocator);
+    try expected.appendSlice(std.testing.allocator, h2c_upgrade.switching_protocols_response);
+    try expected.appendSlice(std.testing.allocator, server_settings);
+    try expected.appendSlice(std.testing.allocator, stripped_upstream);
+
+    var response_buf: [2048]u8 = undefined;
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
+    const bytes_read = readSocketBytes(client_fd, &response_buf);
+    try std.testing.expectEqualSlices(u8, expected.items, response_buf[0..bytes_read]);
+
+    canary_upstream.wait();
+    try std.testing.expectEqual(@as(usize, 1), canary_upstream.accepted);
+}
+
+test "handleConnection routes later HTTP/2 streams after h2c upgrade" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    const upstream_one_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        1,
+        200,
+        "application/grpc",
+        "one",
+    );
+    defer std.testing.allocator.free(upstream_one_response);
+    const upstream_two_response = try http2_response.formatSimpleResponse(
+        std.testing.allocator,
+        1,
+        200,
+        "application/grpc",
+        "two",
+    );
+    defer std.testing.allocator.free(upstream_two_response);
+
+    const first_upstream_settings = http2.parseFrameHeader(upstream_one_response[0..http2.frame_header_len]).?;
+    const stripped_first_response = upstream_one_response[http2.frame_header_len + first_upstream_settings.length ..];
+    const second_response = try http2_response.formatSimpleStreamResponse(
+        std.testing.allocator,
+        3,
+        200,
+        "application/grpc",
+        "two",
+    );
+    defer std.testing.allocator.free(second_response);
+
+    const upstream_one_actions = [_]TestUpstreamAction{
+        .{ .respond = upstream_one_response },
+    };
+    var upstream_one = try TestUpstreamServer.init(&upstream_one_actions);
+    defer upstream_one.deinit();
+    try upstream_one.start();
+
+    const upstream_two_actions = [_]TestUpstreamAction{
+        .{ .respond = upstream_two_response },
+    };
+    var upstream_two = try TestUpstreamServer.init(&upstream_two_actions);
+    defer upstream_two.deinit();
+    try upstream_two.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "grpc-one",
+        .vip_address = "10.43.0.9",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc-one.internal",
+        .http_proxy_path_prefix = "/pkg.First",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{
+        .service_name = "grpc-two",
+        .vip_address = "10.43.0.10",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "grpc-two.internal",
+        .http_proxy_path_prefix = "/pkg.Second",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc-one",
+        .endpoint_id = "grpc-one-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream_one.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "grpc-two",
+        .endpoint_id = "grpc-two-1",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream_two.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "grpc-one:/pkg.First",
+            .service = "grpc-one",
+            .vip_address = "10.43.0.9",
+            .match = .{ .host = "grpc-one.internal", .path_prefix = "/pkg.First" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+        .{
+            .name = "grpc-two:/pkg.Second",
+            .service = "grpc-two",
+            .vip_address = "10.43.0.10",
+            .match = .{ .host = "grpc-two.internal", .path_prefix = "/pkg.Second" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = linux_platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer linux_platform.posix.close(client_fd);
+    const server_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try linux_platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    const upgrade_request = try buildH2cUpgradeRequest(
+        std.testing.allocator,
+        "POST",
+        "grpc-one.internal",
+        "/pkg.First/Call",
+        "",
+    );
+    defer std.testing.allocator.free(upgrade_request);
+    try socket_helpers.writeAll(client_fd, upgrade_request);
+
+    const server_settings = try buildEmptyHttp2SettingsFrame(std.testing.allocator);
+    defer std.testing.allocator.free(server_settings);
+
+    var expected_first: std.ArrayList(u8) = .empty;
+    defer expected_first.deinit(std.testing.allocator);
+    try expected_first.appendSlice(std.testing.allocator, h2c_upgrade.switching_protocols_response);
+    try expected_first.appendSlice(std.testing.allocator, server_settings);
+    try expected_first.appendSlice(std.testing.allocator, stripped_first_response);
+
+    var first_buf: [2048]u8 = undefined;
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
+    const first_len = readSocketBytes(client_fd, &first_buf);
+    try std.testing.expectEqualSlices(u8, expected_first.items, first_buf[0..first_len]);
+
+    const later_request = try buildTestHttp2Request(
+        std.testing.allocator,
+        3,
+        "POST",
+        "grpc-two.internal",
+        "/pkg.Second/Call",
+    );
+    defer std.testing.allocator.free(later_request);
+    try socket_helpers.writeAll(client_fd, later_request);
+
+    const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
+    defer std.testing.allocator.free(settings_ack);
+
+    var expected_second: std.ArrayList(u8) = .empty;
+    defer expected_second.deinit(std.testing.allocator);
+    try expected_second.appendSlice(std.testing.allocator, settings_ack);
+    try expected_second.appendSlice(std.testing.allocator, second_response);
+
+    var second_buf: [2048]u8 = undefined;
+    const second_len = readSocketBytes(client_fd, &second_buf);
+    try std.testing.expectEqualSlices(u8, expected_second.items, second_buf[0..second_len]);
+
+    upstream_one.wait();
+    upstream_two.wait();
+    try std.testing.expectEqual(@as(usize, 1), upstream_one.accepted);
+    try std.testing.expectEqual(@as(usize, 1), upstream_two.accepted);
+    try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream_one.request(0)[0..http2.client_preface.len]));
+    try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream_two.request(0)[0..http2.client_preface.len]));
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try http2_request.parseClientConnectionPreface(arena.allocator(), upstream_two.request(0));
+    try std.testing.expectEqualStrings("POST", parsed.request.method);
+    try std.testing.expectEqualStrings("grpc-two.internal", parsed.request.authority);
+    try std.testing.expectEqualStrings("/pkg.Second/Call", parsed.request.path);
+}
+
 test "handleConnection streams HTTP/2 upstream frames before stream end" {
     const store = @import("../../state/store.zig");
     const service_rollout = @import("../service_rollout.zig");
