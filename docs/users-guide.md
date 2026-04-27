@@ -157,6 +157,8 @@ current limits:
 
 For standalone `yoq cert provision` and `yoq cert renew`, `--email` is optional. yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`. DNS-01 uses `--dns-provider cloudflare|route53|gcloud|exec`, provider-specific `--dns-secret key=name` references, optional `--dns-config key=value`, and `--dns-hook` / `--dns-hook-arg` for the exec fallback.
 
+before yoq sends an ACME request, it checks the local challenge config. it reports missing DNS provider keys, missing referenced secrets, an empty exec hook, and invalid polling intervals before talking to the ACME server. `yoq cert list --json` shows managed renewal metadata: whether a cert will renew through `http-01` or `dns-01`, plus the DNS provider when one is configured.
+
 ### rolling updates
 
 deployment history is tracked in SQLite. updates proceed as app releases, not as ad hoc service mutations.

@@ -12,6 +12,7 @@ pub const AcmeError = error{
     CertificateDownloadFailed,
     NoHttpChallenge,
     NoDnsChallenge,
+    InvalidConfig,
     InvalidResponse,
     CsrGenerationFailed,
     AllocFailed,

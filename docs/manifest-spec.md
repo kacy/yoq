@@ -385,6 +385,8 @@ Built-in DNS-01 providers:
 - `gcloud`: secret ref `access_token`, config `project` and `managed_zone`
 - `exec`: `hook = ["/path/to/hook", "arg1", ...]`; `secrets` become environment variables passed to the hook
 
+yoq validates these local settings before opening an ACME order. missing provider keys, missing referenced secrets, empty exec hooks, and invalid DNS polling intervals fail early with a configuration error.
+
 for manual certificates, use `yoq cert install` first:
 
 ```toml
@@ -398,6 +400,7 @@ standalone certificate commands:
 yoq cert provision example.com
 yoq cert renew example.com
 yoq cert provision example.com --dns-provider cloudflare --dns-secret api_token=cf-acme-token --dns-config zone_id=zone-123
+yoq cert list --json
 ```
 
 `--email` remains available for the standalone ACME flow. When it is omitted, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.

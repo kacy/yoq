@@ -340,6 +340,15 @@ pub const TlsProxy = struct {
         };
         defer managed_config.deinit(self.allocator);
 
+        if (managed_runtime.preflightProblem(self.allocator, self.certs.db, managed_config, true) catch {
+            log.warn("  renewal: failed to validate ACME metadata", .{});
+            return RenewError.AllocFailed;
+        }) |problem| {
+            defer self.allocator.free(problem);
+            log.warn("  renewal: invalid ACME metadata for {s}: {s}", .{ domain, problem });
+            return RenewError.AcmeFailed;
+        }
+
         var client = acme_mod.AcmeClient.init(self.threaded_io.io(), self.allocator, managed_config.directory_url);
         defer client.deinit();
 

@@ -57,9 +57,12 @@ pub const ChallengeConfig = @import("acme/config.zig").ChallengeConfig;
 pub const ManagedConfig = @import("acme/config.zig").ManagedConfig;
 pub const KeyValueRef = @import("acme/config.zig").KeyValueRef;
 pub const cloneKeyValueRefs = @import("acme/config.zig").cloneKeyValueRefs;
+pub const cloneKeyValueRefsFrom = @import("acme/config.zig").cloneKeyValueRefsFrom;
 pub const cloneStringArray = @import("acme/config.zig").cloneStringArray;
 pub const freeKeyValueRefs = @import("acme/config.zig").freeKeyValueRefs;
 pub const freeStringArray = @import("acme/config.zig").freeStringArray;
+pub const buildDnsChallenge = @import("acme/config.zig").buildDnsChallenge;
+pub const acme_preflight = @import("acme/preflight.zig");
 
 /// result of finalizing an ACME order.
 /// cert_pem is the PEM certificate chain, key_der is the raw private key.

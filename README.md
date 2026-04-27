@@ -299,12 +299,13 @@ yoq cert provision <domain> [--email <email>] [--staging] [--dns-provider <provi
 yoq cert renew <domain> [--email <email>] [--staging] [--dns-provider <provider>]
                                      renew a TLS certificate via ACME
 yoq cert install <domain> --cert <path> --key <path>
-yoq cert list                        list certificates
+yoq cert list [--json]               list certificates
 yoq cert rm <domain>                 remove a certificate
 ```
 
 If `--email` is omitted for the standalone ACME flow, yoq uses `YOQ_ACME_EMAIL` when set and otherwise falls back to `admin@<domain>`.
 DNS-01 supports built-in `cloudflare`, `route53`, and `gcloud` providers plus an `exec` fallback. Provider credentials are referenced through `yoq secret` entries rather than embedded directly in manifests.
+before yoq opens an ACME order, it checks the local challenge config and referenced DNS secrets. `yoq cert list --json` shows renewal metadata for managed certificates: challenge type, provider, directory URL, and DNS polling settings.
 
 For app rollbacks, omitting `--release` picks the previous successful release before the current one. Use `--print` to inspect the selected stored app snapshot without applying it.
 For app rollouts, status and history expose a nested `rollout` view with rollout state, control state, target counts, failure details, and checkpoint data. The older top-level fields are still there for compatibility.

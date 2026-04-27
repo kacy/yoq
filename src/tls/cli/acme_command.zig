@@ -182,6 +182,12 @@ fn runAcmeCommand(
     };
     defer managed_config.deinit(alloc);
 
+    if (try managed_runtime.preflightProblem(alloc, opened.db, managed_config, true)) |problem| {
+        defer alloc.free(problem);
+        writeErr("invalid ACME configuration: {s}\n", .{problem});
+        return common.TlsCommandsError.InvalidArgument;
+    }
+
     var client = acme.AcmeClient.init(io, alloc, managed_config.directory_url);
     defer client.deinit();
 
@@ -281,22 +287,21 @@ fn buildDnsChallenge(
             return error.InvalidConfig;
 
     const secret_refs = try selectedKeyValues(alloc, parsed.dns_secret_refs, existing_dns, .secret_refs);
-    errdefer acme.freeKeyValueRefs(alloc, secret_refs);
+    defer acme.freeKeyValueRefs(alloc, secret_refs);
     const config = try selectedKeyValues(alloc, parsed.dns_config, existing_dns, .config);
-    errdefer acme.freeKeyValueRefs(alloc, config);
+    defer acme.freeKeyValueRefs(alloc, config);
     const hook = try selectedHook(alloc, parsed.dns_hook, existing_dns);
-    errdefer acme.freeStringArray(alloc, hook);
+    defer acme.freeStringArray(alloc, hook);
 
-    if (provider == .exec and hook.len == 0) return error.InvalidConfig;
-
-    return .{ .dns_01 = .{
-        .provider = provider,
-        .secret_refs = secret_refs,
-        .config = config,
-        .hook = hook,
-        .propagation_timeout_secs = parsed.propagation_timeout_secs orelse if (existing_dns) |dns| dns.propagation_timeout_secs else 300,
-        .poll_interval_secs = parsed.poll_interval_secs orelse if (existing_dns) |dns| dns.poll_interval_secs else 5,
-    } };
+    return acme.buildDnsChallenge(
+        alloc,
+        provider,
+        secret_refs,
+        config,
+        hook,
+        parsed.propagation_timeout_secs orelse if (existing_dns) |dns| dns.propagation_timeout_secs else 300,
+        parsed.poll_interval_secs orelse if (existing_dns) |dns| dns.poll_interval_secs else 5,
+    );
 }
 
 fn selectedKeyValues(

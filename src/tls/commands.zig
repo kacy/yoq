@@ -29,8 +29,10 @@ pub fn cert(args: *std.process.Args.Iterator, ctx: AppContext) !void {
             \\
             \\commands:
             \\  install <domain> --cert <path> --key <path>   store a certificate
-            \\  provision <domain> [--email <email>] [--staging] obtain via ACME
-            \\  renew <domain> [--email <email>] [--staging]     renew via ACME
+            \\  provision <domain> [--email <email>] [--staging] [--dns-provider <provider>]
+            \\                                                  obtain via ACME
+            \\  renew <domain> [--email <email>] [--staging] [--dns-provider <provider>]
+            \\                                                  renew via ACME
             \\  list                                           list certificates
             \\  rm <domain>                                    remove a certificate
             \\

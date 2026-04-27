@@ -34,6 +34,15 @@ pub fn provisionAcmeCertWithIo(
     };
     defer managed_config.deinit(alloc);
 
+    if (managed_runtime.preflightProblem(alloc, certs.db, managed_config, true) catch {
+        writeErr("    failed to validate ACME TLS configuration\n", .{});
+        return;
+    }) |problem| {
+        defer alloc.free(problem);
+        writeErr("    invalid ACME TLS configuration: {s}\n", .{problem});
+        return;
+    }
+
     var client = acme_mod.AcmeClient.init(io, alloc, managed_config.directory_url);
     defer client.deinit();
 
@@ -84,60 +93,22 @@ fn buildChallengeConfig(alloc: std.mem.Allocator, config: spec.TlsConfig.AcmeCon
         .http_01 => .http_01,
         .dns_01 => blk: {
             const dns = config.dns orelse return error.InvalidConfig;
-            const secret_refs = try cloneKeyValueRefs(alloc, dns.secrets);
-            errdefer acme_mod.freeKeyValueRefs(alloc, secret_refs);
-            const config_pairs = try cloneKeyValueRefs(alloc, dns.config);
-            errdefer acme_mod.freeKeyValueRefs(alloc, config_pairs);
-            const hook = try cloneStrings(alloc, dns.hook);
-            errdefer acme_mod.freeStringArray(alloc, hook);
-
-            break :blk .{ .dns_01 = .{
-                .provider = switch (dns.provider) {
+            break :blk try acme_mod.buildDnsChallenge(
+                alloc,
+                switch (dns.provider) {
                     .cloudflare => .cloudflare,
                     .route53 => .route53,
                     .gcloud => .gcloud,
                     .exec => .exec,
                 },
-                .secret_refs = secret_refs,
-                .config = config_pairs,
-                .hook = hook,
-                .propagation_timeout_secs = dns.propagation_timeout_secs,
-                .poll_interval_secs = dns.poll_interval_secs,
-            } };
+                dns.secrets,
+                dns.config,
+                dns.hook,
+                dns.propagation_timeout_secs,
+                dns.poll_interval_secs,
+            );
         },
     };
-}
-
-fn cloneKeyValueRefs(alloc: std.mem.Allocator, input: []const spec.TlsConfig.KeyValueRef) ![]const acme_mod.KeyValueRef {
-    var out: std.ArrayListUnmanaged(acme_mod.KeyValueRef) = .empty;
-    errdefer {
-        for (out.items) |entry| entry.deinit(alloc);
-        out.deinit(alloc);
-    }
-    for (input) |entry| {
-        const cloned = blk: {
-            const key = try alloc.dupe(u8, entry.key);
-            errdefer alloc.free(key);
-            break :blk acme_mod.KeyValueRef{
-                .key = key,
-                .value = try alloc.dupe(u8, entry.value),
-            };
-        };
-        try out.append(alloc, cloned);
-    }
-    return try out.toOwnedSlice(alloc);
-}
-
-fn cloneStrings(alloc: std.mem.Allocator, input: []const []const u8) ![]const []const u8 {
-    var out: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer {
-        for (out.items) |entry| alloc.free(entry);
-        out.deinit(alloc);
-    }
-    for (input) |entry| {
-        try out.append(alloc, try alloc.dupe(u8, entry));
-    }
-    return try out.toOwnedSlice(alloc);
 }
 
 fn challengeRegistrar(store: *tls_proxy.ChallengeStore) acme_mod.ChallengeRegistrar {

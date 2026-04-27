@@ -3,6 +3,7 @@ const sqlite = @import("sqlite");
 
 const acme = @import("../acme.zig");
 const dns_provider = @import("dns_provider.zig");
+const preflight = @import("preflight.zig");
 const secrets = @import("../../state/secrets.zig");
 
 pub fn issueAndExport(
@@ -20,12 +21,45 @@ pub fn issueAndExport(
     };
 }
 
+pub fn preflightProblem(
+    alloc: std.mem.Allocator,
+    db: ?*sqlite.Db,
+    config: acme.ManagedConfig,
+    http_registrar_available: bool,
+) error{OutOfMemory}!?[]u8 {
+    var maybe_secret_store: ?secrets.SecretsStore = null;
+    if (config.dnsConfig()) |dns| {
+        if (preflight.needsSecretStore(dns)) {
+            const actual_db = db orelse
+                return try preflightMessage(alloc, "dns-01 requires a certificate database for secret lookup");
+            maybe_secret_store = secrets.SecretsStore.init(actual_db, alloc) catch
+                return try preflightMessage(alloc, "failed to open secret store for dns-01 preflight");
+        }
+    }
+
+    return preflight.firstProblem(alloc, config, .{
+        .http_registrar_available = http_registrar_available,
+        .secrets_store = if (maybe_secret_store) |*store| store else null,
+    });
+}
+
+fn preflightMessage(alloc: std.mem.Allocator, message: []const u8) error{OutOfMemory}![]u8 {
+    return alloc.dupe(u8, message) catch return error.OutOfMemory;
+}
+
 fn issueHttp01(
     client: *acme.AcmeClient,
     domain: []const u8,
     config: acme.ManagedConfig,
     registrar: ?acme.ChallengeRegistrar,
 ) acme.AcmeError!acme.ExportResult {
+    if (preflight.firstProblem(client.allocator, config, .{ .http_registrar_available = registrar != null }) catch
+        return acme.AcmeError.AllocFailed) |problem|
+    {
+        client.allocator.free(problem);
+        return acme.AcmeError.InvalidConfig;
+    }
+
     return client.issueAndExport(.{
         .domain = domain,
         .email = config.email,
@@ -46,10 +80,17 @@ fn issueDns01(
     const dns = config.dnsConfig() orelse return acme.AcmeError.ChallengeFailed;
 
     var maybe_secret_store: ?secrets.SecretsStore = null;
-    if (dns.provider != .exec or dns.secret_refs.len > 0) {
+    if (preflight.needsSecretStore(dns)) {
         const actual_db = db orelse return acme.AcmeError.ChallengeFailed;
         maybe_secret_store = secrets.SecretsStore.init(actual_db, alloc) catch
             return acme.AcmeError.ChallengeFailed;
+    }
+
+    if (preflight.firstProblem(alloc, config, .{
+        .secrets_store = if (maybe_secret_store) |*store| store else null,
+    }) catch return acme.AcmeError.AllocFailed) |problem| {
+        alloc.free(problem);
+        return acme.AcmeError.InvalidConfig;
     }
 
     var runtime = try dns_provider.Runtime.init(

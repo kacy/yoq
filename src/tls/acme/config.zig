@@ -186,6 +186,10 @@ fn writeChallengeJson(writer: *std.Io.Writer, challenge: ChallengeConfig) !void 
 }
 
 pub fn cloneKeyValueRefs(alloc: std.mem.Allocator, entries: []const KeyValueRef) ![]const KeyValueRef {
+    return cloneKeyValueRefsFrom(alloc, entries);
+}
+
+pub fn cloneKeyValueRefsFrom(alloc: std.mem.Allocator, entries: anytype) ![]const KeyValueRef {
     var out: std.ArrayListUnmanaged(KeyValueRef) = .empty;
     errdefer {
         freeKeyValueRefs(alloc, out.items);
@@ -203,6 +207,32 @@ pub fn cloneKeyValueRefs(alloc: std.mem.Allocator, entries: []const KeyValueRef)
         try out.append(alloc, cloned);
     }
     return try out.toOwnedSlice(alloc);
+}
+
+pub fn buildDnsChallenge(
+    alloc: std.mem.Allocator,
+    provider: DnsProvider,
+    secret_refs: anytype,
+    config: anytype,
+    hook: []const []const u8,
+    propagation_timeout_secs: u32,
+    poll_interval_secs: u32,
+) !ChallengeConfig {
+    const owned_secret_refs = try cloneKeyValueRefsFrom(alloc, secret_refs);
+    errdefer freeKeyValueRefs(alloc, owned_secret_refs);
+    const owned_config = try cloneKeyValueRefsFrom(alloc, config);
+    errdefer freeKeyValueRefs(alloc, owned_config);
+    const owned_hook = try cloneStringArray(alloc, hook);
+    errdefer freeStringArray(alloc, owned_hook);
+
+    return .{ .dns_01 = .{
+        .provider = provider,
+        .secret_refs = owned_secret_refs,
+        .config = owned_config,
+        .hook = owned_hook,
+        .propagation_timeout_secs = propagation_timeout_secs,
+        .poll_interval_secs = poll_interval_secs,
+    } };
 }
 
 pub fn cloneStringArray(alloc: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
