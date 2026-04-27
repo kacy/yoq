@@ -123,7 +123,7 @@ test "chaos: rapid leader kill, verify recovery" {
         cluster.killNode(leader.id);
 
         // wait a moment for re-election to start
-        std.Thread.sleep(1000 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1000 * std.time.ns_per_ms)), .awake) catch unreachable;
 
         // restart the killed node
         try cluster.restartNode(leader.id);

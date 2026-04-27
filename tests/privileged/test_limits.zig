@@ -5,11 +5,17 @@
 
 const std = @import("std");
 const helpers = @import("helpers");
+const runtime_preflight = @import("runtime_preflight");
 
 const alloc = std.testing.allocator;
 
+fn initTestEnv() !helpers.TestEnv {
+    try runtime_preflight.requireRuntimeCore();
+    return helpers.TestEnv.init(alloc);
+}
+
 test "container with pids_max=1 can only run one process" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -32,7 +38,7 @@ test "container with pids_max=1 can only run one process" {
 }
 
 test "container with memory limit can allocate within limit" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -54,7 +60,7 @@ test "container with memory limit can allocate within limit" {
 }
 
 test "container with 4MB memory minimum is enforced" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -76,7 +82,7 @@ test "container with 4MB memory minimum is enforced" {
 }
 
 test "cpu weight validation rejects out of range values" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -108,7 +114,7 @@ test "cpu weight validation rejects out of range values" {
 }
 
 test "multiple containers with different limits coexist" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -137,7 +143,7 @@ test "multiple containers with different limits coexist" {
 }
 
 test "container restart policy no prevents restart" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -148,15 +154,15 @@ test "container restart policy no prevents restart" {
 
     // run with restart=no - should not restart on failure
     var run_result = try env.runYoq(&.{
-        "run",       "-d", "--name", name,
-        "--restart", "no",
-        fixture.rootfs_path, "/bin/sh", "-c", "exit 1",
+        "run",       "-d",     "--name",            name,
+        "--restart", "no",     fixture.rootfs_path, "/bin/sh",
+        "-c",        "exit 1",
     });
     defer run_result.deinit();
     try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
 
     // wait for it to exit
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(200 * std.time.ns_per_ms)), .awake) catch unreachable;
 
     // check status
     var ps_result = try env.runYoq(&.{"ps"});
@@ -181,7 +187,7 @@ test "backoff increases on restart but caps" {
     // simulate several restarts
     var i: usize = 0;
     while (i < 10) : (i += 1) {
-        const new_backoff = math.min(math.mul(u32, backoff, 2) catch max_backoff, max_backoff);
+        const new_backoff = @min(math.mul(u32, backoff, 2) catch max_backoff, max_backoff);
         backoff = new_backoff;
     }
 

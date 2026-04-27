@@ -727,6 +727,16 @@ pub const posix = struct {
         return fdResult(rc);
     }
 
+    pub fn setsockopt(fd: std.posix.fd_t, level: anytype, optname: anytype, opt: []const u8) !void {
+        try voidResult(std.os.linux.setsockopt(
+            fd,
+            int(i32, level),
+            int(u32, optname),
+            opt.ptr,
+            @intCast(opt.len),
+        ));
+    }
+
     pub fn accept(fd: std.posix.fd_t, addr: ?*std.posix.sockaddr, len: ?*std.posix.socklen_t, flags: anytype) !std.posix.fd_t {
         const rc = std.os.linux.accept4(fd, addr, len, int(u32, flags));
         return fdResult(rc);

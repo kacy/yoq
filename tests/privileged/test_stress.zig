@@ -50,7 +50,7 @@ test "stress: rapid sequential node restarts under load" {
     // restart each node rapidly — simulates rolling restart
     for (cluster.nodes.items) |*node| {
         cluster.killNode(node.id);
-        std.Thread.sleep(500 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(500 * std.time.ns_per_ms)), .awake) catch unreachable;
         try cluster.restartNode(node.id);
 
         // cluster must maintain quorum throughout

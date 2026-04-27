@@ -107,6 +107,11 @@ pub fn build(b: *std.Build) void {
     // heavier integration-style test lanes.
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode") orelse .ReleaseSafe;
     const test_filter = b.option([]const u8, "test-filter", "Only compile unit tests matching this substring");
+    const run_privileged_tests = b.option(
+        bool,
+        "run-privileged-tests",
+        "Run privileged runtime tests instead of preflight-skipping them",
+    ) orelse false;
 
     const exe = b.addExecutable(.{
         .name = "yoq",
@@ -128,6 +133,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    addLinuxImport(test_http_server.root_module, b);
     const install_test_http_server = b.addInstallArtifact(test_http_server, .{});
 
     const test_net_probe = b.addExecutable(.{
@@ -138,6 +144,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    addLinuxImport(test_net_probe.root_module, b);
     const install_test_net_probe = b.addInstallArtifact(test_net_probe, .{});
 
     const run_step = b.step("run", "Run yoq");
@@ -326,80 +333,139 @@ pub fn build(b: *std.Build) void {
     // prerequisites:
     //   zig build                         — build the yoq binary first
 
-    const privileged_test_step = b.step("test-privileged", "Run privileged integration tests (requires root)");
-    privileged_test_step.dependOn(b.getInstallStep());
+    const runtime_core_test_step = b.step(
+        "test-runtime-core",
+        "Run privileged container lifecycle, error, and limits tests",
+    );
+    const runtime_network_test_step = b.step(
+        "test-runtime-network",
+        "Run privileged container networking and service discovery tests",
+    );
+    const runtime_cluster_test_step = b.step(
+        "test-runtime-cluster",
+        "Run privileged cluster, chaos, stress, and API security tests",
+    );
+    const privileged_test_step = b.step(
+        "test-privileged",
+        "Run all privileged runtime integration tests (requires root)",
+    );
+    privileged_test_step.dependOn(runtime_core_test_step);
+    privileged_test_step.dependOn(runtime_network_test_step);
+    privileged_test_step.dependOn(runtime_cluster_test_step);
 
-    const priv_tests = [_][]const u8{
+    const runtime_core_tests = [_][]const u8{
         "tests/privileged/test_container.zig",
-        "tests/privileged/test_networking.zig",
-        "tests/privileged/test_cluster.zig",
-        "tests/privileged/test_chaos.zig",
         "tests/privileged/test_errors.zig",
         "tests/privileged/test_limits.zig",
+    };
+    const runtime_network_tests = [_][]const u8{
+        "tests/privileged/test_networking.zig",
+    };
+    const runtime_cluster_tests = [_][]const u8{
+        "tests/privileged/test_cluster.zig",
+        "tests/privileged/test_chaos.zig",
         "tests/privileged/test_security.zig",
         "tests/privileged/test_security_audit.zig",
         "tests/privileged/test_stress.zig",
     };
+    const runtime_preflight_options = b.addOptions();
+    runtime_preflight_options.addOption(bool, "run_privileged_tests", run_privileged_tests);
 
-    for (priv_tests) |test_file| {
-        const priv_mod = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(test_file),
+    const privileged_lanes = [_]struct {
+        step: *std.Build.Step,
+        tests: []const []const u8,
+        needs_network_helpers: bool = false,
+    }{
+        .{ .step = runtime_core_test_step, .tests = &runtime_core_tests },
+        .{ .step = runtime_network_test_step, .tests = &runtime_network_tests, .needs_network_helpers = true },
+        .{ .step = runtime_cluster_test_step, .tests = &runtime_cluster_tests },
+    };
+
+    for (privileged_lanes) |lane| {
+        lane.step.dependOn(b.getInstallStep());
+
+        for (lane.tests) |test_file| {
+            const priv_mod = b.addTest(.{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(test_file),
+                    .target = target,
+                    .optimize = optimize,
+                }),
+                .filters = if (test_filter) |filter| &.{filter} else &.{},
+            });
+            const helpers_mod = b.createModule(.{
+                .root_source_file = b.path("tests/helpers.zig"),
                 .target = target,
                 .optimize = optimize,
-            }),
-            .filters = if (test_filter) |filter| &.{filter} else &.{},
-        });
-        const helpers_mod = b.createModule(.{
-            .root_source_file = b.path("tests/helpers.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        priv_mod.root_module.addImport("helpers", helpers_mod);
+            });
+            const linux_mod = b.createModule(.{
+                .root_source_file = b.path("src/lib/linux_platform.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            priv_mod.root_module.addImport("linux_platform", linux_mod);
+            const runtime_preflight_mod = b.createModule(.{
+                .root_source_file = b.path("tests/privileged/preflight.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            runtime_preflight_mod.addImport("linux_platform", linux_mod);
+            runtime_preflight_mod.addOptions("build_options", runtime_preflight_options);
+            priv_mod.root_module.addImport("helpers", helpers_mod);
 
-        const cluster_harness_mod = b.createModule(.{
-            .root_source_file = b.path("tests/cluster_test_harness.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        const http_client_mod = b.createModule(.{
-            .root_source_file = b.path("src/cluster/http_client.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        const http_mod = b.createModule(.{
-            .root_source_file = b.path("src/api/http.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        const container_mod = b.createModule(.{
-            .root_source_file = b.path("src/runtime/container.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        const cgroups_mod = b.createModule(.{
-            .root_source_file = b.path("src/runtime/cgroups.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        const cgroups_common_mod = b.createModule(.{
-            .root_source_file = b.path("src/runtime/cgroups/common.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        cluster_harness_mod.addImport("helpers", helpers_mod);
-        cluster_harness_mod.addImport("http_client", http_client_mod);
-        priv_mod.root_module.addImport("http_client", http_client_mod);
-        priv_mod.root_module.addImport("http", http_mod);
-        priv_mod.root_module.addImport("container", container_mod);
-        priv_mod.root_module.addImport("cgroups", cgroups_mod);
-        priv_mod.root_module.addImport("cgroups_common", cgroups_common_mod);
-        priv_mod.root_module.addImport("cluster_test_harness", cluster_harness_mod);
-        const run_priv = createArtifactRunner(b, priv_mod, b.fmt("run {s}", .{test_file}), false);
-        run_priv.step.dependOn(b.getInstallStep());
-        run_priv.step.dependOn(&install_test_http_server.step);
-        run_priv.step.dependOn(&install_test_net_probe.step);
-        privileged_test_step.dependOn(&run_priv.step);
+            const cluster_harness_mod = b.createModule(.{
+                .root_source_file = b.path("tests/cluster_test_harness.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            cluster_harness_mod.addImport("linux_platform", linux_mod);
+            const http_client_mod = b.createModule(.{
+                .root_source_file = b.path("src/cluster/http_client.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            http_client_mod.addImport("linux_platform", linux_mod);
+            const http_mod = b.createModule(.{
+                .root_source_file = b.path("src/api/http.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            const container_mod = b.createModule(.{
+                .root_source_file = b.path("src/runtime/container.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            const cgroups_mod = b.createModule(.{
+                .root_source_file = b.path("src/runtime/cgroups.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            const cgroups_common_mod = b.createModule(.{
+                .root_source_file = b.path("src/runtime/cgroups/common.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            cluster_harness_mod.addImport("helpers", helpers_mod);
+            cluster_harness_mod.addImport("http_client", http_client_mod);
+            cluster_harness_mod.addImport("runtime_preflight", runtime_preflight_mod);
+            priv_mod.root_module.addImport("http_client", http_client_mod);
+            priv_mod.root_module.addImport("http", http_mod);
+            priv_mod.root_module.addImport("container", container_mod);
+            priv_mod.root_module.addImport("cgroups", cgroups_mod);
+            priv_mod.root_module.addImport("cgroups_common", cgroups_common_mod);
+            priv_mod.root_module.addImport("cluster_test_harness", cluster_harness_mod);
+            priv_mod.root_module.addImport("runtime_preflight", runtime_preflight_mod);
+            const run_priv = createArtifactRunner(b, priv_mod, b.fmt("run {s}", .{test_file}), false);
+            if (run_privileged_tests) {
+                run_priv.setEnvironmentVariable("YOQ_RUN_PRIVILEGED_TESTS", "1");
+            }
+            run_priv.step.dependOn(b.getInstallStep());
+            if (lane.needs_network_helpers) {
+                run_priv.step.dependOn(&install_test_http_server.step);
+                run_priv.step.dependOn(&install_test_net_probe.step);
+            }
+            lane.step.dependOn(&run_priv.step);
+        }
     }
 
     // -- cache-sqlite step: precompile sqlite and cache it --

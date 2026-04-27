@@ -130,7 +130,7 @@ For GPU-focused validation without running the full suite, use `zig build test-g
 
 Before landing runtime or parser-sensitive changes, run `make test-hardening`. It collects the non-privileged integration, contract, simulation, GPU, manifest edge, and corpus fuzz lanes that are too broad for the fastest local loop but should stay green before main.
 
-Privileged runtime coverage still lives behind `sudo make test-privileged`; use it for namespace, cgroup, networking, and container lifecycle changes.
+Privileged runtime coverage is split by blast radius. Use `sudo make test-runtime-core` for container lifecycle, error, and limits changes; `sudo make test-runtime-network` for bridge, port mapping, NAT, and service discovery changes; and `sudo make test-runtime-cluster` for cluster, chaos, stress, and API security changes. `sudo make test-privileged` remains the aggregate lane. Raw Zig invocations require build options before the step name, for example `sudo zig build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-core`, to avoid accidental root-only runs on constrained hosts.
 
 For a temporary 5-node GCP validation rig that exercises cluster networking and GPU hosts, see [docs/gcp-cluster-validation.md](docs/gcp-cluster-validation.md).
 For an end-to-end operator evaluation flow across local runtime, HTTP routing, and clustered deployment, see [docs/golden-path.md](docs/golden-path.md).

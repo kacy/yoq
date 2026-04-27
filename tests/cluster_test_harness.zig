@@ -7,6 +7,13 @@
 const std = @import("std");
 const helpers = @import("helpers");
 const http_client = @import("http_client");
+const linux_platform = @import("linux_platform");
+const runtime_preflight = @import("runtime_preflight");
+const lposix = linux_platform.posix;
+
+fn nowMillis() i64 {
+    return std.Io.Clock.real.now(std.testing.io).toMilliseconds();
+}
 
 pub const ClusterNode = struct {
     id: u64,
@@ -23,8 +30,7 @@ pub const ClusterNode = struct {
 
     pub fn stop(self: *ClusterNode) void {
         if (self.process) |*proc| {
-            _ = proc.kill() catch {};
-            _ = proc.wait() catch {};
+            proc.kill(std.testing.io);
             self.process = null;
         }
     }
@@ -50,6 +56,11 @@ pub const TestCluster = struct {
     };
 
     pub fn init(alloc: std.mem.Allocator, config: Config) !TestCluster {
+        try runtime_preflight.requireRuntimeCluster(&.{
+            .{ .base = config.base_raft_port, .count = config.node_count },
+            .{ .base = config.base_api_port, .count = config.node_count },
+        });
+
         const tmp_dir = try helpers.tmpDir();
         errdefer tmp_dir.cleanup();
 
@@ -114,7 +125,7 @@ pub const TestCluster = struct {
     }
 
     pub fn startAll(self: *TestCluster) !void {
-        const start_time = std.time.milliTimestamp();
+        const start_time = nowMillis();
 
         // Pre-compute the full peer list for each node (all nodes are peers)
         var all_nodes_peers: [][512]u8 = try self.alloc.alloc([512]u8, self.nodes.items.len);
@@ -122,8 +133,7 @@ pub const TestCluster = struct {
 
         for (self.nodes.items, 0..) |*node, i| {
             var peers_buf: [512]u8 = undefined;
-            var peers_stream = std.io.fixedBufferStream(&peers_buf);
-            const peers_writer = peers_stream.writer();
+            var peers_writer: std.Io.Writer = .fixed(&peers_buf);
 
             var first = true;
             for (self.nodes.items) |other| {
@@ -138,7 +148,7 @@ pub const TestCluster = struct {
                 });
             }
 
-            const peers_len = peers_stream.pos;
+            const peers_len = peers_writer.buffered().len;
             @memcpy(all_nodes_peers[i][0..peers_len], peers_buf[0..peers_len]);
             all_nodes_peers[i][peers_len] = 0; // null terminate
         }
@@ -156,8 +166,8 @@ pub const TestCluster = struct {
         var attempts: u32 = 0;
         const wait_timeout_ms: u64 = 10000; // 10 second total timeout
 
-        const wait_start = std.time.milliTimestamp();
-        while (!all_ready and std.time.milliTimestamp() - wait_start < wait_timeout_ms) {
+        const wait_start = nowMillis();
+        while (!all_ready and nowMillis() - wait_start < wait_timeout_ms) {
             attempts += 1;
             all_ready = true;
 
@@ -165,15 +175,6 @@ pub const TestCluster = struct {
                 if (!node.isRunning()) {
                     all_ready = false;
                     continue;
-                }
-
-                // Check if process is still alive
-                if (node.process) |*child| {
-                    const check = std.posix.kill(child.id, 0);
-                    _ = check catch {
-                        all_ready = false;
-                        continue;
-                    };
                 }
 
                 // Check if API is responding
@@ -185,23 +186,25 @@ pub const TestCluster = struct {
             if (!all_ready) {
                 // Simple backoff with max 500ms
                 const wait_ms: u64 = @min(50 * attempts, 500);
-                std.Thread.sleep(wait_ms * std.time.ns_per_ms);
+                std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(wait_ms * std.time.ns_per_ms)), .awake) catch unreachable;
             }
         }
 
         if (!all_ready) {
             std.debug.print("✗ Failed to start all nodes within timeout\n", .{});
+            self.printDiagnostics();
             return error.NodeStartupTimeout;
         }
 
-        std.debug.print("✓ All {d} nodes ready after {d}ms ({d} attempts)\n", .{ self.nodes.items.len, std.time.milliTimestamp() - start_time, attempts });
+        std.debug.print("✓ All {d} nodes ready after {d}ms ({d} attempts)\n", .{ self.nodes.items.len, nowMillis() - start_time, attempts });
     }
 
     fn spawnNodeInternal(self: *TestCluster, node: *ClusterNode, peers: []const u8) !void {
         if (node.isRunning()) return;
 
-        var env_map = try std.process.getEnvMap(self.alloc);
+        var env_map = std.process.Environ.Map.init(self.alloc);
         defer env_map.deinit();
+        try env_map.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         try env_map.put("HOME", node.data_dir);
         try env_map.put("XDG_DATA_HOME", node.data_dir);
 
@@ -215,38 +218,36 @@ pub const TestCluster = struct {
         const api_port_str = try std.fmt.allocPrint(self.alloc, "{d}", .{node.api_port});
         defer self.alloc.free(api_port_str);
 
-        var child = std.process.Child.init(&.{
-            "zig-out/bin/yoq",
-            "init-server",
-            "--id",
-            id_str,
-            "--port",
-            raft_port_str,
-            "--api-port",
-            api_port_str,
-            "--peers",
-            peers,
-            "--token",
-            self.join_token,
-            "--api-token",
-            self.api_token,
-        }, self.alloc);
-
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.env_map = &env_map;
-        child.cwd = cwd;
-
-        try child.spawn();
+        const child = try std.process.spawn(std.testing.io, .{
+            .argv = &.{
+                "zig-out/bin/yoq",
+                "init-server",
+                "--id",
+                id_str,
+                "--port",
+                raft_port_str,
+                "--api-port",
+                api_port_str,
+                "--peers",
+                peers,
+                "--token",
+                self.join_token,
+                "--api-token",
+                self.api_token,
+            },
+            .stdin = .ignore,
+            .stdout = .inherit,
+            .stderr = .inherit,
+            .environ_map = &env_map,
+            .cwd = .{ .path = cwd },
+        });
         node.process = child;
     }
 
     pub fn startNode(self: *TestCluster, node: *ClusterNode) !void {
         // Build full peer list for this node (all other nodes)
         var peers_buf: [512]u8 = undefined;
-        var peers_stream = std.io.fixedBufferStream(&peers_buf);
-        const peers_writer = peers_stream.writer();
+        var peers_writer: std.Io.Writer = .fixed(&peers_buf);
 
         var first = true;
         for (self.nodes.items) |other| {
@@ -259,24 +260,23 @@ pub const TestCluster = struct {
                 other.raft_port,
             });
         }
-        const peers = peers_stream.getWritten();
+        const peers = peers_writer.buffered();
 
         try self.spawnNodeInternal(node, peers);
 
         // Wait for ready
         var attempt: u32 = 0;
         while (attempt < 50) : (attempt += 1) {
-            if (node.process) |*child| {
-                const check = std.posix.kill(child.id, 0);
-                _ = check catch continue;
-
+            if (node.process != null) {
                 if (tryConnect(node.api_port)) {
                     return;
                 }
             }
-            std.Thread.sleep(200 * std.time.ns_per_ms);
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(200 * std.time.ns_per_ms)), .awake) catch unreachable;
         }
 
+        std.debug.print("node {d} failed to become ready on api port {d}\n", .{ node.id, node.api_port });
+        self.printDiagnostics();
         return error.NodeStartupTimeout;
     }
 
@@ -303,9 +303,9 @@ pub const TestCluster = struct {
     }
 
     pub fn getLeader(self: *TestCluster, timeout_ms: u64) !?*ClusterNode {
-        const start_time = std.time.milliTimestamp();
+        const start_time = nowMillis();
 
-        while (std.time.milliTimestamp() - start_time < timeout_ms) {
+        while (nowMillis() - start_time < timeout_ms) {
             for (self.nodes.items) |*node| {
                 if (!node.isRunning()) continue;
 
@@ -317,7 +317,7 @@ pub const TestCluster = struct {
                 }
             }
 
-            std.Thread.sleep(100 * std.time.ns_per_ms);
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(100 * std.time.ns_per_ms)), .awake) catch unreachable;
         }
 
         return null;
@@ -350,6 +350,8 @@ pub const TestCluster = struct {
     pub fn waitForLeader(self: *TestCluster, timeout_ms: u64) !*ClusterNode {
         const leader = try self.getLeader(timeout_ms);
         if (leader) |l| return l;
+        std.debug.print("leader election timed out after {d}ms\n", .{timeout_ms});
+        self.printDiagnostics();
         return error.LeaderElectionTimeout;
     }
 
@@ -406,8 +408,8 @@ pub const TestCluster = struct {
         const node = self.getNode(node_id) orelse return;
         if (node.process) |*proc| {
             // SIGKILL — no chance to clean up, simulates hard crash
-            _ = std.posix.kill(proc.id, 9) catch {};
-            _ = proc.wait() catch {};
+            if (proc.id) |pid| _ = std.posix.kill(pid, .KILL) catch {};
+            _ = proc.wait(std.testing.io) catch {};
             node.process = null;
         }
     }
@@ -422,9 +424,9 @@ pub const TestCluster = struct {
     /// wait until all running nodes agree on the same leader.
     /// returns the agreed-upon leader node, or error on timeout.
     pub fn waitForConvergence(self: *TestCluster, timeout_ms: u64) !*ClusterNode {
-        const start_time = std.time.milliTimestamp();
+        const start_time = nowMillis();
 
-        while (std.time.milliTimestamp() - start_time < timeout_ms) {
+        while (nowMillis() - start_time < timeout_ms) {
             var leader_id: ?u64 = null;
             var all_agree = true;
             var checked: u32 = 0;
@@ -458,18 +460,37 @@ pub const TestCluster = struct {
                 return self.getNode(leader_id.?).?;
             }
 
-            std.Thread.sleep(200 * std.time.ns_per_ms);
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(200 * std.time.ns_per_ms)), .awake) catch unreachable;
         }
 
         return error.ConvergenceTimeout;
     }
+
+    pub fn printDiagnostics(self: *TestCluster) void {
+        std.debug.print("cluster diagnostics: tmp_dir={s} nodes={d}\n", .{ self.tmp_dir.slice(), self.nodes.items.len });
+        for (self.nodes.items) |*node| {
+            const running = node.isRunning();
+            std.debug.print(
+                "  node {d}: running={} raft_port={d} api_port={d} data_dir={s}\n",
+                .{ node.id, running, node.raft_port, node.api_port, node.data_dir },
+            );
+            if (!running) continue;
+
+            const status = self.getNodeStatus(node) catch |err| {
+                std.debug.print("    status unavailable: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            defer self.alloc.free(status);
+            std.debug.print("    status: {s}\n", .{status});
+        }
+    }
 };
 
 fn tryConnect(port: u16) bool {
-    const addr = std.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, port);
-    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return false;
-    defer std.posix.close(fd);
-    std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch return false;
+    const addr = linux_platform.net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, port);
+    const fd = lposix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return false;
+    defer lposix.close(fd);
+    lposix.connect(fd, &addr.any, addr.getOsSockLen()) catch return false;
     return true;
 }
 

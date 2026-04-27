@@ -134,7 +134,7 @@ test "leader replicates proposed data to followers" {
     const leader = try cluster.waitForLeader(15000);
 
     // give leader time to fully initialize after election
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(2 * std.time.ns_per_s)), .awake) catch unreachable;
 
     // register an agent via the leader's API using the join token
     var body_buf: [512]u8 = undefined;
@@ -147,7 +147,7 @@ test "leader replicates proposed data to followers" {
     for (0..10) |attempt| {
         var resp = cluster.postToNode(leader, "/agents/register", body) catch |err| {
             std.debug.print("  POST attempt {d} connect error: {}\n", .{ attempt, err });
-            std.Thread.sleep(1 * std.time.ns_per_s);
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
             continue;
         };
         std.debug.print("  POST attempt {d} status={d} body={s}\n", .{ attempt, resp.status_code, resp.body });
@@ -157,7 +157,7 @@ test "leader replicates proposed data to followers" {
             registered = true;
             break;
         }
-        std.Thread.sleep(1 * std.time.ns_per_s);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
     }
 
     if (!registered) {
@@ -166,7 +166,7 @@ test "leader replicates proposed data to followers" {
     }
 
     // wait for raft replication
-    std.Thread.sleep(3 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(3 * std.time.ns_per_s)), .awake) catch unreachable;
 
     // find a follower to query
     var follower: ?*cluster_harness.ClusterNode = null;
@@ -183,7 +183,7 @@ test "leader replicates proposed data to followers" {
         for (0..10) |attempt| {
             var get_resp = cluster.getFromNode(f, "/agents") catch |err| {
                 std.debug.print("  GET attempt {d} error: {}\n", .{ attempt, err });
-                std.Thread.sleep(1 * std.time.ns_per_s);
+                std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
                 continue;
             };
             std.debug.print("  GET attempt {d} status={d} body_len={d}\n", .{ attempt, get_resp.status_code, get_resp.body.len });
@@ -196,7 +196,7 @@ test "leader replicates proposed data to followers" {
                 break;
             }
             get_resp.deinit(alloc);
-            std.Thread.sleep(1 * std.time.ns_per_s);
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
         }
 
         if (!found) {
@@ -244,7 +244,7 @@ test "5-node cluster survives minority failure" {
     }
     std.debug.print("  {d} nodes still running\n", .{running});
 
-    std.Thread.sleep(5 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(5 * std.time.ns_per_s)), .awake) catch unreachable;
     const still_leader = cluster.getLeader(15000) catch |err| {
         std.debug.print("  getLeader error: {}\n", .{err});
         return err;
@@ -285,7 +285,7 @@ test "cluster loses quorum when majority fails" {
     }
 
     // wait for election timeout to expire
-    std.Thread.sleep(5 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(5 * std.time.ns_per_s)), .awake) catch unreachable;
 
     // no leader should be elected (quorum of 3 not met with only 2 alive)
     const no_leader = try cluster.getLeader(5000);
@@ -318,7 +318,7 @@ test "node restart and catch-up after crash" {
     const leader = try cluster.waitForLeader(15000);
 
     // give leader time to stabilize
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(2 * std.time.ns_per_s)), .awake) catch unreachable;
 
     // register an agent via the leader
     var body_buf: [512]u8 = undefined;
@@ -329,7 +329,7 @@ test "node restart and catch-up after crash" {
     var registered = false;
     for (0..10) |_| {
         var resp = cluster.postToNode(leader, "/agents/register", body) catch {
-            std.Thread.sleep(1 * std.time.ns_per_s);
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
             continue;
         };
         const status = resp.status_code;
@@ -338,7 +338,7 @@ test "node restart and catch-up after crash" {
             registered = true;
             break;
         }
-        std.Thread.sleep(1 * std.time.ns_per_s);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
     }
     if (!registered) {
         std.debug.print("  failed to register agent\n", .{});
@@ -346,7 +346,7 @@ test "node restart and catch-up after crash" {
     }
 
     // wait for replication
-    std.Thread.sleep(3 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(3 * std.time.ns_per_s)), .awake) catch unreachable;
 
     // pick a non-leader node
     var target_node: ?*cluster_harness.ClusterNode = null;
@@ -371,19 +371,19 @@ test "node restart and catch-up after crash" {
 
     // stop the node, wait, restart
     cluster.stopNode(target_id);
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(2 * std.time.ns_per_s)), .awake) catch unreachable;
 
     const restarted = cluster.getNode(target_id) orelse return error.SkipZigTest;
     try cluster.startNode(restarted);
 
     // wait for catch-up
-    std.Thread.sleep(5 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(5 * std.time.ns_per_s)), .awake) catch unreachable;
 
     // verify data is present on restarted node
     var found = false;
     for (0..10) |_| {
         var resp = cluster.getFromNode(restarted, "/agents") catch {
-            std.Thread.sleep(1 * std.time.ns_per_s);
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
             continue;
         };
         if (resp.status_code == 200 and
@@ -394,7 +394,7 @@ test "node restart and catch-up after crash" {
             break;
         }
         resp.deinit(alloc);
-        std.Thread.sleep(1 * std.time.ns_per_s);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
     }
 
     if (!found) {
@@ -431,7 +431,7 @@ test "rapid leader churn: repeated leader kills" {
         std.debug.print("  round {d}: killed leader node {d}\n", .{ round, killed_id });
 
         // give cluster time to detect failure and re-elect
-        std.Thread.sleep(5 * std.time.ns_per_s);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(5 * std.time.ns_per_s)), .awake) catch unreachable;
     }
 
     // 3 nodes remain from 5 — quorum of 3 is still met
@@ -479,7 +479,7 @@ test "cascading failure and recovery" {
     std.debug.print("  stopped nodes {d} and {d}\n", .{ stopped_ids[0], stopped_ids[1] });
 
     // verify leader still exists
-    std.Thread.sleep(3 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(3 * std.time.ns_per_s)), .awake) catch unreachable;
     const still_leader = cluster.getLeader(15000) catch |err| {
         std.debug.print("  getLeader error after stops: {}\n", .{err});
         return error.SkipZigTest;
@@ -499,7 +499,7 @@ test "cascading failure and recovery" {
     }
 
     // wait for nodes to rejoin
-    std.Thread.sleep(5 * std.time.ns_per_s);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(5 * std.time.ns_per_s)), .awake) catch unreachable;
 
     // verify all 5 nodes are running
     var running: u32 = 0;

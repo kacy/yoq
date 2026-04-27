@@ -1,37 +1,48 @@
-.PHONY: build run test test-operator test-network test-integration test-contract test-sim test-gpu test-hardening test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
+ZIG ?= $(shell command -v zig)
+
+.PHONY: build run test test-operator test-network test-integration test-contract test-sim test-gpu test-hardening test-runtime-core test-runtime-network test-runtime-cluster test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
 
 build:
-	zig build -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe
 
 run:
-	zig build run -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe run
 
 test:
-	zig build test -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe test
 
 test-operator:
-	zig build test-operator -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe test-operator
 
 test-network:
-	zig build test-network -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe test-network
 
 test-integration:
-	zig build test-integration -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe test-integration
 
 test-contract:
-	zig build test-contract -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe test-contract
 
 test-sim:
-	zig build test-sim -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe test-sim
 
 test-gpu:
-	zig build test-gpu -Doptimize=ReleaseSafe
+	$(ZIG) build -Doptimize=ReleaseSafe test-gpu
 
 test-hardening:
-	YOQ_SKIP_SLOW_TESTS=1 zig build test-hardening -Doptimize=ReleaseSafe
+	YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe test-hardening
+
+test-runtime-core: build
+	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-core
+
+test-runtime-network: build
+	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-network
+
+test-runtime-cluster: build
+	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-cluster
 
 test-privileged: build
-	sudo zig build test-privileged -Doptimize=ReleaseSafe
+	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-privileged
 
 clean:
 	rm -rf zig-out .zig-cache
@@ -40,10 +51,10 @@ clean-all: clean
 	rm -rf vendor/prebuilt
 
 cache-sqlite:
-	zig build cache-sqlite
+	$(ZIG) build cache-sqlite
 
 bpf:
-	zig build bpf
+	$(ZIG) build bpf
 
 install: build
 	cp zig-out/bin/yoq /usr/local/bin/yoq
@@ -80,7 +91,7 @@ CROSS_TARGETS := x86_64-linux aarch64-linux riscv64-linux
 release-cross:
 	@for target in $(CROSS_TARGETS); do \
 		echo "building $$target..."; \
-		zig build -Doptimize=ReleaseSafe -Dtarget=$$target; \
+		$(ZIG) build -Doptimize=ReleaseSafe -Dtarget=$$target; \
 		arch=$$(echo $$target | sed 's/-linux//'); \
 		mkdir -p dist; \
 		cp zig-out/bin/yoq dist/yoq-linux-$$arch; \

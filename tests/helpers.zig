@@ -16,7 +16,7 @@ fn fillRandom(bytes: []u8) void {
 }
 
 pub const RunOptions = struct {
-    env_map: ?*const std.process.EnvMap = null,
+    env_map: ?*const std.process.Environ.Map = null,
     cwd: ?[]const u8 = null,
 };
 
@@ -40,34 +40,23 @@ pub fn run(alloc: std.mem.Allocator, args: []const []const u8) !RunResult {
 
 /// run a command with a custom environment or cwd.
 pub fn runWithOptions(alloc: std.mem.Allocator, args: []const []const u8, options: RunOptions) !RunResult {
-    var child = std.process.Child.init(args, alloc);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    child.env_map = options.env_map;
-    child.cwd = options.cwd;
+    const result = try std.process.run(alloc, std.testing.io, .{
+        .argv = args,
+        .cwd = if (options.cwd) |path| .{ .path = path } else .inherit,
+        .environ_map = options.env_map,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
 
-    try child.spawn();
-
-    var stdout_buf: std.ArrayListUnmanaged(u8) = .empty;
-    var stderr_buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer stdout_buf.deinit(alloc);
-    errdefer stderr_buf.deinit(alloc);
-
-    child.collectOutput(alloc, &stdout_buf, &stderr_buf, 1024 * 1024) catch |err| {
-        if (err != error.BrokenPipe) return err;
-    };
-
-    const term = try child.wait();
-
-    const exit_code: u8 = switch (term) {
-        .Exited => |code| code,
-        .Signal => 128,
+    const exit_code: u8 = switch (result.term) {
+        .exited => |code| code,
+        .signal => 128,
         else => 255,
     };
 
     return .{
-        .stdout = try stdout_buf.toOwnedSlice(alloc),
-        .stderr = try stderr_buf.toOwnedSlice(alloc),
+        .stdout = result.stdout,
+        .stderr = result.stderr,
         .exit_code = exit_code,
         .alloc = alloc,
     };
@@ -134,7 +123,7 @@ pub const TestEnv = struct {
     cwd: []const u8,
     home: []const u8,
     xdg_data_home: []const u8,
-    env_map: std.process.EnvMap,
+    env_map: std.process.Environ.Map,
 
     pub fn init(alloc: std.mem.Allocator) !TestEnv {
         var tmp = try tmpDir();
@@ -151,8 +140,9 @@ pub const TestEnv = struct {
         errdefer alloc.free(xdg_data_home);
         try std.Io.Dir.cwd().createDirPath(std.testing.io, xdg_data_home);
 
-        var env_map = try std.process.getEnvMap(alloc);
+        var env_map = std.process.Environ.Map.init(alloc);
         errdefer env_map.deinit();
+        try env_map.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         try env_map.put("HOME", home);
         try env_map.put("XDG_DATA_HOME", xdg_data_home);
 

@@ -83,6 +83,52 @@ jobs:
           path: ${{ runner.temp }}/linux-feature-report.txt
           retention-days: 7
 
+  privileged-runtime:
+    name: privileged-runtime-${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: core
+            command: test-runtime-core
+          - lane: network
+            command: test-runtime-network
+          - lane: cluster
+            command: test-runtime-cluster
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v4
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-runtime-${{ matrix.lane }}
+
+      - name: build yoq
+        shell: bash
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: run privileged runtime lane
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/runtime-logs"
+          set +e
+          sudo env YOQ_SKIP_SLOW_TESTS=1 zig build -Doptimize=ReleaseSafe -Drun-privileged-tests=true "${{ matrix.command }}" 2>&1 \
+            | tee "$RUNNER_TEMP/runtime-logs/${{ matrix.command }}.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          exit "$status"
+
+      - name: upload privileged runtime logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privileged-runtime-${{ matrix.lane }}-logs
+          path: ${{ runner.temp }}/runtime-logs/
+          retention-days: 7
+
   manual-bpf-runtime-check:
     name: manual-bpf-runtime-check
     runs-on: ubuntu-latest

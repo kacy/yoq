@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const helpers = @import("helpers");
+const runtime_preflight = @import("runtime_preflight");
 
 const alloc = std.testing.allocator;
 
@@ -12,7 +13,13 @@ fn trimOutput(output: []const u8) []const u8 {
     return std.mem.trim(u8, output, " \n\r\t");
 }
 
+fn initTestEnv() !helpers.TestEnv {
+    try runtime_preflight.requireRuntimeCore();
+    return helpers.TestEnv.init(alloc);
+}
+
 fn initLifecycleFixture() !struct { env: helpers.TestEnv, rootfs: helpers.RootfsFixture } {
+    try runtime_preflight.requireRuntimeCore();
     return .{
         .env = try helpers.TestEnv.init(alloc),
         .rootfs = try helpers.createShellRootfs(alloc),
@@ -96,7 +103,7 @@ test "ps --json produces valid json" {
 }
 
 test "version --json produces valid json" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var result = try env.runYoq(&.{ "version", "--json" });
@@ -195,7 +202,7 @@ test "rm running container fails gracefully without corrupting state" {
 }
 
 test "run with nonexistent image fails gracefully" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var result = try env.runYoq(&.{ "run", "nonexistent-image-that-does-not-exist:v999" });
@@ -206,7 +213,7 @@ test "run with nonexistent image fails gracefully" {
 }
 
 test "stop nonexistent container fails gracefully" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var result = try env.runYoq(&.{ "stop", "nonexistent-container-id" });

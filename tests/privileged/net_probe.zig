@@ -1,5 +1,7 @@
 const std = @import("std");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
+const lposix = linux_platform.posix;
 
 const ipv4_loopback = [4]u8{ 127, 0, 0, 1 };
 pub fn main(init: std.process.Init) !void {
@@ -58,31 +60,31 @@ fn queryDnsARecord(host: []const u8) ![4]u8 {
     var packet: [512]u8 = undefined;
     const query_len = try buildDnsQuery(host, &packet);
 
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch |err| {
+    const fd = lposix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch |err| {
         std.debug.print("dns socket failed: {}\n", .{err});
         return err;
     };
-    defer posix.close(fd);
+    defer lposix.close(fd);
 
     const timeout = posix.timeval{ .sec = 1, .usec = 0 };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+    lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
         std.debug.print("dns recv timeout failed: {}\n", .{err});
         return err;
     };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+    lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
         std.debug.print("dns send timeout failed: {}\n", .{err});
         return err;
     };
 
     const dns_addr = try loadDnsServer();
-    const addr = std.net.Address.initIp4(dns_addr, 53);
-    _ = posix.sendto(fd, packet[0..query_len], 0, &addr.any, addr.getOsSockLen()) catch |err| {
+    const addr = linux_platform.net.Address.initIp4(dns_addr, 53);
+    _ = lposix.sendto(fd, packet[0..query_len], 0, &addr.any, addr.getOsSockLen()) catch |err| {
         std.debug.print("dns sendto failed: {}\n", .{err});
         return err;
     };
 
     var response: [512]u8 = undefined;
-    const response_len = posix.recv(fd, &response, 0) catch |err| {
+    const response_len = lposix.recv(fd, &response, 0) catch |err| {
         std.debug.print("dns recv failed: {}\n", .{err});
         return err;
     };
@@ -183,24 +185,24 @@ fn skipDnsName(buf: []const u8, start: usize) !usize {
 }
 
 fn httpGet(alloc: std.mem.Allocator, addr: [4]u8, port: u16, path: []const u8, host_header: []const u8) ![]u8 {
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch |err| {
+    const fd = lposix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch |err| {
         std.debug.print("http socket failed: {}\n", .{err});
         return err;
     };
-    defer posix.close(fd);
+    defer lposix.close(fd);
 
     const timeout = posix.timeval{ .sec = 2, .usec = 0 };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+    lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
         std.debug.print("http recv timeout failed: {}\n", .{err});
         return err;
     };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+    lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
         std.debug.print("http send timeout failed: {}\n", .{err});
         return err;
     };
 
-    const sock_addr = std.net.Address.initIp4(addr, port);
-    posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch |err| {
+    const sock_addr = linux_platform.net.Address.initIp4(addr, port);
+    lposix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch |err| {
         std.debug.print("http connect failed: {}\n", .{err});
         return err;
     };
@@ -218,7 +220,7 @@ fn httpGet(alloc: std.mem.Allocator, addr: [4]u8, port: u16, path: []const u8, h
 
     var buf: [1024]u8 = undefined;
     while (true) {
-        const read_len = posix.read(fd, &buf) catch |err| switch (err) {
+        const read_len = lposix.read(fd, &buf) catch |err| switch (err) {
             error.WouldBlock => break,
             else => return err,
         };
@@ -235,7 +237,7 @@ fn httpGet(alloc: std.mem.Allocator, addr: [4]u8, port: u16, path: []const u8, h
 fn writeAll(fd: posix.socket_t, data: []const u8) !void {
     var total: usize = 0;
     while (total < data.len) {
-        const written = try posix.write(fd, data[total..]);
+        const written = try lposix.write(fd, data[total..]);
         if (written == 0) return error.WriteFailed;
         total += written;
     }
@@ -252,7 +254,7 @@ fn writeU16(buf: []u8, value: u16) void {
 
 fn writeStdout(comptime fmt: []const u8, args: anytype) !void {
     var buf: [4096]u8 = undefined;
-    var writer = std.fs.File.stdout().writer(&buf);
+    var writer = std.Io.File.stdout().writer(std.Options.debug_io, &buf);
     const out = &writer.interface;
     try out.print(fmt, args);
     try out.flush();

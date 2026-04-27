@@ -5,8 +5,14 @@
 
 const std = @import("std");
 const helpers = @import("helpers");
+const runtime_preflight = @import("runtime_preflight");
 
 const alloc = std.testing.allocator;
+
+fn initTestEnv() !helpers.TestEnv {
+    try runtime_preflight.requireRuntimeCore();
+    return helpers.TestEnv.init(alloc);
+}
 
 fn looksLikeValidContainerId(id: []const u8) bool {
     if (id.len != 12) return false;
@@ -20,7 +26,7 @@ fn looksLikeValidContainerId(id: []const u8) bool {
 }
 
 test "run with nonexistent rootfs fails gracefully" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var result = try env.runYoq(&.{
@@ -33,7 +39,7 @@ test "run with nonexistent rootfs fails gracefully" {
 }
 
 test "run with invalid container ID is rejected" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -50,7 +56,7 @@ test "run with invalid container ID is rejected" {
 }
 
 test "run with command that doesn't exist" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -69,7 +75,7 @@ test "run with command that doesn't exist" {
 }
 
 test "run with extremely long command line" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -84,8 +90,9 @@ test "run with extremely long command line" {
     @memset(long_arg, 'a');
 
     var result = try env.runYoq(&.{
-        "run", "--name", name, fixture.rootfs_path,
-        "/bin/sh", "-c", "printf '%s' \"$1\" >/dev/null && echo ok", "sh", long_arg,
+        "run",     "--name", name,                                       fixture.rootfs_path,
+        "/bin/sh", "-c",     "printf '%s' \"$1\" >/dev/null && echo ok", "sh",
+        long_arg,
     });
     defer result.deinit();
 
@@ -95,7 +102,7 @@ test "run with extremely long command line" {
 }
 
 test "logs for nonexistent container" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var result = try env.runYoq(&.{ "logs", "nonexistent123" });
@@ -106,7 +113,7 @@ test "logs for nonexistent container" {
 }
 
 test "rm nonexistent container" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var result = try env.runYoq(&.{ "rm", "nonexistent123" });
@@ -117,7 +124,7 @@ test "rm nonexistent container" {
 }
 
 test "stop nonexistent container" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var result = try env.runYoq(&.{ "stop", "nonexistent123" });
@@ -128,7 +135,7 @@ test "stop nonexistent container" {
 }
 
 test "exec into nonexistent container" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var result = try env.runYoq(&.{ "exec", "nonexistent123", "/bin/sh" });
@@ -139,7 +146,7 @@ test "exec into nonexistent container" {
 }
 
 test "run with invalid bind mount source" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -161,7 +168,7 @@ test "run with invalid bind mount source" {
 }
 
 test "run with resource limits enforced" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -183,7 +190,7 @@ test "run with resource limits enforced" {
 }
 
 test "run with memory below minimum is rejected" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -205,7 +212,7 @@ test "run with memory below minimum is rejected" {
 }
 
 test "run detached and cleanup" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);
@@ -222,7 +229,7 @@ test "run detached and cleanup" {
     try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
 
     // wait a bit for it to complete
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(200 * std.time.ns_per_ms)), .awake) catch unreachable;
 
     // stop should fail since it's already stopped
     var stop_result = try env.runYoq(&.{ "stop", name });
@@ -236,7 +243,7 @@ test "run detached and cleanup" {
 }
 
 test "rapid start/stop cycles don't leak" {
-    var env = try helpers.TestEnv.init(alloc);
+    var env = try initTestEnv();
     defer env.deinit();
 
     var fixture = try helpers.createShellRootfs(alloc);

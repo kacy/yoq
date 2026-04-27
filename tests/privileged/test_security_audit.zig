@@ -9,10 +9,13 @@ const helpers = @import("helpers");
 const cluster_test_harness = @import("cluster_test_harness");
 const http = @import("http");
 const http_client = @import("http_client");
+const linux_platform = @import("linux_platform");
 
 const TestCluster = cluster_test_harness.TestCluster;
 const alloc = std.testing.allocator;
 const addr = [4]u8{ 127, 0, 0, 1 };
+const posix = std.posix;
+const lposix = linux_platform.posix;
 
 fn initCluster(node_count: usize, base_raft: u16, base_api: u16) !TestCluster {
     var cluster = try TestCluster.init(alloc, .{
@@ -140,7 +143,7 @@ test "security audit: WG key file permissions" {
 
     // generate a keypair to verify the crypto path
     const X25519 = std.crypto.dh.X25519;
-    var kp = X25519.KeyPair.generate();
+    var kp = X25519.KeyPair.generate(std.testing.io);
     defer std.crypto.secureZero(u8, &kp.secret_key);
 
     // verify key sizes
@@ -236,7 +239,7 @@ test "security audit: rate limiting on auth failures" {
     try std.testing.expect(failures >= 45);
 
     // Wait for the next limiter window before checking liveness.
-    std.Thread.sleep(1_100_000_000);
+    std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1_100_000_000)), .awake) catch unreachable;
 
     // server should still be responsive after the flood
     var health = http_client.getWithAuth(alloc, addr, port, "/health", null) catch return;
@@ -330,18 +333,18 @@ test "security audit: API endpoints reject oversized JSON" {
         .{ cluster.api_token, http.max_body_bytes + 1 },
     ) catch return;
 
-    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return;
-    defer std.posix.close(fd);
+    const fd = lposix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return;
+    defer lposix.close(fd);
 
-    const timeout = std.posix.timeval{ .sec = 5, .usec = 0 };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    const timeout = posix.timeval{ .sec = 5, .usec = 0 };
+    lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
-    const sock_addr = std.net.Address.initIp4(addr, cluster.nodes.items[0].api_port);
-    std.posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch return;
-    _ = std.posix.write(fd, request) catch return;
+    const sock_addr = linux_platform.net.Address.initIp4(addr, cluster.nodes.items[0].api_port);
+    lposix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch return;
+    _ = lposix.write(fd, request) catch return;
 
     var resp_buf: [1024]u8 = undefined;
-    const bytes = std.posix.read(fd, &resp_buf) catch return;
+    const bytes = lposix.read(fd, &resp_buf) catch return;
     if (bytes > 0) {
         const resp = resp_buf[0..bytes];
         try std.testing.expect(std.mem.indexOf(u8, resp, "413 Content Too Large") != null);

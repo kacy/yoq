@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const helpers = @import("helpers");
+const runtime_preflight = @import("runtime_preflight");
 
 const alloc = std.testing.allocator;
 const service_port: u16 = 8080;
@@ -67,7 +68,7 @@ fn waitForContainerRunning(env: *helpers.TestEnv, name: []const u8) !void {
         {
             return;
         }
-        std.Thread.sleep(250 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(250 * std.time.ns_per_ms)), .awake) catch unreachable;
     }
 
     std.debug.print("timed out waiting for container {s} to reach running state\n", .{name});
@@ -75,6 +76,7 @@ fn waitForContainerRunning(env: *helpers.TestEnv, name: []const u8) !void {
 }
 
 fn initNetworkingFixture() !struct { env: helpers.TestEnv, rootfs: helpers.RootfsFixture } {
+    try runtime_preflight.requireRuntimeNetwork();
     return .{
         .env = try helpers.TestEnv.init(alloc),
         .rootfs = try helpers.createNetworkingRootfs(alloc),
@@ -93,7 +95,7 @@ fn waitForHostHttpBody(env: *helpers.TestEnv, port: u16, expected: []const u8) !
         defer curl.deinit();
 
         if (curl.exit_code == 0 and std.mem.indexOf(u8, curl.stdout, expected) != null) return;
-        std.Thread.sleep(250 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(250 * std.time.ns_per_ms)), .awake) catch unreachable;
     }
 
     std.debug.print("timed out waiting for host HTTP body containing '{s}' on port {d}\n", .{ expected, port });
@@ -116,7 +118,7 @@ fn waitForServiceDiscoveryHttpBody(env: *helpers.TestEnv, rootfs_path: []const u
         removeContainer(env, client_name);
 
         if (client.exit_code == 0 and std.mem.indexOf(u8, client.stdout, expected) != null) return;
-        std.Thread.sleep(250 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(250 * std.time.ns_per_ms)), .awake) catch unreachable;
     }
 
     std.debug.print("timed out waiting for service discovery HTTP body containing '{s}' from {s}\n", .{ expected, server_name });
@@ -139,7 +141,7 @@ fn waitForServiceDiscoveryHttpFailure(env: *helpers.TestEnv, rootfs_path: []cons
         removeContainer(env, client_name);
 
         if (client.exit_code != 0) return;
-        std.Thread.sleep(250 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(250 * std.time.ns_per_ms)), .awake) catch unreachable;
     }
 
     std.debug.print("service discovery for {s} never stopped resolving\n", .{server_name});
@@ -169,7 +171,7 @@ fn waitForServiceDiscoveryResolution(env: *helpers.TestEnv, rootfs_path: []const
         last_stderr = try alloc.dupe(u8, client.stderr);
 
         if (client.exit_code == 0 and isIpv4Output(client.stdout)) return;
-        std.Thread.sleep(250 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(250 * std.time.ns_per_ms)), .awake) catch unreachable;
     }
 
     std.debug.print("timed out waiting for service discovery resolution for {s}\n", .{server_name});
@@ -211,14 +213,14 @@ fn startLocalHttpServer(env: *helpers.TestEnv, rootfs_path: []const u8, name: []
 }
 
 fn requireExternalNetworkTests() !void {
-    const raw = std.process.getEnvVarOwned(alloc, "YOQ_REQUIRE_NETWORK_TESTS") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-    defer alloc.free(raw);
+    const environ = std.Io.Dir.cwd().readFileAlloc(std.testing.io, "/proc/self/environ", alloc, .limited(64 * 1024)) catch return error.SkipZigTest;
+    defer alloc.free(environ);
 
-    const enabled = std.mem.trim(u8, raw, " \n\r\t");
-    if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
+    var entries = std.mem.splitScalar(u8, environ, 0);
+    while (entries.next()) |entry| {
+        if (std.mem.eql(u8, entry, "YOQ_REQUIRE_NETWORK_TESTS=1")) return;
+    }
+    return error.SkipZigTest;
 }
 
 test "container gets an IP address" {

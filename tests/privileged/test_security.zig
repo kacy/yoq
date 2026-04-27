@@ -9,8 +9,11 @@ const helpers = @import("helpers");
 const cluster_test_harness = @import("cluster_test_harness");
 const http = @import("http");
 const http_client = @import("http_client");
+const linux_platform = @import("linux_platform");
 
 const TestCluster = cluster_test_harness.TestCluster;
+const posix = std.posix;
+const lposix = linux_platform.posix;
 
 const alloc = std.testing.allocator;
 
@@ -138,19 +141,19 @@ test "security: oversized request headers rejected" {
     const request = std.fmt.bufPrint(&req_buf, "GET /health HTTP/1.1\r\nHost: localhost\r\nX-Junk: {s}\r\n\r\n", .{big_header[0..16500]}) catch return;
 
     // send raw request via TCP
-    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return;
-    defer std.posix.close(fd);
+    const fd = lposix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return;
+    defer lposix.close(fd);
 
-    const timeout = std.posix.timeval{ .sec = 5, .usec = 0 };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    const timeout = posix.timeval{ .sec = 5, .usec = 0 };
+    lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
-    const sock_addr = std.net.Address.initIp4(addr, cluster.nodes.items[0].api_port);
-    std.posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch return;
-    _ = std.posix.write(fd, request) catch return;
+    const sock_addr = linux_platform.net.Address.initIp4(addr, cluster.nodes.items[0].api_port);
+    lposix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch return;
+    _ = lposix.write(fd, request) catch return;
 
     // read response — should get 431 or connection close, not 200
     var resp_buf: [1024]u8 = undefined;
-    const bytes = std.posix.read(fd, &resp_buf) catch return;
+    const bytes = lposix.read(fd, &resp_buf) catch return;
     if (bytes > 0) {
         const resp = resp_buf[0..bytes];
         // should not contain "200 OK"
@@ -169,18 +172,18 @@ test "security: request body above configured max rejected" {
         .{ cluster.api_token, http.max_body_bytes + 1 },
     ) catch return;
 
-    const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return;
-    defer std.posix.close(fd);
+    const fd = lposix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return;
+    defer lposix.close(fd);
 
-    const timeout = std.posix.timeval{ .sec = 5, .usec = 0 };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    const timeout = posix.timeval{ .sec = 5, .usec = 0 };
+    lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
-    const sock_addr = std.net.Address.initIp4(addr, cluster.nodes.items[0].api_port);
-    std.posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch return;
-    _ = std.posix.write(fd, request) catch return;
+    const sock_addr = linux_platform.net.Address.initIp4(addr, cluster.nodes.items[0].api_port);
+    lposix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch return;
+    _ = lposix.write(fd, request) catch return;
 
     var resp_buf: [1024]u8 = undefined;
-    const bytes = std.posix.read(fd, &resp_buf) catch return;
+    const bytes = lposix.read(fd, &resp_buf) catch return;
     if (bytes > 0) {
         const resp = resp_buf[0..bytes];
         try std.testing.expect(std.mem.indexOf(u8, resp, "413 Content Too Large") != null);

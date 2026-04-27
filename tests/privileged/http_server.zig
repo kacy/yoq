@@ -1,5 +1,7 @@
 const std = @import("std");
+const linux_platform = @import("linux_platform");
 const posix = std.posix;
+const lposix = linux_platform.posix;
 
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
@@ -15,24 +17,24 @@ pub fn main(init: std.process.Init) !void {
     };
     const body = argv[2];
 
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch |err| {
+    const fd = lposix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch |err| {
         std.debug.print("socket failed: {}\n", .{err});
         return err;
     };
-    defer posix.close(fd);
+    defer lposix.close(fd);
 
     const reuse: c_int = 1;
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuse)) catch |err| {
+    lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuse)) catch |err| {
         std.debug.print("setsockopt failed: {}\n", .{err});
         return err;
     };
 
-    const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-    posix.bind(fd, &addr.any, addr.getOsSockLen()) catch |err| {
+    const addr = linux_platform.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+    lposix.bind(fd, &addr.any, addr.getOsSockLen()) catch |err| {
         std.debug.print("bind failed: {}\n", .{err});
         return err;
     };
-    posix.listen(fd, 16) catch |err| {
+    lposix.listen(fd, 16) catch |err| {
         std.debug.print("listen failed: {}\n", .{err});
         return err;
     };
@@ -47,14 +49,14 @@ pub fn main(init: std.process.Init) !void {
     while (true) {
         var client_addr: posix.sockaddr = undefined;
         var client_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        const client_fd = posix.accept(fd, &client_addr, &client_len, 0) catch |err| switch (err) {
+        const client_fd = lposix.accept(fd, &client_addr, &client_len, 0) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
-        defer posix.close(client_fd);
+        defer lposix.close(client_fd);
 
         var request_buf: [1024]u8 = undefined;
-        _ = posix.read(client_fd, &request_buf) catch 0;
+        _ = lposix.read(client_fd, &request_buf) catch 0;
         try writeAll(client_fd, response);
     }
 }
@@ -62,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
 fn writeAll(fd: posix.socket_t, data: []const u8) !void {
     var total: usize = 0;
     while (total < data.len) {
-        const written = try posix.write(fd, data[total..]);
+        const written = try lposix.write(fd, data[total..]);
         if (written == 0) return error.WriteFailed;
         total += written;
     }
