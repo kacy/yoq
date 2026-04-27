@@ -97,6 +97,19 @@ pub fn checkLoadedManifest(
     };
 }
 
+pub fn checkLoadedManifestForHost(
+    alloc: std.mem.Allocator,
+    manifest: *const manifest_spec.Manifest,
+) !ManifestCheckResult {
+    var secret_lookup = try RuntimeSecretLookup.init(alloc);
+    defer secret_lookup.deinit();
+
+    return checkLoadedManifest(alloc, manifest, .{
+        .secret_lookup = secret_lookup.lookup(),
+        .port_checker = defaultPortChecker(),
+    });
+}
+
 fn appendManifestChecks(
     alloc: std.mem.Allocator,
     checks: *std.ArrayList(doctor.Check),

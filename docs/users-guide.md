@@ -163,7 +163,7 @@ before yoq sends an ACME request, it checks the local challenge config. it repor
 
 deployment history is tracked in SQLite. updates proceed as app releases, not as ad hoc service mutations.
 
-for manifest-driven app deploys, yoq now normalizes the manifest into one app snapshot before execution. local `yoq up` and remote `yoq up --server` both operate on that same app-level snapshot, and app releases are recorded in SQLite with the full config snapshot and manifest hash.
+for manifest-driven app deploys, yoq now normalizes the manifest into one app snapshot before execution. local `yoq up` first runs manifest readiness checks, then records the release in SQLite with the full config snapshot and manifest hash. use `yoq up --skip-preflight` only to bypass a known local preflight failure. remote `yoq up --server` uses the same app snapshot model, but does not run local host preflight checks for the cluster.
 
 this gives you a single app-first day-2 model:
 

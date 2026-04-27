@@ -247,6 +247,7 @@ yoq build [-t tag] [-f Dockerfile] . build an image
 yoq up [-f manifest.toml]            start services from a manifest
 yoq up [service...]                  start named services and dependencies
 yoq up --dev                         watch and hot-restart on changes
+yoq up --skip-preflight              bypass local manifest readiness checks
 yoq up --server host:port            deploy to a cluster
 yoq down [-f manifest.toml]          stop services from a manifest
 yoq run-worker <name>                run a one-shot worker
@@ -367,6 +368,7 @@ yoq completion <bash|zsh|fish>       output shell completion
 Notes:
 
 - `--json` is available on `ps`, `images`, `prune`, `version`, `gpu topo`, and `doctor`. `yoq doctor -f manifest.toml --json` groups system and manifest checks separately.
+- local `yoq up` runs manifest readiness checks before starting services; use `--skip-preflight` only when you need to bypass a known local preflight failure.
 - crons defined in the manifest start automatically with `yoq up`.
 - deployment, metrics, and certificate commands also support `--server host:port`.
 - clustered manifest deploys now go through the app-first `/apps/apply` API and carry services, workers, crons, and training definitions in one app snapshot. the older `/deploy` route is still there for legacy callers.

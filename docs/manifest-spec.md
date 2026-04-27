@@ -737,6 +737,7 @@ this is intended for local development, not production.
 | `yoq validate` | validate manifest syntax and semantics |
 | `yoq up` | start all services |
 | `yoq up --dev` | start in dev mode with hot reload |
+| `yoq up --skip-preflight` | bypass local manifest readiness checks |
 | `yoq up <service>` | start a specific service |
 | `yoq down` | stop all services |
 | `yoq run-worker <name>` | run a one-shot worker |

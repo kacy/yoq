@@ -61,7 +61,7 @@ const command_meta = [_]CommandMeta{
     .{ .name = "build", .flags = &.{ "-t", "-f", "--format", "--build-arg" } },
     .{ .name = "init", .flags = &.{"-f"} },
     .{ .name = "validate", .flags = &.{ "-f", "-q", "--quiet" } },
-    .{ .name = "up", .flags = &.{ "-f", "--dev", "--server" } },
+    .{ .name = "up", .flags = &.{ "-f", "--dev", "--skip-preflight", "--server" } },
     .{ .name = "down", .flags = &.{"-f"} },
     .{ .name = "run-worker", .flags = &.{ "-f", "--server" } },
     .{ .name = "rollback", .flags = &.{ "--app", "--server", "--release", "--print" } },
