@@ -442,6 +442,8 @@ threshold-based alerts on CPU, memory, restart count, p99 latency, and error rat
 
 `yoq doctor` runs 7 pre-flight checks: kernel version (≥6.1), cgroup-v2, eBPF, GPU, WireGuard, InfiniBand, and disk space. each check reports pass/warn/fail. GPU, WireGuard, and InfiniBand return `warn` when hardware is absent since these are optional.
 
+`yoq doctor -f manifest.toml` adds app-specific checks before deploy. it loads the manifest, runs semantic validation, checks ACME DNS-01 provider settings and referenced secrets, warns about TLS route/domain mismatches, and warns when HTTP-01 needs port 80 but the port is not available locally. with `--json`, system and manifest checks are grouped separately.
+
 ---
 
 ## operational reference

@@ -47,7 +47,7 @@ pub const CheckResult = struct {
     count: u8,
 };
 
-fn makeCheck(name: []const u8, status: CheckStatus, message: []const u8) Check {
+pub fn makeCheck(name: []const u8, status: CheckStatus, message: []const u8) Check {
     var c = Check{};
     const nlen: u8 = @intCast(@min(name.len, 32));
     @memcpy(c.name[0..nlen], name[0..nlen]);
@@ -57,6 +57,20 @@ fn makeCheck(name: []const u8, status: CheckStatus, message: []const u8) Check {
     @memcpy(c.message[0..mlen], message[0..mlen]);
     c.message_len = mlen;
     return c;
+}
+
+pub fn resultHasFailures(result: *const CheckResult) bool {
+    for (0..result.count) |i| {
+        if (result.checks[i].status == .fail) return true;
+    }
+    return false;
+}
+
+pub fn checkSliceHasFailures(checks: []const Check) bool {
+    for (checks) |check| {
+        if (check.status == .fail) return true;
+    }
+    return false;
 }
 
 pub fn runAllChecks() CheckResult {

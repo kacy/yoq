@@ -7,6 +7,16 @@ const secrets = @import("../../state/secrets.zig");
 pub const Options = struct {
     http_registrar_available: bool = false,
     secrets_store: ?*secrets.SecretsStore = null,
+    secret_lookup: ?SecretLookup = null,
+};
+
+pub const SecretLookup = struct {
+    ctx: *anyopaque,
+    exists_fn: *const fn (ctx: *anyopaque, name: []const u8) error{LookupFailed}!bool,
+
+    pub fn exists(self: SecretLookup, name: []const u8) error{LookupFailed}!bool {
+        return self.exists_fn(self.ctx, name);
+    }
 };
 
 pub fn needsSecretStore(dns: config_mod.DnsConfig) bool {
@@ -26,7 +36,7 @@ pub fn firstProblem(
             null
         else
             try dupProblem(alloc, "http-01 requires an HTTP challenge registrar"),
-        .dns_01 => |dns| firstDnsProblem(alloc, dns, options.secrets_store),
+        .dns_01 => |dns| firstDnsProblem(alloc, dns, options.secrets_store, options.secret_lookup),
     };
 }
 
@@ -34,6 +44,7 @@ fn firstDnsProblem(
     alloc: std.mem.Allocator,
     dns: config_mod.DnsConfig,
     store: ?*secrets.SecretsStore,
+    secret_lookup: ?SecretLookup,
 ) error{OutOfMemory}!?[]u8 {
     if (dns.propagation_timeout_secs == 0)
         return try dupProblem(alloc, "dns propagation timeout must be greater than 0");
@@ -44,16 +55,16 @@ fn firstDnsProblem(
 
     switch (dns.provider) {
         .cloudflare => {
-            if (try requiredSecretProblem(alloc, dns, store, "api_token")) |problem| return problem;
+            if (try requiredSecretProblem(alloc, dns, store, secret_lookup, "api_token")) |problem| return problem;
             if (try requiredConfigProblem(alloc, dns, "zone_id")) |problem| return problem;
         },
         .route53 => {
-            if (try requiredSecretProblem(alloc, dns, store, "access_key_id")) |problem| return problem;
-            if (try requiredSecretProblem(alloc, dns, store, "secret_access_key")) |problem| return problem;
+            if (try requiredSecretProblem(alloc, dns, store, secret_lookup, "access_key_id")) |problem| return problem;
+            if (try requiredSecretProblem(alloc, dns, store, secret_lookup, "secret_access_key")) |problem| return problem;
             if (try requiredConfigProblem(alloc, dns, "hosted_zone_id")) |problem| return problem;
         },
         .gcloud => {
-            if (try requiredSecretProblem(alloc, dns, store, "access_token")) |problem| return problem;
+            if (try requiredSecretProblem(alloc, dns, store, secret_lookup, "access_token")) |problem| return problem;
             if (try requiredConfigProblem(alloc, dns, "project")) |problem| return problem;
             if (try requiredConfigProblem(alloc, dns, "managed_zone")) |problem| return problem;
         },
@@ -69,10 +80,22 @@ fn requiredSecretProblem(
     alloc: std.mem.Allocator,
     dns: config_mod.DnsConfig,
     store: ?*secrets.SecretsStore,
+    secret_lookup: ?SecretLookup,
     key: []const u8,
 ) error{OutOfMemory}!?[]u8 {
     const secret_name = valueForKey(dns.secret_refs, key) orelse
         return std.fmt.allocPrint(alloc, "missing dns secret ref {s}", .{key}) catch return error.OutOfMemory;
+
+    if (secret_lookup) |lookup| {
+        const exists = lookup.exists(secret_name) catch
+            return std.fmt.allocPrint(alloc, "failed to read referenced dns secret: {s}", .{secret_name}) catch
+                return error.OutOfMemory;
+        if (!exists) {
+            return std.fmt.allocPrint(alloc, "referenced dns secret not found: {s}", .{secret_name}) catch
+                return error.OutOfMemory;
+        }
+        return null;
+    }
 
     const actual_store = store orelse return null;
     const value = actual_store.get(secret_name) catch |err| {
@@ -164,6 +187,37 @@ test "preflight reports missing referenced secret" {
     const problem = (try firstProblem(alloc, config, .{ .secrets_store = &store })).?;
     defer alloc.free(problem);
     try std.testing.expectEqualStrings("referenced dns secret not found: cf-token", problem);
+}
+
+test "preflight uses lightweight secret lookup" {
+    const alloc = std.testing.allocator;
+    var found = false;
+    const lookup = SecretLookup{
+        .ctx = &found,
+        .exists_fn = struct {
+            fn exists(ctx: *anyopaque, name: []const u8) error{LookupFailed}!bool {
+                const flag: *bool = @ptrCast(@alignCast(ctx));
+                return flag.* and std.mem.eql(u8, name, "cf-token");
+            }
+        }.exists,
+    };
+    const config = config_mod.ManagedConfig{
+        .email = "ops@example.com",
+        .directory_url = "https://acme.example.com/directory",
+        .challenge = .{ .dns_01 = .{
+            .provider = .cloudflare,
+            .secret_refs = &.{.{ .key = "api_token", .value = "cf-token" }},
+            .config = &.{.{ .key = "zone_id", .value = "zone-123" }},
+        } },
+    };
+
+    const missing = (try firstProblem(alloc, config, .{ .secret_lookup = lookup })).?;
+    defer alloc.free(missing);
+    try std.testing.expectEqualStrings("referenced dns secret not found: cf-token", missing);
+
+    found = true;
+    const problem = try firstProblem(alloc, config, .{ .secret_lookup = lookup });
+    try std.testing.expect(problem == null);
 }
 
 test "preflight reports missing provider config" {

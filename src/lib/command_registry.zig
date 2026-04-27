@@ -80,7 +80,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "backup", .group = .state_security, .usage = "backup [--output path]", .description = "backup database state", .handler = state_cmds.backupCmd },
     .{ .name = "restore", .group = .state_security, .usage = "restore <path>", .description = "restore database from backup", .handler = state_cmds.restoreCmd },
 
-    .{ .name = "doctor", .group = .misc, .usage = "doctor [--json]", .description = "check system readiness", .handler = doctor_cmds.doctorCmd },
+    .{ .name = "doctor", .group = .misc, .usage = "doctor [-f manifest.toml] [--json]", .description = "check system and manifest readiness", .handler = doctor_cmds.doctorCmd },
     .{ .name = "version", .group = .misc, .usage = "version", .description = "print version", .handler = versionHandler },
     .{ .name = "help", .group = .misc, .usage = "help", .description = "show this help", .handler = helpHandler },
     .{ .name = "completion", .group = .misc, .usage = "completion <bash|zsh|fish>", .description = "output shell completion script", .handler = completion.handler },

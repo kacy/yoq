@@ -350,7 +350,8 @@ For clustered training logs, the control plane proxies log reads to the agent th
 ### diagnostics
 
 ```text
-yoq doctor [--json]                  check system readiness
+yoq doctor [-f manifest.toml] [--json]
+                                     check system and manifest readiness
 yoq backup [--output path]           backup database state
 yoq restore <path>                   restore database from backup
 ```
@@ -365,7 +366,7 @@ yoq completion <bash|zsh|fish>       output shell completion
 
 Notes:
 
-- `--json` is available on `ps`, `images`, `prune`, `version`, `gpu topo`, and `doctor`.
+- `--json` is available on `ps`, `images`, `prune`, `version`, `gpu topo`, and `doctor`. `yoq doctor -f manifest.toml --json` groups system and manifest checks separately.
 - crons defined in the manifest start automatically with `yoq up`.
 - deployment, metrics, and certificate commands also support `--server host:port`.
 - clustered manifest deploys now go through the app-first `/apps/apply` API and carry services, workers, crons, and training definitions in one app snapshot. the older `/deploy` route is still there for legacy callers.

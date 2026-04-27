@@ -16,6 +16,8 @@ start with the built-in checks:
 
 ```bash
 yoq doctor
+yoq doctor -f examples/web-app/manifest.toml
+yoq doctor -f examples/http-routing/manifest.toml
 yoq validate -f examples/redis/manifest.toml
 yoq validate -f examples/web-app/manifest.toml
 yoq validate -f examples/http-routing/manifest.toml
